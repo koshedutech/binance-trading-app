@@ -1,0 +1,23 @@
+{
+  "binance": {
+    "api_key": "your_api_key_here",
+    "secret_key": "your_secret_key_here",
+    "base_url": "https://testnet.binance.vision",
+    "testnet": true
+  },
+  "screener": {
+    "enabled": true,
+    "interval": "15m",
+    "min_volume": 100000,
+    "min_price_change": 2.0,
+    "exclude_symbols": ["BUSDUSDT", "USDCUSDT"],
+    "quote_currency": "USDT",
+    "max_symbols": 50,
+    "screening_interval": 60
+  },
+  "trading": {
+    "max_open_positions": 5,
+    "max_risk_per_trade": 2.0,
+    "dry_run": true
+  }
+}
