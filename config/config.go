@@ -7,10 +7,20 @@ import (
 )
 
 type Config struct {
-	BinanceConfig  BinanceConfig  `json:"binance"`
-	ScreenerConfig ScreenerConfig `json:"screener"`
-	TradingConfig  TradingConfig  `json:"trading"`
-	ScannerConfig  ScannerConfig  `json:"scanner"`
+	BinanceConfig      BinanceConfig      `json:"binance"`
+	ScreenerConfig     ScreenerConfig     `json:"screener"`
+	TradingConfig      TradingConfig      `json:"trading"`
+	ScannerConfig      ScannerConfig      `json:"scanner"`
+	NotificationConfig NotificationConfig `json:"notification"`
+	RiskConfig         RiskConfig         `json:"risk"`
+	LoggingConfig      LoggingConfig      `json:"logging"`
+}
+
+type LoggingConfig struct {
+	Level       string `json:"level"`        // DEBUG, INFO, WARN, ERROR
+	Output      string `json:"output"`       // stdout, stderr, or file path
+	JSONFormat  bool   `json:"json_format"`  // Output as JSON
+	IncludeFile bool   `json:"include_file"` // Include file and line number
 }
 
 type BinanceConfig struct {
@@ -44,6 +54,34 @@ type ScannerConfig struct {
 	IncludeWatchlist bool   `json:"include_watchlist"`  // Include watchlist symbols
 	CacheTTL         int    `json:"cache_ttl"`          // Cache TTL in seconds
 	WorkerCount      int    `json:"worker_count"`       // Concurrent worker count
+}
+
+type NotificationConfig struct {
+	Enabled  bool           `json:"enabled"`
+	Telegram TelegramConfig `json:"telegram"`
+	Discord  DiscordConfig  `json:"discord"`
+}
+
+type TelegramConfig struct {
+	Enabled  bool   `json:"enabled"`
+	BotToken string `json:"bot_token"`
+	ChatID   string `json:"chat_id"`
+}
+
+type DiscordConfig struct {
+	Enabled    bool   `json:"enabled"`
+	WebhookURL string `json:"webhook_url"`
+}
+
+type RiskConfig struct {
+	MaxRiskPerTrade     float64 `json:"max_risk_per_trade"`      // Percentage of account to risk per trade
+	MaxDailyDrawdown    float64 `json:"max_daily_drawdown"`      // Max daily loss percentage before stopping
+	MaxOpenPositions    int     `json:"max_open_positions"`      // Maximum concurrent positions
+	PositionSizeMethod  string  `json:"position_size_method"`    // "fixed", "percent", "kelly"
+	FixedPositionSize   float64 `json:"fixed_position_size"`     // Fixed position size in quote currency
+	UseTrailingStop     bool    `json:"use_trailing_stop"`       // Enable trailing stop loss
+	TrailingStopPercent float64 `json:"trailing_stop_percent"`   // Trailing stop distance percentage
+	TrailingStopActivation float64 `json:"trailing_stop_activation"` // Profit % to activate trailing stop
 }
 
 func Load() (*Config, error) {
@@ -85,6 +123,34 @@ func Load() (*Config, error) {
 			IncludeWatchlist: true,
 			CacheTTL:         60,   // 60 seconds
 			WorkerCount:      10,   // 10 concurrent workers
+		},
+		NotificationConfig: NotificationConfig{
+			Enabled: getEnvOrDefault("NOTIFICATIONS_ENABLED", "false") == "true",
+			Telegram: TelegramConfig{
+				Enabled:  getEnvOrDefault("TELEGRAM_ENABLED", "false") == "true",
+				BotToken: getEnvOrDefault("TELEGRAM_BOT_TOKEN", ""),
+				ChatID:   getEnvOrDefault("TELEGRAM_CHAT_ID", ""),
+			},
+			Discord: DiscordConfig{
+				Enabled:    getEnvOrDefault("DISCORD_ENABLED", "false") == "true",
+				WebhookURL: getEnvOrDefault("DISCORD_WEBHOOK_URL", ""),
+			},
+		},
+		RiskConfig: RiskConfig{
+			MaxRiskPerTrade:        2.0,       // 2% per trade
+			MaxDailyDrawdown:       5.0,       // 5% max daily drawdown
+			MaxOpenPositions:       5,
+			PositionSizeMethod:     "percent", // Use percentage-based sizing
+			FixedPositionSize:      100.0,     // $100 if using fixed
+			UseTrailingStop:        true,
+			TrailingStopPercent:    1.0,       // 1% trailing distance
+			TrailingStopActivation: 1.5,       // Activate after 1.5% profit
+		},
+		LoggingConfig: LoggingConfig{
+			Level:       getEnvOrDefault("LOG_LEVEL", "INFO"),
+			Output:      getEnvOrDefault("LOG_OUTPUT", "stdout"),
+			JSONFormat:  getEnvOrDefault("LOG_JSON", "true") == "true",
+			IncludeFile: getEnvOrDefault("LOG_INCLUDE_FILE", "false") == "true",
 		},
 	}, nil
 }
@@ -141,6 +207,34 @@ func GenerateSampleConfig(filename string) error {
 			IncludeWatchlist: true,
 			CacheTTL:         60,
 			WorkerCount:      10,
+		},
+		NotificationConfig: NotificationConfig{
+			Enabled: false,
+			Telegram: TelegramConfig{
+				Enabled:  false,
+				BotToken: "",
+				ChatID:   "",
+			},
+			Discord: DiscordConfig{
+				Enabled:    false,
+				WebhookURL: "",
+			},
+		},
+		RiskConfig: RiskConfig{
+			MaxRiskPerTrade:        2.0,
+			MaxDailyDrawdown:       5.0,
+			MaxOpenPositions:       5,
+			PositionSizeMethod:     "percent",
+			FixedPositionSize:      100.0,
+			UseTrailingStop:        true,
+			TrailingStopPercent:    1.0,
+			TrailingStopActivation: 1.5,
+		},
+		LoggingConfig: LoggingConfig{
+			Level:       "INFO",
+			Output:      "stdout",
+			JSONFormat:  true,
+			IncludeFile: false,
 		},
 	}
 
