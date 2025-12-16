@@ -10,6 +10,7 @@ type Config struct {
 	BinanceConfig  BinanceConfig  `json:"binance"`
 	ScreenerConfig ScreenerConfig `json:"screener"`
 	TradingConfig  TradingConfig  `json:"trading"`
+	ScannerConfig  ScannerConfig  `json:"scanner"`
 }
 
 type BinanceConfig struct {
@@ -34,6 +35,15 @@ type TradingConfig struct {
 	MaxOpenPositions int     `json:"max_open_positions"`
 	MaxRiskPerTrade  float64 `json:"max_risk_per_trade"` // As percentage
 	DryRun           bool    `json:"dry_run"`            // Test mode without real orders
+}
+
+type ScannerConfig struct {
+	Enabled          bool   `json:"enabled"`            // Enable/disable scanner
+	ScanInterval     int    `json:"scan_interval"`      // Seconds between scans
+	MaxSymbols       int    `json:"max_symbols"`        // Max results to show
+	IncludeWatchlist bool   `json:"include_watchlist"`  // Include watchlist symbols
+	CacheTTL         int    `json:"cache_ttl"`          // Cache TTL in seconds
+	WorkerCount      int    `json:"worker_count"`       // Concurrent worker count
 }
 
 func Load() (*Config, error) {
@@ -67,6 +77,14 @@ func Load() (*Config, error) {
 			MaxOpenPositions: 5,
 			MaxRiskPerTrade:  2.0, // 2%
 			DryRun:           true,
+		},
+		ScannerConfig: ScannerConfig{
+			Enabled:          true,
+			ScanInterval:     30,   // 30 seconds
+			MaxSymbols:       50,   // Top 50 results
+			IncludeWatchlist: true,
+			CacheTTL:         60,   // 60 seconds
+			WorkerCount:      10,   // 10 concurrent workers
 		},
 	}, nil
 }
@@ -115,6 +133,14 @@ func GenerateSampleConfig(filename string) error {
 			MaxOpenPositions: 5,
 			MaxRiskPerTrade:  2.0,
 			DryRun:           true,
+		},
+		ScannerConfig: ScannerConfig{
+			Enabled:          true,
+			ScanInterval:     30,
+			MaxSymbols:       50,
+			IncludeWatchlist: true,
+			CacheTTL:         60,
+			WorkerCount:      10,
 		},
 	}
 

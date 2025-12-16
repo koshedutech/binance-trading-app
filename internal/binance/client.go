@@ -304,6 +304,24 @@ func (c *Client) GetExchangeInfo() (*ExchangeInfo, error) {
 	return &exchangeInfo, nil
 }
 
+// GetAllSymbols fetches all USDT trading pairs
+func (c *Client) GetAllSymbols() ([]string, error) {
+	exchangeInfo, err := c.GetExchangeInfo()
+	if err != nil {
+		return nil, err
+	}
+
+	var symbols []string
+	for _, symbol := range exchangeInfo.Symbols {
+		// Only include USDT pairs that are actively trading
+		if symbol.Status == "TRADING" && symbol.QuoteAsset == "USDT" && symbol.IsSpotTradingAllowed {
+			symbols = append(symbols, symbol.Symbol)
+		}
+	}
+
+	return symbols, nil
+}
+
 // sign creates a signature for authenticated requests
 func (c *Client) sign(params map[string]string) string {
 	query := ""
