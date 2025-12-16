@@ -183,6 +183,11 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_pending_signals_status ON pending_signals(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_pending_signals_timestamp ON pending_signals(timestamp)`,
 
+		// Add archived columns to pending_signals for soft delete functionality
+		`ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS archived BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE pending_signals ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_signals_archived ON pending_signals(archived)`,
+
 		// Create positions table (snapshots for history)
 		`CREATE TABLE IF NOT EXISTS position_snapshots (
 			id SERIAL PRIMARY KEY,
@@ -249,6 +254,90 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 		`DROP TRIGGER IF EXISTS update_strategy_configs_updated_at ON strategy_configs`,
 		`CREATE TRIGGER update_strategy_configs_updated_at BEFORE UPDATE ON strategy_configs
 		FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()`,
+
+		// Create watchlist table for favorites
+		`CREATE TABLE IF NOT EXISTS watchlist (
+			id SERIAL PRIMARY KEY,
+			symbol VARCHAR(20) NOT NULL UNIQUE,
+			notes TEXT,
+			added_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_watchlist_symbol ON watchlist(symbol)`,
+
+		// Create scanner results table for historical tracking (optional)
+		`CREATE TABLE IF NOT EXISTS scanner_results (
+			id SERIAL PRIMARY KEY,
+			scan_id VARCHAR(50) NOT NULL,
+			symbol VARCHAR(20) NOT NULL,
+			strategy_name VARCHAR(100) NOT NULL,
+			current_price DECIMAL(20, 8) NOT NULL,
+			target_price DECIMAL(20, 8),
+			distance_percent DECIMAL(10, 4),
+			readiness_score DECIMAL(5, 2),
+			trend_direction VARCHAR(20),
+			conditions_met INTEGER,
+			total_conditions INTEGER,
+			conditions_data JSONB,
+			time_prediction JSONB,
+			timestamp TIMESTAMP NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scanner_results_scan_id ON scanner_results(scan_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_scanner_results_symbol ON scanner_results(symbol)`,
+		`CREATE INDEX IF NOT EXISTS idx_scanner_results_readiness ON scanner_results(readiness_score DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_scanner_results_timestamp ON scanner_results(timestamp DESC)`,
+
+		// Create backtest_results table
+		`CREATE TABLE IF NOT EXISTS backtest_results (
+			id BIGSERIAL PRIMARY KEY,
+			strategy_config_id BIGINT NOT NULL REFERENCES strategy_configs(id) ON DELETE CASCADE,
+			symbol VARCHAR(20) NOT NULL,
+			interval VARCHAR(10) NOT NULL,
+			start_date TIMESTAMP NOT NULL,
+			end_date TIMESTAMP NOT NULL,
+			total_trades INT NOT NULL DEFAULT 0,
+			winning_trades INT NOT NULL DEFAULT 0,
+			losing_trades INT NOT NULL DEFAULT 0,
+			win_rate DECIMAL(5, 2),
+			total_pnl DECIMAL(20, 8) NOT NULL DEFAULT 0,
+			total_fees DECIMAL(20, 8) NOT NULL DEFAULT 0,
+			net_pnl DECIMAL(20, 8) NOT NULL DEFAULT 0,
+			average_win DECIMAL(20, 8),
+			average_loss DECIMAL(20, 8),
+			largest_win DECIMAL(20, 8),
+			largest_loss DECIMAL(20, 8),
+			profit_factor DECIMAL(10, 4),
+			max_drawdown DECIMAL(20, 8),
+			max_drawdown_percent DECIMAL(5, 2),
+			avg_trade_duration_minutes INT,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_backtest_results_strategy ON backtest_results(strategy_config_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_backtest_results_symbol ON backtest_results(symbol)`,
+		`CREATE INDEX IF NOT EXISTS idx_backtest_results_dates ON backtest_results(start_date, end_date)`,
+
+		// Create backtest_trades table
+		`CREATE TABLE IF NOT EXISTS backtest_trades (
+			id BIGSERIAL PRIMARY KEY,
+			backtest_result_id BIGINT NOT NULL REFERENCES backtest_results(id) ON DELETE CASCADE,
+			entry_time TIMESTAMP NOT NULL,
+			entry_price DECIMAL(20, 8) NOT NULL,
+			entry_reason TEXT,
+			exit_time TIMESTAMP NOT NULL,
+			exit_price DECIMAL(20, 8) NOT NULL,
+			exit_reason TEXT,
+			quantity DECIMAL(20, 8) NOT NULL,
+			side VARCHAR(10) NOT NULL,
+			pnl DECIMAL(20, 8) NOT NULL,
+			pnl_percent DECIMAL(10, 4) NOT NULL,
+			fees DECIMAL(20, 8) NOT NULL DEFAULT 0,
+			duration_minutes INT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_backtest_trades_result ON backtest_trades(backtest_result_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_backtest_trades_entry_time ON backtest_trades(entry_time)`,
 	}
 
 	// Execute migrations

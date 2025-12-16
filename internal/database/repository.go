@@ -652,7 +652,7 @@ func (r *Repository) UpdatePendingSignalStatus(ctx context.Context, id int64, st
 func (r *Repository) GetPendingSignals(ctx context.Context) ([]*PendingSignal, error) {
 	query := `
 		SELECT id, strategy_name, symbol, signal_type, entry_price, current_price, stop_loss, take_profit,
-			   quantity, reason, conditions_met, timestamp, status, confirmed_at, rejected_at, created_at
+			   quantity, reason, conditions_met, timestamp, status, confirmed_at, rejected_at, archived, archived_at, created_at
 		FROM pending_signals
 		WHERE status = 'PENDING'
 		ORDER BY timestamp DESC
@@ -671,7 +671,7 @@ func (r *Repository) GetPendingSignals(ctx context.Context) ([]*PendingSignal, e
 			&signal.ID, &signal.StrategyName, &signal.Symbol, &signal.SignalType,
 			&signal.EntryPrice, &signal.CurrentPrice, &signal.StopLoss, &signal.TakeProfit,
 			&signal.Quantity, &signal.Reason, &conditionsJSON, &signal.Timestamp,
-			&signal.Status, &signal.ConfirmedAt, &signal.RejectedAt, &signal.CreatedAt,
+			&signal.Status, &signal.ConfirmedAt, &signal.RejectedAt, &signal.Archived, &signal.ArchivedAt, &signal.CreatedAt,
 		)
 		if err != nil {
 			return nil, err
@@ -690,7 +690,7 @@ func (r *Repository) GetPendingSignals(ctx context.Context) ([]*PendingSignal, e
 func (r *Repository) GetPendingSignalByID(ctx context.Context, id int64) (*PendingSignal, error) {
 	query := `
 		SELECT id, strategy_name, symbol, signal_type, entry_price, current_price, stop_loss, take_profit,
-			   quantity, reason, conditions_met, timestamp, status, confirmed_at, rejected_at, created_at
+			   quantity, reason, conditions_met, timestamp, status, confirmed_at, rejected_at, archived, archived_at, created_at
 		FROM pending_signals
 		WHERE id = $1
 	`
@@ -700,7 +700,7 @@ func (r *Repository) GetPendingSignalByID(ctx context.Context, id int64) (*Pendi
 		&signal.ID, &signal.StrategyName, &signal.Symbol, &signal.SignalType,
 		&signal.EntryPrice, &signal.CurrentPrice, &signal.StopLoss, &signal.TakeProfit,
 		&signal.Quantity, &signal.Reason, &conditionsJSON, &signal.Timestamp,
-		&signal.Status, &signal.ConfirmedAt, &signal.RejectedAt, &signal.CreatedAt,
+		&signal.Status, &signal.ConfirmedAt, &signal.RejectedAt, &signal.Archived, &signal.ArchivedAt, &signal.CreatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -711,4 +711,164 @@ func (r *Repository) GetPendingSignalByID(ctx context.Context, id int64) (*Pendi
 		}
 	}
 	return signal, nil
+}
+
+// GetPendingSignalsByStatus retrieves pending signals filtered by status
+func (r *Repository) GetPendingSignalsByStatus(ctx context.Context, status string, includeArchived bool, limit int) ([]*PendingSignal, error) {
+	query := `
+		SELECT id, strategy_name, symbol, signal_type, entry_price, current_price, stop_loss, take_profit,
+			   quantity, reason, conditions_met, timestamp, status, confirmed_at, rejected_at, archived, archived_at, created_at
+		FROM pending_signals
+		WHERE status = $1 AND ($2 OR archived = FALSE)
+		ORDER BY timestamp DESC
+		LIMIT $3
+	`
+	rows, err := r.db.Pool.Query(ctx, query, status, includeArchived, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var signals []*PendingSignal
+	for rows.Next() {
+		signal := &PendingSignal{}
+		var conditionsJSON []byte
+		err := rows.Scan(
+			&signal.ID, &signal.StrategyName, &signal.Symbol, &signal.SignalType,
+			&signal.EntryPrice, &signal.CurrentPrice, &signal.StopLoss, &signal.TakeProfit,
+			&signal.Quantity, &signal.Reason, &conditionsJSON, &signal.Timestamp,
+			&signal.Status, &signal.ConfirmedAt, &signal.RejectedAt, &signal.Archived, &signal.ArchivedAt, &signal.CreatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if len(conditionsJSON) > 0 {
+			if err := json.Unmarshal(conditionsJSON, &signal.ConditionsMet); err != nil {
+				return nil, err
+			}
+		}
+		signals = append(signals, signal)
+	}
+	return signals, rows.Err()
+}
+
+// ArchivePendingSignal soft deletes a pending signal
+func (r *Repository) ArchivePendingSignal(ctx context.Context, id int64) error {
+	query := `UPDATE pending_signals SET archived = TRUE, archived_at = CURRENT_TIMESTAMP WHERE id = $1`
+	_, err := r.db.Pool.Exec(ctx, query, id)
+	return err
+}
+
+// DeletePendingSignal hard deletes a pending signal
+func (r *Repository) DeletePendingSignal(ctx context.Context, id int64) error {
+	query := `DELETE FROM pending_signals WHERE id = $1`
+	_, err := r.db.Pool.Exec(ctx, query, id)
+	return err
+}
+
+// DuplicatePendingSignal creates a copy of a pending signal with PENDING status
+func (r *Repository) DuplicatePendingSignal(ctx context.Context, id int64) (*PendingSignal, error) {
+	// Fetch the original signal
+	original, err := r.GetPendingSignalByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch original signal: %w", err)
+	}
+
+	// Create new signal with PENDING status
+	conditionsJSON, err := json.Marshal(original.ConditionsMet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal conditions: %w", err)
+	}
+
+	newSignal := &PendingSignal{
+		StrategyName:  original.StrategyName,
+		Symbol:        original.Symbol,
+		SignalType:    original.SignalType,
+		EntryPrice:    original.EntryPrice,
+		CurrentPrice:  original.CurrentPrice,
+		StopLoss:      original.StopLoss,
+		TakeProfit:    original.TakeProfit,
+		Quantity:      original.Quantity,
+		Reason:        original.Reason,
+		ConditionsMet: original.ConditionsMet,
+		Timestamp:     time.Now(),
+		Status:        "PENDING",
+	}
+
+	query := `
+		INSERT INTO pending_signals (strategy_name, symbol, signal_type, entry_price, current_price,
+			stop_loss, take_profit, quantity, reason, conditions_met, timestamp, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id, created_at
+	`
+	err = r.db.Pool.QueryRow(
+		ctx, query,
+		newSignal.StrategyName, newSignal.Symbol, newSignal.SignalType, newSignal.EntryPrice, newSignal.CurrentPrice,
+		newSignal.StopLoss, newSignal.TakeProfit, newSignal.Quantity, newSignal.Reason, conditionsJSON,
+		newSignal.Timestamp, newSignal.Status,
+	).Scan(&newSignal.ID, &newSignal.CreatedAt)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to insert duplicated signal: %w", err)
+	}
+
+	return newSignal, nil
+}
+
+// ============================================================================
+// WATCHLIST
+// ============================================================================
+
+// GetWatchlist retrieves all watchlist items
+func (r *Repository) GetWatchlist(ctx context.Context) ([]*WatchlistItem, error) {
+	query := `SELECT id, symbol, notes, added_at, created_at FROM watchlist ORDER BY added_at DESC`
+
+	rows, err := r.db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query watchlist: %w", err)
+	}
+	defer rows.Close()
+
+	items := []*WatchlistItem{}
+	for rows.Next() {
+		item := &WatchlistItem{}
+		err := rows.Scan(&item.ID, &item.Symbol, &item.Notes, &item.AddedAt, &item.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan watchlist item: %w", err)
+		}
+		items = append(items, item)
+	}
+
+	return items, nil
+}
+
+// AddToWatchlist adds a symbol to the watchlist
+func (r *Repository) AddToWatchlist(ctx context.Context, symbol string, notes *string) error {
+	query := `INSERT INTO watchlist (symbol, notes) VALUES ($1, $2) ON CONFLICT (symbol) DO NOTHING`
+	_, err := r.db.Pool.Exec(ctx, query, symbol, notes)
+	if err != nil {
+		return fmt.Errorf("failed to add to watchlist: %w", err)
+	}
+	return nil
+}
+
+// RemoveFromWatchlist removes a symbol from the watchlist
+func (r *Repository) RemoveFromWatchlist(ctx context.Context, symbol string) error {
+	query := `DELETE FROM watchlist WHERE symbol = $1`
+	_, err := r.db.Pool.Exec(ctx, query, symbol)
+	if err != nil {
+		return fmt.Errorf("failed to remove from watchlist: %w", err)
+	}
+	return nil
+}
+
+// IsInWatchlist checks if a symbol is in the watchlist
+func (r *Repository) IsInWatchlist(ctx context.Context, symbol string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM watchlist WHERE symbol = $1)`
+	var exists bool
+	err := r.db.Pool.QueryRow(ctx, query, symbol).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check watchlist: %w", err)
+	}
+	return exists, nil
 }

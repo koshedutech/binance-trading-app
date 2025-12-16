@@ -150,6 +150,8 @@ type PendingSignal struct {
 	Status        string                 `json:"status"`
 	ConfirmedAt   *time.Time             `json:"confirmed_at,omitempty"`
 	RejectedAt    *time.Time             `json:"rejected_at,omitempty"`
+	Archived      bool                   `json:"archived"`
+	ArchivedAt    *time.Time             `json:"archived_at,omitempty"`
 	CreatedAt     time.Time              `json:"created_at"`
 }
 
@@ -159,4 +161,13 @@ type SignalCondition struct {
 	Description string  `json:"description"`
 	Met         bool    `json:"met"`
 	Value       *string `json:"value,omitempty"`
+}
+
+// WatchlistItem represents a user's favorite symbol for monitoring
+type WatchlistItem struct {
+	ID      int64      `json:"id"`
+	Symbol  string     `json:"symbol"`
+	Notes   *string    `json:"notes,omitempty"`
+	AddedAt time.Time  `json:"added_at"`
+	CreatedAt time.Time `json:"created_at"`
 }
