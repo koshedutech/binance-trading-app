@@ -52,26 +52,28 @@ func main() {
 
 		// Add Telegram notifier
 		if cfg.NotificationConfig.Telegram.Enabled {
-			telegramNotifier := notification.NewTelegramNotifier(
-				cfg.NotificationConfig.Telegram.BotToken,
-				cfg.NotificationConfig.Telegram.ChatID,
-			)
-			notifyManager.AddNotifier("telegram", telegramNotifier)
+			telegramNotifier := notification.NewTelegramNotifier(notification.TelegramConfig{
+				BotToken: cfg.NotificationConfig.Telegram.BotToken,
+				ChatID:   cfg.NotificationConfig.Telegram.ChatID,
+				Enabled:  cfg.NotificationConfig.Telegram.Enabled,
+			})
+			notifyManager.AddNotifier(telegramNotifier)
 			logger.Info("Telegram notifications enabled")
 		}
 
 		// Add Discord notifier
 		if cfg.NotificationConfig.Discord.Enabled {
-			discordNotifier := notification.NewDiscordNotifier(
-				cfg.NotificationConfig.Discord.WebhookURL,
-			)
-			notifyManager.AddNotifier("discord", discordNotifier)
+			discordNotifier := notification.NewDiscordNotifier(notification.DiscordConfig{
+				WebhookURL: cfg.NotificationConfig.Discord.WebhookURL,
+				Enabled:    cfg.NotificationConfig.Discord.Enabled,
+			})
+			notifyManager.AddNotifier(discordNotifier)
 			logger.Info("Discord notifications enabled")
 		}
 	}
 
 	// Initialize risk manager
-	riskManager := risk.NewRiskManager(&risk.RiskConfig{
+	riskManager := risk.NewRiskManager(&risk.Config{
 		MaxRiskPerTrade:    cfg.RiskConfig.MaxRiskPerTrade,
 		MaxDailyDrawdown:   cfg.RiskConfig.MaxDailyDrawdown,
 		MaxOpenPositions:   cfg.RiskConfig.MaxOpenPositions,
@@ -358,21 +360,10 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository,
 			symbol, _ := event.Data["symbol"].(string)
 			pnl, _ := event.Data["pnl"].(float64)
 			pnlPercent, _ := event.Data["pnl_percent"].(float64)
+			entryPrice, _ := event.Data["entry_price"].(float64)
+			exitPrice, _ := event.Data["exit_price"].(float64)
 
-			msg := notification.Message{
-				Title:   "Trade Closed",
-				Message: fmt.Sprintf("%s closed with P&L: $%.2f (%.2f%%)", symbol, pnl, pnlPercent),
-				Level:   notification.LevelInfo,
-				Data: map[string]interface{}{
-					"symbol":      symbol,
-					"pnl":         pnl,
-					"pnl_percent": pnlPercent,
-				},
-			}
-			if pnl < 0 {
-				msg.Level = notification.LevelWarning
-			}
-			if err := notifyManager.Send(ctx, msg); err != nil {
+			if err := notifyManager.SendTradeClose(symbol, entryPrice, exitPrice, pnl, pnlPercent, "closed"); err != nil {
 				logger.WithError(err).Warn("Failed to send trade notification")
 			}
 		}
@@ -405,18 +396,9 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository,
 
 		// Send notification for new signals
 		if notifyManager != nil {
-			msg := notification.Message{
-				Title:   "New Signal",
-				Message: fmt.Sprintf("%s %s @ $%.4f - %s", signalType, symbol, price, reason),
-				Level:   notification.LevelInfo,
-				Data: map[string]interface{}{
-					"strategy": strategyName,
-					"symbol":   symbol,
-					"type":     signalType,
-					"price":    price,
-				},
-			}
-			if err := notifyManager.Send(ctx, msg); err != nil {
+			stopLoss, _ := event.Data["stop_loss"].(float64)
+			takeProfit, _ := event.Data["take_profit"].(float64)
+			if err := notifyManager.SendSignal(symbol, signalType, reason, price, stopLoss, takeProfit); err != nil {
 				logger.WithError(err).Warn("Failed to send signal notification")
 			}
 		}
@@ -452,18 +434,8 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository,
 
 		// Send notification for new orders
 		if notifyManager != nil {
-			msg := notification.Message{
-				Title:   "Order Placed",
-				Message: fmt.Sprintf("%s %s %.6f %s", side, symbol, quantity, orderType),
-				Level:   notification.LevelInfo,
-				Data: map[string]interface{}{
-					"order_id": orderID,
-					"symbol":   symbol,
-					"side":     side,
-					"quantity": quantity,
-				},
-			}
-			if err := notifyManager.Send(ctx, msg); err != nil {
+			price, _ := event.Data["price"].(float64)
+			if err := notifyManager.SendTradeOpen(symbol, side, price, quantity); err != nil {
 				logger.WithError(err).Warn("Failed to send order notification")
 			}
 		}

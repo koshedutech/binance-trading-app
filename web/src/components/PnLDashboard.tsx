@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
-import { TrendingUp, TrendingDown, DollarSign, Activity, Target, AlertTriangle } from 'lucide-react';
+import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
+import { TrendingUp, TrendingDown, DollarSign, Target, AlertTriangle } from 'lucide-react';
 
 interface PnLData {
   timestamp: string;
@@ -87,7 +87,7 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
 
   const buildEquityCurve = (trades: any[]): PnLData[] => {
     let equity = 10000; // Starting balance
-    return trades.map((trade, index) => {
+    return trades.map((trade) => {
       const pnl = trade.pnl || 0;
       equity += pnl;
       return {

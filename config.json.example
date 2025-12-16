@@ -19,5 +19,41 @@
     "max_open_positions": 5,
     "max_risk_per_trade": 2.0,
     "dry_run": true
+  },
+  "scanner": {
+    "enabled": true,
+    "scan_interval": 30,
+    "max_symbols": 50,
+    "include_watchlist": true,
+    "cache_ttl": 60,
+    "worker_count": 10
+  },
+  "notification": {
+    "enabled": false,
+    "telegram": {
+      "enabled": false,
+      "bot_token": "",
+      "chat_id": ""
+    },
+    "discord": {
+      "enabled": false,
+      "webhook_url": ""
+    }
+  },
+  "risk": {
+    "max_risk_per_trade": 2.0,
+    "max_daily_drawdown": 5.0,
+    "max_open_positions": 5,
+    "position_size_method": "percent",
+    "fixed_position_size": 100.0,
+    "use_trailing_stop": true,
+    "trailing_stop_percent": 1.0,
+    "trailing_stop_activation": 1.5
+  },
+  "logging": {
+    "level": "INFO",
+    "output": "stdout",
+    "json_format": true,
+    "include_file": false
   }
 }
