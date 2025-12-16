@@ -15,6 +15,7 @@ import (
 	"binance-trading-bot/internal/bot"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
+	"binance-trading-bot/internal/scanner"
 	"binance-trading-bot/internal/screener"
 	"binance-trading-bot/internal/strategy"
 )
@@ -67,8 +68,31 @@ func main() {
 	// Migrate hardcoded strategies to database
 	migrateDefaultStrategies(repo)
 
-	// Register strategies
+	// Register strategies first
 	registerStrategies(tradingBot, cfg)
+
+	// Initialize strategy scanner
+	scannerConfig := scanner.ScannerConfig{
+		Enabled:          cfg.ScannerConfig.Enabled,
+		ScanInterval:     time.Duration(cfg.ScannerConfig.ScanInterval) * time.Second,
+		MaxSymbols:       cfg.ScannerConfig.MaxSymbols,
+		IncludeWatchlist: cfg.ScannerConfig.IncludeWatchlist,
+		CacheTTL:         time.Duration(cfg.ScannerConfig.CacheTTL) * time.Second,
+		WorkerCount:      cfg.ScannerConfig.WorkerCount,
+	}
+
+	// Get all registered strategies
+	strategyList := tradingBot.GetRegisteredStrategies()
+
+	strategyScanner := scanner.NewScanner(
+		tradingBot.GetBinanceClient(),
+		repo,
+		strategyList,
+		scannerConfig,
+	)
+
+	log.Printf("Strategy scanner initialized (enabled: %v, interval: %v)",
+		scannerConfig.Enabled, scannerConfig.ScanInterval)
 
 	// Subscribe to events and persist to database
 	setupEventPersistence(eventBus, repo)
@@ -89,6 +113,7 @@ func main() {
 	botAPI := &BotAPIWrapper{
 		bot:      tradingBot,
 		screener: coinScreener,
+		scanner:  strategyScanner,
 		cfg:      cfg,
 	}
 
@@ -122,6 +147,9 @@ func main() {
 	// Start screener
 	go coinScreener.StartScreening()
 
+	// Start strategy scanner
+	strategyScanner.Start()
+
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -144,9 +172,10 @@ func main() {
 		log.Printf("Error shutting down web server: %v", err)
 	}
 
-	// Stop bot and screener
+	// Stop bot, screener, and scanner
 	tradingBot.Stop()
 	coinScreener.Stop()
+	strategyScanner.Stop()
 
 	log.Println("Shutdown complete")
 }
@@ -326,6 +355,7 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository)
 type BotAPIWrapper struct {
 	bot      *bot.TradingBot
 	screener *screener.Screener
+	scanner  *scanner.Scanner
 	cfg      *config.Config
 }
 
@@ -349,18 +379,157 @@ func (w *BotAPIWrapper) GetStrategies() []map[string]interface{} {
 }
 
 func (w *BotAPIWrapper) PlaceOrder(symbol, side, orderType string, quantity, price float64) (int64, error) {
-	// TODO: Implement order placement through bot
-	return 0, fmt.Errorf("manual order placement not yet implemented")
+	client := w.bot.GetBinanceClient()
+	if client == nil {
+		return 0, fmt.Errorf("binance client not initialized")
+	}
+
+	params := map[string]string{
+		"symbol":   symbol,
+		"side":     side,
+		"type":     orderType,
+		"quantity": fmt.Sprintf("%.8f", quantity),
+	}
+
+	// Add price for LIMIT orders
+	if orderType == "LIMIT" {
+		params["price"] = fmt.Sprintf("%.8f", price)
+		params["timeInForce"] = "GTC"
+	}
+
+	// In dry run mode, simulate the order
+	if w.cfg.TradingConfig.DryRun {
+		log.Printf("DRY RUN - Manual order: %s %s %.8f %s @ %.8f", side, symbol, quantity, orderType, price)
+		// Return a fake order ID for dry run
+		return time.Now().UnixNano(), nil
+	}
+
+	orderResp, err := client.PlaceOrder(params)
+	if err != nil {
+		return 0, fmt.Errorf("failed to place order: %w", err)
+	}
+
+	log.Printf("Manual order placed: %s %s %.8f @ %.8f (Order ID: %d)", side, symbol, quantity, orderResp.Price, orderResp.OrderId)
+	return orderResp.OrderId, nil
 }
 
 func (w *BotAPIWrapper) CancelOrder(orderID int64) error {
-	// TODO: Implement order cancellation through bot
-	return fmt.Errorf("order cancellation not yet implemented")
+	client := w.bot.GetBinanceClient()
+	if client == nil {
+		return fmt.Errorf("binance client not initialized")
+	}
+
+	// In dry run mode, just log and return success
+	if w.cfg.TradingConfig.DryRun {
+		log.Printf("DRY RUN - Cancel order: %d", orderID)
+		return nil
+	}
+
+	// We need to find the symbol for this order - check open orders in database
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Try to get order from database to find the symbol
+	order, err := w.bot.GetRepository().GetOrderByID(ctx, orderID)
+	if err != nil {
+		return fmt.Errorf("failed to find order %d: %w", orderID, err)
+	}
+
+	if err := client.CancelOrder(order.Symbol, orderID); err != nil {
+		return fmt.Errorf("failed to cancel order: %w", err)
+	}
+
+	log.Printf("Order cancelled: %d for %s", orderID, order.Symbol)
+	return nil
 }
 
 func (w *BotAPIWrapper) ClosePosition(symbol string) error {
-	// TODO: Implement position closing through bot
-	return fmt.Errorf("position closing not yet implemented")
+	client := w.bot.GetBinanceClient()
+	if client == nil {
+		return fmt.Errorf("binance client not initialized")
+	}
+
+	// Get open trades for this symbol from database
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	trades, err := w.bot.GetRepository().GetOpenTrades(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get open trades: %w", err)
+	}
+
+	// Find the trade for this symbol
+	var targetTrade *database.Trade
+	for _, trade := range trades {
+		if trade.Symbol == symbol {
+			targetTrade = trade
+			break
+		}
+	}
+
+	if targetTrade == nil {
+		return fmt.Errorf("no open position found for %s", symbol)
+	}
+
+	// Get current price
+	currentPrice, err := client.GetCurrentPrice(symbol)
+	if err != nil {
+		return fmt.Errorf("failed to get current price: %w", err)
+	}
+
+	// In dry run mode, update the database directly
+	if w.cfg.TradingConfig.DryRun {
+		log.Printf("DRY RUN - Closing position: %s at %.8f", symbol, currentPrice)
+
+		// Calculate P&L
+		var pnl, pnlPercent float64
+		if targetTrade.Side == "BUY" {
+			pnl = (currentPrice - targetTrade.EntryPrice) * targetTrade.Quantity
+			pnlPercent = ((currentPrice - targetTrade.EntryPrice) / targetTrade.EntryPrice) * 100
+		} else {
+			pnl = (targetTrade.EntryPrice - currentPrice) * targetTrade.Quantity
+			pnlPercent = ((targetTrade.EntryPrice - currentPrice) / targetTrade.EntryPrice) * 100
+		}
+
+		// Update trade in database
+		targetTrade.ExitPrice = &currentPrice
+		now := time.Now()
+		targetTrade.ExitTime = &now
+		targetTrade.PnL = &pnl
+		targetTrade.PnLPercent = &pnlPercent
+		targetTrade.Status = "CLOSED"
+
+		if err := w.bot.GetRepository().UpdateTrade(ctx, targetTrade); err != nil {
+			return fmt.Errorf("failed to update trade: %w", err)
+		}
+
+		log.Printf("Position closed: %s - Entry: %.4f, Exit: %.4f, P&L: %.2f%%",
+			symbol, targetTrade.EntryPrice, currentPrice, pnlPercent)
+		return nil
+	}
+
+	// For live trading, place a market order in the opposite direction
+	closeSide := "SELL"
+	if targetTrade.Side == "SELL" {
+		closeSide = "BUY"
+	}
+
+	params := map[string]string{
+		"symbol":   symbol,
+		"side":     closeSide,
+		"type":     "MARKET",
+		"quantity": fmt.Sprintf("%.8f", targetTrade.Quantity),
+	}
+
+	orderResp, err := client.PlaceOrder(params)
+	if err != nil {
+		return fmt.Errorf("failed to close position: %w", err)
+	}
+
+	log.Printf("Position closed via market order: %s %s %.8f @ %.8f (Order ID: %d)",
+		closeSide, symbol, targetTrade.Quantity, orderResp.Price, orderResp.OrderId)
+
+	return nil
 }
 
 func (w *BotAPIWrapper) ToggleStrategy(name string, enabled bool) error {
@@ -374,8 +543,16 @@ func (w *BotAPIWrapper) GetBinanceClient() interface{} {
 	return w.bot.GetBinanceClient()
 }
 
+func (w *BotAPIWrapper) GetClient() interface{} {
+	return w.bot.GetBinanceClient()
+}
+
 func (w *BotAPIWrapper) ExecutePendingSignal(signal *database.PendingSignal) error {
 	return w.bot.ExecutePendingSignal(signal)
+}
+
+func (w *BotAPIWrapper) GetScanner() interface{} {
+	return w.scanner
 }
 
 // Helper functions

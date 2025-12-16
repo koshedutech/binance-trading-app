@@ -84,6 +84,11 @@ func (b *TradingBot) GetBinanceClient() *binance.Client {
 	return b.client
 }
 
+// GetRepository returns the database repository
+func (b *TradingBot) GetRepository() *database.Repository {
+	return b.repo
+}
+
 // RegisterStrategy registers a new trading strategy
 func (b *TradingBot) RegisterStrategy(name string, s strategy.Strategy) {
 	b.mu.Lock()
@@ -91,6 +96,18 @@ func (b *TradingBot) RegisterStrategy(name string, s strategy.Strategy) {
 	b.strategies[name] = s
 	b.enabledStrategies[name] = true // Enable by default
 	log.Printf("Strategy registered: %s for %s", name, s.GetSymbol())
+}
+
+// GetRegisteredStrategies returns all registered strategies as a slice
+func (b *TradingBot) GetRegisteredStrategies() []strategy.Strategy {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	strategies := make([]strategy.Strategy, 0, len(b.strategies))
+	for _, s := range b.strategies {
+		strategies = append(strategies, s)
+	}
+	return strategies
 }
 
 // Start starts the trading bot
