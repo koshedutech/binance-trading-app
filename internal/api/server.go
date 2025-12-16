@@ -42,7 +42,9 @@ type BotAPI interface {
 	ClosePosition(symbol string) error
 	ToggleStrategy(name string, enabled bool) error
 	GetBinanceClient() interface{}
+	GetClient() interface{} // Returns *binance.Client for backtest
 	ExecutePendingSignal(signal *database.PendingSignal) error
+	GetScanner() interface{} // Returns *scanner.Scanner
 }
 
 // NewServer creates a new API server
@@ -103,6 +105,7 @@ func (s *Server) setupRoutes() {
 		api.GET("/positions", s.handleGetPositions)
 		api.GET("/positions/history", s.handleGetPositionHistory)
 		api.POST("/positions/:symbol/close", s.handleClosePosition)
+		api.POST("/positions/close-all", s.handleCloseAllPositions)
 
 		// Order endpoints
 		api.GET("/orders", s.handleGetActiveOrders)
@@ -121,6 +124,12 @@ func (s *Server) setupRoutes() {
 		api.PUT("/strategy-configs/:id", s.handleUpdateStrategyConfig)
 		api.DELETE("/strategy-configs/:id", s.handleDeleteStrategyConfig)
 
+		// Visual strategy & backtest endpoints
+		api.GET("/binance/klines", s.handleGetKlines)
+		api.POST("/strategy-configs/:id/backtest", s.handleRunBacktest)
+		api.GET("/strategy-configs/:id/backtest-results", s.handleGetBacktestResults)
+		api.GET("/backtest-results/:id/trades", s.handleGetBacktestTrades)
+
 		// Signal endpoints
 		api.GET("/signals", s.handleGetSignals)
 
@@ -128,12 +137,28 @@ func (s *Server) setupRoutes() {
 		api.GET("/pending-signals", s.handleGetPendingSignals)
 		api.GET("/pending-signals/:id", s.handleGetPendingSignal)
 		api.POST("/pending-signals/:id/confirm", s.handleConfirmPendingSignal)
+		api.POST("/pending-signals/:id/archive", s.handleArchivePendingSignal)
+		api.DELETE("/pending-signals/:id", s.handleDeletePendingSignal)
+		api.POST("/pending-signals/:id/duplicate", s.handleDuplicatePendingSignal)
 
 		// Screener endpoints
 		api.GET("/screener/results", s.handleGetScreenerResults)
 
 		// Binance data endpoints
 		api.GET("/binance/symbols", s.handleGetBinanceSymbols)
+		api.GET("/binance/all-symbols", s.handleGetAllSymbols)
+
+		// Pattern scanner endpoints
+		api.POST("/pattern-scanner/scan", s.handleScanPatterns)
+
+		// Strategy scanner endpoints
+		api.GET("/strategy-scanner/scan", s.handleGetScanResults)
+		api.POST("/strategy-scanner/refresh", s.handleRefreshScan)
+
+		// Watchlist endpoints
+		api.GET("/watchlist", s.handleGetWatchlist)
+		api.POST("/watchlist", s.handleAddToWatchlist)
+		api.DELETE("/watchlist/:symbol", s.handleRemoveFromWatchlist)
 
 		// Metrics endpoints
 		api.GET("/metrics", s.handleGetMetrics)

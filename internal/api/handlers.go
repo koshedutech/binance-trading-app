@@ -2,7 +2,9 @@ package api
 
 import (
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/scanner"
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -85,6 +87,44 @@ func (s *Server) handleClosePosition(c *gin.Context) {
 	}
 
 	successResponse(c, gin.H{"message": "Position closed successfully"})
+}
+
+// handleCloseAllPositions closes all open positions
+func (s *Server) handleCloseAllPositions(c *gin.Context) {
+	positions := s.botAPI.GetOpenPositions()
+
+	if len(positions) == 0 {
+		successResponse(c, gin.H{"message": "No open positions to close", "closed": 0})
+		return
+	}
+
+	closedCount := 0
+	var errors []string
+
+	for _, pos := range positions {
+		symbol, ok := pos["symbol"].(string)
+		if !ok {
+			continue
+		}
+
+		if err := s.botAPI.ClosePosition(symbol); err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %s", symbol, err.Error()))
+		} else {
+			closedCount++
+		}
+	}
+
+	response := gin.H{
+		"message": fmt.Sprintf("Closed %d of %d positions", closedCount, len(positions)),
+		"closed":  closedCount,
+		"total":   len(positions),
+	}
+
+	if len(errors) > 0 {
+		response["errors"] = errors
+	}
+
+	successResponse(c, response)
 }
 
 // ============================================================================
@@ -505,7 +545,22 @@ func (s *Server) handleDeleteStrategyConfig(c *gin.Context) {
 func (s *Server) handleGetPendingSignals(c *gin.Context) {
 	ctx := c.Request.Context()
 
-	signals, err := s.repo.GetPendingSignals(ctx)
+	// Check for status filter
+	status := c.Query("status")
+	limitStr := c.DefaultQuery("limit", "50")
+	limit, _ := strconv.Atoi(limitStr)
+
+	var signals []*database.PendingSignal
+	var err error
+
+	if status != "" {
+		// Filter by status (CONFIRMED, REJECTED, etc.)
+		signals, err = s.repo.GetPendingSignalsByStatus(ctx, status, false, limit)
+	} else {
+		// Default behavior - get PENDING signals
+		signals, err = s.repo.GetPendingSignals(ctx)
+	}
+
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch pending signals")
 		return
@@ -602,6 +657,73 @@ func (s *Server) handleConfirmPendingSignal(c *gin.Context) {
 	}
 }
 
+// handleArchivePendingSignal archives (soft deletes) a pending signal
+func (s *Server) handleArchivePendingSignal(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid signal ID")
+		return
+	}
+
+	if err := s.repo.ArchivePendingSignal(ctx, id); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to archive signal")
+		return
+	}
+
+	successResponse(c, gin.H{
+		"message": "Signal archived successfully",
+		"signal_id": id,
+	})
+}
+
+// handleDeletePendingSignal permanently deletes a pending signal
+func (s *Server) handleDeletePendingSignal(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid signal ID")
+		return
+	}
+
+	if err := s.repo.DeletePendingSignal(ctx, id); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to delete signal")
+		return
+	}
+
+	successResponse(c, gin.H{
+		"message": "Signal deleted successfully",
+		"signal_id": id,
+	})
+}
+
+// handleDuplicatePendingSignal creates a copy of a signal with PENDING status
+func (s *Server) handleDuplicatePendingSignal(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid signal ID")
+		return
+	}
+
+	newSignal, err := s.repo.DuplicatePendingSignal(ctx, id)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to duplicate signal")
+		return
+	}
+
+	successResponse(c, gin.H{
+		"message": "Signal duplicated successfully",
+		"signal": newSignal,
+	})
+}
+
 // ============================================================================
 // BINANCE DATA HANDLERS
 // ============================================================================
@@ -647,5 +769,162 @@ func (s *Server) handleGetBinanceSymbols(c *gin.Context) {
 	successResponse(c, gin.H{
 		"symbols": symbols,
 		"count":   len(symbols),
+	})
+}
+
+// ============================================================================
+// STRATEGY SCANNER HANDLERS
+// ============================================================================
+
+// handleGetScanResults returns the latest strategy scanner results
+func (s *Server) handleGetScanResults(c *gin.Context) {
+	scannerInterface := s.botAPI.GetScanner()
+	if scannerInterface == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Strategy scanner not available")
+		return
+	}
+
+	// Type assert to *scanner.Scanner
+	sc, ok := scannerInterface.(*scanner.Scanner)
+	if !ok {
+		errorResponse(c, http.StatusInternalServerError, "Invalid scanner type")
+		return
+	}
+
+	result := sc.GetLastResult()
+	if result == nil {
+		// No scan results yet - return empty
+		successResponse(c, gin.H{
+			"scan_id":         "",
+			"start_time":      time.Now(),
+			"end_time":        time.Now(),
+			"duration":        0,
+			"symbols_scanned": 0,
+			"results":         []interface{}{},
+		})
+		return
+	}
+
+	successResponse(c, result)
+}
+
+// handleRefreshScan triggers an immediate scanner refresh
+func (s *Server) handleRefreshScan(c *gin.Context) {
+	scannerInterface := s.botAPI.GetScanner()
+	if scannerInterface == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Strategy scanner not available")
+		return
+	}
+
+	// Type assert to *scanner.Scanner
+	sc, ok := scannerInterface.(*scanner.Scanner)
+	if !ok {
+		errorResponse(c, http.StatusInternalServerError, "Invalid scanner type")
+		return
+	}
+
+	// Trigger scan in background (non-blocking)
+	go sc.Scan()
+
+	successResponse(c, gin.H{
+		"message": "Scan triggered successfully",
+		"status":  "running",
+	})
+}
+
+// ============================================================================
+// WATCHLIST HANDLERS
+// ============================================================================
+
+// handleGetWatchlist returns all watchlist items
+func (s *Server) handleGetWatchlist(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	watchlist, err := s.repo.GetWatchlist(ctx)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to fetch watchlist")
+		return
+	}
+
+	successResponse(c, watchlist)
+}
+
+// AddToWatchlistRequest represents a request to add a symbol to the watchlist
+type AddToWatchlistRequest struct {
+	Symbol string  `json:"symbol" binding:"required"`
+	Notes  *string `json:"notes"`
+}
+
+// handleAddToWatchlist adds a symbol to the watchlist
+func (s *Server) handleAddToWatchlist(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var req AddToWatchlistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	// Validate symbol format (basic check)
+	if len(req.Symbol) < 3 {
+		errorResponse(c, http.StatusBadRequest, "Invalid symbol format")
+		return
+	}
+
+	// Check if already in watchlist
+	exists, err := s.repo.IsInWatchlist(ctx, req.Symbol)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to check watchlist")
+		return
+	}
+
+	if exists {
+		errorResponse(c, http.StatusConflict, "Symbol already in watchlist")
+		return
+	}
+
+	// Add to watchlist
+	if err := s.repo.AddToWatchlist(ctx, req.Symbol, req.Notes); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to add to watchlist: "+err.Error())
+		return
+	}
+
+	successResponse(c, gin.H{
+		"message": "Symbol added to watchlist successfully",
+		"symbol":  req.Symbol,
+	})
+}
+
+// handleRemoveFromWatchlist removes a symbol from the watchlist
+func (s *Server) handleRemoveFromWatchlist(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	// Check if exists in watchlist
+	exists, err := s.repo.IsInWatchlist(ctx, symbol)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to check watchlist")
+		return
+	}
+
+	if !exists {
+		errorResponse(c, http.StatusNotFound, "Symbol not found in watchlist")
+		return
+	}
+
+	// Remove from watchlist
+	if err := s.repo.RemoveFromWatchlist(ctx, symbol); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to remove from watchlist: "+err.Error())
+		return
+	}
+
+	successResponse(c, gin.H{
+		"message": "Symbol removed from watchlist successfully",
+		"symbol":  symbol,
 	})
 }
