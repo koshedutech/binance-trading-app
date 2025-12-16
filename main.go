@@ -15,6 +15,9 @@ import (
 	"binance-trading-bot/internal/bot"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
+	"binance-trading-bot/internal/logging"
+	"binance-trading-bot/internal/notification"
+	"binance-trading-bot/internal/risk"
 	"binance-trading-bot/internal/scanner"
 	"binance-trading-bot/internal/screener"
 	"binance-trading-bot/internal/strategy"
@@ -27,9 +30,63 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	// Initialize structured logging
+	logger := logging.New(&logging.Config{
+		Level:       cfg.LoggingConfig.Level,
+		Output:      cfg.LoggingConfig.Output,
+		JSONFormat:  cfg.LoggingConfig.JSONFormat,
+		IncludeFile: cfg.LoggingConfig.IncludeFile,
+		Component:   "main",
+	})
+	logging.SetDefault(logger)
+	logger.Info("Structured logging initialized")
+
 	// Initialize event bus
 	eventBus := events.NewEventBus()
-	log.Println("Event bus initialized")
+	logger.Info("Event bus initialized")
+
+	// Initialize notification manager
+	var notifyManager *notification.Manager
+	if cfg.NotificationConfig.Enabled {
+		notifyManager = notification.NewManager()
+
+		// Add Telegram notifier
+		if cfg.NotificationConfig.Telegram.Enabled {
+			telegramNotifier := notification.NewTelegramNotifier(
+				cfg.NotificationConfig.Telegram.BotToken,
+				cfg.NotificationConfig.Telegram.ChatID,
+			)
+			notifyManager.AddNotifier("telegram", telegramNotifier)
+			logger.Info("Telegram notifications enabled")
+		}
+
+		// Add Discord notifier
+		if cfg.NotificationConfig.Discord.Enabled {
+			discordNotifier := notification.NewDiscordNotifier(
+				cfg.NotificationConfig.Discord.WebhookURL,
+			)
+			notifyManager.AddNotifier("discord", discordNotifier)
+			logger.Info("Discord notifications enabled")
+		}
+	}
+
+	// Initialize risk manager
+	riskManager := risk.NewRiskManager(&risk.RiskConfig{
+		MaxRiskPerTrade:    cfg.RiskConfig.MaxRiskPerTrade,
+		MaxDailyDrawdown:   cfg.RiskConfig.MaxDailyDrawdown,
+		MaxOpenPositions:   cfg.RiskConfig.MaxOpenPositions,
+		PositionSizeMethod: cfg.RiskConfig.PositionSizeMethod,
+		FixedPositionSize:  cfg.RiskConfig.FixedPositionSize,
+	})
+	logger.Info("Risk manager initialized", "method", cfg.RiskConfig.PositionSizeMethod)
+
+	// Initialize trailing stop manager
+	trailingStopManager := risk.NewTrailingStopManager(&risk.TrailingConfig{
+		Enabled:           cfg.RiskConfig.UseTrailingStop,
+		TrailingPercent:   cfg.RiskConfig.TrailingStopPercent,
+		ActivationPercent: cfg.RiskConfig.TrailingStopActivation,
+	})
+	logger.Info("Trailing stop manager initialized", "enabled", cfg.RiskConfig.UseTrailingStop)
 
 	// Initialize database
 	dbConfig := database.Config{
@@ -95,7 +152,7 @@ func main() {
 		scannerConfig.Enabled, scannerConfig.ScanInterval)
 
 	// Subscribe to events and persist to database
-	setupEventPersistence(eventBus, repo)
+	setupEventPersistence(eventBus, repo, notifyManager, logger)
 
 	// Initialize WebSocket hub
 	wsHub := api.InitWebSocket(eventBus)
@@ -111,10 +168,14 @@ func main() {
 
 	// Create a bot API wrapper for the web interface
 	botAPI := &BotAPIWrapper{
-		bot:      tradingBot,
-		screener: coinScreener,
-		scanner:  strategyScanner,
-		cfg:      cfg,
+		bot:                 tradingBot,
+		screener:            coinScreener,
+		scanner:             strategyScanner,
+		cfg:                 cfg,
+		riskManager:         riskManager,
+		trailingStopManager: trailingStopManager,
+		notifyManager:       notifyManager,
+		logger:              logger,
 	}
 
 	server := api.NewServer(serverConfig, repo, eventBus, botAPI)
@@ -274,7 +335,7 @@ func registerStrategies(bot *bot.TradingBot, cfg *config.Config) {
 	fmt.Println("Strategies registered successfully")
 }
 
-func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository) {
+func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository, notifyManager *notification.Manager, logger *logging.Logger) {
 	// Subscribe to trade events
 	eventBus.Subscribe(events.EventTradeClosed, func(event events.Event) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -289,7 +350,31 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository)
 			Timestamp: event.Timestamp,
 		}
 		if err := repo.CreateSystemEvent(ctx, sysEvent); err != nil {
-			log.Printf("Failed to persist trade closed event: %v", err)
+			logger.WithError(err).Error("Failed to persist trade closed event")
+		}
+
+		// Send notification for closed trades
+		if notifyManager != nil {
+			symbol, _ := event.Data["symbol"].(string)
+			pnl, _ := event.Data["pnl"].(float64)
+			pnlPercent, _ := event.Data["pnl_percent"].(float64)
+
+			msg := notification.Message{
+				Title:   "Trade Closed",
+				Message: fmt.Sprintf("%s closed with P&L: $%.2f (%.2f%%)", symbol, pnl, pnlPercent),
+				Level:   notification.LevelInfo,
+				Data: map[string]interface{}{
+					"symbol":      symbol,
+					"pnl":         pnl,
+					"pnl_percent": pnlPercent,
+				},
+			}
+			if pnl < 0 {
+				msg.Level = notification.LevelWarning
+			}
+			if err := notifyManager.Send(ctx, msg); err != nil {
+				logger.WithError(err).Warn("Failed to send trade notification")
+			}
 		}
 	})
 
@@ -315,7 +400,25 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository)
 			Executed:     false,
 		}
 		if err := repo.CreateSignal(ctx, signal); err != nil {
-			log.Printf("Failed to persist signal: %v", err)
+			logger.WithError(err).Error("Failed to persist signal")
+		}
+
+		// Send notification for new signals
+		if notifyManager != nil {
+			msg := notification.Message{
+				Title:   "New Signal",
+				Message: fmt.Sprintf("%s %s @ $%.4f - %s", signalType, symbol, price, reason),
+				Level:   notification.LevelInfo,
+				Data: map[string]interface{}{
+					"strategy": strategyName,
+					"symbol":   symbol,
+					"type":     signalType,
+					"price":    price,
+				},
+			}
+			if err := notifyManager.Send(ctx, msg); err != nil {
+				logger.WithError(err).Warn("Failed to send signal notification")
+			}
 		}
 	})
 
@@ -344,19 +447,41 @@ func setupEventPersistence(eventBus *events.EventBus, repo *database.Repository)
 			order.Price = &price
 		}
 		if err := repo.CreateOrder(ctx, order); err != nil {
-			log.Printf("Failed to persist order: %v", err)
+			logger.WithError(err).Error("Failed to persist order")
+		}
+
+		// Send notification for new orders
+		if notifyManager != nil {
+			msg := notification.Message{
+				Title:   "Order Placed",
+				Message: fmt.Sprintf("%s %s %.6f %s", side, symbol, quantity, orderType),
+				Level:   notification.LevelInfo,
+				Data: map[string]interface{}{
+					"order_id": orderID,
+					"symbol":   symbol,
+					"side":     side,
+					"quantity": quantity,
+				},
+			}
+			if err := notifyManager.Send(ctx, msg); err != nil {
+				logger.WithError(err).Warn("Failed to send order notification")
+			}
 		}
 	})
 
-	log.Println("Event persistence configured")
+	logger.Info("Event persistence and notifications configured")
 }
 
 // BotAPIWrapper implements the api.BotAPI interface
 type BotAPIWrapper struct {
-	bot      *bot.TradingBot
-	screener *screener.Screener
-	scanner  *scanner.Scanner
-	cfg      *config.Config
+	bot                 *bot.TradingBot
+	screener            *screener.Screener
+	scanner             *scanner.Scanner
+	cfg                 *config.Config
+	riskManager         *risk.RiskManager
+	trailingStopManager *risk.TrailingStopManager
+	notifyManager       *notification.Manager
+	logger              *logging.Logger
 }
 
 func (w *BotAPIWrapper) GetStatus() map[string]interface{} {
@@ -553,6 +678,18 @@ func (w *BotAPIWrapper) ExecutePendingSignal(signal *database.PendingSignal) err
 
 func (w *BotAPIWrapper) GetScanner() interface{} {
 	return w.scanner
+}
+
+func (w *BotAPIWrapper) GetRiskManager() *risk.RiskManager {
+	return w.riskManager
+}
+
+func (w *BotAPIWrapper) GetTrailingStopManager() *risk.TrailingStopManager {
+	return w.trailingStopManager
+}
+
+func (w *BotAPIWrapper) GetNotificationManager() *notification.Manager {
+	return w.notifyManager
 }
 
 // Helper functions
