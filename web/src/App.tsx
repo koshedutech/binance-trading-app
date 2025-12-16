@@ -4,6 +4,8 @@ import { useStore } from './store';
 import { apiService } from './services/api';
 import { wsService } from './services/websocket';
 import Dashboard from './pages/Dashboard';
+import VisualStrategyDemoEnhanced from './pages/VisualStrategyDemoEnhanced';
+import PatternScannerPage from './pages/PatternScannerPage';
 import Header from './components/Header';
 import ConnectionIndicator from './components/ConnectionIndicator';
 
@@ -142,6 +144,8 @@ function App() {
         <main className="container mx-auto px-4 py-6">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/visual-strategy-advanced" element={<VisualStrategyDemoEnhanced />} />
+            <Route path="/pattern-scanner" element={<PatternScannerPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

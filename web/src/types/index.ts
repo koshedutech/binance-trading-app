@@ -93,6 +93,44 @@ export interface Signal {
   created_at: string;
 }
 
+// Pending Signal (awaiting confirmation)
+export interface PendingSignal {
+  id: number;
+  strategy_name: string;
+  symbol: string;
+  signal_type: string;
+  entry_price: number;
+  current_price: number;
+  stop_loss?: number;
+  take_profit?: number;
+  quantity?: number;
+  reason?: string;
+  conditions_met: any;
+  timestamp: string;
+  status: 'PENDING' | 'CONFIRMED' | 'REJECTED' | 'ARCHIVED';
+  confirmed_at?: string;
+  rejected_at?: string;
+  archived?: boolean;
+  archived_at?: string;
+  created_at: string;
+}
+
+// Parsed pattern data from reason field
+export interface PatternData {
+  patternName: string;          // e.g., "Morning Star"
+  confidence: number;            // 0-100
+  confluenceScore: number;       // 0-100
+  confluenceGrade: string;       // A, B, C, etc.
+  fvgPresent: boolean;
+  volumeMultiplier?: number;     // e.g., 2.4
+  additionalFactors: string[];   // ["FVG zone", "High volume"]
+}
+
+// Signal with parsed pattern data
+export interface EnhancedPendingSignal extends PendingSignal {
+  patternData?: PatternData;
+}
+
 // Screener Result
 export interface ScreenerResult {
   id: number;
@@ -163,4 +201,183 @@ export interface PlaceOrderRequest {
   order_type: 'MARKET' | 'LIMIT';
   quantity: number;
   price?: number;
+}
+
+// Strategy Scanner - Proximity Detection Types
+
+export interface ConditionDetail {
+  name: string;
+  description: string;
+  met: boolean;
+  value?: any;
+  target?: any;
+  distance?: any;
+}
+
+export interface ConditionsChecklist {
+  total_conditions: number;
+  met_conditions: number;
+  failed_conditions: number;
+  details: ConditionDetail[];
+}
+
+export interface TimePrediction {
+  min_minutes: number;
+  max_minutes: number;
+  confidence: number;
+  based_on: string;
+}
+
+export interface ProximityResult {
+  symbol: string;
+  strategy_name: string;
+  current_price: number;
+  target_price: number;
+  distance_percent: number;
+  distance_absolute: number;
+  readiness_score: number;
+  trend_direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  conditions: ConditionsChecklist;
+  time_prediction?: TimePrediction;
+  last_evaluated: string;
+  timestamp: string;
+}
+
+export interface ScanResult {
+  scan_id: string;
+  start_time: string;
+  end_time: string;
+  duration: number;
+  symbols_scanned: number;
+  results: ProximityResult[];
+}
+
+export interface WatchlistItem {
+  id: number;
+  symbol: string;
+  notes?: string;
+  added_at: string;
+  created_at: string;
+}
+
+// Visual Strategy Builder Types
+import type { Node, Edge } from '@xyflow/react';
+
+export interface VisualFlowDefinition {
+  version: string;
+  nodes: Node[];
+  edges: Edge[];
+  settings: StrategySettings;
+}
+
+// Type aliases for React Flow types
+export type FlowNode = Node;
+export type FlowEdge = Edge;
+
+export interface NodeData {
+  label: string;
+  [key: string]: any;
+}
+
+export interface StrategySettings {
+  symbol: string;
+  interval: string;
+  stopLoss?: {
+    enabled: boolean;
+    type: 'percentage' | 'absolute' | 'atr';
+    value: number;
+  };
+  takeProfit?: {
+    enabled: boolean;
+    type: 'percentage' | 'absolute';
+    value: number;
+  };
+  riskManagement?: {
+    maxPositionSize: number;
+    maxConcurrentTrades: number;
+  };
+}
+
+export interface ConditionGroup {
+  operator: 'AND' | 'OR';
+  conditions: Condition[];
+  groups: ConditionGroup[];
+}
+
+export interface Condition {
+  type: 'indicator_comparison' | 'candle_property' | 'price_target' | 'pattern';
+  [key: string]: any;
+}
+
+// Backtest Types
+
+export interface BacktestRequest {
+  symbol: string;
+  interval: string;
+  start_date: string;
+  end_date: string;
+}
+
+export interface BacktestResult {
+  id: number;
+  strategy_config_id: number;
+  symbol: string;
+  interval: string;
+  start_date: string;
+  end_date: string;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  total_fees: number;
+  net_pnl: number;
+  average_win: number;
+  average_loss: number;
+  largest_win: number;
+  largest_loss: number;
+  profit_factor: number;
+  max_drawdown: number;
+  max_drawdown_percent: number;
+  avg_trade_duration_minutes: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BacktestTrade {
+  id: number;
+  backtest_result_id: number;
+  entry_time: string;
+  entry_price: number;
+  entry_reason: string;
+  exit_time: string;
+  exit_price: number;
+  exit_reason: string;
+  quantity: number;
+  side: 'BUY' | 'SELL';
+  pnl: number;
+  pnl_percent: number;
+  fees: number;
+  duration_minutes: number;
+  created_at: string;
+}
+
+// Strategy Config (extend existing with visual flow support)
+export interface StrategyConfig {
+  id: number;
+  name: string;
+  symbol: string;
+  timeframe: string;
+  indicator_type: string;
+  autopilot: boolean;
+  enabled: boolean;
+  position_size: number;
+  stop_loss_percent: number;
+  take_profit_percent: number;
+  config_params?: {
+    visual_flow?: VisualFlowDefinition;
+    [key: string]: any;
+  };
+  created_at: string;
+  updated_at: string;
 }

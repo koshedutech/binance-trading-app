@@ -1,16 +1,19 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
-import { TrendingUp, TrendingDown, Activity, DollarSign, Bell, Settings } from 'lucide-react';
+import { TrendingUp, TrendingDown, Activity, DollarSign, Bell, Settings, Sparkles, ArrowRight } from 'lucide-react';
 import PositionsTable from '../components/PositionsTable';
 import OrdersTable from '../components/OrdersTable';
 import StrategiesPanel from '../components/StrategiesPanel';
 import ScreenerResults from '../components/ScreenerResults';
-import SignalsPanel from '../components/SignalsPanel';
+import EnhancedSignalsPanel from '../components/EnhancedSignalsPanel';
 import PendingSignalsModal from '../components/PendingSignalsModal';
 import StrategyConfigModal from '../components/StrategyConfigModal';
+import StrategyScanner from '../components/StrategyScanner';
 
 export default function Dashboard() {
   const { metrics, positions, activeOrders } = useStore();
+  const navigate = useNavigate();
   const [showPendingSignalsModal, setShowPendingSignalsModal] = useState(false);
   const [showStrategyConfigModal, setShowStrategyConfigModal] = useState(false);
 
@@ -25,6 +28,38 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* Visual Strategy Builder Highlight */}
+      <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg p-6 shadow-xl border border-blue-500/50">
+        <div className="flex items-center justify-between">
+          <div className="flex-1">
+            <div className="flex items-center gap-3 mb-2">
+              <Sparkles className="w-8 h-8 text-yellow-300" />
+              <h2 className="text-2xl font-bold text-white">Visual Strategy Builder</h2>
+              <span className="px-2 py-1 bg-green-500 text-white text-xs font-semibold rounded-full">NEW</span>
+            </div>
+            <p className="text-blue-100 mb-4 max-w-2xl">
+              Create advanced trading strategies with drag-and-drop nodes, visual condition builder,
+              multiple indicators, backtesting, and chart visualization. Build complex logic with AND/OR
+              conditions like "Buy when LTP &gt;= EMA(20) AND RSI &lt; 30".
+            </p>
+            <div className="flex flex-wrap gap-2 text-sm text-blue-100">
+              <span className="px-3 py-1 bg-white/10 rounded-full">✓ 9 Technical Indicators</span>
+              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Visual Conditions</span>
+              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Backtesting</span>
+              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Chart Integration</span>
+              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Risk Management</span>
+            </div>
+          </div>
+          <button
+            onClick={() => navigate('/visual-strategy-advanced')}
+            className="bg-white hover:bg-gray-100 text-blue-600 px-6 py-3 rounded-lg font-bold transition-all hover:scale-105 flex items-center gap-2 shadow-lg ml-6"
+          >
+            Launch Builder
+            <ArrowRight className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+
       {/* Action Buttons */}
       <div className="flex justify-end gap-3">
         <button
@@ -186,10 +221,20 @@ export default function Dashboard() {
 
         <div className="card">
           <div className="card-header">
-            <h2 className="text-lg font-semibold">Recent Signals</h2>
+            <h2 className="text-lg font-semibold">Signal Management</h2>
+          </div>
+          <div className="card-body">
+            <EnhancedSignalsPanel />
+          </div>
+        </div>
+
+        {/* Strategy Scanner - Signal Proximity */}
+        <div className="card">
+          <div className="card-header">
+            <h2 className="text-lg font-semibold">Strategy Scanner - Signal Proximity</h2>
           </div>
           <div className="card-body p-0">
-            <SignalsPanel />
+            <StrategyScanner />
           </div>
         </div>
       </div>

@@ -11,6 +11,8 @@ import type {
   TradingMetrics,
   SystemEvent,
   PlaceOrderRequest,
+  ScanResult,
+  WatchlistItem,
 } from '../types';
 
 class APIService {
@@ -61,6 +63,11 @@ class APIService {
 
   async closePosition(symbol: string): Promise<void> {
     await this.client.post(`/positions/${symbol}/close`);
+  }
+
+  async closeAllPositions(): Promise<{ message: string; closed: number; total: number; errors?: string[] }> {
+    const { data } = await this.client.post<APIResponse<{ message: string; closed: number; total: number; errors?: string[] }>>('/positions/close-all');
+    return data.data!;
   }
 
   // Order endpoints
@@ -147,6 +154,26 @@ class APIService {
     return data.data!;
   }
 
+  async getPendingSignalsByStatus(status: 'CONFIRMED' | 'REJECTED', limit = 50): Promise<any[]> {
+    const { data } = await this.client.get<APIResponse<any[]>>('/pending-signals', {
+      params: { status, limit },
+    });
+    return data.data || [];
+  }
+
+  async archivePendingSignal(id: number): Promise<void> {
+    await this.client.post(`/pending-signals/${id}/archive`);
+  }
+
+  async deletePendingSignal(id: number): Promise<void> {
+    await this.client.delete(`/pending-signals/${id}`);
+  }
+
+  async duplicatePendingSignal(id: number): Promise<any> {
+    const { data } = await this.client.post<APIResponse<any>>(`/pending-signals/${id}/duplicate`);
+    return data.data;
+  }
+
   async confirmPendingSignal(id: number, action: 'CONFIRM' | 'REJECT'): Promise<void> {
     await this.client.post(`/pending-signals/${id}/confirm`, { action });
   }
@@ -175,6 +202,78 @@ class APIService {
   async getBinanceSymbols(): Promise<string[]> {
     const { data } = await this.client.get<APIResponse<{ symbols: string[]; count: number }>>('/binance/symbols');
     return data.data?.symbols || [];
+  }
+
+  // Strategy Scanner endpoints
+  async getScanResults(): Promise<ScanResult> {
+    const { data } = await this.client.get<APIResponse<ScanResult>>('/strategy-scanner/scan');
+    return data.data!;
+  }
+
+  async refreshScan(): Promise<void> {
+    await this.client.post('/strategy-scanner/refresh');
+  }
+
+  // Watchlist endpoints
+  async getWatchlist(): Promise<WatchlistItem[]> {
+    const { data } = await this.client.get<APIResponse<WatchlistItem[]>>('/watchlist');
+    return data.data || [];
+  }
+
+  async addToWatchlist(symbol: string, notes?: string): Promise<void> {
+    await this.client.post('/watchlist', { symbol, notes });
+  }
+
+  async removeFromWatchlist(symbol: string): Promise<void> {
+    await this.client.delete(`/watchlist/${symbol}`);
+  }
+
+  // Pattern Scanner endpoints
+  async scanPatterns(request: { symbols: string[]; intervals: string[] }): Promise<any[]> {
+    const { data } = await this.client.post('/pattern-scanner/scan', request);
+    return data || [];
+  }
+
+  async getAllSymbols(): Promise<{ symbols: string[]; count: number }> {
+    const { data } = await this.client.get('/binance/all-symbols');
+    return data;
+  }
+
+  // Visual Strategy & Backtest endpoints
+  async getKlines(symbol: string, interval: string, limit = 500): Promise<any[]> {
+    const { data } = await this.client.get('/binance/klines', {
+      params: { symbol, interval, limit },
+    });
+    return data.data || [];
+  }
+
+  async runBacktest(
+    strategyConfigId: number,
+    request: {
+      symbol: string;
+      interval: string;
+      start_date: string;
+      end_date: string;
+    }
+  ): Promise<any> {
+    const { data } = await this.client.post(
+      `/strategy-configs/${strategyConfigId}/backtest`,
+      request
+    );
+    return data.data;
+  }
+
+  async getBacktestResults(strategyConfigId: number, limit = 10): Promise<any[]> {
+    const { data } = await this.client.get(
+      `/strategy-configs/${strategyConfigId}/backtest-results`,
+      { params: { limit } }
+    );
+    return data.data || [];
+  }
+
+  async getBacktestTrades(backtestResultId: number): Promise<any[]> {
+    const { data } = await this.client.get(`/backtest-results/${backtestResultId}/trades`);
+    return data.data || [];
   }
 }
 
