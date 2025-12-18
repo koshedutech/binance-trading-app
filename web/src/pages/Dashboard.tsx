@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
-import { TrendingUp, TrendingDown, Activity, DollarSign, Bell, Settings, Sparkles, ArrowRight } from 'lucide-react';
+import { TrendingUp, TrendingDown, Activity, DollarSign, Bell, Settings, Sparkles, ArrowRight, Brain, History, Zap, AlertCircle } from 'lucide-react';
 import PositionsTable from '../components/PositionsTable';
 import OrdersTable from '../components/OrdersTable';
 import StrategiesPanel from '../components/StrategiesPanel';
@@ -10,12 +10,54 @@ import EnhancedSignalsPanel from '../components/EnhancedSignalsPanel';
 import PendingSignalsModal from '../components/PendingSignalsModal';
 import StrategyConfigModal from '../components/StrategyConfigModal';
 import StrategyScanner from '../components/StrategyScanner';
+import AISignalsPanel from '../components/AISignalsPanel';
+import TradeHistory from '../components/TradeHistory';
+import TradingModeToggle from '../components/TradingModeToggle';
+import WalletBalanceCard from '../components/WalletBalanceCard';
+import AutopilotRulesPanel from '../components/AutopilotRulesPanel';
+import PanicButton from '../components/PanicButton';
+import FuturesPositionsTable from '../components/FuturesPositionsTable';
+import { futuresApi } from '../services/futuresApi';
+import { apiService } from '../services/api';
+import type { FuturesPosition } from '../types/futures';
 
 export default function Dashboard() {
   const { metrics, positions, activeOrders } = useStore();
   const navigate = useNavigate();
   const [showPendingSignalsModal, setShowPendingSignalsModal] = useState(false);
   const [showStrategyConfigModal, setShowStrategyConfigModal] = useState(false);
+  const [futuresPositions, setFuturesPositions] = useState<FuturesPosition[]>([]);
+  const [tradingMode, setTradingMode] = useState<{ mode: 'paper' | 'live'; mode_label: string } | null>(null);
+  const [positionsView, setPositionsView] = useState<'spot' | 'futures' | 'all'>('all');
+
+  // Fetch futures positions and trading mode
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [futuresPos, modeData] = await Promise.all([
+          futuresApi.getPositions(),
+          apiService.getTradingMode(),
+        ]);
+        setFuturesPositions(futuresPos);
+        setTradingMode(modeData);
+      } catch (error) {
+        console.error('Error fetching data:', error);
+      }
+    };
+
+    fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const refreshPositions = async () => {
+    try {
+      const futuresPos = await futuresApi.getPositions();
+      setFuturesPositions(futuresPos);
+    } catch (error) {
+      console.error('Error refreshing positions:', error);
+    }
+  };
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -60,22 +102,63 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Action Buttons */}
-      <div className="flex justify-end gap-3">
-        <button
-          onClick={() => setShowStrategyConfigModal(true)}
-          className="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center"
-        >
-          <Settings className="w-5 h-5 mr-2" />
-          Configure Strategies
-        </button>
-        <button
-          onClick={() => setShowPendingSignalsModal(true)}
-          className="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center animate-pulse"
-        >
-          <Bell className="w-5 h-5 mr-2" />
-          Pending Signals
-        </button>
+      {/* Trading Mode, Live/Paper Indicator & Action Buttons */}
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        {/* Left side - Trading Mode & Live/Paper Indicator */}
+        <div className="flex items-center gap-4">
+          <TradingModeToggle />
+
+          {/* Live/Paper Indicator */}
+          {tradingMode && (
+            <div className={`
+              flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-sm
+              ${tradingMode.mode === 'live'
+                ? 'bg-green-500/20 border-2 border-green-500 text-green-400'
+                : 'bg-yellow-500/20 border-2 border-yellow-500 text-yellow-400'
+              }
+            `}>
+              <span className={`w-3 h-3 rounded-full animate-pulse ${tradingMode.mode === 'live' ? 'bg-green-500' : 'bg-yellow-500'}`} />
+              {tradingMode.mode === 'live' ? (
+                <>
+                  <Zap className="w-4 h-4" />
+                  LIVE TRADING
+                </>
+              ) : (
+                <>
+                  <AlertCircle className="w-4 h-4" />
+                  PAPER TRADING
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Right side - Action Buttons & Panic Button */}
+        <div className="flex gap-3 flex-wrap">
+          <button
+            onClick={() => setShowStrategyConfigModal(true)}
+            className="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center"
+          >
+            <Settings className="w-5 h-5 mr-2" />
+            Configure Strategies
+          </button>
+          <button
+            onClick={() => setShowPendingSignalsModal(true)}
+            className="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center animate-pulse"
+          >
+            <Bell className="w-5 h-5 mr-2" />
+            Pending Signals
+          </button>
+
+          {/* Panic Button - Close All Positions */}
+          <PanicButton type="all" onComplete={refreshPositions} />
+        </div>
+      </div>
+
+      {/* Wallet Balance & Autopilot Control - Top Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <WalletBalanceCard />
+        <AutopilotRulesPanel />
       </div>
 
       {/* Metrics Cards */}
@@ -175,13 +258,107 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Positions */}
+      {/* Positions - Spot & Futures */}
       <div className="card">
-        <div className="card-header">
-          <h2 className="text-lg font-semibold">Open Positions</h2>
+        <div className="card-header flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <h2 className="text-lg font-semibold">Open Positions</h2>
+            {/* Position counts */}
+            <div className="flex items-center gap-2 text-sm">
+              <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded">
+                Spot: {positions.length}
+              </span>
+              <span className="px-2 py-1 bg-purple-500/20 text-purple-400 rounded">
+                Futures: {futuresPositions.length}
+              </span>
+            </div>
+          </div>
+          {/* View Toggle */}
+          <div className="flex items-center gap-1 bg-gray-700 rounded-lg p-1">
+            <button
+              onClick={() => setPositionsView('all')}
+              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                positionsView === 'all' ? 'bg-primary-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              All
+            </button>
+            <button
+              onClick={() => setPositionsView('spot')}
+              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                positionsView === 'spot' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Spot
+            </button>
+            <button
+              onClick={() => setPositionsView('futures')}
+              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
+                positionsView === 'futures' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              Futures
+            </button>
+          </div>
         </div>
         <div className="card-body p-0">
-          <PositionsTable />
+          {/* Spot Positions */}
+          {(positionsView === 'all' || positionsView === 'spot') && (
+            <div>
+              {positionsView === 'all' && positions.length > 0 && (
+                <div className="px-4 py-2 bg-blue-500/10 border-b border-gray-700 flex items-center gap-2">
+                  <span className="text-blue-400 font-semibold text-sm">SPOT POSITIONS</span>
+                  <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 rounded text-xs">
+                    {tradingMode?.mode === 'live' ? 'LIVE' : 'PAPER'}
+                  </span>
+                </div>
+              )}
+              <PositionsTable />
+            </div>
+          )}
+
+          {/* Futures Positions */}
+          {(positionsView === 'all' || positionsView === 'futures') && (
+            <div>
+              {positionsView === 'all' && (
+                <div className="px-4 py-2 bg-purple-500/10 border-b border-gray-700 flex items-center gap-2">
+                  <span className="text-purple-400 font-semibold text-sm">FUTURES POSITIONS</span>
+                  <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 rounded text-xs">
+                    {tradingMode?.mode === 'live' ? 'LIVE' : 'PAPER'}
+                  </span>
+                </div>
+              )}
+              {futuresPositions.length > 0 ? (
+                <FuturesPositionsTable />
+              ) : (
+                positionsView === 'futures' && (
+                  <div className="text-center py-8 text-gray-400">
+                    No open futures positions
+                  </div>
+                )
+              )}
+            </div>
+          )}
+
+          {/* Empty state */}
+          {positions.length === 0 && futuresPositions.length === 0 && (
+            <div className="text-center py-8 text-gray-400">
+              No open positions
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Trade History */}
+      <div className="card">
+        <div className="card-header">
+          <div className="flex items-center gap-2">
+            <History className="w-5 h-5 text-gray-400" />
+            <h2 className="text-lg font-semibold">Trade History</h2>
+          </div>
+        </div>
+        <div className="card-body">
+          <TradeHistory />
         </div>
       </div>
 
@@ -235,6 +412,19 @@ export default function Dashboard() {
           </div>
           <div className="card-body p-0">
             <StrategyScanner />
+          </div>
+        </div>
+
+        {/* AI Signals - Autopilot Decisions */}
+        <div className="card">
+          <div className="card-header">
+            <div className="flex items-center gap-2">
+              <Brain className="w-5 h-5 text-purple-400" />
+              <h2 className="text-lg font-semibold">AI Signals - Autopilot Decisions</h2>
+            </div>
+          </div>
+          <div className="card-body p-0">
+            <AISignalsPanel />
           </div>
         </div>
       </div>

@@ -165,6 +165,77 @@ func (s *Server) setupRoutes() {
 
 		// System events
 		api.GET("/events", s.handleGetSystemEvents)
+
+		// AI Signals endpoints
+		api.GET("/ai-decisions", s.handleGetAIDecisions)
+		api.GET("/ai-decisions/stats", s.handleGetAIDecisionStats)
+		api.GET("/ai-decisions/:id", s.handleGetAIDecisionByID)
+
+		// Strategy Performance endpoints
+		api.GET("/strategy-performance", s.handleGetStrategyPerformance)
+		api.GET("/strategy-performance/overall", s.handleGetOverallPerformance)
+		api.GET("/strategy-performance/historical", s.handleGetHistoricalSuccessRate)
+
+		// Settings & Control endpoints
+		settings := api.Group("/settings")
+		{
+			settings.GET("/trading-mode", s.handleGetTradingMode)
+			settings.POST("/trading-mode", s.handleSetTradingMode)
+			settings.GET("/wallet-balance", s.handleGetWalletBalance)
+			settings.GET("/autopilot", s.handleGetAutopilotStatus)
+			settings.POST("/autopilot/toggle", s.handleToggleAutopilot)
+			settings.POST("/autopilot/rules", s.handleSetAutopilotRules)
+			settings.GET("/circuit-breaker", s.handleGetCircuitBreakerStatus)
+			settings.POST("/circuit-breaker/reset", s.handleResetCircuitBreaker)
+			settings.POST("/circuit-breaker/config", s.handleUpdateCircuitBreakerConfig)
+		}
+
+		// Futures trading endpoints
+		futures := api.Group("/futures")
+		{
+			// Account endpoints
+			futures.GET("/account", s.handleGetFuturesAccountInfo)
+			futures.GET("/wallet-balance", s.handleGetFuturesWalletBalance)
+			futures.GET("/positions", s.handleGetFuturesPositions)
+			futures.POST("/positions/close-all", s.handleCloseAllFuturesPositions) // Panic button - must be before :symbol route
+			futures.POST("/positions/:symbol/close", s.handleCloseFuturesPosition)
+
+			// Settings endpoints
+			futures.POST("/leverage", s.handleSetLeverage)
+			futures.POST("/margin-type", s.handleSetMarginType)
+			futures.POST("/position-mode", s.handleSetPositionMode)
+			futures.GET("/position-mode", s.handleGetPositionMode)
+			futures.GET("/settings/:symbol", s.handleGetFuturesAccountSettings)
+
+			// Order endpoints
+			futures.POST("/orders", s.handlePlaceFuturesOrder)
+			futures.DELETE("/orders/:symbol/:id", s.handleCancelFuturesOrder)
+			futures.DELETE("/orders/:symbol/all", s.handleCancelAllFuturesOrders)
+			futures.GET("/orders/open", s.handleGetFuturesOpenOrders)
+
+			// Market data endpoints
+			futures.GET("/funding-rate/:symbol", s.handleGetFundingRate)
+			futures.GET("/orderbook/:symbol", s.handleGetOrderBookDepth)
+			futures.GET("/mark-price/:symbol", s.handleGetMarkPrice)
+			futures.GET("/symbols", s.handleGetFuturesSymbols)
+			futures.GET("/klines", s.handleGetFuturesKlines)
+
+			// History endpoints
+			futures.GET("/trades/history", s.handleGetFuturesTradeHistory)
+			futures.GET("/funding-fees/history", s.handleGetFundingFeeHistory)
+			futures.GET("/transactions/history", s.handleGetFuturesTransactionHistory)
+			futures.GET("/metrics", s.handleGetFuturesMetrics)
+
+			// Autopilot endpoints
+			futures.GET("/autopilot/status", s.handleGetFuturesAutopilotStatus)
+			futures.POST("/autopilot/toggle", s.handleToggleFuturesAutopilot)
+			futures.POST("/autopilot/dry-run", s.handleSetFuturesAutopilotDryRun)
+			futures.POST("/autopilot/risk-level", s.handleSetFuturesAutopilotRiskLevel)
+			futures.POST("/autopilot/allocation", s.handleSetFuturesAutopilotAllocation)
+			futures.POST("/autopilot/profit-reinvest", s.handleSetFuturesAutopilotProfitReinvest)
+			futures.GET("/autopilot/profit-stats", s.handleGetFuturesAutopilotProfitStats)
+			futures.POST("/autopilot/reset-allocation", s.handleResetFuturesAutopilotAllocation)
+		}
 	}
 
 	// WebSocket endpoint
