@@ -35,6 +35,13 @@ type AutopilotSettings struct {
 	CooldownMinutes          int     `json:"cooldown_minutes"`
 	MaxTradesPerMinute       int     `json:"max_trades_per_minute"`
 	MaxDailyTrades           int     `json:"max_daily_trades"`
+
+	// Autopilot mode settings (risk level, dry run, etc.)
+	RiskLevel               string  `json:"risk_level"`                // conservative/moderate/aggressive
+	DryRunMode              bool    `json:"dry_run_mode"`              // Paper trading mode
+	MaxUSDAllocation        float64 `json:"max_usd_allocation"`        // Max USD to allocate
+	ProfitReinvestPercent   float64 `json:"profit_reinvest_percent"`   // % of profit to reinvest
+	ProfitReinvestRiskLevel string  `json:"profit_reinvest_risk_level"` // Risk level for reinvested profits
 }
 
 // SettingsManager handles persistent settings storage
@@ -103,6 +110,13 @@ func DefaultSettings() *AutopilotSettings {
 		CooldownMinutes:          30,
 		MaxTradesPerMinute:       10,
 		MaxDailyTrades:           100,
+
+		// Autopilot mode defaults
+		RiskLevel:               "moderate",
+		DryRunMode:              true,
+		MaxUSDAllocation:        2500,
+		ProfitReinvestPercent:   50,
+		ProfitReinvestRiskLevel: "aggressive",
 	}
 }
 
@@ -248,6 +262,62 @@ func (sm *SettingsManager) UpdateCircuitBreaker(
 		settings.MaxDailyTrades = maxDailyTrades
 	}
 
+	return sm.SaveSettings(settings)
+}
+
+// UpdateAutopilotMode updates autopilot mode settings and saves to file
+func (sm *SettingsManager) UpdateAutopilotMode(
+	riskLevel string,
+	dryRun bool,
+	maxAllocation float64,
+	profitReinvestPercent float64,
+	profitReinvestRiskLevel string,
+) error {
+	settings := sm.GetCurrentSettings()
+
+	if riskLevel != "" {
+		settings.RiskLevel = riskLevel
+	}
+	settings.DryRunMode = dryRun
+	if maxAllocation > 0 {
+		settings.MaxUSDAllocation = maxAllocation
+	}
+	if profitReinvestPercent >= 0 {
+		settings.ProfitReinvestPercent = profitReinvestPercent
+	}
+	if profitReinvestRiskLevel != "" {
+		settings.ProfitReinvestRiskLevel = profitReinvestRiskLevel
+	}
+
+	return sm.SaveSettings(settings)
+}
+
+// UpdateRiskLevel updates just the risk level setting
+func (sm *SettingsManager) UpdateRiskLevel(riskLevel string) error {
+	settings := sm.GetCurrentSettings()
+	settings.RiskLevel = riskLevel
+	return sm.SaveSettings(settings)
+}
+
+// UpdateDryRunMode updates just the dry run mode setting
+func (sm *SettingsManager) UpdateDryRunMode(dryRun bool) error {
+	settings := sm.GetCurrentSettings()
+	settings.DryRunMode = dryRun
+	return sm.SaveSettings(settings)
+}
+
+// UpdateMaxAllocation updates just the max USD allocation setting
+func (sm *SettingsManager) UpdateMaxAllocation(maxAllocation float64) error {
+	settings := sm.GetCurrentSettings()
+	settings.MaxUSDAllocation = maxAllocation
+	return sm.SaveSettings(settings)
+}
+
+// UpdateProfitReinvest updates profit reinvestment settings
+func (sm *SettingsManager) UpdateProfitReinvest(percent float64, riskLevel string) error {
+	settings := sm.GetCurrentSettings()
+	settings.ProfitReinvestPercent = percent
+	settings.ProfitReinvestRiskLevel = riskLevel
 	return sm.SaveSettings(settings)
 }
 

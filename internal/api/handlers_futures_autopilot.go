@@ -111,6 +111,14 @@ func (s *Server) handleSetFuturesAutopilotDryRun(c *gin.Context) {
 
 	controller.SetDryRun(req.DryRun)
 
+	// Persist dry run mode to settings file
+	go func() {
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateDryRunMode(req.DryRun); err != nil {
+			fmt.Printf("Failed to persist dry run mode: %v\n", err)
+		}
+	}()
+
 	mode := "LIVE"
 	if req.DryRun {
 		mode = "DRY RUN (Paper Trading)"
@@ -146,6 +154,14 @@ func (s *Server) handleSetFuturesAutopilotRiskLevel(c *gin.Context) {
 		return
 	}
 
+	// Persist risk level to settings file
+	go func() {
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateRiskLevel(req.RiskLevel); err != nil {
+			fmt.Printf("Failed to persist risk level: %v\n", err)
+		}
+	}()
+
 	c.JSON(http.StatusOK, gin.H{
 		"success":    true,
 		"message":    "Risk level updated to " + req.RiskLevel,
@@ -175,6 +191,14 @@ func (s *Server) handleSetFuturesAutopilotAllocation(c *gin.Context) {
 		errorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Persist max allocation to settings file
+	go func() {
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateMaxAllocation(req.MaxUSDAllocation); err != nil {
+			fmt.Printf("Failed to persist max allocation: %v\n", err)
+		}
+	}()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":            true,
@@ -206,6 +230,14 @@ func (s *Server) handleSetFuturesAutopilotProfitReinvest(c *gin.Context) {
 		errorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Persist profit reinvest settings to file
+	go func() {
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateProfitReinvest(req.ProfitReinvestPercent, req.ProfitRiskLevel); err != nil {
+			fmt.Printf("Failed to persist profit reinvest settings: %v\n", err)
+		}
+	}()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":                 true,

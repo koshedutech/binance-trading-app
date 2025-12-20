@@ -4,10 +4,14 @@ import FuturesTradingPanel from '../components/FuturesTradingPanel';
 import FuturesOrderBook from '../components/FuturesOrderBook';
 import FuturesChart from '../components/FuturesChart';
 import FuturesPositionsTable from '../components/FuturesPositionsTable';
-import FuturesHistoryTabs from '../components/FuturesHistoryTabs';
+import FuturesOrdersHistory from '../components/FuturesOrdersHistory';
 import FuturesAutopilotPanel from '../components/FuturesAutopilotPanel';
-import FuturesAISignals from '../components/FuturesAISignals';
+import CircuitBreakerPanel from '../components/CircuitBreakerPanel';
+import AISignalsPanel from '../components/AISignalsPanel';
+import AITradeStatusPanel from '../components/AITradeStatusPanel';
 import PanicButton from '../components/PanicButton';
+import NewsFeedPanel from '../components/NewsFeedPanel';
+import TradeSourceStatsPanel from '../components/TradeSourceStatsPanel';
 import { formatUSD, formatPercent, getPositionColor } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import {
@@ -21,6 +25,8 @@ import {
   BarChart3,
   BookOpen,
   Zap,
+  Brain,
+  Percent,
 } from 'lucide-react';
 
 export default function FuturesDashboard() {
@@ -76,16 +82,25 @@ export default function FuturesDashboard() {
   }, [fetchSymbols, fetchAccountInfo, fetchPositionMode, fetchMetrics]);
 
   // Fetch data for selected symbol
+  // NOTE: Mark price and funding rate are cached from WebSocket, so longer intervals are fine
   useEffect(() => {
     fetchMarkPrice(selectedSymbol);
     fetchFundingRate(selectedSymbol);
 
-    const interval = setInterval(() => {
+    // Mark price: 60s (WebSocket updates cache in real-time)
+    const markPriceInterval = setInterval(() => {
       fetchMarkPrice(selectedSymbol);
-      fetchFundingRate(selectedSymbol);
-    }, 1000);
+    }, 60000);
 
-    return () => clearInterval(interval);
+    // Funding rate: 5 minutes (only changes every 8 hours, cached for 5 min)
+    const fundingInterval = setInterval(() => {
+      fetchFundingRate(selectedSymbol);
+    }, 300000);
+
+    return () => {
+      clearInterval(markPriceInterval);
+      clearInterval(fundingInterval);
+    };
   }, [selectedSymbol, fetchMarkPrice, fetchFundingRate]);
 
   // Periodic account/position refresh
@@ -93,16 +108,23 @@ export default function FuturesDashboard() {
     const interval = setInterval(() => {
       fetchAccountInfo();
       fetchPositions();
-    }, 5000);
+    }, 60000); // Reduced to 60s to avoid rate limits
 
     return () => clearInterval(interval);
   }, [fetchAccountInfo, fetchPositions]);
 
-  const walletBalance = accountInfo?.totalWalletBalance || 0;
-  const currentPrice = markPrice?.markPrice || 0;
+  // Safely parse values that may come as strings from API
+  const safeNum = (val: number | string | null | undefined): number => {
+    if (val === null || val === undefined) return 0;
+    const num = typeof val === 'string' ? parseFloat(val) : val;
+    return isNaN(num) ? 0 : num;
+  };
+
+  const walletBalance = safeNum(accountInfo?.totalWalletBalance);
+  const currentPrice = safeNum(markPrice?.markPrice);
   const priceChange24h = 0; // Would come from ticker data
-  const currentFundingRate = fundingRate?.fundingRate || 0;
-  const nextFundingTime = fundingRate?.nextFundingTime || 0;
+  const currentFundingRate = safeNum(fundingRate?.fundingRate);
+  const nextFundingTime = safeNum(fundingRate?.nextFundingTime);
 
   const filteredSymbols = symbols.filter(s => s.includes('USDT'));
 
@@ -268,6 +290,7 @@ export default function FuturesDashboard() {
         <div className="col-span-12 lg:col-span-3 space-y-4">
           <FuturesTradingPanel />
           <FuturesAutopilotPanel />
+          <CircuitBreakerPanel />
         </div>
 
         {/* Center Column - Order Book / Chart Toggle */}
@@ -302,15 +325,12 @@ export default function FuturesDashboard() {
           <div className="h-[500px]">
             {centerView === 'orderbook' ? <FuturesOrderBook /> : <FuturesChart />}
           </div>
-
-          {/* AI Signals Panel */}
-          <FuturesAISignals />
         </div>
 
         {/* Right Column - Stats/Info */}
         <div className="col-span-12 lg:col-span-6 space-y-4">
-          {/* Quick Stats */}
-          <div className="grid grid-cols-4 gap-4">
+          {/* Quick Stats - Row 1 */}
+          <div className="grid grid-cols-6 gap-4">
             <StatCard
               title="Total Trades"
               value={metrics?.totalTrades || 0}
@@ -323,9 +343,21 @@ export default function FuturesDashboard() {
               valueColor={metrics?.winRate && metrics.winRate >= 50 ? 'text-green-500' : 'text-red-500'}
             />
             <StatCard
-              title="Realized PnL"
+              title="Total PnL"
               value={formatUSD(metrics?.totalRealizedPnl || 0)}
               icon={Wallet}
+              valueColor={getPositionColor(metrics?.totalRealizedPnl || 0)}
+            />
+            <StatCard
+              title="Today's PnL"
+              value={formatUSD(metrics?.dailyRealizedPnl || 0)}
+              icon={TrendingUp}
+              valueColor={getPositionColor(metrics?.dailyRealizedPnl || 0)}
+            />
+            <StatCard
+              title="ROI"
+              value={walletBalance > 0 ? `${(((metrics?.totalRealizedPnl || 0) / walletBalance) * 100).toFixed(2)}%` : '0%'}
+              icon={Percent}
               valueColor={getPositionColor(metrics?.totalRealizedPnl || 0)}
             />
             <StatCard
@@ -336,14 +368,66 @@ export default function FuturesDashboard() {
             />
           </div>
 
-          {/* Positions Table */}
-          <FuturesPositionsTable />
-        </div>
-      </div>
+          {/* Daily Stats - Row 2 */}
+          <div className="grid grid-cols-4 gap-4">
+            <StatCard
+              title="Today's Trades"
+              value={metrics?.dailyTrades || 0}
+              icon={Activity}
+            />
+            <StatCard
+              title="Today's Win Rate"
+              value={`${(metrics?.dailyWinRate || 0).toFixed(1)}%`}
+              icon={TrendingUp}
+              valueColor={metrics?.dailyWinRate && metrics.dailyWinRate >= 50 ? 'text-green-500' : 'text-red-500'}
+            />
+            <StatCard
+              title="Today's Wins"
+              value={metrics?.dailyWins || 0}
+              icon={TrendingUp}
+              valueColor="text-green-500"
+            />
+            <StatCard
+              title="Today's Losses"
+              value={metrics?.dailyLosses || 0}
+              icon={TrendingDown}
+              valueColor="text-red-500"
+            />
+          </div>
 
-      {/* Bottom Section - History Tabs */}
-      <div className="mt-4">
-        <FuturesHistoryTabs />
+          {/* Trade Source Performance Stats */}
+          <TradeSourceStatsPanel />
+
+          {/* Positions Table */}
+          <FuturesPositionsTable
+            onSymbolClick={(symbol) => {
+              setSelectedSymbol(symbol);
+              setCenterView('chart');
+            }}
+          />
+
+          {/* Open Orders & Trade History */}
+          <FuturesOrdersHistory />
+
+          {/* AI Trade Status Panel - Shows Recent Decisions */}
+          <AITradeStatusPanel />
+
+          {/* AI Signals Panel - Like Spot Dashboard */}
+          <div className="card">
+            <div className="card-header">
+              <div className="flex items-center gap-2">
+                <Brain className="w-5 h-5 text-purple-400" />
+                <h2 className="text-lg font-semibold">AI Signals - Autopilot Decisions</h2>
+              </div>
+            </div>
+            <div className="card-body p-0">
+              <AISignalsPanel />
+            </div>
+          </div>
+
+          {/* News Feed Panel */}
+          <NewsFeedPanel />
+        </div>
       </div>
     </div>
   );

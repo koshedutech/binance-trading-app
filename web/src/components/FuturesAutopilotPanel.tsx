@@ -105,7 +105,7 @@ export default function FuturesAutopilotPanel() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   // Circuit Breaker state
   const [circuitStatus, setCircuitStatus] = useState<CircuitBreakerStatus | null>(null);
-  const [showLossControl, setShowLossControl] = useState(false);
+  const [showCircuitBreaker, setShowCircuitBreaker] = useState(false);
   const [isEditingCB, setIsEditingCB] = useState(false);
   const [isSavingCB, setIsSavingCB] = useState(false);
   const [isResettingCB, setIsResettingCB] = useState(false);
@@ -719,9 +719,9 @@ export default function FuturesAutopilotPanel() {
             <Activity className={`w-4 h-4 ${dynamicSLTPConfig.enabled ? 'text-cyan-500' : 'text-gray-400'}`} />
           </button>
           <button
-            onClick={() => setShowLossControl(!showLossControl)}
-            className={`p-1 hover:bg-gray-700 rounded ${showLossControl ? 'bg-gray-700' : ''}`}
-            title="Loss Control"
+            onClick={() => setShowCircuitBreaker(!showCircuitBreaker)}
+            className={`p-1 hover:bg-gray-700 rounded ${showCircuitBreaker ? 'bg-gray-700' : ''}`}
+            title="Circuit Breaker"
           >
             <Shield className={`w-4 h-4 ${circuitStatus?.state === 'open' ? 'text-red-500' : 'text-gray-400'}`} />
           </button>
@@ -1336,7 +1336,7 @@ export default function FuturesAutopilotPanel() {
       )}
 
       {/* Circuit Breaker Panel */}
-      {showLossControl && circuitStatus && (
+      {showCircuitBreaker && circuitStatus && (
         <div className="mt-4 pt-4 border-t border-gray-700 space-y-4">
           <div className="flex items-center justify-between">
             <div className="text-sm font-medium text-gray-400 flex items-center gap-2">
@@ -1434,7 +1434,7 @@ export default function FuturesAutopilotPanel() {
           {/* Config Editor */}
           {isEditingCB ? (
             <div className="p-3 bg-gray-800 rounded-lg space-y-3">
-              <div className="text-xs text-gray-400 font-medium">Edit Loss Limits</div>
+              <div className="text-xs text-gray-400 font-medium">Configure Circuit Breaker</div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">Max Hourly Loss %</label>

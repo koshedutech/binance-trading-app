@@ -293,10 +293,28 @@ func (fc *FuturesController) LoadSavedSettings() {
 		fc.circuitBreaker.UpdateConfig(cbConfig)
 	}
 
+	// Apply Autopilot mode settings (risk level, dry run, allocation)
+	if settings.RiskLevel != "" {
+		fc.currentRiskLevel = settings.RiskLevel
+	}
+	fc.dryRun = settings.DryRunMode
+	if settings.MaxUSDAllocation > 0 {
+		fc.maxUSDAllocation = settings.MaxUSDAllocation
+	}
+	if settings.ProfitReinvestPercent >= 0 {
+		fc.profitReinvestPct = settings.ProfitReinvestPercent
+	}
+	if settings.ProfitReinvestRiskLevel != "" {
+		fc.profitRiskLevel = settings.ProfitReinvestRiskLevel
+	}
+
 	fc.logger.Info("Loaded saved autopilot settings",
 		"dynamic_sltp_enabled", settings.DynamicSLTPEnabled,
 		"scalping_enabled", settings.ScalpingModeEnabled,
-		"circuit_breaker_enabled", settings.CircuitBreakerEnabled)
+		"circuit_breaker_enabled", settings.CircuitBreakerEnabled,
+		"risk_level", settings.RiskLevel,
+		"dry_run", settings.DryRunMode,
+		"max_usd_allocation", settings.MaxUSDAllocation)
 }
 
 // SetMLPredictor sets the ML predictor
@@ -1112,6 +1130,7 @@ func (fc *FuturesController) syncWithActualPositions() {
 	// CRITICAL: Also cancel any orphaned algo orders to prevent them from opening new positions
 	for symbol := range fc.activePositions {
 		if !actualPositionSymbols[symbol] {
+			pos := fc.activePositions[symbol]
 			fc.logger.Info("Removing closed position from activePositions",
 				"symbol", symbol)
 
@@ -1122,6 +1141,29 @@ func (fc *FuturesController) syncWithActualPositions() {
 					"error", err.Error())
 			} else {
 				fc.logger.Info("Cancelled orphaned algo orders for closed position", "symbol", symbol)
+			}
+
+			// Record trade result to circuit breaker based on TP/SL levels
+			// Since position was closed externally (Binance TP/SL), we need to determine outcome
+			if fc.circuitBreaker != nil && pos != nil {
+				currentPrice, err := fc.futuresClient.GetFuturesCurrentPrice(symbol)
+				if err == nil && currentPrice > 0 {
+					var pnlPercent float64
+					if pos.Side == "LONG" {
+						pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+					} else {
+						pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+					}
+
+					// Record to circuit breaker - this will reset consecutive losses if profitable
+					fc.circuitBreaker.RecordTrade(pnlPercent)
+					fc.logger.Info("Recorded externally closed position to circuit breaker",
+						"symbol", symbol,
+						"side", pos.Side,
+						"entry_price", pos.EntryPrice,
+						"current_price", currentPrice,
+						"pnl_percent", pnlPercent)
+				}
 			}
 
 			delete(fc.activePositions, symbol)
@@ -2247,10 +2289,13 @@ func (fc *FuturesController) closePosition(symbol string, pos *FuturesAutopilotP
 	currentPrice, _ := fc.futuresClient.GetFuturesCurrentPrice(symbol)
 
 	var pnl float64
+	var pnlPercent float64
 	if pos.Side == "LONG" {
 		pnl = (currentPrice - pos.EntryPrice) * pos.Quantity
+		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 	} else {
 		pnl = (pos.EntryPrice - currentPrice) * pos.Quantity
+		pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
 	}
 
 	fc.logger.Info("Closing futures position",
@@ -2258,7 +2303,8 @@ func (fc *FuturesController) closePosition(symbol string, pos *FuturesAutopilotP
 		"reason", reason,
 		"entry", pos.EntryPrice,
 		"exit", currentPrice,
-		"pnl", pnl)
+		"pnl", pnl,
+		"pnl_percent", pnlPercent)
 
 	if !fc.dryRun {
 		// CRITICAL: Cancel all outstanding TP/SL algo orders FIRST
@@ -2323,9 +2369,9 @@ func (fc *FuturesController) closePosition(symbol string, pos *FuturesAutopilotP
 		fc.lastCloseTime[symbol] = time.Now()
 	}
 
-	// Record to circuit breaker
+	// Record to circuit breaker (use percentage, not absolute PnL)
 	if fc.circuitBreaker != nil {
-		fc.circuitBreaker.RecordTrade(pnl)
+		fc.circuitBreaker.RecordTrade(pnlPercent)
 	}
 
 	// Add profit to reinvestment pool (called without lock since addToProfit has its own lock)
