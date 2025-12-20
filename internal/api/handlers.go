@@ -45,6 +45,7 @@ func (s *Server) handleGetPositions(c *gin.Context) {
 // handleGetPositionHistory returns historical positions
 func (s *Server) handleGetPositionHistory(c *gin.Context) {
 	ctx := c.Request.Context()
+	userID := s.getUserID(c)
 
 	// Parse pagination parameters
 	limit := 50
@@ -62,11 +63,26 @@ func (s *Server) handleGetPositionHistory(c *gin.Context) {
 		}
 	}
 
-	// Get closed trades from database
-	trades, err := s.repo.GetTradeHistory(ctx, limit, offset)
+	// Check if AI decision details should be included
+	includeAI := c.Query("include_ai") == "true"
+
+	// Get closed trades from database (user-scoped)
+	trades, err := s.repo.GetTradeHistoryForUser(ctx, userID, limit, offset)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch position history")
 		return
+	}
+
+	// Optionally load AI decision details for each trade
+	if includeAI {
+		for i := range trades {
+			if trades[i].AIDecisionID != nil {
+				aiDecision, err := s.repo.GetAIDecisionByID(ctx, *trades[i].AIDecisionID)
+				if err == nil {
+					trades[i].AIDecision = aiDecision
+				}
+			}
+		}
 	}
 
 	successResponse(c, trades)
@@ -187,8 +203,9 @@ func (s *Server) handleCancelOrder(c *gin.Context) {
 // handleGetActiveOrders returns all active orders
 func (s *Server) handleGetActiveOrders(c *gin.Context) {
 	ctx := c.Request.Context()
+	userID := s.getUserID(c)
 
-	orders, err := s.repo.GetActiveOrders(ctx)
+	orders, err := s.repo.GetActiveOrdersForUser(ctx, userID)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch active orders")
 		return
@@ -200,6 +217,7 @@ func (s *Server) handleGetActiveOrders(c *gin.Context) {
 // handleGetOrderHistory returns order history
 func (s *Server) handleGetOrderHistory(c *gin.Context) {
 	ctx := c.Request.Context()
+	userID := s.getUserID(c)
 
 	// Parse pagination
 	limit := 50
@@ -217,7 +235,7 @@ func (s *Server) handleGetOrderHistory(c *gin.Context) {
 		}
 	}
 
-	orders, err := s.repo.GetOrderHistory(ctx, limit, offset)
+	orders, err := s.repo.GetOrderHistoryForUser(ctx, userID, limit, offset)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch order history")
 		return
@@ -328,8 +346,9 @@ func (s *Server) handleGetScreenerResults(c *gin.Context) {
 func (s *Server) handleGetMetrics(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
+	userID := s.getUserID(c)
 
-	metrics, err := s.repo.GetTradingMetrics(ctx)
+	metrics, err := s.repo.GetTradingMetricsForUser(ctx, userID)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch metrics")
 		return

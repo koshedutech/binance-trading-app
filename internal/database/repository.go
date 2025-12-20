@@ -24,21 +24,30 @@ func (r *Repository) HealthCheck(ctx context.Context) error {
 	return r.db.Pool.Ping(ctx)
 }
 
+// GetDB returns the underlying DB instance for direct access to futures methods
+func (r *Repository) GetDB() *DB {
+	return r.db
+}
+
 // ============================================================================
 // TRADES
 // ============================================================================
 
 // CreateTrade inserts a new trade
 func (r *Repository) CreateTrade(ctx context.Context, trade *Trade) error {
+	// Set default trade source if not specified
+	if trade.TradeSource == "" {
+		trade.TradeSource = TradeSourceManual
+	}
 	query := `
-		INSERT INTO trades (symbol, side, entry_price, quantity, entry_time, stop_loss, take_profit, strategy_name, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO trades (symbol, side, entry_price, quantity, entry_time, stop_loss, take_profit, strategy_name, status, trade_source)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, created_at, updated_at
 	`
 	return r.db.Pool.QueryRow(
 		ctx, query,
 		trade.Symbol, trade.Side, trade.EntryPrice, trade.Quantity, trade.EntryTime,
-		trade.StopLoss, trade.TakeProfit, trade.StrategyName, trade.Status,
+		trade.StopLoss, trade.TakeProfit, trade.StrategyName, trade.Status, trade.TradeSource,
 	).Scan(&trade.ID, &trade.CreatedAt, &trade.UpdatedAt)
 }
 
@@ -60,7 +69,7 @@ func (r *Repository) UpdateTrade(ctx context.Context, trade *Trade) error {
 func (r *Repository) GetTradeByID(ctx context.Context, id int64) (*Trade, error) {
 	query := `
 		SELECT id, symbol, side, entry_price, exit_price, quantity, entry_time, exit_time,
-		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at
+		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at, trade_source
 		FROM trades
 		WHERE id = $1
 	`
@@ -69,7 +78,7 @@ func (r *Repository) GetTradeByID(ctx context.Context, id int64) (*Trade, error)
 		&trade.ID, &trade.Symbol, &trade.Side, &trade.EntryPrice, &trade.ExitPrice,
 		&trade.Quantity, &trade.EntryTime, &trade.ExitTime, &trade.StopLoss, &trade.TakeProfit,
 		&trade.PnL, &trade.PnLPercent, &trade.StrategyName, &trade.Status,
-		&trade.CreatedAt, &trade.UpdatedAt,
+		&trade.CreatedAt, &trade.UpdatedAt, &trade.TradeSource,
 	)
 	if err != nil {
 		return nil, err
@@ -81,7 +90,7 @@ func (r *Repository) GetTradeByID(ctx context.Context, id int64) (*Trade, error)
 func (r *Repository) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 	query := `
 		SELECT id, symbol, side, entry_price, exit_price, quantity, entry_time, exit_time,
-		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at
+		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at, trade_source
 		FROM trades
 		WHERE status = 'OPEN'
 		ORDER BY entry_time DESC
@@ -93,7 +102,7 @@ func (r *Repository) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 func (r *Repository) GetTradeHistory(ctx context.Context, limit, offset int) ([]*Trade, error) {
 	query := `
 		SELECT id, symbol, side, entry_price, exit_price, quantity, entry_time, exit_time,
-		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at
+		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at, trade_source, ai_decision_id
 		FROM trades
 		WHERE status = 'CLOSED'
 		ORDER BY exit_time DESC
@@ -106,7 +115,7 @@ func (r *Repository) GetTradeHistory(ctx context.Context, limit, offset int) ([]
 func (r *Repository) GetTradesBySymbol(ctx context.Context, symbol string) ([]*Trade, error) {
 	query := `
 		SELECT id, symbol, side, entry_price, exit_price, quantity, entry_time, exit_time,
-		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at
+		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at, trade_source, ai_decision_id
 		FROM trades
 		WHERE symbol = $1
 		ORDER BY entry_time DESC
@@ -128,7 +137,7 @@ func (r *Repository) queryTrades(ctx context.Context, query string, args ...inte
 			&trade.ID, &trade.Symbol, &trade.Side, &trade.EntryPrice, &trade.ExitPrice,
 			&trade.Quantity, &trade.EntryTime, &trade.ExitTime, &trade.StopLoss, &trade.TakeProfit,
 			&trade.PnL, &trade.PnLPercent, &trade.StrategyName, &trade.Status,
-			&trade.CreatedAt, &trade.UpdatedAt,
+			&trade.CreatedAt, &trade.UpdatedAt, &trade.TradeSource, &trade.AIDecisionID,
 		)
 		if err != nil {
 			return nil, err

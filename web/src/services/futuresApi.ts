@@ -18,6 +18,7 @@ import type {
   FuturesTransaction,
   FuturesAccountSettings,
   FuturesTradingMetrics,
+  TradeSourceStats,
 } from '../types/futures';
 
 class FuturesAPIService {
@@ -128,6 +129,8 @@ class FuturesAPIService {
     order: FuturesOrderResponse;
     takeProfit?: FuturesOrderResponse;
     stopLoss?: FuturesOrderResponse;
+    takeProfitError?: string;
+    stopLossError?: string;
     tradeId: number;
   }> {
     const { data } = await this.client.post('/orders', request);
@@ -148,6 +151,49 @@ class FuturesAPIService {
     const params = symbol ? { symbol } : {};
     const { data } = await this.client.get<FuturesOrder[]>('/orders/open', { params });
     return data || [];
+  }
+
+  async getAllOrders(): Promise<{
+    regular_orders: Array<{
+      orderId: number;
+      symbol: string;
+      side: string;
+      positionSide: string;
+      type: string;
+      price: number;
+      origQty: number;
+      executedQty: number;
+      status: string;
+      time: number;
+      stopPrice?: number;
+    }>;
+    algo_orders: Array<{
+      algoId: number;
+      symbol: string;
+      side: string;
+      positionSide: string;
+      quantity: string;
+      executedQty: string;
+      price: string;
+      triggerPrice: string;
+      createTime: number;
+      updateTime: number;
+      orderType: string;
+      algoType: string;
+      algoStatus: string;
+      closePosition: boolean;
+      reduceOnly: boolean;
+    }>;
+    total_regular: number;
+    total_algo: number;
+  }> {
+    const { data } = await this.client.get('/orders/all');
+    return data;
+  }
+
+  async cancelAlgoOrder(symbol: string, algoId: number): Promise<{ message: string }> {
+    const { data } = await this.client.delete(`/algo-orders/${symbol}/${algoId}`);
+    return data;
   }
 
   // ==================== MARKET DATA ====================
@@ -219,6 +265,20 @@ class FuturesAPIService {
 
   async getMetrics(): Promise<FuturesTradingMetrics> {
     const { data } = await this.client.get<FuturesTradingMetrics>('/metrics');
+    return data;
+  }
+
+  async getTradeSourceStats(): Promise<{
+    ai: TradeSourceStats;
+    strategy: TradeSourceStats;
+    manual: TradeSourceStats;
+  }> {
+    const { data } = await this.client.get('/trade-source-stats');
+    return data;
+  }
+
+  async getPositionTradeSources(): Promise<{ sources: Record<string, string> }> {
+    const { data } = await this.client.get('/position-trade-sources');
     return data;
   }
 
@@ -335,6 +395,326 @@ class FuturesAPIService {
     const { data } = await this.client.get('/autopilot/profit-stats');
     return data;
   }
+
+  async setAutopilotTPSL(
+    takeProfitPercent: number,
+    stopLossPercent: number
+  ): Promise<{
+    success: boolean;
+    message: string;
+    take_profit_percent: number;
+    stop_loss_percent: number;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/tpsl', {
+      take_profit_percent: takeProfitPercent,
+      stop_loss_percent: stopLossPercent,
+    });
+    return data;
+  }
+
+  async setAutopilotLeverage(leverage: number): Promise<{
+    success: boolean;
+    message: string;
+    leverage: number;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/leverage', {
+      leverage,
+    });
+    return data;
+  }
+
+  async setAutopilotMinConfidence(minConfidence: number): Promise<{
+    success: boolean;
+    message: string;
+    min_confidence: number;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/min-confidence', {
+      min_confidence: minConfidence,
+    });
+    return data;
+  }
+
+  // ==================== CIRCUIT BREAKER (LOSS CONTROL) ====================
+
+  async getCircuitBreakerStatus(): Promise<{
+    available: boolean;
+    enabled: boolean;
+    state: string;
+    can_trade: boolean;
+    block_reason: string;
+    consecutive_losses: number;
+    hourly_loss: number;
+    daily_loss: number;
+    trades_last_minute: number;
+    daily_trades: number;
+    trip_reason: string;
+    config: {
+      enabled: boolean;
+      max_loss_per_hour: number;
+      max_daily_loss: number;
+      max_consecutive_losses: number;
+      cooldown_minutes: number;
+      max_trades_per_minute: number;
+      max_daily_trades: number;
+    };
+    message?: string;
+  }> {
+    const { data } = await this.client.get('/autopilot/circuit-breaker/status');
+    return data;
+  }
+
+  async resetCircuitBreaker(): Promise<{
+    success: boolean;
+    message: string;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/circuit-breaker/reset');
+    return data;
+  }
+
+  async updateCircuitBreakerConfig(config: {
+    max_loss_per_hour?: number;
+    max_daily_loss?: number;
+    max_consecutive_losses?: number;
+    cooldown_minutes?: number;
+    max_trades_per_minute?: number;
+    max_daily_trades?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/circuit-breaker/config', config);
+    return data;
+  }
+
+  async toggleCircuitBreaker(enabled: boolean): Promise<{
+    success: boolean;
+    message: string;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/circuit-breaker/toggle', { enabled });
+    return data;
+  }
+
+  // ==================== DYNAMIC SL/TP (VOLATILITY-BASED) ====================
+
+  async getDynamicSLTPConfig(): Promise<{
+    enabled: boolean;
+    atr_period: number;
+    atr_multiplier_sl: number;
+    atr_multiplier_tp: number;
+    llm_weight: number;
+    min_sl_percent: number;
+    max_sl_percent: number;
+    min_tp_percent: number;
+    max_tp_percent: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/dynamic-sltp');
+    return data;
+  }
+
+  async setDynamicSLTPConfig(config: {
+    enabled: boolean;
+    atr_period: number;
+    atr_multiplier_sl: number;
+    atr_multiplier_tp: number;
+    llm_weight: number;
+    min_sl_percent: number;
+    max_sl_percent: number;
+    min_tp_percent: number;
+    max_tp_percent: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/autopilot/dynamic-sltp', config);
+    return data;
+  }
+
+  // ==================== SCALPING MODE ====================
+
+  async getScalpingConfig(): Promise<{
+    enabled: boolean;
+    min_profit: number;
+    quick_reentry: boolean;
+    reentry_delay_sec: number;
+    max_trades_per_day: number;
+    trades_today: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/scalping');
+    return data;
+  }
+
+  async setScalpingConfig(config: {
+    enabled: boolean;
+    min_profit: number;
+    quick_reentry: boolean;
+    reentry_delay_sec: number;
+    max_trades_per_day: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/autopilot/scalping', config);
+    return data;
+  }
+
+  // ==================== TP/SL MANAGEMENT ====================
+
+  async setPositionTPSL(
+    symbol: string,
+    positionSide: string,
+    takeProfit?: number,
+    stopLoss?: number
+  ): Promise<{
+    success: boolean;
+    message: string;
+    take_profit_order?: FuturesOrderResponse;
+    stop_loss_order?: FuturesOrderResponse;
+  }> {
+    const { data } = await this.client.post(`/positions/${symbol}/tpsl`, {
+      position_side: positionSide,
+      take_profit: takeProfit,
+      stop_loss: stopLoss,
+    });
+    return data;
+  }
+
+  async getPositionOrders(symbol: string): Promise<{
+    symbol: string;
+    open_orders: FuturesOrder[];
+    take_profit_orders: FuturesOrder[];
+    stop_loss_orders: FuturesOrder[];
+    trailing_stop_orders: FuturesOrder[];
+  }> {
+    const { data } = await this.client.get(`/positions/${symbol}/orders`);
+    return data;
+  }
+
+  // ==================== ACCOUNT TRADES (DIRECT FROM BINANCE) ====================
+
+  async getAccountTrades(symbol?: string, limit = 50): Promise<{
+    trades: Array<{
+      symbol: string;
+      id: number;
+      orderId: number;
+      side: string;
+      positionSide: string;
+      price: number;
+      qty: number;
+      realizedPnl: number;
+      marginAsset: string;
+      quoteQty: number;
+      commission: number;
+      commissionAsset: string;
+      time: number;
+      buyer: boolean;
+      maker: boolean;
+    }>;
+    errors: string[];
+    count: number;
+  }> {
+    const params = symbol ? { symbol, limit } : { limit };
+    const { data } = await this.client.get('/account/trades', { params });
+    return data;
+  }
+
+  // ==================== RECENT DECISIONS ====================
+
+  async getRecentDecisions(): Promise<{
+    success: boolean;
+    decisions: Array<{
+      timestamp: string;
+      symbol: string;
+      action: string;
+      confidence: number;
+      approved: boolean;
+      executed: boolean;
+      rejection_reason?: string;
+      quantity?: number;
+      leverage?: number;
+      entry_price?: number;
+    }>;
+    count: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/recent-decisions');
+    return data;
+  }
+
+  // ==================== SENTIMENT & NEWS ====================
+
+  async getSentimentNews(limit = 20): Promise<{
+    news: Array<{
+      title: string;
+      source: string;
+      url: string;
+      sentiment: number;
+      published_at: string;
+    }>;
+    sentiment: {
+      overall: number;
+      fear_greed_index: number;
+      fear_greed_label: string;
+      news_score: number;
+      trend_score: number;
+      updated_at: string;
+      sources: string[];
+    } | null;
+    count: number;
+  }> {
+    const { data } = await this.client.get('/sentiment/news', { params: { limit } });
+    return data;
+  }
+
+  // ==================== POSITION AVERAGING ====================
+
+  async getAveragingStatus(): Promise<{
+    enabled: boolean;
+    config: {
+      max_entries: number;
+      min_confidence: number;
+      min_price_improve: number;
+      cooldown_mins: number;
+      news_weight: number;
+    };
+    positions: Array<{
+      symbol: string;
+      side: string;
+      entry_count: number;
+      avg_entry: number;
+      quantity: number;
+      entry_history: Array<{
+        price: number;
+        quantity: number;
+        time: string;
+        confidence: number;
+        news_score: number;
+      }>;
+    }>;
+  }> {
+    const { data } = await this.client.get('/autopilot/averaging/status');
+    return data;
+  }
+
+  async setAveragingConfig(config: {
+    enabled?: boolean;
+    max_entries?: number;
+    min_confidence?: number;
+    min_price_improve?: number;
+    cooldown_mins?: number;
+    news_weight?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    status: unknown;
+  }> {
+    const { data } = await this.client.post('/autopilot/averaging/config', config);
+    return data;
+  }
 }
 
 // Export singleton instance
@@ -386,27 +766,37 @@ export function formatPrice(price: number, precision = 2): string {
   });
 }
 
-export function formatUSD(value: number): string {
+export function formatUSD(value: number | string | null | undefined): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (num === null || num === undefined || isNaN(num)) {
+    return '$0.00';
+  }
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  }).format(value);
+  }).format(num);
 }
 
-export function formatPercent(value: number, includeSign = true): string {
-  const sign = includeSign && value > 0 ? '+' : '';
-  return `${sign}${value.toFixed(2)}%`;
+export function formatPercent(value: number | string | null | undefined, includeSign = true): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (num === null || num === undefined || isNaN(num)) {
+    return '0.00%';
+  }
+  const sign = includeSign && num > 0 ? '+' : '';
+  return `${sign}${num.toFixed(2)}%`;
 }
 
 export function formatFundingRate(rate: number): string {
   return `${(rate * 100).toFixed(4)}%`;
 }
 
-export function getPositionColor(pnl: number): string {
-  if (pnl > 0) return 'text-green-500';
-  if (pnl < 0) return 'text-red-500';
+export function getPositionColor(pnl: number | string | null | undefined): string {
+  const num = typeof pnl === 'string' ? parseFloat(pnl) : pnl;
+  if (num === null || num === undefined || isNaN(num)) return 'text-gray-400';
+  if (num > 0) return 'text-green-500';
+  if (num < 0) return 'text-red-500';
   return 'text-gray-400';
 }
 

@@ -5,23 +5,74 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
+	"binance-trading-bot/internal/auth"
+	"binance-trading-bot/internal/billing"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
+	"binance-trading-bot/internal/vault"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
+// RateLimiter provides simple in-memory rate limiting per endpoint
+type RateLimiter struct {
+	requests map[string][]time.Time
+	mu       sync.Mutex
+	limit    int           // max requests
+	window   time.Duration // time window
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    limit,
+		window:   window,
+	}
+}
+
+// Allow checks if a request is allowed for the given key
+func (r *RateLimiter) Allow(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	windowStart := now.Add(-r.window)
+
+	// Filter out old requests
+	var recent []time.Time
+	for _, t := range r.requests[key] {
+		if t.After(windowStart) {
+			recent = append(recent, t)
+		}
+	}
+
+	if len(recent) >= r.limit {
+		r.requests[key] = recent
+		return false
+	}
+
+	r.requests[key] = append(recent, now)
+	return true
+}
+
 // Server represents the HTTP API server
 type Server struct {
-	router     *gin.Engine
-	httpServer *http.Server
-	repo       *database.Repository
-	eventBus   *events.EventBus
-	botAPI     BotAPI
-	config     ServerConfig
+	router         *gin.Engine
+	httpServer     *http.Server
+	repo           *database.Repository
+	eventBus       *events.EventBus
+	botAPI         BotAPI
+	config         ServerConfig
+	authService    *auth.Service
+	authEnabled    bool
+	vaultClient    *vault.Client
+	billingService *billing.StripeService
+	rateLimiter    *RateLimiter // API rate limiter to prevent Binance bans
 }
 
 // ServerConfig holds server configuration
@@ -53,6 +104,9 @@ func NewServer(
 	repo *database.Repository,
 	eventBus *events.EventBus,
 	botAPI BotAPI,
+	authService *auth.Service, // Can be nil if auth is disabled
+	vaultClient *vault.Client, // Can be nil if vault is disabled
+	billingService *billing.StripeService, // Can be nil if billing is disabled
 ) *Server {
 	// Set Gin mode
 	if config.ProductionMode {
@@ -77,11 +131,16 @@ func NewServer(
 	router.Use(cors.New(corsConfig))
 
 	server := &Server{
-		router:   router,
-		repo:     repo,
-		eventBus: eventBus,
-		botAPI:   botAPI,
-		config:   config,
+		router:         router,
+		repo:           repo,
+		eventBus:       eventBus,
+		botAPI:         botAPI,
+		config:         config,
+		authService:    authService,
+		authEnabled:    authService != nil,
+		vaultClient:    vaultClient,
+		billingService: billingService,
+		rateLimiter:    NewRateLimiter(30, time.Minute), // 30 requests per minute per endpoint
 	}
 
 	server.setupRoutes()
@@ -89,13 +148,56 @@ func NewServer(
 	return server
 }
 
+// rateLimitMiddleware creates a middleware that rate limits requests by endpoint
+func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Use endpoint path as the rate limit key
+		key := c.FullPath()
+		if key == "" {
+			key = c.Request.URL.Path
+		}
+
+		if !s.rateLimiter.Allow(key) {
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":   "Rate limit exceeded",
+				"message": "Too many requests to this endpoint. Please slow down to avoid Binance API bans.",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	// Health check
 	s.router.GET("/health", s.handleHealth)
 
+	// Auth routes (public, no authentication required)
+	if s.authEnabled {
+		authHandlers := auth.NewHandlers(s.authService)
+		authGroup := s.router.Group("/api/auth")
+		authHandlers.RegisterRoutes(authGroup, s.authService.GetJWTManager())
+	}
+
+	// Auth status endpoint (always available, returns whether auth is enabled)
+	s.router.GET("/api/auth/status", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"auth_enabled": s.authEnabled,
+		})
+	})
+
 	// API routes
 	api := s.router.Group("/api")
+
+	// Apply auth middleware if enabled
+	if s.authEnabled {
+		// Optional auth middleware for most routes (allows both authenticated and unauthenticated access)
+		// This sets user context if token is present but doesn't require it
+		api.Use(auth.OptionalMiddleware(s.authService.GetJWTManager()))
+	}
+
 	{
 		// Bot endpoints
 		api.GET("/bot/status", s.handleBotStatus)
@@ -190,8 +292,29 @@ func (s *Server) setupRoutes() {
 			settings.POST("/circuit-breaker/config", s.handleUpdateCircuitBreakerConfig)
 		}
 
-		// Futures trading endpoints
+		// User profile and API keys endpoints (requires auth)
+		user := api.Group("/user")
+		{
+			user.PUT("/profile", s.handleUpdateProfile)
+			user.POST("/change-password", s.handleChangePassword)
+			user.GET("/api-keys", s.handleGetAPIKeys)
+			user.POST("/api-keys", s.handleAddAPIKey)
+			user.DELETE("/api-keys/:id", s.handleDeleteAPIKey)
+			user.POST("/api-keys/:id/test", s.handleTestAPIKey)
+		}
+
+		// Billing endpoints (requires auth)
+		billing := api.Group("/billing")
+		{
+			billing.GET("/profit-history", s.handleGetProfitHistory)
+			billing.GET("/invoices", s.handleGetInvoices)
+			billing.POST("/checkout", s.handleCreateCheckoutSession)
+			billing.POST("/portal", s.handleCreateCustomerPortal)
+		}
+
+		// Futures trading endpoints (rate limited to prevent Binance API bans)
 		futures := api.Group("/futures")
+		futures.Use(s.rateLimitMiddleware()) // Apply rate limiting to all futures endpoints
 		{
 			// Account endpoints
 			futures.GET("/account", s.handleGetFuturesAccountInfo)
@@ -199,6 +322,8 @@ func (s *Server) setupRoutes() {
 			futures.GET("/positions", s.handleGetFuturesPositions)
 			futures.POST("/positions/close-all", s.handleCloseAllFuturesPositions) // Panic button - must be before :symbol route
 			futures.POST("/positions/:symbol/close", s.handleCloseFuturesPosition)
+			futures.GET("/positions/:symbol/orders", s.handleGetPositionOrders)   // Get TP/SL orders for position
+			futures.POST("/positions/:symbol/tpsl", s.handleSetPositionTPSL)       // Set TP/SL for position
 
 			// Settings endpoints
 			futures.POST("/leverage", s.handleSetLeverage)
@@ -212,6 +337,11 @@ func (s *Server) setupRoutes() {
 			futures.DELETE("/orders/:symbol/:id", s.handleCancelFuturesOrder)
 			futures.DELETE("/orders/:symbol/all", s.handleCancelAllFuturesOrders)
 			futures.GET("/orders/open", s.handleGetFuturesOpenOrders)
+			futures.GET("/orders/all", s.handleGetAllFuturesOrders)
+
+			// Algo Order endpoints (TP/SL orders since 2025-12-09)
+			futures.DELETE("/algo-orders/:symbol/:id", s.handleCancelAlgoOrder)
+			futures.DELETE("/algo-orders/:symbol/all", s.handleCancelAllAlgoOrders)
 
 			// Market data endpoints
 			futures.GET("/funding-rate/:symbol", s.handleGetFundingRate)
@@ -222,9 +352,12 @@ func (s *Server) setupRoutes() {
 
 			// History endpoints
 			futures.GET("/trades/history", s.handleGetFuturesTradeHistory)
+			futures.GET("/account/trades", s.handleGetFuturesAccountTrades) // Direct from Binance API
 			futures.GET("/funding-fees/history", s.handleGetFundingFeeHistory)
 			futures.GET("/transactions/history", s.handleGetFuturesTransactionHistory)
 			futures.GET("/metrics", s.handleGetFuturesMetrics)
+			futures.GET("/trade-source-stats", s.handleGetTradeSourceStats)
+			futures.GET("/position-trade-sources", s.handleGetPositionTradeSources)
 
 			// Autopilot endpoints
 			futures.GET("/autopilot/status", s.handleGetFuturesAutopilotStatus)
@@ -235,11 +368,46 @@ func (s *Server) setupRoutes() {
 			futures.POST("/autopilot/profit-reinvest", s.handleSetFuturesAutopilotProfitReinvest)
 			futures.GET("/autopilot/profit-stats", s.handleGetFuturesAutopilotProfitStats)
 			futures.POST("/autopilot/reset-allocation", s.handleResetFuturesAutopilotAllocation)
+			futures.POST("/autopilot/tpsl", s.handleSetFuturesAutopilotTPSL)
+			futures.POST("/autopilot/leverage", s.handleSetFuturesAutopilotLeverage)
+			futures.POST("/autopilot/min-confidence", s.handleSetFuturesAutopilotMinConfidence)
+			futures.POST("/autopilot/confluence", s.handleSetFuturesAutopilotConfluence)
+			futures.POST("/autopilot/max-position-size", s.handleSetFuturesAutopilotMaxPositionSize)
+
+			// Circuit breaker endpoints for futures loss control
+			futures.GET("/autopilot/circuit-breaker/status", s.handleGetFuturesCircuitBreakerStatus)
+			futures.POST("/autopilot/circuit-breaker/reset", s.handleResetFuturesCircuitBreaker)
+			futures.POST("/autopilot/circuit-breaker/config", s.handleUpdateFuturesCircuitBreakerConfig)
+			futures.POST("/autopilot/circuit-breaker/toggle", s.handleToggleFuturesCircuitBreaker)
+
+			// Recent decisions endpoint for UI
+			futures.GET("/autopilot/recent-decisions", s.handleGetFuturesAutopilotRecentDecisions)
+
+			// Sentiment & News endpoints
+			futures.GET("/sentiment/news", s.handleGetSentimentNews)
+
+			// Position averaging endpoints
+			futures.GET("/autopilot/averaging/status", s.handleGetAveragingStatus)
+			futures.POST("/autopilot/averaging/config", s.handleSetAveragingConfig)
+
+			// Dynamic SL/TP endpoints (volatility-based per coin)
+			futures.GET("/autopilot/dynamic-sltp", s.handleGetDynamicSLTPConfig)
+			futures.POST("/autopilot/dynamic-sltp", s.handleSetDynamicSLTPConfig)
+
+			// Scalping mode endpoints
+			futures.GET("/autopilot/scalping", s.handleGetScalpingConfig)
+			futures.POST("/autopilot/scalping", s.handleSetScalpingConfig)
 		}
 	}
 
+	// Health check endpoint
+	api.GET("/health/status", s.handleGetAPIHealthStatus)
+
 	// WebSocket endpoint
 	s.router.GET("/ws", s.handleWebSocket)
+
+	// Stripe webhook endpoint (no auth required - uses signature verification)
+	s.router.POST("/api/billing/webhook", s.handleStripeWebhook)
 
 	// Serve static files (React build) in production
 	if s.config.StaticFilesPath != "" {
@@ -327,4 +495,42 @@ func successResponse(c *gin.Context, data interface{}) {
 		"success": true,
 		"data":    data,
 	})
+}
+
+// getUserID returns the user ID from the context, or empty string if not authenticated
+func (s *Server) getUserID(c *gin.Context) string {
+	if !s.authEnabled {
+		// Return default admin user ID for backward compatibility when auth is disabled
+		return "00000000-0000-0000-0000-000000000000"
+	}
+	return auth.GetUserID(c)
+}
+
+// getUserIDRequired returns the user ID from the context and sends error if not authenticated
+func (s *Server) getUserIDRequired(c *gin.Context) (string, bool) {
+	userID := s.getUserID(c)
+	if userID == "" && s.authEnabled {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "UNAUTHORIZED",
+			"message": "authentication required",
+		})
+		return "", false
+	}
+	return userID, true
+}
+
+// getUserTier returns the user's subscription tier
+func (s *Server) getUserTier(c *gin.Context) string {
+	if !s.authEnabled {
+		return "whale" // Unlimited access when auth is disabled
+	}
+	return auth.GetUserTier(c)
+}
+
+// isUserAdmin checks if the current user is an admin
+func (s *Server) isUserAdmin(c *gin.Context) bool {
+	if !s.authEnabled {
+		return true // Admin access when auth is disabled
+	}
+	return auth.IsAdmin(c)
 }
