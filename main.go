@@ -261,25 +261,76 @@ func main() {
 		logger.Info("ML Predictor initialized")
 	}
 
-	// Initialize LLM Analyzer (Claude)
+	// Initialize LLM Analyzer (Claude, OpenAI, or DeepSeek)
 	var llmAnalyzer *llm.Analyzer
-	if cfg.AIConfig.Enabled && cfg.AIConfig.ClaudeAPIKey != "" {
-		llmConfig := &llm.AnalyzerConfig{
-			Enabled:         true,
-			Provider:        llm.ProviderClaude,
-			APIKey:          cfg.AIConfig.ClaudeAPIKey,
-			Model:           cfg.AIConfig.LLMModel,
-			MaxTokens:       1024,
-			Temperature:     0.3,
-			MinConfidence:   cfg.AutopilotConfig.MinConfidence,
-			CacheDuration:   5 * time.Minute,
-			RateLimitPerMin: 10,
-			EnablePatterns:  true,
-			EnableRiskCheck: true,
-			EnableBigCandle: true,
+	if cfg.AIConfig.Enabled {
+		var provider llm.Provider
+		var apiKey string
+		var model string
+
+		// Select provider based on config or available API key
+		switch cfg.AIConfig.LLMProvider {
+		case "deepseek":
+			if cfg.AIConfig.DeepSeekAPIKey != "" {
+				provider = llm.ProviderDeepSeek
+				apiKey = cfg.AIConfig.DeepSeekAPIKey
+				model = cfg.AIConfig.LLMModel
+				if model == "" || model == "claude-3-haiku-20240307" {
+					model = "deepseek-chat" // Default DeepSeek model
+				}
+			}
+		case "openai":
+			if cfg.AIConfig.OpenAIAPIKey != "" {
+				provider = llm.ProviderOpenAI
+				apiKey = cfg.AIConfig.OpenAIAPIKey
+				model = cfg.AIConfig.LLMModel
+				if model == "" || model == "claude-3-haiku-20240307" {
+					model = "gpt-4o-mini" // Default OpenAI model
+				}
+			}
+		default: // "claude" or default
+			if cfg.AIConfig.ClaudeAPIKey != "" {
+				provider = llm.ProviderClaude
+				apiKey = cfg.AIConfig.ClaudeAPIKey
+				model = cfg.AIConfig.LLMModel
+			}
 		}
-		llmAnalyzer = llm.NewAnalyzer(llmConfig)
-		logger.Info("LLM Analyzer initialized", "provider", "claude", "model", cfg.AIConfig.LLMModel)
+
+		// Fallback: try other providers if preferred one is not configured
+		if apiKey == "" {
+			if cfg.AIConfig.DeepSeekAPIKey != "" {
+				provider = llm.ProviderDeepSeek
+				apiKey = cfg.AIConfig.DeepSeekAPIKey
+				model = "deepseek-chat"
+			} else if cfg.AIConfig.OpenAIAPIKey != "" {
+				provider = llm.ProviderOpenAI
+				apiKey = cfg.AIConfig.OpenAIAPIKey
+				model = "gpt-4o-mini"
+			} else if cfg.AIConfig.ClaudeAPIKey != "" {
+				provider = llm.ProviderClaude
+				apiKey = cfg.AIConfig.ClaudeAPIKey
+				model = cfg.AIConfig.LLMModel
+			}
+		}
+
+		if apiKey != "" {
+			llmConfig := &llm.AnalyzerConfig{
+				Enabled:         true,
+				Provider:        provider,
+				APIKey:          apiKey,
+				Model:           model,
+				MaxTokens:       1024,
+				Temperature:     0.3,
+				MinConfidence:   cfg.AutopilotConfig.MinConfidence,
+				CacheDuration:   5 * time.Minute,
+				RateLimitPerMin: 10,
+				EnablePatterns:  true,
+				EnableRiskCheck: true,
+				EnableBigCandle: true,
+			}
+			llmAnalyzer = llm.NewAnalyzer(llmConfig)
+			logger.Info("LLM Analyzer initialized", "provider", string(provider), "model", model)
+		}
 	}
 
 	// Initialize Sentiment Analyzer

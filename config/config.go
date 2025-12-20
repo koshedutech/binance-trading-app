@@ -112,13 +112,14 @@ type RiskConfig struct {
 
 // AIConfig holds AI/ML configuration
 type AIConfig struct {
-	Enabled       bool   `json:"enabled"`
-	LLMProvider   string `json:"llm_provider"`    // "claude" or "openai"
-	ClaudeAPIKey  string `json:"claude_api_key"`
-	OpenAIAPIKey  string `json:"openai_api_key"`
-	LLMModel      string `json:"llm_model"`       // e.g., "claude-3-opus", "gpt-4"
-	MLEnabled     bool   `json:"ml_enabled"`      // Enable ML predictions
-	SentimentEnabled bool `json:"sentiment_enabled"` // Enable sentiment analysis
+	Enabled          bool   `json:"enabled"`
+	LLMProvider      string `json:"llm_provider"`      // "claude", "openai", or "deepseek"
+	ClaudeAPIKey     string `json:"claude_api_key"`
+	OpenAIAPIKey     string `json:"openai_api_key"`
+	DeepSeekAPIKey   string `json:"deepseek_api_key"`
+	LLMModel         string `json:"llm_model"`         // e.g., "claude-3-opus", "gpt-4", "deepseek-chat"
+	MLEnabled        bool   `json:"ml_enabled"`        // Enable ML predictions
+	SentimentEnabled bool   `json:"sentiment_enabled"` // Enable sentiment analysis
 }
 
 // AutopilotConfig holds autopilot trading configuration
@@ -187,6 +188,17 @@ type FuturesAutopilotConfig struct {
 	ScalpingQuickReentry    bool    `json:"scalping_quick_reentry"`     // Re-enter immediately after close
 	ScalpingReentryDelaySec int     `json:"scalping_reentry_delay_sec"` // Delay before re-entry in seconds
 	ScalpingMaxTradesPerDay int     `json:"scalping_max_trades_per_day"`// Max scalping trades per day (0 = unlimited)
+	// Hedging configuration (opposite position hedging)
+	HedgingEnabled              bool      `json:"hedging_enabled"`                // Master toggle for hedging
+	HedgePriceDropTriggerPct    float64   `json:"hedge_price_drop_trigger_pct"`   // Trigger hedge when position drops X% (e.g., 5.0)
+	HedgeUnrealizedLossTrigger  float64   `json:"hedge_unrealized_loss_trigger"`  // Trigger hedge when unrealized loss exceeds $X
+	HedgeAIEnabled              bool      `json:"hedge_ai_enabled"`               // Let LLM recommend hedges
+	HedgeAIConfidenceMin        float64   `json:"hedge_ai_confidence_min"`        // Min confidence for AI hedge recommendation
+	HedgeDefaultPercent         float64   `json:"hedge_default_percent"`          // Default hedge size as % of position (e.g., 50)
+	HedgePartialSteps           []float64 `json:"hedge_partial_steps"`            // Graduated hedge steps [25, 50, 75, 100]
+	HedgeProfitTakePct          float64   `json:"hedge_profit_take_pct"`          // Close hedge when it's X% profitable
+	HedgeCloseOnRecoveryPct     float64   `json:"hedge_close_on_recovery_pct"`    // Close hedge when original recovers X%
+	HedgeMaxSimultaneous        int       `json:"hedge_max_simultaneous"`         // Max simultaneous hedges
 }
 
 // ScalpingConfig holds scalping strategy configuration
@@ -364,6 +376,7 @@ func Load() (*Config, error) {
 			LLMProvider:      getEnvOrDefault("AI_LLM_PROVIDER", "claude"),
 			ClaudeAPIKey:     getEnvOrDefault("AI_CLAUDE_API_KEY", ""),
 			OpenAIAPIKey:     getEnvOrDefault("AI_OPENAI_API_KEY", ""),
+			DeepSeekAPIKey:   getEnvOrDefault("AI_DEEPSEEK_API_KEY", ""),
 			LLMModel:         getEnvOrDefault("AI_LLM_MODEL", "claude-3-haiku-20240307"),
 			MLEnabled:        getEnvOrDefault("AI_ML_ENABLED", "true") == "true",
 			SentimentEnabled: getEnvOrDefault("AI_SENTIMENT_ENABLED", "false") == "true",
