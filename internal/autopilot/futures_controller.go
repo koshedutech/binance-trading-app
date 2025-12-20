@@ -248,6 +248,57 @@ func NewFuturesController(
 	}
 }
 
+// LoadSavedSettings loads settings from the persistent settings file
+// Call this after creating the controller to restore saved settings
+func (fc *FuturesController) LoadSavedSettings() {
+	sm := GetSettingsManager()
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		fc.logger.Warn("Failed to load saved settings, using defaults", "error", err)
+		return
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	// Apply Dynamic SL/TP settings
+	fc.config.DynamicSLTPEnabled = settings.DynamicSLTPEnabled
+	fc.config.ATRPeriod = settings.ATRPeriod
+	fc.config.ATRMultiplierSL = settings.ATRMultiplierSL
+	fc.config.ATRMultiplierTP = settings.ATRMultiplierTP
+	fc.config.LLMSLTPWeight = settings.LLMSLTPWeight
+	fc.config.MinSLPercent = settings.MinSLPercent
+	fc.config.MaxSLPercent = settings.MaxSLPercent
+	fc.config.MinTPPercent = settings.MinTPPercent
+	fc.config.MaxTPPercent = settings.MaxTPPercent
+
+	// Apply Scalping settings
+	fc.config.ScalpingModeEnabled = settings.ScalpingModeEnabled
+	fc.config.ScalpingMinProfit = settings.ScalpingMinProfit
+	fc.config.ScalpingQuickReentry = settings.ScalpingQuickReentry
+	fc.config.ScalpingReentryDelaySec = settings.ScalpingReentryDelaySec
+	fc.config.ScalpingMaxTradesPerDay = settings.ScalpingMaxTradesPerDay
+
+	// Apply Circuit Breaker settings (if circuit breaker exists)
+	if fc.circuitBreaker != nil {
+		fc.circuitBreaker.SetEnabled(settings.CircuitBreakerEnabled)
+		cbConfig := &circuit.CircuitBreakerConfig{
+			MaxLossPerHour:       settings.MaxLossPerHour,
+			MaxDailyLoss:         settings.MaxDailyLoss,
+			MaxConsecutiveLosses: settings.MaxConsecutiveLosses,
+			CooldownMinutes:      settings.CooldownMinutes,
+			MaxTradesPerMinute:   settings.MaxTradesPerMinute,
+			MaxDailyTrades:       settings.MaxDailyTrades,
+		}
+		fc.circuitBreaker.UpdateConfig(cbConfig)
+	}
+
+	fc.logger.Info("Loaded saved autopilot settings",
+		"dynamic_sltp_enabled", settings.DynamicSLTPEnabled,
+		"scalping_enabled", settings.ScalpingModeEnabled,
+		"circuit_breaker_enabled", settings.CircuitBreakerEnabled)
+}
+
 // SetMLPredictor sets the ML predictor
 func (fc *FuturesController) SetMLPredictor(p *ml.Predictor) {
 	fc.mlPredictor = p
@@ -715,6 +766,24 @@ func (fc *FuturesController) SetDynamicSLTPConfig(
 		"atr_multiplier_sl", fc.config.ATRMultiplierSL,
 		"atr_multiplier_tp", fc.config.ATRMultiplierTP,
 		"llm_weight", fc.config.LLMSLTPWeight)
+
+	// Persist settings to file
+	go func() {
+		sm := GetSettingsManager()
+		if err := sm.UpdateDynamicSLTP(
+			enabled,
+			atrPeriod,
+			atrMultiplierSL,
+			atrMultiplierTP,
+			llmWeight,
+			minSL,
+			maxSL,
+			minTP,
+			maxTP,
+		); err != nil {
+			fc.logger.Warn("Failed to persist dynamic SL/TP settings", "error", err)
+		}
+	}()
 }
 
 // GetScalpingConfig returns the scalping mode configuration
@@ -761,6 +830,20 @@ func (fc *FuturesController) SetScalpingConfig(
 		"quick_reentry", quickReentry,
 		"reentry_delay_sec", fc.config.ScalpingReentryDelaySec,
 		"max_trades_per_day", fc.config.ScalpingMaxTradesPerDay)
+
+	// Persist settings to file
+	go func() {
+		sm := GetSettingsManager()
+		if err := sm.UpdateScalping(
+			enabled,
+			minProfit,
+			quickReentry,
+			reentryDelaySec,
+			maxTradesPerDay,
+		); err != nil {
+			fc.logger.Warn("Failed to persist scalping settings", "error", err)
+		}
+	}()
 }
 
 // SetDefaultLeverage sets custom default leverage for new positions

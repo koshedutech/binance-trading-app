@@ -492,6 +492,26 @@ func (s *Server) handleUpdateFuturesCircuitBreakerConfig(c *gin.Context) {
 		return
 	}
 
+	// Persist circuit breaker settings to file
+	go func() {
+		sm := autopilot.GetSettingsManager()
+		// Get current enabled state from controller status
+		status := controller.GetCircuitBreakerStatus()
+		enabled, _ := status["enabled"].(bool)
+		if err := sm.UpdateCircuitBreaker(
+			enabled,
+			req.MaxLossPerHour,
+			req.MaxDailyLoss,
+			req.MaxConsecutiveLosses,
+			req.CooldownMinutes,
+			req.MaxTradesPerMinute,
+			req.MaxDailyTrades,
+		); err != nil {
+			// Log error but don't fail the request
+			fmt.Printf("Failed to persist circuit breaker settings: %v\n", err)
+		}
+	}()
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Futures circuit breaker config updated",
@@ -520,6 +540,16 @@ func (s *Server) handleToggleFuturesCircuitBreaker(c *gin.Context) {
 		errorResponse(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Persist circuit breaker enabled state
+	go func() {
+		sm := autopilot.GetSettingsManager()
+		settings := sm.GetCurrentSettings()
+		settings.CircuitBreakerEnabled = req.Enabled
+		if err := sm.SaveSettings(settings); err != nil {
+			fmt.Printf("Failed to persist circuit breaker enabled state: %v\n", err)
+		}
+	}()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

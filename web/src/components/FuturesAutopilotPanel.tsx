@@ -131,6 +131,16 @@ export default function FuturesAutopilotPanel() {
     max_tp_percent: 5.0,
   });
   const [isSavingDynamicSLTP, setIsSavingDynamicSLTP] = useState(false);
+  // String inputs for Dynamic SL/TP (allows clearing and typing)
+  const [dynamicSLTPInputs, setDynamicSLTPInputs] = useState({
+    atr_period: '14',
+    atr_multiplier_sl: '1.5',
+    atr_multiplier_tp: '2.0',
+    min_sl_percent: '0.3',
+    max_sl_percent: '3.0',
+    min_tp_percent: '0.5',
+    max_tp_percent: '5.0',
+  });
 
   // Scalping mode state
   const [showScalping, setShowScalping] = useState(false);
@@ -143,6 +153,12 @@ export default function FuturesAutopilotPanel() {
     trades_today: 0,
   });
   const [isSavingScalping, setIsSavingScalping] = useState(false);
+  // String inputs for Scalping (allows clearing and typing)
+  const [scalpingInputs, setScalpingInputs] = useState({
+    min_profit: '0.2',
+    reentry_delay_sec: '5',
+    max_trades_per_day: '0',
+  });
 
   // Setting inputs
   const [riskLevel, setRiskLevel] = useState('moderate');
@@ -216,6 +232,16 @@ export default function FuturesAutopilotPanel() {
     try {
       const config = await futuresApi.getDynamicSLTPConfig();
       setDynamicSLTPConfig(config);
+      // Sync string inputs
+      setDynamicSLTPInputs({
+        atr_period: config.atr_period.toString(),
+        atr_multiplier_sl: config.atr_multiplier_sl.toString(),
+        atr_multiplier_tp: config.atr_multiplier_tp.toString(),
+        min_sl_percent: config.min_sl_percent.toString(),
+        max_sl_percent: config.max_sl_percent.toString(),
+        min_tp_percent: config.min_tp_percent.toString(),
+        max_tp_percent: config.max_tp_percent.toString(),
+      });
     } catch (err) {
       console.error('Failed to fetch dynamic SL/TP config:', err);
     }
@@ -225,6 +251,12 @@ export default function FuturesAutopilotPanel() {
     try {
       const config = await futuresApi.getScalpingConfig();
       setScalpingConfig(config);
+      // Sync string inputs
+      setScalpingInputs({
+        min_profit: config.min_profit.toString(),
+        reentry_delay_sec: config.reentry_delay_sec.toString(),
+        max_trades_per_day: config.max_trades_per_day.toString(),
+      });
     } catch (err) {
       console.error('Failed to fetch scalping config:', err);
     }
@@ -465,9 +497,20 @@ export default function FuturesAutopilotPanel() {
   const handleSaveDynamicSLTP = async () => {
     setIsSavingDynamicSLTP(true);
     try {
-      const result = await futuresApi.setDynamicSLTPConfig(dynamicSLTPConfig);
+      // Parse string inputs to numbers
+      const configToSave = {
+        ...dynamicSLTPConfig,
+        atr_period: parseInt(dynamicSLTPInputs.atr_period) || 14,
+        atr_multiplier_sl: parseFloat(dynamicSLTPInputs.atr_multiplier_sl) || 1.5,
+        atr_multiplier_tp: parseFloat(dynamicSLTPInputs.atr_multiplier_tp) || 2.0,
+        min_sl_percent: parseFloat(dynamicSLTPInputs.min_sl_percent) || 0.3,
+        max_sl_percent: parseFloat(dynamicSLTPInputs.max_sl_percent) || 3.0,
+        min_tp_percent: parseFloat(dynamicSLTPInputs.min_tp_percent) || 0.5,
+        max_tp_percent: parseFloat(dynamicSLTPInputs.max_tp_percent) || 5.0,
+      };
+      const result = await futuresApi.setDynamicSLTPConfig(configToSave);
       if (result.success) {
-        setSuccessMsg('Dynamic SL/TP settings saved');
+        setSuccessMsg('Dynamic SL/TP settings saved permanently');
         setTimeout(() => setSuccessMsg(null), 3000);
         fetchDynamicSLTPConfig();
       }
@@ -476,6 +519,38 @@ export default function FuturesAutopilotPanel() {
       setTimeout(() => setError(null), 3000);
     } finally {
       setIsSavingDynamicSLTP(false);
+    }
+  };
+
+  const handleResetDynamicSLTPDefaults = async () => {
+    const defaults = {
+      enabled: false,
+      atr_period: 14,
+      atr_multiplier_sl: 1.5,
+      atr_multiplier_tp: 2.0,
+      llm_weight: 0.3,
+      min_sl_percent: 0.3,
+      max_sl_percent: 3.0,
+      min_tp_percent: 0.5,
+      max_tp_percent: 5.0,
+    };
+    setDynamicSLTPConfig(defaults);
+    setDynamicSLTPInputs({
+      atr_period: '14',
+      atr_multiplier_sl: '1.5',
+      atr_multiplier_tp: '2.0',
+      min_sl_percent: '0.3',
+      max_sl_percent: '3.0',
+      min_tp_percent: '0.5',
+      max_tp_percent: '5.0',
+    });
+    try {
+      await futuresApi.setDynamicSLTPConfig(defaults);
+      setSuccessMsg('Dynamic SL/TP reset to defaults');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to reset defaults');
+      setTimeout(() => setError(null), 3000);
     }
   };
 
@@ -499,9 +574,16 @@ export default function FuturesAutopilotPanel() {
   const handleSaveScalping = async () => {
     setIsSavingScalping(true);
     try {
-      const result = await futuresApi.setScalpingConfig(scalpingConfig);
+      // Parse string inputs to numbers
+      const configToSave = {
+        ...scalpingConfig,
+        min_profit: parseFloat(scalpingInputs.min_profit) || 0.2,
+        reentry_delay_sec: parseInt(scalpingInputs.reentry_delay_sec) || 5,
+        max_trades_per_day: parseInt(scalpingInputs.max_trades_per_day) || 0,
+      };
+      const result = await futuresApi.setScalpingConfig(configToSave);
       if (result.success) {
-        setSuccessMsg('Scalping mode settings saved');
+        setSuccessMsg('Scalping settings saved permanently');
         setTimeout(() => setSuccessMsg(null), 3000);
         fetchScalpingConfig();
       }
@@ -510,6 +592,31 @@ export default function FuturesAutopilotPanel() {
       setTimeout(() => setError(null), 3000);
     } finally {
       setIsSavingScalping(false);
+    }
+  };
+
+  const handleResetScalpingDefaults = async () => {
+    const defaults = {
+      enabled: false,
+      min_profit: 0.2,
+      quick_reentry: true,
+      reentry_delay_sec: 5,
+      max_trades_per_day: 0,
+      trades_today: 0,
+    };
+    setScalpingConfig(defaults);
+    setScalpingInputs({
+      min_profit: '0.2',
+      reentry_delay_sec: '5',
+      max_trades_per_day: '0',
+    });
+    try {
+      await futuresApi.setScalpingConfig(defaults);
+      setSuccessMsg('Scalping reset to defaults');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to reset defaults');
+      setTimeout(() => setError(null), 3000);
     }
   };
 
@@ -1015,12 +1122,11 @@ export default function FuturesAutopilotPanel() {
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">ATR Period</label>
                   <input
-                    type="number"
-                    value={dynamicSLTPConfig.atr_period}
-                    onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, atr_period: parseInt(e.target.value) || 14})}
+                    type="text"
+                    value={dynamicSLTPInputs.atr_period}
+                    onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, atr_period: e.target.value})}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                    min="7"
-                    max="21"
+                    placeholder="14"
                   />
                 </div>
                 <div>
@@ -1044,25 +1150,21 @@ export default function FuturesAutopilotPanel() {
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">SL Multiplier</label>
                   <input
-                    type="number"
-                    value={dynamicSLTPConfig.atr_multiplier_sl}
-                    onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, atr_multiplier_sl: parseFloat(e.target.value) || 1.5})}
+                    type="text"
+                    value={dynamicSLTPInputs.atr_multiplier_sl}
+                    onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, atr_multiplier_sl: e.target.value})}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                    min="0.5"
-                    max="3"
-                    step="0.1"
+                    placeholder="1.5"
                   />
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">TP Multiplier</label>
                   <input
-                    type="number"
-                    value={dynamicSLTPConfig.atr_multiplier_tp}
-                    onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, atr_multiplier_tp: parseFloat(e.target.value) || 2.0})}
+                    type="text"
+                    value={dynamicSLTPInputs.atr_multiplier_tp}
+                    onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, atr_multiplier_tp: e.target.value})}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                    min="0.5"
-                    max="5"
-                    step="0.1"
+                    placeholder="2.0"
                   />
                 </div>
               </div>
@@ -1072,22 +1174,18 @@ export default function FuturesAutopilotPanel() {
                   <label className="text-xs text-gray-500 mb-1 block">Min/Max SL %</label>
                   <div className="flex gap-1">
                     <input
-                      type="number"
-                      value={dynamicSLTPConfig.min_sl_percent}
-                      onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, min_sl_percent: parseFloat(e.target.value) || 0.3})}
+                      type="text"
+                      value={dynamicSLTPInputs.min_sl_percent}
+                      onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, min_sl_percent: e.target.value})}
                       className="w-1/2 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                      min="0.1"
-                      max="1"
-                      step="0.1"
+                      placeholder="0.3"
                     />
                     <input
-                      type="number"
-                      value={dynamicSLTPConfig.max_sl_percent}
-                      onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, max_sl_percent: parseFloat(e.target.value) || 3})}
+                      type="text"
+                      value={dynamicSLTPInputs.max_sl_percent}
+                      onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, max_sl_percent: e.target.value})}
                       className="w-1/2 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                      min="1"
-                      max="10"
-                      step="0.5"
+                      placeholder="3.0"
                     />
                   </div>
                 </div>
@@ -1095,35 +1193,41 @@ export default function FuturesAutopilotPanel() {
                   <label className="text-xs text-gray-500 mb-1 block">Min/Max TP %</label>
                   <div className="flex gap-1">
                     <input
-                      type="number"
-                      value={dynamicSLTPConfig.min_tp_percent}
-                      onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, min_tp_percent: parseFloat(e.target.value) || 0.5})}
+                      type="text"
+                      value={dynamicSLTPInputs.min_tp_percent}
+                      onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, min_tp_percent: e.target.value})}
                       className="w-1/2 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                      min="0.1"
-                      max="2"
-                      step="0.1"
+                      placeholder="0.5"
                     />
                     <input
-                      type="number"
-                      value={dynamicSLTPConfig.max_tp_percent}
-                      onChange={(e) => setDynamicSLTPConfig({...dynamicSLTPConfig, max_tp_percent: parseFloat(e.target.value) || 5})}
+                      type="text"
+                      value={dynamicSLTPInputs.max_tp_percent}
+                      onChange={(e) => setDynamicSLTPInputs({...dynamicSLTPInputs, max_tp_percent: e.target.value})}
                       className="w-1/2 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                      min="1"
-                      max="15"
-                      step="0.5"
+                      placeholder="5.0"
                     />
                   </div>
                 </div>
               </div>
 
-              <button
-                onClick={handleSaveDynamicSLTP}
-                disabled={isSavingDynamicSLTP}
-                className="w-full py-2 bg-cyan-500/20 text-cyan-500 rounded text-sm hover:bg-cyan-500/30 disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {isSavingDynamicSLTP ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                Save Settings
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveDynamicSLTP}
+                  disabled={isSavingDynamicSLTP}
+                  className="flex-1 py-2 bg-cyan-500/20 text-cyan-500 rounded text-sm hover:bg-cyan-500/30 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isSavingDynamicSLTP ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  Save
+                </button>
+                <button
+                  onClick={handleResetDynamicSLTPDefaults}
+                  className="px-3 py-2 bg-gray-700 text-gray-300 rounded text-sm hover:bg-gray-600 flex items-center justify-center gap-1"
+                  title="Reset to defaults"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Default
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1164,24 +1268,21 @@ export default function FuturesAutopilotPanel() {
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">Min Profit to Book %</label>
                   <input
-                    type="number"
-                    value={scalpingConfig.min_profit}
-                    onChange={(e) => setScalpingConfig({...scalpingConfig, min_profit: parseFloat(e.target.value) || 0.2})}
+                    type="text"
+                    value={scalpingInputs.min_profit}
+                    onChange={(e) => setScalpingInputs({...scalpingInputs, min_profit: e.target.value})}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                    min="0.05"
-                    max="1"
-                    step="0.05"
+                    placeholder="0.2"
                   />
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">Re-entry Delay (sec)</label>
                   <input
-                    type="number"
-                    value={scalpingConfig.reentry_delay_sec}
-                    onChange={(e) => setScalpingConfig({...scalpingConfig, reentry_delay_sec: parseInt(e.target.value) || 5})}
+                    type="text"
+                    value={scalpingInputs.reentry_delay_sec}
+                    onChange={(e) => setScalpingInputs({...scalpingInputs, reentry_delay_sec: e.target.value})}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                    min="1"
-                    max="60"
+                    placeholder="5"
                   />
                 </div>
               </div>
@@ -1202,36 +1303,45 @@ export default function FuturesAutopilotPanel() {
                 <div>
                   <label className="text-xs text-gray-500 mb-1 block">Max Daily Trades (0=∞)</label>
                   <input
-                    type="number"
-                    value={scalpingConfig.max_trades_per_day}
-                    onChange={(e) => setScalpingConfig({...scalpingConfig, max_trades_per_day: parseInt(e.target.value) || 0})}
+                    type="text"
+                    value={scalpingInputs.max_trades_per_day}
+                    onChange={(e) => setScalpingInputs({...scalpingInputs, max_trades_per_day: e.target.value})}
                     className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
-                    min="0"
-                    max="1000"
+                    placeholder="0"
                   />
                 </div>
               </div>
 
-              <button
-                onClick={handleSaveScalping}
-                disabled={isSavingScalping}
-                className="w-full py-2 bg-yellow-500/20 text-yellow-500 rounded text-sm hover:bg-yellow-500/30 disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {isSavingScalping ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                Save Settings
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveScalping}
+                  disabled={isSavingScalping}
+                  className="flex-1 py-2 bg-yellow-500/20 text-yellow-500 rounded text-sm hover:bg-yellow-500/30 disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  {isSavingScalping ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                  Save
+                </button>
+                <button
+                  onClick={handleResetScalpingDefaults}
+                  className="px-3 py-2 bg-gray-700 text-gray-300 rounded text-sm hover:bg-gray-600 flex items-center justify-center gap-1"
+                  title="Reset to defaults"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Default
+                </button>
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* Loss Control / Circuit Breaker Panel */}
+      {/* Circuit Breaker Panel */}
       {showLossControl && circuitStatus && (
         <div className="mt-4 pt-4 border-t border-gray-700 space-y-4">
           <div className="flex items-center justify-between">
             <div className="text-sm font-medium text-gray-400 flex items-center gap-2">
-              <Zap className="w-4 h-4" />
-              Loss Control (Circuit Breaker)
+              <Shield className="w-4 h-4" />
+              Circuit Breaker
             </div>
             <div className="flex items-center gap-2">
               <span className={`text-xs font-medium ${getCBStateColor(circuitStatus.state)}`}>
