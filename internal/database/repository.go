@@ -90,7 +90,7 @@ func (r *Repository) GetTradeByID(ctx context.Context, id int64) (*Trade, error)
 func (r *Repository) GetOpenTrades(ctx context.Context) ([]*Trade, error) {
 	query := `
 		SELECT id, symbol, side, entry_price, exit_price, quantity, entry_time, exit_time,
-		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at, trade_source
+		       stop_loss, take_profit, pnl, pnl_percent, strategy_name, status, created_at, updated_at, trade_source, ai_decision_id
 		FROM trades
 		WHERE status = 'OPEN'
 		ORDER BY entry_time DESC
@@ -532,7 +532,8 @@ func (r *Repository) UpdateStrategyConfig(ctx context.Context, config *StrategyC
 	query := `
 		UPDATE strategy_configs
 		SET symbol = $2, timeframe = $3, indicator_type = $4, autopilot = $5, enabled = $6,
-			position_size = $7, stop_loss_percent = $8, take_profit_percent = $9, config_params = $10
+			position_size = $7, stop_loss_percent = $8, take_profit_percent = $9, config_params = $10,
+			updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 	`
 	_, err = r.db.Pool.Exec(
@@ -880,4 +881,43 @@ func (r *Repository) IsInWatchlist(ctx context.Context, symbol string) (bool, er
 		return false, fmt.Errorf("failed to check watchlist: %w", err)
 	}
 	return exists, nil
+}
+
+// ============================================================================
+// MODE SAFETY AND ALLOCATION - WRAPPER METHODS
+// ============================================================================
+
+// RecordModeSafetyEvent records a safety control event for a mode
+func (r *Repository) RecordModeSafetyEvent(ctx context.Context, event *ModeSafetyHistory) error {
+	return r.db.RecordModeSafetyEvent(ctx, event)
+}
+
+// GetModeSafetyHistory retrieves safety events for a mode
+func (r *Repository) GetModeSafetyHistory(ctx context.Context, mode string, limit int) ([]ModeSafetyHistory, error) {
+	return r.db.GetModeSafetyHistory(ctx, mode, limit)
+}
+
+// RecordModeAllocation records a capital allocation snapshot for a mode
+func (r *Repository) RecordModeAllocation(ctx context.Context, alloc *ModeAllocationHistory) error {
+	return r.db.RecordModeAllocation(ctx, alloc)
+}
+
+// GetModeAllocationHistory retrieves allocation history for a mode
+func (r *Repository) GetModeAllocationHistory(ctx context.Context, mode string, limit int) ([]ModeAllocationHistory, error) {
+	return r.db.GetModeAllocationHistory(ctx, mode, limit)
+}
+
+// UpdateModePerformanceStats updates or inserts performance stats for a mode
+func (r *Repository) UpdateModePerformanceStats(ctx context.Context, stats *ModePerformanceStats) error {
+	return r.db.UpdateModePerformanceStats(ctx, stats)
+}
+
+// GetModePerformanceStats retrieves performance stats for a mode
+func (r *Repository) GetModePerformanceStats(ctx context.Context, mode string) (*ModePerformanceStats, error) {
+	return r.db.GetModePerformanceStats(ctx, mode)
+}
+
+// GetAllModePerformanceStats retrieves performance stats for all modes
+func (r *Repository) GetAllModePerformanceStats(ctx context.Context) (map[string]*ModePerformanceStats, error) {
+	return r.db.GetAllModePerformanceStats(ctx)
 }

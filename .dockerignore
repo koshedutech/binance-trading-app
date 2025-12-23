@@ -1,0 +1,38 @@
+# Node modules (will be rebuilt in container)
+web/node_modules
+node_modules
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Build artifacts
+bin/
+dist/
+coverage.out
+coverage.html
+
+# Logs
+logs/
+*.log
+
+# Environment files (secrets)
+.env.local
+
+# Backups
+backups/
+
+# Docker
+docker-compose.override.yml
+
+# Misc
+.DS_Store
+Thumbs.db
+*.md
+!README.md

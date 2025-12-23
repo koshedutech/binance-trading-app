@@ -26,6 +26,7 @@ import (
 	"binance-trading-bot/internal/continuous"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
+	"binance-trading-bot/internal/license"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/notification"
 	"binance-trading-bot/internal/risk"
@@ -221,6 +222,11 @@ func main() {
 	// Create repository
 	repo := database.NewRepository(db)
 
+	// Run License migrations
+	if err := repo.CreateLicenseTable(ctx); err != nil {
+		log.Printf("Warning: License migrations failed (table may already exist): %v", err)
+	}
+
 	// Initialize the trading bot
 	tradingBot, err := bot.NewTradingBot(cfg, repo, eventBus)
 	if err != nil {
@@ -336,18 +342,18 @@ func main() {
 	// Initialize Sentiment Analyzer
 	var sentimentAnalyzer *sentiment.Analyzer
 	if cfg.AIConfig.Enabled && cfg.AIConfig.SentimentEnabled {
-		cryptoPanicKey := os.Getenv("AI_CRYPTOPANIC_API_KEY")
+		cryptoNewsKey := os.Getenv("CRYPTONEWS_API_KEY")
 		sentimentConfig := &sentiment.SentimentConfig{
-			Enabled:           true,
-			FearGreedEnabled:  true,
-			NewsEnabled:       cryptoPanicKey != "",
-			CryptoPanicAPIKey: cryptoPanicKey,
-			UpdateInterval:    15 * time.Minute,
-			SentimentWeight:   0.2,
+			Enabled:          true,
+			FearGreedEnabled: true,
+			NewsEnabled:      cryptoNewsKey != "",
+			CryptoNewsAPIKey: cryptoNewsKey,
+			UpdateInterval:   15 * time.Minute,
+			SentimentWeight:  0.2,
 		}
 		sentimentAnalyzer = sentiment.NewAnalyzer(sentimentConfig)
 		sentimentAnalyzer.Start()
-		logger.Info("Sentiment Analyzer initialized")
+		logger.Info("Sentiment Analyzer initialized", "news_enabled", cryptoNewsKey != "")
 	}
 
 	// Initialize Big Candle Detector
@@ -544,10 +550,25 @@ func main() {
 		// Load saved settings from persistent storage (overrides config file defaults)
 		futuresAutopilotController.LoadSavedSettings()
 
+		// Swap client if the dry run mode changed due to saved settings
+		// This ensures the correct client (real vs mock) is used based on persisted settings
+		actualDryRun := futuresAutopilotController.GetDryRun()
+		if actualDryRun != cfg.TradingConfig.DryRun {
+			logger.Info("Dry run mode changed by saved settings, swapping futures client",
+				"config_dry_run", cfg.TradingConfig.DryRun,
+				"actual_dry_run", actualDryRun)
+
+			if actualDryRun {
+				futuresAutopilotController.SetFuturesClient(futuresMockClient)
+			} else if futuresRealClient != nil {
+				futuresAutopilotController.SetFuturesClient(futuresRealClient)
+			}
+		}
+
 		logger.Info("Futures Autopilot Controller initialized",
 			"risk_level", cfg.FuturesAutopilotConfig.RiskLevel,
 			"leverage", cfg.FuturesAutopilotConfig.DefaultLeverage,
-			"dry_run", cfg.TradingConfig.DryRun)
+			"dry_run", actualDryRun)
 	}
 
 	// Initialize screener
@@ -707,7 +728,19 @@ func main() {
 		logger.Info("Billing service initialized")
 	}
 
-	server := api.NewServer(serverConfig, repo, eventBus, botAPI, authService, vaultClient, billingService)
+	// Initialize License validation
+	licenseInfo, err := license.GetLicenseFromEnv()
+	if err != nil {
+		logger.Warn("License validation failed, running in trial mode", "error", err)
+	} else if licenseInfo != nil && licenseInfo.IsValid {
+		logger.Info("License validated",
+			"type", licenseInfo.Type,
+			"max_symbols", licenseInfo.MaxSymbols,
+			"features", len(licenseInfo.Features),
+		)
+	}
+
+	server := api.NewServer(serverConfig, repo, eventBus, botAPI, authService, vaultClient, billingService, licenseInfo)
 
 	// Start web server in a goroutine
 	go func() {
@@ -1272,7 +1305,16 @@ func (w *BotAPIWrapper) GetNotificationManager() *notification.Manager {
 }
 
 func (w *BotAPIWrapper) GetFuturesClient() binance.FuturesClient {
-	// Get base client based on dry_run mode
+	// Use FuturesController's actual client if available
+	// The client is already wrapped with cache when passed to FuturesController
+	if w.futuresAutopilotController != nil {
+		client := w.futuresAutopilotController.GetFuturesClient()
+		if client != nil {
+			return client
+		}
+	}
+
+	// Fallback: Get base client based on dry_run mode
 	var baseClient binance.FuturesClient
 	if w.cfg.TradingConfig.DryRun {
 		baseClient = w.futuresMockClient
@@ -1324,14 +1366,71 @@ func (w *BotAPIWrapper) GetDryRunMode() bool {
 }
 
 func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
+	oldMode := w.cfg.TradingConfig.DryRun
 	w.cfg.TradingConfig.DryRun = enabled
 
-	// Also update autopilot if it exists
+	// Update Spot autopilot if it exists
 	if w.autopilotController != nil {
 		w.autopilotController.SetDryRun(enabled)
 	}
 
-	w.logger.Info("Trading mode changed", "dry_run", enabled)
+	// Update Futures autopilot and switch client if mode changed
+	if w.futuresAutopilotController != nil {
+		// Switch the futures client based on new mode
+		if oldMode != enabled {
+			var newClient binance.FuturesClient
+			if enabled {
+				// Switching to PAPER mode - use mock client
+				if w.futuresMockClient != nil {
+					newClient = w.futuresMockClient
+				}
+			} else {
+				// Switching to LIVE mode - use real client
+				if w.futuresRealClient != nil {
+					newClient = w.futuresRealClient
+				} else if w.futuresMockClient != nil {
+					// Fallback to mock if real not available
+					newClient = w.futuresMockClient
+					w.logger.Warn("Real futures client not available, using mock client for LIVE mode")
+				}
+			}
+
+			// Wrap with cache if available
+			if newClient != nil && w.marketDataCache != nil {
+				newClient = binance.NewCachedFuturesClient(newClient, w.marketDataCache)
+			}
+
+			if newClient != nil {
+				w.futuresAutopilotController.SetFuturesClient(newClient)
+			}
+		}
+
+		// Update dry run flag (this will also propagate to Ginie)
+		w.futuresAutopilotController.SetDryRun(enabled)
+	}
+
+	// Save settings to persistent storage so mode survives restarts
+	sm := autopilot.GetSettingsManager()
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		w.logger.Warn("Failed to load settings for mode update", "error", err)
+	} else {
+		// Update both main dry run mode and Ginie dry run mode
+		settings.DryRunMode = enabled
+		settings.GinieDryRunMode = enabled
+		settings.SpotDryRunMode = enabled
+		if err := sm.SaveSettings(settings); err != nil {
+			w.logger.Warn("Failed to save settings after mode change", "error", err)
+		} else {
+			w.logger.Info("Saved trading mode to settings file", "dry_run", enabled)
+		}
+	}
+
+	modeStr := "PAPER"
+	if !enabled {
+		modeStr = "LIVE"
+	}
+	w.logger.Info("Trading mode changed", "mode", modeStr, "dry_run", enabled)
 	return nil
 }
 

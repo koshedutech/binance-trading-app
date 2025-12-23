@@ -154,21 +154,15 @@ func (c *Client) Get24hrTickers() ([]Ticker24hr, error) {
 // PlaceOrder places a new order
 func (c *Client) PlaceOrder(params map[string]string) (*OrderResponse, error) {
 	params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
-	params["signature"] = c.sign(params)
+	query := c.signParams(params)
 
-	values := url.Values{}
-	for k, v := range params {
-		values.Set(k, v)
-	}
-
-	endpoint := fmt.Sprintf("%s/api/v3/order", c.baseURL)
+	endpoint := fmt.Sprintf("%s/api/v3/order?%s", c.baseURL, query)
 
 	req, err := http.NewRequest("POST", endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	req.URL.RawQuery = values.Encode()
 	req.Header.Set("X-MBX-APIKEY", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
@@ -201,21 +195,15 @@ func (c *Client) CancelOrder(symbol string, orderId int64) error {
 		"orderId":   strconv.FormatInt(orderId, 10),
 		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
 	}
-	params["signature"] = c.sign(params)
+	query := c.signParams(params)
 
-	values := url.Values{}
-	for k, v := range params {
-		values.Set(k, v)
-	}
-
-	endpoint := fmt.Sprintf("%s/api/v3/order", c.baseURL)
+	endpoint := fmt.Sprintf("%s/api/v3/order?%s", c.baseURL, query)
 
 	req, err := http.NewRequest("DELETE", endpoint, nil)
 	if err != nil {
 		return err
 	}
 
-	req.URL.RawQuery = values.Encode()
 	req.Header.Set("X-MBX-APIKEY", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
@@ -322,21 +310,71 @@ func (c *Client) GetAllSymbols() ([]string, error) {
 	return symbols, nil
 }
 
-// sign creates a signature for authenticated requests
-func (c *Client) sign(params map[string]string) string {
+// GetAccountInfo fetches account information including balances
+func (c *Client) GetAccountInfo() (*AccountInfo, error) {
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+	query := c.signParams(params)
+
+	endpoint := fmt.Sprintf("%s/api/v3/account?%s", c.baseURL, query)
+
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-MBX-APIKEY", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching account info: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: %s", string(body))
+	}
+
+	var accountInfo AccountInfo
+	if err := json.Unmarshal(body, &accountInfo); err != nil {
+		return nil, fmt.Errorf("error parsing account info: %w", err)
+	}
+
+	return &accountInfo, nil
+}
+
+// buildQueryString creates a query string from params (excluding signature)
+func (c *Client) buildQueryString(params map[string]string) string {
 	query := ""
 	for k, v := range params {
 		if k != "signature" {
 			if query != "" {
 				query += "&"
 			}
-			query += k + "=" + v
+			query += k + "=" + url.QueryEscape(v)
 		}
 	}
+	return query
+}
 
+// sign creates a signature for the given query string
+func (c *Client) sign(query string) string {
 	mac := hmac.New(sha256.New, []byte(c.secretKey))
 	mac.Write([]byte(query))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// signParams builds query string with signature appended
+func (c *Client) signParams(params map[string]string) string {
+	query := c.buildQueryString(params)
+	signature := c.sign(query)
+	return query + "&signature=" + signature
 }
 
 func parseFloat(val interface{}) float64 {

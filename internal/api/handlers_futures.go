@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"log"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"binance-trading-bot/internal/binance"
@@ -11,6 +14,58 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// ==================== INPUT VALIDATION HELPERS ====================
+// Commercial-grade validation for trading API inputs
+
+var (
+	// symbolRegex validates trading pair format (alphanumeric, 2-20 chars, typically ends in USDT/BUSD)
+	symbolRegex = regexp.MustCompile(`^[A-Z0-9]{2,20}$`)
+)
+
+// validateSymbol validates a trading symbol for security and format
+func validateSymbol(symbol string) (string, error) {
+	// Normalize to uppercase
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+
+	// Check format
+	if !symbolRegex.MatchString(symbol) {
+		return "", &ValidationError{Field: "symbol", Message: "invalid symbol format"}
+	}
+
+	return symbol, nil
+}
+
+// validateLeverage validates leverage value
+func validateLeverage(leverage int) error {
+	if leverage < 1 || leverage > 125 {
+		return &ValidationError{Field: "leverage", Message: "leverage must be between 1 and 125"}
+	}
+	return nil
+}
+
+// validateQuantity validates order quantity
+func validateQuantity(quantity float64) error {
+	if quantity <= 0 {
+		return &ValidationError{Field: "quantity", Message: "quantity must be positive"}
+	}
+	if quantity > 1000000 { // Reasonable upper limit
+		return &ValidationError{Field: "quantity", Message: "quantity exceeds maximum"}
+	}
+	return nil
+}
+
+// ValidationError represents a validation error
+type ValidationError struct {
+	Field   string
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	return e.Field + ": " + e.Message
+}
+
+// ==================== END INPUT VALIDATION HELPERS ====================
 
 // FuturesAPI interface defines methods for futures trading
 type FuturesAPI interface {
@@ -101,6 +156,19 @@ func (s *Server) handleGetFuturesPositions(c *gin.Context) {
 func (s *Server) handleSetLeverage(c *gin.Context) {
 	var req SetLeverageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Additional security validation
+	validatedSymbol, err := validateSymbol(req.Symbol)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.Symbol = validatedSymbol
+
+	if err := validateLeverage(req.Leverage); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -211,6 +279,20 @@ func (s *Server) handlePlaceFuturesOrder(c *gin.Context) {
 		return
 	}
 
+	// Additional security validation for symbol
+	validatedSymbol, err := validateSymbol(req.Symbol)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	req.Symbol = validatedSymbol
+
+	// Validate quantity
+	if err := validateQuantity(req.Quantity); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	futuresClient := s.getFuturesClient()
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
@@ -242,35 +324,44 @@ func (s *Server) handlePlaceFuturesOrder(c *gin.Context) {
 		return
 	}
 
-	// Place TP/SL orders if specified
-	var tpOrderResp, slOrderResp *binance.FuturesOrderResponse
+	// Place TP/SL orders if specified using NEW Algo Order API (mandatory since 2025-12-09)
+	var tpOrderResp, slOrderResp *binance.AlgoOrderResponse
+	var tpError, slError string
 
 	if req.TakeProfit > 0 {
-		tpParams := binance.FuturesOrderParams{
+		tpParams := binance.AlgoOrderParams{
 			Symbol:       req.Symbol,
 			Side:         getOppositeSide(req.Side),
 			PositionSide: binance.PositionSide(req.PositionSide),
 			Type:         binance.FuturesOrderTypeTakeProfitMarket,
 			Quantity:     req.Quantity,
-			StopPrice:    req.TakeProfit,
-			ReduceOnly:   true,
+			TriggerPrice: req.TakeProfit,
 			WorkingType:  binance.WorkingTypeMarkPrice,
 		}
-		tpOrderResp, _ = futuresClient.PlaceFuturesOrder(tpParams)
+		var err error
+		tpOrderResp, err = futuresClient.PlaceAlgoOrder(tpParams)
+		if err != nil {
+			tpError = err.Error()
+			log.Printf("Failed to place Take Profit order: %v", err)
+		}
 	}
 
 	if req.StopLoss > 0 {
-		slParams := binance.FuturesOrderParams{
+		slParams := binance.AlgoOrderParams{
 			Symbol:       req.Symbol,
 			Side:         getOppositeSide(req.Side),
 			PositionSide: binance.PositionSide(req.PositionSide),
 			Type:         binance.FuturesOrderTypeStopMarket,
 			Quantity:     req.Quantity,
-			StopPrice:    req.StopLoss,
-			ReduceOnly:   true,
+			TriggerPrice: req.StopLoss,
 			WorkingType:  binance.WorkingTypeMarkPrice,
 		}
-		slOrderResp, _ = futuresClient.PlaceFuturesOrder(slParams)
+		var err error
+		slOrderResp, err = futuresClient.PlaceAlgoOrder(slParams)
+		if err != nil {
+			slError = err.Error()
+			log.Printf("Failed to place Stop Loss order: %v", err)
+		}
 	}
 
 	// Save trade to database
@@ -299,12 +390,22 @@ func (s *Server) handlePlaceFuturesOrder(c *gin.Context) {
 
 	s.repo.GetDB().CreateFuturesTrade(ctx, trade)
 
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"order":      orderResp,
 		"takeProfit": tpOrderResp,
 		"stopLoss":   slOrderResp,
 		"tradeId":    trade.ID,
-	})
+	}
+
+	// Include TP/SL errors in response if any
+	if tpError != "" {
+		response["takeProfitError"] = tpError
+	}
+	if slError != "" {
+		response["stopLossError"] = slError
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // handleCancelFuturesOrder cancels a futures order
@@ -371,6 +472,35 @@ func (s *Server) handleGetFuturesOpenOrders(c *gin.Context) {
 	c.JSON(http.StatusOK, orders)
 }
 
+// handleGetAllFuturesOrders returns all open orders (regular + conditional/algo)
+func (s *Server) handleGetAllFuturesOrders(c *gin.Context) {
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	// Get regular open orders
+	regularOrders, err := futuresClient.GetOpenOrders("")
+	if err != nil {
+		regularOrders = []binance.FuturesOrder{}
+	}
+
+	// Get algo/conditional orders (TP/SL orders)
+	algoOrders, err := futuresClient.GetOpenAlgoOrders("")
+	if err != nil {
+		algoOrders = []binance.AlgoOrder{}
+	}
+
+	// Format response
+	c.JSON(http.StatusOK, gin.H{
+		"regular_orders": regularOrders,
+		"algo_orders":    algoOrders,
+		"total_regular":  len(regularOrders),
+		"total_algo":     len(algoOrders),
+	})
+}
+
 // handleCloseFuturesPosition closes a futures position
 func (s *Server) handleCloseFuturesPosition(c *gin.Context) {
 	symbol := c.Param("symbol")
@@ -405,13 +535,15 @@ func (s *Server) handleCloseFuturesPosition(c *gin.Context) {
 	}
 
 	// Place market order to close
+	// In hedge mode (position side is LONG or SHORT), ReduceOnly is not required
+	// The position side parameter tells the exchange which position to close
 	params := binance.FuturesOrderParams{
 		Symbol:       symbol,
 		Side:         side,
 		PositionSide: binance.PositionSide(position.PositionSide),
 		Type:         binance.FuturesOrderTypeMarket,
 		Quantity:     quantity,
-		ReduceOnly:   true,
+		ReduceOnly:   position.PositionSide == "BOTH", // Only use ReduceOnly in one-way mode
 	}
 
 	orderResp, err := futuresClient.PlaceFuturesOrder(params)
@@ -425,6 +557,326 @@ func (s *Server) handleCloseFuturesPosition(c *gin.Context) {
 		"symbol":   symbol,
 		"order":    orderResp,
 	})
+}
+
+// handleGetPositionOrders returns TP/SL orders for a position
+// Includes both traditional orders and new Algo orders (since 2025-12-09)
+func (s *Server) handleGetPositionOrders(c *gin.Context) {
+	symbol := c.Param("symbol")
+
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	// Get all open orders for this symbol (traditional API)
+	orders, err := futuresClient.GetOpenOrders(symbol)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get all open algo orders for this symbol (new API since 2025-12-09)
+	algoOrders, algoErr := futuresClient.GetOpenAlgoOrders(symbol)
+	if algoErr != nil {
+		// Silently continue - algo orders API may not be available
+		algoOrders = nil
+	}
+
+	// Categorize orders
+	var takeProfitOrders []interface{}
+	var stopLossOrders []interface{}
+	var trailingStopOrders []interface{}
+	var otherOrders []interface{}
+
+	// Process traditional orders (may still have some from before migration)
+	for _, order := range orders {
+		orderData := gin.H{
+			"orderId":      order.OrderId,
+			"symbol":       order.Symbol,
+			"side":         order.Side,
+			"positionSide": order.PositionSide,
+			"type":         order.Type,
+			"origQty":      order.OrigQty,
+			"price":        order.Price,
+			"stopPrice":    order.StopPrice,
+			"status":       order.Status,
+			"time":         order.Time,
+			"updateTime":   order.UpdateTime,
+			"isAlgoOrder":  false,
+		}
+
+		switch order.Type {
+		case "TAKE_PROFIT", "TAKE_PROFIT_MARKET":
+			takeProfitOrders = append(takeProfitOrders, orderData)
+		case "STOP", "STOP_MARKET":
+			stopLossOrders = append(stopLossOrders, orderData)
+		case "TRAILING_STOP_MARKET":
+			trailingStopOrders = append(trailingStopOrders, orderData)
+		default:
+			otherOrders = append(otherOrders, orderData)
+		}
+	}
+
+	// Process algo orders (new API)
+	for _, order := range algoOrders {
+		orderData := gin.H{
+			"algoId":       order.AlgoId,
+			"orderId":      order.AlgoId, // Use algoId as orderId for UI compatibility
+			"symbol":       order.Symbol,
+			"side":         order.Side,
+			"positionSide": order.PositionSide,
+			"type":         order.OrderType,
+			"origQty":      order.Quantity,
+			"price":        order.Price,
+			"stopPrice":    order.TriggerPrice, // TriggerPrice is the stopPrice equivalent
+			"status":       order.AlgoStatus,
+			"time":         order.CreateTime,
+			"updateTime":   order.UpdateTime,
+			"isAlgoOrder":  true,
+			"workingType":  order.WorkingType,
+		}
+
+		switch order.OrderType {
+		case "TAKE_PROFIT", "TAKE_PROFIT_MARKET":
+			takeProfitOrders = append(takeProfitOrders, orderData)
+		case "STOP", "STOP_MARKET":
+			stopLossOrders = append(stopLossOrders, orderData)
+		case "TRAILING_STOP_MARKET":
+			trailingStopOrders = append(trailingStopOrders, orderData)
+		default:
+			otherOrders = append(otherOrders, orderData)
+		}
+	}
+
+	// Also get historical algo orders
+	allAlgoOrders, allAlgoErr := futuresClient.GetAllAlgoOrders(symbol, 20)
+	if allAlgoErr != nil {
+		// Silently continue - algo orders API may not be available
+		allAlgoOrders = nil
+	}
+
+	// Format historical algo orders for response
+	var historicalAlgoOrders []interface{}
+	for _, order := range allAlgoOrders {
+		historicalAlgoOrders = append(historicalAlgoOrders, gin.H{
+			"algoId":       order.AlgoId,
+			"symbol":       order.Symbol,
+			"side":         order.Side,
+			"positionSide": order.PositionSide,
+			"type":         order.OrderType,
+			"quantity":     order.Quantity,
+			"triggerPrice": order.TriggerPrice,
+			"price":        order.Price,
+			"status":       order.AlgoStatus,
+			"createTime":   order.CreateTime,
+			"updateTime":   order.UpdateTime,
+			"triggerTime":  order.TriggerTime,
+			"executedQty":  order.ExecutedQty,
+			"workingType":  order.WorkingType,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":                  symbol,
+		"open_orders":             otherOrders,
+		"take_profit_orders":      takeProfitOrders,
+		"stop_loss_orders":        stopLossOrders,
+		"trailing_stop_orders":    trailingStopOrders,
+		"historical_algo_orders":  historicalAlgoOrders,
+	})
+}
+
+// handleCancelAlgoOrder cancels a single algo order (TP/SL)
+func (s *Server) handleCancelAlgoOrder(c *gin.Context) {
+	symbol := c.Param("symbol")
+	algoIdStr := c.Param("id")
+
+	algoId, err := strconv.ParseInt(algoIdStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid algo ID"})
+		return
+	}
+
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	err = futuresClient.CancelAlgoOrder(symbol, algoId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Algo order canceled",
+		"algoId":  algoId,
+		"symbol":  symbol,
+	})
+}
+
+// handleCancelAllAlgoOrders cancels all algo orders (TP/SL) for a symbol
+func (s *Server) handleCancelAllAlgoOrders(c *gin.Context) {
+	symbol := c.Param("symbol")
+
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	err := futuresClient.CancelAllAlgoOrders(symbol)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "All algo orders canceled",
+		"symbol":  symbol,
+	})
+}
+
+// handleSetPositionTPSL sets take profit and stop loss for a position
+// Uses the new Algo Order API (mandatory since 2025-12-09)
+func (s *Server) handleSetPositionTPSL(c *gin.Context) {
+	symbol := c.Param("symbol")
+
+	var req struct {
+		PositionSide string   `json:"position_side"`
+		TakeProfit   *float64 `json:"take_profit"`
+		StopLoss     *float64 `json:"stop_loss"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	// Get current position to determine side and quantity
+	position, err := futuresClient.GetPositionBySymbol(symbol)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to get position: " + err.Error()})
+		return
+	}
+
+	if position.PositionAmt == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No open position for this symbol"})
+		return
+	}
+
+	// Get position side from Binance response
+	// In ONE_WAY mode, Binance returns "BOTH" - use it directly
+	// In HEDGE mode, Binance returns "LONG" or "SHORT"
+	positionSide := binance.PositionSide(position.PositionSide)
+	if req.PositionSide != "" {
+		positionSide = binance.PositionSide(req.PositionSide)
+	}
+
+	// If position side is empty (shouldn't happen), default to BOTH for ONE_WAY mode
+	if positionSide == "" {
+		positionSide = binance.PositionSideBoth
+	}
+
+	log.Printf("[TP/SL] Setting TP/SL for %s, position_side=%s, position_amt=%.4f",
+		symbol, positionSide, position.PositionAmt)
+
+	// Determine close side based on position amount
+	closeSide := "SELL"
+	if position.PositionAmt < 0 {
+		closeSide = "BUY"
+	}
+
+	var tpOrder, slOrder *binance.AlgoOrderResponse
+	var errors []string
+
+	// Cancel existing TP/SL algo orders for this position first
+	algoOrders, _ := futuresClient.GetOpenAlgoOrders(symbol)
+	for _, order := range algoOrders {
+		if order.PositionSide == string(positionSide) {
+			if order.OrderType == "TAKE_PROFIT" || order.OrderType == "TAKE_PROFIT_MARKET" ||
+				order.OrderType == "STOP" || order.OrderType == "STOP_MARKET" {
+				futuresClient.CancelAlgoOrder(symbol, order.AlgoId)
+			}
+		}
+	}
+
+	// Also cancel any old-style orders (for backwards compatibility)
+	existingOrders, _ := futuresClient.GetOpenOrders(symbol)
+	for _, order := range existingOrders {
+		if order.PositionSide == string(positionSide) {
+			if order.Type == "TAKE_PROFIT" || order.Type == "TAKE_PROFIT_MARKET" ||
+				order.Type == "STOP" || order.Type == "STOP_MARKET" {
+				futuresClient.CancelFuturesOrder(symbol, order.OrderId)
+			}
+		}
+	}
+
+	// Place Take Profit order using NEW Algo Order API
+	if req.TakeProfit != nil && *req.TakeProfit > 0 {
+		tpParams := binance.AlgoOrderParams{
+			Symbol:        symbol,
+			Side:          closeSide,
+			PositionSide:  positionSide,
+			Type:          binance.FuturesOrderTypeTakeProfitMarket,
+			TriggerPrice:  *req.TakeProfit,
+			ClosePosition: true,
+			WorkingType:   binance.WorkingTypeMarkPrice,
+		}
+		order, err := futuresClient.PlaceAlgoOrder(tpParams)
+		if err != nil {
+			errors = append(errors, "TP: "+err.Error())
+		} else {
+			tpOrder = order
+		}
+	}
+
+	// Place Stop Loss order using NEW Algo Order API
+	if req.StopLoss != nil && *req.StopLoss > 0 {
+		slParams := binance.AlgoOrderParams{
+			Symbol:        symbol,
+			Side:          closeSide,
+			PositionSide:  positionSide,
+			Type:          binance.FuturesOrderTypeStopMarket,
+			TriggerPrice:  *req.StopLoss,
+			ClosePosition: true,
+			WorkingType:   binance.WorkingTypeMarkPrice,
+		}
+		order, err := futuresClient.PlaceAlgoOrder(slParams)
+		if err != nil {
+			errors = append(errors, "SL: "+err.Error())
+		} else {
+			slOrder = order
+		}
+	}
+
+	response := gin.H{
+		"success": len(errors) == 0,
+		"message": "TP/SL orders placed via Algo Order API",
+		"symbol":  symbol,
+	}
+
+	if tpOrder != nil {
+		response["take_profit_order"] = tpOrder
+	}
+	if slOrder != nil {
+		response["stop_loss_order"] = slOrder
+	}
+	if len(errors) > 0 {
+		response["errors"] = errors
+		response["message"] = "Some orders failed"
+	}
+
+	c.JSON(http.StatusOK, response)
 }
 
 // handleGetFundingRate returns the current funding rate
@@ -492,12 +944,25 @@ func (s *Server) handleGetFuturesSymbols(c *gin.Context) {
 func (s *Server) handleGetFuturesTradeHistory(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "50")
 	offsetStr := c.DefaultQuery("offset", "0")
+	includeAI := c.DefaultQuery("include_ai", "false") == "true"
+	includeOpen := c.DefaultQuery("include_open", "false") == "true"
 
 	limit, _ := strconv.Atoi(limitStr)
 	offset, _ := strconv.Atoi(offsetStr)
 
 	ctx := context.Background()
-	trades, err := s.repo.GetDB().GetFuturesTradeHistory(ctx, limit, offset)
+
+	var err error
+	var trades []database.FuturesTrade
+
+	if includeAI {
+		// Get trades with AI decisions
+		trades, err = s.repo.GetDB().GetFuturesTradeHistoryWithAI(ctx, limit, offset, includeOpen)
+	} else {
+		// Get trades without AI decisions
+		trades, err = s.repo.GetDB().GetFuturesTradeHistory(ctx, limit, offset)
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -545,16 +1010,321 @@ func (s *Server) handleGetFuturesTransactionHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, transactions)
 }
 
-// handleGetFuturesMetrics returns futures trading metrics
+// Metrics cache to avoid rate limiting
+var (
+	metricsCache     map[string]interface{}
+	metricsCacheTime time.Time
+	metricsCacheTTL  = 5 * time.Minute
+)
+
+// handleGetFuturesMetrics returns futures trading metrics calculated from Binance API
+// Results are cached for 5 minutes to avoid rate limiting
 func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
-	ctx := context.Background()
-	metrics, err := s.repo.GetDB().GetFuturesTradingMetrics(ctx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	// Return cached metrics if still valid
+	if metricsCache != nil && time.Since(metricsCacheTime) < metricsCacheTTL {
+		c.JSON(http.StatusOK, metricsCache)
 		return
 	}
 
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	// Get account trades from Binance for common symbols (reduced list to avoid rate limits)
+	symbols := []string{
+		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+	}
+
+	var allTrades []binance.FuturesTrade
+	for _, sym := range symbols {
+		trades, err := futuresClient.GetTradeHistory(sym, 100)
+		if err == nil {
+			allTrades = append(allTrades, trades...)
+		}
+		time.Sleep(100 * time.Millisecond) // Rate limit between calls
+	}
+
+	// Get funding fee history (only for main symbols)
+	var allFundingFees []binance.FundingFeeRecord
+	for _, sym := range symbols[:3] { // Only BTC, ETH, BNB
+		fees, err := futuresClient.GetFundingFeeHistory(sym, 50)
+		if err == nil {
+			allFundingFees = append(allFundingFees, fees...)
+		}
+		time.Sleep(100 * time.Millisecond) // Rate limit between calls
+	}
+
+	// Calculate metrics from actual trades
+	var totalRealizedPnl float64
+	var totalFundingFees float64
+	var winningTrades, losingTrades int
+	var largestWin, largestLoss float64
+	var totalWin, totalLoss float64
+
+	// Daily stats
+	var dailyRealizedPnl float64
+	var dailyTrades, dailyWins, dailyLosses int
+	now := time.Now()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UnixMilli()
+	var lastTradeTime int64
+
+	// Track closed positions by counting trades where realizedPnl != 0
+	for _, trade := range allTrades {
+		if trade.RealizedPnl != 0 {
+			totalRealizedPnl += trade.RealizedPnl
+			if trade.RealizedPnl > 0 {
+				winningTrades++
+				totalWin += trade.RealizedPnl
+				if trade.RealizedPnl > largestWin {
+					largestWin = trade.RealizedPnl
+				}
+			} else {
+				losingTrades++
+				totalLoss += trade.RealizedPnl
+				if trade.RealizedPnl < largestLoss {
+					largestLoss = trade.RealizedPnl
+				}
+			}
+
+			// Track daily stats
+			if trade.Time >= startOfDay {
+				dailyRealizedPnl += trade.RealizedPnl
+				dailyTrades++
+				if trade.RealizedPnl > 0 {
+					dailyWins++
+				} else {
+					dailyLosses++
+				}
+			}
+
+			// Track last trade time
+			if trade.Time > lastTradeTime {
+				lastTradeTime = trade.Time
+			}
+		}
+	}
+
+	// Calculate funding fees
+	for _, fee := range allFundingFees {
+		totalFundingFees += fee.Income
+	}
+
+	totalTrades := winningTrades + losingTrades
+	var winRate, averagePnl, averageWin, averageLoss, profitFactor float64
+
+	if totalTrades > 0 {
+		winRate = float64(winningTrades) / float64(totalTrades) * 100
+		averagePnl = totalRealizedPnl / float64(totalTrades)
+	}
+	if winningTrades > 0 {
+		averageWin = totalWin / float64(winningTrades)
+	}
+	if losingTrades > 0 {
+		averageLoss = totalLoss / float64(losingTrades)
+	}
+	if totalLoss != 0 {
+		profitFactor = totalWin / (-totalLoss)
+	}
+
+	// Get positions and orders count (single API call each)
+	positions, _ := futuresClient.GetPositions()
+	openPositions := 0
+	var totalLeverage int
+	for _, pos := range positions {
+		if pos.PositionAmt != 0 {
+			openPositions++
+			totalLeverage += pos.Leverage
+		}
+	}
+
+	avgLeverage := 0.0
+	if openPositions > 0 {
+		avgLeverage = float64(totalLeverage) / float64(openPositions)
+	}
+
+	openOrders, _ := futuresClient.GetOpenOrders("")
+	openOrderCount := len(openOrders)
+
+	// Get unrealized PnL from account
+	accountInfo, _ := futuresClient.GetFuturesAccountInfo()
+	totalUnrealizedPnl := 0.0
+	if accountInfo != nil {
+		totalUnrealizedPnl = accountInfo.TotalUnrealizedProfit
+	}
+
+	// Calculate daily win rate
+	var dailyWinRate float64
+	if dailyTrades > 0 {
+		dailyWinRate = float64(dailyWins) / float64(dailyTrades) * 100
+	}
+
+	// Format last trade time
+	var lastTradeTimeStr string
+	if lastTradeTime > 0 {
+		lastTradeTimeStr = time.UnixMilli(lastTradeTime).Format(time.RFC3339)
+	}
+
+	metrics := map[string]interface{}{
+		"totalTrades":        totalTrades,
+		"winningTrades":      winningTrades,
+		"losingTrades":       losingTrades,
+		"winRate":            winRate,
+		"totalRealizedPnl":   totalRealizedPnl,
+		"totalUnrealizedPnl": totalUnrealizedPnl,
+		"totalFundingFees":   totalFundingFees,
+		"averagePnl":         averagePnl,
+		"averageWin":         averageWin,
+		"averageLoss":        averageLoss,
+		"largestWin":         largestWin,
+		"largestLoss":        largestLoss,
+		"profitFactor":       profitFactor,
+		"averageLeverage":    avgLeverage,
+		"openPositions":      openPositions,
+		"openOrders":         openOrderCount,
+		// Daily stats
+		"dailyRealizedPnl": dailyRealizedPnl,
+		"dailyTrades":      dailyTrades,
+		"dailyWins":        dailyWins,
+		"dailyLosses":      dailyLosses,
+		"dailyWinRate":     dailyWinRate,
+		"lastTradeTime":    lastTradeTimeStr,
+	}
+
+	// Cache the metrics
+	metricsCache = metrics
+	metricsCacheTime = time.Now()
+
 	c.JSON(http.StatusOK, metrics)
+}
+
+// handleGetTradeSourceStats returns trading stats grouped by trade source (AI, Strategy, Manual)
+func (s *Server) handleGetTradeSourceStats(c *gin.Context) {
+	// Initialize stats for each source
+	type SourceStats struct {
+		TotalTrades   int     `json:"totalTrades"`
+		WinningTrades int     `json:"winningTrades"`
+		LosingTrades  int     `json:"losingTrades"`
+		WinRate       float64 `json:"winRate"`
+		TotalPnL      float64 `json:"totalPnl"`
+		TPHits        int     `json:"tpHits"`
+		SLHits        int     `json:"slHits"`
+		AvgPnL        float64 `json:"avgPnl"`
+	}
+
+	stats := map[string]*SourceStats{
+		"ai":       {},
+		"strategy": {},
+		"manual":   {},
+	}
+
+	// Get futures client to fetch actual trades from Binance
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"ai":       stats["ai"],
+			"strategy": stats["strategy"],
+			"manual":   stats["manual"],
+		})
+		return
+	}
+
+	// Fetch trades for common symbols from Binance API
+	symbols := []string{
+		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+		"DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT",
+		"DOTUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "NEARUSDT",
+	}
+
+	// Track unique position closes to avoid counting partial fills as separate trades
+	type positionKey struct {
+		symbol   string
+		orderId  int64
+	}
+	closedPositions := make(map[positionKey]float64) // orderId -> total PnL
+
+	for _, sym := range symbols {
+		trades, err := futuresClient.GetTradeHistory(sym, 100)
+		if err != nil {
+			continue // Skip symbols with errors
+		}
+
+		// Group trades by orderId and sum PnL
+		for _, trade := range trades {
+			if trade.RealizedPnl != 0 { // Only count trades that closed positions (have PnL)
+				key := positionKey{symbol: sym, orderId: trade.OrderId}
+				closedPositions[key] += trade.RealizedPnl
+			}
+		}
+	}
+
+	// Calculate stats from closed positions
+	// Since autopilot is managing all trades, attribute to AI
+	aiStats := stats["ai"]
+
+	for _, pnl := range closedPositions {
+		aiStats.TotalTrades++
+		aiStats.TotalPnL += pnl
+
+		if pnl > 0 {
+			aiStats.WinningTrades++
+			aiStats.TPHits++ // Positive PnL typically means TP hit
+		} else if pnl < 0 {
+			aiStats.LosingTrades++
+			aiStats.SLHits++ // Negative PnL typically means SL hit
+		}
+	}
+
+	// Calculate percentages
+	for _, st := range stats {
+		if st.TotalTrades > 0 {
+			st.WinRate = float64(st.WinningTrades) / float64(st.TotalTrades) * 100
+			st.AvgPnL = st.TotalPnL / float64(st.TotalTrades)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"ai":       stats["ai"],
+		"strategy": stats["strategy"],
+		"manual":   stats["manual"],
+	})
+}
+
+// handleGetPositionTradeSources returns trade source (AI/Strategy/Manual) for open positions
+func (s *Server) handleGetPositionTradeSources(c *gin.Context) {
+	ctx := context.Background()
+
+	// Create a map of symbol -> trade source
+	sources := make(map[string]string)
+
+	// First, check autopilot's active positions - these are AI trades
+	controller := s.getFuturesAutopilot()
+	if controller != nil {
+		autopilotSymbols := controller.GetActivePositionSymbols()
+		for _, symbol := range autopilotSymbols {
+			sources[symbol] = "ai"
+		}
+	}
+
+	// Then check database for any trades not in autopilot
+	trades, err := s.repo.GetDB().GetOpenFuturesTrades(ctx)
+	if err == nil {
+		for _, trade := range trades {
+			// Only set if not already set by autopilot
+			if _, exists := sources[trade.Symbol]; !exists {
+				if trade.TradeSource != "" {
+					sources[trade.Symbol] = trade.TradeSource
+				} else {
+					sources[trade.Symbol] = "manual"
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"sources": sources,
+	})
 }
 
 // handleGetFuturesAccountSettings returns account settings for a symbol
@@ -715,13 +1485,14 @@ func (s *Server) handleCloseAllFuturesPositions(c *gin.Context) {
 		}
 
 		// Place market order to close
+		// In hedge mode, ReduceOnly is not required (position side is used instead)
 		params := binance.FuturesOrderParams{
 			Symbol:       position.Symbol,
 			Side:         side,
 			PositionSide: binance.PositionSide(position.PositionSide),
 			Type:         binance.FuturesOrderTypeMarket,
 			Quantity:     quantity,
-			ReduceOnly:   true,
+			ReduceOnly:   position.PositionSide == "BOTH", // Only use in one-way mode
 		}
 
 		orderResp, err := futuresClient.PlaceFuturesOrder(params)
@@ -744,6 +1515,69 @@ func (s *Server) handleCloseAllFuturesPositions(c *gin.Context) {
 		"total":            len(activePositions),
 		"errors":           errors,
 		"closed_positions": closedPositions,
+	})
+}
+
+// handleGetFuturesAccountTrades returns trade history directly from Binance API
+func (s *Server) handleGetFuturesAccountTrades(c *gin.Context) {
+	symbol := c.Query("symbol")
+	limitStr := c.DefaultQuery("limit", "50")
+	limit, _ := strconv.Atoi(limitStr)
+
+	futuresClient := s.getFuturesClient()
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	// If no symbol specified, get trades for common symbols
+	symbols := []string{symbol}
+	if symbol == "" {
+		symbols = []string{
+			"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+			"DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT",
+			"DOTUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "NEARUSDT",
+		}
+	}
+
+	allTrades := []gin.H{}
+	errors := []string{}
+
+	for _, sym := range symbols {
+		if sym == "" {
+			continue
+		}
+		trades, err := futuresClient.GetTradeHistory(sym, limit)
+		if err != nil {
+			errors = append(errors, sym+": "+err.Error())
+			continue
+		}
+
+		for _, trade := range trades {
+			allTrades = append(allTrades, gin.H{
+				"symbol":          sym,
+				"id":              trade.ID,
+				"orderId":         trade.OrderId,
+				"side":            trade.Side,
+				"positionSide":    trade.PositionSide,
+				"price":           trade.Price,
+				"qty":             trade.Qty,
+				"realizedPnl":     trade.RealizedPnl,
+				"marginAsset":     trade.MarginAsset,
+				"quoteQty":        trade.QuoteQty,
+				"commission":      trade.Commission,
+				"commissionAsset": trade.CommissionAsset,
+				"time":            trade.Time,
+				"buyer":           trade.Buyer,
+				"maker":           trade.Maker,
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"trades": allTrades,
+		"errors": errors,
+		"count":  len(allTrades),
 	})
 }
 

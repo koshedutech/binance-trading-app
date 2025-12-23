@@ -1,0 +1,2201 @@
+package autopilot
+
+import (
+	"binance-trading-bot/internal/ai/llm"
+	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/logging"
+	"encoding/json"
+	"fmt"
+	"math"
+	"regexp"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// GinieAnalyzer implements the Adaptive Crypto Trading AI (Ginie)
+type GinieAnalyzer struct {
+	futuresClient binance.FuturesClient
+	logger        *logging.Logger
+	config        *GinieConfig
+
+	// LLM client for AI-based coin selection
+	llmClient *llm.Client
+
+	// Signal aggregator for getting market signals
+	signalAggregator *SignalAggregator
+
+	// Cached data
+	coinScans      map[string]*GinieCoinScan
+	scanLock       sync.RWMutex
+	lastScanTime   time.Time
+
+	// LLM coin selection cache
+	llmCoinsCache     []string
+	llmCoinsCacheTime time.Time
+	llmCoinsCacheTTL  time.Duration
+
+	// Decision history
+	decisions      []GinieDecisionReport
+	decisionLock   sync.RWMutex
+	maxDecisions   int
+
+	// Performance tracking
+	dailyPnL       float64
+	dailyTrades    int
+	wins           int
+	losses         int
+
+	// State
+	enabled        bool
+	activeMode     GinieTradingMode
+	watchSymbols   []string
+}
+
+// NewGinieAnalyzer creates a new Ginie AI analyzer
+func NewGinieAnalyzer(
+	futuresClient binance.FuturesClient,
+	signalAggregator *SignalAggregator,
+	logger *logging.Logger,
+) *GinieAnalyzer {
+	// Core coins to always include (essential for the market)
+	coreSymbols := []string{
+		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+	}
+
+	g := &GinieAnalyzer{
+		futuresClient:    futuresClient,
+		signalAggregator: signalAggregator,
+		logger:           logger,
+		config:           DefaultGinieConfig(),
+		coinScans:        make(map[string]*GinieCoinScan),
+		decisions:        make([]GinieDecisionReport, 0, 500),
+		maxDecisions:     500, // Increased for study purposes
+		enabled:          true,
+		activeMode:       GinieModeSwing,
+		watchSymbols:     coreSymbols, // Start with core coins, LLM will update
+		llmCoinsCacheTTL: 30 * time.Minute, // Refresh LLM coin list every 30 minutes
+	}
+
+	// Load LLM-selected coins in background (will call DeepSeek for 100 coins)
+	go g.LoadLLMSelectedCoins()
+
+	return g
+}
+
+// SetLLMClient sets the LLM client for AI-based coin selection
+func (g *GinieAnalyzer) SetLLMClient(client *llm.Client) {
+	g.llmClient = client
+	if g.logger != nil {
+		g.logger.Info("Ginie LLM client configured", "provider", client.GetProvider())
+	}
+	// Trigger coin selection when LLM is set
+	go g.LoadLLMSelectedCoins()
+}
+
+// LLMCoinSelectionResponse represents the LLM response for coin selection
+type LLMCoinSelectionResponse struct {
+	Coins []struct {
+		Symbol   string `json:"symbol"`
+		Category string `json:"category"` // high_volume, gainer, loser, 1h_volume, stable, medium, volatile, most_traded
+		Reason   string `json:"reason"`
+	} `json:"coins"`
+}
+
+// VolatilityRegime classifies market volatility and provides adaptive parameters
+type VolatilityRegime struct {
+	Level            string        `json:"level"`            // extreme, high, medium, low
+	ATRRatio         float64       `json:"atr_ratio"`        // Ratio of current ATR to baseline
+	BBWidthPercent   float64       `json:"bb_width_percent"` // Bollinger Band width as % of price
+	ReEntryDelay     time.Duration `json:"re_entry_delay"`   // Adaptive delay between trades
+	MaxTradesPerHour int           `json:"max_trades_per_hour"` // Rate limit based on volatility
+	LastUpdate       time.Time     `json:"last_update"`
+}
+
+// UltraFastSignal represents a multi-layer signal for ultra-fast scalping
+type UltraFastSignal struct {
+	Symbol           string              `json:"symbol"`
+	TrendBias        string              `json:"trend_bias"`         // LONG, SHORT, NEUTRAL
+	TrendStrength    float64             `json:"trend_strength"`     // 0-100
+	VolatilityRegime *VolatilityRegime   `json:"volatility_regime"`
+	EntryConfidence  float64             `json:"entry_confidence"`   // 0-100
+	MinProfitTarget  float64             `json:"min_profit_target"`  // % (fee + ATR buffer)
+	MaxHoldTime      time.Duration       `json:"max_hold_time"`      // Maximum time to hold
+	SignalTime       time.Time           `json:"signal_time"`        // When signal was generated
+	GeneratedAt      time.Time           `json:"generated_at"`
+}
+
+// LoadLLMSelectedCoins asks DeepSeek to provide 100 coins based on market criteria
+func (g *GinieAnalyzer) LoadLLMSelectedCoins() error {
+	// Check cache first
+	if len(g.llmCoinsCache) > 0 && time.Since(g.llmCoinsCacheTime) < g.llmCoinsCacheTTL {
+		g.watchSymbols = g.llmCoinsCache
+		return nil
+	}
+
+	if g.llmClient == nil || !g.llmClient.IsConfigured() {
+		if g.logger != nil {
+			g.logger.Warn("LLM client not configured, falling back to market movers")
+		}
+		// Fallback to market movers
+		return g.LoadDynamicSymbols(25)
+	}
+
+	if g.logger != nil {
+		g.logger.Info("Ginie requesting AI-selected coins from LLM")
+	}
+
+	// Get current market data to provide context
+	tickers, err := g.futuresClient.GetAll24hrTickers()
+	if err != nil {
+		if g.logger != nil {
+			g.logger.Error("Failed to get tickers for LLM context", "error", err)
+		}
+		return g.LoadDynamicSymbols(25)
+	}
+
+	// Build market summary for LLM
+	marketSummary := g.buildMarketSummaryForLLM(tickers)
+
+	systemPrompt := `You are a cryptocurrency trading AI assistant specializing in selecting coins for futures trading on Binance.
+Your task is to analyze current market conditions and select exactly 100 cryptocurrency trading pairs (USDT perpetual futures) based on the following criteria:
+
+Categories to include (aim for roughly equal distribution):
+1. HIGH_VOLUME: Top coins by 24h trading volume (most liquid)
+2. GAINER: Top gainers with positive 24h price change (momentum plays)
+3. LOSER: Top losers with negative 24h price change (reversal/short opportunities)
+4. 1H_VOLUME: Coins with high volume in the last 1 hour (current activity)
+5. STABLE: Low volatility coins with steady price action (range trading)
+6. MEDIUM: Medium volatility coins (balanced risk/reward)
+7. VOLATILE: High volatility coins (high risk/high reward scalping)
+8. MOST_TRADED: Currently most actively traded coins
+
+IMPORTANT RULES:
+- Only include coins that end with USDT (e.g., BTCUSDT, ETHUSDT)
+- Exclude stablecoins (USDCUSDT, BUSDUSDT, TUSDUSDT, DAIUSDT, FDUSDUSDT)
+- Prioritize coins with daily volume > $1M USD
+- Include major coins (BTC, ETH, BNB, SOL, XRP) regardless of other criteria
+- Return EXACTLY 100 unique coins
+
+Respond ONLY with a valid JSON object in this exact format (no markdown, no explanation):
+{"coins":[{"symbol":"BTCUSDT","category":"high_volume","reason":"highest volume"},...]}`
+
+	userPrompt := fmt.Sprintf(`Based on the current Binance Futures market data below, select 100 coins for trading:
+
+%s
+
+Return EXACTLY 100 unique USDT perpetual futures symbols in the JSON format specified.`, marketSummary)
+
+	response, err := g.llmClient.Complete(systemPrompt, userPrompt)
+	if err != nil {
+		if g.logger != nil {
+			g.logger.Error("LLM coin selection failed", "error", err)
+		}
+		return g.LoadDynamicSymbols(25)
+	}
+
+	// Parse the response
+	coins, err := g.parseLLMCoinResponse(response)
+	if err != nil {
+		if g.logger != nil {
+			g.logger.Error("Failed to parse LLM coin response", "error", err)
+		}
+		return g.LoadDynamicSymbols(25)
+	}
+
+	// Validate and deduplicate
+	uniqueCoins := make(map[string]bool)
+	validCoins := make([]string, 0, 100)
+
+	// Always include core coins first
+	coreCoins := []string{"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+	for _, coin := range coreCoins {
+		uniqueCoins[coin] = true
+		validCoins = append(validCoins, coin)
+	}
+
+	// Add LLM-selected coins
+	for _, coin := range coins {
+		if !uniqueCoins[coin] && strings.HasSuffix(coin, "USDT") {
+			uniqueCoins[coin] = true
+			validCoins = append(validCoins, coin)
+		}
+		if len(validCoins) >= 100 {
+			break
+		}
+	}
+
+	// If we don't have enough, supplement with market movers
+	if len(validCoins) < 50 {
+		if g.logger != nil {
+			g.logger.Warn("LLM returned insufficient coins, supplementing with market movers", "llm_count", len(validCoins))
+		}
+		movers, _ := g.GetMarketMovers(30)
+		if movers != nil {
+			for _, coin := range movers.TopVolume {
+				if !uniqueCoins[coin] {
+					uniqueCoins[coin] = true
+					validCoins = append(validCoins, coin)
+				}
+			}
+			for _, coin := range movers.TopGainers {
+				if !uniqueCoins[coin] {
+					uniqueCoins[coin] = true
+					validCoins = append(validCoins, coin)
+				}
+			}
+			for _, coin := range movers.TopLosers {
+				if !uniqueCoins[coin] {
+					uniqueCoins[coin] = true
+					validCoins = append(validCoins, coin)
+				}
+			}
+			for _, coin := range movers.HighVolatility {
+				if !uniqueCoins[coin] {
+					uniqueCoins[coin] = true
+					validCoins = append(validCoins, coin)
+				}
+			}
+		}
+	}
+
+	// Update cache and watchlist
+	g.llmCoinsCache = validCoins
+	g.llmCoinsCacheTime = time.Now()
+	g.watchSymbols = validCoins
+
+	if g.logger != nil {
+		g.logger.Info("Ginie loaded AI-selected coins", map[string]interface{}{
+			"total_coins": len(validCoins),
+			"source":      "llm",
+			"sample":      validCoins[:min(10, len(validCoins))],
+		})
+	}
+
+	return nil
+}
+
+// buildMarketSummaryForLLM creates a market summary for the LLM prompt
+func (g *GinieAnalyzer) buildMarketSummaryForLLM(tickers []binance.Futures24hrTicker) string {
+	// Filter and sort tickers
+	var validTickers []binance.Futures24hrTicker
+	stablecoins := map[string]bool{
+		"USDCUSDT": true, "BUSDUSDT": true, "TUSDUSDT": true,
+		"DAIUSDT": true, "FDUSDUSDT": true, "EURUSDT": true,
+	}
+
+	for _, t := range tickers {
+		if strings.HasSuffix(t.Symbol, "USDT") && !stablecoins[t.Symbol] && t.QuoteVolume > 100000 {
+			validTickers = append(validTickers, t)
+		}
+	}
+
+	// Sort by volume
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].QuoteVolume > validTickers[j].QuoteVolume
+	})
+
+	// Build summary (limit to top 200 for token efficiency)
+	limit := 200
+	if len(validTickers) < limit {
+		limit = len(validTickers)
+	}
+
+	var sb strings.Builder
+	sb.WriteString("CURRENT MARKET DATA (Top coins by volume):\n")
+	sb.WriteString("Symbol | 24h Volume (USD) | 24h Change % | Last Price\n")
+	sb.WriteString("-------------------------------------------------\n")
+
+	for i := 0; i < limit; i++ {
+		t := validTickers[i]
+		sb.WriteString(fmt.Sprintf("%s | $%.0f | %.2f%% | %.8f\n",
+			t.Symbol, t.QuoteVolume, t.PriceChangePercent, t.LastPrice))
+	}
+
+	return sb.String()
+}
+
+// parseLLMCoinResponse parses the LLM response to extract coins
+func (g *GinieAnalyzer) parseLLMCoinResponse(response string) ([]string, error) {
+	// Strip markdown code blocks if present
+	response = strings.TrimSpace(response)
+	re := regexp.MustCompile("(?s)^```(?:json)?\\s*\\n?(.*?)\\n?```$")
+	if matches := re.FindStringSubmatch(response); len(matches) > 1 {
+		response = strings.TrimSpace(matches[1])
+	}
+
+	var parsed LLMCoinSelectionResponse
+	if err := json.Unmarshal([]byte(response), &parsed); err != nil {
+		// Try to extract symbols manually if JSON parsing fails
+		return g.extractSymbolsFromText(response), nil
+	}
+
+	coins := make([]string, 0, len(parsed.Coins))
+	for _, c := range parsed.Coins {
+		if c.Symbol != "" {
+			coins = append(coins, strings.ToUpper(c.Symbol))
+		}
+	}
+
+	return coins, nil
+}
+
+// extractSymbolsFromText extracts USDT trading pairs from text response
+func (g *GinieAnalyzer) extractSymbolsFromText(text string) []string {
+	// Match patterns like BTCUSDT, ETHUSDT etc
+	re := regexp.MustCompile(`[A-Z0-9]+USDT`)
+	matches := re.FindAllString(strings.ToUpper(text), -1)
+
+	// Deduplicate
+	seen := make(map[string]bool)
+	result := make([]string, 0)
+	for _, m := range matches {
+		if !seen[m] {
+			seen[m] = true
+			result = append(result, m)
+		}
+	}
+
+	return result
+}
+
+// RefreshLLMCoins forces a refresh of the LLM coin selection
+func (g *GinieAnalyzer) RefreshLLMCoins() (int, error) {
+	g.llmCoinsCacheTime = time.Time{} // Clear cache
+	err := g.LoadLLMSelectedCoins()
+	return len(g.watchSymbols), err
+}
+
+// LoadAllSymbols loads all available futures trading symbols from Binance
+func (g *GinieAnalyzer) LoadAllSymbols() error {
+	if g.logger != nil {
+		g.logger.Info("Ginie loading all futures symbols from Binance", nil)
+	}
+
+	symbols, err := g.futuresClient.GetFuturesSymbols()
+	if err != nil {
+		if g.logger != nil {
+			g.logger.Error("Failed to load futures symbols, using market movers fallback", "error", err)
+		}
+		// Use market movers as fallback instead of hardcoded list
+		return g.LoadDynamicSymbols(25)
+	}
+
+	// Filter for USDT perpetual contracts only
+	usdtSymbols := make([]string, 0)
+	for _, s := range symbols {
+		if len(s) > 4 && s[len(s)-4:] == "USDT" {
+			usdtSymbols = append(usdtSymbols, s)
+		}
+	}
+
+	g.watchSymbols = usdtSymbols
+
+	if g.logger != nil {
+		g.logger.Info("Ginie loaded futures symbols from Binance", "count", len(g.watchSymbols))
+	}
+
+	return nil
+}
+
+// RefreshSymbols manually refreshes the symbol list
+func (g *GinieAnalyzer) RefreshSymbols() (int, error) {
+	err := g.LoadAllSymbols()
+	return len(g.watchSymbols), err
+}
+
+// SetWatchSymbols allows manual override of watched symbols
+func (g *GinieAnalyzer) SetWatchSymbols(symbols []string) {
+	g.watchSymbols = symbols
+	if g.logger != nil {
+		g.logger.Info("Ginie watch symbols updated", "count", len(symbols))
+	}
+}
+
+// GetWatchSymbols returns the current watched symbols
+func (g *GinieAnalyzer) GetWatchSymbols() []string {
+	return g.watchSymbols
+}
+
+// MarketMoverCategory represents different types of market movers
+type MarketMoverCategory struct {
+	TopGainers    []string // Highest 24h % gain
+	TopLosers     []string // Highest 24h % loss
+	TopVolume     []string // Highest 24h volume
+	HighVolatility []string // High price movement + volume
+}
+
+// GetMarketMovers fetches dynamic market movers from Binance 24hr ticker data
+func (g *GinieAnalyzer) GetMarketMovers(topN int) (*MarketMoverCategory, error) {
+	if topN <= 0 {
+		topN = 20
+	}
+
+	// Get all 24hr tickers
+	tickers, err := g.futuresClient.GetAll24hrTickers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get 24hr tickers: %w", err)
+	}
+
+	// Filter for USDT pairs only and exclude stablecoins
+	var validTickers []binance.Futures24hrTicker
+	stablecoins := map[string]bool{
+		"USDCUSDT": true, "BUSDUSDT": true, "TUSDUSDT": true,
+		"DAIUSDT": true, "FDUSDUSDT": true, "EURUSDT": true,
+	}
+
+	for _, t := range tickers {
+		if strings.HasSuffix(t.Symbol, "USDT") && !stablecoins[t.Symbol] {
+			// Filter out very low volume coins (less than $1M daily volume)
+			if t.QuoteVolume > 1000000 {
+				validTickers = append(validTickers, t)
+			}
+		}
+	}
+
+	result := &MarketMoverCategory{
+		TopGainers:     make([]string, 0, topN),
+		TopLosers:      make([]string, 0, topN),
+		TopVolume:      make([]string, 0, topN),
+		HighVolatility: make([]string, 0, topN),
+	}
+
+	// Sort by price change % (gainers - descending)
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].PriceChangePercent > validTickers[j].PriceChangePercent
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.TopGainers = append(result.TopGainers, validTickers[i].Symbol)
+	}
+
+	// Sort by price change % (losers - ascending)
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].PriceChangePercent < validTickers[j].PriceChangePercent
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.TopLosers = append(result.TopLosers, validTickers[i].Symbol)
+	}
+
+	// Sort by 24hr quote volume (descending)
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].QuoteVolume > validTickers[j].QuoteVolume
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.TopVolume = append(result.TopVolume, validTickers[i].Symbol)
+	}
+
+	// High volatility = high absolute price change % + high volume
+	// Score = abs(priceChange%) * log(volume)
+	sort.Slice(validTickers, func(i, j int) bool {
+		scoreI := math.Abs(validTickers[i].PriceChangePercent) * math.Log10(validTickers[i].QuoteVolume+1)
+		scoreJ := math.Abs(validTickers[j].PriceChangePercent) * math.Log10(validTickers[j].QuoteVolume+1)
+		return scoreI > scoreJ
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.HighVolatility = append(result.HighVolatility, validTickers[i].Symbol)
+	}
+
+	if g.logger != nil {
+		g.logger.Info("Fetched market movers", map[string]interface{}{
+			"gainers":    len(result.TopGainers),
+			"losers":     len(result.TopLosers),
+			"volume":     len(result.TopVolume),
+			"volatility": len(result.HighVolatility),
+		})
+	}
+
+	return result, nil
+}
+
+// LoadDynamicSymbols loads symbols based on market movers (gainers, losers, volume, volatility)
+func (g *GinieAnalyzer) LoadDynamicSymbols(topN int) error {
+	movers, err := g.GetMarketMovers(topN)
+	if err != nil {
+		return err
+	}
+
+	// Combine all categories into a unique set
+	symbolSet := make(map[string]bool)
+
+	// Always include core coins
+	coreCoin := []string{"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+	for _, s := range coreCoin {
+		symbolSet[s] = true
+	}
+
+	// Add all market movers
+	for _, s := range movers.TopGainers {
+		symbolSet[s] = true
+	}
+	for _, s := range movers.TopLosers {
+		symbolSet[s] = true
+	}
+	for _, s := range movers.TopVolume {
+		symbolSet[s] = true
+	}
+	for _, s := range movers.HighVolatility {
+		symbolSet[s] = true
+	}
+
+	// Convert to slice
+	symbols := make([]string, 0, len(symbolSet))
+	for s := range symbolSet {
+		symbols = append(symbols, s)
+	}
+
+	// Sort alphabetically for consistency
+	sort.Strings(symbols)
+
+	g.watchSymbols = symbols
+
+	if g.logger != nil {
+		g.logger.Info("Loaded dynamic market mover symbols", map[string]interface{}{
+			"total_symbols": len(symbols),
+			"top_gainers":   movers.TopGainers[:min(5, len(movers.TopGainers))],
+			"top_losers":    movers.TopLosers[:min(5, len(movers.TopLosers))],
+		})
+	}
+
+	return nil
+}
+
+// SetConfig updates the configuration
+func (g *GinieAnalyzer) SetConfig(config *GinieConfig) {
+	g.config = config
+}
+
+// GetConfig returns current configuration
+func (g *GinieAnalyzer) GetConfig() *GinieConfig {
+	return g.config
+}
+
+// Enable enables the Ginie analyzer
+func (g *GinieAnalyzer) Enable() {
+	g.enabled = true
+}
+
+// Disable disables the Ginie analyzer
+func (g *GinieAnalyzer) Disable() {
+	g.enabled = false
+}
+
+// IsEnabled returns if Ginie is enabled
+func (g *GinieAnalyzer) IsEnabled() bool {
+	return g.enabled
+}
+
+// GetStatus returns current Ginie status
+func (g *GinieAnalyzer) GetStatus() *GinieStatus {
+	g.scanLock.RLock()
+	g.decisionLock.RLock()
+	defer g.scanLock.RUnlock()
+	defer g.decisionLock.RUnlock()
+
+	winRate := 0.0
+	total := g.wins + g.losses
+	if total > 0 {
+		winRate = float64(g.wins) / float64(total) * 100
+	}
+
+	maxPos := g.config.MaxSwingPositions
+	switch g.activeMode {
+	case GinieModeScalp:
+		maxPos = g.config.MaxScalpPositions
+	case GinieModePosition:
+		maxPos = g.config.MaxPositionPositions
+	}
+
+	// Get recent decisions (last 10)
+	recentDecisions := make([]GinieDecisionReport, 0)
+	start := len(g.decisions) - 10
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(g.decisions); i++ {
+		recentDecisions = append(recentDecisions, g.decisions[i])
+	}
+
+	return &GinieStatus{
+		Enabled:          g.enabled,
+		ActiveMode:       g.activeMode,
+		ActivePositions:  0, // Will be updated from controller
+		MaxPositions:     maxPos,
+		LastScanTime:     g.lastScanTime,
+		LastDecisionTime: time.Now(),
+		DailyPnL:         g.dailyPnL,
+		DailyTrades:      g.dailyTrades,
+		WinRate:          winRate,
+		Config:           g.config,
+		RecentDecisions:  recentDecisions,
+		WatchedSymbols:   g.watchSymbols,
+		ScannedSymbols:   len(g.coinScans),
+	}
+}
+
+// ScanCoin performs the pre-trade coin scan
+func (g *GinieAnalyzer) ScanCoin(symbol string) (*GinieCoinScan, error) {
+	if g.logger != nil {
+		g.logger.Info("Ginie scanning coin", "symbol", symbol)
+	}
+
+	scan := &GinieCoinScan{
+		Symbol:    symbol,
+		Timestamp: time.Now(),
+	}
+
+	// Get klines for analysis
+	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get klines: %w", err)
+	}
+
+	if len(klines) < 50 {
+		scan.Status = ScanStatusAvoid
+		scan.TradeReady = false
+		scan.Reason = "Insufficient data"
+		return scan, nil
+	}
+
+	// Get 24h ticker for volume
+	ticker, err := g.futuresClient.Get24hrTicker(symbol)
+	if err != nil {
+		// Continue without ticker data
+		ticker = &binance.Futures24hrTicker{}
+	}
+
+	// Get current price
+	price := klines[len(klines)-1].Close
+
+	// 1. Liquidity Check
+	scan.Liquidity = g.checkLiquidity(ticker, price)
+
+	// 2. Volatility Profile
+	scan.Volatility = g.analyzeVolatility(klines)
+
+	// 3. Trend Health
+	scan.Trend = g.analyzeTrend(klines)
+
+	// 4. Market Structure
+	scan.Structure = g.analyzeStructure(klines)
+
+	// 5. Correlation Check (simplified - would need BTC data)
+	scan.Correlation = g.analyzeCorrelation(symbol)
+
+	// Calculate overall score and determine status
+	g.calculateScanScore(scan)
+
+	// Cache the scan
+	g.scanLock.Lock()
+	g.coinScans[symbol] = scan
+	g.lastScanTime = time.Now()
+	g.scanLock.Unlock()
+
+	return scan, nil
+}
+
+// checkLiquidity assesses liquidity
+func (g *GinieAnalyzer) checkLiquidity(ticker *binance.Futures24hrTicker, price float64) LiquidityCheck {
+	liq := LiquidityCheck{
+		Volume24h:   ticker.Volume,
+		VolumeUSD:   ticker.QuoteVolume,
+		SlippageRisk: "medium",
+	}
+
+	// Calculate spread if we have bid/ask
+	if ticker.LastPrice > 0 {
+		// Estimate spread from price movement
+		liq.SpreadPercent = math.Abs(ticker.PriceChangePercent) * 0.01
+		if liq.SpreadPercent < 0.1 {
+			liq.SpreadPercent = 0.05
+		}
+	}
+
+	// Score liquidity
+	score := 0.0
+	if liq.VolumeUSD >= 5000000 {
+		score += 40
+		liq.PassedScalp = true
+		liq.PassedSwing = true
+	} else if liq.VolumeUSD >= 1000000 {
+		score += 25
+		liq.PassedSwing = true
+	} else if liq.VolumeUSD >= 500000 {
+		score += 15
+	}
+
+	if liq.SpreadPercent <= 0.05 {
+		score += 30
+		liq.SlippageRisk = "low"
+	} else if liq.SpreadPercent <= 0.1 {
+		score += 20
+		liq.SlippageRisk = "medium"
+	} else {
+		score += 5
+		liq.SlippageRisk = "high"
+	}
+
+	liq.LiquidityScore = score
+	return liq
+}
+
+// analyzeVolatility analyzes volatility profile
+func (g *GinieAnalyzer) analyzeVolatility(klines []binance.Kline) VolatilityProfile {
+	vol := VolatilityProfile{}
+
+	if len(klines) < 20 {
+		return vol
+	}
+
+	// Calculate ATR(14)
+	atr14 := g.calculateATR(klines, 14)
+	atr20Avg := g.calculateATR(klines, 20)
+
+	currentPrice := klines[len(klines)-1].Close
+	vol.ATR14 = atr14
+	vol.ATRPercent = (atr14 / currentPrice) * 100
+	vol.AvgATR20 = atr20Avg
+	if atr20Avg > 0 {
+		vol.ATRRatio = atr14 / atr20Avg
+	}
+
+	// Bollinger Band Width
+	sma, upper, lower := g.calculateBollingerBands(klines, 20, 2)
+	if sma > 0 {
+		vol.BBWidth = upper - lower
+		vol.BBWidthPercent = (vol.BBWidth / sma) * 100
+	}
+
+	// Classify volatility regime
+	if vol.ATRRatio >= 2.0 {
+		vol.Regime = "Extreme"
+		vol.VolatilityScore = 30 // High volatility = lower score for swing
+	} else if vol.ATRRatio >= 1.5 {
+		vol.Regime = "High"
+		vol.VolatilityScore = 50
+	} else if vol.ATRRatio >= 0.8 {
+		vol.Regime = "Medium"
+		vol.VolatilityScore = 80
+	} else {
+		vol.Regime = "Low"
+		vol.VolatilityScore = 70
+	}
+
+	return vol
+}
+
+// analyzeTrend analyzes trend health
+func (g *GinieAnalyzer) analyzeTrend(klines []binance.Kline) TrendHealth {
+	trend := TrendHealth{}
+
+	if len(klines) < 50 {
+		return trend
+	}
+
+	// Calculate ADX
+	adx, plusDI, minusDI := g.calculateADX(klines, 14)
+	trend.ADXValue = adx
+
+	// Classify ADX strength
+	if adx < 20 {
+		trend.ADXStrength = "weak"
+		trend.IsRanging = true
+	} else if adx < 30 {
+		trend.ADXStrength = "moderate"
+		trend.IsTrending = true
+	} else if adx < 50 {
+		trend.ADXStrength = "strong"
+		trend.IsTrending = true
+	} else {
+		trend.ADXStrength = "very_strong"
+		trend.IsTrending = true
+	}
+
+	// Determine direction
+	if plusDI > minusDI {
+		trend.TrendDirection = "bullish"
+	} else if minusDI > plusDI {
+		trend.TrendDirection = "bearish"
+	} else {
+		trend.TrendDirection = "neutral"
+	}
+
+	// Calculate EMA distances
+	currentPrice := klines[len(klines)-1].Close
+	ema20 := g.calculateEMA(klines, 20)
+	ema50 := g.calculateEMA(klines, 50)
+	ema200 := g.calculateEMA(klines, 200)
+
+	if ema20 > 0 {
+		trend.EMA20Distance = ((currentPrice - ema20) / ema20) * 100
+	}
+	if ema50 > 0 {
+		trend.EMA50Distance = ((currentPrice - ema50) / ema50) * 100
+	}
+	if ema200 > 0 {
+		trend.EMA200Distance = ((currentPrice - ema200) / ema200) * 100
+	}
+
+	// Multi-timeframe alignment check (simplified)
+	trend.MTFAlignment = (trend.EMA20Distance > 0 && trend.EMA50Distance > 0) ||
+		(trend.EMA20Distance < 0 && trend.EMA50Distance < 0)
+
+	// Score trend
+	trend.TrendScore = 0
+	if trend.IsTrending {
+		trend.TrendScore += 40
+	}
+	if trend.MTFAlignment {
+		trend.TrendScore += 30
+	}
+	if adx > 25 {
+		trend.TrendScore += 20
+	}
+
+	return trend
+}
+
+// analyzeStructure analyzes market structure
+func (g *GinieAnalyzer) analyzeStructure(klines []binance.Kline) MarketStructure {
+	structure := MarketStructure{}
+
+	if len(klines) < 30 {
+		return structure
+	}
+
+	// Find swing highs and lows
+	highs, lows := g.findSwingPoints(klines, 5)
+
+	if len(highs) >= 2 && len(lows) >= 2 {
+		// Check for HH/HL or LH/LL pattern
+		lastHigh := highs[len(highs)-1]
+		prevHigh := highs[len(highs)-2]
+		lastLow := lows[len(lows)-1]
+		prevLow := lows[len(lows)-2]
+
+		if lastHigh > prevHigh && lastLow > prevLow {
+			structure.Pattern = "HH/HL" // Uptrend
+		} else if lastHigh < prevHigh && lastLow < prevLow {
+			structure.Pattern = "LH/LL" // Downtrend
+		} else {
+			structure.Pattern = "ranging"
+		}
+	}
+
+	currentPrice := klines[len(klines)-1].Close
+
+	// Set key levels
+	if len(highs) >= 3 {
+		structure.KeyResistances = highs[len(highs)-3:]
+		structure.NearestResistance = findNearestAbove(currentPrice, highs)
+	}
+	if len(lows) >= 3 {
+		structure.KeySupports = lows[len(lows)-3:]
+		structure.NearestSupport = findNearestBelow(currentPrice, lows)
+	}
+
+	// Calculate breakout potential
+	if structure.NearestResistance > 0 {
+		structure.BreakoutPotential = ((structure.NearestResistance - currentPrice) / currentPrice) * 100
+	}
+	if structure.NearestSupport > 0 {
+		structure.BreakdownPotential = ((currentPrice - structure.NearestSupport) / currentPrice) * 100
+	}
+
+	// Score structure
+	structure.StructureScore = 50
+	if structure.Pattern == "HH/HL" || structure.Pattern == "LH/LL" {
+		structure.StructureScore = 80
+	}
+
+	return structure
+}
+
+// analyzeCorrelation checks correlation with BTC/ETH
+func (g *GinieAnalyzer) analyzeCorrelation(symbol string) CorrelationCheck {
+	corr := CorrelationCheck{
+		BTCCorrelation:    0.7,  // Default high correlation
+		ETHCorrelation:    0.6,
+		IndependentCapable: false,
+		CorrelationScore:   50,
+	}
+
+	// Major coins have high correlation
+	switch symbol {
+	case "BTCUSDT":
+		corr.BTCCorrelation = 1.0
+		corr.ETHCorrelation = 0.9
+		corr.IndependentCapable = true
+	case "ETHUSDT":
+		corr.BTCCorrelation = 0.9
+		corr.ETHCorrelation = 1.0
+		corr.IndependentCapable = true
+	case "SOLUSDT", "AVAXUSDT":
+		corr.BTCCorrelation = 0.8
+		corr.ETHCorrelation = 0.85
+		corr.IndependentCapable = true
+	default:
+		corr.IndependentCapable = false
+	}
+
+	return corr
+}
+
+// calculateScanScore calculates overall scan score and status
+func (g *GinieAnalyzer) calculateScanScore(scan *GinieCoinScan) {
+	// Weight the scores
+	score := scan.Liquidity.LiquidityScore*0.25 +
+		scan.Volatility.VolatilityScore*0.2 +
+		scan.Trend.TrendScore*0.3 +
+		scan.Structure.StructureScore*0.15 +
+		scan.Correlation.CorrelationScore*0.1
+
+	scan.Score = score
+
+	// Determine status based on conditions
+	if !scan.Liquidity.PassedSwing {
+		scan.Status = ScanStatusAvoid
+		scan.TradeReady = false
+		scan.Reason = "Insufficient liquidity"
+		return
+	}
+
+	// Determine best mode
+	if scan.Trend.IsRanging && scan.Volatility.ATRRatio > 1.0 && scan.Liquidity.PassedScalp {
+		scan.Status = ScanStatusScalpReady
+		scan.TradeReady = true
+		scan.Reason = "Ranging market with good volatility - ideal for scalping"
+	} else if scan.Trend.IsTrending && scan.Trend.ADXValue >= 25 && scan.Trend.ADXValue <= 45 {
+		scan.Status = ScanStatusSwingReady
+		scan.TradeReady = true
+		scan.Reason = "Clear trend with moderate ADX - ideal for swing trading"
+	} else if scan.Trend.IsTrending && scan.Trend.ADXValue > 35 && scan.Trend.MTFAlignment {
+		scan.Status = ScanStatusPositionReady
+		scan.TradeReady = true
+		scan.Reason = "Strong trend with MTF alignment - ideal for position trading"
+	} else if scan.Volatility.Regime == "Extreme" || score < 40 {
+		scan.Status = ScanStatusHedgeRequired
+		scan.TradeReady = true
+		scan.Reason = "High risk environment - hedge recommended"
+	} else if score < 30 {
+		scan.Status = ScanStatusAvoid
+		scan.TradeReady = false
+		scan.Reason = "Poor trading conditions"
+	} else {
+		scan.Status = ScanStatusSwingReady
+		scan.TradeReady = true
+		scan.Reason = "Acceptable conditions for swing trading"
+	}
+}
+
+// SelectMode determines the best trading mode
+func (g *GinieAnalyzer) SelectMode(scan *GinieCoinScan) GinieTradingMode {
+	// Auto-select based on scan results
+	switch scan.Status {
+	case ScanStatusScalpReady:
+		return GinieModeScalp
+	case ScanStatusPositionReady:
+		return GinieModePosition
+	default:
+		return GinieModeSwing
+	}
+}
+
+// GenerateSignals generates signals for the selected mode
+func (g *GinieAnalyzer) GenerateSignals(symbol string, mode GinieTradingMode, klines []binance.Kline) *GinieSignalSet {
+	signalSet := &GinieSignalSet{
+		Mode:            mode,
+		PrimarySignals:  make([]GinieSignal, 0),
+		SecondarySignals: make([]GinieSignal, 0),
+	}
+
+	if len(klines) < 50 {
+		return signalSet
+	}
+
+	currentPrice := klines[len(klines)-1].Close
+
+	switch mode {
+	case GinieModeScalp:
+		signalSet.PrimaryTimeframe = "1m"
+		signalSet.ConfirmTimeframe = "15m"
+		signalSet.PrimaryRequired = 3
+		g.generateScalpSignals(signalSet, klines, currentPrice)
+	case GinieModeSwing:
+		signalSet.PrimaryTimeframe = "4h"
+		signalSet.ConfirmTimeframe = "1d"
+		signalSet.PrimaryRequired = 4
+		g.generateSwingSignals(signalSet, klines, currentPrice)
+	case GinieModePosition:
+		signalSet.PrimaryTimeframe = "1w"
+		signalSet.ConfirmTimeframe = "1m"
+		signalSet.PrimaryRequired = 4
+		g.generatePositionSignals(signalSet, klines, currentPrice)
+	}
+
+	// Count met signals
+	for _, sig := range signalSet.PrimarySignals {
+		if sig.Met {
+			signalSet.PrimaryMet++
+		}
+	}
+	for _, sig := range signalSet.SecondarySignals {
+		if sig.Met {
+			signalSet.SecondaryMet++
+		}
+	}
+
+	signalSet.PrimaryPassed = signalSet.PrimaryMet >= signalSet.PrimaryRequired
+
+	// Determine direction and strength
+	longScore := 0.0
+	shortScore := 0.0
+	for _, sig := range signalSet.PrimarySignals {
+		if sig.Met {
+			if sig.Value > 0 {
+				longScore += sig.Weight
+			} else {
+				shortScore += sig.Weight
+			}
+		}
+	}
+
+	if longScore > shortScore {
+		signalSet.Direction = "long"
+	} else if shortScore > longScore {
+		signalSet.Direction = "short"
+	} else {
+		signalSet.Direction = "neutral"
+	}
+
+	// Signal strength
+	totalWeight := 0.0
+	metWeight := 0.0
+	for _, sig := range signalSet.PrimarySignals {
+		totalWeight += sig.Weight
+		if sig.Met {
+			metWeight += sig.Weight
+		}
+	}
+
+	if totalWeight > 0 {
+		signalSet.StrengthScore = (metWeight / totalWeight) * 100
+	}
+
+	if signalSet.StrengthScore >= 80 {
+		signalSet.SignalStrength = "Very Strong"
+	} else if signalSet.StrengthScore >= 60 {
+		signalSet.SignalStrength = "Strong"
+	} else if signalSet.StrengthScore >= 40 {
+		signalSet.SignalStrength = "Moderate"
+	} else {
+		signalSet.SignalStrength = "Weak"
+	}
+
+	return signalSet
+}
+
+// generateScalpSignals generates scalping signals
+func (g *GinieAnalyzer) generateScalpSignals(ss *GinieSignalSet, klines []binance.Kline, price float64) {
+	rsi7 := g.calculateRSI(klines, 7)
+	stochRSI := g.calculateStochRSI(klines, 14, 3, 3)
+	ema9 := g.calculateEMA(klines, 9)
+	ema21 := g.calculateEMA(klines, 21)
+
+	// RSI Signal
+	rsiSignal := GinieSignal{
+		Name:      "RSI(7) Crossover",
+		Weight:    0.3,
+		Value:     rsi7,
+		Threshold: 30,
+	}
+	if rsi7 < 30 {
+		rsiSignal.Met = true
+		rsiSignal.Status = "met"
+		rsiSignal.Description = "RSI oversold - potential long"
+		rsiSignal.Value = 1
+	} else if rsi7 > 70 {
+		rsiSignal.Met = true
+		rsiSignal.Status = "met"
+		rsiSignal.Description = "RSI overbought - potential short"
+		rsiSignal.Value = -1
+	} else {
+		rsiSignal.Status = "not_met"
+		rsiSignal.Description = "RSI neutral"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, rsiSignal)
+
+	// Stochastic RSI Signal
+	stochSignal := GinieSignal{
+		Name:      "Stochastic RSI Cross",
+		Weight:    0.25,
+		Value:     stochRSI,
+		Threshold: 20,
+	}
+	if stochRSI < 20 {
+		stochSignal.Met = true
+		stochSignal.Status = "met"
+		stochSignal.Description = "StochRSI oversold zone"
+		stochSignal.Value = 1
+	} else if stochRSI > 80 {
+		stochSignal.Met = true
+		stochSignal.Status = "met"
+		stochSignal.Description = "StochRSI overbought zone"
+		stochSignal.Value = -1
+	} else {
+		stochSignal.Status = "not_met"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, stochSignal)
+
+	// EMA Signal
+	emaSignal := GinieSignal{
+		Name:      "EMA 9/21 Position",
+		Weight:    0.25,
+		Threshold: 0,
+	}
+	if ema9 > ema21 && price > ema9 {
+		emaSignal.Met = true
+		emaSignal.Status = "met"
+		emaSignal.Description = "Price above rising EMAs"
+		emaSignal.Value = 1
+	} else if ema9 < ema21 && price < ema9 {
+		emaSignal.Met = true
+		emaSignal.Status = "met"
+		emaSignal.Description = "Price below falling EMAs"
+		emaSignal.Value = -1
+	} else {
+		emaSignal.Status = "not_met"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, emaSignal)
+
+	// Volume Signal (simplified)
+	volSignal := GinieSignal{
+		Name:      "Volume Confirmation",
+		Weight:    0.2,
+		Threshold: 1.0,
+	}
+	if len(klines) > 5 {
+		lastVol := klines[len(klines)-1].Volume
+		avgVol := 0.0
+		for i := len(klines) - 6; i < len(klines)-1; i++ {
+			avgVol += klines[i].Volume
+		}
+		avgVol /= 5
+		volRatio := lastVol / avgVol
+		volSignal.Value = volRatio
+		if volRatio > 1.0 {
+			volSignal.Met = true
+			volSignal.Status = "met"
+			volSignal.Description = fmt.Sprintf("Volume %.1fx average", volRatio)
+		} else {
+			volSignal.Status = "not_met"
+		}
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, volSignal)
+}
+
+// generateSwingSignals generates swing trading signals
+func (g *GinieAnalyzer) generateSwingSignals(ss *GinieSignalSet, klines []binance.Kline, price float64) {
+	ema50 := g.calculateEMA(klines, 50)
+	rsi14 := g.calculateRSI(klines, 14)
+	macd, signal, _ := g.calculateMACD(klines)
+	adx, plusDI, minusDI := g.calculateADX(klines, 14)
+
+	// EMA 50 Position
+	emaSignal := GinieSignal{
+		Name:      "Price vs EMA 50",
+		Weight:    0.25,
+		Threshold: 0,
+	}
+	if price > ema50 {
+		emaSignal.Met = true
+		emaSignal.Status = "met"
+		emaSignal.Description = "Price above EMA 50"
+		emaSignal.Value = 1
+	} else {
+		emaSignal.Met = true
+		emaSignal.Status = "met"
+		emaSignal.Description = "Price below EMA 50"
+		emaSignal.Value = -1
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, emaSignal)
+
+	// RSI 14 Signal
+	rsiSignal := GinieSignal{
+		Name:      "RSI(14) Trend",
+		Weight:    0.2,
+		Value:     rsi14,
+		Threshold: 50,
+	}
+	if rsi14 > 50 && rsi14 < 70 {
+		rsiSignal.Met = true
+		rsiSignal.Status = "met"
+		rsiSignal.Description = "RSI bullish zone"
+		rsiSignal.Value = 1
+	} else if rsi14 < 50 && rsi14 > 30 {
+		rsiSignal.Met = true
+		rsiSignal.Status = "met"
+		rsiSignal.Description = "RSI bearish zone"
+		rsiSignal.Value = -1
+	} else {
+		rsiSignal.Status = "not_met"
+		rsiSignal.Description = "RSI extreme zone"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, rsiSignal)
+
+	// MACD Signal
+	macdSignal := GinieSignal{
+		Name:      "MACD Cross",
+		Weight:    0.2,
+		Threshold: 0,
+	}
+	if macd > signal {
+		macdSignal.Met = true
+		macdSignal.Status = "met"
+		macdSignal.Description = "MACD above signal line"
+		macdSignal.Value = 1
+	} else {
+		macdSignal.Met = true
+		macdSignal.Status = "met"
+		macdSignal.Description = "MACD below signal line"
+		macdSignal.Value = -1
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, macdSignal)
+
+	// ADX/DMI Signal
+	adxSignal := GinieSignal{
+		Name:      "ADX/DMI Trend",
+		Weight:    0.2,
+		Value:     adx,
+		Threshold: 25,
+	}
+	if adx > 25 {
+		adxSignal.Met = true
+		if plusDI > minusDI {
+			adxSignal.Status = "met"
+			adxSignal.Description = fmt.Sprintf("ADX %.0f with bullish DMI", adx)
+			adxSignal.Value = 1
+		} else {
+			adxSignal.Status = "met"
+			adxSignal.Description = fmt.Sprintf("ADX %.0f with bearish DMI", adx)
+			adxSignal.Value = -1
+		}
+	} else {
+		adxSignal.Status = "not_met"
+		adxSignal.Description = "ADX too weak for trending"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, adxSignal)
+
+	// Volume confirmation
+	volSignal := GinieSignal{
+		Name:      "Volume Profile",
+		Weight:    0.15,
+		Threshold: 1.0,
+	}
+	if len(klines) > 10 {
+		lastVol := klines[len(klines)-1].Volume
+		avgVol := 0.0
+		for i := len(klines) - 11; i < len(klines)-1; i++ {
+			avgVol += klines[i].Volume
+		}
+		avgVol /= 10
+		if lastVol > avgVol {
+			volSignal.Met = true
+			volSignal.Status = "met"
+			volSignal.Description = "Above average volume"
+			volSignal.Value = 1
+		} else {
+			volSignal.Status = "not_met"
+		}
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, volSignal)
+}
+
+// generatePositionSignals generates position trading signals
+func (g *GinieAnalyzer) generatePositionSignals(ss *GinieSignalSet, klines []binance.Kline, price float64) {
+	ema20 := g.calculateEMA(klines, 20)
+	ema50 := g.calculateEMA(klines, 50)
+	rsi14 := g.calculateRSI(klines, 14)
+	macd, signal, _ := g.calculateMACD(klines)
+
+	// Weekly EMA position
+	emaSignal := GinieSignal{
+		Name:      "Weekly EMA 20 Position",
+		Weight:    0.3,
+		Threshold: 0,
+	}
+	if price > ema20 && ema20 > ema50 {
+		emaSignal.Met = true
+		emaSignal.Status = "met"
+		emaSignal.Description = "Price above rising EMA structure"
+		emaSignal.Value = 1
+	} else if price < ema20 && ema20 < ema50 {
+		emaSignal.Met = true
+		emaSignal.Status = "met"
+		emaSignal.Description = "Price below falling EMA structure"
+		emaSignal.Value = -1
+	} else {
+		emaSignal.Status = "partial"
+		emaSignal.Description = "Mixed EMA signals"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, emaSignal)
+
+	// Monthly RSI
+	rsiSignal := GinieSignal{
+		Name:      "Monthly RSI Trend",
+		Weight:    0.25,
+		Value:     rsi14,
+		Threshold: 50,
+	}
+	if rsi14 > 50 {
+		rsiSignal.Met = true
+		rsiSignal.Status = "met"
+		rsiSignal.Description = "Monthly RSI bullish"
+		rsiSignal.Value = 1
+	} else {
+		rsiSignal.Met = true
+		rsiSignal.Status = "met"
+		rsiSignal.Description = "Monthly RSI bearish"
+		rsiSignal.Value = -1
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, rsiSignal)
+
+	// Weekly MACD
+	macdSignal := GinieSignal{
+		Name:      "Weekly MACD",
+		Weight:    0.25,
+		Threshold: 0,
+	}
+	if macd > signal && macd > 0 {
+		macdSignal.Met = true
+		macdSignal.Status = "met"
+		macdSignal.Description = "MACD bullish expansion"
+		macdSignal.Value = 1
+	} else if macd < signal && macd < 0 {
+		macdSignal.Met = true
+		macdSignal.Status = "met"
+		macdSignal.Description = "MACD bearish expansion"
+		macdSignal.Value = -1
+	} else {
+		macdSignal.Status = "partial"
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, macdSignal)
+
+	// Trend structure
+	structSignal := GinieSignal{
+		Name:      "Macro Trend Structure",
+		Weight:    0.2,
+		Threshold: 0,
+	}
+	// Check for HH/HL pattern
+	if len(klines) > 30 {
+		highs, lows := g.findSwingPoints(klines, 10)
+		if len(highs) >= 2 && len(lows) >= 2 {
+			if highs[len(highs)-1] > highs[len(highs)-2] && lows[len(lows)-1] > lows[len(lows)-2] {
+				structSignal.Met = true
+				structSignal.Status = "met"
+				structSignal.Description = "Higher highs and higher lows"
+				structSignal.Value = 1
+			} else if highs[len(highs)-1] < highs[len(highs)-2] && lows[len(lows)-1] < lows[len(lows)-2] {
+				structSignal.Met = true
+				structSignal.Status = "met"
+				structSignal.Description = "Lower highs and lower lows"
+				structSignal.Value = -1
+			}
+		}
+	}
+	ss.PrimarySignals = append(ss.PrimarySignals, structSignal)
+}
+
+// GenerateDecision generates a full trading decision report
+func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, error) {
+	// Scan the coin
+	scan, err := g.ScanCoin(symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get klines
+	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
+	if err != nil {
+		return nil, err
+	}
+
+	// Select mode
+	mode := g.SelectMode(scan)
+
+	// Generate signals
+	signals := g.GenerateSignals(symbol, mode, klines)
+
+	currentPrice := klines[len(klines)-1].Close
+
+	// Build decision report
+	report := &GinieDecisionReport{
+		Symbol:       symbol,
+		Timestamp:    time.Now(),
+		ScanStatus:   scan.Status,
+		SelectedMode: mode,
+	}
+
+	// Market conditions
+	report.MarketConditions.Trend = scan.Trend.TrendDirection
+	report.MarketConditions.ADX = scan.Trend.ADXValue
+	report.MarketConditions.Volatility = scan.Volatility.Regime
+	report.MarketConditions.ATR = scan.Volatility.ATR14
+	if scan.Liquidity.VolumeUSD > 10000000 {
+		report.MarketConditions.Volume = "Above Avg"
+	} else if scan.Liquidity.VolumeUSD > 5000000 {
+		report.MarketConditions.Volume = "Average"
+	} else {
+		report.MarketConditions.Volume = "Below Avg"
+	}
+	report.MarketConditions.BTCCorr = scan.Correlation.BTCCorrelation
+	report.MarketConditions.Sentiment = "Neutral"
+	report.MarketConditions.SentimentVal = 50
+
+	// Signal analysis
+	report.SignalAnalysis = *signals
+
+	// Trade execution
+	if signals.PrimaryPassed && scan.TradeReady {
+		report.TradeExecution.Action = "LONG"
+		if signals.Direction == "short" {
+			report.TradeExecution.Action = "SHORT"
+		}
+
+		// Entry zone based on ATR
+		atrPct := scan.Volatility.ATRPercent
+		if atrPct == 0 {
+			atrPct = 1.0 // Fallback 1%
+		}
+		report.TradeExecution.EntryLow = currentPrice * (1 - atrPct/100*0.3)
+		report.TradeExecution.EntryHigh = currentPrice * (1 + atrPct/100*0.1)
+
+		// === ADAPTIVE SL/TP CALCULATION ===
+		// Get LLM analysis for intelligent SL/TP
+		var llmSLPct, llmTPPct float64
+		var llmUsed bool
+		if g.signalAggregator != nil {
+			llmAnalysis := g.signalAggregator.GetCachedLLMAnalysis(symbol)
+			if llmAnalysis != nil {
+				// Extract LLM suggested SL/TP as percentages
+				if llmAnalysis.StopLoss != nil && *llmAnalysis.StopLoss > 0 {
+					if signals.Direction == "long" {
+						llmSLPct = ((currentPrice - *llmAnalysis.StopLoss) / currentPrice) * 100
+					} else {
+						llmSLPct = ((*llmAnalysis.StopLoss - currentPrice) / currentPrice) * 100
+					}
+					if llmSLPct > 0 {
+						llmUsed = true
+					}
+				}
+				if llmAnalysis.TakeProfit != nil && *llmAnalysis.TakeProfit > 0 {
+					if signals.Direction == "long" {
+						llmTPPct = ((*llmAnalysis.TakeProfit - currentPrice) / currentPrice) * 100
+					} else {
+						llmTPPct = ((currentPrice - *llmAnalysis.TakeProfit) / currentPrice) * 100
+					}
+					if llmTPPct > 0 {
+						llmUsed = true
+					}
+				}
+			}
+		}
+
+		// Mode-specific base multipliers and limits
+		var baseSLMultiplier, baseTPMultiplier float64
+		var minSL, maxSL, minTP, maxTP float64
+		var positionPct, leverage int
+
+		switch mode {
+		case GinieModeScalp:
+			positionPct = 5
+			leverage = 10
+			baseSLMultiplier = 0.5  // 0.5x ATR for tight SL
+			baseTPMultiplier = 1.0  // 1x ATR for quick TP
+			minSL, maxSL = 0.2, 0.8 // Strict limits for scalp
+			minTP, maxTP = 0.3, 2.0
+		case GinieModeSwing:
+			positionPct = 10
+			leverage = 5
+			baseSLMultiplier = 1.5  // 1.5x ATR
+			baseTPMultiplier = 3.0  // 3x ATR
+			minSL, maxSL = 1.0, 5.0 // Wider limits for swing
+			minTP, maxTP = 2.0, 15.0
+		case GinieModePosition:
+			positionPct = 15
+			leverage = 2
+			baseSLMultiplier = 2.5  // 2.5x ATR
+			baseTPMultiplier = 5.0  // 5x ATR
+			minSL, maxSL = 3.0, 15.0
+			minTP, maxTP = 5.0, 50.0
+		}
+
+		report.TradeExecution.PositionPct = float64(positionPct)
+		report.TradeExecution.Leverage = leverage
+
+		// Calculate ATR-based SL/TP
+		atrSLPct := atrPct * baseSLMultiplier
+		atrTPPct := atrPct * baseTPMultiplier
+
+		// Blend LLM and ATR (70% LLM, 30% ATR if LLM available)
+		var finalSLPct, finalTPPct float64
+		if llmUsed && llmSLPct > 0 {
+			finalSLPct = llmSLPct*0.7 + atrSLPct*0.3
+		} else {
+			finalSLPct = atrSLPct
+		}
+		if llmUsed && llmTPPct > 0 {
+			finalTPPct = llmTPPct*0.7 + atrTPPct*0.3
+		} else {
+			finalTPPct = atrTPPct
+		}
+
+		// Clamp to mode-specific limits
+		if finalSLPct < minSL {
+			finalSLPct = minSL
+		}
+		if finalSLPct > maxSL {
+			finalSLPct = maxSL
+		}
+		if finalTPPct < minTP {
+			finalTPPct = minTP
+		}
+		if finalTPPct > maxTP {
+			finalTPPct = maxTP
+		}
+
+		report.TradeExecution.StopLossPct = finalSLPct
+
+		// Generate 4 TP levels proportionally (25% each at 25%, 50%, 75%, 100% of target)
+		report.TradeExecution.TakeProfits = []GinieTakeProfitLevel{
+			{Level: 1, Percent: 25, GainPct: finalTPPct * 0.25}, // 25% of target
+			{Level: 2, Percent: 25, GainPct: finalTPPct * 0.50}, // 50% of target
+			{Level: 3, Percent: 25, GainPct: finalTPPct * 0.75}, // 75% of target
+			{Level: 4, Percent: 25, GainPct: finalTPPct * 1.00}, // 100% of target (trailing)
+		}
+
+		// Log adaptive calculation
+		g.logger.Debug("Ginie adaptive SL/TP calculated",
+			"symbol", symbol,
+			"mode", mode,
+			"atr_pct", fmt.Sprintf("%.2f%%", atrPct),
+			"llm_used", llmUsed,
+			"sl_pct", fmt.Sprintf("%.2f%%", finalSLPct),
+			"tp_pct", fmt.Sprintf("%.2f%%", finalTPPct))
+
+		// Calculate stop loss and TP prices
+		direction := 1.0
+		if signals.Direction == "short" {
+			direction = -1.0
+		}
+		report.TradeExecution.StopLoss = currentPrice * (1 - direction*report.TradeExecution.StopLossPct/100)
+		for i := range report.TradeExecution.TakeProfits {
+			report.TradeExecution.TakeProfits[i].Price = currentPrice * (1 + direction*report.TradeExecution.TakeProfits[i].GainPct/100)
+		}
+
+		// Risk:Reward
+		if len(report.TradeExecution.TakeProfits) > 0 {
+			avgTP := 0.0
+			for _, tp := range report.TradeExecution.TakeProfits {
+				avgTP += tp.GainPct * tp.Percent / 100
+			}
+			report.TradeExecution.RiskReward = avgTP / report.TradeExecution.StopLossPct
+		}
+	} else {
+		report.TradeExecution.Action = "WAIT"
+	}
+
+	// Hedge recommendation
+	if scan.Status == ScanStatusHedgeRequired || scan.Volatility.Regime == "Extreme" {
+		report.Hedge.Required = true
+		report.Hedge.HedgeType = "direct"
+		report.Hedge.HedgeSize = 50
+		report.Hedge.Reason = "High volatility environment"
+	}
+
+	// Invalidation conditions
+	report.InvalidationConditions = []string{
+		fmt.Sprintf("Price breaks below $%.2f", scan.Structure.NearestSupport),
+		"ADX drops below 20",
+		"Volume drops significantly",
+	}
+
+	// Re-evaluate conditions
+	report.ReEvaluateConditions = []string{
+		"New high/low formed",
+		"Major news event",
+		"BTC correlation breaks",
+	}
+
+	// Next review based on mode
+	switch mode {
+	case GinieModeScalp:
+		report.NextReview = "15 minutes"
+	case GinieModeSwing:
+		report.NextReview = "4 hours"
+	case GinieModePosition:
+		report.NextReview = "1 day"
+	}
+
+	// Confidence score - base calculation
+	report.ConfidenceScore = signals.StrengthScore * (scan.Score / 100)
+
+	// === TREND-AGREEMENT FILTER ===
+	// Reduce confidence if signals contradict 1h trend direction
+	// This prevents counter-trend entries from being over-weighted
+	// Bounce trades (buying in downtrend) are still valid but with reduced confidence
+	trendAgreement := 1.0 // Default: signals agree with trend
+	if signals.Direction != "neutral" && scan.Trend.TrendDirection != "NEUTRAL" {
+		// Check if signal direction matches trend direction
+		signalIsBullish := signals.Direction == "long"
+		trendIsBullish := scan.Trend.TrendDirection == "UP"
+
+		if signalIsBullish != trendIsBullish {
+			// Signal contradicts trend (e.g., buying in downtrend / shorting in uptrend)
+			// Apply 20% confidence reduction for counter-trend entries
+			// These are bounce trades - valid but higher risk
+			trendAgreement = 0.80
+			if g.logger != nil {
+				g.logger.Debug("Ginie counter-trend trade detected",
+					"symbol", symbol,
+					"trend", scan.Trend.TrendDirection,
+					"signal", signals.Direction,
+					"confidence_penalty", "20%")
+			}
+		}
+	}
+	report.ConfidenceScore *= trendAgreement
+
+	// Final recommendation (ConfidenceScore is 0-1, thresholds are 0-1)
+	// Execute if >= 30%, Wait if >= 20%, otherwise Skip
+	if report.ConfidenceScore >= 0.30 {
+		report.Recommendation = RecommendationExecute
+		if trendAgreement < 1.0 {
+			report.RecommendationNote = "Counter-trend bounce trade - reduced confidence but valid"
+		} else {
+			report.RecommendationNote = "Strong signals with good market conditions"
+		}
+	} else if report.ConfidenceScore >= 0.20 {
+		report.Recommendation = RecommendationWait
+		report.RecommendationNote = "Signals present but consider waiting for better entry"
+	} else {
+		report.Recommendation = RecommendationSkip
+		if trendAgreement < 1.0 {
+			report.RecommendationNote = "Counter-trend signal rejected due to strong opposing trend"
+		} else {
+			report.RecommendationNote = "Insufficient confluence or poor conditions"
+		}
+	}
+
+	// Store decision
+	g.decisionLock.Lock()
+	g.decisions = append(g.decisions, *report)
+	if len(g.decisions) > g.maxDecisions {
+		g.decisions = g.decisions[1:]
+	}
+	g.decisionLock.Unlock()
+
+	return report, nil
+}
+
+// GetRecentDecisions returns recent decisions
+func (g *GinieAnalyzer) GetRecentDecisions(limit int) []GinieDecisionReport {
+	g.decisionLock.RLock()
+	defer g.decisionLock.RUnlock()
+
+	if limit <= 0 || limit > len(g.decisions) {
+		limit = len(g.decisions)
+	}
+
+	start := len(g.decisions) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	result := make([]GinieDecisionReport, limit)
+	copy(result, g.decisions[start:])
+	return result
+}
+
+// Helper functions
+
+func (g *GinieAnalyzer) calculateATR(klines []binance.Kline, period int) float64 {
+	if len(klines) < period+1 {
+		return 0
+	}
+
+	var trSum float64
+	for i := len(klines) - period; i < len(klines); i++ {
+		high := klines[i].High
+		low := klines[i].Low
+		prevClose := klines[i-1].Close
+
+		tr := math.Max(high-low, math.Max(math.Abs(high-prevClose), math.Abs(low-prevClose)))
+		trSum += tr
+	}
+
+	return trSum / float64(period)
+}
+
+func (g *GinieAnalyzer) calculateBollingerBands(klines []binance.Kline, period int, stdDev float64) (sma, upper, lower float64) {
+	if len(klines) < period {
+		return 0, 0, 0
+	}
+
+	// Calculate SMA
+	sum := 0.0
+	for i := len(klines) - period; i < len(klines); i++ {
+		sum += klines[i].Close
+	}
+	sma = sum / float64(period)
+
+	// Calculate standard deviation
+	variance := 0.0
+	for i := len(klines) - period; i < len(klines); i++ {
+		diff := klines[i].Close - sma
+		variance += diff * diff
+	}
+	sd := math.Sqrt(variance / float64(period))
+
+	upper = sma + stdDev*sd
+	lower = sma - stdDev*sd
+
+	return sma, upper, lower
+}
+
+func (g *GinieAnalyzer) calculateEMA(klines []binance.Kline, period int) float64 {
+	if len(klines) < period {
+		return 0
+	}
+
+	multiplier := 2.0 / float64(period+1)
+
+	// Start with SMA
+	sum := 0.0
+	for i := 0; i < period; i++ {
+		sum += klines[i].Close
+	}
+	ema := sum / float64(period)
+
+	// Calculate EMA
+	for i := period; i < len(klines); i++ {
+		ema = (klines[i].Close-ema)*multiplier + ema
+	}
+
+	return ema
+}
+
+func (g *GinieAnalyzer) calculateRSI(klines []binance.Kline, period int) float64 {
+	if len(klines) < period+1 {
+		return 50
+	}
+
+	gains := 0.0
+	losses := 0.0
+
+	for i := len(klines) - period; i < len(klines); i++ {
+		change := klines[i].Close - klines[i-1].Close
+		if change > 0 {
+			gains += change
+		} else {
+			losses -= change
+		}
+	}
+
+	avgGain := gains / float64(period)
+	avgLoss := losses / float64(period)
+
+	if avgLoss == 0 {
+		return 100
+	}
+
+	rs := avgGain / avgLoss
+	return 100 - (100 / (1 + rs))
+}
+
+func (g *GinieAnalyzer) calculateStochRSI(klines []binance.Kline, rsiPeriod, kPeriod, dPeriod int) float64 {
+	// Simplified StochRSI
+	rsi := g.calculateRSI(klines, rsiPeriod)
+
+	// Normalize to 0-100 range (simplified)
+	return rsi
+}
+
+func (g *GinieAnalyzer) calculateMACD(klines []binance.Kline) (macd, signal, histogram float64) {
+	ema12 := g.calculateEMA(klines, 12)
+	ema26 := g.calculateEMA(klines, 26)
+	macd = ema12 - ema26
+
+	// Signal line (9-period EMA of MACD) - simplified
+	signal = macd * 0.9 // Approximation
+	histogram = macd - signal
+
+	return macd, signal, histogram
+}
+
+func (g *GinieAnalyzer) calculateADX(klines []binance.Kline, period int) (adx, plusDI, minusDI float64) {
+	if len(klines) < period*2 {
+		return 25, 50, 50 // Default values
+	}
+
+	// Calculate +DM, -DM, and TR
+	var plusDMSum, minusDMSum, trSum float64
+
+	for i := len(klines) - period; i < len(klines); i++ {
+		high := klines[i].High
+		low := klines[i].Low
+		prevHigh := klines[i-1].High
+		prevLow := klines[i-1].Low
+		prevClose := klines[i-1].Close
+
+		plusDM := 0.0
+		minusDM := 0.0
+
+		upMove := high - prevHigh
+		downMove := prevLow - low
+
+		if upMove > downMove && upMove > 0 {
+			plusDM = upMove
+		}
+		if downMove > upMove && downMove > 0 {
+			minusDM = downMove
+		}
+
+		tr := math.Max(high-low, math.Max(math.Abs(high-prevClose), math.Abs(low-prevClose)))
+
+		plusDMSum += plusDM
+		minusDMSum += minusDM
+		trSum += tr
+	}
+
+	if trSum > 0 {
+		plusDI = (plusDMSum / trSum) * 100
+		minusDI = (minusDMSum / trSum) * 100
+	}
+
+	// Calculate DX and ADX (simplified)
+	if plusDI+minusDI > 0 {
+		dx := math.Abs(plusDI-minusDI) / (plusDI + minusDI) * 100
+		adx = dx // Simplified - should be smoothed
+	}
+
+	return adx, plusDI, minusDI
+}
+
+func (g *GinieAnalyzer) findSwingPoints(klines []binance.Kline, lookback int) (highs, lows []float64) {
+	highs = make([]float64, 0)
+	lows = make([]float64, 0)
+
+	for i := lookback; i < len(klines)-lookback; i++ {
+		isHigh := true
+		isLow := true
+
+		for j := i - lookback; j <= i+lookback; j++ {
+			if j == i {
+				continue
+			}
+			if klines[j].High > klines[i].High {
+				isHigh = false
+			}
+			if klines[j].Low < klines[i].Low {
+				isLow = false
+			}
+		}
+
+		if isHigh {
+			highs = append(highs, klines[i].High)
+		}
+		if isLow {
+			lows = append(lows, klines[i].Low)
+		}
+	}
+
+	return highs, lows
+}
+
+func findNearestAbove(price float64, levels []float64) float64 {
+	nearest := 0.0
+	minDiff := math.MaxFloat64
+
+	for _, level := range levels {
+		if level > price {
+			diff := level - price
+			if diff < minDiff {
+				minDiff = diff
+				nearest = level
+			}
+		}
+	}
+
+	return nearest
+}
+
+func findNearestBelow(price float64, levels []float64) float64 {
+	nearest := 0.0
+	minDiff := math.MaxFloat64
+
+	for _, level := range levels {
+		if level < price {
+			diff := price - level
+			if diff < minDiff {
+				minDiff = diff
+				nearest = level
+			}
+		}
+	}
+
+	return nearest
+}
+
+// ============================================================================
+// PHASE 2: ULTRA-FAST MULTI-LAYER SIGNAL GENERATION
+// ============================================================================
+
+// ClassifyVolatilityRegime analyzes market volatility and returns adaptive parameters
+// Layer 2 in ultra-fast signal system: Classifies volatility and sets re-entry delays
+func (g *GinieAnalyzer) ClassifyVolatilityRegime(symbol string) (*VolatilityRegime, error) {
+	// Get 5m klines for volatility calculation
+	klines5m, err := g.futuresClient.GetFuturesKlines(symbol, "5m", 30) // 30 * 5m = 150m of history
+	if err != nil || len(klines5m) < 14 {
+		// Fallback to medium volatility on error
+		return &VolatilityRegime{
+			Level:            "medium",
+			ATRRatio:         1.0,
+			BBWidthPercent:   4.0,
+			ReEntryDelay:     5 * time.Second,
+			MaxTradesPerHour: 12,
+			LastUpdate:       time.Now(),
+		}, nil
+	}
+
+	// Calculate ATR on 5m candles
+	atrValues := make([]float64, 0)
+	for i := 1; i < len(klines5m); i++ {
+		high := klines5m[i].High
+		low := klines5m[i].Low
+		prevClose := klines5m[i-1].Close
+
+		tr := high - low
+		if high-prevClose > tr {
+			tr = high - prevClose
+		}
+		if prevClose-low > tr {
+			tr = prevClose - low
+		}
+		atrValues = append(atrValues, tr)
+	}
+
+	// Calculate ATR14
+	if len(atrValues) < 14 {
+		return &VolatilityRegime{
+			Level:            "medium",
+			ATRRatio:         1.0,
+			BBWidthPercent:   4.0,
+			ReEntryDelay:     5 * time.Second,
+			MaxTradesPerHour: 12,
+			LastUpdate:       time.Now(),
+		}, nil
+	}
+
+	atr14 := 0.0
+	for i := 0; i < 14; i++ {
+		atr14 += atrValues[i]
+	}
+	atr14 /= 14.0
+
+	// Get current price for ATR ratio calculation
+	currentPrice := klines5m[len(klines5m)-1].Close
+	atrPercent := (atr14 / currentPrice) * 100
+
+	// Calculate Bollinger Band width
+	// Simplified: use standard deviation of last 20 closes
+	closes := make([]float64, 0)
+	for i := len(klines5m) - 20; i < len(klines5m); i++ {
+		if i >= 0 {
+			closes = append(closes, klines5m[i].Close)
+		}
+	}
+
+	mean := 0.0
+	for _, c := range closes {
+		mean += c
+	}
+	mean /= float64(len(closes))
+
+	variance := 0.0
+	for _, c := range closes {
+		variance += (c - mean) * (c - mean)
+	}
+	variance /= float64(len(closes))
+	stdDev := math.Sqrt(variance)
+
+	bbWidth := (stdDev * 2) / mean * 100 // Bollinger Band width as % of price
+
+	// Classify regime based on ATR ratio
+	regime := &VolatilityRegime{
+		ATRRatio:   atrPercent / 0.8, // Baseline ~0.8%
+		BBWidthPercent: bbWidth,
+		LastUpdate: time.Now(),
+	}
+
+	if atrPercent > 2.0 || bbWidth > 8.0 {
+		regime.Level = "extreme"
+		regime.ReEntryDelay = 0 * time.Second
+		regime.MaxTradesPerHour = 30
+	} else if atrPercent > 1.5 || bbWidth > 5.0 {
+		regime.Level = "high"
+		regime.ReEntryDelay = 1 * time.Second
+		regime.MaxTradesPerHour = 20
+	} else if atrPercent > 0.8 || bbWidth > 3.0 {
+		regime.Level = "medium"
+		regime.ReEntryDelay = 5 * time.Second
+		regime.MaxTradesPerHour = 12
+	} else {
+		regime.Level = "low"
+		regime.ReEntryDelay = 60 * time.Second
+		regime.MaxTradesPerHour = 6
+	}
+
+	return regime, nil
+}
+
+// CalculateFeeAwareTP calculates minimum profit target accounting for trading fees and volatility
+// Formula: MinProfitTarget% = (EntryFee + ExitFee) / PositionUSD × 100 + (0.5 × ATR%)
+func (g *GinieAnalyzer) CalculateFeeAwareTP(symbol string, positionUSD float64, leverage int, atrPercent float64) float64 {
+	// Binance taker fee: 0.04% per order
+	const binanceTakerFee = 0.0004
+
+	// Calculate notional value
+	notionalValue := positionUSD * float64(leverage)
+
+	// Calculate fees (entry + exit)
+	entryFee := notionalValue * binanceTakerFee
+	exitFee := notionalValue * binanceTakerFee
+	totalFee := entryFee + exitFee
+
+	// Fee as % of position
+	feePercent := (totalFee / positionUSD) * 100
+
+	// ATR buffer (0.5x of ATR volatility)
+	atrBuffer := 0.5 * atrPercent
+
+	// Minimum profit target
+	minProfitTarget := feePercent + atrBuffer
+
+	// Ensure minimum of 0.5% (in case calculation is very low)
+	if minProfitTarget < 0.5 {
+		minProfitTarget = 0.5
+	}
+
+	// Cap at 3% for safety
+	if minProfitTarget > 3.0 {
+		minProfitTarget = 3.0
+	}
+
+	return minProfitTarget
+}
+
+// GenerateUltraFastSignal generates a 4-layer signal for ultra-fast scalping
+// Layer 1: Trend Filter (1h) → Layer 2: Volatility Regime (5m) →
+// Layer 3: Entry Trigger (1m) → Layer 4: Dynamic TP calculation
+func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal, error) {
+	signal := &UltraFastSignal{
+		Symbol:      symbol,
+		SignalTime:  time.Now(),
+		GeneratedAt: time.Now(),
+	}
+
+	// Layer 1: Trend Filter from 1h candles
+	klines1h, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 20)
+	if err != nil || len(klines1h) < 3 {
+		return nil, fmt.Errorf("failed to get 1h klines for %s: %w", symbol, err)
+	}
+
+	close1h := klines1h[len(klines1h)-1].Close
+	close1hPrev := klines1h[len(klines1h)-2].Close
+	ema20Idx := len(klines1h) - 1
+	if ema20Idx >= 20 {
+		ema20Idx = 20
+	}
+
+	// Simple trend check: price above/below previous candle
+	if close1h > close1hPrev*1.005 { // 0.5% above
+		signal.TrendBias = "LONG"
+		signal.TrendStrength = 70
+	} else if close1h < close1hPrev*0.995 { // 0.5% below
+		signal.TrendBias = "SHORT"
+		signal.TrendStrength = 70
+	} else {
+		signal.TrendBias = "NEUTRAL"
+		signal.TrendStrength = 40
+	}
+
+	// Layer 2: Volatility Regime classification
+	regime, err := g.ClassifyVolatilityRegime(symbol)
+	if err != nil {
+		regime = &VolatilityRegime{
+			Level:            "medium",
+			ATRRatio:         1.0,
+			BBWidthPercent:   4.0,
+			ReEntryDelay:     5 * time.Second,
+			MaxTradesPerHour: 12,
+		}
+	}
+	signal.VolatilityRegime = regime
+
+	// Layer 3: Entry Trigger from 1m candles
+	klines1m, err := g.futuresClient.GetFuturesKlines(symbol, "1m", 10)
+	if err != nil || len(klines1m) < 5 {
+		// Can't evaluate entry trigger, return with NEUTRAL bias
+		signal.EntryConfidence = 30
+	} else {
+		// Count bullish candles in last 5 candles
+		bullishCount := 0
+		for i := len(klines1m) - 5; i < len(klines1m); i++ {
+			open := klines1m[i].Open
+			close := klines1m[i].Close
+			if close > open {
+				bullishCount++
+			}
+		}
+
+		// Entry confidence based on candle alignment
+		if signal.TrendBias == "LONG" && bullishCount >= 3 {
+			signal.EntryConfidence = 75
+		} else if signal.TrendBias == "SHORT" && bullishCount <= 2 {
+			signal.EntryConfidence = 75
+		} else if signal.TrendBias == "NEUTRAL" {
+			signal.EntryConfidence = 50
+		} else {
+			signal.EntryConfidence = 40
+		}
+	}
+
+	// Layer 4: Dynamic profit target based on fees and volatility
+	// Get ATR for profit calculation
+	klines5m, err := g.futuresClient.GetFuturesKlines(symbol, "5m", 20)
+	if err != nil || len(klines5m) < 14 {
+		signal.MinProfitTarget = 1.0 // Default 1%
+	} else {
+		atrPercent := 1.0 // Default
+		// Simple ATR calculation for TP
+		highs := make([]float64, 0)
+		for _, k := range klines5m {
+			highs = append(highs, k.High)
+		}
+		sort.Float64s(highs)
+		if len(highs) > 0 {
+			avgRange := (highs[len(highs)-1] - highs[0]) / float64(len(highs))
+			lastClose := klines5m[len(klines5m)-1].Close
+			atrPercent = (avgRange / lastClose) * 100
+		}
+
+		signal.MinProfitTarget = g.CalculateFeeAwareTP(symbol, 200, 10, atrPercent)
+	}
+
+	// Set max hold time to 3 seconds for ultra-fast
+	signal.MaxHoldTime = 3 * time.Second
+
+	return signal, nil
+}

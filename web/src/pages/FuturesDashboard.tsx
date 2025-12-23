@@ -5,15 +5,14 @@ import FuturesOrderBook from '../components/FuturesOrderBook';
 import FuturesChart from '../components/FuturesChart';
 import FuturesPositionsTable from '../components/FuturesPositionsTable';
 import FuturesOrdersHistory from '../components/FuturesOrdersHistory';
-import FuturesAutopilotPanel from '../components/FuturesAutopilotPanel';
-import CircuitBreakerPanel from '../components/CircuitBreakerPanel';
-import AISignalsPanel from '../components/AISignalsPanel';
-import AITradeStatusPanel from '../components/AITradeStatusPanel';
+import GiniePanel from '../components/GiniePanel';
 import PanicButton from '../components/PanicButton';
-import NewsFeedPanel from '../components/NewsFeedPanel';
+import NewsDashboard from '../components/NewsDashboard';
 import TradeSourceStatsPanel from '../components/TradeSourceStatsPanel';
+import TradingModeToggle from '../components/TradingModeToggle';
+import ModeAllocationPanel from '../components/ModeAllocationPanel';
+import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import { formatUSD, formatPercent, getPositionColor } from '../services/futuresApi';
-import { apiService } from '../services/api';
 import {
   Wallet,
   TrendingUp,
@@ -27,6 +26,7 @@ import {
   Zap,
   Brain,
   Percent,
+  Sparkles,
 } from 'lucide-react';
 
 export default function FuturesDashboard() {
@@ -58,20 +58,10 @@ export default function FuturesDashboard() {
   const [centerView, setCenterView] = useState<'orderbook' | 'chart'>('orderbook');
   const [tradingMode, setTradingMode] = useState<{ mode: 'paper' | 'live'; mode_label: string } | null>(null);
 
-  // Fetch trading mode
-  useEffect(() => {
-    const fetchTradingMode = async () => {
-      try {
-        const modeData = await apiService.getTradingMode();
-        setTradingMode(modeData);
-      } catch (error) {
-        console.error('Error fetching trading mode:', error);
-      }
-    };
-    fetchTradingMode();
-    const interval = setInterval(fetchTradingMode, 10000);
-    return () => clearInterval(interval);
-  }, []);
+  // Handle trading mode changes from TradingModeToggle component
+  const handleTradingModeChange = (mode: { mode: 'paper' | 'live'; mode_label: string }) => {
+    setTradingMode(mode);
+  };
 
   // Initial data fetch
   useEffect(() => {
@@ -143,154 +133,186 @@ export default function FuturesDashboard() {
         </div>
       )}
 
-      {/* Header - Symbol Selector & Account Summary */}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
-        {/* Left: Symbol Selector */}
+      {/* Header Row - Trading Mode & Actions */}
+      <div className="mb-4 flex items-center justify-between gap-4 flex-wrap">
+        {/* Left side - Trading Mode & Live/Paper Indicator */}
         <div className="flex items-center gap-4">
-          {/* Symbol Dropdown */}
-          <div className="relative">
-            <button
-              onClick={() => setShowSymbolDropdown(!showSymbolDropdown)}
-              className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg border border-gray-700"
-            >
-              <span className="text-lg font-bold">{selectedSymbol}</span>
-              <ChevronDown className={`w-4 h-4 transition-transform ${showSymbolDropdown ? 'rotate-180' : ''}`} />
-            </button>
+          <TradingModeToggle onModeChange={handleTradingModeChange} />
 
-            {showSymbolDropdown && (
-              <div className="absolute z-50 mt-1 w-64 max-h-96 overflow-y-auto bg-gray-800 border border-gray-700 rounded-lg shadow-lg">
-                <input
-                  type="text"
-                  placeholder="Search symbol..."
-                  className="w-full px-3 py-2 bg-gray-900 border-b border-gray-700 text-sm focus:outline-none"
-                  onChange={() => {
-                    // Filter symbols (simple client-side filter)
-                  }}
-                />
-                {filteredSymbols.slice(0, 50).map((symbol) => (
-                  <button
-                    key={symbol}
-                    onClick={() => {
-                      setSelectedSymbol(symbol);
-                      setShowSymbolDropdown(false);
-                    }}
-                    className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-700 ${
-                      symbol === selectedSymbol ? 'bg-gray-700 text-yellow-500' : ''
-                    }`}
-                  >
-                    {symbol}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Price Info */}
-          <div className="flex items-center gap-3">
-            <div className="text-2xl font-bold">
-              {currentPrice > 0 ? formatUSD(currentPrice) : '-'}
-            </div>
-            {priceChange24h !== 0 && (
-              <div className={`flex items-center gap-1 ${priceChange24h >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {priceChange24h >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                {formatPercent(priceChange24h)}
-              </div>
-            )}
-          </div>
-
-          {/* Funding Rate */}
-          <div className="text-sm">
-            <span className="text-gray-500">Funding: </span>
-            <span className={currentFundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>
-              {(currentFundingRate * 100).toFixed(4)}%
-            </span>
-            {nextFundingTime > 0 && (
-              <span className="text-gray-500 ml-2">
-                in {Math.floor((nextFundingTime - Date.now()) / 60000)}m
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Account Summary, Live/Paper Indicator & Panic Button */}
-        <div className="flex items-center gap-4">
           {/* Live/Paper Indicator */}
           {tradingMode && (
             <div className={`
-              flex items-center gap-2 px-3 py-2 rounded-lg font-bold text-sm
+              flex items-center gap-2 px-4 py-2 rounded-lg font-bold text-sm
               ${tradingMode.mode === 'live'
                 ? 'bg-green-500/20 border-2 border-green-500 text-green-400'
                 : 'bg-yellow-500/20 border-2 border-yellow-500 text-yellow-400'
               }
             `}>
-              <span className={`w-2 h-2 rounded-full animate-pulse ${tradingMode.mode === 'live' ? 'bg-green-500' : 'bg-yellow-500'}`} />
+              <span className={`w-3 h-3 rounded-full animate-pulse ${tradingMode.mode === 'live' ? 'bg-green-500' : 'bg-yellow-500'}`} />
               {tradingMode.mode === 'live' ? (
                 <>
                   <Zap className="w-4 h-4" />
-                  LIVE
+                  LIVE TRADING
                 </>
               ) : (
                 <>
                   <AlertCircle className="w-4 h-4" />
-                  PAPER
+                  PAPER TRADING
                 </>
               )}
             </div>
           )}
 
-          {/* Wallet Balance */}
-          <div className="flex items-center gap-2">
-            <Wallet className="w-4 h-4 text-gray-400" />
-            <div>
-              <div className="text-xs text-gray-500">Wallet Balance</div>
-              <div className="font-semibold">{formatUSD(walletBalance)}</div>
-            </div>
+          {/* Futures Trading Badge */}
+          <div className="flex items-center gap-2 px-3 py-2 bg-purple-500/20 border border-purple-500/50 rounded-lg">
+            <Sparkles className="w-4 h-4 text-purple-400" />
+            <span className="text-purple-400 font-semibold text-sm">FUTURES TRADING</span>
           </div>
+        </div>
 
-          {/* Available Balance */}
-          <div>
-            <div className="text-xs text-gray-500">Available</div>
-            <div className="font-semibold text-green-500">{formatUSD(availableBalance)}</div>
-          </div>
-
-          {/* Margin Used */}
-          <div>
-            <div className="text-xs text-gray-500">Margin Used</div>
-            <div className="font-semibold text-yellow-500">{formatUSD(marginUsed)}</div>
-          </div>
-
-          {/* Unrealized PnL */}
-          <div>
-            <div className="text-xs text-gray-500">Unrealized PnL</div>
-            <div className={`font-semibold ${getPositionColor(totalUnrealizedPnl)}`}>
-              {formatUSD(totalUnrealizedPnl)}
-            </div>
-          </div>
-
-          {/* Refresh Button */}
+        {/* Right side - Panic Button & Refresh */}
+        <div className="flex gap-3 flex-wrap">
           <button
             onClick={() => {
               fetchAccountInfo();
               fetchPositions();
             }}
-            className="p-2 hover:bg-gray-700 rounded"
+            className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center"
             title="Refresh"
           >
-            <RefreshCw className={`w-4 h-4 text-gray-400 ${isLoading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+            Refresh
           </button>
-
-          {/* Panic Button */}
           <PanicButton type="futures" onComplete={() => fetchPositions()} />
         </div>
       </div>
 
+      {/* Account Summary Bar */}
+      <div className="mb-4 bg-gray-800 rounded-lg p-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          {/* Symbol Selector */}
+          <div className="flex items-center gap-4">
+            <div className="relative">
+              <button
+                onClick={() => setShowSymbolDropdown(!showSymbolDropdown)}
+                className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg border border-gray-600"
+              >
+                <span className="text-lg font-bold">{selectedSymbol}</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${showSymbolDropdown ? 'rotate-180' : ''}`} />
+              </button>
+
+              {showSymbolDropdown && (
+                <div className="absolute z-50 mt-1 w-64 max-h-96 overflow-y-auto bg-gray-800 border border-gray-700 rounded-lg shadow-lg">
+                  <input
+                    type="text"
+                    placeholder="Search symbol..."
+                    className="w-full px-3 py-2 bg-gray-900 border-b border-gray-700 text-sm focus:outline-none"
+                    onChange={() => {}}
+                  />
+                  {filteredSymbols.slice(0, 50).map((symbol) => (
+                    <button
+                      key={symbol}
+                      onClick={() => {
+                        setSelectedSymbol(symbol);
+                        setShowSymbolDropdown(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-700 ${
+                        symbol === selectedSymbol ? 'bg-gray-700 text-yellow-500' : ''
+                      }`}
+                    >
+                      {symbol}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Price Info */}
+            <div className="flex items-center gap-3">
+              <div className="text-2xl font-bold">
+                {currentPrice > 0 ? formatUSD(currentPrice) : '-'}
+              </div>
+              {priceChange24h !== 0 && (
+                <div className={`flex items-center gap-1 ${priceChange24h >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                  {priceChange24h >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+                  {formatPercent(priceChange24h)}
+                </div>
+              )}
+            </div>
+
+            {/* Funding Rate */}
+            <div className="text-sm">
+              <span className="text-gray-500">Funding: </span>
+              <span className={currentFundingRate >= 0 ? 'text-green-500' : 'text-red-500'}>
+                {(currentFundingRate * 100).toFixed(4)}%
+              </span>
+              {nextFundingTime > 0 && (
+                <span className="text-gray-500 ml-2">
+                  in {Math.floor((nextFundingTime - Date.now()) / 60000)}m
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Account Stats */}
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-gray-400" />
+              <div>
+                <div className="text-xs text-gray-500">Wallet Balance</div>
+                <div className="font-semibold">{formatUSD(walletBalance)}</div>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Available</div>
+              <div className="font-semibold text-green-500">{formatUSD(availableBalance)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Margin Used</div>
+              <div className="font-semibold text-yellow-500">{formatUSD(marginUsed)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Unrealized PnL</div>
+              <div className={`font-semibold ${getPositionColor(totalUnrealizedPnl)}`}>
+                {formatUSD(totalUnrealizedPnl)}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* News Dashboard */}
+      <div className="mb-4">
+        <NewsDashboard />
+      </div>
+
+      {/* Ginie AI Trader - Primary Futures Trading AI */}
+      <div className="mb-4 bg-gradient-to-br from-purple-900/40 to-blue-900/40 rounded-xl border border-purple-500/30 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-purple-500/20 rounded-lg">
+              <Brain className="w-6 h-6 text-purple-400" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-white">Ginie AI Trader</h2>
+              <p className="text-sm text-gray-400">Autonomous futures trading with AI signals</p>
+            </div>
+          </div>
+        </div>
+        <GiniePanel />
+      </div>
+
+      {/* Mode Capital Allocation & Safety Control */}
+      <div className="mb-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <ModeAllocationPanel />
+        <ModeSafetyPanel />
+      </div>
+
       {/* Main Grid Layout */}
       <div className="grid grid-cols-12 gap-4">
-        {/* Left Column - Trading Panel & Autopilot */}
+        {/* Left Column - Trading Panel */}
         <div className="col-span-12 lg:col-span-3 space-y-4">
           <FuturesTradingPanel />
-          <FuturesAutopilotPanel />
-          <CircuitBreakerPanel />
         </div>
 
         {/* Center Column - Order Book / Chart Toggle */}
@@ -409,24 +431,6 @@ export default function FuturesDashboard() {
           {/* Open Orders & Trade History */}
           <FuturesOrdersHistory />
 
-          {/* AI Trade Status Panel - Shows Recent Decisions */}
-          <AITradeStatusPanel />
-
-          {/* AI Signals Panel - Like Spot Dashboard */}
-          <div className="card">
-            <div className="card-header">
-              <div className="flex items-center gap-2">
-                <Brain className="w-5 h-5 text-purple-400" />
-                <h2 className="text-lg font-semibold">AI Signals - Autopilot Decisions</h2>
-              </div>
-            </div>
-            <div className="card-body p-0">
-              <AISignalsPanel />
-            </div>
-          </div>
-
-          {/* News Feed Panel */}
-          <NewsFeedPanel />
         </div>
       </div>
     </div>

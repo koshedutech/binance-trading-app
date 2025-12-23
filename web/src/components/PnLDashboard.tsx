@@ -45,7 +45,7 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
   // Fetch initial data
   useEffect(() => {
     fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 5000); // Update every 5 seconds
+    const interval = setInterval(fetchDashboardData, 30000); // Reduced from 5s to 30s to avoid rate limits
     return () => clearInterval(interval);
   }, []);
 
@@ -128,9 +128,11 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
     }).format(value);
   };
 
-  const formatPercent = (value: number) => {
-    const sign = value >= 0 ? '+' : '';
-    return `${sign}${value.toFixed(2)}%`;
+  const formatPercent = (value: number | string | null | undefined) => {
+    const num = typeof value === 'string' ? parseFloat(value) : value;
+    if (num === null || num === undefined || isNaN(num)) return '0.00%';
+    const sign = num >= 0 ? '+' : '';
+    return `${sign}${Number(num).toFixed(2)}%`;
   };
 
   return (
@@ -172,7 +174,7 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-400 text-sm">Win Rate</p>
-              <p className="text-2xl font-bold text-white">{winRate.toFixed(1)}%</p>
+              <p className="text-2xl font-bold text-white">{Number(winRate || 0).toFixed(1)}%</p>
             </div>
             <Target className="w-8 h-8 text-purple-400" />
           </div>
@@ -183,7 +185,7 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-gray-400 text-sm">Max Drawdown</p>
-              <p className="text-2xl font-bold text-orange-400">{maxDrawdown.toFixed(2)}%</p>
+              <p className="text-2xl font-bold text-orange-400">{Number(maxDrawdown || 0).toFixed(2)}%</p>
             </div>
             <AlertTriangle className="w-8 h-8 text-orange-400" />
           </div>
@@ -281,9 +283,9 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
                     <td className={`py-3 ${pos.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
                       {pos.side}
                     </td>
-                    <td className="py-3 text-right text-gray-300">{pos.entry_price.toFixed(4)}</td>
-                    <td className="py-3 text-right text-gray-300">{pos.current_price.toFixed(4)}</td>
-                    <td className="py-3 text-right text-gray-300">{pos.quantity.toFixed(6)}</td>
+                    <td className="py-3 text-right text-gray-300">{Number(pos.entry_price || 0).toFixed(4)}</td>
+                    <td className="py-3 text-right text-gray-300">{Number(pos.current_price || 0).toFixed(4)}</td>
+                    <td className="py-3 text-right text-gray-300">{Number(pos.quantity || 0).toFixed(6)}</td>
                     <td className={`py-3 text-right font-semibold ${pos.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                       {formatCurrency(pos.pnl)}
                     </td>

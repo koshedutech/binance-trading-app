@@ -212,13 +212,41 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 	entry := LogEntry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Level:     level.String(),
-		Message:   fmt.Sprintf(msg, args...),
+		Message:   msg,
 		Component: l.component,
 		TraceID:   l.traceID,
 	}
 
+	// Copy existing fields
 	if len(l.fields) > 0 {
-		entry.Fields = l.fields
+		entry.Fields = make(map[string]interface{}, len(l.fields)+len(args)/2)
+		for k, v := range l.fields {
+			entry.Fields[k] = v
+		}
+	}
+
+	// Handle args - support both printf-style and structured key-value pairs
+	if len(args) > 0 {
+		// Check if args look like key-value pairs (even count, first arg is string)
+		if len(args) >= 2 && len(args)%2 == 0 {
+			if _, ok := args[0].(string); ok {
+				// Treat as key-value pairs
+				if entry.Fields == nil {
+					entry.Fields = make(map[string]interface{}, len(args)/2)
+				}
+				for i := 0; i < len(args); i += 2 {
+					if key, ok := args[i].(string); ok {
+						entry.Fields[key] = args[i+1]
+					}
+				}
+			} else {
+				// Printf-style formatting
+				entry.Message = fmt.Sprintf(msg, args...)
+			}
+		} else {
+			// Printf-style formatting
+			entry.Message = fmt.Sprintf(msg, args...)
+		}
 	}
 
 	if l.includeFile {

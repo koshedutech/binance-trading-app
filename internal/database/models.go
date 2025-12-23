@@ -4,6 +4,13 @@ import (
 	"time"
 )
 
+// TradeSource constants
+const (
+	TradeSourceManual   = "manual"   // User-initiated trade
+	TradeSourceStrategy = "strategy" // Automated strategy trade
+	TradeSourceAI       = "ai"       // AI autopilot trade
+)
+
 // Trade represents a trading position in the database
 type Trade struct {
 	ID           int64     `json:"id"`
@@ -22,6 +29,19 @@ type Trade struct {
 	Status       string    `json:"status"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+	// Trade source: "manual", "strategy", or "ai"
+	TradeSource  string    `json:"trade_source"`
+	// AI Decision linking
+	AIDecisionID        *int64   `json:"ai_decision_id,omitempty"`
+	AIDecision          *AIDecision `json:"ai_decision,omitempty"`
+	// Trailing stop fields
+	TrailingStopEnabled bool     `json:"trailing_stop_enabled"`
+	TrailingStopPercent *float64 `json:"trailing_stop_percent,omitempty"`
+	HighestPrice        *float64 `json:"highest_price,omitempty"`
+	LowestPrice         *float64 `json:"lowest_price,omitempty"`
+	// Order IDs for TP/SL
+	TakeProfitOrderID   *int64   `json:"take_profit_order_id,omitempty"`
+	StopLossOrderID     *int64   `json:"stop_loss_order_id,omitempty"`
 }
 
 // Order represents an order in the database
@@ -170,4 +190,29 @@ type WatchlistItem struct {
 	Notes   *string    `json:"notes,omitempty"`
 	AddedAt time.Time  `json:"added_at"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// AIDecision represents an autopilot AI decision with all signal sources
+type AIDecision struct {
+	ID                  int64                  `json:"id"`
+	Symbol              string                 `json:"symbol"`
+	CurrentPrice        float64                `json:"current_price"`
+	Action              string                 `json:"action"`
+	Confidence          float64                `json:"confidence"`
+	Reasoning           string                 `json:"reasoning"`
+	Signals             map[string]interface{} `json:"signals"`
+	MLDirection         *string                `json:"ml_direction,omitempty"`
+	MLConfidence        *float64               `json:"ml_confidence,omitempty"`
+	SentimentDirection  *string                `json:"sentiment_direction,omitempty"`
+	SentimentConfidence *float64               `json:"sentiment_confidence,omitempty"`
+	LLMDirection        *string                `json:"llm_direction,omitempty"`
+	LLMConfidence       *float64               `json:"llm_confidence,omitempty"`
+	PatternDirection    *string                `json:"pattern_direction,omitempty"`
+	PatternConfidence   *float64               `json:"pattern_confidence,omitempty"`
+	BigCandleDirection  *string                `json:"bigcandle_direction,omitempty"`
+	BigCandleConfidence *float64               `json:"bigcandle_confidence,omitempty"`
+	ConfluenceCount     int                    `json:"confluence_count"`
+	RiskLevel           string                 `json:"risk_level"`
+	Executed            bool                   `json:"executed"`
+	CreatedAt           time.Time              `json:"created_at"`
 }

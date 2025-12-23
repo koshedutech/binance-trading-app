@@ -11,12 +11,12 @@ import (
 
 // SentimentConfig holds sentiment analyzer configuration
 type SentimentConfig struct {
-	Enabled              bool          `json:"enabled"`
-	FearGreedEnabled     bool          `json:"fear_greed_enabled"`
-	NewsEnabled          bool          `json:"news_enabled"`
-	CryptoPanicAPIKey    string        `json:"cryptopanic_api_key"`
-	UpdateInterval       time.Duration `json:"update_interval"`
-	SentimentWeight      float64       `json:"sentiment_weight"` // Weight in overall decision
+	Enabled           bool          `json:"enabled"`
+	FearGreedEnabled  bool          `json:"fear_greed_enabled"`
+	NewsEnabled       bool          `json:"news_enabled"`
+	CryptoNewsAPIKey  string        `json:"cryptonews_api_key"` // CryptoNews API key from cryptonews-api.com
+	UpdateInterval    time.Duration `json:"update_interval"`
+	SentimentWeight   float64       `json:"sentiment_weight"` // Weight in overall decision
 }
 
 // DefaultSentimentConfig returns default configuration
@@ -59,6 +59,9 @@ type NewsItem struct {
 	URL         string    `json:"url"`
 	Sentiment   float64   `json:"sentiment"` // -1 to +1
 	PublishedAt time.Time `json:"published_at"`
+	Tickers     []string  `json:"tickers,omitempty"`
+	Topic       string    `json:"topic,omitempty"`
+	IsImportant bool      `json:"is_important,omitempty"`
 }
 
 // Analyzer performs market sentiment analysis
@@ -179,15 +182,15 @@ func (a *Analyzer) updateSentiment() {
 		}()
 	}
 
-	// Fetch news sentiment
-	if a.config.NewsEnabled && a.config.CryptoPanicAPIKey != "" {
+	// Fetch news sentiment from CryptoNews API
+	if a.config.NewsEnabled && a.config.CryptoNewsAPIKey != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			news, err := a.fetchCryptoNews()
 			if err == nil && len(news) > 0 {
 				newsScore = calculateNewsScore(news)
-				sources = append(sources, "crypto_news")
+				sources = append(sources, "cryptonews_api")
 				a.mu.Lock()
 				a.newsCache = news
 				a.mu.Unlock()
@@ -242,11 +245,35 @@ func (a *Analyzer) fetchFearGreedIndex() (int, string, error) {
 	return value, fgResp.Data[0].ValueClassification, nil
 }
 
-// fetchCryptoNews fetches news from CryptoPanic API
+// fetchCryptoNews fetches news from CryptoNews API (cryptonews-api.com)
 func (a *Analyzer) fetchCryptoNews() ([]NewsItem, error) {
-	url := fmt.Sprintf("https://cryptopanic.com/api/v1/posts/?auth_token=%s&currencies=BTC,ETH&filter=hot",
-		a.config.CryptoPanicAPIKey)
+	// Fetch news for major trading tickers
+	tickers := "BTC,ETH,SOL,XRP,AVAX,DOGE,ADA,DOT,LINK,MATIC,BNB,PEPE,SHIB,ARB,OP"
 
+	// Fetch regular news sorted by rank (importance)
+	// Paid plan: fetch up to 50 items for comprehensive coverage
+	url := fmt.Sprintf("https://cryptonews-api.com/api/v1?tickers=%s&items=50&sortby=rank&token=%s",
+		tickers, a.config.CryptoNewsAPIKey)
+
+	news, err := a.fetchNewsFromURL(url, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Also fetch trending/breaking news
+	trendingURL := fmt.Sprintf("https://cryptonews-api.com/api/v1/category?section=alltickers&items=10&sortby=rank&token=%s",
+		a.config.CryptoNewsAPIKey)
+	trendingNews, err := a.fetchNewsFromURL(trendingURL, true)
+	if err == nil && len(trendingNews) > 0 {
+		// Prepend trending news (marked as important)
+		news = append(trendingNews, news...)
+	}
+
+	return news, nil
+}
+
+// fetchNewsFromURL fetches news from a specific CryptoNews API URL
+func (a *Analyzer) fetchNewsFromURL(url string, isImportant bool) ([]NewsItem, error) {
 	resp, err := a.httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch news: %w", err)
@@ -259,41 +286,59 @@ func (a *Analyzer) fetchCryptoNews() ([]NewsItem, error) {
 	}
 
 	var result struct {
-		Results []struct {
-			Title   string `json:"title"`
-			Source  struct {
-				Title string `json:"title"`
-			} `json:"source"`
-			URL         string `json:"url"`
-			PublishedAt string `json:"published_at"`
-			Votes       struct {
-				Positive int `json:"positive"`
-				Negative int `json:"negative"`
-			} `json:"votes"`
-		} `json:"results"`
+		Data []struct {
+			Title      string   `json:"title"`
+			NewsURL    string   `json:"news_url"`
+			SourceName string   `json:"source_name"`
+			Date       string   `json:"date"`
+			Sentiment  string   `json:"sentiment"` // "Positive", "Negative", "Neutral"
+			Text       string   `json:"text"`
+			Tickers    []string `json:"tickers"`
+			Topics     []string `json:"topics"`
+		} `json:"data"`
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse news: %w", err)
 	}
 
-	news := make([]NewsItem, 0, len(result.Results))
-	for _, item := range result.Results {
-		// Calculate sentiment from votes
-		totalVotes := item.Votes.Positive + item.Votes.Negative
+	news := make([]NewsItem, 0, len(result.Data))
+	for _, item := range result.Data {
+		// Convert sentiment string to numeric value
 		sentiment := 0.0
-		if totalVotes > 0 {
-			sentiment = float64(item.Votes.Positive-item.Votes.Negative) / float64(totalVotes)
+		switch item.Sentiment {
+		case "Positive":
+			sentiment = 0.7
+		case "Negative":
+			sentiment = -0.7
+		case "Neutral":
+			sentiment = 0.0
 		}
 
-		publishedAt, _ := time.Parse(time.RFC3339, item.PublishedAt)
+		// Parse date - CryptoNews API uses format like "Sat, 20 Dec 2025 01:15:21 -0500"
+		publishedAt, err := time.Parse(time.RFC1123Z, item.Date)
+		if err != nil {
+			// Try alternative formats
+			publishedAt, err = time.Parse("Mon, 02 Jan 2006 15:04:05 -0700", item.Date)
+			if err != nil {
+				publishedAt = time.Now() // Fallback to now if parsing fails
+			}
+		}
+
+		topic := ""
+		if len(item.Topics) > 0 {
+			topic = item.Topics[0]
+		}
 
 		news = append(news, NewsItem{
 			Title:       item.Title,
-			Source:      item.Source.Title,
-			URL:         item.URL,
+			Source:      item.SourceName,
+			URL:         item.NewsURL,
 			Sentiment:   sentiment,
 			PublishedAt: publishedAt,
+			Tickers:     item.Tickers,
+			Topic:       topic,
+			IsImportant: isImportant,
 		})
 	}
 
@@ -306,7 +351,7 @@ func calculateNewsScore(news []NewsItem) float64 {
 		return 0
 	}
 
-	// Weight recent news more heavily
+	// Weight news by recency and importance
 	now := time.Now()
 	totalWeight := 0.0
 	weightedSum := 0.0
@@ -314,12 +359,26 @@ func calculateNewsScore(news []NewsItem) float64 {
 	for _, item := range news {
 		age := now.Sub(item.PublishedAt).Hours()
 		weight := 1.0
+
+		// Time-based weighting
 		if age < 1 {
-			weight = 2.0 // Recent news weighted double
+			weight = 2.5 // Very recent news weighted heavily
+		} else if age < 3 {
+			weight = 2.0
 		} else if age < 6 {
 			weight = 1.5
 		} else if age > 24 {
 			weight = 0.5
+		}
+
+		// Important/trending news gets extra weight
+		if item.IsImportant {
+			weight *= 1.5
+		}
+
+		// Regulatory news can have major impact
+		if item.Topic == "regulations" || item.Topic == "government" {
+			weight *= 1.3
 		}
 
 		weightedSum += item.Sentiment * weight
@@ -356,6 +415,103 @@ func (a *Analyzer) GetRecentNews(limit int) []NewsItem {
 		return a.newsCache
 	}
 	return a.newsCache[:limit]
+}
+
+// GetNewsByTicker returns news filtered by a specific ticker
+func (a *Analyzer) GetNewsByTicker(ticker string, limit int) []NewsItem {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	result := make([]NewsItem, 0)
+	for _, item := range a.newsCache {
+		for _, t := range item.Tickers {
+			if t == ticker {
+				result = append(result, item)
+				break
+			}
+		}
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+// GetBreakingNews returns important/trending news items
+func (a *Analyzer) GetBreakingNews(limit int) []NewsItem {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	result := make([]NewsItem, 0)
+	for _, item := range a.newsCache {
+		if item.IsImportant {
+			result = append(result, item)
+		}
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+// GetNewsByTopic returns news filtered by topic
+func (a *Analyzer) GetNewsByTopic(topic string, limit int) []NewsItem {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	result := make([]NewsItem, 0)
+	for _, item := range a.newsCache {
+		if item.Topic == topic {
+			result = append(result, item)
+		}
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+// GetSentimentStats returns sentiment distribution statistics
+func (a *Analyzer) GetSentimentStats() map[string]int {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	stats := map[string]int{
+		"bullish": 0,
+		"bearish": 0,
+		"neutral": 0,
+	}
+
+	for _, item := range a.newsCache {
+		if item.Sentiment > 0.2 {
+			stats["bullish"]++
+		} else if item.Sentiment < -0.2 {
+			stats["bearish"]++
+		} else {
+			stats["neutral"]++
+		}
+	}
+
+	return stats
+}
+
+// GetAvailableTickers returns unique tickers from cached news
+func (a *Analyzer) GetAvailableTickers() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	tickerMap := make(map[string]bool)
+	for _, item := range a.newsCache {
+		for _, t := range item.Tickers {
+			tickerMap[t] = true
+		}
+	}
+
+	tickers := make([]string, 0, len(tickerMap))
+	for t := range tickerMap {
+		tickers = append(tickers, t)
+	}
+	return tickers
 }
 
 // IsEnabled returns if sentiment analysis is enabled

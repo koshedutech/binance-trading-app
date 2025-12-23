@@ -3,13 +3,24 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store';
 import { apiService } from './services/api';
 import { wsService } from './services/websocket';
+import { AuthProvider, useAuth, ProtectedRoute } from './contexts/AuthContext';
 import Dashboard from './pages/Dashboard';
 import VisualStrategyDemoEnhanced from './pages/VisualStrategyDemoEnhanced';
 import PatternScannerPage from './pages/PatternScannerPage';
+import FuturesDashboard from './pages/FuturesDashboard';
+import Investigate from './pages/Investigate';
+import EnhancedStrategyBuilder from './pages/EnhancedStrategyBuilder';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Profile from './pages/Profile';
+import APIKeys from './pages/APIKeys';
+import Billing from './pages/Billing';
 import Header from './components/Header';
 import ConnectionIndicator from './components/ConnectionIndicator';
 
-function App() {
+// Main app content that requires authentication context
+function AppContent() {
+  const { isAuthenticated, isLoading } = useAuth();
   const {
     setConnected,
     setWSConnected,
@@ -24,6 +35,11 @@ function App() {
   } = useStore();
 
   useEffect(() => {
+    // Only initialize data and websocket when authenticated
+    if (!isAuthenticated || isLoading) {
+      return;
+    }
+
     // Initialize data fetching
     const initializeData = async () => {
       try {
@@ -127,29 +143,108 @@ function App() {
       } catch (error) {
         console.error('Polling error:', error);
       }
-    }, 1000); // Poll every 1 second
+    }, 15000); // Poll every 15 seconds (reduced from 1s to avoid rate limits)
 
     // Cleanup
     return () => {
       clearInterval(pollInterval);
       wsService.disconnect();
     };
-  }, []);
+  }, [isAuthenticated, isLoading]);
+
+  // Show loading spinner while checking auth
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-dark-900 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
 
   return (
+    <div className="min-h-screen bg-dark-900">
+      {/* Always show header, connection indicator only when authenticated */}
+      <Header />
+      {isAuthenticated && <ConnectionIndicator />}
+      <main className={isAuthenticated ? "container mx-auto px-4 py-6" : ""}>
+        <Routes>
+          {/* Public routes */}
+          <Route path="/login" element={
+            isAuthenticated ? <Navigate to="/" replace /> : <Login />
+          } />
+          <Route path="/register" element={
+            isAuthenticated ? <Navigate to="/" replace /> : <Register />
+          } />
+
+          {/* Protected routes */}
+          <Route path="/" element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/dashboard" element={
+            <ProtectedRoute>
+              <Dashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/futures" element={
+            <ProtectedRoute requiredTier={['trader', 'pro', 'whale']}>
+              <FuturesDashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/investigate" element={
+            <ProtectedRoute requiredTier={['trader', 'pro', 'whale']}>
+              <Investigate />
+            </ProtectedRoute>
+          } />
+          <Route path="/strategy-builder" element={
+            <ProtectedRoute>
+              <EnhancedStrategyBuilder />
+            </ProtectedRoute>
+          } />
+          <Route path="/visual-strategy-advanced" element={
+            <ProtectedRoute>
+              <VisualStrategyDemoEnhanced />
+            </ProtectedRoute>
+          } />
+          <Route path="/pattern-scanner" element={
+            <ProtectedRoute>
+              <PatternScannerPage />
+            </ProtectedRoute>
+          } />
+          <Route path="/profile" element={
+            <ProtectedRoute>
+              <Profile />
+            </ProtectedRoute>
+          } />
+          <Route path="/api-keys" element={
+            <ProtectedRoute>
+              <APIKeys />
+            </ProtectedRoute>
+          } />
+          <Route path="/billing" element={
+            <ProtectedRoute>
+              <Billing />
+            </ProtectedRoute>
+          } />
+
+          {/* Catch all - redirect to login if not authenticated, dashboard if authenticated */}
+          <Route path="*" element={
+            isAuthenticated ? <Navigate to="/" replace /> : <Navigate to="/login" replace />
+          } />
+        </Routes>
+      </main>
+    </div>
+  );
+}
+
+// Main App component wrapped with providers
+function App() {
+  return (
     <BrowserRouter>
-      <div className="min-h-screen bg-dark-900">
-        <Header />
-        <ConnectionIndicator />
-        <main className="container mx-auto px-4 py-6">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/visual-strategy-advanced" element={<VisualStrategyDemoEnhanced />} />
-            <Route path="/pattern-scanner" element={<PatternScannerPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </main>
-      </div>
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
     </BrowserRouter>
   );
 }

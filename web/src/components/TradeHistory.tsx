@@ -316,7 +316,7 @@ export default function TradeHistory() {
                             <div className="font-semibold">{formatCurrency(trade.pnl)}</div>
                             <div className="text-xs">
                               {trade.pnl_percent !== undefined
-                                ? `${trade.pnl_percent >= 0 ? '+' : ''}${trade.pnl_percent.toFixed(2)}%`
+                                ? `${trade.pnl_percent >= 0 ? '+' : ''}${Number(trade.pnl_percent || 0).toFixed(2)}%`
                                 : ''
                               }
                             </div>

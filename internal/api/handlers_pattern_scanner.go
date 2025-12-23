@@ -1,8 +1,10 @@
 package api
 
 import (
+	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/strategy"
+	"log"
 	"net/http"
 	"sync"
 
@@ -23,11 +25,14 @@ type TimeframePatternResult struct {
 
 // SymbolPatternResult represents all patterns detected for a symbol
 type SymbolPatternResult struct {
-	Symbol     string                   `json:"symbol"`
-	Timeframes []TimeframePatternResult `json:"timeframes"`
+	Symbol         string                         `json:"symbol"`
+	Timeframes     []TimeframePatternResult       `json:"timeframes"`
+	GinieDecision  *autopilot.GinieDecisionReport `json:"ginie_decision,omitempty"`
+	GinieError     string                         `json:"ginie_error,omitempty"`
 }
 
 // handleScanPatterns scans multiple symbols across multiple timeframes for candlestick patterns
+// and triggers Ginie analysis for symbols where patterns are detected
 func (s *Server) handleScanPatterns(c *gin.Context) {
 	var req PatternScanRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -36,10 +41,17 @@ func (s *Server) handleScanPatterns(c *gin.Context) {
 	}
 
 	// Get Binance client
-	client, ok := s.botAPI.GetClient().(*binance.Client)
+	client, ok := s.botAPI.GetClient().(binance.BinanceClient)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Binance client not available"})
 		return
+	}
+
+	// Try to get Ginie analyzer for analysis after pattern detection
+	var ginie *autopilot.GinieAnalyzer
+	controller := s.getFuturesAutopilot()
+	if controller != nil {
+		ginie = controller.GetGinieAnalyzer()
 	}
 
 	results := []SymbolPatternResult{}
@@ -82,6 +94,20 @@ func (s *Server) handleScanPatterns(c *gin.Context) {
 
 			// Only add if patterns were found
 			if len(symbolResult.Timeframes) > 0 {
+				// Trigger Ginie analysis for symbols with detected patterns
+				if ginie != nil {
+					log.Printf("[PatternScanner] Patterns detected for %s, triggering Ginie analysis", sym)
+					decision, err := ginie.GenerateDecision(sym)
+					if err != nil {
+						log.Printf("[PatternScanner] Ginie analysis failed for %s: %v", sym, err)
+						symbolResult.GinieError = err.Error()
+					} else {
+						symbolResult.GinieDecision = decision
+						log.Printf("[PatternScanner] Ginie decision for %s: %s (confidence: %.1f%%)",
+							sym, decision.Recommendation, decision.ConfidenceScore*100)
+					}
+				}
+
 				mu.Lock()
 				results = append(results, symbolResult)
 				mu.Unlock()
@@ -91,13 +117,25 @@ func (s *Server) handleScanPatterns(c *gin.Context) {
 
 	wg.Wait()
 
+	// Log summary
+	if ginie != nil {
+		executeCount := 0
+		for _, r := range results {
+			if r.GinieDecision != nil && r.GinieDecision.Recommendation == autopilot.RecommendationExecute {
+				executeCount++
+			}
+		}
+		log.Printf("[PatternScanner] Scan complete: %d symbols with patterns, %d EXECUTE recommendations",
+			len(results), executeCount)
+	}
+
 	c.JSON(http.StatusOK, results)
 }
 
 // handleGetAllSymbols returns all available USDT symbols from Binance
 func (s *Server) handleGetAllSymbols(c *gin.Context) {
 	// Get Binance client
-	client, ok := s.botAPI.GetClient().(*binance.Client)
+	client, ok := s.botAPI.GetClient().(binance.BinanceClient)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Binance client not available"})
 		return

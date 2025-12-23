@@ -20,59 +20,221 @@ import (
 // quantityPrecision defines the decimal precision for each symbol's quantity
 // Based on Binance Futures trading rules
 var quantityPrecision = map[string]int{
+	// Top tier
 	"BTCUSDT":   3, // Min qty: 0.001
 	"ETHUSDT":   3, // Min qty: 0.001
-	"BNBUSDT":   2, // Min qty: 0.01
 	"SOLUSDT":   0, // Min qty: 1
+	"BNBUSDT":   2, // Min qty: 0.01
 	"XRPUSDT":   0, // Min qty: 1
 	"DOGEUSDT":  0, // Min qty: 1
 	"ADAUSDT":   0, // Min qty: 1
 	"AVAXUSDT":  0, // Min qty: 1
 	"LINKUSDT":  1, // Min qty: 0.1
 	"DOTUSDT":   0, // Min qty: 1
+	// High volume
 	"LTCUSDT":   2, // Min qty: 0.01
 	"ATOMUSDT":  1, // Min qty: 0.1
 	"UNIUSDT":   0, // Min qty: 1
 	"NEARUSDT":  0, // Min qty: 1
+	"MATICUSDT": 0, // Min qty: 1
+	"APTUSDT":   1, // Min qty: 0.1
+	"ARBUSDT":   0, // Min qty: 1
+	"OPUSDT":    0, // Min qty: 1
+	"SUIUSDT":   0, // Min qty: 1
+	"SEIUSDT":   0, // Min qty: 1
+	// Medium-high volume
+	"FTMUSDT":   0, // Min qty: 1
+	"SANDUSDT":  0, // Min qty: 1
+	"MANAUSDT":  0, // Min qty: 1
+	"GRTUSDT":   0, // Min qty: 1
+	"AAVEUSDT":  1, // Min qty: 0.1
+	"MKRUSDT":   3, // Min qty: 0.001
+	"SNXUSDT":   0, // Min qty: 1
+	"CRVUSDT":   0, // Min qty: 1
+	"LDOUSDT":   0, // Min qty: 1
+	"RNDRUSDT":  0, // Min qty: 1
+	// Popular alts
+	"INJUSDT":   1, // Min qty: 0.1
+	"TIAUSDT":   0, // Min qty: 1
+	"PYTHUSDT":  0, // Min qty: 1
+	"JUPUSDT":   0, // Min qty: 1
+	"WUSDT":     0, // Min qty: 1
+	"ENSUSDT":   1, // Min qty: 0.1
+	"BLURUSDT":  0, // Min qty: 1
+	"STXUSDT":   0, // Min qty: 1
+	"IMXUSDT":   0, // Min qty: 1
+	"FILUSDT":   0, // Min qty: 1
+	// Additional
+	"RUNEUSDT":   0, // Min qty: 1
+	"FETUSDT":    0, // Min qty: 1
+	"AGIXUSDT":   0, // Min qty: 1
+	"OCEANUSDT":  0, // Min qty: 1
+	"PENDLEUSDT": 0, // Min qty: 1 (whole numbers)
+	"JASMYUSDT":  0, // Min qty: 1
+	"GMXUSDT":    2, // Min qty: 0.01
+	"WLDUSDT":    0, // Min qty: 1
+	"ORDIUSDT":   1, // Min qty: 0.1
+	"ONDOUSDT":   0, // Min qty: 1
 }
 
 // roundQuantity rounds a quantity to the proper precision for a symbol
 func roundQuantity(symbol string, quantity float64) float64 {
-	precision, ok := quantityPrecision[symbol]
-	if !ok {
-		precision = 3 // Default to 3 decimal places
-	}
+	precision := getQuantityPrecision(symbol)
 	multiplier := math.Pow(10, float64(precision))
 	return math.Floor(quantity*multiplier) / multiplier
 }
 
-// pricePrecision defines the decimal precision for each symbol's price
-// Based on Binance Futures trading rules
-var pricePrecision = map[string]int{
-	"BTCUSDT":  2, // Tick size: 0.10
-	"ETHUSDT":  2, // Tick size: 0.01
-	"BNBUSDT":  2, // Tick size: 0.01
-	"SOLUSDT":  3, // Tick size: 0.001
-	"XRPUSDT":  4, // Tick size: 0.0001
-	"DOGEUSDT": 5, // Tick size: 0.00001
-	"ADAUSDT":  5, // Tick size: 0.00001
-	"AVAXUSDT": 3, // Tick size: 0.001
-	"LINKUSDT": 3, // Tick size: 0.001
-	"DOTUSDT":  3, // Tick size: 0.001
-	"LTCUSDT":  2, // Tick size: 0.01
-	"ATOMUSDT": 3, // Tick size: 0.001
-	"UNIUSDT":  4, // Tick size: 0.0001
-	"NEARUSDT": 4, // Tick size: 0.0001
+// ==================== FLOATING POINT COMPARISON HELPERS ====================
+// For commercial-grade trading, direct float comparisons can cause issues due to
+// floating point precision. These helpers use appropriate tolerances.
+
+// priceGreaterOrEqual returns true if a >= b with tolerance based on symbol's tick size
+func priceGreaterOrEqual(symbol string, a, b float64) bool {
+	tolerance := getTickSize(symbol)
+	return a >= b-tolerance
 }
 
-// roundPrice rounds a price to the proper precision for a symbol
-func roundPrice(symbol string, price float64) float64 {
-	precision, ok := pricePrecision[symbol]
-	if !ok {
-		precision = 2 // Default to 2 decimal places
+// priceLessOrEqual returns true if a <= b with tolerance based on symbol's tick size
+func priceLessOrEqual(symbol string, a, b float64) bool {
+	tolerance := getTickSize(symbol)
+	return a <= b+tolerance
+}
+
+// getTickSize returns the minimum price increment for a symbol
+func getTickSize(symbol string) float64 {
+	precision := getPricePrecision(symbol)
+	return 1.0 / math.Pow(10, float64(precision))
+}
+
+// ==================== END FLOATING POINT COMPARISON HELPERS ====================
+
+// pricePrecision defines the decimal precision for each symbol's price
+// Based on Binance Futures trading rules (fallback values if API fetch fails)
+var pricePrecision = map[string]int{
+	"BTCUSDT":   2, // Tick size: 0.10
+	"ETHUSDT":   2, // Tick size: 0.01
+	"BNBUSDT":   2, // Tick size: 0.01
+	"SOLUSDT":   3, // Tick size: 0.001
+	"XRPUSDT":   4, // Tick size: 0.0001
+	"DOGEUSDT":  5, // Tick size: 0.00001
+	"ADAUSDT":   5, // Tick size: 0.00001
+	"AVAXUSDT":  3, // Tick size: 0.001
+	"LINKUSDT":  3, // Tick size: 0.001
+	"DOTUSDT":   3, // Tick size: 0.001
+	"LTCUSDT":   2, // Tick size: 0.01
+	"ATOMUSDT":  3, // Tick size: 0.001
+	"UNIUSDT":   4, // Tick size: 0.0001
+	"NEARUSDT":  4, // Tick size: 0.0001
+	"CRVUSDT":   3, // Tick size: 0.001
+	"SEIUSDT":   5, // Tick size: 0.00001
+	"JUPUSDT":   5, // Tick size: 0.00001
+	"BLURUSDT":  5, // Tick size: 0.00001
+	"BCHUSDT":   2, // Tick size: 0.01
+}
+
+// SymbolPrecision holds precision data for a symbol
+type SymbolPrecision struct {
+	Price    int
+	Quantity int
+}
+
+// Dynamic precision cache loaded from Binance API
+var (
+	symbolPrecisionCache   = make(map[string]SymbolPrecision)
+	precisionCacheMu       sync.RWMutex
+	precisionCacheLoaded   bool
+)
+
+// LoadSymbolPrecisions fetches precision data from Binance exchangeInfo API
+// This should be called once during initialization
+func LoadSymbolPrecisions(client binance.FuturesClient) error {
+	info, err := client.GetFuturesExchangeInfo()
+	if err != nil {
+		return fmt.Errorf("failed to fetch exchange info: %w", err)
 	}
+
+	precisionCacheMu.Lock()
+	defer precisionCacheMu.Unlock()
+
+	count := 0
+	for _, sym := range info.Symbols {
+		if sym.Status == "TRADING" {
+			symbolPrecisionCache[sym.Symbol] = SymbolPrecision{
+				Price:    sym.PricePrecision,
+				Quantity: sym.QuantityPrecision,
+			}
+			count++
+		}
+	}
+	precisionCacheLoaded = true
+	return nil
+}
+
+// getPricePrecision gets price precision from cache or falls back to hardcoded map
+func getPricePrecision(symbol string) int {
+	precisionCacheMu.RLock()
+	defer precisionCacheMu.RUnlock()
+
+	if prec, ok := symbolPrecisionCache[symbol]; ok {
+		return prec.Price
+	}
+	// Fallback to hardcoded map
+	if prec, ok := pricePrecision[symbol]; ok {
+		return prec
+	}
+	return 2 // Default fallback
+}
+
+// getQuantityPrecision gets quantity precision from cache or falls back to hardcoded map
+func getQuantityPrecision(symbol string) int {
+	precisionCacheMu.RLock()
+	defer precisionCacheMu.RUnlock()
+
+	if prec, ok := symbolPrecisionCache[symbol]; ok {
+		return prec.Quantity
+	}
+	// Fallback to hardcoded map
+	if prec, ok := quantityPrecision[symbol]; ok {
+		return prec
+	}
+	return 0 // Default fallback (whole numbers)
+}
+
+// roundPrice rounds a price to the proper precision for a symbol (uses standard rounding)
+func roundPrice(symbol string, price float64) float64 {
+	precision := getPricePrecision(symbol)
 	multiplier := math.Pow(10, float64(precision))
 	return math.Round(price*multiplier) / multiplier
+}
+
+// roundPriceForTP rounds price appropriately for take-profit orders
+// For LONG: rounds DOWN (Floor) so TP triggers at or before target
+// For SHORT: rounds UP (Ceil) so TP triggers at or before target
+func roundPriceForTP(symbol string, price float64, side string) float64 {
+	precision := getPricePrecision(symbol)
+	multiplier := math.Pow(10, float64(precision))
+
+	if side == "LONG" {
+		// For LONG: round DOWN so TP triggers when price reaches/exceeds target
+		return math.Floor(price*multiplier) / multiplier
+	}
+	// For SHORT: round UP so TP triggers when price drops to/below target
+	return math.Ceil(price*multiplier) / multiplier
+}
+
+// roundPriceForSL rounds price appropriately for stop-loss orders
+// For LONG: rounds UP (Ceil) so SL triggers before losses exceed threshold
+// For SHORT: rounds DOWN (Floor) so SL triggers before losses exceed threshold
+func roundPriceForSL(symbol string, price float64, side string) float64 {
+	precision := getPricePrecision(symbol)
+	multiplier := math.Pow(10, float64(precision))
+
+	if side == "LONG" {
+		// For LONG: round UP so SL triggers earlier (protects capital)
+		return math.Ceil(price*multiplier) / multiplier
+	}
+	// For SHORT: round DOWN so SL triggers earlier (protects capital)
+	return math.Floor(price*multiplier) / multiplier
 }
 
 // formatSignalBreakdown formats signal breakdown map into a readable string
@@ -102,6 +264,26 @@ type FuturesController struct {
 	mlPredictor       *ml.Predictor
 	llmAnalyzer       *llm.Analyzer
 	sentimentAnalyzer *sentiment.Analyzer
+
+	// Enhanced signal aggregation
+	signalAggregator *SignalAggregator
+	tradingStyle     TradingStyle
+	styleConfig      *TradingStyleConfig
+
+	// Coin classification
+	coinClassifier   *CoinClassifier
+
+	// Hedging
+	hedgingManager   *HedgingManager
+
+	// Adaptive decision engine (human-like decisions)
+	adaptiveEngine   *AdaptiveDecisionEngine
+
+	// Ginie analyzer (advanced multi-mode AI trader)
+	ginieAnalyzer    *GinieAnalyzer
+
+	// Ginie autopilot (autonomous multi-mode trading)
+	ginieAutopilot   *GinieAutopilot
 
 	// State
 	running    bool
@@ -137,6 +319,19 @@ type FuturesController struct {
 	scalpingTradesToday int                  // Daily trade counter for scalping mode
 	scalpingDayStart    time.Time            // When the current trading day started
 	lastCloseTime       map[string]time.Time // symbol -> last close time (for quick re-entry)
+
+	// AI Component Usage Tracking
+	mlLastUsed            time.Time
+	mlSuccessCount        int
+	mlTotalCount          int
+	llmLastUsed           time.Time
+	llmSuccessCount       int
+	llmTotalCount         int
+	sentimentLastUsed     time.Time
+	sentimentSuccessCount int
+	sentimentTotalCount   int
+	confluenceAgreements  int
+	confluenceTotal       int
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -169,8 +364,11 @@ type FuturesAutopilotPosition struct {
 	EntryPrice       float64 // Weighted average entry price
 	Quantity         float64 // Total quantity across all entries
 	Leverage         int
-	TakeProfit       float64
-	StopLoss         float64
+	TakeProfit       float64 // Legacy TP
+	StopLoss         float64 // Current SL (moves to buy price after TP1)
+	TakeProfit1      float64 // TP1 level (10% ROI)
+	TakeProfit2      float64 // TP2 level (30% ROI)
+	TP1SLMoveDone    bool    // Whether SL moved to buy price at TP1
 	TrailingActivated bool
 	HighestPrice     float64
 	LowestPrice      float64
@@ -199,6 +397,8 @@ type FuturesAutopilotDecision struct {
 	// For dynamic SL/TP calculation
 	LLMAnalysis     *llm.MarketAnalysis
 	Klines          []binance.Kline
+	// Adaptive engine position sizing (0.5-1.5 multiplier based on context)
+	PositionSizeMultiplier float64
 }
 
 // SignalContribution represents a single signal's contribution
@@ -224,13 +424,56 @@ func NewFuturesController(
 		logger.Warn("FuturesController initializing WITHOUT circuit breaker - this will cause issues!")
 	}
 
+	// Load symbol precisions from Binance API for accurate price/quantity rounding
+	if err := LoadSymbolPrecisions(futuresClient); err != nil {
+		logger.Warn("Failed to load symbol precisions from Binance API, using fallback values", "error", err)
+	} else {
+		precisionCacheMu.RLock()
+		symbolCount := len(symbolPrecisionCache)
+		precisionCacheMu.RUnlock()
+		logger.Info("Loaded symbol precisions from Binance API", "symbols", symbolCount)
+	}
+
+	// Initialize signal aggregator
+	signalAgg := NewSignalAggregator(futuresClient, logger)
+
+	// Default to swing trading style
+	defaultStyle := StyleSwing
+	styleConfig := GetDefaultStyleConfig(defaultStyle)
+
+	// Initialize coin classifier
+	coinClassifier := NewCoinClassifier(futuresClient, logger)
+
+	// Initialize hedging manager
+	hedgingMgr := NewHedgingManager(cfg, futuresClient, logger)
+
+	// Initialize adaptive decision engine
+	adaptiveEng := NewAdaptiveDecisionEngine(signalAgg, futuresClient, logger)
+	adaptiveEng.SetStyleConfig(styleConfig)
+
+	// Initialize Ginie analyzer (advanced multi-mode AI trader)
+	ginieAn := NewGinieAnalyzer(futuresClient, signalAgg, logger)
+
+	// Initialize Ginie autopilot (autonomous multi-mode trading)
+	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo)
+
+	// Load persisted PnL stats
+	ginieAuto.LoadPnLStats()
+
+	// Sync existing positions from Binance
+	if syncCount, err := ginieAuto.SyncWithExchange(); err != nil {
+		logger.Error("Failed to sync Ginie positions from Binance", "error", err)
+	} else if syncCount > 0 {
+		logger.Info("Synced Ginie positions from Binance", "count", syncCount)
+	}
+
 	return &FuturesController{
 		config:             cfg,
 		futuresClient:      futuresClient,
 		circuitBreaker:     circuitBreaker,
 		repo:               repo,
 		logger:             logger,
-		dryRun:             true, // Start in dry run mode by default
+		dryRun:             false, // Default to LIVE mode - will be overridden by LoadSavedSettings()
 		stopChan:           make(chan struct{}),
 		activePositions:    make(map[string]*FuturesAutopilotPosition),
 		currentRiskLevel:   cfg.RiskLevel,
@@ -245,6 +488,20 @@ func NewFuturesController(
 		scalpingTradesToday: 0,
 		scalpingDayStart:    time.Now().Truncate(24 * time.Hour),
 		lastCloseTime:       make(map[string]time.Time),
+		// Enhanced signal aggregation
+		signalAggregator:    signalAgg,
+		tradingStyle:        defaultStyle,
+		styleConfig:         styleConfig,
+		// Coin classification
+		coinClassifier:      coinClassifier,
+		// Hedging
+		hedgingManager:      hedgingMgr,
+		// Adaptive decision engine
+		adaptiveEngine:      adaptiveEng,
+		// Ginie analyzer
+		ginieAnalyzer:       ginieAn,
+		// Ginie autopilot
+		ginieAutopilot:      ginieAuto,
 	}
 }
 
@@ -308,31 +565,202 @@ func (fc *FuturesController) LoadSavedSettings() {
 		fc.profitRiskLevel = settings.ProfitReinvestRiskLevel
 	}
 
+	// Apply Ginie Autopilot settings
+	if fc.ginieAutopilot != nil {
+		ginieConfig := fc.ginieAutopilot.GetConfig()
+		ginieConfig.DryRun = settings.GinieDryRunMode
+		if settings.GinieRiskLevel != "" {
+			ginieConfig.RiskLevel = settings.GinieRiskLevel
+		}
+		if settings.GinieMaxUSD > 0 {
+			ginieConfig.MaxUSDPerPosition = settings.GinieMaxUSD
+		}
+		if settings.GinieLeverage > 0 {
+			ginieConfig.DefaultLeverage = settings.GinieLeverage
+		}
+		if settings.GinieMinConfidence > 0 {
+			ginieConfig.MinConfidenceToTrade = settings.GinieMinConfidence
+		}
+		if settings.GinieMaxPositions > 0 {
+			ginieConfig.MaxPositions = settings.GinieMaxPositions
+		}
+
+		// Apply Ginie circuit breaker settings
+		ginieConfig.CircuitBreakerEnabled = settings.CircuitBreakerEnabled
+		if settings.MaxLossPerHour > 0 {
+			ginieConfig.CBMaxLossPerHour = settings.MaxLossPerHour
+		}
+		if settings.MaxDailyLoss > 0 {
+			ginieConfig.CBMaxDailyLoss = settings.MaxDailyLoss
+		}
+		if settings.MaxConsecutiveLosses > 0 {
+			ginieConfig.CBMaxConsecutiveLosses = settings.MaxConsecutiveLosses
+		}
+		if settings.CooldownMinutes > 0 {
+			ginieConfig.CBCooldownMinutes = settings.CooldownMinutes
+		}
+
+		fc.ginieAutopilot.SetConfig(ginieConfig)
+		fc.logger.Info("Applied Ginie autopilot settings",
+			"dry_run", ginieConfig.DryRun,
+			"risk_level", ginieConfig.RiskLevel,
+			"max_usd", ginieConfig.MaxUSDPerPosition,
+			"leverage", ginieConfig.DefaultLeverage,
+			"min_confidence", ginieConfig.MinConfidenceToTrade,
+			"max_positions", ginieConfig.MaxPositions,
+			"circuit_breaker_enabled", ginieConfig.CircuitBreakerEnabled,
+			"cb_max_loss_per_hour", ginieConfig.CBMaxLossPerHour,
+			"cb_max_daily_loss", ginieConfig.CBMaxDailyLoss,
+			"cb_max_consecutive_losses", ginieConfig.CBMaxConsecutiveLosses,
+			"cb_cooldown_minutes", ginieConfig.CBCooldownMinutes,
+			"auto_start", settings.GinieAutoStart)
+
+		// Auto-start Ginie if enabled in settings (persists across restarts)
+		if settings.GinieAutoStart {
+			fc.logger.Info("Auto-starting Ginie autopilot (was running before restart)",
+				"mode", map[bool]string{true: "PAPER", false: "LIVE"}[ginieConfig.DryRun])
+			go func() {
+				fc.logger.Info("Calling Ginie Start() from auto-start goroutine")
+				if err := fc.ginieAutopilot.Start(); err != nil {
+					fc.logger.Error("Failed to auto-start Ginie autopilot", "error", err)
+				} else {
+					fc.logger.Info("Ginie auto-start completed successfully")
+				}
+			}()
+		}
+	}
+
 	fc.logger.Info("Loaded saved autopilot settings",
 		"dynamic_sltp_enabled", settings.DynamicSLTPEnabled,
 		"scalping_enabled", settings.ScalpingModeEnabled,
 		"circuit_breaker_enabled", settings.CircuitBreakerEnabled,
 		"risk_level", settings.RiskLevel,
 		"dry_run", settings.DryRunMode,
-		"max_usd_allocation", settings.MaxUSDAllocation)
+		"max_usd_allocation", settings.MaxUSDAllocation,
+		"ginie_auto_start", settings.GinieAutoStart)
 }
 
 // SetMLPredictor sets the ML predictor
 func (fc *FuturesController) SetMLPredictor(p *ml.Predictor) {
 	fc.mlPredictor = p
+	if fc.signalAggregator != nil {
+		fc.signalAggregator.SetMLPredictor(p)
+	}
 }
 
 // SetLLMAnalyzer sets the LLM analyzer
 func (fc *FuturesController) SetLLMAnalyzer(a *llm.Analyzer) {
 	fc.llmAnalyzer = a
+	if fc.signalAggregator != nil {
+		fc.signalAggregator.SetLLMAnalyzer(a)
+	}
+	// Pass to Ginie autopilot for adaptive SL/TP
+	if fc.ginieAutopilot != nil {
+		fc.ginieAutopilot.SetLLMAnalyzer(a)
+	}
+	// Pass LLM client to Ginie analyzer for AI-based coin selection
+	if fc.ginieAnalyzer != nil && a != nil {
+		fc.ginieAnalyzer.SetLLMClient(a.GetClient())
+	}
 }
 
 // SetSentimentAnalyzer sets the sentiment analyzer
 func (fc *FuturesController) SetSentimentAnalyzer(a *sentiment.Analyzer) {
 	fc.sentimentAnalyzer = a
+	if fc.signalAggregator != nil {
+		fc.signalAggregator.SetSentimentAnalyzer(a)
+	}
 }
 
-// SetDryRun sets dry run mode
+// SetTradingStyle sets the trading style
+func (fc *FuturesController) SetTradingStyle(style TradingStyle) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.tradingStyle = style
+	fc.styleConfig = GetDefaultStyleConfig(style)
+
+	// Update adaptive engine with new style config
+	if fc.adaptiveEngine != nil {
+		fc.adaptiveEngine.SetStyleConfig(fc.styleConfig)
+	}
+
+	fc.logger.Info("Trading style updated",
+		"style", string(style),
+		"leverage", fc.styleConfig.DefaultLeverage,
+		"min_confidence", fc.styleConfig.MinConfidence)
+}
+
+// GetTradingStyle returns the current trading style
+func (fc *FuturesController) GetTradingStyle() TradingStyle {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.tradingStyle
+}
+
+// GetStyleConfig returns the current style configuration
+func (fc *FuturesController) GetStyleConfig() *TradingStyleConfig {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.styleConfig
+}
+
+// GetCoinClassifier returns the coin classifier
+func (fc *FuturesController) GetCoinClassifier() *CoinClassifier {
+	return fc.coinClassifier
+}
+
+// GetHedgingManager returns the hedging manager
+func (fc *FuturesController) GetHedgingManager() *HedgingManager {
+	return fc.hedgingManager
+}
+
+// GetAdaptiveEngine returns the adaptive decision engine
+func (fc *FuturesController) GetAdaptiveEngine() *AdaptiveDecisionEngine {
+	return fc.adaptiveEngine
+}
+
+// GetGinieAnalyzer returns the Ginie AI analyzer
+func (fc *FuturesController) GetGinieAnalyzer() *GinieAnalyzer {
+	return fc.ginieAnalyzer
+}
+
+// GetGinieAutopilot returns the Ginie autonomous trading system
+func (fc *FuturesController) GetGinieAutopilot() *GinieAutopilot {
+	return fc.ginieAutopilot
+}
+
+// StartGinieAutopilot starts the Ginie autonomous trading
+func (fc *FuturesController) StartGinieAutopilot() error {
+	if fc.ginieAutopilot == nil {
+		return fmt.Errorf("Ginie autopilot not initialized")
+	}
+	return fc.ginieAutopilot.Start()
+}
+
+// StopGinieAutopilot stops the Ginie autonomous trading
+func (fc *FuturesController) StopGinieAutopilot() error {
+	if fc.ginieAutopilot == nil {
+		return fmt.Errorf("Ginie autopilot not initialized")
+	}
+	return fc.ginieAutopilot.Stop()
+}
+
+// GetDryRun returns the current dry run mode status
+func (fc *FuturesController) GetDryRun() bool {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.dryRun
+}
+
+// GetFuturesClient returns the actual futures client being used by the controller
+func (fc *FuturesController) GetFuturesClient() binance.FuturesClient {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.futuresClient
+}
+
+// SetDryRun sets dry run mode and propagates to Ginie
 func (fc *FuturesController) SetDryRun(enabled bool) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
@@ -354,9 +782,37 @@ func (fc *FuturesController) SetDryRun(enabled bool) {
 		fc.dailyPnL = 0
 
 		fc.logger.Info("Futures autopilot statistics reset for new mode")
+
+		// Also update Ginie autopilot's dry run config
+		if fc.ginieAutopilot != nil {
+			ginieConfig := fc.ginieAutopilot.GetConfig()
+			if ginieConfig != nil && ginieConfig.DryRun != enabled {
+				ginieConfig.DryRun = enabled
+				fc.ginieAutopilot.SetConfig(ginieConfig)
+				fc.logger.Info("Ginie autopilot dry_run updated", "dry_run", enabled)
+
+				// Clear Ginie positions when switching modes
+				fc.ginieAutopilot.ClearPositions()
+			}
+		}
 	}
 
 	fc.dryRun = enabled
+}
+
+// SetFuturesClient updates the futures client (used when switching between paper/live modes)
+func (fc *FuturesController) SetFuturesClient(client binance.FuturesClient) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	fc.futuresClient = client
+	fc.logger.Info("Futures controller client updated")
+
+	// Also update Ginie's client
+	if fc.ginieAutopilot != nil {
+		fc.ginieAutopilot.SetFuturesClient(client)
+		fc.logger.Info("Ginie autopilot client updated")
+	}
 }
 
 // IsDryRun returns current dry run status
@@ -380,13 +836,19 @@ func (fc *FuturesController) Start() error {
 	// Sync with actual Binance positions on startup
 	fc.syncWithActualPositions()
 
+	// Start coin classifier
+	if fc.coinClassifier != nil {
+		fc.coinClassifier.Start()
+	}
+
 	fc.wg.Add(1)
 	go fc.runLoop()
 
 	fc.logger.Info("Futures autopilot started",
 		"dry_run", fc.dryRun,
 		"risk_level", fc.config.RiskLevel,
-		"leverage", fc.config.DefaultLeverage)
+		"leverage", fc.config.DefaultLeverage,
+		"trading_style", string(fc.tradingStyle))
 
 	return nil
 }
@@ -401,6 +863,11 @@ func (fc *FuturesController) Stop() {
 	fc.running = false
 	close(fc.stopChan)
 	fc.mu.Unlock()
+
+	// Stop coin classifier
+	if fc.coinClassifier != nil {
+		fc.coinClassifier.Stop()
+	}
 
 	fc.wg.Wait()
 	fc.logger.Info("Futures autopilot stopped")
@@ -1093,6 +1560,16 @@ func (fc *FuturesController) syncWithActualPositions() {
 				stopLoss = pos.EntryPrice * (1 + slPricePercent/100)
 			}
 
+			// Calculate TP1 and TP2 for synced position
+			var tp1, tp2 float64
+			if side == "LONG" {
+				tp1 = pos.EntryPrice * (1 + fc.config.TakeProfitPercent1/100)
+				tp2 = pos.EntryPrice * (1 + fc.config.TakeProfitPercent2/100)
+			} else {
+				tp1 = pos.EntryPrice * (1 - fc.config.TakeProfitPercent1/100)
+				tp2 = pos.EntryPrice * (1 - fc.config.TakeProfitPercent2/100)
+			}
+
 			fc.activePositions[pos.Symbol] = &FuturesAutopilotPosition{
 				Symbol:       pos.Symbol,
 				Side:         side,
@@ -1100,6 +1577,8 @@ func (fc *FuturesController) syncWithActualPositions() {
 				Quantity:     absAmt,
 				Leverage:     leverage,
 				TakeProfit:   roundPrice(pos.Symbol, takeProfit),
+				TakeProfit1:  roundPrice(pos.Symbol, tp1),
+				TakeProfit2:  roundPrice(pos.Symbol, tp2),
 				StopLoss:     roundPrice(pos.Symbol, stopLoss),
 				HighestPrice: pos.EntryPrice,
 				LowestPrice:  pos.EntryPrice,
@@ -1240,13 +1719,10 @@ func (fc *FuturesController) syncWithActualPositions() {
 func (fc *FuturesController) runLoop() {
 	defer fc.wg.Done()
 
-	interval := time.Duration(fc.config.DecisionIntervalSecs) * time.Second
-	if interval < time.Second {
-		interval = 5 * time.Second
-	}
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	// DEPRECATED: Old FuturesController trading loop is disabled.
+	// All Futures trading is now handled by GinieAutopilot.
+	// This loop only maintains position sync for compatibility.
+	fc.logger.Info("FuturesController loop started (trading disabled - use Ginie instead)")
 
 	// Sync positions every minute to prevent allocation drift
 	syncTicker := time.NewTicker(60 * time.Second)
@@ -1261,8 +1737,9 @@ func (fc *FuturesController) runLoop() {
 			return
 		case <-syncTicker.C:
 			fc.syncWithActualPositions()
-		case <-ticker.C:
-			fc.evaluateMarket()
+		// NOTE: evaluateMarket() is intentionally disabled.
+		// Old AI trading has been moved to SpotController for Spot trading.
+		// Futures trading is now exclusively handled by GinieAutopilot.
 		}
 	}
 }
@@ -1398,7 +1875,7 @@ func (fc *FuturesController) evaluateSymbol(symbol string) {
 	}
 }
 
-// collectSignals collects signals from all AI sources
+// collectSignals collects signals from all AI sources using the enhanced signal aggregator
 func (fc *FuturesController) collectSignals(symbol string, currentPrice float64, klines []binance.Kline) *FuturesAutopilotDecision {
 	decision := &FuturesAutopilotDecision{
 		Symbol:          symbol,
@@ -1407,169 +1884,177 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 		Klines:          klines, // Store for dynamic SL/TP calculation
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	// Use the enhanced signal aggregator to collect from all 6 sources
+	if fc.signalAggregator == nil {
+		fc.logger.Warn("Signal aggregator not initialized", "symbol", symbol)
+		decision.RejectionReason = "Signal aggregator not initialized"
+		return decision
+	}
 
+	// Get current trading style for signal weighting
+	fc.mu.RLock()
+	tradingStyle := fc.tradingStyle
+	fc.mu.RUnlock()
+
+	// Collect signals from all sources (ML, LLM, Sentiment, Pattern, Technical, MTF)
+	signals, llmAnalysis := fc.signalAggregator.CollectAllSignals(symbol, currentPrice, klines, tradingStyle)
+
+	// Track AI component usage timestamps based on signals received
+	now := time.Now()
+	fc.mu.Lock()
+	for _, sig := range signals {
+		switch sig.Source {
+		case "ml_predictor":
+			fc.mlLastUsed = now
+			fc.mlTotalCount++
+		case "llm_analyzer":
+			fc.llmLastUsed = now
+			fc.llmTotalCount++
+		case "sentiment":
+			fc.sentimentLastUsed = now
+			fc.sentimentTotalCount++
+		}
+	}
+	fc.mu.Unlock()
+
+	// Store LLM analysis for dynamic SL/TP calculation
+	if llmAnalysis != nil {
+		decision.LLMAnalysis = llmAnalysis
+	}
+
+	// Convert enhanced signals to legacy format for backward compatibility
+	decision.SignalBreakdown = ConvertToSignalBreakdown(signals)
+
+	// Count signals by direction
 	longSignals := 0
 	shortSignals := 0
-	totalConfidence := 0.0
-	signalCount := 0
+	signalCount := len(signals)
 
-	// ML Predictor Signal
-	if fc.mlPredictor != nil && len(klines) >= 30 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			prediction, err := fc.mlPredictor.Predict(symbol, klines, currentPrice, ml.Timeframe60s)
-			if err != nil || prediction == nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-
-			direction := "neutral"
-			// Convert prediction direction to signal
-			if prediction.Direction == "up" && prediction.Confidence > 0.5 {
-				direction = "long"
-				longSignals++
-			} else if prediction.Direction == "down" && prediction.Confidence > 0.5 {
-				direction = "short"
-				shortSignals++
-			}
-
-			decision.SignalBreakdown["ml_predictor"] = SignalContribution{
-				Direction:  direction,
-				Confidence: prediction.Confidence,
-				Reasoning:  fmt.Sprintf("ML predicted: %s (%.1f%%)", prediction.Direction, prediction.PredictedMove*100),
-			}
-			totalConfidence += prediction.Confidence
-			signalCount++
-		}()
+	for _, s := range signals {
+		switch s.Direction {
+		case "long":
+			longSignals++
+		case "short":
+			shortSignals++
+		}
 	}
 
-	// LLM Analyzer Signal
-	if fc.llmAnalyzer != nil && fc.llmAnalyzer.IsEnabled() && len(klines) >= 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			analysis, err := fc.llmAnalyzer.AnalyzeMarket(symbol, "1m", klines)
-			if err != nil || analysis == nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-
-			// Store LLM analysis for dynamic SL/TP calculation
-			decision.LLMAnalysis = analysis
-
-			direction := "neutral"
-			if analysis.Direction == "long" && analysis.Confidence >= 0.5 {
-				direction = "long"
-				longSignals++
-			} else if analysis.Direction == "short" && analysis.Confidence >= 0.5 {
-				direction = "short"
-				shortSignals++
-			}
-
-			decision.SignalBreakdown["llm_analyzer"] = SignalContribution{
-				Direction:  direction,
-				Confidence: analysis.Confidence,
-				Reasoning:  analysis.Reasoning,
-			}
-			totalConfidence += analysis.Confidence
-			signalCount++
-		}()
+	// Track confluence (when 2+ signals agree on direction)
+	fc.mu.Lock()
+	fc.confluenceTotal++
+	if longSignals >= 2 || shortSignals >= 2 {
+		fc.confluenceAgreements++
 	}
+	fc.mu.Unlock()
 
-	// Sentiment Signal
-	if fc.sentimentAnalyzer != nil && fc.sentimentAnalyzer.IsEnabled() {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			score := fc.sentimentAnalyzer.GetSentiment()
-			if score == nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-
-			direction := "neutral"
-			confidence := 0.5 // Default confidence
-			if score.Overall > 0.3 {
-				direction = "long"
-				confidence = score.Overall
-				longSignals++
-			} else if score.Overall < -0.3 {
-				direction = "short"
-				confidence = -score.Overall
-				shortSignals++
-			}
-
-			decision.SignalBreakdown["sentiment"] = SignalContribution{
-				Direction:  direction,
-				Confidence: confidence,
-				Reasoning:  fmt.Sprintf("Fear/Greed: %d (%s)", score.FearGreedIndex, score.FearGreedLabel),
-			}
-			totalConfidence += confidence
-			signalCount++
-		}()
-	}
-
-	wg.Wait()
-
-	fc.logger.Info("Signal collection complete",
-		"symbol", symbol,
-		"long_signals", longSignals,
-		"short_signals", shortSignals,
-		"signal_count", signalCount,
-		"total_confidence", totalConfidence)
-
-	// Determine action based on signals
-	if signalCount > 0 {
-		decision.Confidence = totalConfidence / float64(signalCount)
-	}
-
-	// Check confluence requirement (0 = any signal is enough)
+	// Use aggregator to determine action with weighted decision
+	minConfidence := fc.config.MinConfidence
 	confluenceRequired := fc.config.RequireConfluence
 
-	// When confluence is 0, approve if we have ANY directional signal
-	if confluenceRequired == 0 {
-		if decision.Confidence >= fc.config.MinConfidence {
-			if longSignals > 0 || shortSignals > 0 {
-				if longSignals >= shortSignals {
-					decision.Action = "open_long"
-					decision.Approved = true
-				} else if fc.config.AllowShorts {
-					decision.Action = "open_short"
-					decision.Approved = true
-				}
-			} else if signalCount == 0 {
-				decision.RejectionReason = "No AI signals available (check if ML/LLM/Sentiment analyzers are configured)"
-			}
-		} else {
-			decision.RejectionReason = fmt.Sprintf("Confidence %.2f below minimum %.2f", decision.Confidence, fc.config.MinConfidence)
+	// If using style-specific config, apply those settings
+	if fc.styleConfig != nil {
+		// Use the more conservative of the two
+		if fc.styleConfig.MinConfidence > minConfidence {
+			minConfidence = fc.styleConfig.MinConfidence
 		}
-	} else if longSignals >= confluenceRequired && decision.Confidence >= fc.config.MinConfidence {
-		decision.Action = "open_long"
-		decision.Approved = true
-	} else if shortSignals >= confluenceRequired && fc.config.AllowShorts && decision.Confidence >= fc.config.MinConfidence {
-		decision.Action = "open_short"
-		decision.Approved = true
-	} else if signalCount == 0 {
-		decision.RejectionReason = "No AI signals available (check if ML/LLM/Sentiment analyzers are configured)"
-	} else if longSignals > 0 && longSignals < confluenceRequired {
-		decision.Action = "open_long"
-		decision.RejectionReason = fmt.Sprintf("Insufficient confluence: %d long signals, need %d", longSignals, confluenceRequired)
-	} else if shortSignals > 0 && shortSignals < confluenceRequired {
-		decision.Action = "open_short"
-		if !fc.config.AllowShorts {
-			decision.RejectionReason = fmt.Sprintf("Short signals detected but shorts are disabled")
-		} else {
-			decision.RejectionReason = fmt.Sprintf("Insufficient confluence: %d short signals, need %d", shortSignals, confluenceRequired)
+		if fc.styleConfig.RequiredConfluence > confluenceRequired {
+			confluenceRequired = fc.styleConfig.RequiredConfluence
 		}
-	} else if decision.Confidence < fc.config.MinConfidence {
-		decision.RejectionReason = fmt.Sprintf("Confidence %.2f below minimum %.2f", decision.Confidence, fc.config.MinConfidence)
 	}
+
+	action, confidence, approved, reason := fc.signalAggregator.AggregateDecision(
+		signals,
+		tradingStyle,
+		minConfidence,
+		confluenceRequired,
+	)
+
+	decision.Action = action
+	decision.Confidence = confidence
+	decision.Approved = approved
+
+	// Check if shorts are allowed
+	if action == "open_short" && !fc.config.AllowShorts {
+		decision.Approved = false
+		decision.RejectionReason = "Short signals detected but shorts are disabled"
+	} else if !approved && reason != "" {
+		decision.RejectionReason = reason
+	}
+
+	// === ADAPTIVE ENGINE INTEGRATION ===
+	// Use human-like decision making with market context
+	if fc.adaptiveEngine != nil && decision.Approved {
+		// Collect market context for adaptive decision
+		fc.mu.RLock()
+		recentWins := 0
+		recentLosses := 0
+		for _, d := range fc.recentDecisions {
+			if d.Executed && d.Approved {
+				recentWins++ // Count executed trades
+			} else if d.Executed && !d.Approved {
+				recentLosses++
+			}
+		}
+		activePositionCount := len(fc.activePositions)
+		fc.mu.RUnlock()
+
+		// Get max positions from style config or use default
+		maxPositions := 5 // Default max concurrent positions
+		if fc.styleConfig != nil && fc.styleConfig.MaxEntries > 0 {
+			maxPositions = fc.styleConfig.MaxEntries
+		}
+
+		marketCtx := &MarketContext{
+			RecentWins:    recentWins,
+			RecentLosses:  recentLosses,
+			OpenPositions: activePositionCount,
+			MaxPositions:  maxPositions,
+		}
+
+		// Get profit stats for context
+		stats := fc.GetProfitStats()
+		if totalProfit, ok := stats["total_profit"].(float64); ok {
+			marketCtx.DailyPnL = totalProfit
+		}
+
+		// Set market context before making decision
+		fc.adaptiveEngine.SetMarketContext(marketCtx)
+
+		// Make adaptive decision (no existing position for new trades)
+		adaptiveDecision := fc.adaptiveEngine.MakeDecision(symbol, currentPrice, klines, nil)
+
+		// Apply adaptive decision adjustments
+		if !adaptiveDecision.Approved {
+			decision.Approved = false
+			decision.RejectionReason = fmt.Sprintf("Adaptive engine: %s", adaptiveDecision.PrimaryReason)
+			fc.logger.Info("Adaptive engine rejected decision",
+				"symbol", symbol,
+				"reason", adaptiveDecision.PrimaryReason,
+				"risk_warnings", adaptiveDecision.RiskWarnings)
+		} else {
+			// Apply position size multiplier from adaptive engine
+			decision.PositionSizeMultiplier = adaptiveDecision.PositionSizeMultiplier
+
+			// Log adaptive reasoning
+			fc.logger.Info("Adaptive engine enhanced decision",
+				"symbol", symbol,
+				"action", adaptiveDecision.Action,
+				"size_multiplier", fmt.Sprintf("%.2f", adaptiveDecision.PositionSizeMultiplier),
+				"primary_reason", adaptiveDecision.PrimaryReason,
+				"context_factors", adaptiveDecision.ContextFactors)
+		}
+	}
+	// === END ADAPTIVE ENGINE INTEGRATION ===
+
+	fc.logger.Info("Enhanced signal collection complete",
+		"symbol", symbol,
+		"trading_style", string(tradingStyle),
+		"total_signals", signalCount,
+		"long_signals", longSignals,
+		"short_signals", shortSignals,
+		"confidence", fmt.Sprintf("%.2f", confidence),
+		"action", action,
+		"approved", approved)
 
 	// Check for flip-flop: prevent reversing direction within 2 hours of last trade
 	// Exception: scalping quick re-entry bypasses this for same-direction trades
@@ -1807,7 +2292,23 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 				return decision
 			}
 
-			rawQuantity := (positionValue * float64(decision.Leverage)) / currentPrice
+			// Apply adaptive engine position size multiplier (default 1.0)
+			sizeMultiplier := decision.PositionSizeMultiplier
+			if sizeMultiplier == 0 {
+				sizeMultiplier = 1.0 // Default to 100% if not set
+			}
+			adjustedPositionValue := positionValue * sizeMultiplier
+
+			// Log if adaptive sizing is being applied
+			if sizeMultiplier != 1.0 {
+				fc.logger.Info("Adaptive position sizing applied",
+					"symbol", symbol,
+					"original_value", positionValue,
+					"multiplier", fmt.Sprintf("%.2f", sizeMultiplier),
+					"adjusted_value", adjustedPositionValue)
+			}
+
+			rawQuantity := (adjustedPositionValue * float64(decision.Leverage)) / currentPrice
 			decision.Quantity = roundQuantity(symbol, rawQuantity)
 
 			// Verify quantity is valid
@@ -1854,6 +2355,19 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		// Track as virtual position in dry run
 		fc.mu.Lock()
 		tradeSide := map[string]string{"open_long": "LONG", "open_short": "SHORT"}[decision.Action]
+
+		// Calculate TP1, TP2, and SL based on configuration
+		var tp1, tp2, sl float64
+		if tradeSide == "LONG" {
+			tp1 = currentPrice * (1 + fc.config.TakeProfitPercent1/100)
+			tp2 = currentPrice * (1 + fc.config.TakeProfitPercent2/100)
+			sl = currentPrice * (1 - fc.config.StopLossPercent/100)
+		} else {
+			tp1 = currentPrice * (1 - fc.config.TakeProfitPercent1/100)
+			tp2 = currentPrice * (1 - fc.config.TakeProfitPercent2/100)
+			sl = currentPrice * (1 + fc.config.StopLossPercent/100)
+		}
+
 		fc.activePositions[symbol] = &FuturesAutopilotPosition{
 			Symbol:       symbol,
 			Side:         tradeSide,
@@ -1861,7 +2375,9 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 			Quantity:     decision.Quantity,
 			Leverage:     decision.Leverage,
 			TakeProfit:   decision.TakeProfit,
-			StopLoss:     decision.StopLoss,
+			TakeProfit1:  tp1,
+			TakeProfit2:  tp2,
+			StopLoss:     sl,
 			HighestPrice: currentPrice,
 			LowestPrice:  currentPrice,
 			EntryTime:    time.Now(),
@@ -1965,6 +2481,19 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 	if decision.Action == "open_short" {
 		tradeSide = "SHORT"
 	}
+
+	// Calculate TP1, TP2, and SL based on configuration
+	var tp1, tp2, sl float64
+	if tradeSide == "LONG" {
+		tp1 = currentPrice * (1 + fc.config.TakeProfitPercent1/100)
+		tp2 = currentPrice * (1 + fc.config.TakeProfitPercent2/100)
+		sl = currentPrice * (1 - fc.config.StopLossPercent/100)
+	} else {
+		tp1 = currentPrice * (1 - fc.config.TakeProfitPercent1/100)
+		tp2 = currentPrice * (1 - fc.config.TakeProfitPercent2/100)
+		sl = currentPrice * (1 + fc.config.StopLossPercent/100)
+	}
+
 	fc.activePositions[symbol] = &FuturesAutopilotPosition{
 		Symbol:       symbol,
 		Side:         tradeSide,
@@ -1972,7 +2501,9 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		Quantity:     decision.Quantity,
 		Leverage:     decision.Leverage,
 		TakeProfit:   decision.TakeProfit,
-		StopLoss:     decision.StopLoss,
+		TakeProfit1:  tp1,
+		TakeProfit2:  tp2,
+		StopLoss:     sl,
 		HighestPrice: currentPrice,
 		LowestPrice:  currentPrice,
 		EntryTime:    time.Now(),
@@ -2189,7 +2720,7 @@ func (fc *FuturesController) monitorPositions() {
 			pos.LowestPrice = currentPrice
 		}
 
-		// Check trailing stop - IMPROVED to maximize profits
+		// Check TP1 SL move and trailing stop logic
 		if fc.config.TrailingStopEnabled {
 			var profitPercent float64
 			if pos.Side == "LONG" {
@@ -2198,16 +2729,30 @@ func (fc *FuturesController) monitorPositions() {
 				profitPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
 			}
 
-			// Activate trailing immediately when we have any profit (0.3% minimum to avoid noise)
-			if !pos.TrailingActivated && profitPercent >= 0.3 {
+			// Move SL to buy price when TP1 (10% ROI) is reached
+			if !pos.TP1SLMoveDone && profitPercent >= fc.config.TakeProfitPercent1 {
+				pos.TP1SLMoveDone = true
+				pos.StopLoss = pos.EntryPrice // Move SL to break-even
+				fc.logger.Info("TP1 reached: Moving SL to break-even",
+					"symbol", symbol,
+					"profit_pct", profitPercent,
+					"tp1", fc.config.TakeProfitPercent1,
+					"new_sl_price", pos.StopLoss)
+			}
+
+			// Activate trailing stop at 60% of TP2 (18% ROI)
+			tp2ActivationLevel := fc.config.TakeProfitPercent2 * (fc.config.TrailingStopActivationPercent / 100)
+			if !pos.TrailingActivated && profitPercent >= tp2ActivationLevel {
 				pos.TrailingActivated = true
-				fc.logger.Info("Trailing stop activated (early)", "symbol", symbol, "profit_pct", profitPercent)
+				fc.logger.Info("Trailing stop activated at TP2 60%",
+					"symbol", symbol,
+					"profit_pct", profitPercent,
+					"activation_level", tp2ActivationLevel)
 			}
 
 			// Check trailing stop trigger when activated
 			if pos.TrailingActivated {
 				var pullback float64
-				var trailingPercent float64
 
 				if pos.Side == "LONG" {
 					pullback = (pos.HighestPrice - currentPrice) / pos.HighestPrice * 100
@@ -2215,23 +2760,15 @@ func (fc *FuturesController) monitorPositions() {
 					pullback = (currentPrice - pos.LowestPrice) / pos.LowestPrice * 100
 				}
 
-				// Dynamic trailing: tighter trail when in higher profit
-				// - Below TP level: use configured trailing percent
-				// - At/above TP level: use half the trailing percent (tighter)
-				if profitPercent >= fc.config.TakeProfitPercent {
-					trailingPercent = fc.config.TrailingStopPercent * 0.5 // Tighter trail when in big profit
-				} else if profitPercent >= fc.config.TakeProfitPercent*0.5 {
-					trailingPercent = fc.config.TrailingStopPercent * 0.75 // Medium trail
-				} else {
-					trailingPercent = fc.config.TrailingStopPercent // Normal trail
-				}
-
-				if pullback >= trailingPercent {
+				// Trigger close if pullback reaches configured trailing percent (8%)
+				if pullback >= fc.config.TrailingStopPercent {
 					fc.logger.Info("Trailing stop triggered",
 						"symbol", symbol,
 						"profit_pct", profitPercent,
 						"pullback", pullback,
-						"trailing_pct", trailingPercent)
+						"trailing_pct", fc.config.TrailingStopPercent,
+						"highest_price", pos.HighestPrice,
+						"current_price", currentPrice)
 					fc.closePosition(symbol, pos, "trailing_stop")
 				}
 			}
@@ -2256,6 +2793,43 @@ func (fc *FuturesController) monitorPositions() {
 						"min_profit", fc.config.ScalpingMinProfit)
 					fc.closePosition(symbol, pos, "scalping_profit")
 					continue // Skip remaining checks for this position
+				}
+			}
+		}
+
+		// Check hedging for Position trading style
+		if fc.hedgingManager != nil && fc.hedgingManager.IsHedgingEnabled() {
+			// Only allow hedging for position/long-term trading style
+			if fc.tradingStyle == StylePosition {
+				// Check if this symbol already has a hedge
+				if !fc.hedgingManager.IsSymbolHedged(symbol) {
+					// Evaluate if hedging is needed
+					// Note: we don't have LLM recommendation here, could add in the future
+					needsHedge, trigger, hedgePercent := fc.hedgingManager.EvaluateHedgingNeed(
+						symbol, pos, currentPrice, false, 0)
+
+					if needsHedge {
+						_, err := fc.hedgingManager.ExecuteHedge(symbol, pos, hedgePercent, trigger, fc.dryRun)
+						if err != nil {
+							fc.logger.Error("Failed to execute hedge",
+								"symbol", symbol,
+								"trigger", trigger,
+								"error", err)
+						}
+					}
+				} else {
+					// Monitor existing hedge
+					shouldClose, reason := fc.hedgingManager.MonitorHedge(symbol, pos, currentPrice)
+					if shouldClose {
+						pnl, err := fc.hedgingManager.CloseHedge(symbol, reason, fc.dryRun)
+						if err != nil {
+							fc.logger.Error("Failed to close hedge", "symbol", symbol, "error", err)
+						} else {
+							fc.logger.Info("Hedge closed", "symbol", symbol, "reason", reason, "pnl", pnl)
+							// Add hedge profit to daily PnL
+							fc.dailyPnL += pnl
+						}
+					}
 				}
 			}
 		}
@@ -2305,6 +2879,9 @@ func (fc *FuturesController) closePosition(symbol string, pos *FuturesAutopilotP
 		"exit", currentPrice,
 		"pnl", pnl,
 		"pnl_percent", pnlPercent)
+
+	// Update the futures trade record in database
+	go fc.updateTradeOnClose(symbol, currentPrice, pnl, pnlPercent, reason)
 
 	if !fc.dryRun {
 		// CRITICAL: Cancel all outstanding TP/SL algo orders FIRST
@@ -2380,6 +2957,19 @@ func (fc *FuturesController) closePosition(symbol string, pos *FuturesAutopilotP
 		go func(profit float64) {
 			fc.addToProfit(profit)
 		}(pnl)
+
+		// Track success for AI components (assumes all active components contributed)
+		fc.mu.Lock()
+		if fc.mlPredictor != nil {
+			fc.mlSuccessCount++
+		}
+		if fc.llmAnalyzer != nil {
+			fc.llmSuccessCount++
+		}
+		if fc.sentimentAnalyzer != nil {
+			fc.sentimentSuccessCount++
+		}
+		fc.mu.Unlock()
 	}
 }
 
@@ -2424,6 +3014,464 @@ func (fc *FuturesController) GetCircuitBreakerStatus() map[string]interface{} {
 			"max_daily_trades":       config.MaxDailyTrades,
 		},
 	}
+}
+
+// InvestigateStatus contains comprehensive diagnostic information
+type InvestigateStatus struct {
+	// Quick Health
+	TradingStatus    string    `json:"trading_status"`    // "active", "blocked", "stopped"
+	BlockReasons     []string  `json:"block_reasons"`     // Why trading is blocked
+	LastDecisionTime time.Time `json:"last_decision_time"`
+	ActivePositions  int       `json:"active_positions"`
+
+	// Recent Rejections
+	RecentRejections []RejectionSummary `json:"recent_rejections"`
+	RejectionStats   RejectionStats     `json:"rejection_stats"`
+
+	// Mode Status
+	Modes map[string]ModeStatus `json:"modes"`
+
+	// Resource Constraints
+	Constraints ConstraintStatus `json:"constraints"`
+
+	// Signal Health
+	SignalHealth SignalHealthStatus `json:"signal_health"`
+
+	// Unusual Activity
+	Alerts []AlertItem `json:"alerts"`
+
+	// API Health
+	APIHealth map[string]string `json:"api_health"`
+}
+
+// RejectionSummary summarizes a rejected decision
+type RejectionSummary struct {
+	Timestamp time.Time `json:"timestamp"`
+	Symbol    string    `json:"symbol"`
+	Action    string    `json:"action"`
+	Reason    string    `json:"reason"`
+}
+
+// RejectionStats contains aggregated rejection statistics
+type RejectionStats struct {
+	TotalDecisions    int            `json:"total_decisions"`
+	TotalRejections   int            `json:"total_rejections"`
+	RejectionRate     float64        `json:"rejection_rate"`
+	CommonReasons     map[string]int `json:"common_reasons"`
+	AvgConfidence     float64        `json:"avg_confidence"`
+}
+
+// ModeStatus represents the status of a mode/feature
+type ModeStatus struct {
+	Enabled bool   `json:"enabled"`
+	Status  string `json:"status"` // "running", "stopped", "tripped", etc.
+	Details string `json:"details"`
+}
+
+// ConstraintStatus contains resource constraint information
+type ConstraintStatus struct {
+	USDAllocation    ConstraintItem `json:"usd_allocation"`
+	DailyTrades      ConstraintItem `json:"daily_trades"`
+	DailyPnL         ConstraintItem `json:"daily_pnl"`
+	HourlyLoss       ConstraintItem `json:"hourly_loss"`
+	ConsecutiveLoss  ConstraintItem `json:"consecutive_loss"`
+}
+
+// ConstraintItem represents a single constraint with current/max values
+type ConstraintItem struct {
+	Current float64 `json:"current"`
+	Max     float64 `json:"max"`
+	Percent float64 `json:"percent"`
+	Status  string  `json:"status"` // "ok", "warning", "critical"
+}
+
+// SignalHealthStatus contains AI signal component health
+type SignalHealthStatus struct {
+	MLPredictor       ComponentHealth `json:"ml_predictor"`
+	LLMAnalyzer       ComponentHealth `json:"llm_analyzer"`
+	SentimentAnalyzer ComponentHealth `json:"sentiment_analyzer"`
+	AvgConfidence     float64         `json:"avg_confidence"`
+	ConfluenceRate    float64         `json:"confluence_rate"`
+}
+
+// ComponentHealth represents the health of an AI component
+type ComponentHealth struct {
+	Available   bool   `json:"available"`
+	LastUsed    string `json:"last_used"`
+	SuccessRate float64 `json:"success_rate"`
+}
+
+// AlertItem represents an unusual activity alert
+type AlertItem struct {
+	Level   string `json:"level"`   // "info", "warning", "critical"
+	Type    string `json:"type"`    // "rejection_rate", "consecutive_loss", "api_error", etc.
+	Message string `json:"message"`
+}
+
+// GetInvestigateStatus returns comprehensive diagnostic information
+func (fc *FuturesController) GetInvestigateStatus() *InvestigateStatus {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	status := &InvestigateStatus{
+		BlockReasons:     make([]string, 0),
+		RecentRejections: make([]RejectionSummary, 0),
+		Modes:            make(map[string]ModeStatus),
+		Alerts:           make([]AlertItem, 0),
+		APIHealth:        make(map[string]string),
+	}
+
+	// === TRADING STATUS ===
+	if !fc.running {
+		status.TradingStatus = "stopped"
+		status.BlockReasons = append(status.BlockReasons, "Autopilot is stopped")
+	} else {
+		// Check circuit breaker
+		canTrade := true
+		if fc.circuitBreaker != nil {
+			var blockReason string
+			canTrade, blockReason = fc.circuitBreaker.CanTrade()
+			if !canTrade {
+				status.BlockReasons = append(status.BlockReasons, blockReason)
+			}
+		}
+
+		// Check daily limits
+		if fc.dailyTrades >= fc.config.MaxDailyTrades {
+			canTrade = false
+			status.BlockReasons = append(status.BlockReasons, fmt.Sprintf("Daily trade limit reached: %d/%d", fc.dailyTrades, fc.config.MaxDailyTrades))
+		}
+		if fc.dailyPnL <= -fc.config.MaxDailyLoss {
+			canTrade = false
+			status.BlockReasons = append(status.BlockReasons, fmt.Sprintf("Daily loss limit reached: $%.2f", fc.dailyPnL))
+		}
+
+		if canTrade {
+			status.TradingStatus = "active"
+		} else {
+			status.TradingStatus = "blocked"
+		}
+	}
+
+	// === ACTIVE POSITIONS ===
+	status.ActivePositions = len(fc.activePositions)
+
+	// === LAST DECISION TIME ===
+	if len(fc.recentDecisions) > 0 {
+		status.LastDecisionTime = fc.recentDecisions[0].Timestamp
+	}
+
+	// === RECENT REJECTIONS & STATS ===
+	rejectionCounts := make(map[string]int)
+	totalConfidence := 0.0
+	rejectedCount := 0
+	for i, decision := range fc.recentDecisions {
+		if i >= 20 { // Analyze last 20 decisions
+			break
+		}
+		totalConfidence += decision.Confidence
+		if !decision.Approved && decision.RejectionReason != "" {
+			rejectedCount++
+			if i < 10 { // Show last 10 rejections
+				status.RecentRejections = append(status.RecentRejections, RejectionSummary{
+					Timestamp: decision.Timestamp,
+					Symbol:    decision.Symbol,
+					Action:    decision.Action,
+					Reason:    decision.RejectionReason,
+				})
+			}
+			// Categorize rejection reason
+			reason := categorizeRejection(decision.RejectionReason)
+			rejectionCounts[reason]++
+		}
+	}
+
+	decisionCount := len(fc.recentDecisions)
+	if decisionCount > 20 {
+		decisionCount = 20
+	}
+	status.RejectionStats = RejectionStats{
+		TotalDecisions:  decisionCount,
+		TotalRejections: rejectedCount,
+		RejectionRate:   0,
+		CommonReasons:   rejectionCounts,
+		AvgConfidence:   0,
+	}
+	if decisionCount > 0 {
+		status.RejectionStats.RejectionRate = float64(rejectedCount) / float64(decisionCount) * 100
+		status.RejectionStats.AvgConfidence = totalConfidence / float64(decisionCount) * 100
+	}
+
+	// === MODE STATUS ===
+	// Autopilot
+	autopilotDetails := fc.config.RiskLevel
+	if fc.dryRun {
+		autopilotDetails += ", Paper"
+	} else {
+		autopilotDetails += ", Live"
+	}
+	status.Modes["autopilot"] = ModeStatus{
+		Enabled: fc.running,
+		Status:  map[bool]string{true: "running", false: "stopped"}[fc.running],
+		Details: autopilotDetails,
+	}
+
+	// Circuit Breaker
+	if fc.circuitBreaker != nil {
+		cbStats := fc.circuitBreaker.GetStats()
+		cbState := cbStats["state"].(string)
+		cbDetails := fmt.Sprintf("%v/%d losses", cbStats["consecutive_losses"], fc.circuitBreaker.GetConfig().MaxConsecutiveLosses)
+		status.Modes["circuit_breaker"] = ModeStatus{
+			Enabled: fc.circuitBreaker.IsEnabled(),
+			Status:  cbState,
+			Details: cbDetails,
+		}
+	}
+
+	// Dynamic SL/TP
+	status.Modes["dynamic_sltp"] = ModeStatus{
+		Enabled: fc.config.DynamicSLTPEnabled,
+		Status:  map[bool]string{true: "enabled", false: "disabled"}[fc.config.DynamicSLTPEnabled],
+		Details: fmt.Sprintf("ATR %d, SL %.1fx, TP %.1fx", fc.config.ATRPeriod, fc.config.ATRMultiplierSL, fc.config.ATRMultiplierTP),
+	}
+
+	// Scalping
+	scalpDetails := fmt.Sprintf("%d trades today", fc.scalpingTradesToday)
+	if fc.config.ScalpingMaxTradesPerDay > 0 {
+		scalpDetails = fmt.Sprintf("%d/%d trades", fc.scalpingTradesToday, fc.config.ScalpingMaxTradesPerDay)
+	}
+	status.Modes["scalping"] = ModeStatus{
+		Enabled: fc.config.ScalpingModeEnabled,
+		Status:  map[bool]string{true: "enabled", false: "disabled"}[fc.config.ScalpingModeEnabled],
+		Details: scalpDetails,
+	}
+
+	// Position Averaging
+	status.Modes["averaging"] = ModeStatus{
+		Enabled: fc.config.AveragingEnabled,
+		Status:  map[bool]string{true: "enabled", false: "disabled"}[fc.config.AveragingEnabled],
+		Details: fmt.Sprintf("Max %d entries", fc.config.MaxEntriesPerPosition),
+	}
+
+	// === RESOURCE CONSTRAINTS ===
+	cbConfig := fc.circuitBreaker.GetConfig()
+	cbStats := fc.circuitBreaker.GetStats()
+
+	// USD Allocation
+	allocPercent := 0.0
+	if fc.maxUSDAllocation > 0 {
+		allocPercent = fc.totalUSDAllocated / fc.maxUSDAllocation * 100
+	}
+	status.Constraints.USDAllocation = ConstraintItem{
+		Current: fc.totalUSDAllocated,
+		Max:     fc.maxUSDAllocation,
+		Percent: allocPercent,
+		Status:  getConstraintStatus(allocPercent),
+	}
+
+	// Daily Trades
+	dailyTradesPercent := 0.0
+	if cbConfig.MaxDailyTrades > 0 {
+		dailyTradesPercent = float64(fc.dailyTrades) / float64(cbConfig.MaxDailyTrades) * 100
+	}
+	status.Constraints.DailyTrades = ConstraintItem{
+		Current: float64(fc.dailyTrades),
+		Max:     float64(cbConfig.MaxDailyTrades),
+		Percent: dailyTradesPercent,
+		Status:  getConstraintStatus(dailyTradesPercent),
+	}
+
+	// Daily PnL (loss)
+	dailyLossPercent := 0.0
+	if cbConfig.MaxDailyLoss > 0 {
+		dailyLoss := cbStats["daily_loss"].(float64)
+		dailyLossPercent = dailyLoss / cbConfig.MaxDailyLoss * 100
+	}
+	status.Constraints.DailyPnL = ConstraintItem{
+		Current: fc.dailyPnL,
+		Max:     -cbConfig.MaxDailyLoss,
+		Percent: dailyLossPercent,
+		Status:  getConstraintStatus(dailyLossPercent),
+	}
+
+	// Hourly Loss
+	hourlyLossPercent := 0.0
+	if cbConfig.MaxLossPerHour > 0 {
+		hourlyLoss := cbStats["hourly_loss"].(float64)
+		hourlyLossPercent = hourlyLoss / cbConfig.MaxLossPerHour * 100
+	}
+	status.Constraints.HourlyLoss = ConstraintItem{
+		Current: cbStats["hourly_loss"].(float64),
+		Max:     cbConfig.MaxLossPerHour,
+		Percent: hourlyLossPercent,
+		Status:  getConstraintStatus(hourlyLossPercent),
+	}
+
+	// Consecutive Losses
+	consecutiveLossPercent := 0.0
+	if cbConfig.MaxConsecutiveLosses > 0 {
+		consecutiveLosses := cbStats["consecutive_losses"].(int)
+		consecutiveLossPercent = float64(consecutiveLosses) / float64(cbConfig.MaxConsecutiveLosses) * 100
+	}
+	status.Constraints.ConsecutiveLoss = ConstraintItem{
+		Current: float64(cbStats["consecutive_losses"].(int)),
+		Max:     float64(cbConfig.MaxConsecutiveLosses),
+		Percent: consecutiveLossPercent,
+		Status:  getConstraintStatus(consecutiveLossPercent),
+	}
+
+	// === SIGNAL HEALTH ===
+	// Helper to format timestamp for display
+	formatTimestamp := func(t time.Time) string {
+		if t.IsZero() {
+			return "N/A"
+		}
+		return t.Format(time.RFC3339)
+	}
+
+	// Helper to calculate success rate
+	calcSuccessRate := func(success, total int) float64 {
+		if total == 0 {
+			return 0
+		}
+		return float64(success) / float64(total)
+	}
+
+	// Calculate confluence rate
+	confluenceRate := 0.0
+	if fc.confluenceTotal > 0 {
+		confluenceRate = float64(fc.confluenceAgreements) / float64(fc.confluenceTotal)
+	}
+
+	status.SignalHealth = SignalHealthStatus{
+		MLPredictor: ComponentHealth{
+			Available:   fc.mlPredictor != nil,
+			LastUsed:    formatTimestamp(fc.mlLastUsed),
+			SuccessRate: calcSuccessRate(fc.mlSuccessCount, fc.mlTotalCount),
+		},
+		LLMAnalyzer: ComponentHealth{
+			Available:   fc.llmAnalyzer != nil,
+			LastUsed:    formatTimestamp(fc.llmLastUsed),
+			SuccessRate: calcSuccessRate(fc.llmSuccessCount, fc.llmTotalCount),
+		},
+		SentimentAnalyzer: ComponentHealth{
+			Available:   fc.sentimentAnalyzer != nil,
+			LastUsed:    formatTimestamp(fc.sentimentLastUsed),
+			SuccessRate: calcSuccessRate(fc.sentimentSuccessCount, fc.sentimentTotalCount),
+		},
+		AvgConfidence:  status.RejectionStats.AvgConfidence,
+		ConfluenceRate: confluenceRate,
+	}
+
+	// === ALERTS ===
+	// High rejection rate
+	if status.RejectionStats.RejectionRate > 80 {
+		status.Alerts = append(status.Alerts, AlertItem{
+			Level:   "warning",
+			Type:    "rejection_rate",
+			Message: fmt.Sprintf("High rejection rate: %.0f%% in recent decisions", status.RejectionStats.RejectionRate),
+		})
+	}
+
+	// Consecutive losses approaching limit
+	if consecutiveLossPercent >= 60 {
+		status.Alerts = append(status.Alerts, AlertItem{
+			Level:   "warning",
+			Type:    "consecutive_loss",
+			Message: fmt.Sprintf("Consecutive losses at %d/%d (%.0f%%)", cbStats["consecutive_losses"], cbConfig.MaxConsecutiveLosses, consecutiveLossPercent),
+		})
+	}
+
+	// Circuit breaker tripped
+	if cbStats["state"].(string) == "open" {
+		status.Alerts = append(status.Alerts, AlertItem{
+			Level:   "critical",
+			Type:    "circuit_breaker",
+			Message: fmt.Sprintf("Circuit breaker tripped: %s", cbStats["trip_reason"]),
+		})
+	}
+
+	// No AI components configured
+	if fc.mlPredictor == nil && fc.llmAnalyzer == nil && fc.sentimentAnalyzer == nil {
+		status.Alerts = append(status.Alerts, AlertItem{
+			Level:   "warning",
+			Type:    "no_ai",
+			Message: "No AI components configured - ML, LLM, and Sentiment analyzers are all disabled",
+		})
+	}
+
+	// Low confidence pattern
+	if status.RejectionStats.AvgConfidence < 50 && decisionCount >= 5 {
+		status.Alerts = append(status.Alerts, AlertItem{
+			Level:   "info",
+			Type:    "low_confidence",
+			Message: fmt.Sprintf("Average confidence is low: %.1f%%", status.RejectionStats.AvgConfidence),
+		})
+	}
+
+	// === API HEALTH ===
+	status.APIHealth["binance_futures"] = "ok"
+	if fc.futuresClient == nil {
+		status.APIHealth["binance_futures"] = "not_configured"
+	}
+	status.APIHealth["database"] = "ok"
+	if fc.repo == nil {
+		status.APIHealth["database"] = "not_configured"
+	}
+
+	return status
+}
+
+// categorizeRejection categorizes a rejection reason into a simple category
+func categorizeRejection(reason string) string {
+	reason = strings.ToLower(reason)
+	switch {
+	case strings.Contains(reason, "confidence"):
+		return "Low Confidence"
+	case strings.Contains(reason, "confluence"):
+		return "Insufficient Confluence"
+	case strings.Contains(reason, "margin") || strings.Contains(reason, "allocation"):
+		return "Insufficient Margin"
+	case strings.Contains(reason, "flip-flop") || strings.Contains(reason, "cooldown"):
+		return "Cooldown Active"
+	case strings.Contains(reason, "circuit"):
+		return "Circuit Breaker"
+	case strings.Contains(reason, "short"):
+		return "Shorts Disabled"
+	case strings.Contains(reason, "daily") || strings.Contains(reason, "limit"):
+		return "Daily Limit"
+	case strings.Contains(reason, "notional") || strings.Contains(reason, "minimum"):
+		return "Below Minimum"
+	case strings.Contains(reason, "no ai") || strings.Contains(reason, "no signal"):
+		return "No Signals"
+	default:
+		return "Other"
+	}
+}
+
+// getConstraintStatus returns status based on percentage used
+func getConstraintStatus(percent float64) string {
+	if percent >= 90 {
+		return "critical"
+	} else if percent >= 70 {
+		return "warning"
+	}
+	return "ok"
+}
+
+// ClearFlipFlopCooldown clears the flip-flop cooldown for all symbols
+func (fc *FuturesController) ClearFlipFlopCooldown() {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.lastTradeSide = make(map[string]string)
+	fc.lastTradeAt = make(map[string]time.Time)
+	fc.logger.Info("Flip-flop cooldown cleared for all symbols")
+}
+
+// ForceSyncPositions forces a sync with Binance positions
+func (fc *FuturesController) ForceSyncPositions() {
+	fc.syncWithActualPositions()
+	fc.logger.Info("Forced position sync completed")
 }
 
 // ResetCircuitBreaker resets the circuit breaker
@@ -2474,11 +3522,36 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 
 	// Build signals map from signal breakdown
 	signals := make(map[string]interface{})
+	var mlDir, llmDir, sentimentDir, patternDir, bigcandleDir string
+	var mlConf, llmConf, sentimentConf, patternConf, bigcandleConf float64
+	confluenceCount := 0
+
 	for k, v := range decision.SignalBreakdown {
 		signals[k] = map[string]interface{}{
 			"direction":  v.Direction,
 			"confidence": v.Confidence,
 			"reasoning":  v.Reasoning,
+		}
+		// Extract individual signal data for AIDecision fields
+		switch k {
+		case "ml", "ML":
+			mlDir = v.Direction
+			mlConf = v.Confidence
+		case "llm", "LLM":
+			llmDir = v.Direction
+			llmConf = v.Confidence
+		case "sentiment", "Sentiment":
+			sentimentDir = v.Direction
+			sentimentConf = v.Confidence
+		case "pattern", "Pattern":
+			patternDir = v.Direction
+			patternConf = v.Confidence
+		case "bigcandle", "BigCandle":
+			bigcandleDir = v.Direction
+			bigcandleConf = v.Confidence
+		}
+		if v.Confidence > 0.5 {
+			confluenceCount++
 		}
 	}
 	signals["leverage"] = decision.Leverage
@@ -2486,15 +3559,130 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 	signals["take_profit"] = decision.TakeProfit
 	signals["stop_loss"] = decision.StopLoss
 
-	aiDecision := &database.AIDecision{
-		Symbol:      decision.Symbol,
-		Action:      decision.Action,
-		Confidence:  decision.Confidence,
-		Reasoning:   decision.Reasoning,
-		Signals:     signals,
+	// Get current price for the decision
+	currentPrice, _ := fc.futuresClient.GetFuturesCurrentPrice(decision.Symbol)
+
+	// Determine risk level based on confidence
+	riskLevel := "moderate"
+	if decision.Confidence >= 0.8 {
+		riskLevel = "conservative"
+	} else if decision.Confidence <= 0.6 {
+		riskLevel = "aggressive"
 	}
 
-	fc.repo.SaveAIDecision(ctx, aiDecision)
+	aiDecision := &database.AIDecision{
+		Symbol:              decision.Symbol,
+		CurrentPrice:        currentPrice,
+		Action:              decision.Action,
+		Confidence:          decision.Confidence,
+		Reasoning:           decision.Reasoning,
+		MLDirection:         &mlDir,
+		MLConfidence:        &mlConf,
+		SentimentDirection:  &sentimentDir,
+		SentimentConfidence: &sentimentConf,
+		LLMDirection:        &llmDir,
+		LLMConfidence:       &llmConf,
+		PatternDirection:    &patternDir,
+		PatternConfidence:   &patternConf,
+		BigCandleDirection:  &bigcandleDir,
+		BigCandleConfidence: &bigcandleConf,
+		ConfluenceCount:     confluenceCount,
+		RiskLevel:           riskLevel,
+		Executed:            true,
+		Signals:             signals,
+	}
+
+	err := fc.repo.SaveAIDecision(ctx, aiDecision)
+	if err != nil {
+		fc.logger.Error("Failed to save AI decision", "error", err.Error())
+		return
+	}
+
+	// Now create a FuturesTrade entry linked to the AI decision
+	positionSide := "LONG"
+	side := "BUY"
+	if decision.Action == "open_short" {
+		positionSide = "SHORT"
+		side = "SELL"
+	}
+
+	futuresTrade := &database.FuturesTrade{
+		Symbol:       decision.Symbol,
+		PositionSide: positionSide,
+		Side:         side,
+		EntryPrice:   currentPrice,
+		Quantity:     decision.Quantity,
+		Leverage:     decision.Leverage,
+		MarginType:   "CROSSED",
+		StopLoss:     &decision.StopLoss,
+		TakeProfit:   &decision.TakeProfit,
+		Status:       "OPEN",
+		EntryTime:    time.Now(),
+		TradeSource:  "ai",
+		AIDecisionID: &aiDecision.ID,
+	}
+
+	err = fc.repo.GetDB().CreateFuturesTrade(ctx, futuresTrade)
+	if err != nil {
+		fc.logger.Error("Failed to save futures trade", "error", err.Error())
+	} else {
+		fc.logger.Info("Saved futures trade with AI decision",
+			"trade_id", futuresTrade.ID,
+			"ai_decision_id", aiDecision.ID,
+			"symbol", decision.Symbol)
+	}
+}
+
+// updateTradeOnClose updates the futures trade record when a position is closed
+func (fc *FuturesController) updateTradeOnClose(symbol string, exitPrice, pnl, pnlPercent float64, reason string) {
+	if fc.repo == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Find the open trade for this symbol
+	trade, err := fc.repo.GetDB().GetOpenFuturesTradeBySymbol(ctx, symbol)
+	if err != nil {
+		fc.logger.Error("Failed to find open trade for closing",
+			"symbol", symbol,
+			"error", err.Error())
+		return
+	}
+	if trade == nil {
+		fc.logger.Warn("No open trade found to close in database",
+			"symbol", symbol,
+			"reason", reason)
+		return
+	}
+
+	// Update the trade with close information
+	trade.ExitPrice = &exitPrice
+	trade.RealizedPnL = &pnl
+	trade.RealizedPnLPercent = &pnlPercent
+	now := time.Now()
+	trade.ExitTime = &now
+	trade.Status = "CLOSED"
+
+	// Add close reason to notes
+	noteText := fmt.Sprintf("Closed by: %s", reason)
+	trade.Notes = &noteText
+
+	err = fc.repo.GetDB().UpdateFuturesTrade(ctx, trade)
+	if err != nil {
+		fc.logger.Error("Failed to update futures trade on close",
+			"symbol", symbol,
+			"trade_id", trade.ID,
+			"error", err.Error())
+	} else {
+		fc.logger.Info("Updated futures trade on close",
+			"trade_id", trade.ID,
+			"symbol", symbol,
+			"pnl", pnl,
+			"pnl_percent", pnlPercent,
+			"reason", reason)
+	}
 }
 
 // ==================== POSITION AVERAGING ====================
@@ -2718,6 +3906,41 @@ func (fc *FuturesController) collectAveragingSignals(
 			decision.Confidence, fc.config.AveragingMinConfidence, agreementCount,
 		)
 	}
+
+	// === ADAPTIVE ENGINE INTEGRATION FOR AVERAGING ===
+	// Use human-like logic to validate averaging decision
+	if fc.adaptiveEngine != nil && decision.Approved {
+		// Make adaptive decision with existing position
+		adaptiveDecision := fc.adaptiveEngine.MakeDecision(symbol, currentPrice, klines, pos)
+
+		// Check if adaptive engine recommends averaging
+		if !adaptiveDecision.ShouldAverage {
+			decision.Approved = false
+			decision.RejectionReason = fmt.Sprintf("Adaptive engine: %s", adaptiveDecision.PrimaryReason)
+			fc.logger.Info("Adaptive engine rejected averaging",
+				"symbol", symbol,
+				"reason", adaptiveDecision.PrimaryReason,
+				"context", adaptiveDecision.ContextFactors)
+		} else {
+			// Apply adaptive position sizing to averaging
+			decision.PositionSizeMultiplier = adaptiveDecision.PositionSizeMultiplier
+			fc.logger.Info("Adaptive engine approved averaging",
+				"symbol", symbol,
+				"size_multiplier", fmt.Sprintf("%.2f", adaptiveDecision.PositionSizeMultiplier),
+				"reason", adaptiveDecision.PrimaryReason)
+		}
+
+		// Check if adaptive engine recommends hedging instead
+		if adaptiveDecision.ShouldHedge && fc.hedgingManager != nil && fc.hedgingManager.IsHedgingEnabled() {
+			fc.logger.Info("Adaptive engine recommends hedging instead of averaging",
+				"symbol", symbol,
+				"position_pnl_percent", adaptiveDecision.ContextFactors)
+			// Don't average - let the hedging monitor handle it
+			decision.Approved = false
+			decision.RejectionReason = "Adaptive engine recommends hedging - position too far underwater"
+		}
+	}
+	// === END ADAPTIVE ENGINE INTEGRATION ===
 
 	return decision
 }
@@ -3041,6 +4264,49 @@ func (fc *FuturesController) GetRecentNews(limit int) []map[string]interface{} {
 	}
 
 	news := fc.sentimentAnalyzer.GetRecentNews(limit)
+	return fc.formatNewsItems(news)
+}
+
+// GetNewsByTicker returns news filtered by ticker
+func (fc *FuturesController) GetNewsByTicker(ticker string, limit int) []map[string]interface{} {
+	if fc.sentimentAnalyzer == nil || !fc.sentimentAnalyzer.IsEnabled() {
+		return []map[string]interface{}{}
+	}
+
+	news := fc.sentimentAnalyzer.GetNewsByTicker(ticker, limit)
+	return fc.formatNewsItems(news)
+}
+
+// GetBreakingNews returns important/trending news
+func (fc *FuturesController) GetBreakingNews(limit int) []map[string]interface{} {
+	if fc.sentimentAnalyzer == nil || !fc.sentimentAnalyzer.IsEnabled() {
+		return []map[string]interface{}{}
+	}
+
+	news := fc.sentimentAnalyzer.GetBreakingNews(limit)
+	return fc.formatNewsItems(news)
+}
+
+// GetSentimentStats returns sentiment distribution
+func (fc *FuturesController) GetSentimentStats() map[string]int {
+	if fc.sentimentAnalyzer == nil || !fc.sentimentAnalyzer.IsEnabled() {
+		return map[string]int{"bullish": 0, "bearish": 0, "neutral": 0}
+	}
+
+	return fc.sentimentAnalyzer.GetSentimentStats()
+}
+
+// GetAvailableTickers returns tickers with news
+func (fc *FuturesController) GetAvailableTickers() []string {
+	if fc.sentimentAnalyzer == nil || !fc.sentimentAnalyzer.IsEnabled() {
+		return []string{}
+	}
+
+	return fc.sentimentAnalyzer.GetAvailableTickers()
+}
+
+// formatNewsItems converts news items to API-friendly format
+func (fc *FuturesController) formatNewsItems(news []sentiment.NewsItem) []map[string]interface{} {
 	result := make([]map[string]interface{}, 0, len(news))
 
 	for _, item := range news {
@@ -3050,6 +4316,9 @@ func (fc *FuturesController) GetRecentNews(limit int) []map[string]interface{} {
 			"url":          item.URL,
 			"sentiment":    item.Sentiment,
 			"published_at": item.PublishedAt,
+			"tickers":      item.Tickers,
+			"topic":        item.Topic,
+			"is_important": item.IsImportant,
 		})
 	}
 

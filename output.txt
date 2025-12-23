@@ -1,0 +1,111 @@
+2025/12/22 20:25:50 .env file loaded successfully
+{"timestamp":"2025-12-22T14:55:50.1689745Z","level":"INFO","message":"Structured logging initialized","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.1689745Z","level":"INFO","message":"Event bus initialized","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.1689745Z","level":"INFO","message":"Risk manager initialized","component":"main","fields":{"method":"percent"}}
+{"timestamp":"2025-12-22T14:55:50.1689745Z","level":"INFO","message":"Trailing stop manager initialized","component":"main","fields":{"enabled":true}}
+2025/12/22 20:25:50 Successfully connected to PostgreSQL database: trading_bot
+2025/12/22 20:25:50 Running database migrations...
+2025/12/22 20:25:50 Database migrations completed successfully
+2025/12/22 20:25:50 Running AI database migrations...
+2025/12/22 20:25:50 AI migration 1 completed
+2025/12/22 20:25:50 AI migration 2 completed
+2025/12/22 20:25:50 AI migration 3 completed
+2025/12/22 20:25:50 AI migration 4 completed
+2025/12/22 20:25:50 AI database migrations completed successfully
+2025/12/22 20:25:50 Running Futures database migrations...
+2025/12/22 20:25:50 Futures migration 1 completed
+2025/12/22 20:25:50 Futures migration 2 completed
+2025/12/22 20:25:50 Futures migration 3 completed
+2025/12/22 20:25:50 Futures migration 4 completed
+2025/12/22 20:25:50 Futures migration 5 completed
+2025/12/22 20:25:50 Futures migration 6 completed
+2025/12/22 20:25:50 Futures migration 7 completed
+2025/12/22 20:25:50 Futures migration 8 completed
+2025/12/22 20:25:50 Futures migration 9 completed
+2025/12/22 20:25:50 Futures migration 10 completed
+2025/12/22 20:25:50 Futures migration 11 completed
+2025/12/22 20:25:50 Futures migration 12 completed
+2025/12/22 20:25:50 Futures migration 13 completed
+2025/12/22 20:25:50 Futures migration 14 completed
+2025/12/22 20:25:50 Futures migration 15 completed
+2025/12/22 20:25:50 Futures migration 16 completed
+2025/12/22 20:25:50 Futures migration 17 completed
+2025/12/22 20:25:50 Futures migration 18 completed
+2025/12/22 20:25:50 Futures migration 19 completed
+2025/12/22 20:25:50 Futures migration 20 completed
+2025/12/22 20:25:50 Futures migration 21 completed
+2025/12/22 20:25:50 Futures migration 22 completed
+2025/12/22 20:25:50 Futures migration 23 completed
+2025/12/22 20:25:50 Futures migration 24 completed
+2025/12/22 20:25:50 Futures migration 25 completed
+2025/12/22 20:25:50 Futures migration 26 completed
+2025/12/22 20:25:50 Futures database migrations completed
+{"timestamp":"2025-12-22T14:55:50.2724278Z","level":"INFO","message":"Futures migrations completed","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.2724278Z","level":"INFO","message":"Futures mock client initialized for paper trading","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.2724278Z","level":"INFO","message":"Futures real client initialized","component":"main","fields":{"default_leverage":10,"testnet":false}}
+{"timestamp":"2025-12-22T14:55:50.2724278Z","level":"INFO","message":"Market data cache initialized","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.2724278Z","level":"INFO","message":"Spot mock client initialized for paper trading","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.2724278Z","level":"INFO","message":"Spot real client initialized","component":"main"}
+2025/12/22 20:25:50 Using MOCK MODE - Binance API calls will use simulated data
+{"timestamp":"2025-12-22T14:55:50.2729575Z","level":"INFO","message":"Circuit breaker initialized","component":"main","fields":{"enabled":true}}
+{"timestamp":"2025-12-22T14:55:50.2729575Z","level":"INFO","message":"ML Predictor initialized","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.2729575Z","level":"INFO","message":"LLM Analyzer initialized","component":"main","fields":{"model":"deepseek-chat","provider":"deepseek"}}
+{"timestamp":"2025-12-22T14:55:50.2729575Z","level":"INFO","message":"Sentiment Analyzer initialized","component":"main","fields":{"news_enabled":true}}
+{"timestamp":"2025-12-22T14:55:50.2729575Z","level":"INFO","message":"Big Candle Detector initialized","component":"main","fields":{"multiplier":1.5}}
+{"timestamp":"2025-12-22T14:55:50.273478Z","level":"INFO","message":"Scalping Strategy initialized","component":"main","fields":{"max_hold":60,"min_profit":0.05}}
+{"timestamp":"2025-12-22T14:55:50.273478Z","level":"INFO","message":"Futures client wrapped with cache for WebSocket data","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.273478Z","level":"INFO","message":"FuturesController initializing with circuit breaker","component":"futures_autopilot","fields":{"circuit_breaker_enabled":true}}
+{"timestamp":"2025-12-22T14:55:50.273478Z","level":"INFO","message":"Loaded symbol precisions from Binance API","component":"futures_autopilot","fields":{"symbols":30}}
+{"timestamp":"2025-12-22T14:55:50.273478Z","level":"WARN","message":"LLM client not configured, falling back to market movers","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Loaded Ginie PnL stats from settings","component":"futures_autopilot","fields":{"daily_pnl":0.06584000954312752,"daily_trades":0,"total_pnl":0.06584000954312752,"total_trades":0,"winning_trades":1}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Exchange positions check","component":"futures_autopilot","fields":{"exchange_count":0,"ginie_count":0}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"LLM analyzer set for Ginie adaptive SL/TP","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Ginie LLM client configured","component":"futures_autopilot","fields":{"provider":"deepseek"}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Ginie requesting AI-selected coins from LLM","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Applied Ginie autopilot settings","component":"futures_autopilot","fields":{"auto_start":true,"cb_cooldown_minutes":30,"cb_max_consecutive_losses":15,"cb_max_daily_loss":500,"cb_max_loss_per_hour":100,"circuit_breaker_enabled":true,"dry_run":false,"leverage":10,"max_positions":10,"max_usd":50,"min_confidence":50,"risk_level":"aggressive"}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Auto-starting Ginie autopilot (was running before restart)","component":"futures_autopilot","fields":{"mode":"LIVE"}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Loaded saved autopilot settings","component":"futures_autopilot","fields":{"circuit_breaker_enabled":true,"dry_run":false,"dynamic_sltp_enabled":true,"ginie_auto_start":true,"max_usd_allocation":2500,"risk_level":"moderate","scalping_enabled":true}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Futures Autopilot Controller initialized","component":"main","fields":{"dry_run":true,"leverage":5,"risk_level":"moderate"}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Calling Ginie Start() from auto-start goroutine","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Ginie Start() called","component":"futures_autopilot","fields":{"current_running":false,"dry_run":false}}
+{"timestamp":"2025-12-22T14:55:50.2745347Z","level":"INFO","message":"Exchange positions check","component":"futures_autopilot","fields":{"exchange_count":0,"ginie_count":0}}
+2025/12/22 20:25:50 [GINIE] Running startup orphan order cleanup...
+2025/12/22 20:25:50 [GINIE-CLEANUP] Found 0 positions on exchange
+2025/12/22 20:25:50 [GINIE-CLEANUP] Cleanup complete: 0 total orders checked, 0 cancelled
+{"timestamp":"2025-12-22T14:55:50.2752227Z","level":"INFO","message":"Starting Ginie Autopilot","component":"futures_autopilot","fields":{"dry_run":false,"max_positions":10,"modes":"scalp=true swing=true position=true"}}
+{"timestamp":"2025-12-22T14:55:50.2752227Z","level":"INFO","message":"Adaptive SL/TP monitor started with LLM","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.2752227Z","level":"INFO","message":"Ginie Autopilot fully started - all monitors running","component":"futures_autopilot"}
+2025/12/22 20:25:50 [GINIE-MONITOR] Position monitor goroutine started
+{"timestamp":"2025-12-22T14:55:50.2752227Z","level":"INFO","message":"Ginie auto-start completed successfully","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.2752227Z","level":"INFO","message":"Ginie position monitor started - will check positions every 5 seconds","component":"futures_autopilot"}
+2025/12/22 20:25:50 Strategy 'Breakout High' already exists in database, skipping migration
+2025/12/22 20:25:50 Strategy 'Support Low' already exists in database, skipping migration
+2025/12/22 20:25:50 Strategy registered: breakout_high for BTCUSDT
+2025/12/22 20:25:50 Strategy registered: support_low for ETHUSDT
+Enhanced strategies registered (EMA + RSI + Volume filters enabled)
+2025/12/22 20:25:50 Strategy scanner initialized (enabled: true, interval: 1m0s)
+{"timestamp":"2025-12-22T14:55:50.2779222Z","level":"INFO","message":"Event persistence and notifications configured","component":"main"}
+2025/12/22 20:25:50 WebSocket hub initialized
+2025/12/22 20:25:50 WebSocket hub initialized with 0 clients
+2025/12/22 20:25:50 Connecting to Futures WebSocket: wss://fstream.binance.com/stream?streams=%21markPrice%40arr%2Fbtcusdt%40kline_1m%2Fethusdt%40kline_1m%2Fbnbusdt%40kline_1m%2Fsolusdt%40kline_1m%2Fxrpusdt%40kline_1m%2Fdogeusdt%40kline_1m%2Fadausdt%40kline_1m%2Favaxusdt%40kline_1m%2Flinkusdt%40kline_1m%2Fdotusdt%40kline_1m%2Fltcusdt%40kline_1m%2Fatomusdt%40kline_1m%2Funiusdt%40kline_1m%2Fnearusdt%40kline_1m
+2025/12/22 20:25:50 Futures WebSocket connected, subscribed to 15 streams
+{"timestamp":"2025-12-22T14:55:50.6279198Z","level":"INFO","message":"Futures WebSocket connected","component":"main","fields":{"streams":15,"symbols":14}}
+{"timestamp":"2025-12-22T14:55:50.6279198Z","level":"INFO","message":"Authentication disabled - running in single-user mode","component":"main"}
+{"timestamp":"2025-12-22T14:55:50.6279198Z","level":"INFO","message":"License validated","component":"main","fields":{"features":2,"max_symbols":3,"type":"trial"}}
+2025/12/22 20:25:50 Starting Binance Trading Bot...
+2025/12/22 20:25:50 Dry run mode: true
+2025/12/22 20:25:50 Web interface available at http://0.0.0.0:8093
+2025/12/22 20:25:50 Trading Bot started
+2025/12/22 20:25:50 Dry run mode: true
+2025/12/22 20:25:50 Max open positions: 5
+2025/12/22 20:25:50 Starting HTTP server on 0.0.0.0:8093
+2025/12/22 20:25:50 Strategy scanner started
+{"timestamp":"2025-12-22T14:55:50.6287052Z","level":"INFO","message":"Coin classifier started","component":"futures_autopilot"}
+{"timestamp":"2025-12-22T14:55:50.6287052Z","level":"INFO","message":"Futures autopilot started","component":"futures_autopilot","fields":{"dry_run":false,"leverage":5,"risk_level":"moderate","trading_style":"swing"}}
+{"timestamp":"2025-12-22T14:55:50.6287052Z","level":"INFO","message":"Futures autopilot started","component":"main"}
+2025/12/22 20:25:50 [Scanner] Starting scan scan-1766415350
+{"timestamp":"2025-12-22T14:55:50.6287052Z","level":"INFO","message":"FuturesController loop started (trading disabled - use Ginie instead)","component":"futures_autopilot"}
+2025/12/22 20:25:50 Screener started
+2025/12/22 20:25:50 Starting market scan...
+2025/12/22 20:25:50 Market scan completed in 0s. Found 3 opportunities (filtered 17)
+2025/12/22 20:25:50 Failed to start web server: failed to start server: listen tcp 0.0.0.0:8093: bind: Only one usage of each socket address (protocol/network address/port) is normally permitted.

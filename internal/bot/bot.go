@@ -15,7 +15,7 @@ import (
 
 // TradingBot manages the trading operations
 type TradingBot struct {
-	client            *binance.Client
+	client            binance.BinanceClient
 	config            *config.Config
 	repo              *database.Repository
 	eventBus          *events.EventBus
@@ -55,16 +55,25 @@ type Order struct {
 }
 
 func NewTradingBot(cfg *config.Config, repo *database.Repository, eventBus *events.EventBus) (*TradingBot, error) {
-	baseURL := cfg.BinanceConfig.BaseURL
-	if cfg.BinanceConfig.TestNet {
-		baseURL = "https://testnet.binance.vision"
-	}
+	var client binance.BinanceClient
 
-	client := binance.NewClient(
-		cfg.BinanceConfig.APIKey,
-		cfg.BinanceConfig.SecretKey,
-		baseURL,
-	)
+	if cfg.BinanceConfig.MockMode {
+		// Use mock client for development/testing when Binance API is unavailable
+		log.Println("Using MOCK MODE - Binance API calls will use simulated data")
+		client = binance.NewMockClient()
+	} else {
+		// Use real Binance client
+		baseURL := cfg.BinanceConfig.BaseURL
+		if cfg.BinanceConfig.TestNet {
+			baseURL = "https://testnet.binance.vision"
+		}
+
+		client = binance.NewClient(
+			cfg.BinanceConfig.APIKey,
+			cfg.BinanceConfig.SecretKey,
+			baseURL,
+		)
+	}
 
 	return &TradingBot{
 		client:            client,
@@ -80,7 +89,7 @@ func NewTradingBot(cfg *config.Config, repo *database.Repository, eventBus *even
 }
 
 // GetBinanceClient returns the Binance client
-func (b *TradingBot) GetBinanceClient() *binance.Client {
+func (b *TradingBot) GetBinanceClient() binance.BinanceClient {
 	return b.client
 }
 
@@ -356,9 +365,130 @@ func (b *TradingBot) checkPositions() {
 
 // calculatePositionSize calculates the position size based on risk management
 func (b *TradingBot) calculatePositionSize(signal *strategy.Signal) float64 {
-	// This is a simplified calculation
-	// In production, you'd fetch account balance and calculate based on risk per trade
-	return 0.001 // Default small position
+	// Get current price for the symbol
+	currentPrice, err := b.client.GetCurrentPrice(signal.Symbol)
+	if err != nil {
+		log.Printf("Error getting price for position sizing: %v, using fallback", err)
+		currentPrice = signal.EntryPrice
+	}
+	if currentPrice <= 0 {
+		currentPrice = signal.EntryPrice
+	}
+
+	// Minimum notional value required by Binance (typically $5-10 USDT)
+	minNotional := 10.0 // Safe minimum for most pairs
+
+	// Get account balance
+	accountInfo, err := b.client.GetAccountInfo()
+	if err != nil {
+		log.Printf("Error getting account info: %v, using fixed position size", err)
+		// Fallback to fixed position size from config
+		fixedSize := b.config.RiskConfig.FixedPositionSize
+		if fixedSize <= 0 {
+			fixedSize = 20.0 // Default $20 USD
+		}
+		quantity := fixedSize / currentPrice
+		// Ensure minimum notional
+		if quantity*currentPrice < minNotional {
+			quantity = minNotional / currentPrice
+		}
+		return b.roundQuantity(signal.Symbol, quantity)
+	}
+
+	// Find USDT balance
+	var usdtBalance float64
+	for _, balance := range accountInfo.Balances {
+		if balance.Asset == "USDT" {
+			var free float64
+			fmt.Sscanf(balance.Free, "%f", &free)
+			usdtBalance = free
+			break
+		}
+	}
+
+	if usdtBalance <= 0 {
+		log.Printf("No USDT balance found, using minimum position")
+		quantity := minNotional / currentPrice
+		return b.roundQuantity(signal.Symbol, quantity)
+	}
+
+	var positionValue float64
+
+	// Calculate position size based on method
+	switch b.config.RiskConfig.PositionSizeMethod {
+	case "fixed":
+		// Use fixed USD amount
+		positionValue = b.config.RiskConfig.FixedPositionSize
+		if positionValue <= 0 {
+			positionValue = 20.0 // Default $20
+		}
+	case "percent", "":
+		// Use percentage of balance (default method)
+		riskPercent := b.config.RiskConfig.MaxRiskPerTrade
+		if riskPercent <= 0 {
+			riskPercent = 2.0 // Default 2%
+		}
+		positionValue = usdtBalance * (riskPercent / 100.0)
+	case "kelly":
+		// Kelly criterion - simplified version
+		// For now, use conservative 1% of balance
+		positionValue = usdtBalance * 0.01
+	default:
+		// Default to 2% of balance
+		positionValue = usdtBalance * 0.02
+	}
+
+	// Ensure minimum notional is met
+	if positionValue < minNotional {
+		positionValue = minNotional
+	}
+
+	// Don't exceed available balance
+	if positionValue > usdtBalance*0.95 { // Keep 5% buffer
+		positionValue = usdtBalance * 0.95
+	}
+
+	// Calculate quantity
+	quantity := positionValue / currentPrice
+
+	log.Printf("Position sizing: balance=%.2f USDT, method=%s, value=%.2f USDT, price=%.4f, quantity=%.8f",
+		usdtBalance, b.config.RiskConfig.PositionSizeMethod, positionValue, currentPrice, quantity)
+
+	return b.roundQuantity(signal.Symbol, quantity)
+}
+
+// roundQuantity rounds the quantity to the appropriate precision for the symbol
+func (b *TradingBot) roundQuantity(symbol string, quantity float64) float64 {
+	// Common step sizes for popular trading pairs
+	// BTC pairs: 0.00001, ETH pairs: 0.0001, others vary
+	var stepSize float64
+
+	switch {
+	case len(symbol) >= 3 && symbol[:3] == "BTC":
+		stepSize = 0.00001 // 5 decimals for BTC
+	case len(symbol) >= 3 && symbol[:3] == "ETH":
+		stepSize = 0.0001 // 4 decimals for ETH
+	case len(symbol) >= 3 && symbol[:3] == "BNB":
+		stepSize = 0.001 // 3 decimals for BNB
+	case quantity >= 100:
+		stepSize = 1 // Round to whole numbers for large quantities
+	case quantity >= 1:
+		stepSize = 0.01 // 2 decimals
+	case quantity >= 0.1:
+		stepSize = 0.001 // 3 decimals
+	default:
+		stepSize = 0.00001 // 5 decimals for small quantities
+	}
+
+	// Round down to nearest step size
+	rounded := float64(int(quantity/stepSize)) * stepSize
+
+	// Ensure we don't return zero
+	if rounded <= 0 && quantity > 0 {
+		rounded = stepSize
+	}
+
+	return rounded
 }
 
 // hasPosition checks if there's an open position for a symbol
@@ -392,6 +522,7 @@ func (b *TradingBot) createVirtualTrade(signal *strategy.Signal) error {
 		Status:       "OPEN",
 		EntryTime:    time.Now(),
 		StrategyName: &signal.Reason,
+		TradeSource:  database.TradeSourceStrategy,
 	}
 
 	if err := b.repo.CreateTrade(ctx, trade); err != nil {
@@ -469,16 +600,18 @@ func (b *TradingBot) GetOpenVirtualTrades() []map[string]interface{} {
 		}
 
 		result = append(result, map[string]interface{}{
-			"symbol":        trade.Symbol,
-			"side":          trade.Side,
-			"entry_price":   trade.EntryPrice,
-			"current_price": currentPrice,
-			"quantity":      trade.Quantity,
-			"pnl":           pnl,
-			"pnl_percent":   pnlPercent,
-			"entry_time":    trade.EntryTime,
-			"stop_loss":     trade.StopLoss,
-			"take_profit":   trade.TakeProfit,
+			"symbol":         trade.Symbol,
+			"side":           trade.Side,
+			"entry_price":    trade.EntryPrice,
+			"current_price":  currentPrice,
+			"quantity":       trade.Quantity,
+			"pnl":            pnl,
+			"pnl_percent":    pnlPercent,
+			"entry_time":     trade.EntryTime,
+			"stop_loss":      trade.StopLoss,
+			"take_profit":    trade.TakeProfit,
+			"trade_source":   trade.TradeSource,
+			"ai_decision_id": trade.AIDecisionID,
 		})
 	}
 

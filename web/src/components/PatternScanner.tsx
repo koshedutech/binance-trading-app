@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Sparkles, TrendingUp, TrendingDown, AlertCircle, Loader, ShoppingCart, LogOut, BarChart3, Star, DollarSign } from 'lucide-react';
+import { Search, Sparkles, TrendingUp, TrendingDown, AlertCircle, Loader, ShoppingCart, LogOut, BarChart3, Star, DollarSign, ChevronDown, Zap } from 'lucide-react';
 import { apiService } from '../services/api';
+import { futuresApi } from '../services/futuresApi';
 import { ChartModal } from './ChartModal';
 
 interface CandlestickPattern {
@@ -39,18 +40,32 @@ export const PatternScanner: React.FC = () => {
   const [closingAll, setClosingAll] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>([]);
+  const [tradingMode, setTradingMode] = useState<'spot' | 'futures'>('spot');
+  const [allSymbols, setAllSymbols] = useState<string[]>([]);
+  const [showSymbolDropdown, setShowSymbolDropdown] = useState(false);
+  const [symbolSearch, setSymbolSearch] = useState('');
+  const [futuresLongSymbol, setFuturesLongSymbol] = useState<string | null>(null);
+  const [futuresShortSymbol, setFuturesShortSymbol] = useState<string | null>(null);
 
   useEffect(() => {
-    // Load watchlist on component mount
-    const loadWatchlist = async () => {
+    // Load watchlist and all symbols on component mount
+    const loadData = async () => {
       try {
-        const items = await apiService.getWatchlist();
-        setWatchlist(items.map((item: any) => item.symbol));
+        const [watchlistItems, symbols, futuresSymbols] = await Promise.all([
+          apiService.getWatchlist(),
+          apiService.getBinanceSymbols().catch(() => []),
+          futuresApi.getSymbols().catch(() => []),
+        ]);
+        setWatchlist(watchlistItems.map((item: any) => item.symbol));
+
+        // Combine spot and futures symbols, removing duplicates
+        const allUniqueSymbols = [...new Set([...symbols, ...futuresSymbols])].filter(s => s.endsWith('USDT'));
+        setAllSymbols(allUniqueSymbols.sort());
       } catch (err) {
-        console.error('Failed to load watchlist:', err);
+        console.error('Failed to load data:', err);
       }
     };
-    loadWatchlist();
+    loadData();
   }, []);
 
   const addSymbol = () => {
@@ -222,6 +237,75 @@ export const PatternScanner: React.FC = () => {
     }
   };
 
+  const handleFuturesLong = async (symbol: string) => {
+    setFuturesLongSymbol(symbol);
+    setError(null);
+    setSuccessMessage(null);
+
+    try {
+      // Use LONG position side for hedge mode accounts
+      await futuresApi.placeOrder({
+        symbol,
+        side: 'BUY',
+        position_side: 'LONG',
+        order_type: 'MARKET',
+        quantity: 0.001, // Small test quantity - will be adjusted based on min notional
+      });
+
+      setSuccessMessage(`Successfully opened LONG position for ${symbol}`);
+      setTimeout(() => setSuccessMessage(null), 5000);
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.message || 'Failed to open long position');
+    } finally {
+      setFuturesLongSymbol(null);
+    }
+  };
+
+  const handleFuturesShort = async (symbol: string) => {
+    setFuturesShortSymbol(symbol);
+    setError(null);
+    setSuccessMessage(null);
+
+    try {
+      // Use SHORT position side for hedge mode accounts
+      await futuresApi.placeOrder({
+        symbol,
+        side: 'SELL',
+        position_side: 'SHORT',
+        order_type: 'MARKET',
+        quantity: 0.001, // Small test quantity - will be adjusted based on min notional
+      });
+
+      setSuccessMessage(`Successfully opened SHORT position for ${symbol}`);
+      setTimeout(() => setSuccessMessage(null), 5000);
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.message || 'Failed to open short position');
+    } finally {
+      setFuturesShortSymbol(null);
+    }
+  };
+
+  // Get sorted symbols with watchlist first
+  const getSortedSymbols = () => {
+    const filtered = allSymbols.filter(s =>
+      symbolSearch === '' || s.toLowerCase().includes(symbolSearch.toLowerCase())
+    );
+
+    // Separate watchlist and non-watchlist symbols
+    const starred = filtered.filter(s => watchlist.includes(s));
+    const unstarred = filtered.filter(s => !watchlist.includes(s));
+
+    return [...starred, ...unstarred];
+  };
+
+  const addSymbolFromDropdown = (symbol: string) => {
+    if (!selectedSymbols.includes(symbol)) {
+      setSelectedSymbols([...selectedSymbols, symbol]);
+    }
+    setShowSymbolDropdown(false);
+    setSymbolSearch('');
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -275,17 +359,73 @@ export const PatternScanner: React.FC = () => {
             >
               Add
             </button>
+
+            {/* Symbol Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => setShowSymbolDropdown(!showSymbolDropdown)}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded transition-colors flex items-center gap-2"
+              >
+                <span>All Coins</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${showSymbolDropdown ? 'rotate-180' : ''}`} />
+              </button>
+
+              {showSymbolDropdown && (
+                <div className="absolute z-50 right-0 mt-2 w-64 bg-gray-800 border border-gray-600 rounded-lg shadow-xl max-h-80 overflow-hidden">
+                  <div className="p-2 border-b border-gray-700">
+                    <input
+                      type="text"
+                      value={symbolSearch}
+                      onChange={(e) => setSymbolSearch(e.target.value.toUpperCase())}
+                      placeholder="Search symbols..."
+                      className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:border-blue-500"
+                      autoFocus
+                    />
+                  </div>
+                  <div className="max-h-60 overflow-y-auto">
+                    {getSortedSymbols().slice(0, 100).map((symbol) => (
+                      <button
+                        key={symbol}
+                        onClick={() => addSymbolFromDropdown(symbol)}
+                        disabled={selectedSymbols.includes(symbol)}
+                        className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 hover:bg-gray-700 ${
+                          selectedSymbols.includes(symbol) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                      >
+                        {watchlist.includes(symbol) && (
+                          <Star className="w-3 h-3 text-yellow-500 fill-current" />
+                        )}
+                        <span className={watchlist.includes(symbol) ? 'text-yellow-400' : 'text-white'}>
+                          {symbol}
+                        </span>
+                        {selectedSymbols.includes(symbol) && (
+                          <span className="ml-auto text-xs text-gray-500">Added</span>
+                        )}
+                      </button>
+                    ))}
+                    {getSortedSymbols().length === 0 && (
+                      <div className="px-4 py-3 text-gray-500 text-sm text-center">No symbols found</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
             {selectedSymbols.length === 0 ? (
-              <div className="text-gray-500 text-sm">No symbols selected</div>
+              <div className="text-gray-500 text-sm">No symbols selected. Type a symbol or click "All Coins" to browse.</div>
             ) : (
               selectedSymbols.map((symbol) => (
                 <div
                   key={symbol}
-                  className="flex items-center gap-2 px-3 py-1 bg-blue-900/30 border border-blue-500/50 rounded text-blue-400"
+                  className={`flex items-center gap-2 px-3 py-1 rounded ${
+                    watchlist.includes(symbol)
+                      ? 'bg-yellow-900/30 border border-yellow-500/50 text-yellow-400'
+                      : 'bg-blue-900/30 border border-blue-500/50 text-blue-400'
+                  }`}
                 >
+                  {watchlist.includes(symbol) && <Star className="w-3 h-3 fill-current" />}
                   <span>{symbol}</span>
                   <button onClick={() => removeSymbol(symbol)} className="hover:text-red-400">
                     ×
@@ -318,6 +458,34 @@ export const PatternScanner: React.FC = () => {
 
           <div className="mt-4 text-sm text-gray-400">
             {selectedTimeframes.length} timeframe{selectedTimeframes.length !== 1 ? 's' : ''} selected
+          </div>
+
+          {/* Trading Mode Toggle */}
+          <div className="mt-6 pt-4 border-t border-gray-700">
+            <h4 className="text-sm font-semibold text-gray-400 mb-3">Trading Mode</h4>
+            <div className="flex bg-gray-700 rounded-lg p-1">
+              <button
+                onClick={() => setTradingMode('spot')}
+                className={`flex-1 py-2 rounded-md text-sm font-medium transition-colors ${
+                  tradingMode === 'spot'
+                    ? 'bg-blue-600 text-white'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                Spot Trading
+              </button>
+              <button
+                onClick={() => setTradingMode('futures')}
+                className={`flex-1 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-1 ${
+                  tradingMode === 'futures'
+                    ? 'bg-orange-600 text-white'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                <Zap className="w-4 h-4" />
+                Futures
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -400,40 +568,82 @@ export const PatternScanner: React.FC = () => {
                       <BarChart3 className="w-4 h-4" />
                       Chart
                     </button>
-                    <button
-                      onClick={() => handleBuy(symbolResult.symbol)}
-                      disabled={buyingSymbol === symbolResult.symbol}
-                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {buyingSymbol === symbolResult.symbol ? (
-                        <>
-                          <Loader className="w-4 h-4 animate-spin" />
-                          Buying...
-                        </>
-                      ) : (
-                        <>
-                          <ShoppingCart className="w-4 h-4" />
-                          Buy
-                        </>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => handleSell(symbolResult.symbol)}
-                      disabled={sellingSymbol === symbolResult.symbol}
-                      className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {sellingSymbol === symbolResult.symbol ? (
-                        <>
-                          <Loader className="w-4 h-4 animate-spin" />
-                          Selling...
-                        </>
-                      ) : (
-                        <>
-                          <DollarSign className="w-4 h-4" />
-                          Sell
-                        </>
-                      )}
-                    </button>
+
+                    {tradingMode === 'spot' ? (
+                      <>
+                        <button
+                          onClick={() => handleBuy(symbolResult.symbol)}
+                          disabled={buyingSymbol === symbolResult.symbol}
+                          className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {buyingSymbol === symbolResult.symbol ? (
+                            <>
+                              <Loader className="w-4 h-4 animate-spin" />
+                              Buying...
+                            </>
+                          ) : (
+                            <>
+                              <ShoppingCart className="w-4 h-4" />
+                              Buy
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleSell(symbolResult.symbol)}
+                          disabled={sellingSymbol === symbolResult.symbol}
+                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {sellingSymbol === symbolResult.symbol ? (
+                            <>
+                              <Loader className="w-4 h-4 animate-spin" />
+                              Selling...
+                            </>
+                          ) : (
+                            <>
+                              <DollarSign className="w-4 h-4" />
+                              Sell
+                            </>
+                          )}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleFuturesLong(symbolResult.symbol)}
+                          disabled={futuresLongSymbol === symbolResult.symbol}
+                          className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {futuresLongSymbol === symbolResult.symbol ? (
+                            <>
+                              <Loader className="w-4 h-4 animate-spin" />
+                              Opening...
+                            </>
+                          ) : (
+                            <>
+                              <TrendingUp className="w-4 h-4" />
+                              Long
+                            </>
+                          )}
+                        </button>
+                        <button
+                          onClick={() => handleFuturesShort(symbolResult.symbol)}
+                          disabled={futuresShortSymbol === symbolResult.symbol}
+                          className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded font-semibold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          {futuresShortSymbol === symbolResult.symbol ? (
+                            <>
+                              <Loader className="w-4 h-4 animate-spin" />
+                              Opening...
+                            </>
+                          ) : (
+                            <>
+                              <TrendingDown className="w-4 h-4" />
+                              Short
+                            </>
+                          )}
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>

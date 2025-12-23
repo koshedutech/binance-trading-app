@@ -15,7 +15,7 @@ import (
 
 // Scanner orchestrates strategy scanning across multiple symbols
 type Scanner struct {
-	client     *binance.Client
+	client     binance.BinanceClient
 	repo       *database.Repository
 	evaluator  *ProximityEvaluator
 	strategies []strategy.Strategy
@@ -28,7 +28,7 @@ type Scanner struct {
 
 // NewScanner creates a new scanner instance
 func NewScanner(
-	client *binance.Client,
+	client binance.BinanceClient,
 	repo *database.Repository,
 	strategies []strategy.Strategy,
 	config ScannerConfig,
@@ -126,10 +126,16 @@ func (sc *Scanner) scan() {
 		close(resultChan)
 	}()
 
-	// Collect results
+	// Collect results with deduplication by symbol+strategy
+	seenResults := make(map[string]bool)
 	for result := range resultChan {
 		if result.ReadinessScore > 0 { // Only include relevant results
-			allResults = append(allResults, result)
+			// Create unique key from symbol and strategy name
+			key := fmt.Sprintf("%s-%s", result.Symbol, result.StrategyName)
+			if !seenResults[key] {
+				seenResults[key] = true
+				allResults = append(allResults, result)
+			}
 		}
 	}
 
@@ -180,7 +186,7 @@ func (sc *Scanner) worker(
 	}
 }
 
-// scanSymbol evaluates all strategies against a single symbol
+// scanSymbol evaluates strategies that match the given symbol
 func (sc *Scanner) scanSymbol(
 	ctx context.Context,
 	symbol string,
@@ -192,8 +198,13 @@ func (sc *Scanner) scanSymbol(
 		return
 	}
 
-	// Evaluate each strategy
+	// Evaluate only strategies that match this symbol
 	for _, strat := range sc.strategies {
+		// Skip strategies that don't match this symbol
+		if strat.GetSymbol() != symbol {
+			continue
+		}
+
 		// Get klines for this strategy's interval
 		klines, err := sc.client.GetKlines(symbol, strat.GetInterval(), 100)
 		if err != nil {

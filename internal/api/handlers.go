@@ -5,6 +5,7 @@ import (
 	"binance-trading-bot/internal/scanner"
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -203,14 +204,28 @@ func (s *Server) handleCancelOrder(c *gin.Context) {
 // handleGetActiveOrders returns all active orders
 func (s *Server) handleGetActiveOrders(c *gin.Context) {
 	ctx := c.Request.Context()
-	userID := s.getUserID(c)
 
-	orders, err := s.repo.GetActiveOrdersForUser(ctx, userID)
+	var orders []*database.Order
+	var err error
+
+	log.Printf("[DEBUG] handleGetActiveOrders: authEnabled=%v", s.authEnabled)
+
+	if s.authEnabled {
+		userID := s.getUserID(c)
+		log.Printf("[DEBUG] Using user-scoped query, userID=%d", userID)
+		orders, err = s.repo.GetActiveOrdersForUser(ctx, userID)
+	} else {
+		log.Printf("[DEBUG] Using non-scoped query")
+		orders, err = s.repo.GetActiveOrders(ctx)
+	}
+
 	if err != nil {
+		log.Printf("[DEBUG] Error fetching orders: %v", err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch active orders")
 		return
 	}
 
+	log.Printf("[DEBUG] Successfully fetched %d orders", len(orders))
 	successResponse(c, orders)
 }
 
@@ -346,9 +361,17 @@ func (s *Server) handleGetScreenerResults(c *gin.Context) {
 func (s *Server) handleGetMetrics(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	userID := s.getUserID(c)
 
-	metrics, err := s.repo.GetTradingMetricsForUser(ctx, userID)
+	var metrics *database.TradingMetrics
+	var err error
+
+	if s.authEnabled {
+		userID := s.getUserID(c)
+		metrics, err = s.repo.GetTradingMetricsForUser(ctx, userID)
+	} else {
+		metrics, err = s.repo.GetTradingMetrics(ctx)
+	}
+
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to fetch metrics")
 		return

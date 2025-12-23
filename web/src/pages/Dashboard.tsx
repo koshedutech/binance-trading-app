@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
-import { TrendingUp, TrendingDown, Activity, DollarSign, Bell, Settings, Sparkles, ArrowRight, Brain, History, Zap, AlertCircle } from 'lucide-react';
+import { TrendingUp, Activity, DollarSign, Bell, Settings, Sparkles, ArrowRight, Brain, History, Zap, AlertCircle } from 'lucide-react';
 import PositionsTable from '../components/PositionsTable';
 import OrdersTable from '../components/OrdersTable';
 import StrategiesPanel from '../components/StrategiesPanel';
@@ -11,52 +11,24 @@ import PendingSignalsModal from '../components/PendingSignalsModal';
 import StrategyConfigModal from '../components/StrategyConfigModal';
 import StrategyScanner from '../components/StrategyScanner';
 import AISignalsPanel from '../components/AISignalsPanel';
+import AITradeStatusPanel from '../components/AITradeStatusPanel';
 import TradeHistory from '../components/TradeHistory';
 import TradingModeToggle from '../components/TradingModeToggle';
 import WalletBalanceCard from '../components/WalletBalanceCard';
-import AutopilotRulesPanel from '../components/AutopilotRulesPanel';
 import PanicButton from '../components/PanicButton';
-import FuturesPositionsTable from '../components/FuturesPositionsTable';
-import { futuresApi } from '../services/futuresApi';
-import { apiService } from '../services/api';
-import type { FuturesPosition } from '../types/futures';
+import SpotAutopilotPanel from '../components/SpotAutopilotPanel';
 
 export default function Dashboard() {
-  const { metrics, positions, activeOrders } = useStore();
+  const { metrics, positions } = useStore();
   const navigate = useNavigate();
   const [showPendingSignalsModal, setShowPendingSignalsModal] = useState(false);
   const [showStrategyConfigModal, setShowStrategyConfigModal] = useState(false);
-  const [futuresPositions, setFuturesPositions] = useState<FuturesPosition[]>([]);
   const [tradingMode, setTradingMode] = useState<{ mode: 'paper' | 'live'; mode_label: string } | null>(null);
-  const [positionsView, setPositionsView] = useState<'spot' | 'futures' | 'all'>('all');
+  const [activeTab, setActiveTab] = useState<'ai-trader' | 'signals' | 'scanner'>('ai-trader');
 
-  // Fetch futures positions and trading mode
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const [futuresPos, modeData] = await Promise.all([
-          futuresApi.getPositions(),
-          apiService.getTradingMode(),
-        ]);
-        setFuturesPositions(futuresPos);
-        setTradingMode(modeData);
-      } catch (error) {
-        console.error('Error fetching data:', error);
-      }
-    };
-
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const refreshPositions = async () => {
-    try {
-      const futuresPos = await futuresApi.getPositions();
-      setFuturesPositions(futuresPos);
-    } catch (error) {
-      console.error('Error refreshing positions:', error);
-    }
+  // Handle trading mode changes from TradingModeToggle component
+  const handleTradingModeChange = (mode: { mode: 'paper' | 'live'; mode_label: string }) => {
+    setTradingMode(mode);
   };
 
   const formatCurrency = (value: number) => {
@@ -70,43 +42,11 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Visual Strategy Builder Highlight */}
-      <div className="bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg p-6 shadow-xl border border-blue-500/50">
-        <div className="flex items-center justify-between">
-          <div className="flex-1">
-            <div className="flex items-center gap-3 mb-2">
-              <Sparkles className="w-8 h-8 text-yellow-300" />
-              <h2 className="text-2xl font-bold text-white">Visual Strategy Builder</h2>
-              <span className="px-2 py-1 bg-green-500 text-white text-xs font-semibold rounded-full">NEW</span>
-            </div>
-            <p className="text-blue-100 mb-4 max-w-2xl">
-              Create advanced trading strategies with drag-and-drop nodes, visual condition builder,
-              multiple indicators, backtesting, and chart visualization. Build complex logic with AND/OR
-              conditions like "Buy when LTP &gt;= EMA(20) AND RSI &lt; 30".
-            </p>
-            <div className="flex flex-wrap gap-2 text-sm text-blue-100">
-              <span className="px-3 py-1 bg-white/10 rounded-full">✓ 9 Technical Indicators</span>
-              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Visual Conditions</span>
-              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Backtesting</span>
-              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Chart Integration</span>
-              <span className="px-3 py-1 bg-white/10 rounded-full">✓ Risk Management</span>
-            </div>
-          </div>
-          <button
-            onClick={() => navigate('/visual-strategy-advanced')}
-            className="bg-white hover:bg-gray-100 text-blue-600 px-6 py-3 rounded-lg font-bold transition-all hover:scale-105 flex items-center gap-2 shadow-lg ml-6"
-          >
-            Launch Builder
-            <ArrowRight className="w-5 h-5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Trading Mode, Live/Paper Indicator & Action Buttons */}
+      {/* Header Row - Trading Mode & Actions */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
         {/* Left side - Trading Mode & Live/Paper Indicator */}
         <div className="flex items-center gap-4">
-          <TradingModeToggle />
+          <TradingModeToggle onModeChange={handleTradingModeChange} />
 
           {/* Live/Paper Indicator */}
           {tradingMode && (
@@ -131,238 +71,235 @@ export default function Dashboard() {
               )}
             </div>
           )}
+
+          {/* Spot Trading Badge */}
+          <div className="flex items-center gap-2 px-3 py-2 bg-blue-500/20 border border-blue-500/50 rounded-lg">
+            <DollarSign className="w-4 h-4 text-blue-400" />
+            <span className="text-blue-400 font-semibold text-sm">SPOT TRADING</span>
+          </div>
         </div>
 
-        {/* Right side - Action Buttons & Panic Button */}
+        {/* Right side - Action Buttons */}
         <div className="flex gap-3 flex-wrap">
           <button
             onClick={() => setShowStrategyConfigModal(true)}
-            className="bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center"
+            className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center"
           >
-            <Settings className="w-5 h-5 mr-2" />
-            Configure Strategies
+            <Settings className="w-4 h-4 mr-2" />
+            Strategies
           </button>
           <button
             onClick={() => setShowPendingSignalsModal(true)}
-            className="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-semibold transition-colors flex items-center animate-pulse"
+            className="bg-yellow-600 hover:bg-yellow-700 text-white px-4 py-2 rounded-lg font-medium transition-colors flex items-center"
           >
-            <Bell className="w-5 h-5 mr-2" />
-            Pending Signals
+            <Bell className="w-4 h-4 mr-2" />
+            Signals
           </button>
-
-          {/* Panic Button - Close All Positions */}
-          <PanicButton type="all" onComplete={refreshPositions} />
+          <PanicButton type="spot" onComplete={() => {}} />
         </div>
       </div>
 
-      {/* Wallet Balance & Autopilot Control - Top Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <WalletBalanceCard />
-        <AutopilotRulesPanel />
-      </div>
+      {/* Wallet Balance */}
+      <WalletBalanceCard />
 
-      {/* Metrics Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="metric-card">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="metric-label">Total P&L</div>
-              <div
-                className={`metric-value ${
-                  (metrics?.total_pnl || 0) >= 0 ? 'text-positive' : 'text-negative'
-                }`}
-              >
-                {formatCurrency(metrics?.total_pnl || 0)}
-              </div>
-            </div>
-            <DollarSign className="w-8 h-8 text-primary-500" />
-          </div>
-        </div>
-
-        <div className="metric-card">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="metric-label">Win Rate</div>
-              <div className="metric-value text-primary-400">
-                {(metrics?.win_rate || 0).toFixed(1)}%
-              </div>
-              <div className="text-xs text-gray-400 mt-1">
-                {metrics?.winning_trades || 0}W / {metrics?.losing_trades || 0}L
-              </div>
-            </div>
-            <Activity className="w-8 h-8 text-primary-500" />
-          </div>
-        </div>
-
-        <div className="metric-card">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="metric-label">Open Positions</div>
-              <div className="metric-value">{positions.length}</div>
-              <div className="text-xs text-gray-400 mt-1">
-                {activeOrders.length} active orders
-              </div>
-            </div>
-            <TrendingUp className="w-8 h-8 text-success" />
-          </div>
-        </div>
-
-        <div className="metric-card">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="metric-label">Total Trades</div>
-              <div className="metric-value">{metrics?.total_trades || 0}</div>
-              <div className="text-xs text-gray-400 mt-1">
-                PF: {(metrics?.profit_factor || 0).toFixed(2)}
-              </div>
-            </div>
-            <TrendingDown className="w-8 h-8 text-gray-400" />
-          </div>
-        </div>
-      </div>
-
-      {/* Performance Stats */}
-      {metrics && (
-        <div className="card">
-          <div className="card-header">
-            <h2 className="text-lg font-semibold">Performance Statistics</h2>
-          </div>
-          <div className="card-body">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div>
-                <div className="text-sm text-gray-400">Average Win</div>
-                <div className="text-lg font-semibold text-positive">
-                  {formatCurrency(metrics.average_win)}
+      {/* Main Content - Two Column Layout */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        {/* Left Column - AI Trader & Controls (2/3 width) */}
+        <div className="xl:col-span-2 space-y-6">
+          {/* Spot AI Trader - Primary Trading AI */}
+          <div className="bg-gradient-to-br from-blue-900/40 to-purple-900/40 rounded-xl border border-blue-500/30 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-blue-500/20 rounded-lg">
+                  <Brain className="w-6 h-6 text-blue-400" />
                 </div>
-              </div>
-              <div>
-                <div className="text-sm text-gray-400">Average Loss</div>
-                <div className="text-lg font-semibold text-negative">
-                  {formatCurrency(metrics.average_loss)}
-                </div>
-              </div>
-              <div>
-                <div className="text-sm text-gray-400">Largest Win</div>
-                <div className="text-lg font-semibold text-positive">
-                  {formatCurrency(metrics.largest_win)}
-                </div>
-              </div>
-              <div>
-                <div className="text-sm text-gray-400">Largest Loss</div>
-                <div className="text-lg font-semibold text-negative">
-                  {formatCurrency(metrics.largest_loss)}
+                <div>
+                  <h2 className="text-xl font-bold text-white">Spot AI Trader</h2>
+                  <p className="text-sm text-gray-400">Autonomous spot trading with AI signals</p>
                 </div>
               </div>
             </div>
+            <SpotAutopilotPanel />
+          </div>
+
+          {/* Tab Navigation for AI Features */}
+          <div className="bg-gray-800 rounded-lg p-1 flex">
+            <button
+              onClick={() => setActiveTab('ai-trader')}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md text-sm font-medium transition-colors ${
+                activeTab === 'ai-trader' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Brain className="w-4 h-4" />
+              AI Decisions
+            </button>
+            <button
+              onClick={() => setActiveTab('signals')}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md text-sm font-medium transition-colors ${
+                activeTab === 'signals' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Activity className="w-4 h-4" />
+              Signal Management
+            </button>
+            <button
+              onClick={() => setActiveTab('scanner')}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-md text-sm font-medium transition-colors ${
+                activeTab === 'scanner' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              Strategy Scanner
+            </button>
+          </div>
+
+          {/* Tab Content */}
+          <div className="min-h-[400px]">
+            {activeTab === 'ai-trader' && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <AITradeStatusPanel />
+                <div className="card">
+                  <div className="card-header">
+                    <div className="flex items-center gap-2">
+                      <Brain className="w-5 h-5 text-purple-400" />
+                      <h2 className="text-lg font-semibold">AI Signals</h2>
+                    </div>
+                  </div>
+                  <div className="card-body p-0">
+                    <AISignalsPanel />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'signals' && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="card">
+                  <div className="card-header">
+                    <h2 className="text-lg font-semibold">Signal Management</h2>
+                  </div>
+                  <div className="card-body">
+                    <EnhancedSignalsPanel />
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-header">
+                    <h2 className="text-lg font-semibold">Market Opportunities</h2>
+                  </div>
+                  <div className="card-body p-0">
+                    <ScreenerResults />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'scanner' && (
+              <div className="card">
+                <div className="card-header">
+                  <h2 className="text-lg font-semibold">Strategy Scanner - Signal Proximity</h2>
+                </div>
+                <div className="card-body p-0">
+                  <StrategyScanner />
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      )}
 
-      {/* Positions - Spot & Futures */}
-      <div className="card">
-        <div className="card-header flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <h2 className="text-lg font-semibold">Open Positions</h2>
-            {/* Position counts */}
-            <div className="flex items-center gap-2 text-sm">
-              <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded">
-                Spot: {positions.length}
+        {/* Right Column - Stats & Quick Info (1/3 width) */}
+        <div className="space-y-6">
+          {/* Performance Metrics */}
+          <div className="card">
+            <div className="card-header">
+              <h2 className="text-lg font-semibold">Performance</h2>
+            </div>
+            <div className="card-body space-y-4">
+              <div className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <DollarSign className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-400">Total P&L</span>
+                </div>
+                <span className={`text-lg font-bold ${(metrics?.total_pnl || 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                  {formatCurrency(metrics?.total_pnl || 0)}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-400">Win Rate</span>
+                </div>
+                <span className="text-lg font-bold text-blue-400">
+                  {(metrics?.win_rate || 0).toFixed(1)}%
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-gray-800 rounded-lg">
+                <div className="flex items-center gap-2">
+                  <TrendingUp className="w-5 h-5 text-gray-400" />
+                  <span className="text-sm text-gray-400">Total Trades</span>
+                </div>
+                <span className="text-lg font-bold text-white">
+                  {metrics?.total_trades || 0}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 text-sm">
+                <div className="p-2 bg-green-500/10 rounded text-center">
+                  <div className="text-green-400 font-semibold">{metrics?.winning_trades || 0}</div>
+                  <div className="text-gray-500 text-xs">Wins</div>
+                </div>
+                <div className="p-2 bg-red-500/10 rounded text-center">
+                  <div className="text-red-400 font-semibold">{metrics?.losing_trades || 0}</div>
+                  <div className="text-gray-500 text-xs">Losses</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Open Positions Summary */}
+          <div className="card">
+            <div className="card-header flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Open Positions</h2>
+              <span className="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-sm font-medium">
+                {positions.length}
               </span>
-              <span className="px-2 py-1 bg-purple-500/20 text-purple-400 rounded">
-                Futures: {futuresPositions.length}
-              </span>
             </div>
-          </div>
-          {/* View Toggle */}
-          <div className="flex items-center gap-1 bg-gray-700 rounded-lg p-1">
-            <button
-              onClick={() => setPositionsView('all')}
-              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                positionsView === 'all' ? 'bg-primary-600 text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setPositionsView('spot')}
-              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                positionsView === 'spot' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              Spot
-            </button>
-            <button
-              onClick={() => setPositionsView('futures')}
-              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${
-                positionsView === 'futures' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              Futures
-            </button>
-          </div>
-        </div>
-        <div className="card-body p-0">
-          {/* Spot Positions */}
-          {(positionsView === 'all' || positionsView === 'spot') && (
-            <div>
-              {positionsView === 'all' && positions.length > 0 && (
-                <div className="px-4 py-2 bg-blue-500/10 border-b border-gray-700 flex items-center gap-2">
-                  <span className="text-blue-400 font-semibold text-sm">SPOT POSITIONS</span>
-                  <span className="px-2 py-0.5 bg-blue-500/20 text-blue-300 rounded text-xs">
-                    {tradingMode?.mode === 'live' ? 'LIVE' : 'PAPER'}
-                  </span>
-                </div>
-              )}
+            <div className="card-body p-0 max-h-[300px] overflow-y-auto">
               <PositionsTable />
             </div>
-          )}
+          </div>
 
-          {/* Futures Positions */}
-          {(positionsView === 'all' || positionsView === 'futures') && (
-            <div>
-              {positionsView === 'all' && (
-                <div className="px-4 py-2 bg-purple-500/10 border-b border-gray-700 flex items-center gap-2">
-                  <span className="text-purple-400 font-semibold text-sm">FUTURES POSITIONS</span>
-                  <span className="px-2 py-0.5 bg-purple-500/20 text-purple-300 rounded text-xs">
-                    {tradingMode?.mode === 'live' ? 'LIVE' : 'PAPER'}
-                  </span>
+          {/* Active Strategies */}
+          <div className="card">
+            <div className="card-header">
+              <h2 className="text-lg font-semibold">Active Strategies</h2>
+            </div>
+            <div className="card-body p-0">
+              <StrategiesPanel />
+            </div>
+          </div>
+
+          {/* Visual Strategy Builder Link */}
+          <div
+            onClick={() => navigate('/visual-strategy-advanced')}
+            className="bg-gradient-to-r from-blue-600/80 to-purple-600/80 rounded-lg p-4 cursor-pointer hover:from-blue-600 hover:to-purple-600 transition-all group"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Sparkles className="w-6 h-6 text-yellow-300" />
+                <div>
+                  <h3 className="font-semibold text-white">Visual Strategy Builder</h3>
+                  <p className="text-xs text-blue-100">Create custom trading strategies</p>
                 </div>
-              )}
-              {futuresPositions.length > 0 ? (
-                <FuturesPositionsTable />
-              ) : (
-                positionsView === 'futures' && (
-                  <div className="text-center py-8 text-gray-400">
-                    No open futures positions
-                  </div>
-                )
-              )}
+              </div>
+              <ArrowRight className="w-5 h-5 text-white group-hover:translate-x-1 transition-transform" />
             </div>
-          )}
-
-          {/* Empty state */}
-          {positions.length === 0 && futuresPositions.length === 0 && (
-            <div className="text-center py-8 text-gray-400">
-              No open positions
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Trade History */}
-      <div className="card">
-        <div className="card-header">
-          <div className="flex items-center gap-2">
-            <History className="w-5 h-5 text-gray-400" />
-            <h2 className="text-lg font-semibold">Trade History</h2>
           </div>
         </div>
-        <div className="card-body">
-          <TradeHistory />
-        </div>
       </div>
 
-      {/* Two Column Layout */}
+      {/* Bottom Section - Orders & History */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Active Orders */}
         <div className="card">
@@ -374,57 +311,16 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Strategies */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="text-lg font-semibold">Active Strategies</h2>
-          </div>
-          <div className="card-body p-0">
-            <StrategiesPanel />
-          </div>
-        </div>
-      </div>
-
-      {/* Market Screener and Signals */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card">
-          <div className="card-header">
-            <h2 className="text-lg font-semibold">Market Opportunities</h2>
-          </div>
-          <div className="card-body p-0">
-            <ScreenerResults />
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-header">
-            <h2 className="text-lg font-semibold">Signal Management</h2>
-          </div>
-          <div className="card-body">
-            <EnhancedSignalsPanel />
-          </div>
-        </div>
-
-        {/* Strategy Scanner - Signal Proximity */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="text-lg font-semibold">Strategy Scanner - Signal Proximity</h2>
-          </div>
-          <div className="card-body p-0">
-            <StrategyScanner />
-          </div>
-        </div>
-
-        {/* AI Signals - Autopilot Decisions */}
+        {/* Trade History */}
         <div className="card">
           <div className="card-header">
             <div className="flex items-center gap-2">
-              <Brain className="w-5 h-5 text-purple-400" />
-              <h2 className="text-lg font-semibold">AI Signals - Autopilot Decisions</h2>
+              <History className="w-5 h-5 text-gray-400" />
+              <h2 className="text-lg font-semibold">Trade History</h2>
             </div>
           </div>
-          <div className="card-body p-0">
-            <AISignalsPanel />
+          <div className="card-body">
+            <TradeHistory />
           </div>
         </div>
       </div>

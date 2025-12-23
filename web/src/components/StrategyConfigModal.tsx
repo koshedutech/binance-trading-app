@@ -142,13 +142,24 @@ export default function StrategyConfigModal({ isOpen, onClose, onSaved }: Props)
 
   const toggleAutopilot = async (config: StrategyConfig) => {
     try {
-      await apiService.updateStrategyConfig(config.id!, {
-        ...config,
+      console.log('[StrategyConfigModal] Toggling autopilot for:', config.name, 'from', config.autopilot, 'to', !config.autopilot);
+      const updatePayload = {
+        symbol: config.symbol,
+        timeframe: config.timeframe,
+        indicator_type: config.indicator_type,
         autopilot: !config.autopilot,
-      });
+        enabled: config.enabled,
+        position_size: config.position_size,
+        stop_loss_percent: config.stop_loss_percent,
+        take_profit_percent: config.take_profit_percent,
+      };
+      console.log('[StrategyConfigModal] Update payload:', updatePayload);
+      const result = await apiService.updateStrategyConfig(config.id!, updatePayload);
+      console.log('[StrategyConfigModal] Update result:', result);
       await fetchConfigs();
-    } catch (err) {
-      setError('Failed to update autopilot setting');
+    } catch (err: any) {
+      console.error('[StrategyConfigModal] Toggle autopilot error:', err);
+      setError('Failed to update autopilot setting: ' + (err.message || err.response?.data?.message || 'Unknown error'));
     }
   };
 

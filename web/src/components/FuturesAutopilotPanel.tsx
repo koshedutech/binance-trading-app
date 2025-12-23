@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { futuresApi, formatUSD, formatPercent } from '../services/futuresApi';
-import { Bot, Power, PowerOff, Settings, AlertTriangle, CheckCircle, RefreshCw, TrendingUp, DollarSign, Shield, Percent, Target, Check, RotateCcw, Save, X, Edit2, Zap, Clock, Activity } from 'lucide-react';
+import { Bot, Power, PowerOff, Settings, AlertTriangle, RefreshCw, TrendingUp, DollarSign, Shield, Percent, Target, Check, RotateCcw, Save, X, Edit2, Zap, Clock, Activity } from 'lucide-react';
 
 interface AutopilotStatus {
   enabled: boolean;
@@ -96,6 +96,19 @@ interface ScalpingConfig {
   trades_today: number;
 }
 
+interface AutoModeConfig {
+  enabled: boolean;
+  max_positions: number;
+  max_leverage: number;
+  max_position_size: number;
+  max_total_usd: number;
+  allow_averaging: boolean;
+  max_averages: number;
+  min_hold_minutes: number;
+  quick_profit_mode: boolean;
+  min_profit_for_exit: number;
+}
+
 export default function FuturesAutopilotPanel() {
   const [status, setStatus] = useState<AutopilotStatus | null>(null);
   const [profitStats, setProfitStats] = useState<ProfitStats | null>(null);
@@ -158,6 +171,32 @@ export default function FuturesAutopilotPanel() {
     min_profit: '0.2',
     reentry_delay_sec: '5',
     max_trades_per_day: '0',
+  });
+
+  // Auto Mode state (LLM decides everything)
+  const [showAutoMode, setShowAutoMode] = useState(false);
+  const [autoModeConfig, setAutoModeConfig] = useState<AutoModeConfig>({
+    enabled: false,
+    max_positions: 5,
+    max_leverage: 10,
+    max_position_size: 500,
+    max_total_usd: 2000,
+    allow_averaging: true,
+    max_averages: 2,
+    min_hold_minutes: 5,
+    quick_profit_mode: false,
+    min_profit_for_exit: 1.0,
+  });
+  const [isSavingAutoMode, setIsSavingAutoMode] = useState(false);
+  // String inputs for Auto Mode
+  const [autoModeInputs, setAutoModeInputs] = useState({
+    max_positions: '5',
+    max_leverage: '10',
+    max_position_size: '500',
+    max_total_usd: '2000',
+    max_averages: '2',
+    min_hold_minutes: '5',
+    min_profit_for_exit: '1.0',
   });
 
   // Setting inputs
@@ -262,18 +301,39 @@ export default function FuturesAutopilotPanel() {
     }
   };
 
+  const fetchAutoModeConfig = async () => {
+    try {
+      const config = await futuresApi.getAutoModeConfig();
+      setAutoModeConfig(config);
+      // Sync string inputs
+      setAutoModeInputs({
+        max_positions: config.max_positions.toString(),
+        max_leverage: config.max_leverage.toString(),
+        max_position_size: config.max_position_size.toString(),
+        max_total_usd: config.max_total_usd.toString(),
+        max_averages: config.max_averages.toString(),
+        min_hold_minutes: config.min_hold_minutes.toString(),
+        min_profit_for_exit: config.min_profit_for_exit.toString(),
+      });
+    } catch (err) {
+      console.error('Failed to fetch auto mode config:', err);
+    }
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchProfitStats();
     fetchCircuitBreakerStatus();
     fetchDynamicSLTPConfig();
     fetchScalpingConfig();
+    fetchAutoModeConfig();
     const interval = setInterval(() => {
       fetchStatus();
       fetchProfitStats();
       fetchCircuitBreakerStatus();
       fetchDynamicSLTPConfig();
       fetchScalpingConfig();
+      fetchAutoModeConfig();
     }, 15000); // Reduced from 5s to 15s to avoid rate limits
     return () => clearInterval(interval);
   }, []);
@@ -636,6 +696,83 @@ export default function FuturesAutopilotPanel() {
     }
   };
 
+  // Auto Mode handlers (LLM-driven trading)
+  const handleSaveAutoMode = async () => {
+    setIsSavingAutoMode(true);
+    try {
+      const configToSave = {
+        ...autoModeConfig,
+        max_positions: parseInt(autoModeInputs.max_positions) || 5,
+        max_leverage: parseInt(autoModeInputs.max_leverage) || 10,
+        max_position_size: parseFloat(autoModeInputs.max_position_size) || 500,
+        max_total_usd: parseFloat(autoModeInputs.max_total_usd) || 2000,
+        max_averages: parseInt(autoModeInputs.max_averages) || 2,
+        min_hold_minutes: parseInt(autoModeInputs.min_hold_minutes) || 5,
+        min_profit_for_exit: parseFloat(autoModeInputs.min_profit_for_exit) || 1.0,
+      };
+      const result = await futuresApi.setAutoModeConfig(configToSave);
+      if (result.success) {
+        setSuccessMsg('Auto Mode settings saved');
+        setTimeout(() => setSuccessMsg(null), 3000);
+        fetchAutoModeConfig();
+      }
+    } catch (err) {
+      setError('Failed to save Auto Mode settings');
+      setTimeout(() => setError(null), 3000);
+    } finally {
+      setIsSavingAutoMode(false);
+    }
+  };
+
+  const handleResetAutoModeDefaults = async () => {
+    const defaults: AutoModeConfig = {
+      enabled: false,
+      max_positions: 5,
+      max_leverage: 10,
+      max_position_size: 500,
+      max_total_usd: 2000,
+      allow_averaging: true,
+      max_averages: 2,
+      min_hold_minutes: 5,
+      quick_profit_mode: false,
+      min_profit_for_exit: 1.0,
+    };
+    setAutoModeConfig(defaults);
+    setAutoModeInputs({
+      max_positions: '5',
+      max_leverage: '10',
+      max_position_size: '500',
+      max_total_usd: '2000',
+      max_averages: '2',
+      min_hold_minutes: '5',
+      min_profit_for_exit: '1.0',
+    });
+    try {
+      await futuresApi.setAutoModeConfig(defaults);
+      setSuccessMsg('Auto Mode reset to defaults');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to reset Auto Mode defaults');
+      setTimeout(() => setError(null), 3000);
+    }
+  };
+
+  const handleToggleAutoMode = async () => {
+    const newConfig = { ...autoModeConfig, enabled: !autoModeConfig.enabled };
+    setAutoModeConfig(newConfig);
+    try {
+      const result = await futuresApi.toggleAutoMode(newConfig.enabled);
+      if (result.success) {
+        setSuccessMsg(`Auto Mode ${newConfig.enabled ? 'enabled' : 'disabled'}`);
+        setTimeout(() => setSuccessMsg(null), 3000);
+      }
+    } catch (err) {
+      setError('Failed to toggle Auto Mode');
+      setAutoModeConfig(autoModeConfig); // Revert
+      setTimeout(() => setError(null), 3000);
+    }
+  };
+
   const getRiskLevelColor = (level: string) => {
     switch (level) {
       case 'conservative': return 'text-blue-500 bg-blue-500/20';
@@ -696,75 +833,69 @@ export default function FuturesAutopilotPanel() {
   }
 
   return (
-    <div className="bg-gray-900 rounded-lg border border-gray-700 p-4">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+    <div className="bg-gray-800 rounded-lg border border-gray-700 p-3 h-full">
+      {/* Header Row 1 - Title and Status */}
+      <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
-          <Bot className="w-5 h-5 text-purple-500" />
-          <span className="font-semibold">AI Autopilot</span>
+          <Bot className="w-4 h-4 text-purple-500" />
+          <span className="text-sm font-semibold text-white">Autopilot</span>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowScalping(!showScalping)}
-            className={`p-1 hover:bg-gray-700 rounded ${showScalping ? 'bg-gray-700' : ''}`}
-            title="Scalping Mode"
-          >
-            <Zap className={`w-4 h-4 ${scalpingConfig.enabled ? 'text-yellow-500' : 'text-gray-400'}`} />
-          </button>
-          <button
-            onClick={() => setShowDynamicSLTP(!showDynamicSLTP)}
-            className={`p-1 hover:bg-gray-700 rounded ${showDynamicSLTP ? 'bg-gray-700' : ''}`}
-            title="Dynamic SL/TP"
-          >
-            <Activity className={`w-4 h-4 ${dynamicSLTPConfig.enabled ? 'text-cyan-500' : 'text-gray-400'}`} />
-          </button>
-          <button
-            onClick={() => setShowCircuitBreaker(!showCircuitBreaker)}
-            className={`p-1 hover:bg-gray-700 rounded ${showCircuitBreaker ? 'bg-gray-700' : ''}`}
-            title="Circuit Breaker"
-          >
-            <Shield className={`w-4 h-4 ${circuitStatus?.state === 'open' ? 'text-red-500' : 'text-gray-400'}`} />
-          </button>
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className={`p-1 hover:bg-gray-700 rounded ${showSettings ? 'bg-gray-700' : ''}`}
-            title="Settings"
-          >
-            <Settings className="w-4 h-4 text-gray-400" />
-          </button>
-          <button
-            onClick={() => { fetchStatus(); fetchProfitStats(); fetchCircuitBreakerStatus(); fetchDynamicSLTPConfig(); fetchScalpingConfig(); }}
-            className="p-1 hover:bg-gray-700 rounded"
-            title="Refresh"
-          >
-            <RefreshCw className="w-4 h-4 text-gray-400" />
-          </button>
-        </div>
-      </div>
-
-      {/* Status */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          {status.running ? (
-            <>
-              <CheckCircle className="w-4 h-4 text-green-500" />
-              <span className="text-green-500 text-sm">Running</span>
-            </>
-          ) : (
-            <>
-              <PowerOff className="w-4 h-4 text-gray-500" />
-              <span className="text-gray-500 text-sm">Stopped</span>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`px-2 py-0.5 rounded text-xs capitalize ${getRiskLevelColor(riskLevel)}`}>
+        <div className="flex items-center gap-1">
+          <span className={`px-1.5 py-0.5 rounded text-[10px] capitalize ${getRiskLevelColor(riskLevel)}`}>
             {riskLevel}
           </span>
-          <span className={`px-2 py-0.5 rounded text-xs ${status.dry_run ? 'bg-yellow-500/20 text-yellow-500' : 'bg-red-500/20 text-red-500'}`}>
+          <span className={`px-1 py-0.5 rounded text-[10px] ${status.dry_run ? 'bg-yellow-500/20 text-yellow-500' : 'bg-red-500/20 text-red-500'}`}>
             {status.dry_run ? 'PAPER' : 'LIVE'}
           </span>
+          {status.running && (
+            <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px] animate-pulse">ON</span>
+          )}
         </div>
+      </div>
+      {/* Header Row 2 - Buttons */}
+      <div className="flex items-center justify-center gap-1 mb-3">
+        <button
+          onClick={() => setShowScalping(!showScalping)}
+          className={`flex items-center justify-center w-7 h-7 rounded transition-colors ${showScalping ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+          title="Scalping Mode"
+        >
+          <Zap className={`w-3.5 h-3.5 ${scalpingConfig.enabled ? 'text-yellow-500' : 'text-gray-400'}`} />
+        </button>
+        <button
+          onClick={() => setShowDynamicSLTP(!showDynamicSLTP)}
+          className={`flex items-center justify-center w-7 h-7 rounded transition-colors ${showDynamicSLTP ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+          title="Dynamic SL/TP"
+        >
+          <Activity className={`w-3.5 h-3.5 ${dynamicSLTPConfig.enabled ? 'text-cyan-500' : 'text-gray-400'}`} />
+        </button>
+        <button
+          onClick={() => setShowCircuitBreaker(!showCircuitBreaker)}
+          className={`flex items-center justify-center w-7 h-7 rounded transition-colors ${showCircuitBreaker ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+          title="Circuit Breaker"
+        >
+          <Shield className={`w-3.5 h-3.5 ${circuitStatus?.state === 'open' ? 'text-red-500' : 'text-gray-400'}`} />
+        </button>
+        <button
+          onClick={() => setShowAutoMode(!showAutoMode)}
+          className={`flex items-center justify-center w-7 h-7 rounded transition-colors ${showAutoMode ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+          title="Auto Mode (LLM-Driven)"
+        >
+          <Bot className={`w-3.5 h-3.5 ${autoModeConfig.enabled ? 'text-purple-500' : 'text-gray-400'}`} />
+        </button>
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          className={`flex items-center justify-center w-7 h-7 rounded transition-colors ${showSettings ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+          title="Settings"
+        >
+          <Settings className="w-3.5 h-3.5 text-gray-400" />
+        </button>
+        <button
+          onClick={() => { fetchStatus(); fetchProfitStats(); fetchCircuitBreakerStatus(); fetchDynamicSLTPConfig(); fetchScalpingConfig(); fetchAutoModeConfig(); }}
+          className="flex items-center justify-center w-7 h-7 hover:bg-gray-700 rounded transition-colors"
+          title="Refresh"
+        >
+          <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+        </button>
       </div>
 
       {error && (
@@ -1332,6 +1463,164 @@ export default function FuturesAutopilotPanel() {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Auto Mode Panel (LLM-Driven Trading) */}
+      {showAutoMode && (
+        <div className="mt-4 pt-4 border-t border-gray-700 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-medium text-gray-400 flex items-center gap-2">
+              <Bot className="w-4 h-4 text-purple-500" />
+              Auto Mode (LLM-Driven)
+            </div>
+            <button
+              onClick={handleToggleAutoMode}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                autoModeConfig.enabled
+                  ? 'bg-purple-500/20 text-purple-500 border border-purple-500/30'
+                  : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+              }`}
+            >
+              {autoModeConfig.enabled ? 'ENABLED' : 'DISABLED'}
+            </button>
+          </div>
+
+          {autoModeConfig.enabled && (
+            <div className="text-xs text-purple-400 bg-purple-500/10 border border-purple-500/30 rounded p-2">
+              LLM is making all trading decisions: position size, leverage, which coins to trade, when to average, and when to take profit.
+            </div>
+          )}
+
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Max Positions</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.max_positions}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, max_positions: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="5"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Max Leverage</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.max_leverage}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, max_leverage: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="10"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Max Position Size ($)</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.max_position_size}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, max_position_size: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="500"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Max Total USD</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.max_total_usd}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, max_total_usd: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="2000"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="allow-averaging"
+                  checked={autoModeConfig.allow_averaging}
+                  onChange={(e) => setAutoModeConfig({...autoModeConfig, allow_averaging: e.target.checked})}
+                  className="rounded bg-gray-800 border-gray-700"
+                />
+                <label htmlFor="allow-averaging" className="text-xs text-gray-400">
+                  Allow Averaging
+                </label>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Max Averages</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.max_averages}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, max_averages: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="2"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Min Hold (min)</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.min_hold_minutes}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, min_hold_minutes: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="5"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="quick-profit-mode"
+                  checked={autoModeConfig.quick_profit_mode}
+                  onChange={(e) => setAutoModeConfig({...autoModeConfig, quick_profit_mode: e.target.checked})}
+                  className="rounded bg-gray-800 border-gray-700"
+                />
+                <label htmlFor="quick-profit-mode" className="text-xs text-gray-400">
+                  Quick Profit Mode
+                </label>
+              </div>
+            </div>
+
+            {autoModeConfig.quick_profit_mode && (
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Min Profit for Exit (%)</label>
+                <input
+                  type="text"
+                  value={autoModeInputs.min_profit_for_exit}
+                  onChange={(e) => setAutoModeInputs({...autoModeInputs, min_profit_for_exit: e.target.value})}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm"
+                  placeholder="1.0"
+                />
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                onClick={handleSaveAutoMode}
+                disabled={isSavingAutoMode}
+                className="flex-1 py-2 bg-purple-500/20 text-purple-500 rounded text-sm hover:bg-purple-500/30 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isSavingAutoMode ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                Save
+              </button>
+              <button
+                onClick={handleResetAutoModeDefaults}
+                className="px-3 py-2 bg-gray-700 text-gray-300 rounded text-sm hover:bg-gray-600 flex items-center justify-center gap-1"
+                title="Reset to defaults"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Default
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -1,0 +1,11 @@
+	// CRITICAL: Cancel ALL existing algo orders for this symbol FIRST
+	// This prevents accumulation of orphan orders when updating SL/TP
+	log.Printf("[GINIE] %%s: Cancelling existing algo orders before placing new SL/TP", pos.Symbol)
+	ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
+
+	// Clear stored algo IDs since we cancelled all orders
+	pos.StopLossAlgoID = 0
+	pos.TakeProfitAlgoIDs = nil
+
+	// Determine the side for closing orders
+	closeSide := "SELL"

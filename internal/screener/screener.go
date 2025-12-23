@@ -14,7 +14,7 @@ import (
 
 // Screener scans all crypto pairs for opportunities
 type Screener struct {
-	client   *binance.Client
+	client   binance.BinanceClient
 	config   config.ScreenerConfig
 	repo     *database.Repository
 	stopChan chan struct{}
@@ -38,7 +38,7 @@ type ScreenResult struct {
 	Signals   []string
 }
 
-func NewScreener(client *binance.Client, config config.ScreenerConfig, repo *database.Repository) *Screener {
+func NewScreener(client binance.BinanceClient, config config.ScreenerConfig, repo *database.Repository) *Screener {
 	return &Screener{
 		client:   client,
 		config:   config,

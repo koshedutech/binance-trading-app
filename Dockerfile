@@ -65,7 +65,11 @@ RUN chown -R appuser:appuser /app
 USER appuser
 
 # Expose web interface port
-EXPOSE 8088
+EXPOSE 8090
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8090/api/health || exit 1
 
 # Run the application
 CMD ["./trading-bot"]

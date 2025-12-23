@@ -9,11 +9,13 @@ import (
 type EventType string
 
 const (
-	EventTradeOpened    EventType = "TRADE_OPENED"
-	EventTradeClosed    EventType = "TRADE_CLOSED"
-	EventOrderPlaced    EventType = "ORDER_PLACED"
-	EventOrderFilled    EventType = "ORDER_FILLED"
-	EventOrderCancelled EventType = "ORDER_CANCELLED"
+	EventTradeOpened     EventType = "TRADE_OPENED"
+	EventTradeClosed     EventType = "TRADE_CLOSED"
+	EventTradeUpdate     EventType = "TRADE_UPDATE"
+	EventOrderPlaced     EventType = "ORDER_PLACED"
+	EventOrderFilled     EventType = "ORDER_FILLED"
+	EventOrderCancelled  EventType = "ORDER_CANCELLED"
+	EventOrderUpdate     EventType = "ORDER_UPDATE"
 	EventSignalGenerated EventType = "SIGNAL_GENERATED"
 	EventStrategyToggled EventType = "STRATEGY_TOGGLED"
 	EventScreenerUpdate  EventType = "SCREENER_UPDATE"

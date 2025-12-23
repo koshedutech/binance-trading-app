@@ -27,7 +27,7 @@ export default function EnhancedSignalsPanel() {
 
   useEffect(() => {
     fetchSignals();
-    const interval = setInterval(fetchSignals, 5000); // Poll every 5 seconds
+    const interval = setInterval(fetchSignals, 15000); // Reduced from 5s to 15s to avoid rate limits
     return () => clearInterval(interval);
   }, []);
 

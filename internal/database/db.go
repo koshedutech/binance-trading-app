@@ -338,6 +338,10 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_backtest_trades_result ON backtest_trades(backtest_result_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_backtest_trades_entry_time ON backtest_trades(entry_time)`,
+
+		// Add trade_source column to trades table
+		`ALTER TABLE trades ADD COLUMN IF NOT EXISTS trade_source VARCHAR(20) DEFAULT 'manual'`,
+		`CREATE INDEX IF NOT EXISTS idx_trades_trade_source ON trades(trade_source)`,
 	}
 
 	// Execute migrations

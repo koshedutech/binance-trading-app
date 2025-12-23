@@ -1,0 +1,369 @@
+package api
+
+import (
+	"binance-trading-bot/internal/autopilot"
+	"encoding/json"
+	"net/http"
+
+	"github.com/gorilla/mux"
+)
+
+// ==================== COIN CLASSIFICATION HANDLERS ====================
+
+// GetCoinClassifications returns all coin classifications
+func (s *Server) GetCoinClassifications(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	classifications := classifier.GetAllClassifications()
+
+	// Convert to slice for JSON response
+	var result []*autopilot.CoinClassification
+	for _, c := range classifications {
+		result = append(result, c)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// GetCoinClassification returns classification for a specific symbol
+func (s *Server) GetCoinClassification(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	symbol := vars["symbol"]
+
+	if symbol == "" {
+		http.Error(w, "Symbol is required", http.StatusBadRequest)
+		return
+	}
+
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	classification := classifier.GetClassification(symbol)
+	if classification == nil {
+		http.Error(w, "Classification not found for symbol", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(classification)
+}
+
+// GetCoinClassificationSummary returns a summary of all classifications
+func (s *Server) GetCoinClassificationSummary(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	summary := classifier.GetSummary()
+	if summary == nil {
+		http.Error(w, "Summary not available", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
+}
+
+// GetCoinClassificationSettings returns current classification settings
+func (s *Server) GetCoinClassificationSettings(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	settings := classifier.GetSettings()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(settings)
+}
+
+// UpdateCoinClassificationSettings updates classification settings
+func (s *Server) UpdateCoinClassificationSettings(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var settings autopilot.CoinClassificationSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	classifier.SetSettings(&settings)
+
+	// Trigger refresh after settings change
+	go classifier.RefreshAllClassifications()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "settings updated"})
+}
+
+// UpdateCoinPreferenceRequest is the request body for updating coin preference
+type UpdateCoinPreferenceRequest struct {
+	Symbol   string `json:"symbol"`
+	Enabled  bool   `json:"enabled"`
+	Priority int    `json:"priority"`
+}
+
+// UpdateCoinPreference updates the preference for a specific coin
+func (s *Server) UpdateCoinPreference(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req UpdateCoinPreferenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Symbol == "" {
+		http.Error(w, "Symbol is required", http.StatusBadRequest)
+		return
+	}
+
+	classifier.UpdateCoinPreference(req.Symbol, req.Enabled, req.Priority)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status": "preference updated",
+		"symbol": req.Symbol,
+	})
+}
+
+// UpdateCategoryAllocationRequest is the request body for updating category allocation
+type UpdateCategoryAllocationRequest struct {
+	CategoryType      string  `json:"category_type"`      // "volatility", "market_cap", "momentum"
+	Category          string  `json:"category"`           // e.g., "stable", "blue_chip", "gainer"
+	Enabled           bool    `json:"enabled"`
+	AllocationPercent float64 `json:"allocation_percent"`
+	MaxPositions      int     `json:"max_positions"`
+}
+
+// UpdateCategoryAllocation updates allocation for a category
+func (s *Server) UpdateCategoryAllocation(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req UpdateCategoryAllocationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	alloc := &autopilot.CategoryAllocation{
+		Enabled:           req.Enabled,
+		AllocationPercent: req.AllocationPercent,
+		MaxPositions:      req.MaxPositions,
+	}
+
+	switch req.CategoryType {
+	case "volatility":
+		var class autopilot.VolatilityClass
+		switch req.Category {
+		case "stable":
+			class = autopilot.VolatilityStable
+		case "medium":
+			class = autopilot.VolatilityMedium
+		case "high":
+			class = autopilot.VolatilityHigh
+		default:
+			http.Error(w, "Invalid volatility category", http.StatusBadRequest)
+			return
+		}
+		classifier.UpdateVolatilityAllocation(class, alloc)
+
+	case "market_cap":
+		var class autopilot.MarketCapClass
+		switch req.Category {
+		case "blue_chip":
+			class = autopilot.MarketCapBlueChip
+		case "large_cap":
+			class = autopilot.MarketCapLarge
+		case "mid_small":
+			class = autopilot.MarketCapMidSmall
+		default:
+			http.Error(w, "Invalid market cap category", http.StatusBadRequest)
+			return
+		}
+		classifier.UpdateMarketCapAllocation(class, alloc)
+
+	case "momentum":
+		var class autopilot.MomentumClass
+		switch req.Category {
+		case "gainer":
+			class = autopilot.MomentumGainer
+		case "neutral":
+			class = autopilot.MomentumNeutral
+		case "loser":
+			class = autopilot.MomentumLoser
+		default:
+			http.Error(w, "Invalid momentum category", http.StatusBadRequest)
+			return
+		}
+		classifier.UpdateMomentumAllocation(class, alloc)
+
+	default:
+		http.Error(w, "Invalid category type", http.StatusBadRequest)
+		return
+	}
+
+	// Trigger refresh after allocation change
+	go classifier.RefreshAllClassifications()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":        "allocation updated",
+		"category_type": req.CategoryType,
+		"category":      req.Category,
+	})
+}
+
+// GetEligibleSymbols returns symbols that pass all filters
+func (s *Server) GetEligibleSymbols(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	symbols := classifier.GetEligibleSymbols()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"symbols": symbols,
+		"count":   len(symbols),
+	})
+}
+
+// RefreshClassifications triggers a manual refresh of classifications
+func (s *Server) RefreshClassifications(w http.ResponseWriter, r *http.Request) {
+	classifier := s.getCoinClassifier()
+	if classifier == nil {
+		http.Error(w, "Coin classifier not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	go classifier.RefreshAllClassifications()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "refresh initiated"})
+}
+
+// ==================== TRADING STYLE HANDLERS ====================
+
+// GetTradingStyle returns the current trading style
+func (s *Server) GetTradingStyle(w http.ResponseWriter, r *http.Request) {
+	fc := s.getFuturesController()
+	if fc == nil {
+		http.Error(w, "Futures controller not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	style := fc.GetTradingStyle()
+	config := fc.GetStyleConfig()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"active_style": string(style),
+		"config":       config,
+		"description":  autopilot.GetStyleDescription(style),
+	})
+}
+
+// GetTradingStyles returns all available trading styles with comparison
+func (s *Server) GetTradingStyles(w http.ResponseWriter, r *http.Request) {
+	styles := autopilot.GetAllStyles()
+	var styleInfos []map[string]interface{}
+
+	for _, style := range styles {
+		config := autopilot.GetDefaultStyleConfig(style)
+		styleInfos = append(styleInfos, map[string]interface{}{
+			"style":       string(style),
+			"name":        config.Name,
+			"description": autopilot.GetStyleDescription(style),
+			"config":      config,
+		})
+	}
+
+	comparison := autopilot.GetStyleComparisonTable()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"styles":     styleInfos,
+		"comparison": comparison,
+	})
+}
+
+// SetTradingStyleRequest is the request body for setting trading style
+type SetTradingStyleRequest struct {
+	Style string `json:"style"`
+}
+
+// SetTradingStyle sets the trading style
+func (s *Server) SetTradingStyle(w http.ResponseWriter, r *http.Request) {
+	fc := s.getFuturesController()
+	if fc == nil {
+		http.Error(w, "Futures controller not initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req SetTradingStyleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	style, valid := autopilot.ValidateStyle(req.Style)
+	if !valid {
+		http.Error(w, "Invalid trading style. Valid options: scalping, swing, position", http.StatusBadRequest)
+		return
+	}
+
+	fc.SetTradingStyle(style)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "style updated",
+		"style":  string(style),
+		"config": fc.GetStyleConfig(),
+	})
+}
+
+// ==================== HELPER METHODS ====================
+
+// getCoinClassifier returns the coin classifier instance
+func (s *Server) getCoinClassifier() *autopilot.CoinClassifier {
+	// This should be stored in the Server struct
+	// For now, we'll access it through the futures controller
+	fc := s.getFuturesController()
+	if fc == nil {
+		return nil
+	}
+	return fc.GetCoinClassifier()
+}
+
+// getFuturesController returns the futures controller instance
+func (s *Server) getFuturesController() *autopilot.FuturesController {
+	if s.futuresAutopilot == nil {
+		return nil
+	}
+	return s.futuresAutopilot
+}

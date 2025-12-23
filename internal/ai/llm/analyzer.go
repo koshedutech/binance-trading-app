@@ -118,6 +118,121 @@ type RiskAssessment struct {
 	Reasoning                  string   `json:"reasoning"`
 }
 
+// AutoTradingDecision represents LLM's autonomous trading decisions
+// When Auto Mode is enabled, the LLM decides everything: size, leverage, coins, averaging
+type AutoTradingDecision struct {
+	MarketAssessment MarketAssessmentData `json:"market_assessment"`
+	TradingDecisions []TradingDecisionData `json:"trading_decisions"`
+	PortfolioAllocation PortfolioAllocationData `json:"portfolio_allocation"`
+	RiskManagement RiskManagementData `json:"risk_management"`
+	WaitConditions WaitConditionsData `json:"wait_conditions"`
+}
+
+// MarketAssessmentData contains overall market assessment
+type MarketAssessmentData struct {
+	OverallSentiment string `json:"overall_sentiment"` // bullish, bearish, neutral, mixed
+	VolatilityLevel  string `json:"volatility_level"`  // low, medium, high, extreme
+	BestStrategy     string `json:"best_strategy"`     // trend_following, mean_reversion, breakout, scalping, wait
+	MarketPhase      string `json:"market_phase"`      // accumulation, markup, distribution, markdown, ranging
+}
+
+// TradingDecisionData contains decision for a single symbol
+type TradingDecisionData struct {
+	Symbol              string    `json:"symbol"`
+	Action              string    `json:"action"` // open_long, open_short, close, average_down, average_up, take_profit, hold, skip
+	PositionSizeUSD     float64   `json:"position_size_usd"`
+	Leverage            int       `json:"leverage"`
+	Confidence          float64   `json:"confidence"`
+	EntryZone           EntryZoneData `json:"entry_zone"`
+	StopLossPercent     float64   `json:"stop_loss_percent"`
+	TakeProfitPercent   float64   `json:"take_profit_percent"`
+	Reasoning           string    `json:"reasoning"`
+	Priority            int       `json:"priority"`
+	HoldDuration        string    `json:"hold_duration"` // short, medium, long
+	ShouldAverageIfDown bool      `json:"should_average_if_down"`
+	MaxAverageCount     int       `json:"max_average_count"`
+	ReentryAfterTP      bool      `json:"reentry_after_tp"`
+}
+
+// EntryZoneData contains min/max entry prices
+type EntryZoneData struct {
+	Min float64 `json:"min"`
+	Max float64 `json:"max"`
+}
+
+// PortfolioAllocationData contains portfolio allocation guidance
+type PortfolioAllocationData struct {
+	TotalUSDToDeploy        float64 `json:"total_usd_to_deploy"`
+	ReservePercent          float64 `json:"reserve_percent"`
+	MaxSinglePositionPercent float64 `json:"max_single_position_percent"`
+}
+
+// RiskManagementData contains risk management guidance
+type RiskManagementData struct {
+	OverallRiskLevel     string  `json:"overall_risk_level"` // conservative, moderate, aggressive
+	CorrelationWarning   string  `json:"correlation_warning"`
+	MaxDrawdownTolerance float64 `json:"max_drawdown_tolerance"`
+}
+
+// WaitConditionsData contains conditions when to wait instead of trade
+type WaitConditionsData struct {
+	ShouldWait bool   `json:"should_wait"`
+	WaitReason string `json:"wait_reason"`
+	ResumeWhen string `json:"resume_when"`
+}
+
+// AutoModeConstraints contains the hard limits for auto mode trading
+type AutoModeConstraints struct {
+	MaxPositions      int
+	MaxLeverage       int
+	MaxPositionSizeUSD float64
+	MaxTotalUSD       float64
+	AllowAveraging    bool
+	MaxAverages       int
+	MinHoldMinutes    int
+	QuickProfitMode   bool
+	MinProfitForExit  float64
+}
+
+// ExistingPositionInfo contains info about an existing position for auto mode analysis
+type ExistingPositionInfo struct {
+	Symbol        string
+	Side          string
+	EntryPrice    float64
+	Quantity      float64
+	UnrealizedPnL float64
+	PnLPercent    float64
+	EntryCount    int
+	HoldMinutes   int
+}
+
+// PositionSLTPAnalysis represents LLM analysis for position SL/TP management
+type PositionSLTPAnalysis struct {
+	RecommendedSL  float64 `json:"recommended_sl"`
+	RecommendedTP  float64 `json:"recommended_tp"`
+	SLReasoning    string  `json:"sl_reasoning"`
+	TPReasoning    string  `json:"tp_reasoning"`
+	Urgency        string  `json:"urgency"`         // immediate, normal, hold
+	RiskAssessment string  `json:"risk_assessment"` // low, medium, high
+	Action         string  `json:"action"`          // tighten_sl, widen_sl, move_to_breakeven, trail_stop, hold_current, close_now
+	Confidence     float64 `json:"confidence"`
+}
+
+// PositionInfo holds current position details for LLM analysis
+type PositionInfo struct {
+	Symbol        string
+	Side          string  // LONG or SHORT
+	EntryPrice    float64
+	CurrentPrice  float64
+	Quantity      float64
+	UnrealizedPnL float64
+	PnLPercent    float64
+	CurrentSL     float64
+	CurrentTP     float64
+	HoldDuration  string // e.g., "2h 15m"
+	Mode          string // scalp, swing, position
+}
+
 // CachedAnalysis holds cached analysis result
 type CachedAnalysis struct {
 	Analysis  interface{}
@@ -297,6 +412,216 @@ func (a *Analyzer) AssessRisk(tradeDetails map[string]interface{}, accountBalanc
 	return &assessment, nil
 }
 
+// AnalyzeAutoTrading performs autonomous trading analysis
+// LLM decides position sizes, leverage, which coins to trade, averaging decisions
+func (a *Analyzer) AnalyzeAutoTrading(
+	watchlist []string,
+	klinesBySymbol map[string][]binance.Kline,
+	existingPositions []ExistingPositionInfo,
+	constraints AutoModeConstraints,
+	accountBalance float64,
+	allocatedUSD float64,
+) (*AutoTradingDecision, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled or configured")
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	// Build watchlist string
+	watchlistStr := strings.Join(watchlist, ", ")
+
+	// Build constraints string
+	constraintsStr := fmt.Sprintf(`Max Concurrent Positions: %d
+Max Leverage: %dx
+Max Position Size: $%.2f
+Max Total USD Deployed: $%.2f
+Allow Averaging: %v
+Max Averages Per Position: %d
+Min Hold Time: %d minutes
+Quick Profit Mode: %v
+Min Profit for Quick Exit: %.2f%%`,
+		constraints.MaxPositions,
+		constraints.MaxLeverage,
+		constraints.MaxPositionSizeUSD,
+		constraints.MaxTotalUSD,
+		constraints.AllowAveraging,
+		constraints.MaxAverages,
+		constraints.MinHoldMinutes,
+		constraints.QuickProfitMode,
+		constraints.MinProfitForExit)
+
+	// Build existing positions string
+	existingPosStr := "None"
+	if len(existingPositions) > 0 {
+		existingPosStr = ""
+		for _, pos := range existingPositions {
+			existingPosStr += fmt.Sprintf(`
+- %s: %s at $%.4f, Qty: %.4f, PnL: $%.2f (%.2f%%), Entries: %d, Held: %d min`,
+				pos.Symbol,
+				pos.Side,
+				pos.EntryPrice,
+				pos.Quantity,
+				pos.UnrealizedPnL,
+				pos.PnLPercent,
+				pos.EntryCount,
+				pos.HoldMinutes)
+		}
+	}
+
+	// Build market data by symbol
+	marketDataStr := ""
+	for symbol, klines := range klinesBySymbol {
+		if len(klines) > 0 {
+			klineData := formatKlines(klines)
+			indicators := calculateIndicatorsSummary(klines)
+			marketDataStr += fmt.Sprintf("\n=== %s ===\n%s\n\nIndicators:\n%s\n", symbol, klineData, indicators)
+		}
+	}
+
+	// Build account balance string
+	availableUSD := accountBalance - allocatedUSD
+	accountStr := fmt.Sprintf(`Total Balance: $%.2f
+Currently Allocated: $%.2f
+Available for Trading: $%.2f`,
+		accountBalance,
+		allocatedUSD,
+		availableUSD)
+
+	prompt := BuildAutoTradingPrompt(watchlistStr, marketDataStr, existingPosStr, constraintsStr, accountStr)
+
+	response, err := a.client.Complete(SystemPromptAutoTradingDecision, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	cleanResponse := stripMarkdownCodeBlock(response)
+	var decision AutoTradingDecision
+	if err := json.Unmarshal([]byte(cleanResponse), &decision); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	// Enforce hard limits on the decisions
+	decision = a.enforceAutoModeConstraints(decision, constraints)
+
+	return &decision, nil
+}
+
+// enforceAutoModeConstraints ensures the LLM decisions don't exceed hard limits
+func (a *Analyzer) enforceAutoModeConstraints(decision AutoTradingDecision, constraints AutoModeConstraints) AutoTradingDecision {
+	validDecisions := make([]TradingDecisionData, 0)
+	totalAllocated := 0.0
+	positionCount := 0
+
+	for _, d := range decision.TradingDecisions {
+		// Skip if we've hit max positions
+		if positionCount >= constraints.MaxPositions {
+			continue
+		}
+
+		// Enforce max leverage
+		if d.Leverage > constraints.MaxLeverage {
+			d.Leverage = constraints.MaxLeverage
+		}
+		if d.Leverage < 1 {
+			d.Leverage = 1
+		}
+
+		// Enforce max position size
+		if d.PositionSizeUSD > constraints.MaxPositionSizeUSD {
+			d.PositionSizeUSD = constraints.MaxPositionSizeUSD
+		}
+
+		// Enforce total USD limit
+		if totalAllocated+d.PositionSizeUSD > constraints.MaxTotalUSD {
+			remaining := constraints.MaxTotalUSD - totalAllocated
+			if remaining > 10 { // Only if there's meaningful amount left
+				d.PositionSizeUSD = remaining
+			} else {
+				continue
+			}
+		}
+
+		// Enforce averaging constraints
+		if !constraints.AllowAveraging && (d.Action == "average_down" || d.Action == "average_up") {
+			continue
+		}
+		if d.MaxAverageCount > constraints.MaxAverages {
+			d.MaxAverageCount = constraints.MaxAverages
+		}
+
+		validDecisions = append(validDecisions, d)
+		totalAllocated += d.PositionSizeUSD
+		if d.Action == "open_long" || d.Action == "open_short" {
+			positionCount++
+		}
+	}
+
+	decision.TradingDecisions = validDecisions
+	return decision
+}
+
+// AnalyzePositionSLTP analyzes current position and recommends optimal SL/TP levels
+func (a *Analyzer) AnalyzePositionSLTP(pos *PositionInfo, klines []binance.Kline) (*PositionSLTPAnalysis, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled")
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	// Build position info string
+	pnlStatus := "PROFIT"
+	if pos.UnrealizedPnL < 0 {
+		pnlStatus = "LOSS"
+	}
+
+	positionInfo := fmt.Sprintf(`Symbol: %s
+Side: %s
+Entry Price: %.8f
+Current Price: %.8f
+Quantity: %.4f
+Unrealized P&L: $%.2f (%s, %.2f%%)
+Current Stop Loss: %.8f
+Current Take Profit: %.8f
+Position Duration: %s
+Trading Mode: %s`,
+		pos.Symbol,
+		pos.Side,
+		pos.EntryPrice,
+		pos.CurrentPrice,
+		pos.Quantity,
+		pos.UnrealizedPnL,
+		pnlStatus,
+		pos.PnLPercent,
+		pos.CurrentSL,
+		pos.CurrentTP,
+		pos.HoldDuration,
+		pos.Mode)
+
+	// Build market data string
+	klineData := formatKlines(klines)
+	indicators := calculateIndicatorsSummary(klines)
+
+	prompt := BuildPositionSLTPPrompt(positionInfo, klineData, indicators)
+
+	response, err := a.client.Complete(SystemPromptPositionSLTP, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	cleanResponse := stripMarkdownCodeBlock(response)
+	var analysis PositionSLTPAnalysis
+	if err := json.Unmarshal([]byte(cleanResponse), &analysis); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	return &analysis, nil
+}
+
 // GetSignalFromAnalysis converts market analysis to trading signal
 func (a *Analyzer) GetSignalFromAnalysis(analysis *MarketAnalysis, currentPrice float64) (direction string, confidence float64, entry, stop, target float64) {
 	if analysis == nil || analysis.Confidence < a.config.MinConfidence {
@@ -369,6 +694,11 @@ func (a *Analyzer) checkRateLimit() bool {
 // IsEnabled returns if the analyzer is enabled
 func (a *Analyzer) IsEnabled() bool {
 	return a.config.Enabled && a.client.IsConfigured()
+}
+
+// GetClient returns the underlying LLM client for direct use
+func (a *Analyzer) GetClient() *Client {
+	return a.client
 }
 
 // ClearCache clears the analysis cache

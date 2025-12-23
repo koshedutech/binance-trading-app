@@ -30,8 +30,8 @@ export default function PendingSignalsModal({ isOpen, onClose }: Props) {
   useEffect(() => {
     if (isOpen) {
       fetchPendingSignals();
-      // Poll for new signals every 2 seconds while modal is open
-      const interval = setInterval(fetchPendingSignals, 2000);
+      // Poll for new signals every 5 seconds while modal is open
+      const interval = setInterval(fetchPendingSignals, 5000);
       return () => clearInterval(interval);
     }
   }, [isOpen]);

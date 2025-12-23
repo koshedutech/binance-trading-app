@@ -15,8 +15,17 @@ import type {
   WatchlistItem,
 } from '../types';
 
+// Token storage keys
+const ACCESS_TOKEN_KEY = 'access_token';
+const REFRESH_TOKEN_KEY = 'refresh_token';
+
 class APIService {
   private client: AxiosInstance;
+  private isRefreshing = false;
+  private failedQueue: Array<{
+    resolve: (token: string) => void;
+    reject: (error: unknown) => void;
+  }> = [];
 
   constructor() {
     this.client = axios.create({
@@ -27,14 +36,98 @@ class APIService {
       },
     });
 
-    // Response interceptor for error handling
+    // Request interceptor to add auth token
+    this.client.interceptors.request.use(
+      (config) => {
+        const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+
+    // Response interceptor for error handling and token refresh
     this.client.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
+        const originalRequest = error.config;
+
+        // Handle 401 Unauthorized
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          if (this.isRefreshing) {
+            // Queue the request while refreshing
+            return new Promise((resolve, reject) => {
+              this.failedQueue.push({ resolve, reject });
+            }).then((token) => {
+              originalRequest.headers.Authorization = `Bearer ${token}`;
+              return this.client(originalRequest);
+            });
+          }
+
+          originalRequest._retry = true;
+          this.isRefreshing = true;
+
+          try {
+            const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+            if (!refreshToken) {
+              throw new Error('No refresh token');
+            }
+
+            const response = await axios.post('/api/auth/refresh', {
+              refresh_token: refreshToken,
+            });
+
+            // Auth endpoints return data directly, not wrapped
+            const { access_token, refresh_token: newRefreshToken } = response.data;
+            localStorage.setItem(ACCESS_TOKEN_KEY, access_token);
+            localStorage.setItem(REFRESH_TOKEN_KEY, newRefreshToken);
+
+            // Process queued requests
+            this.failedQueue.forEach((request) => request.resolve(access_token));
+            this.failedQueue = [];
+
+            originalRequest.headers.Authorization = `Bearer ${access_token}`;
+            return this.client(originalRequest);
+          } catch (refreshError) {
+            // Refresh failed, clear tokens and redirect to login
+            localStorage.removeItem(ACCESS_TOKEN_KEY);
+            localStorage.removeItem(REFRESH_TOKEN_KEY);
+            localStorage.removeItem('user');
+
+            // Process queued requests with error
+            this.failedQueue.forEach((request) => request.reject(refreshError));
+            this.failedQueue = [];
+
+            // Redirect to login if not already there
+            if (window.location.pathname !== '/login') {
+              window.location.href = '/login';
+            }
+            return Promise.reject(refreshError);
+          } finally {
+            this.isRefreshing = false;
+          }
+        }
+
         console.error('API Error:', error);
         return Promise.reject(error);
       }
     );
+  }
+
+  // Generic post method for any API endpoint
+  async post<T = unknown>(url: string, data?: unknown): Promise<{ data: T }> {
+    const response = await this.client.post<T>(url, data);
+    return { data: response.data };
+  }
+
+  // Generic get method for any API endpoint
+  async get<T = any>(url: string): Promise<{ data: T }> {
+    const response = await this.client.get<T>(url);
+    return { data: response.data };
   }
 
   // Bot endpoints
@@ -54,9 +147,9 @@ class APIService {
     return data.data || [];
   }
 
-  async getPositionHistory(limit = 50, offset = 0): Promise<Trade[]> {
+  async getPositionHistory(limit = 50, offset = 0, includeAI = false): Promise<Trade[]> {
     const { data } = await this.client.get<APIResponse<Trade[]>>('/positions/history', {
-      params: { limit, offset },
+      params: { limit, offset, include_ai: includeAI },
     });
     return data.data || [];
   }
@@ -275,6 +368,336 @@ class APIService {
     const { data } = await this.client.get(`/backtest-results/${backtestResultId}/trades`);
     return data.data || [];
   }
+
+  // ==================== Settings & Control Endpoints ====================
+
+  // Trading Mode
+  async getTradingMode(): Promise<{
+    dry_run: boolean;
+    mode: 'paper' | 'live';
+    mode_label: string;
+    can_switch: boolean;
+    switch_error?: string;
+  }> {
+    const { data } = await this.client.get('/settings/trading-mode');
+    return data;
+  }
+
+  async setTradingMode(dryRun: boolean): Promise<{
+    success: boolean;
+    dry_run: boolean;
+    mode: string;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/settings/trading-mode', { dry_run: dryRun });
+    return data;
+  }
+
+  // Wallet Balance
+  async getWalletBalance(): Promise<{
+    total_balance: number;
+    available_balance: number;
+    locked_balance: number;
+    currency: string;
+    is_simulated: boolean;
+    assets: Array<{ asset: string; free: number; locked: number }>;
+  }> {
+    const { data } = await this.client.get('/settings/wallet-balance');
+    return data;
+  }
+
+  // Autopilot Status & Control
+  async getAutopilotStatus(): Promise<{
+    available: boolean;
+    enabled: boolean;
+    running: boolean;
+    dry_run: boolean;
+    stats?: {
+      total_decisions: number;
+      approved_decisions: number;
+      rejected_decisions: number;
+      total_trades: number;
+      winning_trades: number;
+      losing_trades: number;
+      total_pnl: number;
+      daily_pnl: number;
+      win_rate: number;
+    };
+    circuit_breaker?: {
+      enabled: boolean;
+      state: string;
+      can_trade: boolean;
+      trip_reason: string;
+      stats: any;
+    };
+  }> {
+    const { data } = await this.client.get('/settings/autopilot');
+    return data;
+  }
+
+  async toggleAutopilot(enabled: boolean): Promise<{
+    success: boolean;
+    enabled: boolean;
+    running: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/settings/autopilot/toggle', { enabled });
+    return data;
+  }
+
+  async setAutopilotRules(rules: {
+    enabled?: boolean;
+    max_daily_loss?: number;
+    max_consecutive_losses?: number;
+    min_confidence?: number;
+    cooldown_minutes?: number;
+    require_multi_signal?: boolean;
+    risk_level?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/settings/autopilot/rules', rules);
+    return data;
+  }
+
+  // Circuit Breaker
+  async getCircuitBreakerStatus(): Promise<{
+    available: boolean;
+    enabled: boolean;
+    state: string;
+    can_trade: boolean;
+    block_reason: string;
+    consecutive_losses: number;
+    hourly_loss: number;
+    daily_loss: number;
+    trades_last_minute: number;
+    daily_trades: number;
+    trip_reason: string;
+    last_trip_time: string;
+    config: {
+      max_loss_per_hour: number;
+      max_daily_loss: number;
+      max_consecutive_losses: number;
+      cooldown_minutes: number;
+      max_trades_per_minute: number;
+      max_daily_trades: number;
+    };
+  }> {
+    const { data } = await this.client.get('/settings/circuit-breaker');
+    return data;
+  }
+
+  async resetCircuitBreaker(): Promise<{ success: boolean; message: string; state: string }> {
+    const { data } = await this.client.post('/settings/circuit-breaker/reset');
+    return data;
+  }
+
+  async updateCircuitBreakerConfig(config: {
+    enabled?: boolean;
+    max_loss_per_hour?: number;
+    max_daily_loss?: number;
+    max_consecutive_losses?: number;
+    cooldown_minutes?: number;
+    max_trades_per_minute?: number;
+    max_daily_trades?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    config: {
+      enabled: boolean;
+      max_loss_per_hour: number;
+      max_daily_loss: number;
+      max_consecutive_losses: number;
+      cooldown_minutes: number;
+      max_trades_per_minute: number;
+      max_daily_trades: number;
+    };
+  }> {
+    const { data } = await this.client.post('/settings/circuit-breaker/config', config);
+    return data;
+  }
+
+  // ==================== Strategy Performance Endpoints ====================
+
+  async getStrategyPerformance(timeRange: 'today' | 'week' | 'month' | 'all' = 'all'): Promise<{
+    success: boolean;
+    performances: Array<{
+      strategy_name: string;
+      symbol: string;
+      total_trades: number;
+      winning_trades: number;
+      losing_trades: number;
+      win_rate: number;
+      total_pnl: number;
+      avg_pnl: number;
+      avg_win: number;
+      avg_loss: number;
+      largest_win: number;
+      largest_loss: number;
+      profit_factor: number;
+      max_drawdown: number;
+      expectancy: number;
+      risk_reward: number;
+      consecutive_wins: number;
+      consecutive_losses: number;
+      last_trade_time?: string;
+      status: 'active' | 'paused' | 'stopped';
+      trend: 'up' | 'down' | 'neutral';
+      recent_pnl: number[];
+    }>;
+    time_range: string;
+  }> {
+    const { data } = await this.client.get('/strategy-performance', {
+      params: { range: timeRange },
+    });
+    return data;
+  }
+
+  async getOverallPerformance(): Promise<{
+    total_strategies: number;
+    active_strategies: number;
+    total_trades: number;
+    total_pnl: number;
+    overall_win_rate: number;
+    today_pnl: number;
+    week_pnl: number;
+    month_pnl: number;
+    best_strategy: string;
+    worst_strategy: string;
+    avg_trades_per_day: number;
+    total_days_trading: number;
+  }> {
+    const { data } = await this.client.get('/strategy-performance/overall');
+    return data;
+  }
+
+  async getHistoricalSuccessRate(strategyName?: string): Promise<{
+    strategy_name: string;
+    daily: Array<{
+      period: string;
+      start_date: string;
+      end_date: string;
+      trades: number;
+      win_rate: number;
+      pnl: number;
+      profit_factor: number;
+    }>;
+    weekly: Array<{
+      period: string;
+      trades: number;
+      win_rate: number;
+      pnl: number;
+      profit_factor: number;
+    }>;
+    monthly: Array<{
+      period: string;
+      trades: number;
+      win_rate: number;
+      pnl: number;
+      profit_factor: number;
+    }>;
+  }> {
+    const { data } = await this.client.get('/strategy-performance/historical', {
+      params: strategyName ? { strategy: strategyName } : {},
+    });
+    return data;
+  }
+
+  // ==================== User Profile Endpoints ====================
+
+  async updateProfile(profileData: { name?: string; email?: string }): Promise<void> {
+    await this.client.put('/user/profile', profileData);
+  }
+
+  async changePassword(passwordData: { current_password: string; new_password: string }): Promise<void> {
+    await this.client.post('/user/change-password', passwordData);
+  }
+
+  // ==================== API Keys Endpoints ====================
+
+  async getAPIKeys(): Promise<Array<{
+    id: string;
+    exchange: string;
+    api_key_last_four: string;
+    is_testnet: boolean;
+    is_active: boolean;
+    created_at: string;
+  }>> {
+    const { data } = await this.client.get<APIResponse<any[]>>('/user/api-keys');
+    return data.data || [];
+  }
+
+  async addAPIKey(keyData: {
+    api_key: string;
+    secret_key: string;
+    is_testnet: boolean;
+  }): Promise<void> {
+    await this.client.post('/user/api-keys', keyData);
+  }
+
+  async deleteAPIKey(keyId: string): Promise<void> {
+    await this.client.delete(`/user/api-keys/${keyId}`);
+  }
+
+  async testAPIKey(keyId: string): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post(`/user/api-keys/${keyId}/test`);
+    return data;
+  }
+
+  // ==================== Billing Endpoints ====================
+
+  async getProfitHistory(): Promise<Array<{
+    id: string;
+    period_start: string;
+    period_end: string;
+    starting_balance: number;
+    ending_balance: number;
+    gross_profit: number;
+    net_profit: number;
+    profit_share_rate: number;
+    profit_share_due: number;
+    settlement_status: string;
+    created_at: string;
+  }>> {
+    const { data } = await this.client.get<APIResponse<any[]>>('/billing/profit-history');
+    return data.data || [];
+  }
+
+  async getInvoices(): Promise<Array<{
+    id: string;
+    amount: number;
+    status: string;
+    created_at: string;
+    pdf_url?: string;
+  }>> {
+    const { data } = await this.client.get<APIResponse<any[]>>('/billing/invoices');
+    return data.data || [];
+  }
+
+  async createCheckoutSession(tierId: string): Promise<{ checkout_url: string }> {
+    const { data } = await this.client.post('/billing/checkout', { tier: tierId });
+    return data;
+  }
+
+  async createCustomerPortal(): Promise<{ portal_url: string }> {
+    const { data } = await this.client.post('/billing/portal');
+    return data;
+  }
+
+  // ==================== Health Status ====================
+
+  async getAPIHealthStatus(): Promise<{
+    success: boolean;
+    healthy: boolean;
+    services: {
+      binance_spot: { status: string; message: string };
+      binance_futures: { status: string; message: string };
+      ai_service: { status: string; message: string };
+      database: { status: string; message: string };
+    };
+  }> {
+    const { data } = await this.client.get('/health/status');
+    return data;
+  }
 }
 
 export const apiService = new APIService();
+export const api = apiService; // Alias for auth context

@@ -141,6 +141,7 @@ type AutopilotConfig struct {
 // FuturesAutopilotConfig holds futures autopilot trading configuration
 type FuturesAutopilotConfig struct {
 	Enabled              bool     `json:"enabled"`
+	DryRun               bool     `json:"dry_run"`                // Test mode without real orders (overrides TradingConfig if set)
 	RiskLevel            string   `json:"risk_level"`             // "conservative", "moderate", "aggressive"
 	MaxDailyTrades       int      `json:"max_daily_trades"`
 	MaxDailyLoss         float64  `json:"max_daily_loss"`         // Percentage
@@ -156,10 +157,13 @@ type FuturesAutopilotConfig struct {
 	MaxFundingRate       float64  `json:"max_funding_rate"`       // Max funding rate to hold (avoid high carry cost)
 	AllowShorts          bool     `json:"allow_shorts"`           // Allow short positions
 	AutoReduceRisk       bool     `json:"auto_reduce_risk"`       // Auto-reduce position near liquidation
-	TakeProfitPercent    float64  `json:"take_profit_percent"`    // Default TP %
-	StopLossPercent      float64  `json:"stop_loss_percent"`      // Default SL %
-	TrailingStopEnabled  bool     `json:"trailing_stop_enabled"`  // Enable trailing stop
-	TrailingStopPercent  float64  `json:"trailing_stop_percent"`  // Trailing stop distance %
+	TakeProfitPercent    float64  `json:"take_profit_percent"`     // Default TP %
+	TakeProfitPercent1   float64  `json:"take_profit_percent_1"`   // TP1 level (10% ROI)
+	TakeProfitPercent2   float64  `json:"take_profit_percent_2"`   // TP2 level (30% ROI)
+	StopLossPercent      float64  `json:"stop_loss_percent"`       // Default SL %
+	TrailingStopEnabled  bool     `json:"trailing_stop_enabled"`   // Enable trailing stop
+	TrailingStopPercent  float64  `json:"trailing_stop_percent"`   // Trailing stop pullback % (8%)
+	TrailingStopActivationPercent float64 `json:"trailing_stop_activation_percent"` // Activate at % of TP2 (60%)
 	DecisionIntervalSecs int      `json:"decision_interval_secs"` // Seconds between decisions
 	// New allocation and profit reinvestment settings
 	MaxUSDAllocation        float64 `json:"max_usd_allocation"`         // Maximum USD to allocate for trading
@@ -409,10 +413,13 @@ func Load() (*Config, error) {
 			MaxFundingRate:       getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_FUNDING_RATE", 0.1),
 			AllowShorts:          getEnvOrDefault("FUTURES_AUTOPILOT_ALLOW_SHORTS", "true") == "true",
 			AutoReduceRisk:       getEnvOrDefault("FUTURES_AUTOPILOT_AUTO_REDUCE_RISK", "true") == "true",
-			TakeProfitPercent:    getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT", 2.0),
-			StopLossPercent:      getEnvFloatOrDefault("FUTURES_AUTOPILOT_STOP_LOSS", 1.0),
-			TrailingStopEnabled:  getEnvOrDefault("FUTURES_AUTOPILOT_TRAILING_STOP_ENABLED", "true") == "true",
-			TrailingStopPercent:  getEnvFloatOrDefault("FUTURES_AUTOPILOT_TRAILING_STOP_PERCENT", 0.5),
+			TakeProfitPercent:     getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT", 2.0),
+			TakeProfitPercent1:    getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT_1", 10.0),
+			TakeProfitPercent2:    getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT_2", 30.0),
+			StopLossPercent:       getEnvFloatOrDefault("FUTURES_AUTOPILOT_STOP_LOSS", 12.0),
+			TrailingStopEnabled:   getEnvOrDefault("FUTURES_AUTOPILOT_TRAILING_STOP_ENABLED", "true") == "true",
+			TrailingStopPercent:   getEnvFloatOrDefault("FUTURES_AUTOPILOT_TRAILING_STOP_PERCENT", 8.0),
+			TrailingStopActivationPercent: getEnvFloatOrDefault("FUTURES_AUTOPILOT_TRAILING_ACTIVATION_PERCENT", 60.0),
 			DecisionIntervalSecs: getEnvIntOrDefault("FUTURES_AUTOPILOT_DECISION_INTERVAL", 5),
 			// New allocation and profit reinvestment settings
 			MaxUSDAllocation:        getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_USD_ALLOCATION", 2500.0),

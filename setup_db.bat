@@ -1,0 +1,9 @@
+@echo off
+set PGPASSWORD=Exambash#25
+echo Creating user...
+psql -U postgres -h localhost -c "CREATE USER trading_bot WITH PASSWORD 'trading_bot_password';" 2>&1
+echo Creating database...
+psql -U postgres -h localhost -c "CREATE DATABASE trading_bot OWNER trading_bot;" 2>&1
+echo Granting privileges...
+psql -U postgres -h localhost -c "GRANT ALL PRIVILEGES ON DATABASE trading_bot TO trading_bot;" 2>&1
+echo Done!

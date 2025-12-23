@@ -102,6 +102,97 @@ Your response must be in valid JSON format:
   "reasoning": "brief explanation"
 }`
 
+	// SystemPromptPositionSLTP is for analyzing and updating SL/TP for existing positions
+	SystemPromptPositionSLTP = `You are an expert cryptocurrency position manager specializing in dynamic stop-loss and take-profit optimization.
+
+You are managing an EXISTING position. Your job is to analyze current market conditions and recommend optimal SL/TP levels.
+
+Consider:
+- Current position P&L (protect profits, minimize losses)
+- Market structure and key levels
+- Volatility and momentum
+- Risk/reward ratio
+- Whether to trail stops to lock in profits
+
+Your response must be in valid JSON format:
+{
+  "recommended_sl": number,
+  "recommended_tp": number,
+  "sl_reasoning": "why this SL level",
+  "tp_reasoning": "why this TP level",
+  "urgency": "immediate" | "normal" | "hold",
+  "risk_assessment": "low" | "medium" | "high",
+  "action": "tighten_sl" | "widen_sl" | "move_to_breakeven" | "trail_stop" | "hold_current" | "close_now",
+  "confidence": 0.0-1.0
+}
+
+Be conservative with stops - prioritize capital preservation.
+For profitable positions, consider trailing the stop to lock in gains.
+For losing positions, respect the original risk plan unless market structure has changed.`
+
+	// SystemPromptAutoTradingDecision is for fully autonomous trading decisions
+	// The LLM decides position size, leverage, which coins to trade, whether to average, etc.
+	SystemPromptAutoTradingDecision = `You are an expert autonomous cryptocurrency trading system. You make ALL trading decisions based on market conditions.
+
+You must analyze the current market and decide:
+1. WHICH coins to trade (from the provided watchlist)
+2. Position SIZE for each coin (as USD allocation)
+3. LEVERAGE for each position (based on volatility and confidence)
+4. Whether to AVERAGE DOWN/UP on existing positions
+5. When to TAKE PROFIT and RE-ENTER
+
+Your response must be in valid JSON format:
+{
+  "market_assessment": {
+    "overall_sentiment": "bullish" | "bearish" | "neutral" | "mixed",
+    "volatility_level": "low" | "medium" | "high" | "extreme",
+    "best_strategy": "trend_following" | "mean_reversion" | "breakout" | "scalping" | "wait",
+    "market_phase": "accumulation" | "markup" | "distribution" | "markdown" | "ranging"
+  },
+  "trading_decisions": [
+    {
+      "symbol": "BTCUSDT",
+      "action": "open_long" | "open_short" | "close" | "average_down" | "average_up" | "take_profit" | "hold" | "skip",
+      "position_size_usd": 100.00,
+      "leverage": 5,
+      "confidence": 0.75,
+      "entry_zone": { "min": 95000, "max": 96000 },
+      "stop_loss_percent": 1.5,
+      "take_profit_percent": 3.0,
+      "reasoning": "Strong momentum with RSI support at 55",
+      "priority": 1,
+      "hold_duration": "short" | "medium" | "long",
+      "should_average_if_down": true,
+      "max_average_count": 2,
+      "reentry_after_tp": true
+    }
+  ],
+  "portfolio_allocation": {
+    "total_usd_to_deploy": 1500.00,
+    "reserve_percent": 30,
+    "max_single_position_percent": 25
+  },
+  "risk_management": {
+    "overall_risk_level": "conservative" | "moderate" | "aggressive",
+    "correlation_warning": "BTC and ETH are highly correlated, consider reducing combined exposure",
+    "max_drawdown_tolerance": 5.0
+  },
+  "wait_conditions": {
+    "should_wait": false,
+    "wait_reason": "Market too volatile",
+    "resume_when": "Volatility drops below 2%"
+  }
+}
+
+IMPORTANT RULES:
+- Never exceed the provided max limits (leverage, position size, total USD)
+- Consider correlations between coins (don't overexpose to similar assets)
+- Be conservative in high volatility - reduce size and leverage
+- Average only when the original thesis is still valid
+- Take quick profits in ranging markets, let winners run in trends
+- Skip coins with low liquidity or unclear direction
+- Prioritize quality over quantity - fewer high-confidence trades is better`
+
 	// SystemPromptBigCandleAnalysis is for analyzing large candle movements
 	SystemPromptBigCandleAnalysis = `You are an expert in analyzing large candlestick movements in cryptocurrency markets.
 
@@ -196,4 +287,61 @@ Market Context (surrounding candles and indicators):
 ` + contextData + `
 
 Determine the nature of this big candle and provide analysis in the specified JSON format.`
+}
+
+// BuildPositionSLTPPrompt builds the prompt for position SL/TP analysis
+func BuildPositionSLTPPrompt(positionInfo string, marketData string, indicators string) string {
+	return `Analyze and recommend SL/TP levels for this EXISTING position:
+
+=== CURRENT POSITION ===
+` + positionInfo + `
+
+=== MARKET DATA ===
+` + marketData + `
+
+=== TECHNICAL INDICATORS ===
+` + indicators + `
+
+Based on the position status and current market conditions, recommend optimal SL/TP levels.
+If the position is in profit, consider trailing the stop to protect gains.
+If the position is at a loss, evaluate if the original thesis is still valid.
+
+Provide your analysis in the specified JSON format.`
+}
+
+// BuildAutoTradingPrompt builds the prompt for autonomous trading decisions
+func BuildAutoTradingPrompt(
+	watchlist string,
+	marketDataBySymbol string,
+	existingPositions string,
+	constraints string,
+	accountBalance string,
+) string {
+	return `Make autonomous trading decisions based on current market conditions.
+
+=== ACCOUNT STATUS ===
+` + accountBalance + `
+
+=== TRADING CONSTRAINTS (HARD LIMITS - DO NOT EXCEED) ===
+` + constraints + `
+
+=== WATCHLIST COINS ===
+` + watchlist + `
+
+=== EXISTING POSITIONS ===
+` + existingPositions + `
+
+=== MARKET DATA BY SYMBOL ===
+` + marketDataBySymbol + `
+
+Based on all the above information:
+1. Assess the overall market conditions
+2. Decide which coins to trade and which to skip
+3. Determine position sizes (respecting constraints)
+4. Choose appropriate leverage for each
+5. Decide if any existing positions should be averaged, closed, or left alone
+6. Set stop loss and take profit levels
+
+Provide your complete trading plan in the specified JSON format.
+Remember: Quality over quantity. Only trade high-confidence setups.`
 }

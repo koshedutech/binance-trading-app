@@ -661,19 +661,21 @@ func (s *Server) setupRoutes() {
 		s.router.Static("/assets", s.config.StaticFilesPath+"/assets")
 		s.router.StaticFile("/", s.config.StaticFilesPath+"/index.html")
 
-		// Catch-all route for React Router (SPA) - but NOT for API routes
+		// Catch-all for undefined API routes - return 404 JSON
 		s.router.NoRoute(func(c *gin.Context) {
-			path := c.Request.URL.Path
-			// Don't serve index.html for API routes - return 404 JSON instead
-			if len(path) > 5 && path[:5] == "/api/" {
+			// If this is an API request path that wasn't matched by any handler,
+			// return 404 JSON instead of serving index.html
+			if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
 				c.JSON(http.StatusNotFound, gin.H{
 					"error":   "API endpoint not found",
-					"path":    path,
-					"message": "This API endpoint does not exist. Please check your request path.",
+					"path":    c.Request.URL.Path,
+					"method":  c.Request.Method,
+					"message": "This API endpoint does not exist. Check your request path and HTTP method.",
 				})
 				return
 			}
-			// Serve index.html for SPA routes (frontend)
+
+			// For non-API paths, serve React's index.html to support client-side routing
 			c.File(s.config.StaticFilesPath + "/index.html")
 		})
 	}

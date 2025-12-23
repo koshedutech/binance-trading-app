@@ -45,7 +45,7 @@ type WSHub struct {
 func NewWSHub() *WSHub {
 	return &WSHub{
 		clients:    make(map[*WSClient]bool),
-		broadcast:  make(chan []byte, 256),
+		broadcast:  make(chan []byte, 4096),
 		register:   make(chan *WSClient),
 		unregister: make(chan *WSClient),
 	}
@@ -59,7 +59,7 @@ func (h *WSHub) Run() {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
-			log.Printf("WebSocket client connected. Total clients: %d", len(h.clients))
+			// Reduced logging - only log at debug level if needed
 
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -68,7 +68,7 @@ func (h *WSHub) Run() {
 				close(client.send)
 			}
 			h.mu.Unlock()
-			log.Printf("WebSocket client disconnected. Total clients: %d", len(h.clients))
+			// Reduced logging - only log at debug level if needed
 
 		case message := <-h.broadcast:
 			h.mu.RLock()

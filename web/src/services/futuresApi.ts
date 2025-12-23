@@ -233,9 +233,9 @@ class FuturesAPIService {
 
   // ==================== HISTORY ====================
 
-  async getTradeHistory(limit = 50, offset = 0): Promise<FuturesTrade[]> {
+  async getTradeHistory(limit = 50, offset = 0, includeAI = false): Promise<FuturesTrade[]> {
     const { data } = await this.client.get<FuturesTrade[]>('/trades/history', {
-      params: { limit, offset },
+      params: { limit, offset, include_ai: includeAI, include_open: true },
     });
     return data || [];
   }
@@ -647,13 +647,16 @@ class FuturesAPIService {
 
   // ==================== SENTIMENT & NEWS ====================
 
-  async getSentimentNews(limit = 20): Promise<{
+  async getSentimentNews(limit = 50, ticker?: string): Promise<{
     news: Array<{
       title: string;
       source: string;
       url: string;
       sentiment: number;
       published_at: string;
+      tickers: string[];
+      topic: string;
+      is_important: boolean;
     }>;
     sentiment: {
       overall: number;
@@ -664,9 +667,34 @@ class FuturesAPIService {
       updated_at: string;
       sources: string[];
     } | null;
+    stats: {
+      bullish: number;
+      bearish: number;
+      neutral: number;
+    };
+    tickers: string[];
     count: number;
   }> {
-    const { data } = await this.client.get('/sentiment/news', { params: { limit } });
+    const params: Record<string, unknown> = { limit };
+    if (ticker) params.ticker = ticker;
+    const { data } = await this.client.get('/sentiment/news', { params });
+    return data;
+  }
+
+  async getBreakingNews(limit = 10): Promise<{
+    news: Array<{
+      title: string;
+      source: string;
+      url: string;
+      sentiment: number;
+      published_at: string;
+      tickers: string[];
+      topic: string;
+      is_important: boolean;
+    }>;
+    count: number;
+  }> {
+    const { data } = await this.client.get('/sentiment/breaking', { params: { limit } });
     return data;
   }
 
@@ -715,6 +743,1523 @@ class FuturesAPIService {
     const { data } = await this.client.post('/autopilot/averaging/config', config);
     return data;
   }
+
+  // ==================== AI DECISIONS (from database) ====================
+
+  async getAIDecisions(limit = 50, symbol?: string, action?: string): Promise<{
+    success: boolean;
+    data: Array<{
+      id: number;
+      symbol: string;
+      current_price: number;
+      action: string;
+      confidence: number;
+      reasoning: string;
+      ml_direction?: string;
+      ml_confidence?: number;
+      sentiment_direction?: string;
+      sentiment_confidence?: number;
+      llm_direction?: string;
+      llm_confidence?: number;
+      pattern_direction?: string;
+      pattern_confidence?: number;
+      bigcandle_direction?: string;
+      bigcandle_confidence?: number;
+      confluence_count: number;
+      risk_level: string;
+      executed: boolean;
+      created_at: string;
+    }>;
+    count: number;
+  }> {
+    const params: Record<string, string | number> = { limit };
+    if (symbol) params.symbol = symbol;
+    if (action) params.action = action;
+
+    // This endpoint is at /api/ai-decisions, not /api/futures
+    const response = await axios.get('/api/ai-decisions', { params });
+    return response.data;
+  }
+
+  // ==================== INVESTIGATE / DIAGNOSTICS ====================
+
+  async getInvestigateStatus(): Promise<InvestigateStatus> {
+    const { data } = await this.client.get('/autopilot/investigate');
+    return data;
+  }
+
+  async clearFlipFlopCooldown(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/clear-cooldown');
+    return data;
+  }
+
+  async forceSyncPositions(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/force-sync');
+    return data;
+  }
+
+  async recalculateAllocation(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/recalculate-allocation');
+    return data;
+  }
+
+  // ==================== COIN CLASSIFICATION ====================
+
+  async getCoinClassifications(): Promise<{
+    classifications: CoinClassification[];
+    settings: CoinClassificationSettings;
+  }> {
+    const { data } = await this.client.get('/autopilot/coin-classifications');
+    return data;
+  }
+
+  async getCoinClassificationSummary(): Promise<ClassificationSummary> {
+    const { data } = await this.client.get('/autopilot/coin-classifications/summary');
+    return data;
+  }
+
+  async updateCoinPreference(
+    symbol: string,
+    enabled: boolean,
+    priority = 0
+  ): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/coin-preference', {
+      symbol,
+      enabled,
+      priority,
+    });
+    return data;
+  }
+
+  async updateCategoryAllocation(
+    category: string, // e.g., "volatility:stable", "market_cap:blue_chip"
+    enabled: boolean,
+    allocationPercent: number,
+    maxPositions: number
+  ): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/category-allocation', {
+      category,
+      enabled,
+      allocation_percent: allocationPercent,
+      max_positions: maxPositions,
+    });
+    return data;
+  }
+
+  async getCoinPreferences(): Promise<{
+    coins: CoinPreferenceInfo[];
+    total: number;
+    settings: CoinClassificationSettings;
+  }> {
+    const { data } = await this.client.get('/autopilot/coin-preferences');
+    return data;
+  }
+
+  async bulkUpdateCoinPreferences(
+    coins: Array<{ symbol: string; enabled: boolean; priority: number }>
+  ): Promise<{ success: boolean; message: string; updated: number }> {
+    const { data } = await this.client.post('/autopilot/coin-preferences/bulk', { coins });
+    return data;
+  }
+
+  async getEligibleCoins(): Promise<{
+    eligible_coins: EligibleCoin[];
+    total: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/coins/eligible');
+    return data;
+  }
+
+  async refreshCoinClassifications(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/coin-classifications/refresh');
+    return data;
+  }
+
+  async enableAllCoins(): Promise<{ success: boolean; message: string; enabled: number }> {
+    const { data } = await this.client.post('/autopilot/coins/enable-all');
+    return data;
+  }
+
+  async disableAllCoins(): Promise<{ success: boolean; message: string; disabled: number }> {
+    const { data } = await this.client.post('/autopilot/coins/disable-all');
+    return data;
+  }
+
+  // ==================== TRADING STYLE ====================
+
+  async getTradingStyle(): Promise<{
+    style: 'scalping' | 'swing' | 'position';
+    config: TradingStyleConfig;
+  }> {
+    const { data } = await this.client.get('/autopilot/trading-style');
+    return data;
+  }
+
+  async setTradingStyle(style: 'scalping' | 'swing' | 'position'): Promise<{
+    success: boolean;
+    message: string;
+    style: string;
+    config: TradingStyleConfig;
+  }> {
+    const { data } = await this.client.post('/autopilot/trading-style', { style });
+    return data;
+  }
+
+  // ==================== HEDGING ====================
+
+  async getHedgingStatus(): Promise<HedgingStatus> {
+    const { data } = await this.client.get('/autopilot/hedging/status');
+    return data;
+  }
+
+  async getHedgingConfig(): Promise<HedgingStatus> {
+    const { data } = await this.client.get('/autopilot/hedging/config');
+    return data;
+  }
+
+  async updateHedgingConfig(config: {
+    enabled?: boolean;
+    price_drop_trigger_pct?: number;
+    unrealized_loss_trigger?: number;
+    ai_enabled?: boolean;
+    ai_confidence_min?: number;
+    default_percent?: number;
+    partial_steps?: number[];
+    profit_take_pct?: number;
+    close_on_recovery_pct?: number;
+    max_simultaneous?: number;
+  }): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/hedging/config', config);
+    return data;
+  }
+
+  async executeManualHedge(
+    symbol: string,
+    hedgePercent: number
+  ): Promise<{ success: boolean; hedge: HedgePositionInfo }> {
+    const { data } = await this.client.post('/autopilot/hedging/manual', {
+      symbol,
+      hedge_percent: hedgePercent,
+    });
+    return data;
+  }
+
+  async closeHedge(
+    symbol: string,
+    reason = 'manual_close'
+  ): Promise<{ success: boolean; pnl: number; symbol: string; reason: string }> {
+    const { data } = await this.client.post('/autopilot/hedging/close', {
+      symbol,
+      reason,
+    });
+    return data;
+  }
+
+  async enableHedgeMode(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/hedging/enable-mode');
+    return data;
+  }
+
+  async clearAllHedges(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/hedging/clear-all');
+    return data;
+  }
+
+  async getHedgeHistory(symbol: string): Promise<HedgeEvent[]> {
+    const { data } = await this.client.get('/autopilot/hedging/history', {
+      params: { symbol },
+    });
+    return data;
+  }
+
+  // ==================== GINIE AI TRADER ====================
+
+  async getGinieStatus(): Promise<GinieStatus> {
+    const { data } = await this.client.get('/ginie/status');
+    return data;
+  }
+
+  async getGinieConfig(): Promise<GinieConfig> {
+    const { data } = await this.client.get('/ginie/config');
+    return data;
+  }
+
+  async updateGinieConfig(config: Partial<GinieConfig>): Promise<{
+    success: boolean;
+    message: string;
+    config: GinieConfig;
+  }> {
+    const { data } = await this.client.post('/ginie/config', config);
+    return data;
+  }
+
+  async toggleGinie(enabled: boolean): Promise<{
+    success: boolean;
+    message: string;
+    enabled: boolean;
+  }> {
+    const { data } = await this.client.post('/ginie/toggle', { enabled });
+    return data;
+  }
+
+  async ginieScanCoin(symbol: string): Promise<GinieCoinScan> {
+    const { data } = await this.client.get('/ginie/scan', {
+      params: { symbol },
+    });
+    return data;
+  }
+
+  async ginieGenerateDecision(symbol: string): Promise<GinieDecisionReport> {
+    const { data } = await this.client.get('/ginie/decision', {
+      params: { symbol },
+    });
+    return data;
+  }
+
+  async ginieGetDecisions(): Promise<{
+    decisions: GinieDecisionReport[];
+    count: number;
+  }> {
+    const { data } = await this.client.get('/ginie/decisions');
+    return data;
+  }
+
+  async ginieScanAll(): Promise<{
+    scans: GinieCoinScan[];
+    count: number;
+    symbols: string[];
+  }> {
+    const { data } = await this.client.post('/ginie/scan-all');
+    return data;
+  }
+
+  async ginieAnalyzeAll(): Promise<{
+    decisions: GinieDecisionReport[];
+    count: number;
+    best_long: GinieDecisionReport | null;
+    best_short: GinieDecisionReport | null;
+  }> {
+    const { data } = await this.client.post('/ginie/analyze-all');
+    return data;
+  }
+
+  // ==================== GINIE AUTOPILOT ====================
+
+  async getGinieAutopilotStatus(): Promise<GinieAutopilotStatus> {
+    const { data } = await this.client.get('/ginie/autopilot/status');
+    return data;
+  }
+
+  async getGinieAutopilotConfig(): Promise<GinieAutopilotConfig> {
+    const { data } = await this.client.get('/ginie/autopilot/config');
+    return data;
+  }
+
+  async updateGinieAutopilotConfig(config: Partial<GinieAutopilotConfig>): Promise<{
+    success: boolean;
+    message: string;
+    config: GinieAutopilotConfig;
+  }> {
+    const { data } = await this.client.post('/ginie/autopilot/config', config);
+    return data;
+  }
+
+  async startGinieAutopilot(): Promise<{
+    success: boolean;
+    message: string;
+    running: boolean;
+  }> {
+    const { data } = await this.client.post('/ginie/autopilot/start');
+    return data;
+  }
+
+  async stopGinieAutopilot(): Promise<{
+    success: boolean;
+    message: string;
+    running: boolean;
+  }> {
+    const { data } = await this.client.post('/ginie/autopilot/stop');
+    return data;
+  }
+
+  async getGinieAutopilotPositions(): Promise<{
+    positions: GiniePosition[];
+    count: number;
+  }> {
+    const { data } = await this.client.get('/ginie/autopilot/positions');
+    return data;
+  }
+
+  async getGinieAutopilotTradeHistory(): Promise<{
+    trades: GinieTradeResult[];
+    count: number;
+  }> {
+    const { data } = await this.client.get('/ginie/autopilot/history');
+    return data;
+  }
+
+  async clearGiniePositions(): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/ginie/autopilot/clear');
+    return data;
+  }
+
+  async setGinieDryRun(dryRun: boolean): Promise<{
+    success: boolean;
+    message: string;
+    config: GinieAutopilotConfig;
+  }> {
+    // Get current config, update dry_run, and send back
+    const currentConfig = await this.getGinieAutopilotConfig();
+    const { data } = await this.client.post('/ginie/autopilot/config', {
+      ...currentConfig,
+      dry_run: dryRun,
+    });
+    return data;
+  }
+
+  // ==================== GINIE CIRCUIT BREAKER ====================
+
+  async getGinieCircuitBreakerStatus(): Promise<GinieCircuitBreakerStatus> {
+    const { data } = await this.client.get('/ginie/circuit-breaker/status');
+    return data;
+  }
+
+  async resetGinieCircuitBreaker(): Promise<{
+    success: boolean;
+    message: string;
+    status: GinieCircuitBreakerStatus;
+  }> {
+    const { data } = await this.client.post('/ginie/circuit-breaker/reset');
+    return data;
+  }
+
+  async toggleGinieCircuitBreaker(enabled: boolean): Promise<{
+    success: boolean;
+    message: string;
+    enabled: boolean;
+    status: GinieCircuitBreakerStatus;
+  }> {
+    const { data } = await this.client.post('/ginie/circuit-breaker/toggle', { enabled });
+    return data;
+  }
+
+  async updateGinieCircuitBreakerConfig(config: {
+    max_loss_per_hour: number;
+    max_daily_loss: number;
+    max_consecutive_losses: number;
+    cooldown_minutes: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    status: GinieCircuitBreakerStatus;
+  }> {
+    const { data } = await this.client.post('/ginie/circuit-breaker/config', config);
+    return data;
+  }
+
+  // ==================== GINIE POSITION SYNC ====================
+
+  async syncGiniePositions(): Promise<{
+    success: boolean;
+    message: string;
+    synced_count: number;
+    total_positions: number;
+    positions: GiniePosition[];
+  }> {
+    const { data } = await this.client.post('/ginie/positions/sync');
+    return data;
+  }
+
+  // ==================== GINIE PANIC BUTTON ====================
+
+  async closeAllGiniePositions(): Promise<{
+    success: boolean;
+    message: string;
+    positions_closed: number;
+    total_pnl: number;
+  }> {
+    const { data } = await this.client.post('/ginie/positions/close-all');
+    return data;
+  }
+
+  // ==================== GINIE RISK LEVEL ====================
+
+  async getGinieRiskLevel(): Promise<{
+    risk_level: string;
+    min_confidence: number;
+    max_usd: number;
+    leverage: number;
+  }> {
+    const { data } = await this.client.get('/ginie/risk-level');
+    return data;
+  }
+
+  async setGinieRiskLevel(riskLevel: string): Promise<{
+    success: boolean;
+    message: string;
+    risk_level: string;
+    min_confidence: number;
+    max_usd: number;
+    leverage: number;
+  }> {
+    const { data } = await this.client.post('/ginie/risk-level', { risk_level: riskLevel });
+    return data;
+  }
+
+  // ==================== GINIE MARKET MOVERS ====================
+
+  async getMarketMovers(topN: number = 20): Promise<MarketMoversResponse> {
+    const { data } = await this.client.get(`/ginie/market-movers?top=${topN}`);
+    return data;
+  }
+
+  async refreshDynamicSymbols(topN: number = 15): Promise<{
+    success: boolean;
+    message: string;
+    top_n: number;
+    symbol_count: number;
+    symbols: string[];
+  }> {
+    const { data } = await this.client.post('/ginie/symbols/refresh-dynamic', { top_n: topN });
+    return data;
+  }
+
+  // ==================== GINIE DIAGNOSTICS ====================
+
+  async getGinieDiagnostics(): Promise<GinieDiagnostics> {
+    const { data } = await this.client.get('/ginie/diagnostics');
+    return data;
+  }
+
+  // ==================== GINIE SIGNAL LOGS ====================
+
+  async getGinieSignalLogs(limit = 100, status?: string, symbol?: string): Promise<{
+    signals: GinieSignalLog[];
+    count: number;
+  }> {
+    const params: Record<string, string | number> = { limit };
+    if (status) params.status = status;
+    if (symbol) params.symbol = symbol;
+    const { data } = await this.client.get('/ginie/signals', { params });
+    return data;
+  }
+
+  async getGinieSignalStats(): Promise<GinieSignalStats> {
+    const { data } = await this.client.get('/ginie/signals/stats');
+    return data;
+  }
+
+  // ==================== GINIE SL UPDATE HISTORY ====================
+
+  async getGinieSLHistory(symbol?: string): Promise<{
+    history: Record<string, GinieSLUpdateHistory>;
+    count: number;
+  }> {
+    const params: Record<string, string> = {};
+    if (symbol) params.symbol = symbol;
+    const { data } = await this.client.get('/ginie/sl-history', { params });
+    return data;
+  }
+
+  async getGinieSLStats(): Promise<GinieSLStats> {
+    const { data } = await this.client.get('/ginie/sl-history/stats');
+    return data;
+  }
+
+  // ==================== GINIE LLM SL STATUS ====================
+
+  async getGinieLLMSLStatus(): Promise<GinieLLMSLStatus> {
+    const { data } = await this.client.get('/ginie/llm-sl/status');
+    return data;
+  }
+
+  async resetGinieLLMSL(symbol: string): Promise<{
+    success: boolean;
+    message: string;
+    symbol: string;
+    was_disabled: boolean;
+  }> {
+    const { data } = await this.client.post(`/ginie/llm-sl/reset/${symbol}`);
+    return data;
+  }
+
+  // ==================== SYMBOL PERFORMANCE SETTINGS ====================
+
+  async getSymbolPerformanceSettings(): Promise<{
+    symbols: Record<string, SymbolPerformanceSettings>;
+    category_config: {
+      confidence_boost: Record<string, number>;
+      size_multiplier: Record<string, number>;
+    };
+    global_min_confidence: number;
+    global_max_usd: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/symbols');
+    return data;
+  }
+
+  async getSymbolPerformanceReport(): Promise<{
+    report: SymbolPerformanceReport[];
+    count: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/symbols/report');
+    return data;
+  }
+
+  async getSymbolsByCategory(category: string): Promise<{
+    symbols: SymbolPerformanceReport[];
+    category: string;
+    count: number;
+  }> {
+    const { data } = await this.client.get(`/autopilot/symbols/category/${category}`);
+    return data;
+  }
+
+  async getSingleSymbolSettings(symbol: string): Promise<SymbolPerformanceSettings> {
+    const { data } = await this.client.get(`/autopilot/symbols/${symbol}`);
+    return data;
+  }
+
+  async updateSymbolSettings(symbol: string, settings: {
+    category?: string;
+    enabled?: boolean;
+    size_multiplier?: number;
+    min_confidence?: number;
+    max_position_usd?: number;
+    notes?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.put(`/autopilot/symbols/${symbol}`, settings);
+    return data;
+  }
+
+  async blacklistSymbol(symbol: string, reason: string): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post(`/autopilot/symbols/${symbol}/blacklist`, { reason });
+    return data;
+  }
+
+  async unblacklistSymbol(symbol: string): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.delete(`/autopilot/symbols/${symbol}/blacklist`);
+    return data;
+  }
+
+  async updateCategoryConfig(config: {
+    confidence_boost: Record<string, number>;
+    size_multiplier: Record<string, number>;
+  }): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/autopilot/category-config', config);
+    return data;
+  }
+
+  // ==================== AUTO MODE (LLM-DRIVEN TRADING) ====================
+
+  async getAutoModeConfig(): Promise<AutoModeConfig> {
+    const { data } = await this.client.get('/autopilot/auto-mode');
+    return data;
+  }
+
+  async setAutoModeConfig(config: Partial<AutoModeConfig>): Promise<{
+    success: boolean;
+    message: string;
+    config: AutoModeConfig;
+  }> {
+    const { data } = await this.client.post('/autopilot/auto-mode', config);
+    return data;
+  }
+
+  async toggleAutoMode(enabled: boolean): Promise<{
+    success: boolean;
+    message: string;
+    enabled: boolean;
+  }> {
+    const { data } = await this.client.post('/autopilot/auto-mode/toggle', { enabled });
+    return data;
+  }
+
+  // ==================== STRATEGY PERFORMANCE ====================
+
+  async getStrategyPerformance(): Promise<{
+    strategies: StrategyPerformance[];
+    count: number;
+  }> {
+    const { data } = await this.client.get('/ginie/strategy-performance');
+    return data;
+  }
+
+  async getSourcePerformance(): Promise<{
+    sources: SourcePerformance[];
+  }> {
+    const { data } = await this.client.get('/ginie/source-performance');
+    return data;
+  }
+
+  async getPositionsBySource(source: 'ai' | 'strategy' | 'all' = 'all'): Promise<{
+    positions: GiniePosition[];
+    count: number;
+    filter: string;
+  }> {
+    const { data } = await this.client.get('/ginie/positions/filter', {
+      params: { source }
+    });
+    return data;
+  }
+
+  async getTradeHistoryBySource(source: 'ai' | 'strategy' | 'all' = 'all', limit = 100): Promise<{
+    trades: GinieTradeResult[];
+    count: number;
+    filter: string;
+  }> {
+    const { data } = await this.client.get('/ginie/history/filter', {
+      params: { source, limit }
+    });
+    return data;
+  }
+
+  // ==================== MODE ALLOCATION ====================
+
+  async getModeAllocations(): Promise<any> {
+    const { data } = await this.client.get('/modes/allocations');
+    return data;
+  }
+
+  async updateModeAllocations(allocations: any): Promise<any> {
+    const { data } = await this.client.post('/modes/allocations', allocations);
+    return data;
+  }
+
+  async getModeAllocationHistory(mode?: string, limit = 100): Promise<any> {
+    const endpoint = mode ? `/modes/allocations/${mode}` : '/modes/allocations/history';
+    const { data } = await this.client.get(endpoint, {
+      params: { limit }
+    });
+    return data;
+  }
+
+  // ==================== MODE SAFETY ====================
+
+  async getModeSafetyStatus(): Promise<any> {
+    const { data } = await this.client.get('/modes/safety');
+    return data;
+  }
+
+  async resumeMode(mode: string): Promise<any> {
+    const { data } = await this.client.post(`/modes/safety/${mode}/resume`, {});
+    return data;
+  }
+
+  async getModeSafetyHistory(mode?: string, limit = 100): Promise<any> {
+    const endpoint = mode ? `/modes/safety/${mode}/history` : '/modes/safety/history';
+    const { data } = await this.client.get(endpoint, {
+      params: { limit }
+    });
+    return data;
+  }
+
+  // ==================== MODE PERFORMANCE ====================
+
+  async getModePerformance(): Promise<any> {
+    const { data } = await this.client.get('/modes/performance');
+    return data;
+  }
+
+  async getModePerformanceByMode(mode: string): Promise<any> {
+    const { data } = await this.client.get(`/modes/performance/${mode}`);
+    return data;
+  }
+}
+
+// ==================== MARKET MOVERS TYPES ====================
+
+export interface MarketMoversResponse {
+  success: boolean;
+  top_n: number;
+  top_gainers: string[];
+  top_losers: string[];
+  top_volume: string[];
+  high_volatility: string[];
+}
+
+// ==================== GINIE AUTOPILOT TYPES ====================
+
+export interface GinieAutopilotConfig {
+  enabled: boolean;
+  max_positions: number;
+  max_usd_per_position: number;
+  total_max_usd: number;
+  default_leverage: number;
+  dry_run: boolean;
+  risk_level: string;
+  enable_scalp_mode: boolean;
+  enable_swing_mode: boolean;
+  enable_position_mode: boolean;
+  tp1_percent: number;
+  tp2_percent: number;
+  tp3_percent: number;
+  tp4_percent: number;
+  move_to_breakeven_after_tp1: boolean;
+  breakeven_buffer: number;
+  scalp_scan_interval: number;
+  swing_scan_interval: number;
+  position_scan_interval: number;
+  min_confidence_to_trade: number;
+  max_daily_trades: number;
+  max_daily_loss: number;
+}
+
+export interface GinieTakeProfitLevel {
+  level: number;
+  price: number;
+  percent: number;
+  gain_pct: number;
+  status: string;
+}
+
+export interface GiniePosition {
+  symbol: string;
+  side: string;
+  mode: GinieTradingMode;
+  entry_price: number;
+  original_qty: number;
+  remaining_qty: number;
+  leverage: number;
+  entry_time: string;
+  take_profits: GinieTakeProfitLevel[];
+  current_tp_level: number;
+  stop_loss: number;
+  original_sl: number;
+  moved_to_breakeven: boolean;
+  trailing_active: boolean;
+  highest_price: number;
+  lowest_price: number;
+  trailing_percent: number;
+  realized_pnl: number;
+  unrealized_pnl: number;
+  // Trade source tracking
+  source: 'ai' | 'strategy';
+  strategy_id?: number;
+  strategy_name?: string;
+}
+
+export interface GinieTradeResult {
+  symbol: string;
+  action: string;
+  side: string;
+  quantity: number;
+  price: number;
+  pnl: number;
+  pnl_percent: number;
+  reason: string;
+  tp_level?: number;
+  timestamp: string;
+  // Trade source tracking
+  source?: 'ai' | 'strategy';
+  strategy_id?: number;
+  strategy_name?: string;
+}
+
+export interface StrategyPerformance {
+  strategy_id: number;
+  strategy_name: string;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  largest_win: number;
+  largest_loss: number;
+  last_trade_time: string;
+}
+
+export interface SourcePerformance {
+  source: string;
+  total_trades: number;
+  winning_trades: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_pnl: number;
+}
+
+export interface GinieAutopilotStats {
+  running: boolean;
+  dry_run: boolean;
+  total_trades: number;
+  winning_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  daily_trades: number;
+  daily_pnl: number;
+  unrealized_pnl: number;
+  combined_pnl: number;
+  active_positions: number;
+  max_positions: number;
+}
+
+export interface GinieAutopilotStatus {
+  stats: GinieAutopilotStats;
+  config: GinieAutopilotConfig;
+  positions: GiniePosition[];
+  trade_history: GinieTradeResult[];
+  available_balance?: number;
+  wallet_balance?: number;
+}
+
+export interface GinieCircuitBreakerStatus {
+  enabled: boolean;
+  can_trade: boolean;
+  block_reason: string;
+  state: string;
+  hourly_loss: number;
+  daily_loss: number;
+  consecutive_losses: number;
+  trades_last_minute: number;
+  daily_trades: number;
+  trip_reason: string;
+  last_trip_time: string;
+  max_loss_per_hour: number;
+  max_daily_loss: number;
+  max_consecutive: number;
+  cooldown_minutes: number;
+}
+
+// ==================== GINIE AI TRADER TYPES ====================
+
+export type GinieTradingMode = 'scalp' | 'swing' | 'position';
+export type GinieScanStatus = 'SCALP-READY' | 'SWING-READY' | 'POSITION-READY' | 'HEDGE-REQUIRED' | 'AVOID';
+export type GinieRecommendation = 'EXECUTE' | 'WAIT' | 'SKIP';
+
+export interface LiquidityCheck {
+  volume_24h: number;
+  volume_usd: number;
+  bid_ask_spread: number;
+  spread_percent: number;
+  slippage_risk: string;
+  order_book_depth: number;
+  liquidity_score: number;
+  passed_scalp: boolean;
+  passed_swing: boolean;
+}
+
+export interface VolatilityProfile {
+  atr_14: number;
+  atr_percent: number;
+  avg_atr_20: number;
+  atr_ratio: number;
+  bb_width: number;
+  bb_width_percent: number;
+  volatility_7d: number;
+  volatility_30d: number;
+  regime: string;
+  volatility_score: number;
+}
+
+export interface TrendHealth {
+  adx_value: number;
+  adx_strength: string;
+  is_trending: boolean;
+  is_ranging: boolean;
+  trend_direction: string;
+  ema_20_distance: number;
+  ema_50_distance: number;
+  ema_200_distance: number;
+  mtf_alignment: boolean;
+  aligned_tfs: string[];
+  trend_age: number;
+  trend_maturity: string;
+  trend_score: number;
+}
+
+export interface MarketStructure {
+  pattern: string;
+  key_resistances: number[];
+  key_supports: number[];
+  nearest_resistance: number;
+  nearest_support: number;
+  breakout_potential: number;
+  breakdown_potential: number;
+  consolidation_days: number;
+  structure_score: number;
+}
+
+export interface CorrelationCheck {
+  btc_correlation: number;
+  eth_correlation: number;
+  sector_correlation: number;
+  independent_capable: boolean;
+  correlation_score: number;
+}
+
+export interface GinieCoinScan {
+  symbol: string;
+  timestamp: string;
+  status: GinieScanStatus;
+  liquidity: LiquidityCheck;
+  volatility: VolatilityProfile;
+  trend: TrendHealth;
+  structure: MarketStructure;
+  correlation: CorrelationCheck;
+  score: number;
+  trade_ready: boolean;
+  reason: string;
+}
+
+export interface GinieSignal {
+  name: string;
+  description: string;
+  status: string;
+  value: number;
+  threshold: number;
+  weight: number;
+  met: boolean;
+}
+
+export interface GinieSignalSet {
+  mode: GinieTradingMode;
+  primary_timeframe: string;
+  confirm_timeframe: string;
+  primary_signals: GinieSignal[];
+  primary_met: number;
+  primary_required: number;
+  primary_passed: boolean;
+  secondary_signals: GinieSignal[];
+  secondary_met: number;
+  signal_strength: string;
+  strength_score: number;
+  direction: string;
+}
+
+export interface GinieTakeProfitLevel {
+  level: number;
+  price: number;
+  percent: number;
+  gain_pct: number;
+  status: string;
+}
+
+export interface GinieTradeExecution {
+  action: string;
+  entry_low: number;
+  entry_high: number;
+  position_pct: number;
+  risk_usd: number;
+  leverage: number;
+  take_profits: GinieTakeProfitLevel[];
+  stop_loss: number;
+  stop_loss_pct: number;
+  risk_reward: number;
+  trailing_stop: number;
+}
+
+export interface GinieHedgeRecommendation {
+  required: boolean;
+  hedge_type: string;
+  hedge_size: number;
+  entry_rule: string;
+  exit_rule: string;
+  reason: string;
+}
+
+export interface GinieDecisionReport {
+  symbol: string;
+  timestamp: string;
+  scan_status: GinieScanStatus;
+  selected_mode: GinieTradingMode;
+  market_conditions: {
+    trend: string;
+    adx: number;
+    volatility: string;
+    atr: number;
+    volume: string;
+    btc_correlation: number;
+    sentiment: string;
+    sentiment_value: number;
+  };
+  signal_analysis: GinieSignalSet;
+  trade_execution: GinieTradeExecution;
+  hedge: GinieHedgeRecommendation;
+  invalidation_conditions: string[];
+  re_evaluate_conditions: string[];
+  next_review: string;
+  confidence_score: number;
+  recommendation: GinieRecommendation;
+  recommendation_note: string;
+}
+
+export interface GinieConfig {
+  enabled: boolean;
+  scalp_adx_max: number;
+  swing_adx_min: number;
+  swing_adx_max: number;
+  position_adx_min: number;
+  high_volatility_ratio: number;
+  min_scalp_volume: number;
+  min_swing_volume: number;
+  max_bid_ask_spread: number;
+  scalp_signals_required: number;
+  swing_signals_required: number;
+  position_signals_required: number;
+  max_daily_drawdown: number;
+  max_weekly_drawdown: number;
+  max_monthly_drawdown: number;
+  max_scalp_positions: number;
+  max_swing_positions: number;
+  max_position_positions: number;
+  auto_override_enabled: boolean;
+  scalp_monitor_interval: number;
+  swing_monitor_interval: number;
+  position_monitor_interval: number;
+}
+
+export interface GinieStatus {
+  enabled: boolean;
+  active_mode: GinieTradingMode;
+  active_positions: number;
+  max_positions: number;
+  last_scan_time: string;
+  last_decision_time: string;
+  daily_pnl: number;
+  daily_trades: number;
+  win_rate: number;
+  config: GinieConfig;
+  recent_decisions: GinieDecisionReport[];
+  watched_symbols: string[];
+  scanned_symbols: number;
+}
+
+// Investigate Status Types
+export interface InvestigateStatus {
+  trading_status: 'active' | 'blocked' | 'stopped';
+  block_reasons: string[];
+  last_decision_time: string;
+  active_positions: number;
+  recent_rejections: RejectionSummary[];
+  rejection_stats: RejectionStats;
+  modes: Record<string, ModeStatus>;
+  constraints: ConstraintStatus;
+  signal_health: SignalHealthStatus;
+  alerts: AlertItem[];
+  api_health: Record<string, string>;
+}
+
+export interface RejectionSummary {
+  timestamp: string;
+  symbol: string;
+  action: string;
+  reason: string;
+}
+
+export interface RejectionStats {
+  total_decisions: number;
+  total_rejections: number;
+  rejection_rate: number;
+  common_reasons: Record<string, number>;
+  avg_confidence: number;
+}
+
+export interface ModeStatus {
+  enabled: boolean;
+  status: string;
+  details: string;
+}
+
+export interface ConstraintStatus {
+  usd_allocation: ConstraintItem;
+  daily_trades: ConstraintItem;
+  daily_pnl: ConstraintItem;
+  hourly_loss: ConstraintItem;
+  consecutive_loss: ConstraintItem;
+}
+
+export interface ConstraintItem {
+  current: number;
+  max: number;
+  percent: number;
+  status: 'ok' | 'warning' | 'critical';
+}
+
+export interface SignalHealthStatus {
+  ml_predictor: ComponentHealth;
+  llm_analyzer: ComponentHealth;
+  sentiment_analyzer: ComponentHealth;
+  avg_confidence: number;
+  confluence_rate: number;
+}
+
+export interface ComponentHealth {
+  available: boolean;
+  last_used: string;
+  success_rate: number;
+}
+
+export interface AlertItem {
+  level: 'info' | 'warning' | 'critical';
+  type: string;
+  message: string;
+}
+
+// ==================== COIN CLASSIFICATION TYPES ====================
+
+export type VolatilityClass = 'stable' | 'medium' | 'high';
+export type MarketCapClass = 'blue_chip' | 'large_cap' | 'mid_small';
+export type MomentumClass = 'gainer' | 'neutral' | 'loser';
+
+export interface CoinClassification {
+  symbol: string;
+  last_price: number;
+  volatility: VolatilityClass;
+  volatility_atr: number;
+  market_cap: MarketCapClass;
+  momentum: MomentumClass;
+  momentum_24h_pct: number;
+  volume_24h: number;
+  quote_volume_24h: number;
+  risk_score: number;
+  opportunity_score: number;
+  enabled: boolean;
+  last_updated: string;
+}
+
+export interface CategoryAllocation {
+  enabled: boolean;
+  allocation_percent: number;
+  max_positions: number;
+}
+
+export interface CoinClassificationSettings {
+  volatility_stable_max: number;
+  volatility_medium_max: number;
+  momentum_gainer_min: number;
+  momentum_loser_max: number;
+  min_volume_24h: number;
+  atr_period: number;
+  atr_timeframe: string;
+  refresh_interval_secs: number;
+  volatility_allocations: Record<VolatilityClass, CategoryAllocation>;
+  market_cap_allocations: Record<MarketCapClass, CategoryAllocation>;
+  momentum_allocations: Record<MomentumClass, CategoryAllocation>;
+}
+
+export interface ClassificationSummary {
+  total_symbols: number;
+  enabled_symbols: number;
+  by_volatility: Record<VolatilityClass, string[]>;
+  by_market_cap: Record<MarketCapClass, string[]>;
+  by_momentum: Record<MomentumClass, string[]>;
+  top_gainers: CoinClassification[];
+  top_losers: CoinClassification[];
+  top_volume: CoinClassification[];
+  last_updated: string;
+}
+
+export interface CoinPreferenceInfo {
+  symbol: string;
+  enabled: boolean;
+  priority: number;
+  volatility?: string;
+  market_cap?: string;
+  momentum?: string;
+  atr_percent?: number;
+  change_24h?: number;
+}
+
+export interface EligibleCoin {
+  symbol: string;
+  priority: number;
+  volatility: string;
+  market_cap: string;
+  momentum: string;
+  atr_percent: number;
+  change_24h: number;
+}
+
+// ==================== TRADING STYLE TYPES ====================
+
+export interface TradingStyleConfig {
+  name: string;
+  default_leverage: number;
+  max_leverage: number;
+  sl_atr_multiple: number;
+  tp_atr_multiple: number;
+  min_hold_time: number;
+  max_hold_time: number;
+  allow_averaging: boolean;
+  max_avg_entries: number;
+  allow_hedging: boolean;
+  min_confidence: number;
+  required_confluence: number;
+  trend_timeframes: string[];
+  signal_timeframe: string;
+  entry_timeframe: string;
+}
+
+// ==================== HEDGING TYPES ====================
+
+export type HedgeTrigger = 'price_drop' | 'unrealized_loss' | 'ai_recommendation' | 'manual';
+
+export interface HedgeEvent {
+  timestamp: string;
+  trigger: HedgeTrigger;
+  action: 'open' | 'close' | 'partial_close';
+  hedge_percent: number;
+  hedge_price: number;
+  quantity: number;
+  pnl?: number;
+  reason: string;
+}
+
+export interface HedgePositionInfo {
+  symbol: string;
+  side: string;
+  entry_price: number;
+  quantity: number;
+  leverage: number;
+  trigger_reason: HedgeTrigger;
+  trigger_price: number;
+  open_time: string;
+  current_pnl: number;
+  current_pnl_pct: number;
+}
+
+export interface HedgingStatus {
+  enabled: boolean;
+  hedge_mode_enabled: boolean;
+  active_hedges: Array<{
+    symbol: string;
+    side: string;
+    entry_price: number;
+    quantity: number;
+    trigger: HedgeTrigger;
+    trigger_price: number;
+    current_pnl: number;
+    current_pnl_pct: number;
+    open_time: string;
+  }>;
+  active_count: number;
+  max_simultaneous: number;
+  price_drop_trigger: number;
+  loss_trigger: number;
+  ai_enabled: boolean;
+  default_percent: number;
+  profit_take_pct: number;
+  close_on_recovery: number;
+}
+
+// ==================== GINIE DIAGNOSTICS TYPES ====================
+
+export interface GinieDiagnostics {
+  timestamp: string;
+  autopilot_running: boolean;
+  is_live_mode: boolean;
+  can_trade: boolean;
+  can_trade_reason: string;
+  circuit_breaker: CBDiagnostics;
+  positions: PositionDiagnostics;
+  scanning: ScanDiagnostics;
+  signals: SignalDiagnostics;
+  profit_booking: ProfitDiagnostics;
+  blocked_coins: BlockedCoinInfo[] | null;
+  llm_status: LLMDiagnostics;
+  issues: DiagnosticIssue[];
+}
+
+export interface CBDiagnostics {
+  enabled: boolean;
+  state: string;
+  hourly_loss: number;
+  hourly_loss_limit: number;
+  daily_loss: number;
+  daily_loss_limit: number;
+  consecutive_losses: number;
+  cooldown_remaining: string;
+}
+
+export interface PositionDiagnostics {
+  open_count: number;
+  max_allowed: number;
+  slots_available: number;
+  total_unrealized_pnl: number;
+}
+
+export interface ScanDiagnostics {
+  last_scan_time: string;
+  seconds_since_last_scan: number;
+  symbols_in_watchlist: number;
+  symbols_scanned_last_cycle: number;
+  scalp_enabled: boolean;
+  swing_enabled: boolean;
+  position_enabled: boolean;
+}
+
+export interface SignalDiagnostics {
+  total_generated: number;
+  executed: number;
+  rejected: number;
+  execution_rate_pct: number;
+  top_rejection_reasons: Record<string, number>;
+}
+
+export interface ProfitDiagnostics {
+  positions_with_pending_tp: number;
+  tp_hits_last_hour: number;
+  partial_closes_last_hour: number;
+  failed_closes_last_hour: number;
+  trailing_active_count: number;
+}
+
+export interface BlockedCoinInfo {
+  symbol: string;
+  block_reason: string;
+  block_time: string;
+  loss_amount: number;
+  loss_roi: number;
+  consec_losses: number;
+  auto_unblock: string;
+  block_count: number;
+  manual_only: boolean;
+}
+
+export interface LLMDiagnostics {
+  connected: boolean;
+  provider: string;
+  last_call_time: string;
+  coin_list_cached: boolean;
+  coin_list_age: string;
+  disabled_symbols: string[];
+}
+
+export interface DiagnosticIssue {
+  severity: 'critical' | 'warning' | 'info';
+  category: string;
+  message: string;
+  suggestion: string;
+}
+
+// ==================== GINIE SIGNAL LOG TYPES ====================
+
+export interface GinieSignalLog {
+  id: string;
+  symbol: string;
+  timestamp: string;
+  direction: string;
+  mode: string;
+  confidence: number;
+  status: 'executed' | 'rejected' | 'pending';
+  rejection_reason?: string;
+  entry_price: number;
+  stop_loss: number;
+  take_profit_1: number;
+  leverage: number;
+  risk_reward: number;
+  trend: string;
+  volatility: string;
+  atr_percent: number;
+  signal_names: string[];
+  primary_met: number;
+  primary_required: number;
+  current_price: number;
+}
+
+export interface GinieSignalStats {
+  total: number;
+  executed: number;
+  rejected: number;
+  pending: number;
+  execution_rate: number;
+  rejection_reasons: Record<string, number>;
+}
+
+// ==================== GINIE SL UPDATE HISTORY TYPES ====================
+
+export interface GinieSLUpdateRecord {
+  timestamp: string;
+  old_sl: number;
+  new_sl: number;
+  current_price: number;
+  status: 'applied' | 'rejected';
+  rejection_rule?: string;
+  source: string;
+  llm_confidence?: number;
+}
+
+export interface GinieSLUpdateHistory {
+  symbol: string;
+  total_attempts: number;
+  applied: number;
+  rejected: number;
+  updates: GinieSLUpdateRecord[];
+}
+
+export interface GinieSLStats {
+  total_attempts: number;
+  applied: number;
+  rejected: number;
+  approval_rate: number;
+  rejections_by_rule: Record<string, number>;
+  symbols_tracked: number;
+}
+
+export interface GinieLLMSLStatus {
+  kill_switch_active: Record<string, boolean>;
+  bad_call_counts: Record<string, number>;
+  disabled_symbols: string[];
+  threshold: number;
+}
+
+// ==================== AUTO MODE TYPES (LLM-DRIVEN TRADING) ====================
+
+export interface AutoModeConfig {
+  enabled: boolean;
+  max_positions: number;
+  max_leverage: number;
+  max_position_size: number;
+  max_total_usd: number;
+  allow_averaging: boolean;
+  max_averages: number;
+  min_hold_minutes: number;
+  quick_profit_mode: boolean;
+  min_profit_for_exit: number;
+}
+
+// ==================== SYMBOL PERFORMANCE TYPES ====================
+
+export type SymbolPerformanceCategory = 'best' | 'good' | 'neutral' | 'poor' | 'worst' | 'blacklist';
+
+export interface SymbolPerformanceSettings {
+  symbol: string;
+  category: SymbolPerformanceCategory;
+  min_confidence: number;
+  max_position_usd: number;
+  size_multiplier: number;
+  leverage_override: number;
+  enabled: boolean;
+  notes: string;
+  total_trades: number;
+  winning_trades: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_pnl: number;
+  last_updated: string;
+}
+
+export interface SymbolPerformanceReport {
+  symbol: string;
+  category: SymbolPerformanceCategory;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_pnl: number;
+  avg_win: number;
+  avg_loss: number;
+  min_confidence: number;
+  max_position_usd: number;
+  size_multiplier: number;
+  enabled: boolean;
 }
 
 // Export singleton instance
@@ -755,12 +2300,28 @@ export function calculateLiquidationPrice(
   }
 }
 
-export function formatQuantity(quantity: number, precision = 4): string {
-  return quantity.toFixed(precision);
+// Safe toFixed helper that handles null, undefined, strings, and NaN
+export function safeToFixed(value: number | string | null | undefined, precision = 2): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (num === null || num === undefined || isNaN(num)) {
+    return (0).toFixed(precision);
+  }
+  return Number(num).toFixed(precision);
 }
 
-export function formatPrice(price: number, precision = 2): string {
-  return price.toLocaleString('en-US', {
+export function formatQuantity(quantity: number | string | null | undefined, precision = 4): string {
+  return safeToFixed(quantity, precision);
+}
+
+export function formatPrice(price: number | string | null | undefined, precision = 2): string {
+  const num = typeof price === 'string' ? parseFloat(price) : price;
+  if (num === null || num === undefined || isNaN(num)) {
+    return (0).toLocaleString('en-US', {
+      minimumFractionDigits: precision,
+      maximumFractionDigits: precision,
+    });
+  }
+  return num.toLocaleString('en-US', {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision,
   });
@@ -785,11 +2346,15 @@ export function formatPercent(value: number | string | null | undefined, include
     return '0.00%';
   }
   const sign = includeSign && num > 0 ? '+' : '';
-  return `${sign}${num.toFixed(2)}%`;
+  return `${sign}${safeToFixed(num, 2)}%`;
 }
 
-export function formatFundingRate(rate: number): string {
-  return `${(rate * 100).toFixed(4)}%`;
+export function formatFundingRate(rate: number | string | null | undefined): string {
+  const num = typeof rate === 'string' ? parseFloat(rate) : rate;
+  if (num === null || num === undefined || isNaN(num)) {
+    return '0.0000%';
+  }
+  return `${safeToFixed(num * 100, 4)}%`;
 }
 
 export function getPositionColor(pnl: number | string | null | undefined): string {
