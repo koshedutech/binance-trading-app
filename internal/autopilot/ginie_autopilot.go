@@ -4448,6 +4448,77 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		// Update trailing percent based on mode
 		pos.TrailingPercent = ga.getTrailingPercent(pos.Mode)
 
+		// Place SLTP orders on Binance in background
+		slPrice := pos.StopLoss
+		tpPrices := []float64{
+			pos.TakeProfits[0].Price,
+			pos.TakeProfits[1].Price,
+			pos.TakeProfits[2].Price,
+			pos.TakeProfits[3].Price,
+		}
+		qty := pos.RemainingQty
+		posSymbol := symbol
+		posSide := pos.Side
+
+		go func() {
+			if pos.StopLossAlgoID > 0 {
+				_ = ga.futuresClient.CancelAlgoOrder(posSymbol, pos.StopLossAlgoID)
+			}
+			for _, tpID := range pos.TakeProfitAlgoIDs {
+				if tpID > 0 {
+					_ = ga.futuresClient.CancelAlgoOrder(posSymbol, tpID)
+				}
+			}
+
+			slSide := "SELL"
+			if posSide == "SHORT" {
+				slSide = "BUY"
+			}
+
+			slParams := binance.AlgoOrderParams{
+				Symbol:       posSymbol,
+				Side:         slSide,
+				Type:         "STOP_MARKET",
+				TriggerPrice: slPrice,
+				Quantity:     qty,
+				ReduceOnly:   true,
+			}
+
+			if slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams); err == nil {
+				pos.StopLossAlgoID = slOrder.AlgoId
+			} else {
+				ga.logger.Error("SLTP: Failed to place SL order", "symbol", posSymbol, "error", err)
+			}
+
+			tpSide := "SELL"
+			if posSide == "SHORT" {
+				tpSide = "BUY"
+			}
+
+			newTPIDs := []int64{}
+			tpQty := qty / 4.0
+
+			for i, tpPrice := range tpPrices {
+				tpParams := binance.AlgoOrderParams{
+					Symbol:       posSymbol,
+					Side:         tpSide,
+					Type:         "TAKE_PROFIT_MARKET",
+					TriggerPrice: tpPrice,
+					Quantity:     tpQty,
+					ReduceOnly:   true,
+				}
+
+				if tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams); err == nil {
+					newTPIDs = append(newTPIDs, tpOrder.AlgoId)
+					ga.logger.Info("SLTP: TP order placed", "symbol", posSymbol, "level", i+1, "price", tpPrice)
+				} else {
+					ga.logger.Error("SLTP: Failed to place TP order", "symbol", posSymbol, "level", i+1, "error", err)
+				}
+			}
+
+			pos.TakeProfitAlgoIDs = newTPIDs
+		}()
+
 		updated++
 
 		ga.logger.Info("Adaptive SL/TP applied to position",
