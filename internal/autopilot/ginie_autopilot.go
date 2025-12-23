@@ -848,6 +848,8 @@ func (ga *GinieAutopilot) Stop() error {
 func (ga *GinieAutopilot) runMainLoop() {
 	defer ga.wg.Done()
 
+	ga.logger.Info("Ginie main loop started")
+
 	// Use the shortest enabled interval as base, then check mode-specific timing
 	baseTicker := time.NewTicker(time.Duration(ga.config.ScalpScanInterval) * time.Second)
 	defer baseTicker.Stop()
@@ -861,6 +863,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 	for {
 		select {
 		case <-ga.stopChan:
+			ga.logger.Info("Ginie main loop stopping")
 			return
 		case <-baseTicker.C:
 			now := time.Now()
@@ -869,6 +872,8 @@ func (ga *GinieAutopilot) runMainLoop() {
 			if !ga.canTrade() {
 				continue
 			}
+
+			ga.logger.Debug("Ginie canTrade passed, proceeding with scans")
 
 			// Scan based on mode intervals
 			if ga.config.EnableScalpMode && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
@@ -911,15 +916,18 @@ func (ga *GinieAutopilot) canTrade() bool {
 
 	// Check daily limits
 	if ga.config.MaxDailyTrades > 0 && ga.dailyTrades >= ga.config.MaxDailyTrades {
+		ga.logger.Warn("Ginie max daily trades reached", "current", ga.dailyTrades, "max", ga.config.MaxDailyTrades)
 		return false
 	}
 
 	if ga.config.MaxDailyLoss > 0 && ga.dailyPnL <= -ga.config.MaxDailyLoss {
+		ga.logger.Warn("Ginie max daily loss reached", "current_loss", ga.dailyPnL, "max_loss", -ga.config.MaxDailyLoss)
 		return false
 	}
 
 	// Check max positions
 	if len(ga.positions) >= ga.config.MaxPositions {
+		ga.logger.Warn("Ginie max positions reached", "current", len(ga.positions), "max", ga.config.MaxPositions)
 		return false
 	}
 
