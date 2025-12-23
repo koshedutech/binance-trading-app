@@ -2298,7 +2298,14 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	// This must happen before anything else to avoid race conditions
 	log.Printf("[GINIE] %s: Closing position, cancelling all algo orders (SL_ID=%d, TP_IDs=%v)",
 		symbol, pos.StopLossAlgoID, pos.TakeProfitAlgoIDs)
-	ga.cancelAllAlgoOrdersForSymbol(symbol)
+	success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
+	if err != nil || failed > 0 {
+		ga.logger.Warn("Failed to cancel all algo orders on position close",
+			"symbol", symbol,
+			"success", success,
+			"failed", failed,
+			"error", err)
+	}
 
 	// Calculate PnL
 	var grossPnl float64
@@ -3063,7 +3070,14 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 	for _, symbol := range toRemove {
 		ga.logger.Info("Removing stale position and cancelling orphan orders", "symbol", symbol)
 		// CRITICAL: Cancel all algo orders for this symbol to prevent orphan orders
-		ga.cancelAllAlgoOrdersForSymbol(symbol)
+		success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
+		if err != nil || failed > 0 {
+			ga.logger.Warn("Failed to cancel all algo orders on stale position removal",
+				"symbol", symbol,
+				"success", success,
+				"failed", failed,
+				"error", err)
+		}
 		delete(ga.positions, symbol)
 		removed++
 	}
@@ -3164,7 +3178,14 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 	// CRITICAL: Cancel ALL existing algo orders for this symbol FIRST
 	// This prevents accumulation of orphan orders when updating SL/TP
 	log.Printf("[GINIE] %s: Cancelling existing algo orders before placing new SL/TP", pos.Symbol)
-	ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
+	success, failed, err := ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
+	if err != nil || failed > 0 {
+		ga.logger.Warn("Failed to cancel all algo orders in placeSLTPOrders",
+			"symbol", pos.Symbol,
+			"success", success,
+			"failed", failed,
+			"error", err)
+	}
 
 	// Clear stored algo IDs since we cancelled all orders
 	pos.StopLossAlgoID = 0
@@ -3862,7 +3883,14 @@ func (ga *GinieAutopilot) modifySLTPOrders(pos *GiniePosition, newSL float64, ne
 	}
 
 	// Cancel ALL existing algo orders from Binance (more robust than stored IDs)
-	ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
+	success, failed, err := ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
+	if err != nil || failed > 0 {
+		ga.logger.Warn("Failed to cancel all algo orders in modifySLTPOrders",
+			"symbol", pos.Symbol,
+			"success", success,
+			"failed", failed,
+			"error", err)
+	}
 
 	// Clear stored algo IDs since we cancelled all orders
 	pos.StopLossAlgoID = 0
@@ -4084,10 +4112,17 @@ func (ga *GinieAutopilot) updatePositionSLTPFromLLM(symbol string, pos *GiniePos
 			"sl_reasoning", sltpAnalysis.SLReasoning)
 
 		// Cancel existing algo orders first
-		ga.cancelAllAlgoOrdersForSymbol(symbol)
+		success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
+		if err != nil || failed > 0 {
+			ga.logger.Warn("Failed to cancel all algo orders before LLM-triggered close",
+				"symbol", symbol,
+				"success", success,
+				"failed", failed,
+				"error", err)
+		}
 
 		// Close position at market
-		err := ga.closePositionAtMarket(pos)
+		err = ga.closePositionAtMarket(pos)
 		if err != nil {
 			ga.logger.Error("Failed to close position at market",
 				"symbol", symbol,
