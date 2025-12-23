@@ -515,8 +515,9 @@ func (fc *FuturesController) LoadSavedSettings() {
 		return
 	}
 
+	// CRITICAL: Only hold lock while updating fc fields, NOT for Ginie config or I/O operations
+	// This prevents blocking API handlers that need the lock
 	fc.mu.Lock()
-	defer fc.mu.Unlock()
 
 	// Apply Dynamic SL/TP settings
 	fc.config.DynamicSLTPEnabled = settings.DynamicSLTPEnabled
@@ -565,7 +566,10 @@ func (fc *FuturesController) LoadSavedSettings() {
 		fc.profitRiskLevel = settings.ProfitReinvestRiskLevel
 	}
 
-	// Apply Ginie Autopilot settings
+	fc.mu.Unlock()
+	// LOCK RELEASED - API handlers can now proceed
+
+	// Apply Ginie Autopilot settings AFTER releasing lock to prevent API timeouts
 	if fc.ginieAutopilot != nil {
 		ginieConfig := fc.ginieAutopilot.GetConfig()
 		ginieConfig.DryRun = settings.GinieDryRunMode
