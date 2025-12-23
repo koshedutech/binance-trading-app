@@ -619,21 +619,12 @@ func (fc *FuturesController) LoadSavedSettings() {
 			"cb_cooldown_minutes", ginieConfig.CBCooldownMinutes,
 			"auto_start", settings.GinieAutoStart)
 
-		// Auto-start Ginie if enabled in settings (persists across restarts)
-		// Use a delayed goroutine to avoid blocking on long-running operations
+		// NOTE: Auto-start is disabled during LoadSavedSettings to avoid blocking API startup
+		// The API handler /api/futures/ginie/toggle will handle auto-start on-demand
 		if settings.GinieAutoStart {
-			fc.logger.Info("Scheduling Ginie auto-start (will start after 2 second delay)",
-				"mode", map[bool]string{true: "PAPER", false: "LIVE"}[ginieConfig.DryRun])
-			go func() {
-				// Wait 2 seconds before starting to allow API to be responsive
-				time.Sleep(2 * time.Second)
-				fc.logger.Info("Starting Ginie autopilot from auto-start goroutine")
-				if err := fc.ginieAutopilot.Start(); err != nil {
-					fc.logger.Error("Failed to auto-start Ginie autopilot", "error", err)
-				} else {
-					fc.logger.Info("Ginie auto-start completed successfully")
-				}
-			}()
+			fc.logger.Info("Ginie auto-start is enabled in settings",
+				"mode", map[bool]string{true: "PAPER", false: "LIVE"}[ginieConfig.DryRun],
+				"note", "auto-start will be triggered via API or manual start")
 		}
 	}
 
