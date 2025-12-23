@@ -63,6 +63,9 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 			return
 		}
 
+		// Load saved settings before starting (ensures config is up-to-date)
+		controller.LoadSavedSettings()
+
 		if err := controller.Start(); err != nil {
 			errorResponse(c, http.StatusInternalServerError, "Failed to start futures autopilot: "+err.Error())
 			return
@@ -734,11 +737,13 @@ func (s *Server) getFuturesAutopilot() *autopilot.FuturesController {
 
 // handleGetSentimentNews returns recent crypto news with sentiment
 func (s *Server) handleGetSentimentNews(c *gin.Context) {
-	limitStr := c.DefaultQuery("limit", "20")
+	limitStr := c.DefaultQuery("limit", "50")
 	limit, _ := strconv.Atoi(limitStr)
-	if limit > 50 {
-		limit = 50
+	if limit > 100 {
+		limit = 100
 	}
+
+	ticker := c.Query("ticker") // Optional ticker filter
 
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
@@ -753,12 +758,47 @@ func (s *Server) handleGetSentimentNews(c *gin.Context) {
 
 	// Get sentiment analyzer from controller
 	sentiment := controller.GetSentimentScore()
-	news := controller.GetRecentNews(limit)
+	stats := controller.GetSentimentStats()
+	tickers := controller.GetAvailableTickers()
+
+	var news []map[string]interface{}
+	if ticker != "" {
+		news = controller.GetNewsByTicker(ticker, limit)
+	} else {
+		news = controller.GetRecentNews(limit)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"news":      news,
 		"sentiment": sentiment,
+		"stats":     stats,
+		"tickers":   tickers,
 		"count":     len(news),
+	})
+}
+
+// handleGetBreakingNews returns trending/important news
+func (s *Server) handleGetBreakingNews(c *gin.Context) {
+	limitStr := c.DefaultQuery("limit", "10")
+	limit, _ := strconv.Atoi(limitStr)
+	if limit > 20 {
+		limit = 20
+	}
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"news":  []interface{}{},
+			"count": 0,
+		})
+		return
+	}
+
+	news := controller.GetBreakingNews(limit)
+
+	c.JSON(http.StatusOK, gin.H{
+		"news":  news,
+		"count": len(news),
 	})
 }
 
@@ -928,5 +968,447 @@ func (s *Server) handleSetScalpingConfig(c *gin.Context) {
 		"success": true,
 		"message": "Scalping config updated",
 		"config":  controller.GetScalpingConfig(),
+	})
+}
+
+// handleGetInvestigateStatus returns comprehensive diagnostic information
+func (s *Server) handleGetInvestigateStatus(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Autopilot not configured")
+		return
+	}
+
+	status := controller.GetInvestigateStatus()
+	c.JSON(http.StatusOK, status)
+}
+
+// handleClearFlipFlopCooldown clears the flip-flop cooldown
+func (s *Server) handleClearFlipFlopCooldown(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Autopilot not configured")
+		return
+	}
+
+	controller.ClearFlipFlopCooldown()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Flip-flop cooldown cleared for all symbols",
+	})
+}
+
+// handleForceSyncPositions forces a sync with Binance positions
+func (s *Server) handleForceSyncPositions(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Autopilot not configured")
+		return
+	}
+
+	controller.ForceSyncPositions()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Position sync completed",
+	})
+}
+
+// handleRecalculateAllocation recalculates USD allocation based on current balance
+func (s *Server) handleRecalculateAllocation(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Autopilot not configured")
+		return
+	}
+
+	controller.RecalculateAllocation()
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Allocation recalculated based on current balance",
+	})
+}
+
+// handleGetAdaptiveEngineStatus returns the adaptive decision engine status
+func (s *Server) handleGetAdaptiveEngineStatus(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"enabled":       false,
+			"message":       "Autopilot not configured",
+			"style":         "unknown",
+			"market_context": nil,
+		})
+		return
+	}
+
+	engine := controller.GetAdaptiveEngine()
+	if engine == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"enabled":       false,
+			"message":       "Adaptive engine not initialized",
+			"style":         "unknown",
+			"market_context": nil,
+		})
+		return
+	}
+
+	status := engine.GetStatus()
+	c.JSON(http.StatusOK, status)
+}
+
+// ============================================================================
+// AUTO MODE ENDPOINTS (LLM-Driven Trading)
+// ============================================================================
+
+// handleGetAutoModeConfig returns auto mode configuration
+func (s *Server) handleGetAutoModeConfig(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	config := sm.GetAutoModeSettings()
+	c.JSON(http.StatusOK, config)
+}
+
+// handleSetAutoModeConfig updates auto mode configuration
+func (s *Server) handleSetAutoModeConfig(c *gin.Context) {
+	var req struct {
+		Enabled           bool    `json:"enabled"`
+		MaxPositions      int     `json:"max_positions"`
+		MaxLeverage       int     `json:"max_leverage"`
+		MaxPositionSize   float64 `json:"max_position_size"`
+		MaxTotalUSD       float64 `json:"max_total_usd"`
+		AllowAveraging    bool    `json:"allow_averaging"`
+		MaxAverages       int     `json:"max_averages"`
+		MinHoldMinutes    int     `json:"min_hold_minutes"`
+		QuickProfitMode   bool    `json:"quick_profit_mode"`
+		MinProfitForExit  float64 `json:"min_profit_for_exit"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateAutoModeSettings(
+		req.Enabled,
+		req.MaxPositions,
+		req.MaxLeverage,
+		req.MaxPositionSize,
+		req.MaxTotalUSD,
+		req.AllowAveraging,
+		req.MaxAverages,
+		req.MinHoldMinutes,
+		req.QuickProfitMode,
+		req.MinProfitForExit,
+	); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save auto mode settings: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Auto mode settings updated",
+		"config":  sm.GetAutoModeSettings(),
+	})
+}
+
+// handleToggleAutoMode toggles auto mode on/off
+func (s *Server) handleToggleAutoMode(c *gin.Context) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateAutoModeEnabled(req.Enabled); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to toggle auto mode: "+err.Error())
+		return
+	}
+
+	status := "disabled"
+	if req.Enabled {
+		status = "enabled"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Auto mode " + status,
+		"enabled": req.Enabled,
+	})
+}
+
+// ============================================================================
+// PER-SYMBOL PERFORMANCE SETTINGS ENDPOINTS
+// ============================================================================
+
+// handleGetSymbolSettings returns all symbol settings with performance data
+func (s *Server) handleGetSymbolSettings(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	allSettings := sm.GetAllSymbolSettings()
+
+	// Also get category defaults
+	categorySettings := sm.GetCategorySettings()
+	globalSettings := sm.GetCurrentSettings()
+
+	// Apply category adjustments to each symbol's effective values
+	type EnrichedSymbolSettings struct {
+		*autopilot.SymbolSettings
+		EffectiveConfidence float64 `json:"effective_confidence"`
+		EffectiveMaxUSD     float64 `json:"effective_max_usd"`
+	}
+
+	enrichedSymbols := make(map[string]*EnrichedSymbolSettings)
+	for symbol, settings := range allSettings {
+		enrichedSymbols[symbol] = &EnrichedSymbolSettings{
+			SymbolSettings:      settings,
+			EffectiveConfidence: sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
+			EffectiveMaxUSD:     sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbols":          enrichedSymbols,
+		"category_config":  categorySettings,
+		"global_min_confidence": globalSettings.GinieMinConfidence,
+		"global_max_usd":   globalSettings.GinieMaxUSD,
+	})
+}
+
+// handleGetSymbolPerformanceReport returns a detailed performance report for all symbols
+func (s *Server) handleGetSymbolPerformanceReport(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	report := sm.GetSymbolPerformanceReport()
+
+	// Group by category
+	byCategory := make(map[string][]autopilot.SymbolPerformanceReport)
+	for _, r := range report {
+		byCategory[r.Category] = append(byCategory[r.Category], r)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"report":      report,
+		"by_category": byCategory,
+		"total_symbols": len(report),
+	})
+}
+
+// handleGetSingleSymbolSettings returns settings for a specific symbol
+func (s *Server) handleGetSingleSymbolSettings(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetSymbolSettings(symbol)
+	globalSettings := sm.GetCurrentSettings()
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":              symbol,
+		"settings":            settings,
+		"effective_confidence": sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
+		"effective_max_usd":   sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+		"enabled":             sm.IsSymbolEnabled(symbol),
+	})
+}
+
+// handleUpdateSymbolSettings updates settings for a specific symbol
+func (s *Server) handleUpdateSymbolSettings(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
+		return
+	}
+
+	var req struct {
+		Category         string  `json:"category"`
+		MinConfidence    float64 `json:"min_confidence"`
+		MaxPositionUSD   float64 `json:"max_position_usd"`
+		SizeMultiplier   float64 `json:"size_multiplier"`
+		LeverageOverride int     `json:"leverage_override"`
+		Enabled          bool    `json:"enabled"`
+		Notes            string  `json:"notes"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+
+	// Map string category to type
+	category := autopilot.PerformanceNeutral
+	switch req.Category {
+	case "best":
+		category = autopilot.PerformanceBest
+	case "good":
+		category = autopilot.PerformanceGood
+	case "neutral":
+		category = autopilot.PerformanceNeutral
+	case "poor":
+		category = autopilot.PerformancePoor
+	case "worst":
+		category = autopilot.PerformanceWorst
+	case "blacklist":
+		category = autopilot.PerformanceBlacklist
+	}
+
+	update := &autopilot.SymbolSettings{
+		Symbol:           symbol,
+		Category:         category,
+		MinConfidence:    req.MinConfidence,
+		MaxPositionUSD:   req.MaxPositionUSD,
+		SizeMultiplier:   req.SizeMultiplier,
+		LeverageOverride: req.LeverageOverride,
+		Enabled:          req.Enabled,
+		Notes:            req.Notes,
+	}
+
+	if err := sm.UpdateSymbolSettings(symbol, update); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update symbol settings: "+err.Error())
+		return
+	}
+
+	globalSettings := sm.GetCurrentSettings()
+	c.JSON(http.StatusOK, gin.H{
+		"success":              true,
+		"message":              "Symbol settings updated",
+		"symbol":               symbol,
+		"settings":             sm.GetSymbolSettings(symbol),
+		"effective_confidence": sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
+		"effective_max_usd":    sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+	})
+}
+
+// handleBlacklistSymbol adds a symbol to the blacklist
+func (s *Server) handleBlacklistSymbol(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	c.ShouldBindJSON(&req) // Optional
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.BlacklistSymbol(symbol, req.Reason); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to blacklist symbol: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": symbol + " has been blacklisted",
+		"symbol":  symbol,
+		"reason":  req.Reason,
+	})
+}
+
+// handleUnblacklistSymbol removes a symbol from the blacklist
+func (s *Server) handleUnblacklistSymbol(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UnblacklistSymbol(symbol); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to unblacklist symbol: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": symbol + " has been removed from blacklist",
+		"symbol":  symbol,
+	})
+}
+
+// handleUpdateCategorySettings updates the default adjustments for performance categories
+func (s *Server) handleUpdateCategorySettings(c *gin.Context) {
+	var req struct {
+		ConfidenceBoost map[string]float64 `json:"confidence_boost"`
+		SizeMultiplier  map[string]float64 `json:"size_multiplier"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateCategorySettings(req.ConfidenceBoost, req.SizeMultiplier); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update category settings: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"message":  "Category settings updated",
+		"settings": sm.GetCategorySettings(),
+	})
+}
+
+// handleGetSymbolsByCategory returns all symbols in a given performance category
+func (s *Server) handleGetSymbolsByCategory(c *gin.Context) {
+	category := c.Param("category")
+	if category == "" {
+		errorResponse(c, http.StatusBadRequest, "Category parameter required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+
+	// Map string to category type
+	var perfCategory autopilot.SymbolPerformanceCategory
+	switch category {
+	case "best":
+		perfCategory = autopilot.PerformanceBest
+	case "good":
+		perfCategory = autopilot.PerformanceGood
+	case "neutral":
+		perfCategory = autopilot.PerformanceNeutral
+	case "poor":
+		perfCategory = autopilot.PerformancePoor
+	case "worst":
+		perfCategory = autopilot.PerformanceWorst
+	case "blacklist":
+		perfCategory = autopilot.PerformanceBlacklist
+	default:
+		errorResponse(c, http.StatusBadRequest, "Invalid category. Use: best, good, neutral, poor, worst, blacklist")
+		return
+	}
+
+	symbols := sm.GetSymbolsByCategory(perfCategory)
+	globalSettings := sm.GetCurrentSettings()
+
+	// Get effective settings for each symbol
+	symbolDetails := make([]map[string]interface{}, 0, len(symbols))
+	for _, symbol := range symbols {
+		settings := sm.GetSymbolSettings(symbol)
+		symbolDetails = append(symbolDetails, map[string]interface{}{
+			"symbol":              symbol,
+			"win_rate":            settings.WinRate,
+			"total_pnl":           settings.TotalPnL,
+			"total_trades":        settings.TotalTrades,
+			"effective_confidence": sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
+			"effective_max_usd":   sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+			"enabled":             settings.Enabled,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"category": category,
+		"count":    len(symbols),
+		"symbols":  symbolDetails,
 	})
 }
