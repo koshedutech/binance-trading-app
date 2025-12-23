@@ -12,6 +12,7 @@ import (
 	"binance-trading-bot/internal/billing"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
+	"binance-trading-bot/internal/license"
 	"binance-trading-bot/internal/vault"
 
 	"github.com/gin-contrib/cors"
@@ -72,6 +73,7 @@ type Server struct {
 	authEnabled    bool
 	vaultClient    *vault.Client
 	billingService *billing.StripeService
+	licenseInfo    *license.LicenseInfo
 	rateLimiter    *RateLimiter // API rate limiter to prevent Binance bans
 }
 
@@ -107,6 +109,7 @@ func NewServer(
 	authService *auth.Service, // Can be nil if auth is disabled
 	vaultClient *vault.Client, // Can be nil if vault is disabled
 	billingService *billing.StripeService, // Can be nil if billing is disabled
+	licenseInfo *license.LicenseInfo, // Can be nil for trial mode
 ) *Server {
 	// Set Gin mode
 	if config.ProductionMode {
@@ -123,7 +126,7 @@ func NewServer(
 
 	// CORS middleware
 	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowOrigins = []string{"http://localhost:5173", "http://localhost:8088"}
+	corsConfig.AllowOrigins = []string{"http://localhost:5173", "http://localhost:8088", "http://localhost:8090"}
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Authorization"}
 	corsConfig.ExposeHeaders = []string{"Content-Length"}
@@ -140,7 +143,8 @@ func NewServer(
 		authEnabled:    authService != nil,
 		vaultClient:    vaultClient,
 		billingService: billingService,
-		rateLimiter:    NewRateLimiter(30, time.Minute), // 30 requests per minute per endpoint
+		licenseInfo:    licenseInfo,
+		rateLimiter:    NewRateLimiter(120, time.Minute), // 120 requests per minute per endpoint (Binance allows 1200/min)
 	}
 
 	server.setupRoutes()
@@ -150,17 +154,66 @@ func NewServer(
 
 // rateLimitMiddleware creates a middleware that rate limits requests by endpoint
 func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
+	// Endpoints that don't call Binance API - no rate limiting needed
+	noRateLimitPaths := map[string]bool{
+		// Ginie endpoints (internal state only)
+		"/api/futures/ginie/status":                    true,
+		"/api/futures/ginie/config":                    true,
+		"/api/futures/ginie/autopilot/status":          true,
+		"/api/futures/ginie/autopilot/config":          true,
+		"/api/futures/ginie/autopilot/positions":       true,
+		"/api/futures/ginie/autopilot/history":         true,
+		"/api/futures/ginie/circuit-breaker/status":    true,
+		"/api/futures/ginie/decisions":                 true,
+		"/api/futures/ginie/blocked-coins":             true,
+		"/api/futures/ginie/risk-level":                true,
+		// Autopilot status endpoints (internal state)
+		"/api/futures/autopilot/status":                true,
+		"/api/futures/autopilot/circuit-breaker/status": true,
+		"/api/futures/autopilot/recent-decisions":      true,
+		"/api/futures/autopilot/investigate":           true,
+		"/api/futures/autopilot/averaging/status":      true,
+		"/api/futures/autopilot/dynamic-sltp":          true,
+		"/api/futures/autopilot/scalping":              true,
+		"/api/futures/autopilot/coin-preferences":      true,
+		"/api/futures/autopilot/trading-style":         true,
+		// Hedging status (internal state)
+		"/api/futures/autopilot/hedging/status":        true,
+		"/api/futures/autopilot/hedging/config":        true,
+		"/api/futures/autopilot/hedging/history":       true,
+		// Adaptive engine (internal state)
+		"/api/futures/autopilot/adaptive-engine/status": true,
+		// Trade history from DB (not Binance)
+		"/api/futures/trades/history":                  true,
+		"/api/futures/metrics":                         true,
+		"/api/futures/trade-source-stats":              true,
+		// Spot autopilot endpoints (internal state)
+		"/api/spot/autopilot/status":                   true,
+		"/api/spot/autopilot/profit-stats":             true,
+		"/api/spot/circuit-breaker/status":             true,
+		"/api/spot/coin-preferences":                   true,
+		"/api/spot/ai-decisions":                       true,
+		"/api/spot/ai-decisions/stats":                 true,
+		"/api/spot/positions":                          true,
+	}
+
 	return func(c *gin.Context) {
-		// Use endpoint path as the rate limit key
-		key := c.FullPath()
-		if key == "" {
-			key = c.Request.URL.Path
+		path := c.FullPath()
+		if path == "" {
+			path = c.Request.URL.Path
 		}
 
-		if !s.rateLimiter.Allow(key) {
+		// Skip rate limiting for internal endpoints
+		if noRateLimitPaths[path] {
+			c.Next()
+			return
+		}
+
+		if !s.rateLimiter.Allow(path) {
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"error":   "Rate limit exceeded",
 				"message": "Too many requests to this endpoint. Please slow down to avoid Binance API bans.",
+				"path":    path,
 			})
 			c.Abort()
 			return
@@ -278,6 +331,10 @@ func (s *Server) setupRoutes() {
 		api.GET("/strategy-performance/overall", s.handleGetOverallPerformance)
 		api.GET("/strategy-performance/historical", s.handleGetHistoricalSuccessRate)
 
+		// License endpoints
+		api.GET("/license", s.handleGetLicenseInfo)
+		api.GET("/license/feature/:feature", s.handleCheckFeature)
+
 		// Settings & Control endpoints
 		settings := api.Group("/settings")
 		{
@@ -385,6 +442,7 @@ func (s *Server) setupRoutes() {
 
 			// Sentiment & News endpoints
 			futures.GET("/sentiment/news", s.handleGetSentimentNews)
+			futures.GET("/sentiment/breaking", s.handleGetBreakingNews)
 
 			// Position averaging endpoints
 			futures.GET("/autopilot/averaging/status", s.handleGetAveragingStatus)
@@ -397,7 +455,196 @@ func (s *Server) setupRoutes() {
 			// Scalping mode endpoints
 			futures.GET("/autopilot/scalping", s.handleGetScalpingConfig)
 			futures.POST("/autopilot/scalping", s.handleSetScalpingConfig)
+
+			// Investigate/diagnostics endpoints
+			futures.GET("/autopilot/investigate", s.handleGetInvestigateStatus)
+			futures.POST("/autopilot/clear-cooldown", s.handleClearFlipFlopCooldown)
+			futures.POST("/autopilot/force-sync", s.handleForceSyncPositions)
+			futures.POST("/autopilot/recalculate-allocation", s.handleRecalculateAllocation)
+
+			// Coin classification endpoints
+			futures.GET("/autopilot/coin-classifications", s.handleGetCoinClassifications)
+			futures.GET("/autopilot/coin-classifications/summary", s.handleGetCoinClassificationSummary)
+			futures.POST("/autopilot/coin-classifications/refresh", s.handleRefreshCoinClassifications)
+			futures.POST("/autopilot/coin-preference", s.handleUpdateCoinPreference)
+			futures.POST("/autopilot/coin-preferences/bulk", s.handleBulkUpdateCoinPreferences)
+			futures.GET("/autopilot/coin-preferences", s.handleGetCoinPreferences)
+			futures.GET("/autopilot/coins/eligible", s.handleGetEligibleCoins)
+			futures.POST("/autopilot/coins/enable-all", s.handleEnableAllCoins)
+			futures.POST("/autopilot/coins/disable-all", s.handleDisableAllCoins)
+			futures.POST("/autopilot/category-allocation", s.handleUpdateCategoryAllocation)
+
+			// Trading style endpoints
+			futures.GET("/autopilot/trading-style", s.handleGetTradingStyle)
+			futures.POST("/autopilot/trading-style", s.handleSetTradingStyle)
+
+			// Hedging endpoints
+			futures.GET("/autopilot/hedging/status", s.handleGetHedgingStatus)
+			futures.GET("/autopilot/hedging/config", s.handleGetHedgingConfig)
+			futures.POST("/autopilot/hedging/config", s.handleUpdateHedgingConfig)
+			futures.POST("/autopilot/hedging/manual", s.handleExecuteManualHedge)
+			futures.POST("/autopilot/hedging/close", s.handleCloseHedge)
+			futures.POST("/autopilot/hedging/enable-mode", s.handleEnableHedgeMode)
+			futures.POST("/autopilot/hedging/clear-all", s.handleClearAllHedges)
+			futures.GET("/autopilot/hedging/history", s.handleGetHedgeHistory)
+
+			// Adaptive engine (human-like AI decision making)
+			futures.GET("/autopilot/adaptive-engine/status", s.handleGetAdaptiveEngineStatus)
+
+			// Auto Mode endpoints (LLM-driven trading decisions)
+			futures.GET("/autopilot/auto-mode", s.handleGetAutoModeConfig)
+			futures.POST("/autopilot/auto-mode", s.handleSetAutoModeConfig)
+			futures.POST("/autopilot/auto-mode/toggle", s.handleToggleAutoMode)
+
+			// Ginie AI Trader endpoints (advanced multi-mode trading)
+			futures.GET("/ginie/status", s.handleGetGinieStatus)
+			futures.GET("/ginie/config", s.handleGetGinieConfig)
+			futures.POST("/ginie/config", s.handleUpdateGinieConfig)
+			futures.POST("/ginie/toggle", s.handleToggleGinie)
+			futures.GET("/ginie/scan", s.handleGinieScanCoin)
+			futures.GET("/ginie/decision", s.handleGinieGenerateDecision)
+			futures.GET("/ginie/decisions", s.handleGinieGetDecisions)
+			futures.POST("/ginie/scan-all", s.handleGinieScanAll)
+			futures.POST("/ginie/analyze-all", s.handleGinieAnalyzeAll)
+
+			// Ginie Autopilot endpoints (autonomous multi-mode trading)
+			futures.GET("/ginie/autopilot/status", s.handleGetGinieAutopilotStatus)
+			futures.GET("/ginie/autopilot/config", s.handleGetGinieAutopilotConfig)
+			futures.POST("/ginie/autopilot/config", s.handleUpdateGinieAutopilotConfig)
+			futures.POST("/ginie/autopilot/start", s.handleStartGinieAutopilot)
+			futures.POST("/ginie/autopilot/stop", s.handleStopGinieAutopilot)
+			futures.GET("/ginie/autopilot/positions", s.handleGetGinieAutopilotPositions)
+			futures.GET("/ginie/autopilot/history", s.handleGetGinieAutopilotTradeHistory)
+			futures.POST("/ginie/autopilot/clear", s.handleClearGinieAutopilotPositions)
+			futures.POST("/ginie/refresh-symbols", s.handleRefreshGinieSymbols)
+
+			// Per-symbol performance settings endpoints
+			futures.GET("/autopilot/symbols", s.handleGetSymbolSettings)
+			futures.GET("/autopilot/symbols/report", s.handleGetSymbolPerformanceReport)
+			futures.GET("/autopilot/symbols/category/:category", s.handleGetSymbolsByCategory)
+			futures.GET("/autopilot/symbols/:symbol", s.handleGetSingleSymbolSettings)
+			futures.PUT("/autopilot/symbols/:symbol", s.handleUpdateSymbolSettings)
+			futures.POST("/autopilot/symbols/:symbol/blacklist", s.handleBlacklistSymbol)
+			futures.DELETE("/autopilot/symbols/:symbol/blacklist", s.handleUnblacklistSymbol)
+			futures.POST("/autopilot/category-config", s.handleUpdateCategorySettings)
+
+			// Ginie Circuit Breaker endpoints (separate from FuturesController)
+			futures.GET("/ginie/circuit-breaker/status", s.handleGetGinieCircuitBreakerStatus)
+			futures.POST("/ginie/circuit-breaker/reset", s.handleResetGinieCircuitBreaker)
+			futures.POST("/ginie/circuit-breaker/toggle", s.handleToggleGinieCircuitBreaker)
+			futures.POST("/ginie/circuit-breaker/config", s.handleUpdateGinieCircuitBreakerConfig)
+
+			// Ginie Position Sync (sync with exchange)
+			futures.POST("/ginie/positions/sync", s.handleSyncGiniePositions)
+
+			// Ginie Panic Button (closes only Ginie positions)
+			futures.POST("/ginie/positions/close-all", s.handleCloseAllGiniePositions)
+
+			// Ginie Adaptive SL/TP (recalculate for naked positions)
+			futures.POST("/ginie/positions/recalc-sltp", s.handleRecalculateAdaptiveSLTP)
+
+			// Ginie Risk Level endpoints
+			futures.GET("/ginie/risk-level", s.handleGetGinieRiskLevel)
+			futures.POST("/ginie/risk-level", s.handleSetGinieRiskLevel)
+
+			// Ginie Market Movers endpoints (dynamic symbol selection)
+			futures.GET("/ginie/market-movers", s.handleGetMarketMovers)
+			futures.POST("/ginie/symbols/refresh-dynamic", s.handleRefreshDynamicSymbols)
+
+			// Ginie Blocked Coins endpoints (per-coin circuit breaker)
+			futures.GET("/ginie/blocked-coins", s.handleGetGinieBlockedCoins)
+			futures.POST("/ginie/blocked-coins/:symbol/unblock", s.handleUnblockGinieCoin)
+			futures.POST("/ginie/blocked-coins/:symbol/reset-history", s.handleResetGinieCoinBlockHistory)
+
+			// Ginie LLM SL Validation endpoints (kill switch after 3 bad calls)
+			futures.GET("/ginie/llm-sl/status", s.handleGetGinieLLMSLStatus)
+			futures.POST("/ginie/llm-sl/reset/:symbol", s.handleResetGinieLLMSL)
+
+			// Ginie Signal Logs endpoints (all signals with executed/rejected status)
+			futures.GET("/ginie/signals", s.handleGetGinieSignalLogs)
+			futures.GET("/ginie/signals/stats", s.handleGetGinieSignalStats)
+
+			// Ginie SL Update History endpoints
+			futures.GET("/ginie/sl-history", s.handleGetGinieSLHistory)
+			futures.GET("/ginie/sl-history/stats", s.handleGetGinieSLStats)
+
+			// Ginie Diagnostics endpoint
+			futures.GET("/ginie/diagnostics", s.handleGetGinieDiagnostics)
+
+			// Strategy Performance endpoints (AI vs Strategy comparison)
+			futures.GET("/ginie/strategy-performance", s.handleGetStrategyPerformance)
+			futures.GET("/ginie/source-performance", s.handleGetSourcePerformance)
+			futures.GET("/ginie/positions/filter", s.handleGetPositionsBySource)
+			futures.GET("/ginie/history/filter", s.handleGetTradeHistoryBySource)
+
+			// Mode Allocation endpoints (per-mode capital management)
+			futures.GET("/modes/allocations", s.handleGetModeAllocations)
+			futures.POST("/modes/allocations", s.handleUpdateModeAllocations)
+			futures.GET("/modes/allocations/history", s.handleGetModeAllocationHistory)
+			futures.GET("/modes/allocations/:mode", s.handleGetModeAllocationStatus)
+
+			// Mode Safety endpoints (per-mode safety controls)
+			futures.GET("/modes/safety", s.handleGetModeSafetyStatus)
+			futures.POST("/modes/safety/:mode/resume", s.handleResumeMode)
+			futures.GET("/modes/safety/history", s.handleGetModeSafetyHistory)
+			futures.GET("/modes/safety/:mode/history", s.handleGetModeSafetyEventHistory)
+
+			// Mode Performance endpoints (per-mode performance metrics)
+			futures.GET("/modes/performance", s.handleGetModePerformance)
+			futures.GET("/modes/performance/:mode", s.handleGetModePerformanceSingle)
 		}
+
+		// ==================== SPOT AUTOPILOT ENDPOINTS ====================
+		// Separate AI trading system for Spot market
+		spot := api.Group("/spot")
+		spot.Use(s.rateLimitMiddleware()) // Apply rate limiting
+		{
+			// Autopilot status & control
+			spot.GET("/autopilot/status", s.handleGetSpotAutopilotStatus)
+			spot.POST("/autopilot/toggle", s.handleToggleSpotAutopilot)
+			spot.POST("/autopilot/dry-run", s.handleSetSpotAutopilotDryRun)
+			spot.POST("/autopilot/risk-level", s.handleSetSpotAutopilotRiskLevel)
+			spot.POST("/autopilot/allocation", s.handleSetSpotAutopilotAllocation)
+			spot.POST("/autopilot/max-positions", s.handleSetSpotAutopilotMaxPositions)
+			spot.POST("/autopilot/tpsl", s.handleSetSpotAutopilotTPSL)
+			spot.POST("/autopilot/min-confidence", s.handleSetSpotAutopilotMinConfidence)
+			spot.GET("/autopilot/profit-stats", s.handleGetSpotAutopilotProfitStats)
+
+			// Circuit breaker
+			spot.GET("/circuit-breaker/status", s.handleGetSpotCircuitBreakerStatus)
+			spot.POST("/circuit-breaker/reset", s.handleResetSpotCircuitBreaker)
+			spot.POST("/circuit-breaker/config", s.handleUpdateSpotCircuitBreakerConfig)
+			spot.POST("/circuit-breaker/toggle", s.handleToggleSpotCircuitBreaker)
+
+			// Coin preferences
+			spot.GET("/coin-preferences", s.handleGetSpotCoinPreferences)
+			spot.POST("/coin-preferences", s.handleSetSpotCoinPreferences)
+
+			// AI decisions
+			spot.GET("/ai-decisions", s.handleGetSpotAutopilotRecentDecisions)
+			spot.GET("/ai-decisions/stats", s.handleGetSpotDecisionStats)
+
+			// Positions
+			spot.GET("/positions", s.handleGetSpotPositions)
+			spot.POST("/positions/:symbol/close", s.handleCloseSpotPosition)
+			spot.POST("/positions/close-all", s.handleCloseAllSpotPositions)
+		}
+	}
+
+	// Admin endpoints (requires admin role)
+	admin := api.Group("/admin")
+	admin.Use(s.adminMiddleware())
+	{
+		// License management
+		admin.POST("/licenses/generate", s.handleAdminGenerateLicense)
+		admin.POST("/licenses/bulk-generate", s.handleAdminBulkGenerateLicenses)
+		admin.GET("/licenses", s.handleAdminListLicenses)
+		admin.GET("/licenses/stats", s.handleAdminGetLicenseStats)
+		admin.GET("/licenses/:id", s.handleAdminGetLicense)
+		admin.PUT("/licenses/:id", s.handleAdminUpdateLicense)
+		admin.POST("/licenses/:id/deactivate", s.handleAdminDeactivateLicense)
+		admin.DELETE("/licenses/:id", s.handleAdminDeleteLicense)
+		admin.POST("/licenses/validate", s.handleAdminValidateLicense)
 	}
 
 	// Health check endpoint
@@ -414,8 +661,19 @@ func (s *Server) setupRoutes() {
 		s.router.Static("/assets", s.config.StaticFilesPath+"/assets")
 		s.router.StaticFile("/", s.config.StaticFilesPath+"/index.html")
 
-		// Catch-all route for React Router (SPA)
+		// Catch-all route for React Router (SPA) - but NOT for API routes
 		s.router.NoRoute(func(c *gin.Context) {
+			path := c.Request.URL.Path
+			// Don't serve index.html for API routes - return 404 JSON instead
+			if len(path) > 5 && path[:5] == "/api/" {
+				c.JSON(http.StatusNotFound, gin.H{
+					"error":   "API endpoint not found",
+					"path":    path,
+					"message": "This API endpoint does not exist. Please check your request path.",
+				})
+				return
+			}
+			// Serve index.html for SPA routes (frontend)
 			c.File(s.config.StaticFilesPath + "/index.html")
 		})
 	}
