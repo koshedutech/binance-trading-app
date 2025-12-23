@@ -515,6 +515,10 @@ func (fc *FuturesController) LoadSavedSettings() {
 		return
 	}
 
+	fc.logger.Info("DEBUG: Loaded settings from file",
+		"ginie_dry_run_mode_from_file", settings.GinieDryRunMode,
+		"dry_run_mode_from_file", settings.DryRunMode)
+
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 
@@ -554,7 +558,10 @@ func (fc *FuturesController) LoadSavedSettings() {
 	if settings.RiskLevel != "" {
 		fc.currentRiskLevel = settings.RiskLevel
 	}
-	fc.dryRun = settings.DryRunMode
+	fc.dryRun = settings.GinieDryRunMode
+	fc.logger.Info("DEBUG: Set fc.dryRun",
+		"fc.dryRun_value", fc.dryRun,
+		"from_ginie_dry_run_mode", settings.GinieDryRunMode)
 	if settings.MaxUSDAllocation > 0 {
 		fc.maxUSDAllocation = settings.MaxUSDAllocation
 	}
@@ -620,11 +627,20 @@ func (fc *FuturesController) LoadSavedSettings() {
 			fc.logger.Info("Auto-starting Ginie autopilot (was running before restart)",
 				"mode", map[bool]string{true: "PAPER", false: "LIVE"}[ginieConfig.DryRun])
 			go func() {
+				// Verify the mode before starting
+				currentConfig := fc.ginieAutopilot.GetConfig()
+				fc.logger.Info("DEBUG: Before Start(), Ginie config dry_run",
+					"dry_run", currentConfig.DryRun,
+					"mode", map[bool]string{true: "PAPER", false: "LIVE"}[currentConfig.DryRun])
+
 				fc.logger.Info("Calling Ginie Start() from auto-start goroutine")
 				if err := fc.ginieAutopilot.Start(); err != nil {
 					fc.logger.Error("Failed to auto-start Ginie autopilot", "error", err)
 				} else {
-					fc.logger.Info("Ginie auto-start completed successfully")
+					currentConfig := fc.ginieAutopilot.GetConfig()
+					fc.logger.Info("Ginie auto-start completed successfully",
+						"dry_run", currentConfig.DryRun,
+						"mode", map[bool]string{true: "PAPER", false: "LIVE"}[currentConfig.DryRun])
 				}
 			}()
 		}
