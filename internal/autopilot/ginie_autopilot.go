@@ -483,6 +483,11 @@ type GinieAutopilot struct {
 	partialClosesLastHour  int
 	lastLLMCallTime        time.Time
 
+	// Balance caching (to avoid blocking API calls)
+	cachedAvailableBalance float64
+	cachedWalletBalance    float64
+	lastBalanceUpdateTime  time.Time
+
 	// Strategy Evaluation
 	strategyEvaluator *StrategyEvaluator
 	lastStrategyScan  time.Time
@@ -706,14 +711,44 @@ func (ga *GinieAutopilot) GetPositions() []*GiniePosition {
 	return positions
 }
 
-// GetBalanceInfo returns available and wallet balance from Binance
+// GetBalanceInfo returns available and wallet balance from Binance (uses cache to avoid blocking API calls)
 func (ga *GinieAutopilot) GetBalanceInfo() (availableBalance float64, walletBalance float64) {
-	accountInfo, err := ga.futuresClient.GetFuturesAccountInfo()
-	if err != nil {
-		ga.logger.Error("Failed to get balance info", "error", err)
-		return 0, 0
+	ga.mu.RLock()
+	cachedAvailable := ga.cachedAvailableBalance
+	cachedWallet := ga.cachedWalletBalance
+	timeSinceUpdate := time.Since(ga.lastBalanceUpdateTime)
+	ga.mu.RUnlock()
+
+	// Return cached value if fresh (less than 30 seconds old)
+	if timeSinceUpdate < 30*time.Second {
+		return cachedAvailable, cachedWallet
 	}
-	return accountInfo.AvailableBalance, accountInfo.TotalWalletBalance
+
+	// Always fetch in background to update cache, but return immediately
+	// This prevents API endpoints from blocking on network calls
+	select {
+	case <-ga.stopChan:
+		// If stopping, just return cached values
+		return cachedAvailable, cachedWallet
+	default:
+		// Spawn background fetch if cache is stale
+		go func() {
+			accountInfo, err := ga.futuresClient.GetFuturesAccountInfo()
+			if err != nil {
+				ga.logger.Error("Failed to update balance info in background", "error", err)
+				return
+			}
+
+			ga.mu.Lock()
+			ga.cachedAvailableBalance = accountInfo.AvailableBalance
+			ga.cachedWalletBalance = accountInfo.TotalWalletBalance
+			ga.lastBalanceUpdateTime = time.Now()
+			ga.mu.Unlock()
+		}()
+
+		// Return immediately with cached values
+		return cachedAvailable, cachedWallet
+	}
 }
 
 // ClearPositions clears all tracked positions and resets stats
