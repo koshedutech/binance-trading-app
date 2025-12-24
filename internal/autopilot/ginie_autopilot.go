@@ -226,10 +226,11 @@ type GiniePosition struct {
 	MovedToBreakeven bool   `json:"moved_to_breakeven"`
 
 	// Trailing
-	TrailingActive   bool    `json:"trailing_active"`
-	HighestPrice     float64 `json:"highest_price"`
-	LowestPrice      float64 `json:"lowest_price"`
-	TrailingPercent  float64 `json:"trailing_percent"` // Dynamic trailing %
+	TrailingActive      bool    `json:"trailing_active"`
+	HighestPrice        float64 `json:"highest_price"`
+	LowestPrice         float64 `json:"lowest_price"`
+	TrailingPercent     float64 `json:"trailing_percent"`       // Dynamic trailing %
+	TrailingActivationPct float64 `json:"trailing_activation_pct"` // % profit needed to activate trailing
 
 	// Algo Order IDs (for Binance SL/TP orders)
 	StopLossAlgoID   int64   `json:"stop_loss_algo_id,omitempty"`   // Binance algo order ID for SL
@@ -4520,59 +4521,87 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			}
 		}
 
-		// Mode-specific limits
-		var baseSLMult, baseTPMult float64
-		var minSL, maxSL, minTP, maxTP float64
+		// Check for manual SL/TP override from settings
+		sm := GetSettingsManager()
+		settings := sm.GetCurrentSettings()
+		var manualSLPct, manualTPPct float64
 
 		switch pos.Mode {
 		case GinieModeScalp:
-			baseSLMult, baseTPMult = 0.5, 1.0
-			minSL, maxSL = 0.2, 0.8
-			minTP, maxTP = 0.3, 2.0
+			manualSLPct = settings.GinieSLPercentScalp
+			manualTPPct = settings.GinieTPPercentScalp
 		case GinieModeSwing:
-			baseSLMult, baseTPMult = 1.5, 3.0
-			minSL, maxSL = 1.0, 5.0
-			minTP, maxTP = 2.0, 15.0
+			manualSLPct = settings.GinieSLPercentSwing
+			manualTPPct = settings.GinieTPPercentSwing
 		case GinieModePosition:
-			baseSLMult, baseTPMult = 2.5, 5.0
-			minSL, maxSL = 3.0, 15.0
-			minTP, maxTP = 5.0, 50.0
-		default:
-			// Default to swing
-			baseSLMult, baseTPMult = 1.5, 3.0
-			minSL, maxSL = 1.0, 5.0
-			minTP, maxTP = 2.0, 15.0
+			manualSLPct = settings.GinieSLPercentPosition
+			manualTPPct = settings.GinieTPPercentPosition
 		}
 
-		// Calculate ATR-based SL/TP
-		atrSLPct := atrPct * baseSLMult
-		atrTPPct := atrPct * baseTPMult
-
-		// Blend LLM and ATR (70% LLM, 30% ATR if LLM available)
+		// Manual override takes precedence if set (> 0)
 		var finalSLPct, finalTPPct float64
-		if llmUsed && llmSLPct > 0 {
-			finalSLPct = llmSLPct*0.7 + atrSLPct*0.3
+		if manualSLPct > 0 && manualTPPct > 0 {
+			finalSLPct = manualSLPct
+			finalTPPct = manualTPPct
+			ga.logger.Info("Using manual SL/TP override for position",
+				"symbol", symbol,
+				"mode", pos.Mode,
+				"sl_pct", finalSLPct,
+				"tp_pct", finalTPPct)
 		} else {
-			finalSLPct = atrSLPct
-		}
-		if llmUsed && llmTPPct > 0 {
-			finalTPPct = llmTPPct*0.7 + atrTPPct*0.3
-		} else {
-			finalTPPct = atrTPPct
-		}
+			// Mode-specific limits for ATR/LLM blend
+			var baseSLMult, baseTPMult float64
+			var minSL, maxSL, minTP, maxTP float64
 
-		// Clamp to limits
-		if finalSLPct < minSL {
-			finalSLPct = minSL
-		}
-		if finalSLPct > maxSL {
-			finalSLPct = maxSL
-		}
-		if finalTPPct < minTP {
-			finalTPPct = minTP
-		}
-		if finalTPPct > maxTP {
-			finalTPPct = maxTP
+			switch pos.Mode {
+			case GinieModeScalp:
+				baseSLMult, baseTPMult = 0.5, 1.0
+				minSL, maxSL = 0.2, 0.8
+				minTP, maxTP = 0.3, 2.0
+			case GinieModeSwing:
+				baseSLMult, baseTPMult = 1.5, 3.0
+				minSL, maxSL = 1.0, 5.0
+				minTP, maxTP = 2.0, 15.0
+			case GinieModePosition:
+				baseSLMult, baseTPMult = 2.5, 5.0
+				minSL, maxSL = 3.0, 15.0
+				minTP, maxTP = 5.0, 50.0
+			default:
+				// Default to swing
+				baseSLMult, baseTPMult = 1.5, 3.0
+				minSL, maxSL = 1.0, 5.0
+				minTP, maxTP = 2.0, 15.0
+			}
+
+			// Calculate ATR-based SL/TP
+			atrSLPct := atrPct * baseSLMult
+			atrTPPct := atrPct * baseTPMult
+
+			// Blend LLM and ATR (70% LLM, 30% ATR if LLM available)
+			if llmUsed && llmSLPct > 0 {
+				finalSLPct = llmSLPct*0.7 + atrSLPct*0.3
+			} else {
+				finalSLPct = atrSLPct
+			}
+			if llmUsed && llmTPPct > 0 {
+				finalTPPct = llmTPPct*0.7 + atrTPPct*0.3
+			} else {
+				finalTPPct = atrTPPct
+			}
+
+			// Clamp to limits
+			if finalSLPct < minSL {
+				finalSLPct = minSL
+			}
+			if finalSLPct > maxSL {
+				finalSLPct = maxSL
+			}
+			if finalTPPct < minTP {
+				finalTPPct = minTP
+			}
+			if finalTPPct > maxTP {
+				finalTPPct = maxTP
+			}
 		}
 
 		// Apply to position
@@ -4587,26 +4616,93 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		pos.StopLoss = pos.EntryPrice * (1 - direction*finalSLPct/100)
 		pos.OriginalSL = pos.StopLoss
 
-		// Generate 4 TP levels
-		pos.TakeProfits = []GinieTakeProfitLevel{
-			{Level: 1, Percent: 25, GainPct: finalTPPct * 0.25, Price: pos.EntryPrice * (1 + direction*finalTPPct*0.25/100), Status: "pending"},
-			{Level: 2, Percent: 25, GainPct: finalTPPct * 0.50, Price: pos.EntryPrice * (1 + direction*finalTPPct*0.50/100), Status: "pending"},
-			{Level: 3, Percent: 25, GainPct: finalTPPct * 0.75, Price: pos.EntryPrice * (1 + direction*finalTPPct*0.75/100), Status: "pending"},
-			{Level: 4, Percent: 25, GainPct: finalTPPct * 1.00, Price: pos.EntryPrice * (1 + direction*finalTPPct*1.00/100), Status: "pending"},
+		// Generate TP levels based on TP mode (single vs multi)
+		if settings.GinieUseSingleTP {
+			// Single TP mode: Close 100% at one level
+			singleTPPrice := pos.EntryPrice * (1 + direction*settings.GinieSingleTPPercent/100)
+			pos.TakeProfits = []GinieTakeProfitLevel{
+				{Level: 1, Percent: 100, GainPct: settings.GinieSingleTPPercent, Price: singleTPPrice, Status: "pending"},
+			}
+			ga.logger.Debug("Single TP mode applied",
+				"symbol", symbol,
+				"tp_percent", settings.GinieSingleTPPercent,
+				"tp_price", singleTPPrice)
+		} else {
+			// Multi-TP mode: Use configured allocation (default 25% each)
+			tp1Pct := settings.GinieTP1Percent
+			tp2Pct := settings.GinieTP2Percent
+			tp3Pct := settings.GinieTP3Percent
+			tp4Pct := settings.GinieTP4Percent
+
+			// Calculate actual gain % for each level based on allocation
+			tp1Gain := finalTPPct * (tp1Pct / 100)
+			tp2Gain := finalTPPct * (tp2Pct / 100)
+			tp3Gain := finalTPPct * (tp3Pct / 100)
+			tp4Gain := finalTPPct * (tp4Pct / 100)
+
+			pos.TakeProfits = []GinieTakeProfitLevel{
+				{Level: 1, Percent: tp1Pct, GainPct: tp1Gain, Price: pos.EntryPrice * (1 + direction*tp1Gain/100), Status: "pending"},
+				{Level: 2, Percent: tp2Pct, GainPct: tp2Gain, Price: pos.EntryPrice * (1 + direction*tp2Gain/100), Status: "pending"},
+				{Level: 3, Percent: tp3Pct, GainPct: tp3Gain, Price: pos.EntryPrice * (1 + direction*tp3Gain/100), Status: "pending"},
+				{Level: 4, Percent: tp4Pct, GainPct: tp4Gain, Price: pos.EntryPrice * (1 + direction*tp4Gain/100), Status: "pending"},
+			}
+
+			ga.logger.Debug("Multi-TP mode applied",
+				"symbol", symbol,
+				"allocation", fmt.Sprintf("%.0f%%/%.0f%%/%.0f%%/%.0f%%", tp1Pct, tp2Pct, tp3Pct, tp4Pct))
 		}
 
-		// Update trailing percent based on mode
-		pos.TrailingPercent = ga.getTrailingPercent(pos.Mode)
+		// Apply configured trailing stop settings
+		var trailingEnabled bool
+		var trailingPercent, trailingActivation float64
+
+		switch pos.Mode {
+		case GinieModeScalp:
+			trailingEnabled = settings.GinieTrailingStopEnabledScalp
+			trailingPercent = settings.GinieTrailingStopPercentScalp
+			trailingActivation = settings.GinieTrailingStopActivationScalp
+		case GinieModeSwing:
+			trailingEnabled = settings.GinieTrailingStopEnabledSwing
+			trailingPercent = settings.GinieTrailingStopPercentSwing
+			trailingActivation = settings.GinieTrailingStopActivationSwing
+		case GinieModePosition:
+			trailingEnabled = settings.GinieTrailingStopEnabledPosition
+			trailingPercent = settings.GinieTrailingStopPercentPosition
+			trailingActivation = settings.GinieTrailingStopActivationPosition
+		default:
+			trailingEnabled = true
+			trailingPercent = 1.5  // Default swing mode
+			trailingActivation = 1.0
+		}
+
+		if trailingEnabled {
+			pos.TrailingPercent = trailingPercent
+			pos.TrailingActivationPct = trailingActivation
+			ga.logger.Debug("Trailing stop configured",
+				"symbol", symbol,
+				"mode", pos.Mode,
+				"trailing_pct", trailingPercent,
+				"activation_pct", trailingActivation)
+		} else {
+			pos.TrailingPercent = 0
+			pos.TrailingActivationPct = 0
+			ga.logger.Debug("Trailing stop disabled", "symbol", symbol, "mode", pos.Mode)
+		}
 
 		// Place SLTP orders on Binance in background
 		posSymbol := symbol
 		slPrice := roundPrice(posSymbol, pos.StopLoss)
-		tpPrices := []float64{
-			roundPrice(posSymbol, pos.TakeProfits[0].Price),
-			roundPrice(posSymbol, pos.TakeProfits[1].Price),
-			roundPrice(posSymbol, pos.TakeProfits[2].Price),
-			roundPrice(posSymbol, pos.TakeProfits[3].Price),
+
+		// Build TP prices array dynamically based on configured TP levels
+		var tpPrices []float64
+		var tpQuantities []float64
+		for _, tpLevel := range pos.TakeProfits {
+			tpPrices = append(tpPrices, roundPrice(posSymbol, tpLevel.Price))
+			// Calculate quantity for this TP level based on its percent allocation
+			tpQtyForLevel := roundQuantity(posSymbol, pos.RemainingQty*tpLevel.Percent/100)
+			tpQuantities = append(tpQuantities, tpQtyForLevel)
 		}
+
 		qty := roundQuantity(posSymbol, pos.RemainingQty)
 		posSide := pos.Side
 
@@ -4647,9 +4743,10 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			}
 
 			newTPIDs := []int64{}
-			tpQty := roundQuantity(posSymbol, qty/4.0)
 
 			for i, tpPrice := range tpPrices {
+				tpQty := tpQuantities[i]
+
 				tpParams := binance.AlgoOrderParams{
 					Symbol:       posSymbol,
 					Side:         tpSide,
@@ -4661,7 +4758,7 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 
 				if tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams); err == nil {
 					newTPIDs = append(newTPIDs, tpOrder.AlgoId)
-					ga.logger.Info("SLTP: TP order placed", "symbol", posSymbol, "level", i+1, "price", tpPrice)
+					ga.logger.Info("SLTP: TP order placed", "symbol", posSymbol, "level", i+1, "price", tpPrice, "qty", tpQty)
 				} else {
 					ga.logger.Error("SLTP: Failed to place TP order", "symbol", posSymbol, "level", i+1, "error", err.Error())
 				}
