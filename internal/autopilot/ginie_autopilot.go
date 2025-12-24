@@ -567,6 +567,9 @@ type GinieAutopilot struct {
 	// Strategy Evaluation
 	strategyEvaluator *StrategyEvaluator
 	lastStrategyScan  time.Time
+
+	// SLTP Job Queue (for async recalculation)
+	sltpJobQueue *SLTPJobQueue
 }
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
@@ -652,6 +655,9 @@ func NewGinieAutopilot(
 	if repo != nil {
 		ga.strategyEvaluator = NewStrategyEvaluator(repo, futuresClient, logger)
 	}
+
+	// Initialize SLTP job queue (keep last 50 jobs)
+	ga.sltpJobQueue = NewSLTPJobQueue(50)
 
 	return ga
 }
@@ -4939,6 +4945,155 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 
 	ga.logger.Info("Adaptive SL/TP recalculation completed", "updated", updated, "total_positions", len(ga.positions))
 	return updated, nil
+}
+
+// GetSLTPJobQueue returns the SLTP job queue
+func (ga *GinieAutopilot) GetSLTPJobQueue() *SLTPJobQueue {
+	return ga.sltpJobQueue
+}
+
+// RecalculateAdaptiveSLTPAsync starts an async SLTP recalculation job and returns immediately with job ID
+// The actual processing happens in background with progress tracking
+func (ga *GinieAutopilot) RecalculateAdaptiveSLTPAsync() string {
+	ga.mu.RLock()
+	positions := make([]*GiniePosition, 0, len(ga.positions))
+	for _, pos := range ga.positions {
+		positions = append(positions, pos)
+	}
+	ga.mu.RUnlock()
+
+	// Create job
+	job := ga.sltpJobQueue.CreateJob(len(positions))
+
+	// Process in background
+	go ga.processAsyncSLTPRecalculation(job.ID, positions)
+
+	return job.ID
+}
+
+// processAsyncSLTPRecalculation processes SLTP recalculation in background with progress tracking
+func (ga *GinieAutopilot) processAsyncSLTPRecalculation(jobID string, positions []*GiniePosition) {
+	// Start the job
+	ga.sltpJobQueue.StartJob(jobID)
+
+	successCount := 0
+	failedCount := 0
+	results := make([]*GiniePosition, 0, len(positions))
+
+	// Process positions sequentially (could be parallelized for better performance)
+	for idx, pos := range positions {
+		if pos == nil {
+			continue
+		}
+
+		// Update progress
+		ga.sltpJobQueue.UpdateJobProgress(jobID, pos.Symbol, idx, successCount, failedCount)
+
+		// Process this position
+		if err := ga.recalculateSinglePositionSLTP(pos); err != nil {
+			ga.logger.Error("Failed to recalculate SL/TP for position",
+				"symbol", pos.Symbol,
+				"error", err.Error())
+			failedCount++
+		} else {
+			successCount++
+			results = append(results, pos)
+		}
+	}
+
+	// Mark job as completed
+	ga.sltpJobQueue.CompleteJob(jobID, results)
+
+	ga.logger.Info("Async SLTP recalculation completed",
+		"job_id", jobID,
+		"total", len(positions),
+		"success", successCount,
+		"failed", failedCount,
+		"elapsed_seconds", ga.sltpJobQueue.GetJob(jobID).ElapsedSeconds)
+}
+
+// recalculateSinglePositionSLTP recalculates SL/TP for a single position
+func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) error {
+	symbol := pos.Symbol
+
+	// Get klines
+	klines, err := ga.futuresClient.GetFuturesKlines(symbol, "1h", 200)
+	if err != nil {
+		return fmt.Errorf("failed to fetch klines: %w", err)
+	}
+
+	if len(klines) < 50 {
+		return fmt.Errorf("insufficient klines for analysis")
+	}
+
+	// Get settings
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Determine mode for this position
+	mode := pos.Mode
+	if mode == "" {
+		mode = "swing" // Default
+	}
+
+	// Get manual SL/TP override if set
+	var manualSL, manualTP float64
+	switch mode {
+	case "scalp":
+		manualSL = settings.GinieSLPercentScalp
+		manualTP = settings.GinieTPPercentScalp
+	case "swing":
+		manualSL = settings.GinieSLPercentSwing
+		manualTP = settings.GinieTPPercentSwing
+	case "position":
+		manualSL = settings.GinieSLPercentPosition
+		manualTP = settings.GinieTPPercentPosition
+	default:
+		manualSL = settings.GinieSLPercentSwing
+		manualTP = settings.GinieTPPercentSwing
+	}
+
+	var finalSLPct, finalTPPct float64
+
+	// Use manual override if set, otherwise calculate ATR-based
+	if manualSL > 0 && manualTP > 0 {
+		finalSLPct = manualSL
+		finalTPPct = manualTP
+	} else {
+		// Simple ATR calculation as fallback
+		atrPct := ga.calculateATRPercent(klines)
+		finalSLPct = atrPct * 1.5
+		finalTPPct = atrPct * 3.0
+	}
+
+	// Calculate SL price
+	if pos.Side == "LONG" {
+		pos.StopLoss = pos.EntryPrice * (1 - finalSLPct/100)
+	} else {
+		pos.StopLoss = pos.EntryPrice * (1 + finalSLPct/100)
+	}
+
+	// Calculate TP levels - use simple single TP for async version
+	// (Full RecalculateAdaptiveSLTP handles complex multi-TP logic)
+	tpPrice := 0.0
+	if pos.Side == "LONG" {
+		tpPrice = pos.EntryPrice * (1 + finalTPPct/100)
+	} else {
+		tpPrice = pos.EntryPrice * (1 - finalTPPct/100)
+	}
+
+	// Create single TP level
+	pos.TakeProfits = []GinieTakeProfitLevel{
+		{
+			Level:   1,
+			Price:   tpPrice,
+			Percent: 100,
+			GainPct: finalTPPct,
+			Status:  "pending",
+		},
+	}
+
+	return nil
 }
 
 // calculateATRPercent calculates ATR as a percentage of current price

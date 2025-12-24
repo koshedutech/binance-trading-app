@@ -890,21 +890,79 @@ func (s *Server) handleRecalculateAdaptiveSLTP(c *gin.Context) {
 		return
 	}
 
-	// Recalculate adaptive SL/TP for all positions
-	updated, err := giniePilot.RecalculateAdaptiveSLTP()
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to recalculate SL/TP: "+err.Error())
+	// Default to async (non-blocking) - return immediately with job ID
+	jobID := giniePilot.RecalculateAdaptiveSLTPAsync()
+	c.JSON(http.StatusAccepted, gin.H{
+		"success":    true,
+		"message":    "SLTP recalculation started in background",
+		"job_id":     jobID,
+		"status_url": "/api/futures/ginie/positions/recalc-sltp/status/" + jobID,
+	})
+}
+
+// handleGetSLTPJobStatus returns the status of a SLTP recalculation job
+func (s *Server) handleGetSLTPJobStatus(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
 
-	// Return updated positions
-	positions := giniePilot.GetPositions()
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	jobID := c.Param("job_id")
+	if jobID == "" {
+		errorResponse(c, http.StatusBadRequest, "Job ID is required")
+		return
+	}
+
+	queue := giniePilot.GetSLTPJobQueue()
+	job := queue.GetJob(jobID)
+
+	if job == nil {
+		errorResponse(c, http.StatusNotFound, "Job not found: "+jobID)
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":           true,
-		"message":           "Adaptive SL/TP applied to positions",
-		"positions_updated": updated,
-		"positions":         positions,
+		"success": true,
+		"job":     job,
+	})
+}
+
+// handleListSLTPJobs returns recent SLTP recalculation jobs
+func (s *Server) handleListSLTPJobs(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Get limit from query param (default 10)
+	limit := 10
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	queue := giniePilot.GetSLTPJobQueue()
+	jobs := queue.GetRecentJobs(limit)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"jobs":    jobs,
+		"count":   len(jobs),
 	})
 }
 

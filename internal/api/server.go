@@ -537,6 +537,10 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ginie/circuit-breaker/toggle", s.handleToggleGinieCircuitBreaker)
 			futures.POST("/ginie/circuit-breaker/config", s.handleUpdateGinieCircuitBreakerConfig)
 
+			// Ginie Per-Position ROI Target (custom early profit booking ROI%)
+			// NOTE: This must come AFTER specific routes like /close-all, /sync, /recalc-sltp
+			// because Gin matches routes in order and :symbol is a catch-all parameter
+
 			// Ginie Position Sync (sync with exchange)
 			futures.POST("/ginie/positions/sync", s.handleSyncGiniePositions)
 
@@ -545,8 +549,10 @@ func (s *Server) setupRoutes() {
 
 			// Ginie Adaptive SL/TP (recalculate for naked positions)
 			futures.POST("/ginie/positions/recalc-sltp", s.handleRecalculateAdaptiveSLTP)
+			futures.GET("/ginie/positions/recalc-sltp/status/:job_id", s.handleGetSLTPJobStatus)
+			futures.GET("/ginie/positions/recalc-sltp/jobs", s.handleListSLTPJobs)
 
-			// Ginie Per-Position ROI Target (custom early profit booking ROI%)
+			// Per-Position ROI Target (MUST be registered LAST due to :symbol parameter)
 			futures.POST("/ginie/positions/:symbol/roi-target", s.handleSetPositionROITarget)
 
 			// Ginie Risk Level endpoints

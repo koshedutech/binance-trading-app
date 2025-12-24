@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/database"
 
@@ -149,7 +150,68 @@ func (s *Server) handleGetFuturesPositions(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, activePositions)
+	// Enrich positions with custom ROI data from Ginie Autopilot and Settings
+	enrichedPositions := make([]map[string]interface{}, len(activePositions))
+
+	customROIMap := make(map[string]interface{}) // Can be *float64 (position-level) or float64 (symbol-level)
+
+	// First, try to get position-level custom ROI from Ginie Autopilot
+	if controller := s.getFuturesAutopilot(); controller != nil {
+		if autopilot := controller.GetGinieAutopilot(); autopilot != nil {
+			giniePositions := autopilot.GetPositions()
+			for _, gPos := range giniePositions {
+				if gPos.CustomROIPercent != nil {
+					customROIMap[gPos.Symbol] = gPos.CustomROIPercent
+				}
+			}
+		}
+	}
+
+	// Then, get symbol-level custom ROI from Settings (for all symbols)
+	settingsManager := autopilot.GetSettingsManager()
+	if settingsManager != nil {
+		settings := settingsManager.GetCurrentSettings()
+		if settings != nil && settings.SymbolSettings != nil {
+			for symbol, symbolSettings := range settings.SymbolSettings {
+				// Only add symbol-level ROI if we don't already have position-level ROI
+				if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
+					if _, exists := customROIMap[symbol]; !exists {
+						customROIMap[symbol] = symbolSettings.CustomROIPercent
+					}
+				}
+			}
+		}
+	}
+
+	// Build response with enriched data
+	for i, pos := range activePositions {
+		enrichedPos := map[string]interface{}{
+			"symbol":               pos.Symbol,
+			"positionAmt":          pos.PositionAmt,
+			"entryPrice":           pos.EntryPrice,
+			"markPrice":            pos.MarkPrice,
+			"unRealizedProfit":     pos.UnrealizedProfit,
+			"liquidationPrice":     pos.LiquidationPrice,
+			"leverage":             pos.Leverage,
+			"maxNotionalValue":     pos.MaxNotionalValue,
+			"marginType":           pos.MarginType,
+			"positionSide":         pos.PositionSide,
+			"notional":             pos.Notional,
+			"isolatedWallet":       pos.IsolatedWallet,
+			"isolatedMargin":       pos.IsolatedMargin,
+			"isAutoAddMargin":      pos.IsAutoAddMargin,
+			"updateTime":           pos.UpdateTime,
+		}
+
+		// Add custom ROI if present (either position-level *float64 or symbol-level float64)
+		if customROI, exists := customROIMap[pos.Symbol]; exists {
+			enrichedPos["custom_roi_percent"] = customROI
+		}
+
+		enrichedPositions[i] = enrichedPos
+	}
+
+	c.JSON(http.StatusOK, enrichedPositions)
 }
 
 // handleSetLeverage sets leverage for a symbol
