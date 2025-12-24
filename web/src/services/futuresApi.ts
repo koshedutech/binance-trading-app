@@ -1664,6 +1664,50 @@ class FuturesAPIService {
     const { data } = await this.client.get(`/modes/performance/${mode}`);
     return data;
   }
+
+  // ==================== TRADE HISTORY & PERFORMANCE ====================
+
+  async getTradeHistoryWithDateRange(startDate?: string, endDate?: string): Promise<{
+    trades: GinieTradeResult[];
+    count: number;
+  }> {
+    const params: Record<string, string> = {};
+    if (startDate) params.start = startDate;
+    if (endDate) params.end = endDate;
+    const { data } = await this.client.get('/ginie/trade-history', { params });
+    return data;
+  }
+
+  async getPerformanceMetrics(startDate?: string, endDate?: string): Promise<any> {
+    const params: Record<string, string> = {};
+    if (startDate) params.start = startDate;
+    if (endDate) params.end = endDate;
+    const { data } = await this.client.get('/ginie/performance-metrics', { params });
+    return data;
+  }
+
+  // ==================== LLM DIAGNOSTICS ====================
+
+  async getLLMDiagnostics(): Promise<{
+    switches: Array<{
+      timestamp: string;
+      symbol: string;
+      action: 'enable' | 'disable';
+      reason: string;
+    }>;
+    count: number;
+  }> {
+    const { data } = await this.client.get('/ginie/llm-diagnostics');
+    return data;
+  }
+
+  async resetLLMDiagnostics(): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/ginie/llm-diagnostics/reset', {});
+    return data;
+  }
 }
 
 // ==================== MARKET MOVERS TYPES ====================

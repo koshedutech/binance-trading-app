@@ -75,6 +75,7 @@ export default function GiniePanel() {
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'strategy'>('all');
   // Trend Timeframes state
   const [trendTimeframes, setTrendTimeframes] = useState({
+    ultrafast: '5m',
     scalp: '15m',
     swing: '1h',
     position: '4h',
@@ -84,6 +85,7 @@ export default function GiniePanel() {
   const [editingTimeframes, setEditingTimeframes] = useState(false);
   // SL/TP Configuration state
   const [sltpConfig, setSltpConfig] = useState({
+    ultrafast: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.1, trailing_activation: 0.2 },
     scalp: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.3, trailing_activation: 0.5 },
     swing: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 1.5, trailing_activation: 1.0 },
     position: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 3.0, trailing_activation: 2.0 },
@@ -98,7 +100,16 @@ export default function GiniePanel() {
   });
   const [savingSLTP, setSavingSLTP] = useState(false);
   const [editingSLTP, setEditingSLTP] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<'scalp' | 'swing' | 'position'>('swing');
+  const [selectedMode, setSelectedMode] = useState<'ultrafast' | 'scalp' | 'swing' | 'position'>('swing');
+  // Trade history with full decision details
+  const [tradeHistory, setTradeHistory] = useState<any[]>([]);
+  const [expandedTrade, setExpandedTrade] = useState<string | null>(null);
+  const [selectedDateRange, setSelectedDateRange] = useState({ start: '', end: '' });
+  // LLM diagnostics tracking
+  const [llmSwitches, setLlmSwitches] = useState<any[]>([]);
+  // Performance metrics with live data
+  const [performanceMetrics, setPerformanceMetrics] = useState<any>(null);
+  const [loadingPerformance, setLoadingPerformance] = useState(false);
 
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
 
@@ -212,6 +223,9 @@ export default function GiniePanel() {
     fetchSignalLogs();
     fetchTrendTimeframes(); // Fetch trend timeframe configuration
     fetchSLTPConfig(); // Fetch SL/TP configuration
+    fetchTradeHistory(); // Fetch trade history
+    fetchPerformanceMetrics(); // Fetch performance metrics
+    fetchLLMSwitches(); // Fetch LLM diagnostics
     syncPositionsOnLoad(); // Auto-sync positions on mount
     const interval = setInterval(() => {
       fetchStatus();
@@ -525,6 +539,7 @@ export default function GiniePanel() {
     setSavingTimeframes(true);
     try {
       const result = await futuresApi.updateGinieTrendTimeframes({
+        ultrafast_timeframe: trendTimeframes.ultrafast,
         scalp_timeframe: trendTimeframes.scalp,
         swing_timeframe: trendTimeframes.swing,
         position_timeframe: trendTimeframes.position,
@@ -587,8 +602,51 @@ export default function GiniePanel() {
     }
   };
 
+  const fetchTradeHistory = async () => {
+    try {
+      const result = await futuresApi.getTradeHistoryWithDateRange(selectedDateRange.start, selectedDateRange.end);
+      setTradeHistory(result.trades || []);
+    } catch (err) {
+      console.error('Failed to fetch trade history:', err);
+    }
+  };
+
+  const fetchPerformanceMetrics = async () => {
+    setLoadingPerformance(true);
+    try {
+      const result = await futuresApi.getPerformanceMetrics(selectedDateRange.start, selectedDateRange.end);
+      setPerformanceMetrics(result);
+    } catch (err) {
+      console.error('Failed to fetch performance metrics:', err);
+    } finally {
+      setLoadingPerformance(false);
+    }
+  };
+
+  const fetchLLMSwitches = async () => {
+    try {
+      const result = await futuresApi.getLLMDiagnostics();
+      setLlmSwitches(result.switches || []);
+    } catch (err) {
+      console.error('Failed to fetch LLM diagnostics:', err);
+    }
+  };
+
+  const handleResetLLMDiagnostics = async () => {
+    if (!window.confirm('Reset all LLM diagnostic data? This cannot be undone.')) return;
+    try {
+      await futuresApi.resetLLMDiagnostics();
+      setSuccessMsg('LLM diagnostics reset');
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchLLMSwitches();
+    } catch (err) {
+      setError('Failed to reset LLM diagnostics');
+    }
+  };
+
   const getModeColor = (mode: string) => {
     switch (mode) {
+      case 'ultrafast': return 'text-orange-400';
       case 'scalp': return 'text-yellow-400';
       case 'swing': return 'text-blue-400';
       case 'position': return 'text-purple-400';
@@ -598,6 +656,8 @@ export default function GiniePanel() {
 
   const getStatusBadge = (scanStatus: string) => {
     switch (scanStatus) {
+      case 'ULTRAFAST-READY':
+        return <span className="px-2 py-0.5 bg-orange-900/50 text-orange-400 rounded text-xs">UF</span>;
       case 'SCALP-READY':
         return <span className="px-2 py-0.5 bg-yellow-900/50 text-yellow-400 rounded text-xs">SCALP</span>;
       case 'SWING-READY':
@@ -1541,8 +1601,41 @@ export default function GiniePanel() {
       )}
 
       {/* History Tab */}
-      {activeTab === 'history' && autopilotStatus?.trade_history && (
+      {activeTab === 'history' && (
         <div className="space-y-2">
+          {/* Date Range Filter */}
+          <div className="flex items-center gap-2 mb-2 text-xs">
+            <span className="text-gray-400">From:</span>
+            <input
+              type="date"
+              value={selectedDateRange.start}
+              onChange={(e) => {
+                setSelectedDateRange({...selectedDateRange, start: e.target.value});
+                fetchTradeHistory();
+              }}
+              className="px-2 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+            />
+            <span className="text-gray-400">To:</span>
+            <input
+              type="date"
+              value={selectedDateRange.end}
+              onChange={(e) => {
+                setSelectedDateRange({...selectedDateRange, end: e.target.value});
+                fetchTradeHistory();
+              }}
+              className="px-2 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+            />
+            <button
+              onClick={() => {
+                setSelectedDateRange({start: '', end: ''});
+                fetchTradeHistory();
+              }}
+              className="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300"
+            >
+              Clear
+            </button>
+          </div>
+
           {/* Source Filter for History */}
           <div className="flex items-center gap-1 mb-2">
             <span className="text-xs text-gray-400 mr-1">Source:</span>
@@ -1562,18 +1655,22 @@ export default function GiniePanel() {
               </button>
             ))}
           </div>
+
           <div className="space-y-1 max-h-60 overflow-y-auto">
-            {autopilotStatus.trade_history
-              .filter(trade => sourceFilter === 'all' || trade.source === sourceFilter)
-              .length === 0 ? (
+            {tradeHistory.length === 0 && (!autopilotStatus?.trade_history || autopilotStatus.trade_history.length === 0) ? (
               <div className="text-center text-gray-500 py-4">
                 No {sourceFilter === 'all' ? '' : sourceFilter + ' '}trade history yet
               </div>
             ) : (
-              autopilotStatus.trade_history
+              (tradeHistory.length > 0 ? tradeHistory : autopilotStatus?.trade_history || [])
                 .filter(trade => sourceFilter === 'all' || trade.source === sourceFilter)
                 .slice().reverse().map((trade, idx) => (
-                  <TradeHistoryRow key={`${trade.symbol}-${idx}`} trade={trade} />
+                  <TradeHistoryRow
+                    key={`${trade.symbol}-${idx}`}
+                    trade={trade}
+                    expanded={expandedTrade === `${trade.symbol}-${idx}`}
+                    onToggle={() => setExpandedTrade(expandedTrade === `${trade.symbol}-${idx}` ? null : `${trade.symbol}-${idx}`)}
+                  />
                 ))
             )}
           </div>
@@ -2102,13 +2199,140 @@ export default function GiniePanel() {
               )}
             </div>
           </div>
+
+          {/* LLM Switches Tracking */}
+          <div className="mt-4 pt-4 border-t border-gray-700">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-gray-400 flex items-center gap-1">
+                <Sparkles className="w-3.5 h-3.5" /> LLM Switches
+              </div>
+              <button
+                onClick={handleResetLLMDiagnostics}
+                className="px-2 py-0.5 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] transition-colors"
+              >
+                Reset
+              </button>
+            </div>
+
+            {llmSwitches.length === 0 ? (
+              <p className="text-center text-gray-500 py-2 text-xs">No LLM switches recorded</p>
+            ) : (
+              <div className="space-y-1 max-h-24 overflow-y-auto">
+                {llmSwitches.slice(-20).reverse().map((sw, idx) => (
+                  <div key={idx} className="bg-gray-700/30 rounded p-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1">
+                        <span className="text-gray-500">{new Date(sw.timestamp).toLocaleTimeString()}</span>
+                        <span className="text-white font-medium">{sw.symbol}</span>
+                        <span className={`px-1 py-0.5 rounded text-[9px] ${
+                          sw.action === 'enable' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
+                        }`}>
+                          {sw.action.toUpperCase()}
+                        </span>
+                      </div>
+                      <span className="text-gray-400 text-[9px]">{sw.reason}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {/* Performance Tab */}
       {activeTab === 'performance' && (
-        <div className="max-h-96 overflow-y-auto">
-          <SymbolPerformancePanel />
+        <div className="space-y-2">
+          {/* Reload Button */}
+          <button
+            onClick={() => {
+              fetchPerformanceMetrics();
+            }}
+            disabled={loadingPerformance}
+            className="w-full px-2 py-1 bg-green-900/30 hover:bg-green-900/50 disabled:bg-gray-700 text-green-400 disabled:text-gray-500 rounded text-xs transition-colors"
+          >
+            {loadingPerformance ? 'Loading...' : 'Refresh Performance Data'}
+          </button>
+
+          {/* Performance Summary */}
+          {performanceMetrics && (
+            <div className="max-h-96 overflow-y-auto space-y-2">
+              {/* Overall Stats */}
+              <div className="grid grid-cols-4 gap-2">
+                <div className="bg-gray-700/30 rounded p-2">
+                  <div className="text-[10px] text-gray-400">Total PnL</div>
+                  <div className={`text-sm font-bold ${(performanceMetrics.total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {formatUSD(performanceMetrics.total_pnl || 0)}
+                  </div>
+                </div>
+                <div className="bg-gray-700/30 rounded p-2">
+                  <div className="text-[10px] text-gray-400">Total Trades</div>
+                  <div className="text-sm font-bold text-white">{performanceMetrics.total_trades || 0}</div>
+                </div>
+                <div className="bg-gray-700/30 rounded p-2">
+                  <div className="text-[10px] text-gray-400">Win Rate</div>
+                  <div className="text-sm font-bold text-green-400">
+                    {performanceMetrics.total_trades > 0
+                      ? ((performanceMetrics.winning_trades || 0) / performanceMetrics.total_trades * 100).toFixed(1)
+                      : 0}%
+                  </div>
+                </div>
+                <div className="bg-gray-700/30 rounded p-2">
+                  <div className="text-[10px] text-gray-400">Avg Win/Loss</div>
+                  <div className="text-sm font-bold text-blue-400">
+                    {((performanceMetrics.total_pnl || 0) / Math.max(performanceMetrics.total_trades || 1, 1)).toFixed(2)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Per-Coin Performance */}
+              {performanceMetrics.coin_metrics && Object.entries(performanceMetrics.coin_metrics).length > 0 && (
+                <div className="border-t border-gray-700 pt-2">
+                  <div className="text-xs font-medium text-gray-400 mb-2">Per-Coin Performance</div>
+                  <div className="space-y-1">
+                    {Object.entries(performanceMetrics.coin_metrics)
+                      .sort((a: any, b: any) => (b[1].total_pnl || 0) - (a[1].total_pnl || 0))
+                      .slice(0, 10)
+                      .map(([coin, metrics]: [string, any]) => (
+                        <div key={coin} className="bg-gray-700/30 rounded p-2 text-xs">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-white font-medium">{coin}</span>
+                            <span className={`font-bold ${(metrics.total_pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {formatUSD(metrics.total_pnl || 0)}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-4 gap-2 text-[10px] text-gray-400">
+                            <div>
+                              <span className="text-gray-500">Trades:</span> {metrics.total_trades || 0}
+                            </div>
+                            <div>
+                              <span className="text-gray-500">Wins:</span> {metrics.winning_trades || 0}
+                            </div>
+                            <div>
+                              <span className="text-gray-500">Rate:</span> {metrics.total_trades > 0 ? ((metrics.winning_trades || 0) / metrics.total_trades * 100).toFixed(0) : 0}%
+                            </div>
+                            <div>
+                              <span className="text-gray-500">Avg:</span> {((metrics.total_pnl || 0) / Math.max(metrics.total_trades || 1, 1)).toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              {/* SymbolPerformancePanel as fallback */}
+              <div className="border-t border-gray-700 pt-2">
+                <SymbolPerformancePanel />
+              </div>
+            </div>
+          )}
+
+          {!performanceMetrics && (
+            <div className="text-center text-gray-500 py-4 text-xs">
+              Click "Refresh Performance Data" to load metrics
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -2128,11 +2352,12 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
           <span className={`text-xs font-bold ${position.side === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
             {position.side}
           </span>
-          <span className={`text-xs uppercase ${
+          <span className={`text-xs uppercase font-bold ${
+            position.mode === 'ultrafast' ? 'text-orange-400' :
             position.mode === 'scalp' ? 'text-yellow-400' :
             position.mode === 'swing' ? 'text-blue-400' :
             'text-purple-400'
-          }`}>{position.mode}</span>
+          }`}>{position.mode === 'ultrafast' ? 'UF' : position.mode.slice(0, 3).toUpperCase()}</span>
           {/* Source Badge */}
           <span className={`px-1 py-0.5 rounded text-xs ${
             position.source === 'strategy' ? 'bg-purple-900/50 text-purple-400' : 'bg-blue-900/50 text-blue-400'
@@ -2203,35 +2428,85 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
 }
 
 // Trade History Row Component
-function TradeHistoryRow({ trade }: { trade: GinieTradeResult }) {
+function TradeHistoryRow({ trade, expanded = false, onToggle }: { trade: GinieTradeResult; expanded?: boolean; onToggle?: () => void }) {
   const time = new Date(trade.timestamp).toLocaleTimeString();
+  const date = new Date(trade.timestamp).toLocaleDateString();
 
   return (
-    <div className="flex items-center justify-between p-2 bg-gray-700/30 rounded text-xs">
-      <div className="flex items-center gap-2">
-        <span className="text-gray-400">{time}</span>
-        <span className="text-white font-medium">{trade.symbol.replace('USDT', '')}</span>
-        <span className={`font-bold ${trade.side === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
-          {trade.side}
-        </span>
-        <span className="text-gray-400">{trade.action}</span>
-        {trade.source && (
-          <span className={`px-1 py-0.5 rounded ${
-            trade.source === 'strategy' ? 'bg-purple-900/30 text-purple-400' : 'bg-blue-900/30 text-blue-400'
-          }`}>
-            {trade.source === 'strategy' ? trade.strategy_name || 'Strategy' : 'AI'}
+    <div className="bg-gray-700/30 rounded">
+      <div
+        className="flex items-center justify-between p-2 cursor-pointer hover:bg-gray-700/50 transition-colors"
+        onClick={onToggle}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-gray-500 text-xs">{date} {time}</span>
+          <span className="text-white font-medium">{trade.symbol.replace('USDT', '')}</span>
+          <span className={`font-bold text-xs ${trade.side === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
+            {trade.side}
           </span>
-        )}
-        {trade.tp_level && trade.tp_level > 0 && (
-          <span className="px-1 py-0.5 bg-green-900/30 text-green-400 rounded">TP{trade.tp_level}</span>
-        )}
+          <span className="text-gray-400 text-xs">{trade.action}</span>
+          {trade.source && (
+            <span className={`px-1 py-0.5 rounded text-xs ${
+              trade.source === 'strategy' ? 'bg-purple-900/30 text-purple-400' : 'bg-blue-900/30 text-blue-400'
+            }`}>
+              {trade.source === 'strategy' ? trade.strategy_name || 'Strategy' : 'AI'}
+            </span>
+          )}
+          {trade.mode && (
+            <span className={`px-1 py-0.5 rounded text-xs font-bold ${
+              trade.mode === 'ultrafast' ? 'text-orange-400' :
+              trade.mode === 'scalp' ? 'text-yellow-400' :
+              trade.mode === 'swing' ? 'text-blue-400' :
+              'text-purple-400'
+            }`}>
+              {trade.mode === 'ultrafast' ? 'UF' : trade.mode.slice(0, 3).toUpperCase()}
+            </span>
+          )}
+          {trade.tp_level && trade.tp_level > 0 && (
+            <span className="px-1 py-0.5 bg-green-900/30 text-green-400 rounded text-xs">TP{trade.tp_level}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-gray-400 text-xs">{Number(trade.quantity || 0).toFixed(4)}</span>
+          <span className={`font-bold text-xs ${(trade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {formatUSD(trade.pnl || 0)}
+          </span>
+          {onToggle && (expanded ? <ChevronUp className="w-3 h-3 text-gray-400" /> : <ChevronDown className="w-3 h-3 text-gray-400" />)}
+        </div>
       </div>
-      <div className="flex items-center gap-2">
-        <span className="text-gray-400">{Number(trade.quantity || 0).toFixed(4)}</span>
-        <span className={`font-bold ${(trade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-          {formatUSD(trade.pnl || 0)}
-        </span>
-      </div>
+
+      {expanded && (
+        <div className="border-t border-gray-600 p-2 bg-gray-800/50 space-y-2 text-xs">
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <span className="text-gray-500">Entry Price:</span>
+              <div className="text-white font-mono">{Number(trade.entry_price || 0).toFixed(8)}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">Exit Price:</span>
+              <div className="text-white font-mono">{Number(trade.exit_price || 0).toFixed(8)}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">Entry Time:</span>
+              <div className="text-white">{new Date(trade.entry_time || 0).toLocaleString()}</div>
+            </div>
+            <div>
+              <span className="text-gray-500">Exit Time:</span>
+              <div className="text-white">{new Date(trade.timestamp).toLocaleString()}</div>
+            </div>
+          </div>
+          {trade.decision_details && (
+            <div className="mt-2 p-2 bg-gray-900/50 rounded border border-gray-700">
+              <span className="text-gray-400">Decision Details:</span>
+              <div className="text-gray-300 mt-1 whitespace-pre-wrap text-xs max-h-32 overflow-y-auto">
+                {typeof trade.decision_details === 'string'
+                  ? trade.decision_details
+                  : JSON.stringify(trade.decision_details, null, 2)}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
