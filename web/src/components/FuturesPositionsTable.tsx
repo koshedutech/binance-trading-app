@@ -54,6 +54,10 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   const [tpValue, setTpValue] = useState<string>('');
   const [slValue, setSlValue] = useState<string>('');
   const [savingTPSL, setSavingTPSL] = useState(false);
+  const [editingROI, setEditingROI] = useState<string | null>(null);
+  const [roiValue, setRoiValue] = useState<string>('');
+  const [saveForFuture, setSaveForFuture] = useState<boolean>(false);
+  const [savingROI, setSavingROI] = useState(false);
   const [tradingMode, setTradingMode] = useState<'live' | 'paper' | null>(null);
   const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
 
@@ -164,6 +168,45 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     }
   };
 
+  const startEditROI = (symbol: string, currentROI?: number) => {
+    setEditingROI(symbol);
+    setRoiValue(currentROI ? currentROI.toString() : '');
+    setSaveForFuture(false);
+  };
+
+  const cancelEditROI = () => {
+    setEditingROI(null);
+    setRoiValue('');
+    setSaveForFuture(false);
+  };
+
+  const saveROI = async (symbol: string) => {
+    setSavingROI(true);
+    try {
+      const roiPercent = roiValue ? parseFloat(roiValue) : 0;
+
+      // Validation
+      if (roiPercent < 0 || roiPercent > 1000) {
+        alert('ROI % must be between 0-1000');
+        return;
+      }
+
+      await futuresApi.setPositionROITarget(symbol, roiPercent, saveForFuture);
+
+      // Refresh positions to get updated data
+      await fetchPositions();
+
+      setEditingROI(null);
+      setRoiValue('');
+      setSaveForFuture(false);
+    } catch (err) {
+      console.error('Error saving ROI target:', err);
+      alert('Failed to save ROI target');
+    } finally {
+      setSavingROI(false);
+    }
+  };
+
   if (activePositions.length === 0) {
     return (
       <div className="bg-gray-900 rounded-lg border border-gray-700 p-6">
@@ -222,6 +265,12 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                 </div>
               </th>
               <th className="text-right py-3 px-4 font-medium">PnL (ROE%)</th>
+              <th className="text-center py-3 px-4 font-medium">
+                <div className="flex items-center justify-center gap-1">
+                  <TrendingUp className="w-3 h-3 text-yellow-500" />
+                  ROI Target %
+                </div>
+              </th>
               <th className="text-center py-3 px-4 font-medium">Actions</th>
             </tr>
           </thead>
@@ -426,10 +475,69 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                     )}
                   </td>
 
+                  {/* ROI Target */}
+                  <td className="py-3 px-4 text-center">
+                    {editingROI === position.symbol ? (
+                      <div className="flex flex-col gap-1">
+                        <input
+                          type="number"
+                          value={roiValue}
+                          onChange={(e) => setRoiValue(e.target.value)}
+                          placeholder="ROI %"
+                          className="w-20 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs text-center"
+                          step="0.1"
+                          min="0"
+                          max="1000"
+                        />
+                        <label className="flex items-center gap-1 text-xs text-gray-400">
+                          <input
+                            type="checkbox"
+                            checked={saveForFuture}
+                            onChange={(e) => setSaveForFuture(e.target.checked)}
+                            className="w-3 h-3"
+                          />
+                          Save
+                        </label>
+                      </div>
+                    ) : (position as any).custom_roi_percent ? (
+                      <div>
+                        <div className="font-mono text-xs text-yellow-400">
+                          {((position as any).custom_roi_percent).toFixed(2)}%
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          (custom)
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-gray-500">
+                        <div>-</div>
+                        <div className="text-xs text-gray-600">(auto)</div>
+                      </div>
+                    )}
+                  </td>
+
                   {/* Actions */}
                   <td className="py-3 px-4">
                     <div className="flex items-center justify-center gap-1">
-                      {isEditing ? (
+                      {editingROI === position.symbol ? (
+                        <>
+                          <button
+                            onClick={() => saveROI(position.symbol)}
+                            disabled={savingROI}
+                            className="p-1.5 bg-green-500/20 hover:bg-green-500/30 text-green-500 rounded"
+                            title="Save ROI Target"
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={cancelEditROI}
+                            className="p-1.5 bg-gray-500/20 hover:bg-gray-500/30 text-gray-400 rounded"
+                            title="Cancel"
+                          >
+                            <XCircle className="w-3 h-3" />
+                          </button>
+                        </>
+                      ) : isEditing ? (
                         <>
                           <button
                             onClick={() => saveTPSL(position.symbol, position.positionSide)}
@@ -456,9 +564,16 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                               slOrder?.stopPrice
                             )}
                             className="p-1.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-400 rounded"
-                            title="Set TP/SL"
+                            title="Edit TP/SL/ROI"
                           >
                             <Edit2 className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => startEditROI(position.symbol, (position as any).custom_roi_percent)}
+                            className="p-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 rounded"
+                            title="Set ROI Target"
+                          >
+                            <TrendingUp className="w-3 h-3" />
                           </button>
                           <button
                             onClick={() => handleClosePosition(position.symbol)}

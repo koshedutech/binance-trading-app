@@ -1013,9 +1013,8 @@ func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 		}
 	}
 
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	// Get current settings BEFORE acquiring the lock to avoid deadlock
+	// (GetCurrentSettings acquires RLock internally)
 	settings := sm.GetCurrentSettings()
 
 	if ultrafastTF != "" {

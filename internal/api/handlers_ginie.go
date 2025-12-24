@@ -972,14 +972,14 @@ func (s *Server) handleSetPositionROITarget(c *gin.Context) {
 	if req.SaveForFuture {
 		settingsManager := autopilot.GetSettingsManager()
 		if err := settingsManager.UpdateSymbolROITarget(symbol, req.ROIPercent); err != nil {
-			logger.Printf("[API] Failed to save symbol ROI target: %v", err)
+			fmt.Printf("[API] Failed to save symbol ROI target: %v\n", err)
 			errorResponse(c, http.StatusInternalServerError, "Failed to save symbol ROI target")
 			return
 		}
-		logger.Printf("[API] Saved custom ROI %.2f%% for symbol %s to settings", req.ROIPercent, symbol)
+		fmt.Printf("[API] Saved custom ROI %.2f%% for symbol %s to settings\n", req.ROIPercent, symbol)
 	}
 
-	logger.Printf("[API] Set custom ROI %.2f%% for position %s (save_for_future=%v)",
+	fmt.Printf("[API] Set custom ROI %.2f%% for position %s (save_for_future=%v)\n",
 		req.ROIPercent, symbol, req.SaveForFuture)
 
 	c.JSON(http.StatusOK, gin.H{

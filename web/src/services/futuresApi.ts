@@ -584,6 +584,24 @@ class FuturesAPIService {
     return data;
   }
 
+  async setPositionROITarget(
+    symbol: string,
+    roiPercent: number,
+    saveForFuture: boolean = false
+  ): Promise<{
+    success: boolean;
+    message: string;
+    symbol: string;
+    roi_percent: number;
+    save_for_future: boolean;
+  }> {
+    const { data } = await this.client.post(`/ginie/positions/${symbol}/roi-target`, {
+      roi_percent: roiPercent,
+      save_for_future: saveForFuture,
+    });
+    return data;
+  }
+
   async getPositionOrders(symbol: string): Promise<{
     symbol: string;
     open_orders: FuturesOrder[];
