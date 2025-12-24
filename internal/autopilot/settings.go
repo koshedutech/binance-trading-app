@@ -127,6 +127,7 @@ type SymbolSettings struct {
 	SizeMultiplier      float64                   `json:"size_multiplier"`      // Multiplier for position size (1.0 = normal)
 	LeverageOverride    int                       `json:"leverage_override"`    // Override leverage (0 = use global)
 	Enabled             bool                      `json:"enabled"`              // Whether to trade this symbol
+	CustomROIPercent    float64                   `json:"custom_roi_percent"`   // Custom ROI% for early profit booking (0 = use mode defaults)
 	Notes               string                    `json:"notes"`                // User notes about this symbol
 
 	// Performance metrics (updated periodically)
@@ -1475,6 +1476,30 @@ func (sm *SettingsManager) GetSymbolSettings(symbol string) *SymbolSettings {
 		SizeMultiplier: 1.0,
 		Enabled:        true,
 	}
+}
+
+// UpdateSymbolROITarget updates the custom ROI% for a symbol
+// If roiPercent is 0, removes the custom ROI (reverts to mode defaults)
+func (sm *SettingsManager) UpdateSymbolROITarget(symbol string, roiPercent float64) error {
+	settings := sm.GetCurrentSettings()
+
+	if settings.SymbolSettings == nil {
+		settings.SymbolSettings = make(map[string]*SymbolSettings)
+	}
+
+	// Get or create symbol settings
+	if settings.SymbolSettings[symbol] == nil {
+		settings.SymbolSettings[symbol] = &SymbolSettings{
+			Symbol:         symbol,
+			Enabled:        true,
+			Category:       PerformanceNeutral,
+			SizeMultiplier: 1.0,
+		}
+	}
+
+	settings.SymbolSettings[symbol].CustomROIPercent = roiPercent
+
+	return sm.SaveSettings(settings)
 }
 
 // GetEffectiveConfidence returns the effective min confidence for a symbol

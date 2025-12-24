@@ -251,6 +251,9 @@ type GiniePosition struct {
 	UltraFastSignal       *UltraFastSignal `json:"ultra_fast_signal,omitempty"`       // Signal that triggered entry
 	UltraFastTargetPercent float64         `json:"ultra_fast_target_percent,omitempty"` // Fee-aware profit target %
 	MaxHoldTime           time.Duration    `json:"max_hold_time,omitempty"`            // 3s for ultra-fast
+
+	// Early Profit Booking (per-position custom ROI target)
+	CustomROIPercent *float64 `json:"custom_roi_percent,omitempty"` // Custom ROI% for this position (nil = use mode defaults)
 }
 
 // GinieTradeResult tracks the result of a trade action with full signal info for study
@@ -307,6 +310,14 @@ type GinieEntryParams struct {
 	TakeProfits  []float64 `json:"take_profits"`
 	Leverage     int       `json:"leverage"`
 	RiskReward   float64   `json:"risk_reward"`
+}
+
+// LLMSwitchEvent tracks when LLM enables or disables a coin
+type LLMSwitchEvent struct {
+	Timestamp time.Time `json:"timestamp"`
+	Symbol    string    `json:"symbol"`
+	Action    string    `json:"action"`    // "enable" or "disable"
+	Reason    string    `json:"reason"`    // Explanation for the switch
 }
 
 // GinieSignalLog tracks all signals generated with executed/rejected status
@@ -504,6 +515,10 @@ type GinieAutopilot struct {
 	tradeHistory  []GinieTradeResult
 	maxHistory    int
 
+	// LLM switch tracking
+	llmSwitches   []LLMSwitchEvent
+	maxLLMSwitches int
+
 	// Daily tracking
 	dailyTrades   int
 	dailyPnL      float64
@@ -594,6 +609,8 @@ func NewGinieAutopilot(
 		slUpdateHistory:   make(map[string]*SLUpdateHistory),
 		tradeHistory:      make([]GinieTradeResult, 0, 1000),
 		maxHistory:        1000, // Increased for study purposes
+		llmSwitches:       make([]LLMSwitchEvent, 0, 500),
+		maxLLMSwitches:    500, // Keep last 500 LLM switch events
 		dayStart:             time.Now().Truncate(24 * time.Hour),
 		volatilityRegimes:    make(map[string]*VolatilityRegime),
 		lastRegimeUpdate:     make(map[string]time.Time),
@@ -845,6 +862,82 @@ func (ga *GinieAutopilot) GetTradeHistory(limit int) []GinieTradeResult {
 	result := make([]GinieTradeResult, limit)
 	copy(result, ga.tradeHistory[start:])
 	return result
+}
+
+// GetTradeHistoryInDateRange returns trade history within a date range
+func (ga *GinieAutopilot) GetTradeHistoryInDateRange(startTime, endTime time.Time) []GinieTradeResult {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	var result []GinieTradeResult
+	for _, trade := range ga.tradeHistory {
+		if (startTime.IsZero() || trade.Timestamp.After(startTime) || trade.Timestamp.Equal(startTime)) &&
+			(endTime.IsZero() || trade.Timestamp.Before(endTime) || trade.Timestamp.Equal(endTime)) {
+			result = append(result, trade)
+		}
+	}
+	return result
+}
+
+// RecordLLMSwitch records an LLM switch event (enable/disable coin)
+func (ga *GinieAutopilot) RecordLLMSwitch(symbol string, action string, reason string) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	event := LLMSwitchEvent{
+		Timestamp: time.Now(),
+		Symbol:    symbol,
+		Action:    action,
+		Reason:    reason,
+	}
+
+	ga.llmSwitches = append(ga.llmSwitches, event)
+
+	// Keep only the last maxLLMSwitches events
+	if len(ga.llmSwitches) > ga.maxLLMSwitches {
+		ga.llmSwitches = ga.llmSwitches[len(ga.llmSwitches)-ga.maxLLMSwitches:]
+	}
+}
+
+// GetLLMSwitches returns recent LLM switch events (limit most recent)
+func (ga *GinieAutopilot) GetLLMSwitches(limit int) []LLMSwitchEvent {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	if limit <= 0 || limit > len(ga.llmSwitches) {
+		limit = len(ga.llmSwitches)
+	}
+
+	start := len(ga.llmSwitches) - limit
+	if start < 0 {
+		start = 0
+	}
+
+	result := make([]LLMSwitchEvent, limit)
+	copy(result, ga.llmSwitches[start:])
+	return result
+}
+
+// GetLLMSwitchesInDateRange returns LLM switches within a date range
+func (ga *GinieAutopilot) GetLLMSwitchesInDateRange(startTime, endTime time.Time) []LLMSwitchEvent {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	var result []LLMSwitchEvent
+	for _, event := range ga.llmSwitches {
+		if (startTime.IsZero() || event.Timestamp.After(startTime) || event.Timestamp.Equal(startTime)) &&
+			(endTime.IsZero() || event.Timestamp.Before(endTime) || event.Timestamp.Equal(endTime)) {
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+// ClearLLMSwitches clears all LLM switch history
+func (ga *GinieAutopilot) ClearLLMSwitches() {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.llmSwitches = make([]LLMSwitchEvent, 0, 500)
 }
 
 // Start starts the Ginie autopilot
@@ -1969,7 +2062,11 @@ func (ga *GinieAutopilot) checkStopLoss(pos *GiniePosition, currentPrice float64
 // checkTakeProfits checks and executes take profit levels
 // Uses tolerance-based comparison to avoid floating point precision issues
 // shouldBookEarlyProfit checks if position should be closed early based on ROI threshold
-// Returns true if ROI after fees exceeds the threshold for the current trading mode
+// Priority order for threshold selection:
+//   1. Position.CustomROIPercent (temporary, per-position override)
+//   2. SymbolSettings.CustomROIPercent (persistent, per-symbol override)
+//   3. Mode-based thresholds (SCALP=5%, SWING=8%, POSITION=10%, ULTRAFAST=3%)
+// Returns (shouldBook, currentROI, source) where source indicates which threshold was used
 func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice float64) (bool, float64, string) {
 	if !ga.config.EarlyProfitBookingEnabled || pos.CurrentTPLevel > 0 {
 		return false, 0, ""
@@ -1983,31 +2080,49 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 		return false, 0, ""
 	}
 
-	// Determine threshold based on trading mode
-	threshold := ga.config.PositionROIThreshold
-	modeStr := "position"
+	// Determine threshold: Custom position ROI > Custom symbol ROI > Mode-based threshold
+	var threshold float64
+	var source string
 
-	switch pos.Mode {
-	case GinieModeUltraFast:
-		threshold = ga.config.UltraFastScalpROIThreshold
-		modeStr = "ultra_fast_scalp"
-	case GinieModeScalp:
-		threshold = ga.config.ScalpROIThreshold
-		modeStr = "scalp"
-	case GinieModeSwing:
-		threshold = ga.config.SwingROIThreshold
-		modeStr = "swing"
-	case GinieModePosition:
-		threshold = ga.config.PositionROIThreshold
-		modeStr = "position"
+	// 1. Check position-level custom ROI (highest priority)
+	if pos.CustomROIPercent != nil && *pos.CustomROIPercent > 0 {
+		threshold = *pos.CustomROIPercent
+		source = "position_custom"
+	} else {
+		// 2. Check symbol-level custom ROI (second priority)
+		settingsManager := GetSettingsManager()
+		symbolSettings := settingsManager.GetSymbolSettings(pos.Symbol)
+		if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
+			threshold = symbolSettings.CustomROIPercent
+			source = "symbol_custom"
+		} else {
+			// 3. Fallback to mode-based threshold (existing logic)
+			threshold = ga.config.PositionROIThreshold
+			source = "position_default"
+
+			switch pos.Mode {
+			case GinieModeUltraFast:
+				threshold = ga.config.UltraFastScalpROIThreshold
+				source = "ultra_fast_default"
+			case GinieModeScalp:
+				threshold = ga.config.ScalpROIThreshold
+				source = "scalp_default"
+			case GinieModeSwing:
+				threshold = ga.config.SwingROIThreshold
+				source = "swing_default"
+			case GinieModePosition:
+				threshold = ga.config.PositionROIThreshold
+				source = "position_default"
+			}
+		}
 	}
 
 	// Check if ROI exceeds threshold
 	if roiPercent >= threshold {
-		return true, roiPercent, modeStr
+		return true, roiPercent, source
 	}
 
-	return false, roiPercent, modeStr
+	return false, roiPercent, source
 }
 
 func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice float64, pnlPercent float64) int {

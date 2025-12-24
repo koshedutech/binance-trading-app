@@ -908,6 +908,89 @@ func (s *Server) handleRecalculateAdaptiveSLTP(c *gin.Context) {
 	})
 }
 
+// ==================== Per-Position ROI Target Handlers ====================
+
+// handleSetPositionROITarget sets custom ROI% target for a specific position
+func (s *Server) handleSetPositionROITarget(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	var req struct {
+		ROIPercent    float64 `json:"roi_percent"`      // Custom ROI% (0.1-1000)
+		SaveForFuture bool    `json:"save_for_future"`  // If true, save to SymbolSettings
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validation
+	if req.ROIPercent < 0 || req.ROIPercent > 1000 {
+		errorResponse(c, http.StatusBadRequest, "ROI percent must be between 0-1000%")
+		return
+	}
+
+	// Get the position
+	positions := giniePilot.GetPositions()
+	var targetPos *autopilot.GiniePosition
+	for _, pos := range positions {
+		if pos.Symbol == symbol {
+			targetPos = pos
+			break
+		}
+	}
+
+	if targetPos == nil {
+		errorResponse(c, http.StatusNotFound, fmt.Sprintf("Position not found: %s", symbol))
+		return
+	}
+
+	// Set custom ROI on position (in-memory)
+	if req.ROIPercent > 0 {
+		targetPos.CustomROIPercent = &req.ROIPercent
+	} else {
+		targetPos.CustomROIPercent = nil // Clear custom ROI
+	}
+
+	// Optionally save to SymbolSettings for future positions
+	if req.SaveForFuture {
+		settingsManager := autopilot.GetSettingsManager()
+		if err := settingsManager.UpdateSymbolROITarget(symbol, req.ROIPercent); err != nil {
+			logger.Printf("[API] Failed to save symbol ROI target: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save symbol ROI target")
+			return
+		}
+		logger.Printf("[API] Saved custom ROI %.2f%% for symbol %s to settings", req.ROIPercent, symbol)
+	}
+
+	logger.Printf("[API] Set custom ROI %.2f%% for position %s (save_for_future=%v)",
+		req.ROIPercent, symbol, req.SaveForFuture)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"message":         fmt.Sprintf("Custom ROI target set for %s", symbol),
+		"symbol":          symbol,
+		"roi_percent":     req.ROIPercent,
+		"save_for_future": req.SaveForFuture,
+	})
+}
+
 // ==================== Ginie Risk Level Handlers ====================
 
 // handleGetGinieRiskLevel returns the current Ginie risk level
@@ -1944,5 +2027,176 @@ func (s *Server) handleResetUltraFastStats(c *gin.Context) {
 			"today_trades": 0,
 			"daily_pnl":    0,
 		},
+	})
+}
+
+// handleGetGinieTradeHistoryWithDateRange returns trade history filtered by date range
+func (s *Server) handleGetGinieTradeHistoryWithDateRange(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	autopilot := controller.GetGinieAutopilot()
+	if autopilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Parse query parameters for date range
+	startStr := c.Query("start")
+	endStr := c.Query("end")
+
+	var startTime, endTime time.Time
+	var err error
+
+	// Parse start date if provided (format: 2025-12-24)
+	if startStr != "" {
+		startTime, err = time.Parse("2006-01-02", startStr)
+		if err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid start date format. Use YYYY-MM-DD: "+err.Error())
+			return
+		}
+	}
+
+	// Parse end date if provided (format: 2025-12-24)
+	if endStr != "" {
+		endTime, err = time.Parse("2006-01-02", endStr)
+		if err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid end date format. Use YYYY-MM-DD: "+err.Error())
+			return
+		}
+		// Include entire end date by moving to start of next day
+		endTime = endTime.Add(24 * time.Hour)
+	}
+
+	// Get trades in date range
+	var trades []interface{}
+	if startTime.IsZero() && endTime.IsZero() {
+		// No date filter, return recent trades
+		historyTrades := autopilot.GetTradeHistory(50)
+		for _, trade := range historyTrades {
+			trades = append(trades, trade)
+		}
+	} else {
+		historyTrades := autopilot.GetTradeHistoryInDateRange(startTime, endTime)
+		for _, trade := range historyTrades {
+			trades = append(trades, trade)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"trades":  trades,
+		"count":   len(trades),
+		"filters": gin.H{
+			"start_date": startStr,
+			"end_date":   endStr,
+		},
+	})
+}
+
+// handleGetGiniePerformanceMetrics returns performance metrics with optional date filtering
+func (s *Server) handleGetGiniePerformanceMetrics(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	autopilot := controller.GetGinieAutopilot()
+	if autopilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Parse query parameters for date range
+	startStr := c.Query("start")
+	endStr := c.Query("end")
+
+	var startTime, endTime time.Time
+	var err error
+
+	if startStr != "" {
+		startTime, err = time.Parse("2006-01-02", startStr)
+		if err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid start date format. Use YYYY-MM-DD: "+err.Error())
+			return
+		}
+	}
+
+	if endStr != "" {
+		endTime, err = time.Parse("2006-01-02", endStr)
+		if err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid end date format. Use YYYY-MM-DD: "+err.Error())
+			return
+		}
+		endTime = endTime.Add(24 * time.Hour)
+	}
+
+	// Get trades in date range
+	var trades interface{}
+	if startTime.IsZero() && endTime.IsZero() {
+		trades = autopilot.GetTradeHistory(1000)
+	} else {
+		trades = autopilot.GetTradeHistoryInDateRange(startTime, endTime)
+	}
+
+	// Return basic performance data
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"trades":  trades,
+		"date_filters": gin.H{
+			"start_date": startStr,
+			"end_date":   endStr,
+		},
+	})
+}
+
+// handleGetGinieLLMDiagnostics returns LLM switch history
+func (s *Server) handleGetGinieLLMDiagnostics(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	autopilot := controller.GetGinieAutopilot()
+	if autopilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Get all LLM switches
+	switches := autopilot.GetLLMSwitches(500)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"switches": switches,
+		"count":   len(switches),
+	})
+}
+
+// handleResetGinieLLMDiagnostics clears LLM diagnostic data
+func (s *Server) handleResetGinieLLMDiagnostics(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	autopilot := controller.GetGinieAutopilot()
+	if autopilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Clear LLM switch history
+	autopilot.ClearLLMSwitches()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "LLM diagnostic data cleared",
 	})
 }

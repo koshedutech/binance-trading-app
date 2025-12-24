@@ -163,6 +163,9 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/ginie/autopilot/config":          true,
 		"/api/futures/ginie/autopilot/positions":       true,
 		"/api/futures/ginie/autopilot/history":         true,
+		"/api/futures/ginie/trade-history":             true,
+		"/api/futures/ginie/performance-metrics":       true,
+		"/api/futures/ginie/llm-diagnostics":           true,
 		"/api/futures/ginie/circuit-breaker/status":    true,
 		"/api/futures/ginie/decisions":                 true,
 		"/api/futures/ginie/blocked-coins":             true,
@@ -543,6 +546,9 @@ func (s *Server) setupRoutes() {
 			// Ginie Adaptive SL/TP (recalculate for naked positions)
 			futures.POST("/ginie/positions/recalc-sltp", s.handleRecalculateAdaptiveSLTP)
 
+			// Ginie Per-Position ROI Target (custom early profit booking ROI%)
+			futures.POST("/ginie/positions/:symbol/roi-target", s.handleSetPositionROITarget)
+
 			// Ginie Risk Level endpoints
 			futures.GET("/ginie/risk-level", s.handleGetGinieRiskLevel)
 			futures.POST("/ginie/risk-level", s.handleSetGinieRiskLevel)
@@ -585,6 +591,14 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ultrafast/config", s.handleUpdateUltraFastConfig)
 			futures.POST("/ultrafast/toggle", s.handleToggleUltraFast)
 			futures.POST("/ultrafast/reset-stats", s.handleResetUltraFastStats)
+
+			// Enhanced Trade History and Performance Metrics (with date filtering)
+			futures.GET("/ginie/trade-history", s.handleGetGinieTradeHistoryWithDateRange)
+			futures.GET("/ginie/performance-metrics", s.handleGetGiniePerformanceMetrics)
+
+			// LLM Diagnostics endpoints (track LLM coin enable/disable events)
+			futures.GET("/ginie/llm-diagnostics", s.handleGetGinieLLMDiagnostics)
+			futures.POST("/ginie/llm-diagnostics/reset", s.handleResetGinieLLMDiagnostics)
 
 			// Strategy Performance endpoints (AI vs Strategy comparison)
 			futures.GET("/ginie/strategy-performance", s.handleGetStrategyPerformance)
