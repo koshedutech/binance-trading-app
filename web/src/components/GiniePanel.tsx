@@ -75,6 +75,7 @@ export default function GiniePanel() {
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'strategy'>('all');
   // Trend Timeframes state
   const [trendTimeframes, setTrendTimeframes] = useState({
+    ultra_fast: '5m',
     scalp: '15m',
     swing: '1h',
     position: '4h',
@@ -84,6 +85,7 @@ export default function GiniePanel() {
   const [editingTimeframes, setEditingTimeframes] = useState(false);
   // SL/TP Configuration state
   const [sltpConfig, setSltpConfig] = useState({
+    ultra_fast: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.1, trailing_activation: 0.2 },
     scalp: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.3, trailing_activation: 0.5 },
     swing: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 1.5, trailing_activation: 1.0 },
     position: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 3.0, trailing_activation: 2.0 },
@@ -98,7 +100,7 @@ export default function GiniePanel() {
   });
   const [savingSLTP, setSavingSLTP] = useState(false);
   const [editingSLTP, setEditingSLTP] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<'scalp' | 'swing' | 'position'>('swing');
+  const [selectedMode, setSelectedMode] = useState<'ultra_fast' | 'scalp' | 'swing' | 'position'>('swing');
   // Trade history with full decision details
   const [tradeHistory, setTradeHistory] = useState<any[]>([]);
   const [expandedTrade, setExpandedTrade] = useState<string | null>(null);
@@ -1059,6 +1061,8 @@ export default function GiniePanel() {
           <span className="text-xs text-gray-300 whitespace-nowrap">Timeframes:</span>
           {!editingTimeframes ? (
             <>
+              <span className="text-[10px] text-gray-500">UF:</span>
+              <span className="text-xs text-red-400 font-medium">{(trendTimeframes as any).ultra_fast}</span>
               <span className="text-[10px] text-gray-500">Scalp:</span>
               <span className="text-xs text-yellow-400 font-medium">{trendTimeframes.scalp}</span>
               <span className="text-[10px] text-gray-500">Swing:</span>
@@ -1072,6 +1076,16 @@ export default function GiniePanel() {
           ) : (
             <>
               <div className="flex-1 flex items-center gap-2">
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500">UF:</span>
+                  <select
+                    value={(trendTimeframes as any).ultra_fast}
+                    onChange={(e) => setTrendTimeframes({...trendTimeframes, ultra_fast: e.target.value} as any)}
+                    className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  >
+                    {validTimeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                  </select>
+                </div>
                 <div className="flex items-center gap-1">
                   <span className="text-[10px] text-gray-500">Scalp:</span>
                   <select
@@ -1148,7 +1162,7 @@ export default function GiniePanel() {
 
           {/* Mode Tabs - Always Visible */}
           <div className="flex gap-1 mr-2">
-            {(['scalp', 'swing', 'position'] as const).map(mode => (
+            {(['ultra_fast', 'scalp', 'swing', 'position'] as const).map(mode => (
               <button
                 key={mode}
                 onClick={() => setSelectedMode(mode)}
