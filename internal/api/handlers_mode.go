@@ -35,12 +35,16 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 		if alloc, exists := allocationsMap[mode]; exists {
 			// Type assert to get individual fields
 			if allocMap, ok := alloc.(map[string]interface{}); ok {
-				// Extract and convert capital_utilization to a float64
-				var capacityPercent float64 = 0.0
-				if cuValue, exists := allocMap["capital_utilization"]; exists && cuValue != nil {
-					// Type assert to float64
-					if cuFloat, ok := cuValue.(float64); ok {
-						capacityPercent = cuFloat
+				// Convert capital_utilization to float64 to ensure proper JSON encoding
+				var capacityPercent float64 = 0
+				if cu, exists := allocMap["capital_utilization"]; exists && cu != nil {
+					switch v := cu.(type) {
+					case float64:
+						capacityPercent = v
+					case int:
+						capacityPercent = float64(v)
+					case int64:
+						capacityPercent = float64(v)
 					}
 				}
 
@@ -52,7 +56,7 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 					"available_usd":        allocMap["available_usd"],
 					"current_positions":    allocMap["current_positions"],
 					"max_positions":        allocMap["max_positions"],
-					"capacity_percent":     capacityPercent,
+					"capacity_percent":     capacityPercent,  // Explicitly convert to float64
 				})
 			}
 		}
