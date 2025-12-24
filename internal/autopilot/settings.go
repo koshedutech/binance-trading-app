@@ -3,6 +3,7 @@ package autopilot
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -210,6 +211,37 @@ type AutopilotSettings struct {
 	// Ginie divergence detection
 	GinieBlockOnDivergence bool `json:"ginie_block_on_divergence"` // Block trades when timeframe divergence detected
 
+	// Ginie SL/TP manual overrides (per mode) - if set (> 0), override ATR/LLM calculations
+	GinieSLPercentScalp    float64 `json:"ginie_sl_percent_scalp"`    // e.g., 1.0 (1%)
+	GinieTPPercentScalp    float64 `json:"ginie_tp_percent_scalp"`    // e.g., 2.0 (2%)
+	GinieSLPercentSwing    float64 `json:"ginie_sl_percent_swing"`    // e.g., 2.0 (2%)
+	GinieTPPercentSwing    float64 `json:"ginie_tp_percent_swing"`    // e.g., 6.0 (6%)
+	GinieSLPercentPosition float64 `json:"ginie_sl_percent_position"` // e.g., 3.0 (3%)
+	GinieTPPercentPosition float64 `json:"ginie_tp_percent_position"` // e.g., 10.0 (10%)
+
+	// Trailing stop configuration (per mode)
+	GinieTrailingStopEnabledScalp       bool    `json:"ginie_trailing_stop_enabled_scalp"`
+	GinieTrailingStopPercentScalp       float64 `json:"ginie_trailing_stop_percent_scalp"`       // e.g., 0.3%
+	GinieTrailingStopActivationScalp    float64 `json:"ginie_trailing_stop_activation_scalp"`    // e.g., 0.5% profit
+
+	GinieTrailingStopEnabledSwing       bool    `json:"ginie_trailing_stop_enabled_swing"`
+	GinieTrailingStopPercentSwing       float64 `json:"ginie_trailing_stop_percent_swing"`       // e.g., 1.5%
+	GinieTrailingStopActivationSwing    float64 `json:"ginie_trailing_stop_activation_swing"`    // e.g., 1.0% profit
+
+	GinieTrailingStopEnabledPosition    bool    `json:"ginie_trailing_stop_enabled_position"`
+	GinieTrailingStopPercentPosition    float64 `json:"ginie_trailing_stop_percent_position"`    // e.g., 3.0%
+	GinieTrailingStopActivationPosition float64 `json:"ginie_trailing_stop_activation_position"` // e.g., 2.0% profit
+
+	// TP mode configuration
+	GinieUseSingleTP      bool    `json:"ginie_use_single_tp"`       // true = 100% at TP1, false = 4-level
+	GinieSingleTPPercent  float64 `json:"ginie_single_tp_percent"`   // If single TP, this is the gain %
+
+	// TP allocation for multi-TP mode (if not using single TP)
+	GinieTP1Percent float64 `json:"ginie_tp1_percent"` // e.g., 25.0 (25%)
+	GinieTP2Percent float64 `json:"ginie_tp2_percent"` // e.g., 25.0 (25%)
+	GinieTP3Percent float64 `json:"ginie_tp3_percent"` // e.g., 25.0 (25%)
+	GinieTP4Percent float64 `json:"ginie_tp4_percent"` // e.g., 25.0 (25%)
+
 	// Ginie PnL statistics (persisted)
 	GinieTotalPnL      float64 `json:"ginie_total_pnl"`       // Lifetime realized PnL
 	GinieDailyPnL      float64 `json:"ginie_daily_pnl"`       // Today's realized PnL
@@ -408,6 +440,37 @@ func DefaultSettings() *AutopilotSettings {
 
 		// Ginie divergence detection
 		GinieBlockOnDivergence: true, // Default to safest mode (block on severe divergence)
+
+		// Ginie SL/TP manual overrides (0 = use ATR/LLM blend)
+		GinieSLPercentScalp:    0,   // Disabled, use ATR/LLM
+		GinieTPPercentScalp:    0,   // Disabled, use ATR/LLM
+		GinieSLPercentSwing:    0,   // Disabled, use ATR/LLM
+		GinieTPPercentSwing:    0,   // Disabled, use ATR/LLM
+		GinieSLPercentPosition: 0,   // Disabled, use ATR/LLM
+		GinieTPPercentPosition: 0,   // Disabled, use ATR/LLM
+
+		// Ginie trailing stop defaults (match current hardcoded values)
+		GinieTrailingStopEnabledScalp:       true,
+		GinieTrailingStopPercentScalp:       0.3,  // 0.3%
+		GinieTrailingStopActivationScalp:    0.5,  // After 0.5% profit
+
+		GinieTrailingStopEnabledSwing:       true,
+		GinieTrailingStopPercentSwing:       1.5,  // 1.5%
+		GinieTrailingStopActivationSwing:    1.0,  // After 1% profit
+
+		GinieTrailingStopEnabledPosition:    true,
+		GinieTrailingStopPercentPosition:    3.0,  // 3.0%
+		GinieTrailingStopActivationPosition: 2.0,  // After 2% profit
+
+		// Ginie TP mode (default to 4-level system)
+		GinieUseSingleTP:     false, // Use multi-TP
+		GinieSingleTPPercent: 5.0,   // If single TP enabled, 5% gain
+
+		// Ginie TP allocation (current default: 25% each)
+		GinieTP1Percent: 25.0,
+		GinieTP2Percent: 25.0,
+		GinieTP3Percent: 25.0,
+		GinieTP4Percent: 25.0,
 
 		// Auto Mode defaults (LLM-driven trading)
 		AutoModeEnabled:          false, // Disabled by default - user must opt in
@@ -944,6 +1007,113 @@ func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 		settings.GinieTrendTimeframePosition = positionTF
 	}
 	settings.GinieBlockOnDivergence = blockOnDivergence
+
+	return sm.SaveSettings(settings)
+}
+
+// ValidateSLTPPercents validates SL/TP percentage settings
+func ValidateSLTPPercents(slPct, tpPct float64) error {
+	if slPct < 0 || slPct > 20 {
+		return fmt.Errorf("SL percent must be between 0-20%%, got: %.2f", slPct)
+	}
+	if tpPct < 0 || tpPct > 50 {
+		return fmt.Errorf("TP percent must be between 0-50%%, got: %.2f", tpPct)
+	}
+	if slPct > 0 && tpPct > 0 && tpPct <= slPct {
+		return fmt.Errorf("TP (%.2f%%) must be greater than SL (%.2f%%)", tpPct, slPct)
+	}
+	return nil
+}
+
+// ValidateTPAllocation validates TP allocation percentages sum to 100
+func ValidateTPAllocation(tp1, tp2, tp3, tp4 float64) error {
+	total := tp1 + tp2 + tp3 + tp4
+	if math.Abs(total-100.0) > 0.1 {
+		return fmt.Errorf("TP allocation must sum to 100%%, got: %.2f%%", total)
+	}
+	if tp1 < 0 || tp2 < 0 || tp3 < 0 || tp4 < 0 {
+		return fmt.Errorf("TP percentages cannot be negative")
+	}
+	return nil
+}
+
+// UpdateGinieSLTPSettings updates SL/TP configuration for a specific mode
+func (sm *SettingsManager) UpdateGinieSLTPSettings(
+	mode string, // "scalp", "swing", "position"
+	slPercent, tpPercent float64,
+	trailingEnabled bool,
+	trailingPercent, trailingActivation float64,
+) error {
+	// Validate inputs
+	if err := ValidateSLTPPercents(slPercent, tpPercent); err != nil {
+		return err
+	}
+
+	if trailingPercent < 0 || trailingPercent > 10 {
+		return fmt.Errorf("trailing percent must be 0-10%%, got: %.2f", trailingPercent)
+	}
+
+	if trailingActivation < 0 || trailingActivation > 20 {
+		return fmt.Errorf("trailing activation must be 0-20%%, got: %.2f", trailingActivation)
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings := sm.GetCurrentSettings()
+
+	switch mode {
+	case "scalp":
+		settings.GinieSLPercentScalp = slPercent
+		settings.GinieTPPercentScalp = tpPercent
+		settings.GinieTrailingStopEnabledScalp = trailingEnabled
+		settings.GinieTrailingStopPercentScalp = trailingPercent
+		settings.GinieTrailingStopActivationScalp = trailingActivation
+	case "swing":
+		settings.GinieSLPercentSwing = slPercent
+		settings.GinieTPPercentSwing = tpPercent
+		settings.GinieTrailingStopEnabledSwing = trailingEnabled
+		settings.GinieTrailingStopPercentSwing = trailingPercent
+		settings.GinieTrailingStopActivationSwing = trailingActivation
+	case "position":
+		settings.GinieSLPercentPosition = slPercent
+		settings.GinieTPPercentPosition = tpPercent
+		settings.GinieTrailingStopEnabledPosition = trailingEnabled
+		settings.GinieTrailingStopPercentPosition = trailingPercent
+		settings.GinieTrailingStopActivationPosition = trailingActivation
+	default:
+		return fmt.Errorf("invalid mode: %s (must be scalp, swing, or position)", mode)
+	}
+
+	return sm.SaveSettings(settings)
+}
+
+// UpdateGinieTPMode updates the TP mode (single vs multi) and allocation
+func (sm *SettingsManager) UpdateGinieTPMode(
+	useSingleTP bool,
+	singleTPPercent float64,
+	tp1, tp2, tp3, tp4 float64,
+) error {
+	if useSingleTP {
+		if singleTPPercent <= 0 || singleTPPercent > 50 {
+			return fmt.Errorf("single TP percent must be 0-50%%, got: %.2f", singleTPPercent)
+		}
+	} else {
+		if err := ValidateTPAllocation(tp1, tp2, tp3, tp4); err != nil {
+			return err
+		}
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings := sm.GetCurrentSettings()
+	settings.GinieUseSingleTP = useSingleTP
+	settings.GinieSingleTPPercent = singleTPPercent
+	settings.GinieTP1Percent = tp1
+	settings.GinieTP2Percent = tp2
+	settings.GinieTP3Percent = tp3
+	settings.GinieTP4Percent = tp4
 
 	return sm.SaveSettings(settings)
 }

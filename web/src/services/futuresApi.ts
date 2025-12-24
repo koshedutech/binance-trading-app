@@ -1244,6 +1244,90 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== GINIE SL/TP CONFIGURATION ====================
+
+  async getGinieSLTPConfig(): Promise<{
+    success: boolean;
+    sltp_config: {
+      scalp: {
+        sl_percent: number;
+        tp_percent: number;
+        trailing_enabled: boolean;
+        trailing_percent: number;
+        trailing_activation: number;
+      };
+      swing: {
+        sl_percent: number;
+        tp_percent: number;
+        trailing_enabled: boolean;
+        trailing_percent: number;
+        trailing_activation: number;
+      };
+      position: {
+        sl_percent: number;
+        tp_percent: number;
+        trailing_enabled: boolean;
+        trailing_percent: number;
+        trailing_activation: number;
+      };
+    };
+    tp_mode: {
+      use_single_tp: boolean;
+      single_tp_percent: number;
+      tp1_percent: number;
+      tp2_percent: number;
+      tp3_percent: number;
+      tp4_percent: number;
+    };
+  }> {
+    const { data } = await this.client.get('/ginie/sltp-config');
+    return data;
+  }
+
+  async updateGinieSLTP(mode: 'scalp' | 'swing' | 'position', config: {
+    sl_percent?: number;
+    tp_percent?: number;
+    trailing_enabled?: boolean;
+    trailing_percent?: number;
+    trailing_activation?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    config: {
+      sl_percent: number;
+      tp_percent: number;
+      trailing_enabled: boolean;
+      trailing_percent: number;
+      trailing_activation: number;
+    };
+  }> {
+    const { data } = await this.client.post(`/ginie/sltp/${mode}`, config);
+    return data;
+  }
+
+  async updateGinieTPMode(config: {
+    use_single_tp?: boolean;
+    single_tp_percent?: number;
+    tp1_percent?: number;
+    tp2_percent?: number;
+    tp3_percent?: number;
+    tp4_percent?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    config: {
+      use_single_tp: boolean;
+      single_tp_percent: number;
+      tp1_percent: number;
+      tp2_percent: number;
+      tp3_percent: number;
+      tp4_percent: number;
+    };
+  }> {
+    const { data } = await this.client.post('/ginie/tp-mode', config);
+    return data;
+  }
+
   // ==================== GINIE MARKET MOVERS ====================
 
   async getMarketMovers(topN: number = 20): Promise<MarketMoversResponse> {

@@ -1538,6 +1538,195 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	})
 }
 
+// handleGetGinieSLTPConfig returns current SL/TP configuration
+func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"sltp_config": gin.H{
+			"scalp": gin.H{
+				"sl_percent":             settings.GinieSLPercentScalp,
+				"tp_percent":             settings.GinieTPPercentScalp,
+				"trailing_enabled":       settings.GinieTrailingStopEnabledScalp,
+				"trailing_percent":       settings.GinieTrailingStopPercentScalp,
+				"trailing_activation":    settings.GinieTrailingStopActivationScalp,
+			},
+			"swing": gin.H{
+				"sl_percent":             settings.GinieSLPercentSwing,
+				"tp_percent":             settings.GinieTPPercentSwing,
+				"trailing_enabled":       settings.GinieTrailingStopEnabledSwing,
+				"trailing_percent":       settings.GinieTrailingStopPercentSwing,
+				"trailing_activation":    settings.GinieTrailingStopActivationSwing,
+			},
+			"position": gin.H{
+				"sl_percent":             settings.GinieSLPercentPosition,
+				"tp_percent":             settings.GinieTPPercentPosition,
+				"trailing_enabled":       settings.GinieTrailingStopEnabledPosition,
+				"trailing_percent":       settings.GinieTrailingStopPercentPosition,
+				"trailing_activation":    settings.GinieTrailingStopActivationPosition,
+			},
+		},
+		"tp_mode": gin.H{
+			"use_single_tp":     settings.GinieUseSingleTP,
+			"single_tp_percent": settings.GinieSingleTPPercent,
+			"tp1_percent":       settings.GinieTP1Percent,
+			"tp2_percent":       settings.GinieTP2Percent,
+			"tp3_percent":       settings.GinieTP3Percent,
+			"tp4_percent":       settings.GinieTP4Percent,
+		},
+	})
+}
+
+// handleUpdateGinieSLTP updates SL/TP configuration for a mode
+func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
+	mode := c.Param("mode") // scalp, swing, or position
+
+	var req struct {
+		SLPercent           *float64 `json:"sl_percent"`
+		TPPercent           *float64 `json:"tp_percent"`
+		TrailingEnabled     *bool    `json:"trailing_enabled"`
+		TrailingPercent     *float64 `json:"trailing_percent"`
+		TrailingActivation  *float64 `json:"trailing_activation"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Get current values as defaults
+	var slPct, tpPct, trailPct, trailAct float64
+	var trailEnabled bool
+
+	switch mode {
+	case "scalp":
+		slPct = settings.GinieSLPercentScalp
+		tpPct = settings.GinieTPPercentScalp
+		trailEnabled = settings.GinieTrailingStopEnabledScalp
+		trailPct = settings.GinieTrailingStopPercentScalp
+		trailAct = settings.GinieTrailingStopActivationScalp
+	case "swing":
+		slPct = settings.GinieSLPercentSwing
+		tpPct = settings.GinieTPPercentSwing
+		trailEnabled = settings.GinieTrailingStopEnabledSwing
+		trailPct = settings.GinieTrailingStopPercentSwing
+		trailAct = settings.GinieTrailingStopActivationSwing
+	case "position":
+		slPct = settings.GinieSLPercentPosition
+		tpPct = settings.GinieTPPercentPosition
+		trailEnabled = settings.GinieTrailingStopEnabledPosition
+		trailPct = settings.GinieTrailingStopPercentPosition
+		trailAct = settings.GinieTrailingStopActivationPosition
+	default:
+		errorResponse(c, http.StatusBadRequest, "Invalid mode: must be scalp, swing, or position")
+		return
+	}
+
+	// Update with provided values
+	if req.SLPercent != nil {
+		slPct = *req.SLPercent
+	}
+	if req.TPPercent != nil {
+		tpPct = *req.TPPercent
+	}
+	if req.TrailingEnabled != nil {
+		trailEnabled = *req.TrailingEnabled
+	}
+	if req.TrailingPercent != nil {
+		trailPct = *req.TrailingPercent
+	}
+	if req.TrailingActivation != nil {
+		trailAct = *req.TrailingActivation
+	}
+
+	// Update settings
+	if err := sm.UpdateGinieSLTPSettings(mode, slPct, tpPct, trailEnabled, trailPct, trailAct); err != nil {
+		errorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("SL/TP config updated for %s mode", mode),
+		"config": gin.H{
+			"sl_percent":          slPct,
+			"tp_percent":          tpPct,
+			"trailing_enabled":    trailEnabled,
+			"trailing_percent":    trailPct,
+			"trailing_activation": trailAct,
+		},
+	})
+}
+
+// handleUpdateGinieTPMode updates TP mode (single vs multi)
+func (s *Server) handleUpdateGinieTPMode(c *gin.Context) {
+	var req struct {
+		UseSingleTP     *bool    `json:"use_single_tp"`
+		SingleTPPercent *float64 `json:"single_tp_percent"`
+		TP1Percent      *float64 `json:"tp1_percent"`
+		TP2Percent      *float64 `json:"tp2_percent"`
+		TP3Percent      *float64 `json:"tp3_percent"`
+		TP4Percent      *float64 `json:"tp4_percent"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	useSingle := settings.GinieUseSingleTP
+	singlePct := settings.GinieSingleTPPercent
+	tp1 := settings.GinieTP1Percent
+	tp2 := settings.GinieTP2Percent
+	tp3 := settings.GinieTP3Percent
+	tp4 := settings.GinieTP4Percent
+
+	if req.UseSingleTP != nil {
+		useSingle = *req.UseSingleTP
+	}
+	if req.SingleTPPercent != nil {
+		singlePct = *req.SingleTPPercent
+	}
+	if req.TP1Percent != nil {
+		tp1 = *req.TP1Percent
+	}
+	if req.TP2Percent != nil {
+		tp2 = *req.TP2Percent
+	}
+	if req.TP3Percent != nil {
+		tp3 = *req.TP3Percent
+	}
+	if req.TP4Percent != nil {
+		tp4 = *req.TP4Percent
+	}
+
+	if err := sm.UpdateGinieTPMode(useSingle, singlePct, tp1, tp2, tp3, tp4); err != nil {
+		errorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "TP mode updated successfully",
+		"config": gin.H{
+			"use_single_tp":     useSingle,
+			"single_tp_percent": singlePct,
+			"tp1_percent":       tp1,
+			"tp2_percent":       tp2,
+			"tp3_percent":       tp3,
+			"tp4_percent":       tp4,
+		},
+	})
+}
+
 // parseIntParam is a helper to parse integer query parameters
 func parseIntParam(s string) (int, error) {
 	return strconv.Atoi(s)

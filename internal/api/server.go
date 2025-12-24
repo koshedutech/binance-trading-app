@@ -575,6 +575,11 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/trend-timeframes", s.handleGetGinieTrendTimeframes)
 			futures.POST("/ginie/trend-timeframes", s.handleUpdateGinieTrendTimeframes)
 
+			// SL/TP configuration endpoints
+			futures.GET("/ginie/sltp-config", s.handleGetGinieSLTPConfig)
+			futures.POST("/ginie/sltp/:mode", s.handleUpdateGinieSLTP)  // :mode = scalp/swing/position
+			futures.POST("/ginie/tp-mode", s.handleUpdateGinieTPMode)
+
 			// Strategy Performance endpoints (AI vs Strategy comparison)
 			futures.GET("/ginie/strategy-performance", s.handleGetStrategyPerformance)
 			futures.GET("/ginie/source-performance", s.handleGetSourcePerformance)
