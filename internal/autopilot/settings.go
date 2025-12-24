@@ -204,6 +204,7 @@ type AutopilotSettings struct {
 	GinieMaxPositions  int     `json:"ginie_max_positions"`   // Max concurrent positions for Ginie
 
 	// Ginie trend detection timeframes (per mode)
+	GinieTrendTimeframeUltrafast string `json:"ginie_trend_timeframe_ultrafast"` // e.g., "5m"
 	GinieTrendTimeframeScalp    string `json:"ginie_trend_timeframe_scalp"`    // e.g., "15m"
 	GinieTrendTimeframeSwing    string `json:"ginie_trend_timeframe_swing"`    // e.g., "1h"
 	GinieTrendTimeframePosition string `json:"ginie_trend_timeframe_position"` // e.g., "4h"
@@ -212,25 +213,31 @@ type AutopilotSettings struct {
 	GinieBlockOnDivergence bool `json:"ginie_block_on_divergence"` // Block trades when timeframe divergence detected
 
 	// Ginie SL/TP manual overrides (per mode) - if set (> 0), override ATR/LLM calculations
-	GinieSLPercentScalp    float64 `json:"ginie_sl_percent_scalp"`    // e.g., 1.0 (1%)
-	GinieTPPercentScalp    float64 `json:"ginie_tp_percent_scalp"`    // e.g., 2.0 (2%)
-	GinieSLPercentSwing    float64 `json:"ginie_sl_percent_swing"`    // e.g., 2.0 (2%)
-	GinieTPPercentSwing    float64 `json:"ginie_tp_percent_swing"`    // e.g., 6.0 (6%)
-	GinieSLPercentPosition float64 `json:"ginie_sl_percent_position"` // e.g., 3.0 (3%)
-	GinieTPPercentPosition float64 `json:"ginie_tp_percent_position"` // e.g., 10.0 (10%)
+	GinieSLPercentUltrafast    float64 `json:"ginie_sl_percent_ultrafast"`    // e.g., 0.5 (0.5%)
+	GinieTPPercentUltrafast    float64 `json:"ginie_tp_percent_ultrafast"`    // e.g., 1.0 (1%)
+	GinieSLPercentScalp        float64 `json:"ginie_sl_percent_scalp"`        // e.g., 1.0 (1%)
+	GinieTPPercentScalp        float64 `json:"ginie_tp_percent_scalp"`        // e.g., 2.0 (2%)
+	GinieSLPercentSwing        float64 `json:"ginie_sl_percent_swing"`        // e.g., 2.0 (2%)
+	GinieTPPercentSwing        float64 `json:"ginie_tp_percent_swing"`        // e.g., 6.0 (6%)
+	GinieSLPercentPosition     float64 `json:"ginie_sl_percent_position"`     // e.g., 3.0 (3%)
+	GinieTPPercentPosition     float64 `json:"ginie_tp_percent_position"`     // e.g., 10.0 (10%)
 
 	// Trailing stop configuration (per mode)
-	GinieTrailingStopEnabledScalp       bool    `json:"ginie_trailing_stop_enabled_scalp"`
-	GinieTrailingStopPercentScalp       float64 `json:"ginie_trailing_stop_percent_scalp"`       // e.g., 0.3%
-	GinieTrailingStopActivationScalp    float64 `json:"ginie_trailing_stop_activation_scalp"`    // e.g., 0.5% profit
+	GinieTrailingStopEnabledUltrafast       bool    `json:"ginie_trailing_stop_enabled_ultrafast"`
+	GinieTrailingStopPercentUltrafast       float64 `json:"ginie_trailing_stop_percent_ultrafast"`       // e.g., 0.1%
+	GinieTrailingStopActivationUltrafast    float64 `json:"ginie_trailing_stop_activation_ultrafast"`    // e.g., 0.2% profit
 
-	GinieTrailingStopEnabledSwing       bool    `json:"ginie_trailing_stop_enabled_swing"`
-	GinieTrailingStopPercentSwing       float64 `json:"ginie_trailing_stop_percent_swing"`       // e.g., 1.5%
-	GinieTrailingStopActivationSwing    float64 `json:"ginie_trailing_stop_activation_swing"`    // e.g., 1.0% profit
+	GinieTrailingStopEnabledScalp           bool    `json:"ginie_trailing_stop_enabled_scalp"`
+	GinieTrailingStopPercentScalp           float64 `json:"ginie_trailing_stop_percent_scalp"`       // e.g., 0.3%
+	GinieTrailingStopActivationScalp        float64 `json:"ginie_trailing_stop_activation_scalp"`    // e.g., 0.5% profit
 
-	GinieTrailingStopEnabledPosition    bool    `json:"ginie_trailing_stop_enabled_position"`
-	GinieTrailingStopPercentPosition    float64 `json:"ginie_trailing_stop_percent_position"`    // e.g., 3.0%
-	GinieTrailingStopActivationPosition float64 `json:"ginie_trailing_stop_activation_position"` // e.g., 2.0% profit
+	GinieTrailingStopEnabledSwing           bool    `json:"ginie_trailing_stop_enabled_swing"`
+	GinieTrailingStopPercentSwing           float64 `json:"ginie_trailing_stop_percent_swing"`       // e.g., 1.5%
+	GinieTrailingStopActivationSwing        float64 `json:"ginie_trailing_stop_activation_swing"`    // e.g., 1.0% profit
+
+	GinieTrailingStopEnabledPosition        bool    `json:"ginie_trailing_stop_enabled_position"`
+	GinieTrailingStopPercentPosition        float64 `json:"ginie_trailing_stop_percent_position"`    // e.g., 3.0%
+	GinieTrailingStopActivationPosition     float64 `json:"ginie_trailing_stop_activation_position"` // e.g., 2.0% profit
 
 	// TP mode configuration
 	GinieUseSingleTP      bool    `json:"ginie_use_single_tp"`       // true = 100% at TP1, false = 4-level
@@ -434,6 +441,7 @@ func DefaultSettings() *AutopilotSettings {
 		GinieMaxPositions:  10,
 
 		// Ginie trend timeframe defaults (per mode)
+		GinieTrendTimeframeUltrafast: "5m",
 		GinieTrendTimeframeScalp:    "15m",
 		GinieTrendTimeframeSwing:    "1h",
 		GinieTrendTimeframePosition: "4h",
@@ -442,25 +450,31 @@ func DefaultSettings() *AutopilotSettings {
 		GinieBlockOnDivergence: true, // Default to safest mode (block on severe divergence)
 
 		// Ginie SL/TP manual overrides (0 = use ATR/LLM blend)
-		GinieSLPercentScalp:    0,   // Disabled, use ATR/LLM
-		GinieTPPercentScalp:    0,   // Disabled, use ATR/LLM
-		GinieSLPercentSwing:    0,   // Disabled, use ATR/LLM
-		GinieTPPercentSwing:    0,   // Disabled, use ATR/LLM
-		GinieSLPercentPosition: 0,   // Disabled, use ATR/LLM
-		GinieTPPercentPosition: 0,   // Disabled, use ATR/LLM
+		GinieSLPercentUltrafast:    0,   // Disabled, use ATR/LLM
+		GinieTPPercentUltrafast:    0,   // Disabled, use ATR/LLM
+		GinieSLPercentScalp:        0,   // Disabled, use ATR/LLM
+		GinieTPPercentScalp:        0,   // Disabled, use ATR/LLM
+		GinieSLPercentSwing:        0,   // Disabled, use ATR/LLM
+		GinieTPPercentSwing:        0,   // Disabled, use ATR/LLM
+		GinieSLPercentPosition:     0,   // Disabled, use ATR/LLM
+		GinieTPPercentPosition:     0,   // Disabled, use ATR/LLM
 
 		// Ginie trailing stop defaults (match current hardcoded values)
-		GinieTrailingStopEnabledScalp:       true,
-		GinieTrailingStopPercentScalp:       0.3,  // 0.3%
-		GinieTrailingStopActivationScalp:    0.5,  // After 0.5% profit
+		GinieTrailingStopEnabledUltrafast:       true,
+		GinieTrailingStopPercentUltrafast:       0.1,  // 0.1%
+		GinieTrailingStopActivationUltrafast:    0.2,  // After 0.2% profit
 
-		GinieTrailingStopEnabledSwing:       true,
-		GinieTrailingStopPercentSwing:       1.5,  // 1.5%
-		GinieTrailingStopActivationSwing:    1.0,  // After 1% profit
+		GinieTrailingStopEnabledScalp:           true,
+		GinieTrailingStopPercentScalp:           0.3,  // 0.3%
+		GinieTrailingStopActivationScalp:        0.5,  // After 0.5% profit
 
-		GinieTrailingStopEnabledPosition:    true,
-		GinieTrailingStopPercentPosition:    3.0,  // 3.0%
-		GinieTrailingStopActivationPosition: 2.0,  // After 2% profit
+		GinieTrailingStopEnabledSwing:           true,
+		GinieTrailingStopPercentSwing:           1.5,  // 1.5%
+		GinieTrailingStopActivationSwing:        1.0,  // After 1% profit
+
+		GinieTrailingStopEnabledPosition:        true,
+		GinieTrailingStopPercentPosition:        3.0,  // 3.0%
+		GinieTrailingStopActivationPosition:     2.0,  // After 2% profit
 
 		// Ginie TP mode (default to 4-level system)
 		GinieUseSingleTP:     false, // Use multi-TP
@@ -970,12 +984,18 @@ func ValidateTimeframe(tf string) error {
 
 // UpdateGinieTrendTimeframes updates the trend timeframe settings for each mode
 func (sm *SettingsManager) UpdateGinieTrendTimeframes(
+	ultrafastTF string,
 	scalpTF string,
 	swingTF string,
 	positionTF string,
 	blockOnDivergence bool,
 ) error {
 	// Validate all timeframes before saving
+	if ultrafastTF != "" {
+		if err := ValidateTimeframe(ultrafastTF); err != nil {
+			return fmt.Errorf("ultrafast timeframe: %w", err)
+		}
+	}
 	if scalpTF != "" {
 		if err := ValidateTimeframe(scalpTF); err != nil {
 			return fmt.Errorf("scalp timeframe: %w", err)
@@ -997,6 +1017,9 @@ func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 
 	settings := sm.GetCurrentSettings()
 
+	if ultrafastTF != "" {
+		settings.GinieTrendTimeframeUltrafast = ultrafastTF
+	}
 	if scalpTF != "" {
 		settings.GinieTrendTimeframeScalp = scalpTF
 	}

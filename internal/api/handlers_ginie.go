@@ -1451,6 +1451,7 @@ func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"timeframes": gin.H{
+			"ultrafast":          settings.GinieTrendTimeframeUltrafast,
 			"scalp":              settings.GinieTrendTimeframeScalp,
 			"swing":              settings.GinieTrendTimeframeSwing,
 			"position":           settings.GinieTrendTimeframePosition,
@@ -1471,6 +1472,7 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	}
 
 	var req struct {
+		UltrafastTimeframe string `json:"ultrafast_timeframe"`
 		ScalpTimeframe    string `json:"scalp_timeframe"`
 		SwingTimeframe    string `json:"swing_timeframe"`
 		PositionTimeframe string `json:"position_timeframe"`
@@ -1483,6 +1485,12 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	}
 
 	// Validate timeframes if provided
+	if req.UltrafastTimeframe != "" {
+		if err := autopilot.ValidateTimeframe(req.UltrafastTimeframe); err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid ultrafast timeframe: "+err.Error())
+			return
+		}
+	}
 	if req.ScalpTimeframe != "" {
 		if err := autopilot.ValidateTimeframe(req.ScalpTimeframe); err != nil {
 			errorResponse(c, http.StatusBadRequest, "Invalid scalp timeframe: "+err.Error())
@@ -1512,6 +1520,7 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	}
 
 	if err := sm.UpdateGinieTrendTimeframes(
+		req.UltrafastTimeframe,
 		req.ScalpTimeframe,
 		req.SwingTimeframe,
 		req.PositionTimeframe,
@@ -1547,6 +1556,13 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"sltp_config": gin.H{
+			"ultrafast": gin.H{
+				"sl_percent":             settings.GinieSLPercentUltrafast,
+				"tp_percent":             settings.GinieTPPercentUltrafast,
+				"trailing_enabled":       settings.GinieTrailingStopEnabledUltrafast,
+				"trailing_percent":       settings.GinieTrailingStopPercentUltrafast,
+				"trailing_activation":    settings.GinieTrailingStopActivationUltrafast,
+			},
 			"scalp": gin.H{
 				"sl_percent":             settings.GinieSLPercentScalp,
 				"tp_percent":             settings.GinieTPPercentScalp,
@@ -1605,6 +1621,12 @@ func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
 	var trailEnabled bool
 
 	switch mode {
+	case "ultrafast":
+		slPct = settings.GinieSLPercentUltrafast
+		tpPct = settings.GinieTPPercentUltrafast
+		trailEnabled = settings.GinieTrailingStopEnabledUltrafast
+		trailPct = settings.GinieTrailingStopPercentUltrafast
+		trailAct = settings.GinieTrailingStopActivationUltrafast
 	case "scalp":
 		slPct = settings.GinieSLPercentScalp
 		tpPct = settings.GinieTPPercentScalp
@@ -1624,7 +1646,7 @@ func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
 		trailPct = settings.GinieTrailingStopPercentPosition
 		trailAct = settings.GinieTrailingStopActivationPosition
 	default:
-		errorResponse(c, http.StatusBadRequest, "Invalid mode: must be scalp, swing, or position")
+		errorResponse(c, http.StatusBadRequest, "Invalid mode: must be ultrafast, scalp, swing, or position")
 		return
 	}
 
