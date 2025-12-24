@@ -674,7 +674,7 @@ func (g *GinieAnalyzer) ScanCoin(symbol string) (*GinieCoinScan, error) {
 	scan.Volatility = g.analyzeVolatility(klines)
 
 	// 3. Trend Health
-	scan.Trend = g.analyzeTrend(klines)
+	scan.Trend = g.analyzeTrend(klines, "1h")
 
 	// 4. Market Structure
 	scan.Structure = g.analyzeStructure(klines)
@@ -785,8 +785,10 @@ func (g *GinieAnalyzer) analyzeVolatility(klines []binance.Kline) VolatilityProf
 }
 
 // analyzeTrend analyzes trend health
-func (g *GinieAnalyzer) analyzeTrend(klines []binance.Kline) TrendHealth {
-	trend := TrendHealth{}
+func (g *GinieAnalyzer) analyzeTrend(klines []binance.Kline, timeframe string) TrendHealth {
+	trend := TrendHealth{
+		Timeframe: timeframe,
+	}
 
 	if len(klines) < 50 {
 		return trend
@@ -1424,6 +1426,22 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 	// Select mode
 	mode := g.SelectMode(scan)
 
+	// Fetch 4h klines for trend analysis for swing/position modes
+	var trendAnalysis TrendHealth = scan.Trend
+	if mode == GinieModeSwing || mode == GinieModePosition {
+		klines4h, err := g.futuresClient.GetFuturesKlines(symbol, "4h", 200)
+		if err == nil && len(klines4h) >= 50 {
+			trendAnalysis = g.analyzeTrend(klines4h, "4h")
+			if g.logger != nil {
+				g.logger.Debug("Using 4h trend analysis for mode",
+					"symbol", symbol,
+					"mode", mode,
+					"trend", trendAnalysis.TrendDirection,
+					"adx", trendAnalysis.ADXValue)
+			}
+		}
+	}
+
 	// Generate signals
 	signals := g.GenerateSignals(symbol, mode, klines)
 
@@ -1438,8 +1456,8 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 	}
 
 	// Market conditions
-	report.MarketConditions.Trend = scan.Trend.TrendDirection
-	report.MarketConditions.ADX = scan.Trend.ADXValue
+	report.MarketConditions.Trend = trendAnalysis.TrendDirection
+	report.MarketConditions.ADX = trendAnalysis.ADXValue
 	report.MarketConditions.Volatility = scan.Volatility.Regime
 	report.MarketConditions.ATR = scan.Volatility.ATR14
 	if scan.Liquidity.VolumeUSD > 10000000 {
@@ -1638,54 +1656,80 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 		report.NextReview = "1 day"
 	}
 
-	// Confidence score - base calculation
-	report.ConfidenceScore = signals.StrengthScore * (scan.Score / 100)
+	// === ADAPTIVE ADX STRENGTH FILTER ===
+	// Check if trend is strong enough for the selected mode
+	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, mode)
+	if !adxPassed {
+		if g.logger != nil {
+			g.logger.Warn("Weak trend detected - applying ADX strength penalty",
+				"symbol", symbol,
+				"adx", trendAnalysis.ADXValue,
+				"mode", mode,
+				"penalty", "10%")
+		}
+	}
 
-	// === TREND-AGREEMENT FILTER ===
-	// Reduce confidence if signals contradict 1h trend direction
-	// This prevents counter-trend entries from being over-weighted
-	// Bounce trades (buying in downtrend) are still valid but with reduced confidence
-	trendAgreement := 1.0 // Default: signals agree with trend
-	if signals.Direction != "neutral" && scan.Trend.TrendDirection != "NEUTRAL" {
+	// === LLM TREND CONFIRMATION (OPTIONAL FINAL GATE) ===
+	// LLM trend confirmation is optional - if not available, continue with trade
+	// This is a future enhancement for improved accuracy
+	if g.logger != nil {
+		g.logger.Debug("Ginie trend analysis complete - LLM confirmation feature can be enabled in future updates",
+			"symbol", symbol,
+			"mode", mode)
+	}
+
+	report.ConfidenceScore = signals.StrengthScore * (scan.Score / 100) * adxPenalty
+
+	// === STRICT COUNTER-TREND FILTER ===
+	// Block counter-trend trades unless they have strong reversal signals
+	if signals.Direction != "neutral" && trendAnalysis.TrendDirection != "neutral" {
 		// Check if signal direction matches trend direction
 		signalIsBullish := signals.Direction == "long"
-		trendIsBullish := scan.Trend.TrendDirection == "UP"
+		trendIsBullish := trendAnalysis.TrendDirection == "bullish"
 
 		if signalIsBullish != trendIsBullish {
-			// Signal contradicts trend (e.g., buying in downtrend / shorting in uptrend)
-			// Apply 20% confidence reduction for counter-trend entries
-			// These are bounce trades - valid but higher risk
-			trendAgreement = 0.80
+			// Signal contradicts trend - this is a counter-trend trade (bounce trade)
+			// Validate with strict reversal signal requirements
+			if !g.isValidReversalTrade(signals.Direction, report.ConfidenceScore, klines) {
+				if g.logger != nil {
+					g.logger.Info("Blocking counter-trend trade - insufficient reversal signals",
+						"symbol", symbol,
+						"signal", signals.Direction,
+						"trend", trendAnalysis.TrendDirection,
+						"confidence", report.ConfidenceScore)
+				}
+				return &GinieDecisionReport{
+					Symbol:           symbol,
+					Timestamp:        time.Now(),
+					ScanStatus:       scan.Status,
+					SelectedMode:     mode,
+					Recommendation:   RecommendationSkip,
+					RecommendationNote: "Counter-trend trade rejected - missing required reversal signals (RSI extreme zone, ADX weakening, reversal pattern)",
+					ConfidenceScore:  0.0,
+				}, nil
+			}
+
 			if g.logger != nil {
-				g.logger.Debug("Ginie counter-trend trade detected",
+				g.logger.Info("Allowing counter-trend trade with strong reversal signals",
 					"symbol", symbol,
-					"trend", scan.Trend.TrendDirection,
 					"signal", signals.Direction,
-					"confidence_penalty", "20%")
+					"trend", trendAnalysis.TrendDirection,
+					"confidence", report.ConfidenceScore)
 			}
 		}
 	}
-	report.ConfidenceScore *= trendAgreement
 
 	// Final recommendation (ConfidenceScore is 0-1, thresholds are 0-1)
 	// Execute if >= 30%, Wait if >= 20%, otherwise Skip
 	if report.ConfidenceScore >= 0.30 {
 		report.Recommendation = RecommendationExecute
-		if trendAgreement < 1.0 {
-			report.RecommendationNote = "Counter-trend bounce trade - reduced confidence but valid"
-		} else {
-			report.RecommendationNote = "Strong signals with good market conditions"
-		}
+		report.RecommendationNote = "Strong signals with good market conditions"
 	} else if report.ConfidenceScore >= 0.20 {
 		report.Recommendation = RecommendationWait
 		report.RecommendationNote = "Signals present but consider waiting for better entry"
 	} else {
 		report.Recommendation = RecommendationSkip
-		if trendAgreement < 1.0 {
-			report.RecommendationNote = "Counter-trend signal rejected due to strong opposing trend"
-		} else {
-			report.RecommendationNote = "Insufficient confluence or poor conditions"
-		}
+		report.RecommendationNote = "Insufficient confluence or poor conditions"
 	}
 
 	// Store decision
@@ -1716,6 +1760,149 @@ func (g *GinieAnalyzer) GetRecentDecisions(limit int) []GinieDecisionReport {
 	result := make([]GinieDecisionReport, limit)
 	copy(result, g.decisions[start:])
 	return result
+}
+
+
+// ===== LLM TREND CONFIRMATION SYSTEM =====
+// trendConfirmationCache stores cached LLM trend confirmations
+type trendConfirmationCache struct {
+	mu          sync.RWMutex
+	cache       map[string]*TrendConfirmation
+	lastUpdated map[string]time.Time
+}
+
+var llmTrendCache = &trendConfirmationCache{
+	cache:       make(map[string]*TrendConfirmation),
+	lastUpdated: make(map[string]time.Time),
+}
+
+
+func (g *GinieAnalyzer) checkADXStrengthRequirement(adx float64, mode GinieTradingMode) (bool, float64) {
+	thresholds := map[GinieTradingMode]float64{
+		GinieModeUltraFast: 30.0, // Scalp needs strong trends
+		GinieModeScalp:     30.0,
+		GinieModeSwing:     20.0, // Swing more forgiving
+		GinieModePosition:  25.0, // Position needs moderate strength
+	}
+
+	threshold, exists := thresholds[mode]
+	if !exists {
+		threshold = 25.0 // Default
+	}
+
+	if adx < threshold {
+		// Weak trend - apply 10% confidence penalty
+		return false, 0.90
+	}
+
+	// Strong enough trend - no penalty
+	return true, 1.0
+}
+
+// ===== COUNTER-TREND TRADE VALIDATION =====
+// isValidReversalTrade validates if a counter-trend trade has sufficient reversal signals
+// Returns true only if the trade passes all strict requirements
+func (g *GinieAnalyzer) isValidReversalTrade(
+	direction string,
+	confidence float64,
+	klines []binance.Kline,
+) bool {
+	// Require very high confidence for counter-trend trades
+	if confidence < 80.0 {
+		return false
+	}
+
+	if len(klines) < 50 {
+		return false
+	}
+
+	// Check for reversal pattern confirmation (market structure)
+	if !g.hasReversalPattern(klines, direction) {
+		return false
+	}
+
+	// ADX must be weakening (trend losing strength)
+	if len(klines) < 35 {
+		return false
+	}
+	currentADX, _, _ := g.calculateADX(klines, 14)
+	previousADX, _, _ := g.calculateADX(klines[:len(klines)-5], 14)
+	if currentADX >= previousADX {
+		return false // Trend still strengthening, not weakening
+	}
+
+	// RSI must be in extreme zone
+	rsi := g.calculateRSI(klines, 14)
+	if direction == "long" && rsi > 30 {
+		return false // Not oversold enough for long bounce
+	}
+	if direction == "short" && rsi < 70 {
+		return false // Not overbought enough for short bounce
+	}
+
+	// Block reversals in extreme volatility
+	atr := g.calculateATR(klines, 14)
+	avgATR := g.calculateAverageATR(klines, 50)
+	if atr > avgATR*2.0 {
+		return false // Too volatile, risk too high
+	}
+
+	return true
+}
+
+// hasReversalPattern checks if there's a reversal pattern in the klines
+func (g *GinieAnalyzer) hasReversalPattern(klines []binance.Kline, direction string) bool {
+	if len(klines) < 5 {
+		return false
+	}
+
+	// Get swing points
+	highs, lows := g.findSwingPoints(klines, 5)
+
+	if len(highs) < 2 || len(lows) < 2 {
+		return false
+	}
+
+	lastHigh := highs[len(highs)-1]
+	prevHigh := highs[len(highs)-2]
+	lastLow := lows[len(lows)-1]
+	prevLow := lows[len(lows)-2]
+
+	// For LONG reversal, expect LL (Lower Low) or test of previous support
+	if direction == "long" {
+		// Check if we have a potential reversal from downtrend
+		// LH/LL pattern indicates downtrend reversal potential
+		return (lastHigh > prevHigh && lastLow > prevLow) || // Starting HH/HL
+			   (lastLow < prevLow) // Lower low suggests potential reversal
+	}
+
+	// For SHORT reversal, expect HH (Higher High) or test of previous resistance
+	if direction == "short" {
+		// Check if we have a potential reversal from uptrend
+		// HH/HL pattern indicates uptrend reversal potential
+		return (lastHigh < prevHigh && lastLow < prevLow) || // Starting LL/LH
+			   (lastHigh > prevHigh) // Higher high suggests potential reversal
+	}
+
+	return false
+}
+
+// calculateAverageATR calculates the average ATR over a period
+func (g *GinieAnalyzer) calculateAverageATR(klines []binance.Kline, period int) float64 {
+	if len(klines) < period {
+		period = len(klines)
+	}
+
+	var sum float64
+	for i := len(klines) - period; i < len(klines); i++ {
+		atr := g.calculateATR(klines[:i+1], 14)
+		sum += atr
+	}
+
+	if period == 0 {
+		return 0
+	}
+	return sum / float64(period)
 }
 
 // Helper functions

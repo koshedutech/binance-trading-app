@@ -88,6 +88,7 @@ type VolatilityProfile struct {
 
 // TrendHealth contains trend assessment
 type TrendHealth struct {
+	Timeframe       string   `json:"timeframe"`        // 1h, 4h, 1d - the timeframe used for analysis
 	ADXValue        float64  `json:"adx_value"`
 	ADXStrength     string   `json:"adx_strength"` // weak, moderate, strong, very_strong
 	IsTrending      bool     `json:"is_trending"`  // ADX > 25
@@ -230,6 +231,14 @@ type GinieDecisionReport struct {
 	ConfidenceScore    float64             `json:"confidence_score"`
 	Recommendation     GenieRecommendation `json:"recommendation"`
 	RecommendationNote string              `json:"recommendation_note"`
+}
+
+// TrendConfirmation contains LLM trend analysis
+type TrendConfirmation struct {
+	Trend      string  `json:"trend"`      // BULLISH, BEARISH, NEUTRAL
+	Strength   float64 `json:"strength"`   // 0-100
+	Confidence float64 `json:"confidence"` // 0-100
+	Reasoning  string  `json:"reasoning"`
 }
 
 // GinieConfig contains Ginie configuration

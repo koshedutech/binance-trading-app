@@ -460,12 +460,15 @@ func NewFuturesController(
 	// Load persisted PnL stats
 	ginieAuto.LoadPnLStats()
 
-	// Sync existing positions from Binance
-	if syncCount, err := ginieAuto.SyncWithExchange(); err != nil {
-		logger.Error("Failed to sync Ginie positions from Binance", "error", err)
-	} else if syncCount > 0 {
-		logger.Info("Synced Ginie positions from Binance", "count", syncCount)
-	}
+	// Sync existing positions from Binance in background to avoid blocking API startup
+	// This is a network operation that can take multiple seconds
+	go func() {
+		if syncCount, err := ginieAuto.SyncWithExchange(); err != nil {
+			logger.Error("Failed to sync Ginie positions from Binance", "error", err)
+		} else if syncCount > 0 {
+			logger.Info("Synced Ginie positions from Binance", "count", syncCount)
+		}
+	}()
 
 	return &FuturesController{
 		config:             cfg,

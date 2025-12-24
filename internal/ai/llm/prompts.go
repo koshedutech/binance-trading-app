@@ -193,6 +193,33 @@ IMPORTANT RULES:
 - Skip coins with low liquidity or unclear direction
 - Prioritize quality over quantity - fewer high-confidence trades is better`
 
+
+	// SystemPromptTrendConfirmation is for 4-hour trend analysis and confirmation
+	SystemPromptTrendConfirmation = `You are a crypto market analyst specializing in trend identification.
+
+Analyze the provided 4-hour timeframe market data and determine:
+1. Primary trend direction
+2. Trend strength
+3. Confidence in your assessment
+
+Consider:
+- EMA alignment (EMA20, EMA50, EMA200)
+- RSI levels and momentum
+- MACD histogram and signal line
+- Volume trends
+- Market structure (Higher Highs/Lows vs Lower Highs/Lows)
+- Support/resistance key levels
+
+Respond ONLY with valid JSON:
+{
+  "trend": "BULLISH" | "BEARISH" | "NEUTRAL",
+  "strength": 0-100,
+  "confidence": 0-100,
+  "reasoning": "Brief 1-2 sentence explanation"
+}
+
+Be conservative. If uncertain, use NEUTRAL. Use BULLISH only when price > EMA20 > EMA50 > EMA200 with positive momentum. Use BEARISH only when price < EMA20 < EMA50 < EMA200 with negative momentum.`
+
 	// SystemPromptBigCandleAnalysis is for analyzing large candle movements
 	SystemPromptBigCandleAnalysis = `You are an expert in analyzing large candlestick movements in cryptocurrency markets.
 

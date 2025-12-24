@@ -32,6 +32,51 @@ func calculateTradingFee(quantity, price float64) float64 {
 	return notionalValue * TakerFeeRate
 }
 
+// ===== EARLY PROFIT BOOKING (ROI-BASED) =====
+// calculateROIAfterFees calculates the ROI% after accounting for both entry and exit trading fees
+// Returns: ROI percentage (e.g., 3.5 for 3.5% gain after fees)
+// IMPORTANT: For leveraged positions, ROI is calculated on actual collateral, not notional value
+// entryPrice: Entry price
+// currentPrice: Current/exit price
+// quantity: Position quantity (notional value)
+// side: "LONG" or "SHORT"
+// leverage: Position leverage (e.g., 5 for 5x leverage). Default is 1 for unleveraged
+func calculateROIAfterFees(entryPrice, currentPrice, quantity float64, side string, leverage int) float64 {
+	// Validate leverage
+	if leverage <= 0 {
+		leverage = 1
+	}
+
+	// Calculate gross profit/loss (in USD)
+	var grossPnl float64
+	if side == "LONG" {
+		grossPnl = (currentPrice - entryPrice) * quantity
+	} else {
+		grossPnl = (entryPrice - currentPrice) * quantity
+	}
+
+	// Calculate entry and exit fees (on notional value)
+	entryFee := calculateTradingFee(quantity, entryPrice)
+	exitFee := calculateTradingFee(quantity, currentPrice)
+	totalFees := entryFee + exitFee
+
+	// Net profit after fees
+	netPnl := grossPnl - totalFees
+
+	// For leveraged positions, collateral = notional / leverage
+	// ROI is calculated on actual collateral invested, not notional
+	// ROI% = (Net PnL / Collateral) * 100 = (Net PnL * Leverage / Notional) * 100
+	notionalAtEntry := quantity * entryPrice
+
+	if notionalAtEntry <= 0 {
+		return 0
+	}
+
+	// Account for leverage: actual collateral is notional / leverage
+	roiPercent := (netPnl * float64(leverage) / notionalAtEntry) * 100
+	return roiPercent
+}
+
 // ==================== END TRADING FEE CONSTANTS ====================
 
 // GinieAutopilotConfig holds configuration for Ginie autonomous trading
@@ -89,6 +134,14 @@ type GinieAutopilotConfig struct {
 	CBMaxDailyLoss        float64 `json:"cb_max_daily_loss"`
 	CBMaxConsecutiveLosses int    `json:"cb_max_consecutive_losses"`
 	CBCooldownMinutes     int     `json:"cb_cooldown_minutes"`
+
+	// === EARLY PROFIT BOOKING (ROI-BASED) ===
+	// Book profits early based on ROI after trading fees to lock in gains
+	EarlyProfitBookingEnabled    bool    `json:"early_profit_booking_enabled"`   // Enable early profit booking
+	UltraFastScalpROIThreshold   float64 `json:"ultra_fast_scalp_roi_threshold"` // Book at 3%+ ROI (after fees)
+	ScalpROIThreshold            float64 `json:"scalp_roi_threshold"`             // Book at 5%+ ROI (after fees)
+	SwingROIThreshold            float64 `json:"swing_roi_threshold"`             // Book at 8%+ ROI (after fees)
+	PositionROIThreshold         float64 `json:"position_roi_threshold"`          // Book at 10%+ ROI (after fees)
 }
 
 // DefaultGinieAutopilotConfig returns default configuration
@@ -142,6 +195,13 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		CBMaxDailyLoss:         300,  // $300 max daily loss
 		CBMaxConsecutiveLosses: 3,    // 3 consecutive losses triggers cooldown
 		CBCooldownMinutes:      30,   // 30 minute cooldown
+
+		// Early profit booking (ROI-based) - book profits when ROI hits threshold (after fees)
+		EarlyProfitBookingEnabled:  true,
+		UltraFastScalpROIThreshold: 3.0,   // Book at 3%+ ROI (after fees) for ultra-fast scalping
+		ScalpROIThreshold:          5.0,   // Book at 5%+ ROI (after fees) for scalping
+		SwingROIThreshold:          8.0,   // Book at 8%+ ROI (after fees) for swing
+		PositionROIThreshold:       10.0,  // Book at 10%+ ROI (after fees) for position trades
 	}
 }
 
@@ -1814,6 +1874,22 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		}
 		// === END PROACTIVE PROFIT PROTECTION ===
 
+		// === EARLY PROFIT BOOKING (ROI-BASED) ===
+		// Close position if ROI after fees exceeds mode-specific threshold
+		shouldBook, roiPercent, modeStr := ga.shouldBookEarlyProfit(pos, currentPrice)
+		if shouldBook {
+			ga.logger.Info("Booking profit early based on ROI threshold",
+				"symbol", symbol,
+				"roi_percent", roiPercent,
+				"mode", modeStr,
+				"threshold", roiPercent,
+				"entry_price", pos.EntryPrice,
+				"current_price", currentPrice)
+			ga.closePosition(symbol, pos, currentPrice, "early_profit_booking", pos.CurrentTPLevel)
+			continue
+		}
+		// === END EARLY PROFIT BOOKING ===
+
 		// Check Stop Loss
 		if ga.checkStopLoss(pos, currentPrice) {
 			ga.closePosition(symbol, pos, currentPrice, "stop_loss", 0)
@@ -1855,6 +1931,48 @@ func (ga *GinieAutopilot) checkStopLoss(pos *GiniePosition, currentPrice float64
 
 // checkTakeProfits checks and executes take profit levels
 // Uses tolerance-based comparison to avoid floating point precision issues
+// shouldBookEarlyProfit checks if position should be closed early based on ROI threshold
+// Returns true if ROI after fees exceeds the threshold for the current trading mode
+func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice float64) (bool, float64, string) {
+	if !ga.config.EarlyProfitBookingEnabled || pos.CurrentTPLevel > 0 {
+		return false, 0, ""
+	}
+
+	// Calculate ROI after fees (including leverage effect)
+	roiPercent := calculateROIAfterFees(pos.EntryPrice, currentPrice, pos.RemainingQty, pos.Side, pos.Leverage)
+
+	// Only book if profitable after fees
+	if roiPercent <= 0 {
+		return false, 0, ""
+	}
+
+	// Determine threshold based on trading mode
+	threshold := ga.config.PositionROIThreshold
+	modeStr := "position"
+
+	switch pos.Mode {
+	case GinieModeUltraFast:
+		threshold = ga.config.UltraFastScalpROIThreshold
+		modeStr = "ultra_fast_scalp"
+	case GinieModeScalp:
+		threshold = ga.config.ScalpROIThreshold
+		modeStr = "scalp"
+	case GinieModeSwing:
+		threshold = ga.config.SwingROIThreshold
+		modeStr = "swing"
+	case GinieModePosition:
+		threshold = ga.config.PositionROIThreshold
+		modeStr = "position"
+	}
+
+	// Check if ROI exceeds threshold
+	if roiPercent >= threshold {
+		return true, roiPercent, modeStr
+	}
+
+	return false, roiPercent, modeStr
+}
+
 func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice float64, pnlPercent float64) int {
 	for i, tp := range pos.TakeProfits {
 		if tp.Status == "hit" {

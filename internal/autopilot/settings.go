@@ -787,7 +787,7 @@ func (sm *SettingsManager) UpdateRiskLevel(riskLevel string) error {
 // UpdateDryRunMode updates just the dry run mode setting
 func (sm *SettingsManager) UpdateDryRunMode(dryRun bool) error {
 	settings := sm.GetCurrentSettings()
-	settings.DryRunMode = dryRun
+	settings.GinieDryRunMode = dryRun
 	return sm.SaveSettings(settings)
 }
 
