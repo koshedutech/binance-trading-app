@@ -1384,25 +1384,35 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 		"to_mode", modeStr,
 		"mode_changed", oldMode != enabled)
 
-	// If no mode change, still verify settings consistency
+	// If no mode change, still verify settings consistency and persist
 	if oldMode == enabled {
-		w.logger.Info("Mode change requested but already in desired mode", "mode", modeStr)
-		// Still ensure settings are consistent
+		w.logger.Info("Mode change requested but already in desired mode, ensuring persistence", "mode", modeStr)
+		// Always verify and persist settings to ensure consistency across all layers
 		sm := autopilot.GetSettingsManager()
 		settings, err := sm.LoadSettings()
 		if err == nil {
-			if settings.DryRunMode != enabled || settings.GinieDryRunMode != enabled {
-				w.logger.Warn("Mode inconsistency detected during no-op call, correcting",
-					"old_dry_run", settings.DryRunMode,
-					"old_ginie_dry_run", settings.GinieDryRunMode,
-					"expected", enabled)
-				settings.DryRunMode = enabled
-				settings.GinieDryRunMode = enabled
-				settings.SpotDryRunMode = enabled
-				sm.SaveSettings(settings)
+			// Force mode to requested state in all settings fields
+			settings.DryRunMode = enabled
+			settings.GinieDryRunMode = enabled
+			settings.SpotDryRunMode = enabled
+
+			w.logger.Info("Force-persisting mode settings for consistency",
+				"dry_run", enabled,
+				"ginie_dry_run", enabled,
+				"spot_dry_run", enabled)
+
+			if err := sm.SaveSettings(settings); err != nil {
+				w.logger.Error("Failed to persist mode settings", "error", err)
+				return fmt.Errorf("failed to persist settings: %w", err)
 			}
+
+			w.logger.Info("Mode persistence verified and applied")
+		} else {
+			w.logger.Warn("Failed to load settings for consistency check", "error", err)
 		}
-		return nil
+
+		// Continue with rest of mode switch logic below (don't return early)
+		// This ensures in-memory state is also refreshed
 	}
 
 	// Update all mode fields FIRST before doing any async operations
@@ -1415,44 +1425,79 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 		w.logger.Info("Updated Spot autopilot mode", "dry_run", enabled)
 	}
 
-	// Update Futures autopilot and switch client
+	// Update Futures autopilot and switch client with timeout protection
 	if w.futuresAutopilotController != nil {
-		// Switch the futures client based on new mode
-		var newClient binance.FuturesClient
-		if enabled {
-			// Switching to PAPER mode - use mock client
-			if w.futuresMockClient != nil {
-				newClient = w.futuresMockClient
-				w.logger.Info("Selecting mock client for PAPER mode")
+		// Use a context with timeout to prevent hanging during client switch
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Run client switch in a goroutine with timeout
+		done := make(chan error, 1)
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					w.logger.Error("Panic during futures client switch", "panic", r)
+					done <- fmt.Errorf("panic during client switch: %v", r)
+				}
+			}()
+
+			// Switch the futures client based on new mode
+			var newClient binance.FuturesClient
+			if enabled {
+				// Switching to PAPER mode - use mock client
+				if w.futuresMockClient != nil {
+					newClient = w.futuresMockClient
+					w.logger.Info("Selecting mock client for PAPER mode")
+				}
+			} else {
+				// Switching to LIVE mode - use real client
+				if w.futuresRealClient != nil {
+					newClient = w.futuresRealClient
+					w.logger.Info("Selecting real client for LIVE mode")
+				} else if w.futuresMockClient != nil {
+					// Fallback to mock if real not available
+					newClient = w.futuresMockClient
+					w.logger.Warn("Real futures client not available, using mock client for LIVE mode")
+				}
 			}
-		} else {
-			// Switching to LIVE mode - use real client
-			if w.futuresRealClient != nil {
-				newClient = w.futuresRealClient
-				w.logger.Info("Selecting real client for LIVE mode")
-			} else if w.futuresMockClient != nil {
-				// Fallback to mock if real not available
-				newClient = w.futuresMockClient
-				w.logger.Warn("Real futures client not available, using mock client for LIVE mode")
+
+			// Wrap with cache if available
+			if newClient != nil && w.marketDataCache != nil {
+				newClient = binance.NewCachedFuturesClient(newClient, w.marketDataCache)
+				w.logger.Info("Wrapped futures client with cache")
+			}
+
+			if newClient != nil {
+				w.futuresAutopilotController.SetFuturesClient(newClient)
+				w.logger.Info("Set futures controller client",
+					"mode", modeStr,
+					"client_type", map[bool]string{true: "mock", false: "real"}[enabled])
+			}
+
+			// Update dry run flag (this will also propagate to Ginie)
+			w.futuresAutopilotController.SetDryRun(enabled)
+			w.logger.Info("Updated FuturesController dry_run", "dry_run", enabled)
+
+			done <- nil
+		}()
+
+		// Wait for client switch to complete with timeout
+		select {
+		case <-ctx.Done():
+			w.logger.Error("Futures client switch TIMEOUT - exceeded 5 seconds",
+				"timeout_reason", ctx.Err(),
+				"mode", modeStr)
+			// Don't fail entirely - the goroutine will continue in background
+			// but we'll proceed with settings persistence
+		case err := <-done:
+			if err != nil {
+				w.logger.Error("Futures client switch failed", "error", err)
+				// Continue anyway - settings will still be persisted
+			} else {
+				w.logger.Info("Futures client switch completed successfully")
 			}
 		}
-
-		// Wrap with cache if available
-		if newClient != nil && w.marketDataCache != nil {
-			newClient = binance.NewCachedFuturesClient(newClient, w.marketDataCache)
-			w.logger.Info("Wrapped futures client with cache")
-		}
-
-		if newClient != nil {
-			w.futuresAutopilotController.SetFuturesClient(newClient)
-			w.logger.Info("Set futures controller client",
-				"mode", modeStr,
-				"client_type", map[bool]string{true: "mock", false: "real"}[enabled])
-		}
-
-		// Update dry run flag (this will also propagate to Ginie)
-		w.futuresAutopilotController.SetDryRun(enabled)
-		w.logger.Info("Updated FuturesController dry_run", "dry_run", enabled)
 	}
 
 	// Save settings to persistent storage synchronously to ensure persistence

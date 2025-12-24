@@ -2,7 +2,9 @@ package api
 
 import (
 	"fmt"
+	"log"
 	"net/http"
+	"time"
 
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
@@ -94,10 +96,32 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		return
 	}
 
+	// SAFETY CHECK: Stop Ginie autopilot if running before mode switch
+	// This prevents lock contention and timeouts during client switching
+	futuresController := s.getFuturesAutopilot()
+	if futuresController != nil {
+		if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
+			if giniePilot.IsRunning() {
+				log.Println("[MODE-SWITCH] Ginie autopilot is running, stopping it before mode switch...")
+				if err := futuresController.StopGinieAutopilot(); err != nil {
+					log.Printf("[MODE-SWITCH] Warning: Failed to stop Ginie before mode switch: %v\n", err)
+					// Don't fail here - continue with mode switch anyway
+				} else {
+					log.Println("[MODE-SWITCH] Ginie autopilot stopped successfully, waiting for cleanup...")
+					// Wait for cleanup to complete before proceeding
+					time.Sleep(500 * time.Millisecond)
+					log.Println("[MODE-SWITCH] Cleanup complete, proceeding with mode switch")
+				}
+			}
+		}
+	}
+
+	log.Printf("[MODE-SWITCH] Starting trading mode switch to dry_run=%v\n", req.DryRun)
 	if err := settingsAPI.SetDryRunMode(req.DryRun); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to update trading mode: "+err.Error())
 		return
 	}
+	log.Println("[MODE-SWITCH] Trading mode switch completed successfully")
 
 	// Verify the change was applied by reading back the current mode
 	currentMode := settingsAPI.GetDryRunMode()
