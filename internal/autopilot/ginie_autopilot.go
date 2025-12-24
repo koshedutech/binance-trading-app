@@ -4449,15 +4449,15 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		pos.TrailingPercent = ga.getTrailingPercent(pos.Mode)
 
 		// Place SLTP orders on Binance in background
-		slPrice := pos.StopLoss
-		tpPrices := []float64{
-			pos.TakeProfits[0].Price,
-			pos.TakeProfits[1].Price,
-			pos.TakeProfits[2].Price,
-			pos.TakeProfits[3].Price,
-		}
-		qty := pos.RemainingQty
 		posSymbol := symbol
+		slPrice := roundPrice(posSymbol, pos.StopLoss)
+		tpPrices := []float64{
+			roundPrice(posSymbol, pos.TakeProfits[0].Price),
+			roundPrice(posSymbol, pos.TakeProfits[1].Price),
+			roundPrice(posSymbol, pos.TakeProfits[2].Price),
+			roundPrice(posSymbol, pos.TakeProfits[3].Price),
+		}
+		qty := roundQuantity(posSymbol, pos.RemainingQty)
 		posSide := pos.Side
 
 		go func() {
@@ -4486,8 +4486,9 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 
 			if slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams); err == nil {
 				pos.StopLossAlgoID = slOrder.AlgoId
+				ga.logger.Info("SLTP: SL order placed", "symbol", posSymbol, "price", slPrice)
 			} else {
-				ga.logger.Error("SLTP: Failed to place SL order", "symbol", posSymbol, "error", err)
+				ga.logger.Error("SLTP: Failed to place SL order", "symbol", posSymbol, "error", err.Error())
 			}
 
 			tpSide := "SELL"
@@ -4496,7 +4497,7 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			}
 
 			newTPIDs := []int64{}
-			tpQty := qty / 4.0
+			tpQty := roundQuantity(posSymbol, qty/4.0)
 
 			for i, tpPrice := range tpPrices {
 				tpParams := binance.AlgoOrderParams{
@@ -4512,7 +4513,7 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 					newTPIDs = append(newTPIDs, tpOrder.AlgoId)
 					ga.logger.Info("SLTP: TP order placed", "symbol", posSymbol, "level", i+1, "price", tpPrice)
 				} else {
-					ga.logger.Error("SLTP: Failed to place TP order", "symbol", posSymbol, "level", i+1, "error", err)
+					ga.logger.Error("SLTP: Failed to place TP order", "symbol", posSymbol, "level", i+1, "error", err.Error())
 				}
 			}
 
