@@ -851,27 +851,10 @@ func (ga *GinieAutopilot) GetTradeHistory(limit int) []GinieTradeResult {
 func (ga *GinieAutopilot) Start() error {
 	ga.logger.Info("Ginie Start() called", "dry_run", ga.config.DryRun, "current_running", ga.running)
 
-	// Sync positions with exchange before starting (don't hold main lock)
-	if !ga.config.DryRun {
-		synced, err := ga.SyncWithExchange()
-		if err != nil {
-			ga.logger.Warn("Failed to sync positions on start", "error", err)
-		} else if synced > 0 {
-			ga.logger.Info("Synced positions from exchange on start", "count", synced)
-		}
-
-		// Place SL/TP orders for all existing positions (including those synced during initialization)
-		ga.placeSLTPOrdersForSyncedPositions()
-
-		// CRITICAL: Run comprehensive orphan order cleanup at startup
-		log.Printf("[GINIE] Running startup orphan order cleanup...")
-		ga.cleanupAllOrphanOrders()
-	}
-
+	// CRITICAL FIX: Acquire lock FIRST before checking running state (prevents race conditions)
 	ga.mu.Lock()
-	defer ga.mu.Unlock()
-
 	if ga.running {
+		ga.mu.Unlock()
 		return fmt.Errorf("Ginie autopilot already running")
 	}
 
@@ -919,7 +902,33 @@ func (ga *GinieAutopilot) Start() error {
 	ga.wg.Add(1)
 	go ga.periodicOrphanOrderCleanup()
 
-	ga.logger.Info("Ginie Autopilot fully started - all monitors running")
+	ga.mu.Unlock()
+	// CRITICAL: Release lock BEFORE doing any blocking operations (prevents API handler timeouts)
+
+	// BACKGROUND: Run heavy initialization tasks in background goroutine
+	// This prevents the API endpoint from timing out due to Binance API calls
+	if !ga.config.DryRun {
+		go func() {
+			// Sync positions with exchange (this can be slow)
+			synced, err := ga.SyncWithExchange()
+			if err != nil {
+				ga.logger.Warn("Failed to sync positions on start", "error", err)
+			} else if synced > 0 {
+				ga.logger.Info("Synced positions from exchange on start", "count", synced)
+			}
+
+			// Place SL/TP orders for all existing positions (including those synced during initialization)
+			ga.placeSLTPOrdersForSyncedPositions()
+
+			// CRITICAL: Run comprehensive orphan order cleanup at startup
+			ga.logger.Info("Running startup orphan order cleanup in background")
+			ga.cleanupAllOrphanOrders()
+
+			ga.logger.Info("Ginie startup initialization tasks completed")
+		}()
+	}
+
+	ga.logger.Info("Ginie Autopilot started - initialization tasks running in background")
 	return nil
 }
 
@@ -935,8 +944,14 @@ func (ga *GinieAutopilot) Stop() error {
 	close(ga.stopChan)
 	ga.mu.Unlock()
 
-	ga.wg.Wait()
-	ga.logger.Info("Ginie Autopilot stopped")
+	// CRITICAL FIX: Don't block waiting for goroutines - return immediately
+	// Let goroutines clean up in background
+	go func() {
+		ga.wg.Wait()
+		ga.logger.Info("Ginie Autopilot stopped (background cleanup completed)")
+	}()
+
+	ga.logger.Info("Ginie Autopilot stop initiated - cleanup running in background")
 	return nil
 }
 
