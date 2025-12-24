@@ -4929,11 +4929,12 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			"new_sl", pos.StopLoss,
 			"sl_pct", fmt.Sprintf("%.2f%%", finalSLPct),
 			"tp_pct", fmt.Sprintf("%.2f%%", finalTPPct),
-			"tp1", pos.TakeProfits[0].Price,
-			"tp2", pos.TakeProfits[1].Price,
-			"tp3", pos.TakeProfits[2].Price,
-			"tp4", pos.TakeProfits[3].Price,
 			"llm_used", llmUsed)
+
+	// Log individual TP levels dynamically to support both single TP and multi-TP modes
+	for i, tp := range pos.TakeProfits {
+		ga.logger.Debug("TP level configured", "symbol", symbol, "level", i+1, "price", fmt.Sprintf("%.2f", tp.Price), "percent", fmt.Sprintf("%.0f%%", tp.Percent))
+	}
 	}
 
 	ga.logger.Info("Adaptive SL/TP recalculation completed", "updated", updated, "total_positions", len(ga.positions))
