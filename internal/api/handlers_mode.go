@@ -37,7 +37,7 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 			if allocMap, ok := alloc.(map[string]interface{}); ok {
 				capitalUtil := allocMap["capital_utilization"]
 				if capitalUtil == nil {
-					capitalUtil = 99.9
+					capitalUtil = 0.0
 				}
 				allocationsArray = append(allocationsArray, gin.H{
 					"mode":                 mode,
