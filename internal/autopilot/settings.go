@@ -1080,9 +1080,8 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		return fmt.Errorf("trailing activation must be 0-20%%, got: %.2f", trailingActivation)
 	}
 
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	// Get current settings BEFORE acquiring the lock to avoid deadlock
+	// (GetCurrentSettings acquires RLock internally)
 	settings := sm.GetCurrentSettings()
 
 	switch mode {
@@ -1127,9 +1126,8 @@ func (sm *SettingsManager) UpdateGinieTPMode(
 		}
 	}
 
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
+	// Get current settings BEFORE acquiring the lock to avoid deadlock
+	// (GetCurrentSettings acquires RLock internally)
 	settings := sm.GetCurrentSettings()
 	settings.GinieUseSingleTP = useSingleTP
 	settings.GinieSingleTPPercent = singleTPPercent
