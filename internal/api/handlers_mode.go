@@ -27,15 +27,6 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 	// Get total capital from controller balance
 	allocationsMap := ginie.GetModeAllocationStatus()
 
-	// DEBUG: Return raw allocationsMap first to see what's actually in the backend response
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"debug": true,
-		"raw_allocations_map": allocationsMap,
-		"allocations": []string{},
-	})
-	return
-
 	// Convert map to array format expected by frontend
 	allocationsArray := make([]gin.H, 0, len(allocationsMap))
 	modeOrder := []string{"ultra_fast", "scalp", "swing", "position"}
