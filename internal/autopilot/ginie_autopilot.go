@@ -1818,24 +1818,45 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			ga.updateBinanceSLOrder(pos)
 		}
 
-		// 2. Trailing SL: Activate early trailing when profit >= threshold
-		if !pos.TrailingActive && pnlPercent >= ga.config.TrailingActivationPercent {
+		// 2. Trailing SL: Activate early trailing when profit >= configured threshold
+		var trailingThreshold float64
+		if pos.TrailingActivationPct > 0 {
+			// Use per-mode configuration if set
+			trailingThreshold = pos.TrailingActivationPct
+		} else {
+			// Fall back to global config default
+			trailingThreshold = ga.config.TrailingActivationPercent
+		}
+
+		if !pos.TrailingActive && pnlPercent >= trailingThreshold {
 			pos.TrailingActive = true
+			configSource := "global"
+			if pos.TrailingActivationPct > 0 {
+				configSource = "per-mode"
+			}
 			ga.logger.Info("Early trailing activated",
 				"symbol", pos.Symbol,
 				"pnl_percent", pnlPercent,
-				"threshold", ga.config.TrailingActivationPercent)
+				"threshold", trailingThreshold,
+				"mode", pos.Mode,
+				"config_source", configSource)
 		}
 
 		// 3. Trail SL upward: Update SL as price moves favorably
-		if pos.TrailingActive && ga.config.TrailingStepPercent > 0 {
+		// Use configured trailing percent (per-mode), or fall back to global config
+		trailingPercent := pos.TrailingPercent
+		if trailingPercent == 0 {
+			trailingPercent = ga.config.TrailingStepPercent
+		}
+
+		if pos.TrailingActive && trailingPercent > 0 {
 			var newTrailingSL float64
 			if pos.Side == "LONG" {
 				// For longs: trail from highest price
-				newTrailingSL = pos.HighestPrice * (1 - ga.config.TrailingStepPercent/100)
+				newTrailingSL = pos.HighestPrice * (1 - trailingPercent/100)
 			} else {
 				// For shorts: trail from lowest price
-				newTrailingSL = pos.LowestPrice * (1 + ga.config.TrailingStepPercent/100)
+				newTrailingSL = pos.LowestPrice * (1 + trailingPercent/100)
 			}
 
 			// Only move SL in profitable direction (never lower for longs, never higher for shorts)
