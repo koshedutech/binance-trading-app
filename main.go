@@ -563,6 +563,12 @@ func main() {
 			} else if futuresRealClient != nil {
 				futuresAutopilotController.SetFuturesClient(futuresRealClient)
 			}
+
+			// CRITICAL FIX: Update cfg to match the actual dry_run mode from saved settings
+			// This ensures GetDryRunMode() returns the correct persisted mode, not the config file default
+			cfg.TradingConfig.DryRun = actualDryRun
+			logger.Info("Updated cfg.TradingConfig.DryRun to match saved settings",
+				"dry_run", actualDryRun)
 		}
 
 		logger.Info("Futures Autopilot Controller initialized",

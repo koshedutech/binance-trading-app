@@ -14,6 +14,7 @@ export default function GiniePanel() {
   const [autopilotStatus, setAutopilotStatus] = useState<GinieAutopilotStatus | null>(null);
   const [circuitBreaker, setCircuitBreaker] = useState<GinieCircuitBreakerStatus | null>(null);
   const [loading, setLoading] = useState(false);
+  const [togglingAutopilot, setTogglingAutopilot] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [togglingMode, setTogglingMode] = useState(false);
@@ -81,6 +82,25 @@ export default function GiniePanel() {
   });
   const [savingTimeframes, setSavingTimeframes] = useState(false);
   const [editingTimeframes, setEditingTimeframes] = useState(false);
+  // SL/TP Configuration state
+  const [sltpConfig, setSltpConfig] = useState({
+    scalp: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.3, trailing_activation: 0.5 },
+    swing: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 1.5, trailing_activation: 1.0 },
+    position: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 3.0, trailing_activation: 2.0 },
+  });
+  const [tpMode, setTpMode] = useState({
+    use_single_tp: true,
+    single_tp_percent: 5.0,
+    tp1_percent: 25.0,
+    tp2_percent: 25.0,
+    tp3_percent: 25.0,
+    tp4_percent: 25.0,
+  });
+  const [savingSLTP, setSavingSLTP] = useState(false);
+  const [editingSLTP, setEditingSLTP] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<'scalp' | 'swing' | 'position'>('swing');
+
+  const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
 
   const isRunning = autopilotStatus?.stats?.running ?? false;
   const isDryRun = autopilotStatus?.config?.dry_run ?? true;
@@ -191,6 +211,7 @@ export default function GiniePanel() {
     fetchDiagnostics();
     fetchSignalLogs();
     fetchTrendTimeframes(); // Fetch trend timeframe configuration
+    fetchSLTPConfig(); // Fetch SL/TP configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
     const interval = setInterval(() => {
       fetchStatus();
@@ -221,6 +242,22 @@ export default function GiniePanel() {
       setError('Failed to toggle Ginie');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleToggleFuturesAutopilot = async () => {
+    if (!autopilotStatus) return;
+    setTogglingAutopilot(true);
+    try {
+      const newRunning = !autopilotStatus.stats.running;
+      const result = await futuresApi.toggleAutopilot(newRunning);
+      setSuccessMsg(result.message || `Futures Autopilot ${newRunning ? 'enabled' : 'disabled'}`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchAutopilotStatus();
+    } catch (err) {
+      setError('Failed to toggle Futures Autopilot');
+    } finally {
+      setTogglingAutopilot(false);
     }
   };
 
@@ -505,6 +542,51 @@ export default function GiniePanel() {
     }
   };
 
+  const fetchSLTPConfig = async () => {
+    try {
+      const result = await futuresApi.getGinieSLTPConfig();
+      if (result.success) {
+        setSltpConfig(result.sltp_config);
+        setTpMode(result.tp_mode);
+      }
+    } catch (err) {
+      console.error('Failed to fetch SL/TP config:', err);
+    }
+  };
+
+  const handleSaveSLTP = async () => {
+    setSavingSLTP(true);
+    try {
+      const config = sltpConfig[selectedMode];
+      await futuresApi.updateGinieSLTP(selectedMode, {
+        sl_percent: config.sl_percent,
+        tp_percent: config.tp_percent,
+        trailing_enabled: config.trailing_enabled,
+        trailing_percent: config.trailing_percent,
+        trailing_activation: config.trailing_activation,
+      });
+      setSuccessMsg(`${selectedMode} mode SL/TP updated`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to update SL/TP configuration');
+    } finally {
+      setSavingSLTP(false);
+    }
+  };
+
+  const handleSaveTPMode = async () => {
+    setSavingSLTP(true);
+    try {
+      await futuresApi.updateGinieTPMode(tpMode);
+      setSuccessMsg('TP mode updated successfully');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to update TP mode');
+    } finally {
+      setSavingSLTP(false);
+    }
+  };
+
   const getModeColor = (mode: string) => {
     switch (mode) {
       case 'scalp': return 'text-yellow-400';
@@ -621,6 +703,26 @@ export default function GiniePanel() {
         >
           {status.enabled ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
         </button>
+
+        {/* CONDITIONAL: Show Futures Autopilot toggle only when Genie is DISABLED */}
+        {!status.enabled && (
+          <>
+            <button
+              onClick={handleToggleFuturesAutopilot}
+              disabled={togglingAutopilot}
+              className={`flex items-center justify-center w-7 h-7 rounded transition-colors ${
+                autopilotStatus?.stats?.running
+                  ? 'bg-orange-900/30 hover:bg-orange-900/50 text-orange-400'
+                  : 'bg-gray-900/30 hover:bg-gray-900/50 text-gray-400'
+              }`}
+              title={autopilotStatus?.stats?.running ? 'Stop Futures Autopilot' : 'Start Futures Autopilot'}
+            >
+              {autopilotStatus?.stats?.running ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
+            </button>
+            <div className="w-px h-5 bg-gray-600 mx-0.5" />
+          </>
+        )}
+
         <div className="w-px h-5 bg-gray-600 mx-0.5" />
         {/* Paper/Live Toggle */}
         <button
@@ -913,28 +1015,37 @@ export default function GiniePanel() {
             </>
           ) : (
             <>
-              <div className="flex-1 flex items-center gap-1">
-                <input
-                  type="text"
-                  value={trendTimeframes.scalp}
-                  onChange={(e) => setTrendTimeframes({...trendTimeframes, scalp: e.target.value})}
-                  placeholder="15m"
-                  className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                />
-                <input
-                  type="text"
-                  value={trendTimeframes.swing}
-                  onChange={(e) => setTrendTimeframes({...trendTimeframes, swing: e.target.value})}
-                  placeholder="1h"
-                  className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                />
-                <input
-                  type="text"
-                  value={trendTimeframes.position}
-                  onChange={(e) => setTrendTimeframes({...trendTimeframes, position: e.target.value})}
-                  placeholder="4h"
-                  className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                />
+              <div className="flex-1 flex items-center gap-2">
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500">Scalp:</span>
+                  <select
+                    value={trendTimeframes.scalp}
+                    onChange={(e) => setTrendTimeframes({...trendTimeframes, scalp: e.target.value})}
+                    className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  >
+                    {validTimeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500">Swing:</span>
+                  <select
+                    value={trendTimeframes.swing}
+                    onChange={(e) => setTrendTimeframes({...trendTimeframes, swing: e.target.value})}
+                    className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  >
+                    {validTimeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-gray-500">Pos:</span>
+                  <select
+                    value={trendTimeframes.position}
+                    onChange={(e) => setTrendTimeframes({...trendTimeframes, position: e.target.value})}
+                    className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  >
+                    {validTimeframes.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                  </select>
+                </div>
                 <button
                   onClick={() => setTrendTimeframes({...trendTimeframes, block_on_divergence: !trendTimeframes.block_on_divergence})}
                   className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
@@ -969,6 +1080,231 @@ export default function GiniePanel() {
         {editingTimeframes && (
           <div className="px-2 py-2 bg-blue-900/20 border border-blue-700/30 rounded text-[10px] text-blue-400">
             💡 Set per-mode timeframes for trend detection. Block option prevents trades when severe divergence detected between timeframes.
+          </div>
+        )}
+      </div>
+
+      {/* SL/TP Configuration Section */}
+      <div className="space-y-2 mb-3">
+        <div className="flex items-center gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600">
+          <Target className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+          <span className="text-xs text-gray-300 whitespace-nowrap">SL/TP:</span>
+
+          {!editingSLTP ? (
+            <>
+              <span className="text-[10px] text-gray-500">Manual:</span>
+              <span className="text-xs text-yellow-400">{sltpConfig[selectedMode].sl_percent > 0 ? '✓' : '✗'}</span>
+              <span className="text-[10px] text-gray-500">Trailing:</span>
+              <span className="text-xs text-blue-400">{sltpConfig[selectedMode].trailing_enabled ? '✓' : '✗'}</span>
+              <span className="text-[10px] text-gray-500">TP Mode:</span>
+              <span className="text-xs text-purple-400">{tpMode.use_single_tp ? 'Single' : 'Multi'}</span>
+              <span className="ml-auto text-[10px] text-gray-500">{selectedMode}</span>
+            </>
+          ) : (
+            <>
+              <div className="flex-1 flex items-center gap-3">
+                {/* Mode Tabs */}
+                <div className="flex gap-1">
+                  {(['scalp', 'swing', 'position'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => setSelectedMode(mode)}
+                      className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                        selectedMode === mode
+                          ? 'bg-white/20 text-white font-bold'
+                          : 'bg-gray-600/30 text-gray-400 hover:text-gray-300'
+                      }`}
+                    >
+                      {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+          <button
+            onClick={() => setEditingSLTP(!editingSLTP)}
+            disabled={savingSLTP}
+            className="px-1.5 py-0.5 bg-blue-900/50 hover:bg-blue-900/70 text-blue-400 rounded text-[10px] transition-colors disabled:opacity-50"
+          >
+            {editingSLTP ? 'Done' : 'Edit'}
+          </button>
+        </div>
+
+        {editingSLTP && (
+          <div className="space-y-3 px-3 py-2 bg-gray-800/50 border border-gray-600 rounded">
+            {/* SL/TP Percentages */}
+            <div>
+              <h4 className="text-[11px] font-semibold text-gray-400 mb-2 flex items-center gap-1">
+                <span>Manual SL/TP % (0 = use ATR/LLM)</span>
+              </h4>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-gray-400 mb-1">Stop Loss %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="20"
+                    value={sltpConfig[selectedMode].sl_percent}
+                    onChange={(e) => setSltpConfig({
+                      ...sltpConfig,
+                      [selectedMode]: {...sltpConfig[selectedMode], sl_percent: parseFloat(e.target.value) || 0}
+                    })}
+                    className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] text-gray-400 mb-1">Take Profit %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="50"
+                    value={sltpConfig[selectedMode].tp_percent}
+                    onChange={(e) => setSltpConfig({
+                      ...sltpConfig,
+                      [selectedMode]: {...sltpConfig[selectedMode], tp_percent: parseFloat(e.target.value) || 0}
+                    })}
+                    className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Trailing Stop */}
+            <div>
+              <label className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 mb-2">
+                <input
+                  type="checkbox"
+                  checked={sltpConfig[selectedMode].trailing_enabled}
+                  onChange={(e) => setSltpConfig({
+                    ...sltpConfig,
+                    [selectedMode]: {...sltpConfig[selectedMode], trailing_enabled: e.target.checked}
+                  })}
+                  className="w-3 h-3"
+                />
+                Trailing Stop
+              </label>
+              {sltpConfig[selectedMode].trailing_enabled && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Trailing %</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="10"
+                      value={sltpConfig[selectedMode].trailing_percent}
+                      onChange={(e) => setSltpConfig({
+                        ...sltpConfig,
+                        [selectedMode]: {...sltpConfig[selectedMode], trailing_percent: parseFloat(e.target.value) || 0}
+                      })}
+                      className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Activation %</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="20"
+                      value={sltpConfig[selectedMode].trailing_activation}
+                      onChange={(e) => setSltpConfig({
+                        ...sltpConfig,
+                        [selectedMode]: {...sltpConfig[selectedMode], trailing_activation: parseFloat(e.target.value) || 0}
+                      })}
+                      className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* TP Mode Selection */}
+            <div>
+              <label className="block text-[11px] font-semibold text-gray-400 mb-2">Take Profit Mode</label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setTpMode({...tpMode, use_single_tp: true})}
+                  className={`px-2 py-1 rounded text-[10px] transition-colors ${
+                    tpMode.use_single_tp
+                      ? 'bg-green-900/50 text-green-400 border border-green-700'
+                      : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+                  }`}
+                >
+                  Single TP
+                </button>
+                <button
+                  onClick={() => setTpMode({...tpMode, use_single_tp: false})}
+                  className={`px-2 py-1 rounded text-[10px] transition-colors ${
+                    !tpMode.use_single_tp
+                      ? 'bg-blue-900/50 text-blue-400 border border-blue-700'
+                      : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+                  }`}
+                >
+                  Multi TP
+                </button>
+              </div>
+
+              {tpMode.use_single_tp ? (
+                <div className="mt-2">
+                  <label className="block text-[10px] text-gray-400 mb-1">Close at % gain</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="50"
+                    value={tpMode.single_tp_percent}
+                    onChange={(e) => setTpMode({...tpMode, single_tp_percent: parseFloat(e.target.value) || 0})}
+                    className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  />
+                </div>
+              ) : (
+                <div className="mt-2 grid grid-cols-4 gap-1">
+                  {(['tp1', 'tp2', 'tp3', 'tp4'] as const).map((level) => (
+                    <div key={level}>
+                      <label className="block text-[10px] text-gray-400 mb-1">{level.toUpperCase()}</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        max="100"
+                        value={tpMode[`${level}_percent`]}
+                        onChange={(e) => setTpMode({...tpMode, [`${level}_percent`]: parseFloat(e.target.value) || 0})}
+                        className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
+                      />
+                      <div className="text-[9px] text-gray-500 text-center mt-0.5">
+                        {(tpMode.tp1_percent + tpMode.tp2_percent + tpMode.tp3_percent + tpMode.tp4_percent).toFixed(1)}% total
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Save Buttons */}
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={handleSaveSLTP}
+                disabled={savingSLTP}
+                className="flex-1 px-2 py-1 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded text-[10px] transition-colors disabled:opacity-50"
+              >
+                {savingSLTP ? 'Saving...' : `Save ${selectedMode}`}
+              </button>
+              <button
+                onClick={handleSaveTPMode}
+                disabled={savingSLTP}
+                className="flex-1 px-2 py-1 bg-purple-900/50 hover:bg-purple-900/70 text-purple-400 rounded text-[10px] transition-colors disabled:opacity-50"
+              >
+                {savingSLTP ? 'Saving...' : 'Save TP Mode'}
+              </button>
+            </div>
+
+            <div className="px-2 py-1.5 bg-blue-900/20 border border-blue-700/30 rounded text-[10px] text-blue-400">
+              💡 Manual override: Set % &gt; 0 to override ATR/LLM. Single TP closes at one level, Multi-TP distributes across 4 levels.
+            </div>
           </div>
         )}
       </div>
