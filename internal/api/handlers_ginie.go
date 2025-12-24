@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -1730,4 +1731,196 @@ func (s *Server) handleUpdateGinieTPMode(c *gin.Context) {
 // parseIntParam is a helper to parse integer query parameters
 func parseIntParam(s string) (int, error) {
 	return strconv.Atoi(s)
+}
+
+// ====== ULTRAFAST SCALPING MODE ======
+
+// handleGetUltraFastConfig returns current ultrafast scalping configuration
+func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"ultrafast_config": gin.H{
+			"enabled":           settings.UltraFastEnabled,
+			"scan_interval_ms":  settings.UltraFastScanInterval,
+			"monitor_interval_ms": settings.UltraFastMonitorInterval,
+			"max_positions":     settings.UltraFastMaxPositions,
+			"max_usd_per_pos":   settings.UltraFastMaxUSDPerPos,
+			"min_confidence":    settings.UltraFastMinConfidence,
+			"min_profit_pct":    settings.UltraFastMinProfitPct,
+			"max_hold_ms":       settings.UltraFastMaxHoldMS,
+			"max_daily_trades":  settings.UltraFastMaxDailyTrades,
+		},
+		"ultrafast_stats": gin.H{
+			"today_trades":  settings.UltraFastTodayTrades,
+			"daily_pnl":     settings.UltraFastDailyPnL,
+			"total_pnl":     settings.UltraFastTotalPnL,
+			"win_rate":      settings.UltraFastWinRate,
+			"last_update":   settings.UltraFastLastUpdate,
+		},
+	})
+}
+
+// handleUpdateUltraFastConfig updates ultrafast scalping configuration
+func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
+	var req struct {
+		Enabled          *bool    `json:"enabled"`
+		ScanIntervalMs   *int     `json:"scan_interval_ms"`
+		MonitorIntervalMs *int    `json:"monitor_interval_ms"`
+		MaxPositions     *int     `json:"max_positions"`
+		MaxUSDPerPos     *float64 `json:"max_usd_per_pos"`
+		MinConfidence    *float64 `json:"min_confidence"`
+		MinProfitPct     *float64 `json:"min_profit_pct"`
+		MaxHoldMs        *int     `json:"max_hold_ms"`
+		MaxDailyTrades   *int     `json:"max_daily_trades"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Update with provided values
+	if req.Enabled != nil {
+		settings.UltraFastEnabled = *req.Enabled
+	}
+	if req.ScanIntervalMs != nil {
+		if *req.ScanIntervalMs < 1000 || *req.ScanIntervalMs > 30000 {
+			errorResponse(c, http.StatusBadRequest, "Scan interval must be between 1000-30000ms")
+			return
+		}
+		settings.UltraFastScanInterval = *req.ScanIntervalMs
+	}
+	if req.MonitorIntervalMs != nil {
+		if *req.MonitorIntervalMs < 100 || *req.MonitorIntervalMs > 5000 {
+			errorResponse(c, http.StatusBadRequest, "Monitor interval must be between 100-5000ms")
+			return
+		}
+		settings.UltraFastMonitorInterval = *req.MonitorIntervalMs
+	}
+	if req.MaxPositions != nil {
+		if *req.MaxPositions < 1 || *req.MaxPositions > 10 {
+			errorResponse(c, http.StatusBadRequest, "Max positions must be between 1-10")
+			return
+		}
+		settings.UltraFastMaxPositions = *req.MaxPositions
+	}
+	if req.MaxUSDPerPos != nil {
+		if *req.MaxUSDPerPos < 50 || *req.MaxUSDPerPos > 5000 {
+			errorResponse(c, http.StatusBadRequest, "Max USD per position must be between $50-$5000")
+			return
+		}
+		settings.UltraFastMaxUSDPerPos = *req.MaxUSDPerPos
+	}
+	if req.MinConfidence != nil {
+		if *req.MinConfidence < 10 || *req.MinConfidence > 99 {
+			errorResponse(c, http.StatusBadRequest, "Min confidence must be between 10-99%")
+			return
+		}
+		settings.UltraFastMinConfidence = *req.MinConfidence
+	}
+	if req.MinProfitPct != nil {
+		if *req.MinProfitPct < 0 || *req.MinProfitPct > 5 {
+			errorResponse(c, http.StatusBadRequest, "Min profit must be between 0-5%")
+			return
+		}
+		settings.UltraFastMinProfitPct = *req.MinProfitPct
+	}
+	if req.MaxHoldMs != nil {
+		if *req.MaxHoldMs < 500 || *req.MaxHoldMs > 60000 {
+			errorResponse(c, http.StatusBadRequest, "Max hold time must be between 500-60000ms")
+			return
+		}
+		settings.UltraFastMaxHoldMS = *req.MaxHoldMs
+	}
+	if req.MaxDailyTrades != nil {
+		if *req.MaxDailyTrades < 10 || *req.MaxDailyTrades > 500 {
+			errorResponse(c, http.StatusBadRequest, "Max daily trades must be between 10-500")
+			return
+		}
+		settings.UltraFastMaxDailyTrades = *req.MaxDailyTrades
+	}
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update ultrafast config: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Ultrafast scalping configuration updated",
+		"config": gin.H{
+			"enabled":           settings.UltraFastEnabled,
+			"scan_interval_ms":  settings.UltraFastScanInterval,
+			"monitor_interval_ms": settings.UltraFastMonitorInterval,
+			"max_positions":     settings.UltraFastMaxPositions,
+			"max_usd_per_pos":   settings.UltraFastMaxUSDPerPos,
+			"min_confidence":    settings.UltraFastMinConfidence,
+			"min_profit_pct":    settings.UltraFastMinProfitPct,
+			"max_hold_ms":       settings.UltraFastMaxHoldMS,
+			"max_daily_trades":  settings.UltraFastMaxDailyTrades,
+		},
+	})
+}
+
+// handleToggleUltraFast toggles ultrafast mode on/off
+func (s *Server) handleToggleUltraFast(c *gin.Context) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	settings.UltraFastEnabled = req.Enabled
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to toggle ultrafast: "+err.Error())
+		return
+	}
+
+	status := "disabled"
+	if req.Enabled {
+		status = "enabled"
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("Ultrafast scalping mode %s", status),
+		"enabled": req.Enabled,
+	})
+}
+
+// handleResetUltraFastStats resets daily ultrafast statistics
+func (s *Server) handleResetUltraFastStats(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Reset daily stats
+	settings.UltraFastTodayTrades = 0
+	settings.UltraFastDailyPnL = 0
+	settings.UltraFastLastUpdate = time.Now().Format("2006-01-02")
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to reset stats: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Ultrafast daily statistics reset",
+		"stats": gin.H{
+			"today_trades": 0,
+			"daily_pnl":    0,
+		},
+	})
 }

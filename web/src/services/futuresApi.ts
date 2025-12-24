@@ -1328,6 +1328,83 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== ULTRAFAST SCALPING MODE ====================
+
+  async getUltraFastConfig(): Promise<{
+    success: boolean;
+    ultrafast_config: {
+      enabled: boolean;
+      scan_interval_ms: number;
+      monitor_interval_ms: number;
+      max_positions: number;
+      max_usd_per_pos: number;
+      min_confidence: number;
+      min_profit_pct: number;
+      max_hold_ms: number;
+      max_daily_trades: number;
+    };
+    ultrafast_stats: {
+      today_trades: number;
+      daily_pnl: number;
+      total_pnl: number;
+      win_rate: number;
+      last_update: string;
+    };
+  }> {
+    const { data } = await this.client.get('/ultrafast/config');
+    return data;
+  }
+
+  async updateUltraFastConfig(config: {
+    enabled?: boolean;
+    scan_interval_ms?: number;
+    monitor_interval_ms?: number;
+    max_positions?: number;
+    max_usd_per_pos?: number;
+    min_confidence?: number;
+    min_profit_pct?: number;
+    max_hold_ms?: number;
+    max_daily_trades?: number;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    config: {
+      enabled: boolean;
+      scan_interval_ms: number;
+      monitor_interval_ms: number;
+      max_positions: number;
+      max_usd_per_pos: number;
+      min_confidence: number;
+      min_profit_pct: number;
+      max_hold_ms: number;
+      max_daily_trades: number;
+    };
+  }> {
+    const { data } = await this.client.post('/ultrafast/config', config);
+    return data;
+  }
+
+  async toggleUltraFast(enabled: boolean): Promise<{
+    success: boolean;
+    message: string;
+    enabled: boolean;
+  }> {
+    const { data } = await this.client.post('/ultrafast/toggle', { enabled });
+    return data;
+  }
+
+  async resetUltraFastStats(): Promise<{
+    success: boolean;
+    message: string;
+    stats: {
+      today_trades: number;
+      daily_pnl: number;
+    };
+  }> {
+    const { data } = await this.client.post('/ultrafast/reset-stats', {});
+    return data;
+  }
+
   // ==================== GINIE MARKET MOVERS ====================
 
   async getMarketMovers(topN: number = 20): Promise<MarketMoversResponse> {

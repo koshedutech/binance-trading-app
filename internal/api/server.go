@@ -580,6 +580,12 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ginie/sltp/:mode", s.handleUpdateGinieSLTP)  // :mode = scalp/swing/position
 			futures.POST("/ginie/tp-mode", s.handleUpdateGinieTPMode)
 
+			// Ultrafast scalping mode configuration
+			futures.GET("/ultrafast/config", s.handleGetUltraFastConfig)
+			futures.POST("/ultrafast/config", s.handleUpdateUltraFastConfig)
+			futures.POST("/ultrafast/toggle", s.handleToggleUltraFast)
+			futures.POST("/ultrafast/reset-stats", s.handleResetUltraFastStats)
+
 			// Strategy Performance endpoints (AI vs Strategy comparison)
 			futures.GET("/ginie/strategy-performance", s.handleGetStrategyPerformance)
 			futures.GET("/ginie/source-performance", s.handleGetSourcePerformance)
