@@ -75,7 +75,6 @@ export default function GiniePanel() {
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'strategy'>('all');
   // Trend Timeframes state
   const [trendTimeframes, setTrendTimeframes] = useState({
-    ultrafast: '5m',
     scalp: '15m',
     swing: '1h',
     position: '4h',
@@ -85,7 +84,6 @@ export default function GiniePanel() {
   const [editingTimeframes, setEditingTimeframes] = useState(false);
   // SL/TP Configuration state
   const [sltpConfig, setSltpConfig] = useState({
-    ultrafast: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.1, trailing_activation: 0.2 },
     scalp: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.3, trailing_activation: 0.5 },
     swing: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 1.5, trailing_activation: 1.0 },
     position: { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 3.0, trailing_activation: 2.0 },
@@ -100,7 +98,7 @@ export default function GiniePanel() {
   });
   const [savingSLTP, setSavingSLTP] = useState(false);
   const [editingSLTP, setEditingSLTP] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<'ultrafast' | 'scalp' | 'swing' | 'position'>('swing');
+  const [selectedMode, setSelectedMode] = useState<'scalp' | 'swing' | 'position'>('swing');
   // Trade history with full decision details
   const [tradeHistory, setTradeHistory] = useState<any[]>([]);
   const [expandedTrade, setExpandedTrade] = useState<string | null>(null);
@@ -539,7 +537,6 @@ export default function GiniePanel() {
     setSavingTimeframes(true);
     try {
       const result = await futuresApi.updateGinieTrendTimeframes({
-        ultrafast_timeframe: trendTimeframes.ultrafast,
         scalp_timeframe: trendTimeframes.scalp,
         swing_timeframe: trendTimeframes.swing,
         position_timeframe: trendTimeframes.position,
@@ -646,7 +643,6 @@ export default function GiniePanel() {
 
   const getModeColor = (mode: string) => {
     switch (mode) {
-      case 'ultrafast': return 'text-orange-400';
       case 'scalp': return 'text-yellow-400';
       case 'swing': return 'text-blue-400';
       case 'position': return 'text-purple-400';
@@ -2343,6 +2339,34 @@ export default function GiniePanel() {
 function PositionCard({ position, expanded, onToggle }: { position: GiniePosition; expanded: boolean; onToggle: () => void }) {
   const pnlTotal = position.realized_pnl + position.unrealized_pnl;
   const pnlPercent = ((position.remaining_qty > 0 ? position.unrealized_pnl : 0) / (position.entry_price * position.original_qty)) * 100;
+  const [editingROI, setEditingROI] = useState(false);
+  const [roiValue, setRoiValue] = useState((position as any).custom_roi_percent?.toString() || '');
+  const [savingROI, setSavingROI] = useState(false);
+
+  const handleSaveROI = async () => {
+    if (!roiValue) {
+      setEditingROI(false);
+      return;
+    }
+
+    const roiPercent = parseFloat(roiValue);
+    if (isNaN(roiPercent) || roiPercent < 0 || roiPercent > 1000) {
+      alert('ROI % must be between 0-1000');
+      return;
+    }
+
+    setSavingROI(true);
+    try {
+      await futuresApi.setPositionROITarget(position.symbol, roiPercent, false);
+      setEditingROI(false);
+      setRoiValue('');
+    } catch (err) {
+      console.error('Error saving ROI target:', err);
+      alert('Failed to save ROI target');
+    } finally {
+      setSavingROI(false);
+    }
+  };
 
   return (
     <div className="bg-gray-700/30 rounded p-2">
@@ -2353,11 +2377,10 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
             {position.side}
           </span>
           <span className={`text-xs uppercase font-bold ${
-            position.mode === 'ultrafast' ? 'text-orange-400' :
             position.mode === 'scalp' ? 'text-yellow-400' :
             position.mode === 'swing' ? 'text-blue-400' :
             'text-purple-400'
-          }`}>{position.mode === 'ultrafast' ? 'UF' : position.mode.slice(0, 3).toUpperCase()}</span>
+          }`}>{position.mode.slice(0, 3).toUpperCase()}</span>
           {/* Source Badge */}
           <span className={`px-1 py-0.5 rounded text-xs ${
             position.source === 'strategy' ? 'bg-purple-900/50 text-purple-400' : 'bg-blue-900/50 text-blue-400'
@@ -2366,6 +2389,12 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
           </span>
           {position.trailing_active && (
             <span className="px-1 py-0.5 bg-blue-900/50 text-blue-400 rounded text-xs">TRAIL</span>
+          )}
+          {/* ROI Target Badge */}
+          {(position as any).custom_roi_percent && (
+            <span className="px-1 py-0.5 bg-yellow-900/50 text-yellow-400 rounded text-xs font-bold">
+              ROI: {((position as any).custom_roi_percent).toFixed(2)}%
+            </span>
           )}
         </div>
         <div className="flex items-center gap-3">
@@ -2378,7 +2407,7 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
 
       {expanded && (
         <div className="mt-3 pt-3 border-t border-gray-600 space-y-2 text-xs">
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-5 gap-2">
             <div className="bg-gray-700/50 p-1.5 rounded">
               <div className="text-gray-500">Entry</div>
               <div className="text-white">${Number(position.entry_price || 0).toFixed(2)}</div>
@@ -2397,6 +2426,61 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
             <div className="bg-gray-700/50 p-1.5 rounded">
               <div className="text-gray-500">Leverage</div>
               <div className="text-white">{position.leverage}x</div>
+            </div>
+            <div className="bg-gray-700/50 p-1.5 rounded">
+              <div className="text-gray-500">🎯 ROI Target</div>
+              {editingROI ? (
+                <div className="space-y-1">
+                  <input
+                    type="number"
+                    value={roiValue}
+                    onChange={(e) => setRoiValue(e.target.value)}
+                    placeholder="ROI %"
+                    step="0.1"
+                    min="0"
+                    max="1000"
+                    className="w-full bg-gray-600 text-white rounded px-1 py-0.5 text-xs border border-gray-500"
+                    autoFocus
+                  />
+                  <div className="flex gap-1">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleSaveROI();
+                      }}
+                      disabled={savingROI}
+                      className="flex-1 bg-green-600 hover:bg-green-700 text-white px-1 py-0.5 rounded text-xs disabled:opacity-50"
+                    >
+                      {savingROI ? 'Saving...' : 'Save'}
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingROI(false);
+                        setRoiValue('');
+                      }}
+                      className="flex-1 bg-gray-600 hover:bg-gray-700 text-white px-1 py-0.5 rounded text-xs"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRoiValue((position as any).custom_roi_percent?.toString() || '');
+                    setEditingROI(true);
+                  }}
+                  className="cursor-pointer hover:text-yellow-300 transition"
+                >
+                  {(position as any).custom_roi_percent ? (
+                    <span className="text-yellow-400 font-bold">{((position as any).custom_roi_percent).toFixed(2)}%</span>
+                  ) : (
+                    <span className="text-gray-400">-</span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -2452,14 +2536,13 @@ function TradeHistoryRow({ trade, expanded = false, onToggle }: { trade: GinieTr
               {trade.source === 'strategy' ? trade.strategy_name || 'Strategy' : 'AI'}
             </span>
           )}
-          {trade.mode && (
+          {(trade as any).mode && (
             <span className={`px-1 py-0.5 rounded text-xs font-bold ${
-              trade.mode === 'ultrafast' ? 'text-orange-400' :
-              trade.mode === 'scalp' ? 'text-yellow-400' :
-              trade.mode === 'swing' ? 'text-blue-400' :
+              (trade as any).mode === 'scalp' ? 'text-yellow-400' :
+              (trade as any).mode === 'swing' ? 'text-blue-400' :
               'text-purple-400'
             }`}>
-              {trade.mode === 'ultrafast' ? 'UF' : trade.mode.slice(0, 3).toUpperCase()}
+              {((trade as any).mode || '').slice(0, 3).toUpperCase()}
             </span>
           )}
           {trade.tp_level && trade.tp_level > 0 && (
@@ -2480,28 +2563,28 @@ function TradeHistoryRow({ trade, expanded = false, onToggle }: { trade: GinieTr
           <div className="grid grid-cols-2 gap-2">
             <div>
               <span className="text-gray-500">Entry Price:</span>
-              <div className="text-white font-mono">{Number(trade.entry_price || 0).toFixed(8)}</div>
+              <div className="text-white font-mono">{Number((trade as any).entry_price || 0).toFixed(8)}</div>
             </div>
             <div>
               <span className="text-gray-500">Exit Price:</span>
-              <div className="text-white font-mono">{Number(trade.exit_price || 0).toFixed(8)}</div>
+              <div className="text-white font-mono">{Number((trade as any).exit_price || 0).toFixed(8)}</div>
             </div>
             <div>
               <span className="text-gray-500">Entry Time:</span>
-              <div className="text-white">{new Date(trade.entry_time || 0).toLocaleString()}</div>
+              <div className="text-white">{new Date((trade as any).entry_time || 0).toLocaleString()}</div>
             </div>
             <div>
               <span className="text-gray-500">Exit Time:</span>
               <div className="text-white">{new Date(trade.timestamp).toLocaleString()}</div>
             </div>
           </div>
-          {trade.decision_details && (
+          {(trade as any).decision_details && (
             <div className="mt-2 p-2 bg-gray-900/50 rounded border border-gray-700">
               <span className="text-gray-400">Decision Details:</span>
               <div className="text-gray-300 mt-1 whitespace-pre-wrap text-xs max-h-32 overflow-y-auto">
-                {typeof trade.decision_details === 'string'
-                  ? trade.decision_details
-                  : JSON.stringify(trade.decision_details, null, 2)}
+                {typeof (trade as any).decision_details === 'string'
+                  ? (trade as any).decision_details
+                  : JSON.stringify((trade as any).decision_details, null, 2)}
               </div>
             </div>
           )}

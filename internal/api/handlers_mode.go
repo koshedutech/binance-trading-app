@@ -27,6 +27,15 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 	// Get total capital from controller balance
 	allocationsMap := ginie.GetModeAllocationStatus()
 
+	// DEBUG: Return raw allocationsMap first to see what's actually in the backend response
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"debug": true,
+		"raw_allocations_map": allocationsMap,
+		"allocations": []string{},
+	})
+	return
+
 	// Convert map to array format expected by frontend
 	allocationsArray := make([]gin.H, 0, len(allocationsMap))
 	modeOrder := []string{"ultra_fast", "scalp", "swing", "position"}
@@ -35,10 +44,15 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 		if alloc, exists := allocationsMap[mode]; exists {
 			// Type assert to get individual fields
 			if allocMap, ok := alloc.(map[string]interface{}); ok {
-				capitalUtil := allocMap["capital_utilization"]
-				if capitalUtil == nil {
-					capitalUtil = 0.0
+				// Extract and convert capital_utilization to a float64
+				var capacityPercent float64 = 0.0
+				if cuValue, exists := allocMap["capital_utilization"]; exists && cuValue != nil {
+					// Type assert to float64
+					if cuFloat, ok := cuValue.(float64); ok {
+						capacityPercent = cuFloat
+					}
 				}
+
 				allocationsArray = append(allocationsArray, gin.H{
 					"mode":                 mode,
 					"allocated_percent":    allocMap["allocated_percent"],
@@ -47,7 +61,7 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 					"available_usd":        allocMap["available_usd"],
 					"current_positions":    allocMap["current_positions"],
 					"max_positions":        allocMap["max_positions"],
-					"capacity_percent":     capitalUtil,
+					"capacity_percent":     capacityPercent,
 				})
 			}
 		}

@@ -89,12 +89,42 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     }
   }, [activePositions]);
 
+  // State for custom ROI from Ginie positions
+  const [roiFromGinie, setRoiFromGinie] = useState<Record<string, number | null>>({});
+
   useEffect(() => {
     fetchPositions();
     // Positions must use REST API - 30s interval to reduce API calls
     const interval = setInterval(fetchPositions, 30000);
     return () => clearInterval(interval);
   }, [fetchPositions]);
+
+  // Fetch Ginie positions to get custom ROI values
+  useEffect(() => {
+    const fetchGinieROI = async () => {
+      try {
+        const response = await fetch('/api/futures/ginie/autopilot/positions');
+        if (response.ok) {
+          const data = await response.json();
+          const roiMap: Record<string, number | null> = {};
+          if (data.positions && Array.isArray(data.positions)) {
+            for (const pos of data.positions) {
+              if ((pos as any).custom_roi_percent !== undefined) {
+                roiMap[pos.symbol] = (pos as any).custom_roi_percent;
+              }
+            }
+          }
+          setRoiFromGinie(roiMap);
+        }
+      } catch (err) {
+        console.error('Error fetching Ginie ROI:', err);
+      }
+    };
+
+    fetchGinieROI();
+    const interval = setInterval(fetchGinieROI, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Fetch orders for each position
   useEffect(() => {
@@ -499,10 +529,10 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                           Save
                         </label>
                       </div>
-                    ) : (position as any).custom_roi_percent ? (
+                    ) : roiFromGinie[position.symbol] !== null && roiFromGinie[position.symbol] !== undefined ? (
                       <div>
                         <div className="font-mono text-xs text-yellow-400">
-                          {((position as any).custom_roi_percent).toFixed(2)}%
+                          {(roiFromGinie[position.symbol]!).toFixed(2)}%
                         </div>
                         <div className="text-xs text-gray-500">
                           (custom)
@@ -569,7 +599,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                             <Edit2 className="w-3 h-3" />
                           </button>
                           <button
-                            onClick={() => startEditROI(position.symbol, (position as any).custom_roi_percent)}
+                            onClick={() => startEditROI(position.symbol, roiFromGinie[position.symbol] || undefined)}
                             className="p-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-400 rounded"
                             title="Set ROI Target"
                           >

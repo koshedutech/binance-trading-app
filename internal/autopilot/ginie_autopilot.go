@@ -1874,6 +1874,12 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 	if len(ga.positions) > 0 {
 		log.Printf("[GINIE-MONITOR] Checking %d positions for trailing/TP/SL", len(ga.positions))
+		// DEBUG: Show which positions are being monitored
+		var posSymbols []string
+		for sym := range ga.positions {
+			posSymbols = append(posSymbols, sym)
+		}
+		log.Printf("[GINIE-MONITOR-DEBUG] Positions in monitoring: %v", posSymbols)
 	}
 
 	for symbol, pos := range ga.positions {
@@ -2012,6 +2018,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 		// === EARLY PROFIT BOOKING (ROI-BASED) ===
 		// Close position if ROI after fees exceeds mode-specific threshold
+		log.Printf("[MONITOR-EARLY-PROFIT] %s: About to check early profit booking\n", symbol)
 		shouldBook, roiPercent, modeStr := ga.shouldBookEarlyProfit(pos, currentPrice)
 		if shouldBook {
 			ga.logger.Info("Booking profit early based on ROI threshold",
@@ -2074,15 +2081,29 @@ func (ga *GinieAutopilot) checkStopLoss(pos *GiniePosition, currentPrice float64
 //   3. Mode-based thresholds (SCALP=5%, SWING=8%, POSITION=10%, ULTRAFAST=3%)
 // Returns (shouldBook, currentROI, source) where source indicates which threshold was used
 func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice float64) (bool, float64, string) {
+	// Debug: Log early profit booking check start
+	fmt.Printf("[EARLY-PROFIT-DEBUG] Checking %s | entry=%.8f current=%.8f | enabled=%v tpLevel=%d\n",
+		pos.Symbol, pos.EntryPrice, currentPrice, ga.config.EarlyProfitBookingEnabled, pos.CurrentTPLevel)
+
 	if !ga.config.EarlyProfitBookingEnabled || pos.CurrentTPLevel > 0 {
+		if !ga.config.EarlyProfitBookingEnabled {
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Early profit booking DISABLED in config\n", pos.Symbol)
+		}
+		if pos.CurrentTPLevel > 0 {
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Skipping early profit - TP level already hit (CurrentTPLevel=%d)\n",
+				pos.Symbol, pos.CurrentTPLevel)
+		}
 		return false, 0, ""
 	}
 
 	// Calculate ROI after fees (including leverage effect)
 	roiPercent := calculateROIAfterFees(pos.EntryPrice, currentPrice, pos.RemainingQty, pos.Side, pos.Leverage)
 
+	fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Calculated ROI after fees = %.4f%%\n", pos.Symbol, roiPercent)
+
 	// Only book if profitable after fees
 	if roiPercent <= 0 {
+		fmt.Printf("[EARLY-PROFIT-DEBUG] %s: ROI not profitable (%.4f%%), skipping\n", pos.Symbol, roiPercent)
 		return false, 0, ""
 	}
 
@@ -2094,14 +2115,31 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 	if pos.CustomROIPercent != nil && *pos.CustomROIPercent > 0 {
 		threshold = *pos.CustomROIPercent
 		source = "position_custom"
+		fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using POSITION-LEVEL custom ROI = %.4f%%\n", pos.Symbol, threshold)
 	} else {
+		if pos.CustomROIPercent == nil {
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Position custom ROI is NIL (not set)\n", pos.Symbol)
+		} else {
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Position custom ROI is <= 0 (%.4f), checking symbol settings\n",
+				pos.Symbol, *pos.CustomROIPercent)
+		}
+
 		// 2. Check symbol-level custom ROI (second priority)
 		settingsManager := GetSettingsManager()
 		symbolSettings := settingsManager.GetSymbolSettings(pos.Symbol)
 		if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
 			threshold = symbolSettings.CustomROIPercent
 			source = "symbol_custom"
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SYMBOL-LEVEL custom ROI = %.4f%% from settings\n",
+				pos.Symbol, threshold)
 		} else {
+			if symbolSettings == nil {
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: No symbol settings found\n", pos.Symbol)
+			} else {
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Symbol settings found but CustomROIPercent = %.4f (not set)\n",
+					pos.Symbol, symbolSettings.CustomROIPercent)
+			}
+
 			// 3. Fallback to mode-based threshold (existing logic)
 			threshold = ga.config.PositionROIThreshold
 			source = "position_default"
@@ -2110,24 +2148,35 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 			case GinieModeUltraFast:
 				threshold = ga.config.UltraFastScalpROIThreshold
 				source = "ultra_fast_default"
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using ULTRA-FAST mode threshold = %.4f%%\n", pos.Symbol, threshold)
 			case GinieModeScalp:
 				threshold = ga.config.ScalpROIThreshold
 				source = "scalp_default"
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SCALP mode threshold = %.4f%%\n", pos.Symbol, threshold)
 			case GinieModeSwing:
 				threshold = ga.config.SwingROIThreshold
 				source = "swing_default"
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SWING mode threshold = %.4f%%\n", pos.Symbol, threshold)
 			case GinieModePosition:
 				threshold = ga.config.PositionROIThreshold
 				source = "position_default"
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using POSITION mode threshold = %.4f%%\n", pos.Symbol, threshold)
 			}
 		}
 	}
 
 	// Check if ROI exceeds threshold
+	fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Comparing ROI %.4f%% >= Threshold %.4f%% (source: %s)\n",
+		pos.Symbol, roiPercent, threshold, source)
+
 	if roiPercent >= threshold {
+		fmt.Printf("[EARLY-PROFIT-DEBUG] %s: ✅ YES - BOOKING EARLY PROFIT! ROI %.4f%% exceeds threshold %.4f%%\n",
+			pos.Symbol, roiPercent, threshold)
 		return true, roiPercent, source
 	}
 
+	fmt.Printf("[EARLY-PROFIT-DEBUG] %s: ❌ NO - ROI %.4f%% below threshold %.4f%%\n",
+		pos.Symbol, roiPercent, threshold)
 	return false, roiPercent, source
 }
 
