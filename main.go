@@ -1367,70 +1367,141 @@ func (w *BotAPIWrapper) GetDryRunMode() bool {
 
 func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 	oldMode := w.cfg.TradingConfig.DryRun
-	w.cfg.TradingConfig.DryRun = enabled
-
-	// Update Spot autopilot if it exists
-	if w.autopilotController != nil {
-		w.autopilotController.SetDryRun(enabled)
-	}
-
-	// Update Futures autopilot and switch client if mode changed
-	if w.futuresAutopilotController != nil {
-		// Switch the futures client based on new mode
-		if oldMode != enabled {
-			var newClient binance.FuturesClient
-			if enabled {
-				// Switching to PAPER mode - use mock client
-				if w.futuresMockClient != nil {
-					newClient = w.futuresMockClient
-				}
-			} else {
-				// Switching to LIVE mode - use real client
-				if w.futuresRealClient != nil {
-					newClient = w.futuresRealClient
-				} else if w.futuresMockClient != nil {
-					// Fallback to mock if real not available
-					newClient = w.futuresMockClient
-					w.logger.Warn("Real futures client not available, using mock client for LIVE mode")
-				}
-			}
-
-			// Wrap with cache if available
-			if newClient != nil && w.marketDataCache != nil {
-				newClient = binance.NewCachedFuturesClient(newClient, w.marketDataCache)
-			}
-
-			if newClient != nil {
-				w.futuresAutopilotController.SetFuturesClient(newClient)
-			}
-		}
-
-		// Update dry run flag (this will also propagate to Ginie)
-		w.futuresAutopilotController.SetDryRun(enabled)
-	}
-
-	// Save settings to persistent storage so mode survives restarts
-	sm := autopilot.GetSettingsManager()
-	settings, err := sm.LoadSettings()
-	if err != nil {
-		w.logger.Warn("Failed to load settings for mode update", "error", err)
-	} else {
-		// Update both main dry run mode and Ginie dry run mode
-		settings.DryRunMode = enabled
-		settings.GinieDryRunMode = enabled
-		settings.SpotDryRunMode = enabled
-		if err := sm.SaveSettings(settings); err != nil {
-			w.logger.Warn("Failed to save settings after mode change", "error", err)
-		} else {
-			w.logger.Info("Saved trading mode to settings file", "dry_run", enabled)
-		}
-	}
-
 	modeStr := "PAPER"
 	if !enabled {
 		modeStr = "LIVE"
 	}
-	w.logger.Info("Trading mode changed", "mode", modeStr, "dry_run", enabled)
+
+	// Log the mode change request
+	w.logger.Info("Mode change requested",
+		"from_mode", map[bool]string{true: "PAPER", false: "LIVE"}[oldMode],
+		"to_mode", modeStr,
+		"mode_changed", oldMode != enabled)
+
+	// If no mode change, still verify settings consistency
+	if oldMode == enabled {
+		w.logger.Info("Mode change requested but already in desired mode", "mode", modeStr)
+		// Still ensure settings are consistent
+		sm := autopilot.GetSettingsManager()
+		settings, err := sm.LoadSettings()
+		if err == nil {
+			if settings.DryRunMode != enabled || settings.GinieDryRunMode != enabled {
+				w.logger.Warn("Mode inconsistency detected during no-op call, correcting",
+					"old_dry_run", settings.DryRunMode,
+					"old_ginie_dry_run", settings.GinieDryRunMode,
+					"expected", enabled)
+				settings.DryRunMode = enabled
+				settings.GinieDryRunMode = enabled
+				settings.SpotDryRunMode = enabled
+				sm.SaveSettings(settings)
+			}
+		}
+		return nil
+	}
+
+	// Update all mode fields FIRST before doing any async operations
+	w.cfg.TradingConfig.DryRun = enabled
+	w.logger.Info("Updated BotAPIWrapper config", "dry_run", enabled)
+
+	// Update Spot autopilot if it exists
+	if w.autopilotController != nil {
+		w.autopilotController.SetDryRun(enabled)
+		w.logger.Info("Updated Spot autopilot mode", "dry_run", enabled)
+	}
+
+	// Update Futures autopilot and switch client
+	if w.futuresAutopilotController != nil {
+		// Switch the futures client based on new mode
+		var newClient binance.FuturesClient
+		if enabled {
+			// Switching to PAPER mode - use mock client
+			if w.futuresMockClient != nil {
+				newClient = w.futuresMockClient
+				w.logger.Info("Selecting mock client for PAPER mode")
+			}
+		} else {
+			// Switching to LIVE mode - use real client
+			if w.futuresRealClient != nil {
+				newClient = w.futuresRealClient
+				w.logger.Info("Selecting real client for LIVE mode")
+			} else if w.futuresMockClient != nil {
+				// Fallback to mock if real not available
+				newClient = w.futuresMockClient
+				w.logger.Warn("Real futures client not available, using mock client for LIVE mode")
+			}
+		}
+
+		// Wrap with cache if available
+		if newClient != nil && w.marketDataCache != nil {
+			newClient = binance.NewCachedFuturesClient(newClient, w.marketDataCache)
+			w.logger.Info("Wrapped futures client with cache")
+		}
+
+		if newClient != nil {
+			w.futuresAutopilotController.SetFuturesClient(newClient)
+			w.logger.Info("Set futures controller client",
+				"mode", modeStr,
+				"client_type", map[bool]string{true: "mock", false: "real"}[enabled])
+		}
+
+		// Update dry run flag (this will also propagate to Ginie)
+		w.futuresAutopilotController.SetDryRun(enabled)
+		w.logger.Info("Updated FuturesController dry_run", "dry_run", enabled)
+	}
+
+	// Save settings to persistent storage synchronously to ensure persistence
+	sm := autopilot.GetSettingsManager()
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		w.logger.Warn("Failed to load settings for mode update", "error", err)
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	// Update both main dry run mode and Ginie dry run mode together
+	oldDryRunMode := settings.DryRunMode
+	oldGinieDryRunMode := settings.GinieDryRunMode
+
+	settings.DryRunMode = enabled
+	settings.GinieDryRunMode = enabled
+	settings.SpotDryRunMode = enabled
+
+	w.logger.Info("Updating settings file",
+		"old_dry_run", oldDryRunMode,
+		"new_dry_run", enabled,
+		"old_ginie_dry_run", oldGinieDryRunMode,
+		"new_ginie_dry_run", enabled)
+
+	if err := sm.SaveSettings(settings); err != nil {
+		w.logger.Error("Failed to save settings after mode change", "error", err)
+		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	w.logger.Info("Successfully saved trading mode to settings file",
+		"mode", modeStr,
+		"dry_run", enabled,
+		"dry_run_mode_saved", settings.DryRunMode,
+		"ginie_dry_run_mode_saved", settings.GinieDryRunMode)
+
+	// Verify the change was applied
+	verifySettings, err := sm.LoadSettings()
+	if err != nil {
+		w.logger.Warn("Failed to verify settings after mode change", "error", err)
+	} else {
+		if verifySettings.DryRunMode != enabled || verifySettings.GinieDryRunMode != enabled {
+			w.logger.Error("Settings verification FAILED after mode change",
+				"expected_dry_run", enabled,
+				"actual_dry_run", verifySettings.DryRunMode,
+				"expected_ginie_dry_run", enabled,
+				"actual_ginie_dry_run", verifySettings.GinieDryRunMode)
+			return fmt.Errorf("settings verification failed: expected dry_run=%v, got %v (ginie=%v)",
+				enabled, verifySettings.DryRunMode, verifySettings.GinieDryRunMode)
+		}
+		w.logger.Info("Settings verification PASSED after mode change",
+			"verified_dry_run", verifySettings.DryRunMode,
+			"verified_ginie_dry_run", verifySettings.GinieDryRunMode)
+	}
+
+	w.logger.Info("Trading mode changed successfully", "mode", modeStr, "dry_run", enabled)
 	return nil
 }
 

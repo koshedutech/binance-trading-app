@@ -48,11 +48,6 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 		return
 	}
 
-	// Update dry run mode if specified
-	if req.DryRun != nil {
-		controller.SetDryRun(*req.DryRun)
-	}
-
 	if req.Enabled {
 		if controller.IsRunning() {
 			c.JSON(http.StatusOK, gin.H{
@@ -65,6 +60,25 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 
 		// Load saved settings before starting (ensures config is up-to-date)
 		controller.LoadSavedSettings()
+
+		// Update dry run mode if specified AFTER loading saved settings
+		// so user-provided value overrides saved settings
+		if req.DryRun != nil {
+			// Use centralized mode switching to ensure proper client swap and sync
+			settingsAPI := s.getSettingsAPI()
+			if settingsAPI != nil {
+				if err := settingsAPI.SetDryRunMode(*req.DryRun); err != nil {
+					fmt.Printf("Failed to update dry run mode: %v\n", err)
+				}
+			} else {
+				// Fallback if settings API not available (legacy support)
+				controller.SetDryRun(*req.DryRun)
+				sm := autopilot.GetSettingsManager()
+				if err := sm.UpdateDryRunMode(*req.DryRun); err != nil {
+					fmt.Printf("Failed to persist dry run mode: %v\n", err)
+				}
+			}
+		}
 
 		if err := controller.Start(); err != nil {
 			errorResponse(c, http.StatusInternalServerError, "Failed to start futures autopilot: "+err.Error())
@@ -84,6 +98,24 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 				"status":  controller.GetStatus(),
 			})
 			return
+		}
+
+		// Update dry run mode if specified even when disabling
+		if req.DryRun != nil {
+			// Use centralized mode switching to ensure proper client swap and sync
+			settingsAPI := s.getSettingsAPI()
+			if settingsAPI != nil {
+				if err := settingsAPI.SetDryRunMode(*req.DryRun); err != nil {
+					fmt.Printf("Failed to update dry run mode: %v\n", err)
+				}
+			} else {
+				// Fallback if settings API not available (legacy support)
+				controller.SetDryRun(*req.DryRun)
+				sm := autopilot.GetSettingsManager()
+				if err := sm.UpdateDryRunMode(*req.DryRun); err != nil {
+					fmt.Printf("Failed to persist dry run mode: %v\n", err)
+				}
+			}
 		}
 
 		controller.Stop()
@@ -112,15 +144,22 @@ func (s *Server) handleSetFuturesAutopilotDryRun(c *gin.Context) {
 		return
 	}
 
-	controller.SetDryRun(req.DryRun)
-
-	// Persist dry run mode to settings file
-	go func() {
+	// Use centralized mode switching to ensure proper client swap and sync
+	settingsAPI := s.getSettingsAPI()
+	if settingsAPI != nil {
+		if err := settingsAPI.SetDryRunMode(req.DryRun); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to update trading mode: "+err.Error())
+			return
+		}
+	} else {
+		// Fallback if settings API not available (legacy support)
+		controller.SetDryRun(req.DryRun)
+		// Persist dry run mode to settings file (synchronous, not async)
 		sm := autopilot.GetSettingsManager()
 		if err := sm.UpdateDryRunMode(req.DryRun); err != nil {
 			fmt.Printf("Failed to persist dry run mode: %v\n", err)
 		}
-	}()
+	}
 
 	mode := "LIVE"
 	if req.DryRun {

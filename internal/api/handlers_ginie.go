@@ -2,6 +2,7 @@ package api
 
 import (
 	"binance-trading-bot/internal/autopilot"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -360,6 +361,17 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 		return
 	}
 
+	// CRITICAL: Check if dry_run mode is being updated
+	// ALWAYS use centralized SetDryRunMode() when dry_run is in updates
+	// because the main config and Ginie config may be out of sync
+	var dryRunUpdated bool
+	var newDryRunValue bool
+	if v, ok := updates["dry_run"].(bool); ok {
+		dryRunUpdated = true
+		newDryRunValue = v
+		fmt.Printf("[GINIE-MODE] Dry run update requested: %v (will always sync to main config)\n", v)
+	}
+
 	// Apply updates to current config
 	if v, ok := updates["enabled"].(bool); ok {
 		currentConfig.Enabled = v
@@ -443,17 +455,45 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 
 	giniePilot.SetConfig(currentConfig)
 
-	// Persist Ginie settings to file so they survive restarts
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateGinieSettings(
-		currentConfig.RiskLevel,
-		currentConfig.DryRun,
-		currentConfig.MaxUSDPerPosition,
-		currentConfig.DefaultLeverage,
-		currentConfig.MinConfidenceToTrade,
-		currentConfig.MaxPositions,
-	); err != nil {
-		log.Printf("Warning: Failed to persist Ginie settings: %v", err)
+	// CRITICAL: If dry_run is being updated, use centralized SetDryRunMode() to ensure consistency
+	if dryRunUpdated {
+		fmt.Printf("[GINIE-MODE] Syncing dry_run to main config: %v\n", newDryRunValue)
+		settingsAPI := s.getSettingsAPI()
+		if settingsAPI != nil {
+			fmt.Printf("[GINIE-MODE] Using centralized SetDryRunMode() method\n")
+			if err := settingsAPI.SetDryRunMode(newDryRunValue); err != nil {
+				fmt.Printf("[GINIE-MODE] ERROR: SetDryRunMode failed: %v\n", err)
+				errorResponse(c, http.StatusInternalServerError, "Failed to sync trading mode: "+err.Error())
+				return
+			}
+			fmt.Printf("[GINIE-MODE] Mode synced successfully via settingsAPI\n")
+		} else {
+			// Fallback: if getSettingsAPI() is nil, directly update FuturesController
+			fmt.Printf("[GINIE-MODE] WARNING: getSettingsAPI() returned nil, using fallback method\n")
+			controller.SetDryRun(newDryRunValue)
+			fmt.Printf("[GINIE-MODE] Called SetDryRun directly\n")
+
+			// Also persist to settings file
+			sm := autopilot.GetSettingsManager()
+			if err := sm.UpdateDryRunMode(newDryRunValue); err != nil {
+				fmt.Printf("[GINIE-MODE] ERROR: Failed to persist mode to settings: %v\n", err)
+			} else {
+				fmt.Printf("[GINIE-MODE] Mode synced successfully via fallback\n")
+			}
+		}
+	} else {
+		// If dry_run didn't change, just persist other Ginie-specific settings
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateGinieSettings(
+			currentConfig.RiskLevel,
+			currentConfig.DryRun,
+			currentConfig.MaxUSDPerPosition,
+			currentConfig.DefaultLeverage,
+			currentConfig.MinConfidenceToTrade,
+			currentConfig.MaxPositions,
+		); err != nil {
+			log.Printf("Warning: Failed to persist Ginie settings: %v", err)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
