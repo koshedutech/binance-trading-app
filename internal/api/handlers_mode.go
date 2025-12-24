@@ -35,6 +35,10 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 		if alloc, exists := allocationsMap[mode]; exists {
 			// Type assert to get individual fields
 			if allocMap, ok := alloc.(map[string]interface{}); ok {
+				capitalUtil := allocMap["capital_utilization"]
+				if capitalUtil == nil {
+					capitalUtil = 99.9
+				}
 				allocationsArray = append(allocationsArray, gin.H{
 					"mode":                 mode,
 					"allocated_percent":    allocMap["allocated_percent"],
@@ -43,7 +47,7 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 					"available_usd":        allocMap["available_usd"],
 					"current_positions":    allocMap["current_positions"],
 					"max_positions":        allocMap["max_positions"],
-					"capacity_percent":     allocMap["capacity_percent"],
+					"capacity_percent":     capitalUtil,
 				})
 			}
 		}
