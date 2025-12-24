@@ -72,6 +72,15 @@ export default function GiniePanel() {
   const [isEditingCBConfig, setIsEditingCBConfig] = useState(false);
   // Source filter for positions/history (AI vs Strategy)
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'strategy'>('all');
+  // Trend Timeframes state
+  const [trendTimeframes, setTrendTimeframes] = useState({
+    scalp: '15m',
+    swing: '1h',
+    position: '4h',
+    block_on_divergence: true,
+  });
+  const [savingTimeframes, setSavingTimeframes] = useState(false);
+  const [editingTimeframes, setEditingTimeframes] = useState(false);
 
   const isRunning = autopilotStatus?.stats?.running ?? false;
   const isDryRun = autopilotStatus?.config?.dry_run ?? true;
@@ -181,6 +190,7 @@ export default function GiniePanel() {
     fetchMarketMovers();
     fetchDiagnostics();
     fetchSignalLogs();
+    fetchTrendTimeframes(); // Fetch trend timeframe configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
     const interval = setInterval(() => {
       fetchStatus();
@@ -460,6 +470,38 @@ export default function GiniePanel() {
       setError('Failed to update confidence threshold');
     } finally {
       setSavingConfig(false);
+    }
+  };
+
+  const fetchTrendTimeframes = async () => {
+    try {
+      const result = await futuresApi.getGinieTrendTimeframes();
+      if (result.success && result.timeframes) {
+        setTrendTimeframes(result.timeframes);
+      }
+    } catch (err) {
+      console.error('Failed to fetch trend timeframes:', err);
+    }
+  };
+
+  const handleSaveTimeframes = async () => {
+    setSavingTimeframes(true);
+    try {
+      const result = await futuresApi.updateGinieTrendTimeframes({
+        scalp_timeframe: trendTimeframes.scalp,
+        swing_timeframe: trendTimeframes.swing,
+        position_timeframe: trendTimeframes.position,
+        block_on_divergence: trendTimeframes.block_on_divergence,
+      });
+      if (result.success) {
+        setSuccessMsg('Trend timeframes updated successfully');
+        setEditingTimeframes(false);
+        setTimeout(() => setSuccessMsg(null), 3000);
+      }
+    } catch (err) {
+      setError('Failed to update trend timeframes');
+    } finally {
+      setSavingTimeframes(false);
     }
   };
 
@@ -850,6 +892,85 @@ export default function GiniePanel() {
         >
           {savingConfig ? '...' : 'Save'}
         </button>
+      </div>
+
+      {/* Trend Timeframes Setting */}
+      <div className="space-y-2 mb-3">
+        <div className="flex items-center gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600">
+          <BarChart3 className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
+          <span className="text-xs text-gray-300 whitespace-nowrap">Timeframes:</span>
+          {!editingTimeframes ? (
+            <>
+              <span className="text-[10px] text-gray-500">Scalp:</span>
+              <span className="text-xs text-yellow-400 font-medium">{trendTimeframes.scalp}</span>
+              <span className="text-[10px] text-gray-500">Swing:</span>
+              <span className="text-xs text-blue-400 font-medium">{trendTimeframes.swing}</span>
+              <span className="text-[10px] text-gray-500">Pos:</span>
+              <span className="text-xs text-purple-400 font-medium">{trendTimeframes.position}</span>
+              <span className="ml-auto text-[10px]">
+                {trendTimeframes.block_on_divergence ? '🚫' : '✓'}
+              </span>
+            </>
+          ) : (
+            <>
+              <div className="flex-1 flex items-center gap-1">
+                <input
+                  type="text"
+                  value={trendTimeframes.scalp}
+                  onChange={(e) => setTrendTimeframes({...trendTimeframes, scalp: e.target.value})}
+                  placeholder="15m"
+                  className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                />
+                <input
+                  type="text"
+                  value={trendTimeframes.swing}
+                  onChange={(e) => setTrendTimeframes({...trendTimeframes, swing: e.target.value})}
+                  placeholder="1h"
+                  className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                />
+                <input
+                  type="text"
+                  value={trendTimeframes.position}
+                  onChange={(e) => setTrendTimeframes({...trendTimeframes, position: e.target.value})}
+                  placeholder="4h"
+                  className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                />
+                <button
+                  onClick={() => setTrendTimeframes({...trendTimeframes, block_on_divergence: !trendTimeframes.block_on_divergence})}
+                  className={`px-1.5 py-0.5 rounded text-[10px] transition-colors ${
+                    trendTimeframes.block_on_divergence
+                      ? 'bg-red-900/50 text-red-400 border border-red-700'
+                      : 'bg-green-900/50 text-green-400 border border-green-700'
+                  }`}
+                  title="Toggle divergence blocking"
+                >
+                  {trendTimeframes.block_on_divergence ? 'BLOCK' : 'ALLOW'}
+                </button>
+              </div>
+            </>
+          )}
+          <button
+            onClick={() => setEditingTimeframes(!editingTimeframes)}
+            disabled={savingTimeframes}
+            className="px-1.5 py-0.5 bg-blue-900/50 hover:bg-blue-900/70 text-blue-400 rounded text-[10px] transition-colors disabled:opacity-50"
+          >
+            {editingTimeframes ? 'Done' : 'Edit'}
+          </button>
+          {editingTimeframes && (
+            <button
+              onClick={handleSaveTimeframes}
+              disabled={savingTimeframes}
+              className="px-1.5 py-0.5 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded text-[10px] transition-colors disabled:opacity-50"
+            >
+              {savingTimeframes ? '...' : 'Save'}
+            </button>
+          )}
+        </div>
+        {editingTimeframes && (
+          <div className="px-2 py-2 bg-blue-900/20 border border-blue-700/30 rounded text-[10px] text-blue-400">
+            💡 Set per-mode timeframes for trend detection. Block option prevents trades when severe divergence detected between timeframes.
+          </div>
+        )}
       </div>
 
       {/* Position Size Setting */}

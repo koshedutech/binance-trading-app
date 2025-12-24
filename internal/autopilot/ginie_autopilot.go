@@ -2324,6 +2324,11 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 			// Place next TP order if available
 			if nextTPIndex+1 < len(pos.TakeProfits) {
 				ga.placeNextTPOrder(pos, nextTPIndex+1)
+			} else {
+				// Last TP executed - ensure SL is placed for remaining qty if not trailing
+				if pos.RemainingQty > 0 && !pos.TrailingActive {
+					ga.placeSLOrder(pos)
+				}
 			}
 		}
 		return
@@ -2357,6 +2362,10 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		"algo_id", tpOrder.AlgoId,
 		"trigger_price", roundedTPPrice,
 		"quantity", tpQty)
+
+	// CRITICAL FIX: Place a new SL order for remaining quantity
+	// Without this, the remaining position is unprotected after TP placement
+	ga.placeSLOrder(pos)
 }
 
 // updateBinanceSLOrder cancels the existing SL algo order and places a new one at the updated price
@@ -2520,18 +2529,41 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 			closePrice = currentPrice * 1.001 // 0.1% buffer above for SHORT
 		}
 
+		// CRITICAL FIX: Round quantity and price to match Binance's precision requirements
+		// Without this, orders are rejected with precision errors
+		roundedQty := roundQuantity(symbol, pos.RemainingQty)
+		roundedPrice := roundPriceForTP(symbol, closePrice, pos.Side)  // Ensure tick-size alignment
+
+		ga.logger.Info("Placing close order",
+			"symbol", symbol,
+			"side", side,
+			"qty", roundedQty,
+			"price", roundedPrice,
+			"current_price", currentPrice,
+			"raw_qty", pos.RemainingQty,
+			"raw_price", closePrice)
+
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
 			PositionSide: positionSide,
 			Type:         binance.FuturesOrderTypeLimit,
-			Quantity:     pos.RemainingQty,
-			Price:        closePrice, // LIMIT order with 0.1% buffer
+			Quantity:     roundedQty,
+			Price:        roundedPrice, // LIMIT order with 0.1% buffer
 		}
 
 		_, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
 		if err != nil {
-			ga.logger.Error("Ginie full close failed", "symbol", symbol, "error", err)
+			errMsg := "unknown"
+			if err != nil {
+				errMsg = err.Error()
+			}
+			ga.logger.Error("Ginie full close failed",
+				"symbol", symbol,
+				"error_msg", errMsg,
+				"qty", roundedQty,
+				"price", roundedPrice,
+				"reason", reason)
 			return
 		}
 

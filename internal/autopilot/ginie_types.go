@@ -227,6 +227,9 @@ type GinieDecisionReport struct {
 	ReEvaluateConditions   []string `json:"re_evaluate_conditions"`
 	NextReview             string   `json:"next_review"`
 
+	// Divergence Detection
+	TrendDivergence *TrendDivergence `json:"trend_divergence,omitempty"`
+
 	// Final Scores
 	ConfidenceScore    float64             `json:"confidence_score"`
 	Recommendation     GenieRecommendation `json:"recommendation"`
@@ -239,6 +242,18 @@ type TrendConfirmation struct {
 	Strength   float64 `json:"strength"`   // 0-100
 	Confidence float64 `json:"confidence"` // 0-100
 	Reasoning  string  `json:"reasoning"`
+}
+
+// TrendDivergence represents a detected divergence between scan and decision timeframes
+type TrendDivergence struct {
+	Detected           bool    `json:"detected"`
+	ScanTimeframe      string  `json:"scan_timeframe"`
+	ScanTrend          string  `json:"scan_trend"`          // bullish/bearish/neutral
+	DecisionTimeframe  string  `json:"decision_timeframe"`
+	DecisionTrend      string  `json:"decision_trend"`
+	Severity           string  `json:"severity"`            // minor/moderate/severe
+	ShouldBlock        bool    `json:"should_block"`
+	Reason             string  `json:"reason"`
 }
 
 // GinieConfig contains Ginie configuration

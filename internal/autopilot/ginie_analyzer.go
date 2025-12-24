@@ -19,6 +19,7 @@ type GinieAnalyzer struct {
 	futuresClient binance.FuturesClient
 	logger        *logging.Logger
 	config        *GinieConfig
+	settings      *AutopilotSettings // Settings for trend timeframes and divergence detection
 
 	// LLM client for AI-based coin selection
 	llmClient *llm.Client
@@ -64,11 +65,15 @@ func NewGinieAnalyzer(
 		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
 	}
 
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
 	g := &GinieAnalyzer{
 		futuresClient:    futuresClient,
 		signalAggregator: signalAggregator,
 		logger:           logger,
 		config:           DefaultGinieConfig(),
+		settings:         settings,
 		coinScans:        make(map[string]*GinieCoinScan),
 		decisions:        make([]GinieDecisionReport, 0, 500),
 		maxDecisions:     500, // Increased for study purposes
@@ -92,6 +97,77 @@ func (g *GinieAnalyzer) SetLLMClient(client *llm.Client) {
 	}
 	// Trigger coin selection when LLM is set
 	go g.LoadLLMSelectedCoins()
+}
+
+// RefreshSettings reloads settings from SettingsManager
+func (g *GinieAnalyzer) RefreshSettings() {
+	sm := GetSettingsManager()
+	g.scanLock.Lock()
+	g.settings = sm.GetCurrentSettings()
+	g.scanLock.Unlock()
+}
+
+// DetectTrendDivergence compares two TrendHealth analyses to detect divergence
+func (g *GinieAnalyzer) DetectTrendDivergence(
+	scanTrend TrendHealth,
+	decisionTrend TrendHealth,
+	blockOnDivergence bool,
+) *TrendDivergence {
+	div := &TrendDivergence{
+		Detected:          false,
+		ScanTimeframe:     scanTrend.Timeframe,
+		ScanTrend:         scanTrend.TrendDirection,
+		DecisionTimeframe: decisionTrend.Timeframe,
+		DecisionTrend:     decisionTrend.TrendDirection,
+		Severity:          "none",
+		ShouldBlock:       false,
+	}
+
+	// No divergence if timeframes are the same
+	if scanTrend.Timeframe == decisionTrend.Timeframe {
+		return div
+	}
+
+	// SEVERE: Opposite directions (bullish vs bearish)
+	if (scanTrend.TrendDirection == "bullish" && decisionTrend.TrendDirection == "bearish") ||
+		(scanTrend.TrendDirection == "bearish" && decisionTrend.TrendDirection == "bullish") {
+		div.Detected = true
+		div.Severity = "severe"
+		div.Reason = fmt.Sprintf("Opposite trends: %s shows %s but %s shows %s",
+			scanTrend.Timeframe, scanTrend.TrendDirection,
+			decisionTrend.Timeframe, decisionTrend.TrendDirection)
+		div.ShouldBlock = blockOnDivergence
+		return div
+	}
+
+	// MODERATE: One trending, one neutral/ranging
+	if (scanTrend.TrendDirection != "neutral" && decisionTrend.TrendDirection == "neutral") ||
+		(scanTrend.TrendDirection == "neutral" && decisionTrend.TrendDirection != "neutral") {
+		div.Detected = true
+		div.Severity = "moderate"
+		div.Reason = fmt.Sprintf("Trend mismatch: %s is %s but %s is %s",
+			scanTrend.Timeframe, scanTrend.TrendDirection,
+			decisionTrend.Timeframe, decisionTrend.TrendDirection)
+		div.ShouldBlock = blockOnDivergence
+		return div
+	}
+
+	// MINOR: Same direction but significantly different ADX strengths
+	if scanTrend.TrendDirection == decisionTrend.TrendDirection &&
+		scanTrend.TrendDirection != "neutral" {
+		adxDiff := math.Abs(scanTrend.ADXValue - decisionTrend.ADXValue)
+		if adxDiff > 15 {
+			div.Detected = true
+			div.Severity = "minor"
+			div.Reason = fmt.Sprintf("Same trend direction but ADX differs significantly: %s (%.1f) vs %s (%.1f)",
+				scanTrend.Timeframe, scanTrend.ADXValue,
+				decisionTrend.Timeframe, decisionTrend.ADXValue)
+			div.ShouldBlock = false // Never block on minor divergence
+			return div
+		}
+	}
+
+	return div
 }
 
 // LLMCoinSelectionResponse represents the LLM response for coin selection
@@ -1417,7 +1493,7 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 		return nil, err
 	}
 
-	// Get klines
+	// Get klines for signal generation (always 1h)
 	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
 	if err != nil {
 		return nil, err
@@ -1426,18 +1502,68 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 	// Select mode
 	mode := g.SelectMode(scan)
 
-	// Fetch 4h klines for trend analysis for swing/position modes
+	// Determine target trend timeframe based on mode
+	var targetTimeframe string
+	switch mode {
+	case GinieModeScalp:
+		targetTimeframe = "15m" // default
+		if g.settings != nil && g.settings.GinieTrendTimeframeScalp != "" {
+			targetTimeframe = g.settings.GinieTrendTimeframeScalp
+		}
+	case GinieModeSwing:
+		targetTimeframe = "1h" // default
+		if g.settings != nil && g.settings.GinieTrendTimeframeSwing != "" {
+			targetTimeframe = g.settings.GinieTrendTimeframeSwing
+		}
+	case GinieModePosition:
+		targetTimeframe = "4h" // default
+		if g.settings != nil && g.settings.GinieTrendTimeframePosition != "" {
+			targetTimeframe = g.settings.GinieTrendTimeframePosition
+		}
+	default:
+		targetTimeframe = "1h"
+	}
+
+	// Fetch klines for target timeframe if different from scan
 	var trendAnalysis TrendHealth = scan.Trend
-	if mode == GinieModeSwing || mode == GinieModePosition {
-		klines4h, err := g.futuresClient.GetFuturesKlines(symbol, "4h", 200)
-		if err == nil && len(klines4h) >= 50 {
-			trendAnalysis = g.analyzeTrend(klines4h, "4h")
+	var divergence *TrendDivergence
+
+	if targetTimeframe != scan.Trend.Timeframe {
+		targetKlines, err := g.futuresClient.GetFuturesKlines(symbol, targetTimeframe, 200)
+		if err != nil {
 			if g.logger != nil {
-				g.logger.Debug("Using 4h trend analysis for mode",
+				g.logger.Warn("Failed to fetch target timeframe klines, using scan trend",
+					"symbol", symbol,
+					"target_timeframe", targetTimeframe,
+					"error", err.Error())
+			}
+			trendAnalysis = scan.Trend // Fallback
+		} else if len(targetKlines) >= 50 {
+			trendAnalysis = g.analyzeTrend(targetKlines, targetTimeframe)
+
+			if g.logger != nil {
+				g.logger.Debug("Using configurable trend timeframe",
 					"symbol", symbol,
 					"mode", mode,
+					"scan_timeframe", scan.Trend.Timeframe,
+					"target_timeframe", targetTimeframe,
 					"trend", trendAnalysis.TrendDirection,
 					"adx", trendAnalysis.ADXValue)
+			}
+
+			// Detect divergence
+			blockOnDivergence := false
+			if g.settings != nil {
+				blockOnDivergence = g.settings.GinieBlockOnDivergence
+			}
+			divergence = g.DetectTrendDivergence(scan.Trend, trendAnalysis, blockOnDivergence)
+
+			if divergence.Detected && g.logger != nil {
+				g.logger.Warn("Trend divergence detected",
+					"symbol", symbol,
+					"severity", divergence.Severity,
+					"reason", divergence.Reason,
+					"should_block", divergence.ShouldBlock)
 			}
 		}
 	}
@@ -1449,10 +1575,11 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 
 	// Build decision report
 	report := &GinieDecisionReport{
-		Symbol:       symbol,
-		Timestamp:    time.Now(),
-		ScanStatus:   scan.Status,
-		SelectedMode: mode,
+		Symbol:          symbol,
+		Timestamp:       time.Now(),
+		ScanStatus:      scan.Status,
+		SelectedMode:    mode,
+		TrendDivergence: divergence,
 	}
 
 	// Market conditions
@@ -1473,6 +1600,22 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 
 	// Signal analysis
 	report.SignalAnalysis = *signals
+
+	// CRITICAL: Block trade if divergence detected and blocking enabled
+	if divergence != nil && divergence.ShouldBlock {
+		report.Recommendation = RecommendationSkip
+		report.RecommendationNote = fmt.Sprintf("BLOCKED: %s", divergence.Reason)
+		report.ConfidenceScore = 0
+
+		if g.logger != nil {
+			g.logger.Info("Trade blocked due to trend divergence",
+				"symbol", symbol,
+				"severity", divergence.Severity,
+				"reason", divergence.Reason)
+		}
+
+		return report, nil
+	}
 
 	// Trade execution
 	if signals.PrimaryPassed && scan.TradeReady {

@@ -1209,6 +1209,41 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== GINIE TREND TIMEFRAMES ====================
+
+  async getGinieTrendTimeframes(): Promise<{
+    success: boolean;
+    timeframes: {
+      scalp: string;
+      swing: string;
+      position: string;
+      block_on_divergence: boolean;
+    };
+    valid_timeframes: string[];
+  }> {
+    const { data } = await this.client.get('/ginie/trend-timeframes');
+    return data;
+  }
+
+  async updateGinieTrendTimeframes(config: {
+    scalp_timeframe?: string;
+    swing_timeframe?: string;
+    position_timeframe?: string;
+    block_on_divergence?: boolean;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    timeframes: {
+      scalp: string;
+      swing: string;
+      position: string;
+      block_on_divergence: boolean;
+    };
+  }> {
+    const { data } = await this.client.post('/ginie/trend-timeframes', config);
+    return data;
+  }
+
   // ==================== GINIE MARKET MOVERS ====================
 
   async getMarketMovers(topN: number = 20): Promise<MarketMoversResponse> {

@@ -571,6 +571,10 @@ func (s *Server) setupRoutes() {
 			// Ginie Diagnostics endpoint
 			futures.GET("/ginie/diagnostics", s.handleGetGinieDiagnostics)
 
+			// Ginie Trend Timeframes endpoints (multi-timeframe divergence detection)
+			futures.GET("/ginie/trend-timeframes", s.handleGetGinieTrendTimeframes)
+			futures.POST("/ginie/trend-timeframes", s.handleUpdateGinieTrendTimeframes)
+
 			// Strategy Performance endpoints (AI vs Strategy comparison)
 			futures.GET("/ginie/strategy-performance", s.handleGetStrategyPerformance)
 			futures.GET("/ginie/source-performance", s.handleGetSourcePerformance)

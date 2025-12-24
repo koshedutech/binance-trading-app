@@ -1442,6 +1442,102 @@ func (s *Server) handleGetTradeHistoryBySource(c *gin.Context) {
 	})
 }
 
+// handleGetGinieTrendTimeframes returns current trend timeframe configuration
+func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"timeframes": gin.H{
+			"scalp":              settings.GinieTrendTimeframeScalp,
+			"swing":              settings.GinieTrendTimeframeSwing,
+			"position":           settings.GinieTrendTimeframePosition,
+			"block_on_divergence": settings.GinieBlockOnDivergence,
+		},
+		"valid_timeframes": []string{
+			"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
+		},
+	})
+}
+
+// handleUpdateGinieTrendTimeframes updates trend timeframe configuration
+func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	var req struct {
+		ScalpTimeframe    string `json:"scalp_timeframe"`
+		SwingTimeframe    string `json:"swing_timeframe"`
+		PositionTimeframe string `json:"position_timeframe"`
+		BlockOnDivergence *bool  `json:"block_on_divergence"` // Pointer to detect if provided
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate timeframes if provided
+	if req.ScalpTimeframe != "" {
+		if err := autopilot.ValidateTimeframe(req.ScalpTimeframe); err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid scalp timeframe: "+err.Error())
+			return
+		}
+	}
+	if req.SwingTimeframe != "" {
+		if err := autopilot.ValidateTimeframe(req.SwingTimeframe); err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid swing timeframe: "+err.Error())
+			return
+		}
+	}
+	if req.PositionTimeframe != "" {
+		if err := autopilot.ValidateTimeframe(req.PositionTimeframe); err != nil {
+			errorResponse(c, http.StatusBadRequest, "Invalid position timeframe: "+err.Error())
+			return
+		}
+	}
+
+	// Update settings
+	sm := autopilot.GetSettingsManager()
+	blockOnDiv := false
+	if req.BlockOnDivergence != nil {
+		blockOnDiv = *req.BlockOnDivergence
+	} else {
+		blockOnDiv = sm.GetCurrentSettings().GinieBlockOnDivergence
+	}
+
+	if err := sm.UpdateGinieTrendTimeframes(
+		req.ScalpTimeframe,
+		req.SwingTimeframe,
+		req.PositionTimeframe,
+		blockOnDiv,
+	); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update timeframes: "+err.Error())
+		return
+	}
+
+	// Refresh GinieAnalyzer settings to pick up changes immediately
+	ginie := controller.GetGinieAnalyzer()
+	if ginie != nil {
+		ginie.RefreshSettings()
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Trend timeframes updated successfully",
+		"timeframes": gin.H{
+			"scalp":              sm.GetCurrentSettings().GinieTrendTimeframeScalp,
+			"swing":              sm.GetCurrentSettings().GinieTrendTimeframeSwing,
+			"position":           sm.GetCurrentSettings().GinieTrendTimeframePosition,
+			"block_on_divergence": sm.GetCurrentSettings().GinieBlockOnDivergence,
+		},
+	})
+}
+
 // parseIntParam is a helper to parse integer query parameters
 func parseIntParam(s string) (int, error) {
 	return strconv.Atoi(s)

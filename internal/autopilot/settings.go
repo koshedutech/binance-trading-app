@@ -202,6 +202,14 @@ type AutopilotSettings struct {
 	GinieMinConfidence float64 `json:"ginie_min_confidence"`  // Min confidence to trade
 	GinieMaxPositions  int     `json:"ginie_max_positions"`   // Max concurrent positions for Ginie
 
+	// Ginie trend detection timeframes (per mode)
+	GinieTrendTimeframeScalp    string `json:"ginie_trend_timeframe_scalp"`    // e.g., "15m"
+	GinieTrendTimeframeSwing    string `json:"ginie_trend_timeframe_swing"`    // e.g., "1h"
+	GinieTrendTimeframePosition string `json:"ginie_trend_timeframe_position"` // e.g., "4h"
+
+	// Ginie divergence detection
+	GinieBlockOnDivergence bool `json:"ginie_block_on_divergence"` // Block trades when timeframe divergence detected
+
 	// Ginie PnL statistics (persisted)
 	GinieTotalPnL      float64 `json:"ginie_total_pnl"`       // Lifetime realized PnL
 	GinieDailyPnL      float64 `json:"ginie_daily_pnl"`       // Today's realized PnL
@@ -392,6 +400,14 @@ func DefaultSettings() *AutopilotSettings {
 		GinieLeverage:      10,
 		GinieMinConfidence: 65.0,
 		GinieMaxPositions:  10,
+
+		// Ginie trend timeframe defaults (per mode)
+		GinieTrendTimeframeScalp:    "15m",
+		GinieTrendTimeframeSwing:    "1h",
+		GinieTrendTimeframePosition: "4h",
+
+		// Ginie divergence detection
+		GinieBlockOnDivergence: true, // Default to safest mode (block on severe divergence)
 
 		// Auto Mode defaults (LLM-driven trading)
 		AutoModeEnabled:          false, // Disabled by default - user must opt in
@@ -872,6 +888,64 @@ func (sm *SettingsManager) UpdateGinieAutoStart(autoStart bool) error {
 func (sm *SettingsManager) GetGinieAutoStart() bool {
 	settings := sm.GetCurrentSettings()
 	return settings.GinieAutoStart
+}
+
+// ValidBinanceTimeframes lists all valid Binance timeframe intervals
+var ValidBinanceTimeframes = map[string]bool{
+	"1m": true, "3m": true, "5m": true, "15m": true, "30m": true,
+	"1h": true, "2h": true, "4h": true, "6h": true, "8h": true,
+	"12h": true, "1d": true, "3d": true, "1w": true, "1M": true,
+}
+
+// ValidateTimeframe checks if a timeframe string is valid for Binance API
+func ValidateTimeframe(tf string) error {
+	if !ValidBinanceTimeframes[tf] {
+		return fmt.Errorf("invalid timeframe '%s': must be one of: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M", tf)
+	}
+	return nil
+}
+
+// UpdateGinieTrendTimeframes updates the trend timeframe settings for each mode
+func (sm *SettingsManager) UpdateGinieTrendTimeframes(
+	scalpTF string,
+	swingTF string,
+	positionTF string,
+	blockOnDivergence bool,
+) error {
+	// Validate all timeframes before saving
+	if scalpTF != "" {
+		if err := ValidateTimeframe(scalpTF); err != nil {
+			return fmt.Errorf("scalp timeframe: %w", err)
+		}
+	}
+	if swingTF != "" {
+		if err := ValidateTimeframe(swingTF); err != nil {
+			return fmt.Errorf("swing timeframe: %w", err)
+		}
+	}
+	if positionTF != "" {
+		if err := ValidateTimeframe(positionTF); err != nil {
+			return fmt.Errorf("position timeframe: %w", err)
+		}
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings := sm.GetCurrentSettings()
+
+	if scalpTF != "" {
+		settings.GinieTrendTimeframeScalp = scalpTF
+	}
+	if swingTF != "" {
+		settings.GinieTrendTimeframeSwing = swingTF
+	}
+	if positionTF != "" {
+		settings.GinieTrendTimeframePosition = positionTF
+	}
+	settings.GinieBlockOnDivergence = blockOnDivergence
+
+	return sm.SaveSettings(settings)
 }
 
 // ResetToDefaults resets all settings to defaults and saves to file
