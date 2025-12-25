@@ -607,6 +607,21 @@ func (fc *FuturesController) LoadSavedSettings() {
 			ginieConfig.CBCooldownMinutes = settings.CooldownMinutes
 		}
 
+		// Apply Ginie TP percentages (multi-level take profit allocation)
+		if settings.GinieUseSingleTP {
+			// Single TP mode: book entire position at single TP
+			ginieConfig.TP1Percent = 100.0
+			ginieConfig.TP2Percent = 0
+			ginieConfig.TP3Percent = 0
+			ginieConfig.TP4Percent = 0
+		} else {
+			// Multi-TP mode: allocate across 4 levels
+			ginieConfig.TP1Percent = settings.GinieTP1Percent
+			ginieConfig.TP2Percent = settings.GinieTP2Percent
+			ginieConfig.TP3Percent = settings.GinieTP3Percent
+			ginieConfig.TP4Percent = settings.GinieTP4Percent
+		}
+
 		fc.ginieAutopilot.SetConfig(ginieConfig)
 		fc.logger.Info("Applied Ginie autopilot settings",
 			"dry_run", ginieConfig.DryRun,
@@ -620,7 +635,20 @@ func (fc *FuturesController) LoadSavedSettings() {
 			"cb_max_daily_loss", ginieConfig.CBMaxDailyLoss,
 			"cb_max_consecutive_losses", ginieConfig.CBMaxConsecutiveLosses,
 			"cb_cooldown_minutes", ginieConfig.CBCooldownMinutes,
+			"tp_mode", map[bool]string{true: "SINGLE", false: "MULTI"}[settings.GinieUseSingleTP],
+			"tp1_percent", ginieConfig.TP1Percent,
+			"trend_timeframes", map[string]string{
+				"ultrafast": settings.GinieTrendTimeframeUltrafast,
+				"scalp":     settings.GinieTrendTimeframeScalp,
+				"swing":     settings.GinieTrendTimeframeSwing,
+				"position":  settings.GinieTrendTimeframePosition,
+			},
+			"block_on_divergence", settings.GinieBlockOnDivergence,
 			"auto_start", settings.GinieAutoStart)
+
+		// NOTE: Ginie analyzer automatically reads trend timeframes and divergence settings
+		// from SettingsManager, so no additional configuration needed here.
+		// The settings are applied when GinieAnalyzer calls GetCurrentSettings()
 
 		// NOTE: Auto-start is disabled during LoadSavedSettings to avoid blocking API startup
 		// The API handler /api/futures/ginie/toggle will handle auto-start on-demand

@@ -1,0 +1,203 @@
+================================================================================
+SLTP FINE-TUNING PERFORMANCE MONITORING GUIDE
+================================================================================
+Date Started: 2025-12-25
+Configuration Applied: Mode-specific SLTP levels with multi-TP ladders
+
+================================================================================
+CURRENT SYSTEM STATE
+================================================================================
+
+POSITIONS UNDER MONITORING: 6
+  1. BNBUSDT (SHORT, Swing mode) - SL 852.50, TP1 816.11
+  2. BEATUSDT (SHORT, Position mode) - SL 2.48703, TPs pending
+  3. LABUSDT (SHORT, Position mode) - SL 0.15433950, TP1 0.14274180
+  4. MIRAUSDT (LONG, Swing mode) - SL 0.13386790, TP1 0.14021600
+  5. USELESSUSDT (LONG, Position mode) - SL 0.05978360, TP1 0.06388820
+  6. ATUSDT (LONG, Position mode) - SL 0.09788150, TP1 0.11089920
+
+ACTIVE SLTP ORDERS: 11
+  - Stop Loss orders: 6
+  - Take Profit orders: 5
+  - Pending multi-TP orders: 1
+
+================================================================================
+SLTP CONFIGURATION ACTIVE
+================================================================================
+
+SCALP MODE:
+  SL: 0.5% | TP: 0.8% | Ratio: 1:1.6
+  Trailing: 0.2% @ 0.3% activation
+  Expected Win Rate: 50-55%
+
+SWING MODE:
+  SL: 2.0% | TP: 4.0% | Ratio: 1:2.0 (OPTIMAL)
+  Trailing: 1.0% @ 1.5% activation
+  TP Levels: 4-level ladder (25% each)
+  Expected Win Rate: 50-55%
+
+POSITION MODE:
+  SL: 3.0% | TP: 6.0% | Ratio: 1:2.0 (OPTIMAL)
+  Trailing: 1.5% @ 2.5% activation
+  TP Levels: 5-level ladder (20% each)
+  Expected Win Rate: 50-55%
+
+================================================================================
+MONITORING METRICS
+================================================================================
+
+PRIMARY METRICS (Core KPIs):
+  [*] Win Rate: Target 50-55% (baseline 45%)
+  [*] Average Win: Target $50-100 (baseline $30-50)
+  [*] Average Loss: Target $25-50 (baseline $20-35)
+  [*] Risk/Reward: Target 1:2.0 (baseline 1:0.8-1.3)
+
+SECONDARY METRICS:
+  [*] TP Level Hit Distribution (which TP hits most?)
+  [*] SL Hit Frequency (how often stops triggered?)
+  [*] Whipsaw Count (false stops in noise)
+  [*] Trailing Stop Effectiveness
+  [*] Mode-Specific Performance
+
+OPERATIONAL METRICS:
+  [*] Daily P&L
+  [*] Consecutive Wins/Losses
+  [*] Time in Trade
+  [*] Circuit Breaker Activations
+
+================================================================================
+MONITORING SCHEDULE
+================================================================================
+
+REAL-TIME (Automated every 5 minutes):
+  - Trailing stop distance checks
+  - Distance to next TP level
+  - Unrealized P&L monitoring
+  - Highest price tracking
+
+HOURLY (Manual dashboard check):
+  - New trades completed
+  - Running win/loss count
+  - Updated daily P&L
+
+DAILY (Full analysis):
+  - Win rate for the day
+  - Average trade size
+  - Total daily P&L
+  - Mode-specific breakdown
+  - Alert threshold checks
+
+WEEKLY (Comprehensive review):
+  - Statistical analysis
+  - Pattern identification
+  - Performance vs targets
+  - Adjustment recommendations
+
+================================================================================
+ALERT CONDITIONS
+================================================================================
+
+RED FLAGS - IMMEDIATE REVIEW:
+  [!] Win rate below 45% after 20 trades
+  [!] Average loss exceeds $75 per trade
+  [!] 5+ consecutive losses
+  [!] Daily drawdown exceeds 5%
+  [!] SL hit 2x more than TP hits
+  [!] Trailing stops not activating
+
+YELLOW FLAGS - MONITOR:
+  [?] Win rate 45-50% (acceptable but below target)
+  [?] More than 30% trades exit at highest TP
+  [?] Trailing stops rarely triggering
+  [?] Win rate variance >10% between modes
+
+GREEN FLAGS - SUCCESS:
+  [+] Win rate 50-55%+
+  [+] Average win $50-100+
+  [+] Risk/reward 1:2.0+
+  [+] Balanced TP distribution
+  [+] Trailing stops active
+  [+] Zero whipsaws
+
+================================================================================
+PERFORMANCE MILESTONES
+================================================================================
+
+AFTER 10 TRADES (Days 1-2):
+  Goal: Validate configuration
+  Check: Order placement, trailing stops
+  Expected: Data collection phase
+
+AFTER 20-30 TRADES (Days 5-7):
+  Goal: Statistical validation point
+  Target: Win rate 50-55%, Risk/reward 1:2.0+
+  Validation: Compare to 45% baseline
+
+AFTER 50+ TRADES (Days 15-30):
+  Goal: Full performance analysis
+  Actions: Mode breakdown, symbol patterns
+  Expected: Identify best configurations
+
+AFTER 100+ TRADES (Days 30-60):
+  Goal: Long-term consistency
+  Actions: Full optimization
+  Expected: High confidence, ready to scale
+
+================================================================================
+MONITORING TOOLS
+================================================================================
+
+Automated Dashboard:
+  python3 SLTP_MONITORING_DASHBOARD.py
+  python3 SLTP_MONITORING_DASHBOARD.py --continuous (every 60 seconds)
+
+API Endpoints:
+  GET /api/futures/ginie/autopilot/status - Trade history
+  GET /api/futures/orders/all - Current orders
+  GET /api/futures/positions - Current positions
+
+Log Files:
+  server.log - Trading activity
+  autopilot_settings.json - Configuration
+
+================================================================================
+WHAT TO DO IF BELOW TARGET
+================================================================================
+
+Win Rate Below 45% (after 20 trades):
+  1. Verify SLTP order placement
+  2. Check mode assignments
+  3. Widen SL by 0.5%
+  4. Review LLM signal quality
+  5. Consider manual overrides
+
+Win Rate 45-50% (after 20 trades):
+  1. Continue to 50+ trades
+  2. Find underperforming mode
+  3. Adjust TP levels
+  4. Review symbol issues
+  5. Document findings
+
+Win Rate 50-55%+ (SUCCESS):
+  1. Configuration working as intended
+  2. Continue monitoring
+  3. Optimize based on TP distribution
+  4. Plan expansion to new symbols
+  5. Document success metrics
+
+================================================================================
+STATUS: LIVE MONITORING ACTIVE
+================================================================================
+
+Current State:
+  - 6 positions active with optimized SLTP
+  - 11 total orders placed
+  - Monitoring dashboard deployed
+  - Trailing stops enabled
+  - Real-time tracking active
+
+Next Step: Monitor for first SLTP hits and trade closures
+
+System ready for continuous performance validation!
+
+================================================================================

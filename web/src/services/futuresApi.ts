@@ -1247,6 +1247,7 @@ class FuturesAPIService {
     scalp_timeframe?: string;
     swing_timeframe?: string;
     position_timeframe?: string;
+    ultrafast_timeframe?: string;
     block_on_divergence?: boolean;
   }): Promise<{
     success: boolean;
@@ -1255,6 +1256,8 @@ class FuturesAPIService {
       scalp: string;
       swing: string;
       position: string;
+      ultra_fast?: string;
+      ultrafast?: string;
       block_on_divergence: boolean;
     };
   }> {
@@ -1302,7 +1305,7 @@ class FuturesAPIService {
     return data;
   }
 
-  async updateGinieSLTP(mode: 'scalp' | 'swing' | 'position', config: {
+  async updateGinieSLTP(mode: 'ultra_fast' | 'scalp' | 'swing' | 'position', config: {
     sl_percent?: number;
     tp_percent?: number;
     trailing_enabled?: boolean;

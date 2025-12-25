@@ -2226,7 +2226,19 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 
 			// Place the next TP order on Binance (TP2 after TP1, TP3 after TP2, etc.)
 			if tpLevel < len(pos.TakeProfits) {
+				ga.logger.Info("TP level hit - placing next TP order",
+					"symbol", pos.Symbol,
+					"current_tp_level", tpLevel,
+					"next_tp_level", tpLevel+1,
+					"remaining_qty", pos.RemainingQty,
+					"next_tp_price", pos.TakeProfits[tpLevel].Price)
 				ga.placeNextTPOrder(pos, tpLevel)
+			} else {
+				ga.logger.Info("Final TP level hit - no more TPs to place",
+					"symbol", pos.Symbol,
+					"tp_level", tpLevel,
+					"total_tp_levels", len(pos.TakeProfits),
+					"trailing_active", pos.TrailingActive)
 			}
 
 			return tpLevel
@@ -2396,8 +2408,20 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition) {
 func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel int) {
 	nextTPIndex := currentTPLevel // currentTPLevel is 1-based, so index for next is same as level
 	if nextTPIndex >= len(pos.TakeProfits) {
+		ga.logger.Info("Cannot place next TP - index out of bounds",
+			"symbol", pos.Symbol,
+			"current_tp_level", currentTPLevel,
+			"next_tp_index", nextTPIndex,
+			"total_tp_levels", len(pos.TakeProfits))
 		return // No more TP levels
 	}
+
+	ga.logger.Info("placeNextTPOrder called",
+		"symbol", pos.Symbol,
+		"current_tp_level", currentTPLevel,
+		"next_tp_level", nextTPIndex+1,
+		"next_tp_price", pos.TakeProfits[nextTPIndex].Price,
+		"dry_run", ga.config.DryRun)
 
 	// CRITICAL: Cancel ALL algo orders for this symbol before placing new one
 	// This is aggressive but necessary to prevent order accumulation

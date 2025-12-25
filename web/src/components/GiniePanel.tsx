@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
-  ListChecks
+  ListChecks, AlertCircle
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 
@@ -528,7 +528,16 @@ export default function GiniePanel() {
     try {
       const result = await futuresApi.getGinieTrendTimeframes();
       if (result.success && result.timeframes) {
-        setTrendTimeframes(result.timeframes);
+        // Merge API response with defaults to ensure all modes are present
+        const apiData = result.timeframes as any;
+        setTrendTimeframes({
+          ...trendTimeframes,
+          ultra_fast: apiData?.ultra_fast || apiData?.ultrafast || '5m',
+          scalp: apiData?.scalp || '15m',
+          swing: apiData?.swing || '1h',
+          position: apiData?.position || '4h',
+          block_on_divergence: apiData?.block_on_divergence !== undefined ? apiData.block_on_divergence : true,
+        });
       }
     } catch (err) {
       console.error('Failed to fetch trend timeframes:', err);
@@ -542,6 +551,7 @@ export default function GiniePanel() {
         scalp_timeframe: trendTimeframes.scalp,
         swing_timeframe: trendTimeframes.swing,
         position_timeframe: trendTimeframes.position,
+        ultrafast_timeframe: trendTimeframes.ultra_fast,
         block_on_divergence: trendTimeframes.block_on_divergence,
       });
       if (result.success) {
@@ -559,8 +569,16 @@ export default function GiniePanel() {
   const fetchSLTPConfig = async () => {
     try {
       const result = await futuresApi.getGinieSLTPConfig();
-      if (result.success) {
-        setSltpConfig(result.sltp_config);
+      if (result.success && result.sltp_config) {
+        // Merge with defaults to ensure all modes are present
+        const apiConfig = result.sltp_config as any;
+        const mergedConfig = {
+          ultra_fast: apiConfig?.ultra_fast || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.1, trailing_activation: 0.2 },
+          scalp: apiConfig?.scalp || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.3, trailing_activation: 0.5 },
+          swing: apiConfig?.swing || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 1.5, trailing_activation: 1.0 },
+          position: apiConfig?.position || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 3.0, trailing_activation: 2.0 },
+        };
+        setSltpConfig(mergedConfig);
         setTpMode(result.tp_mode);
       }
     } catch (err) {
@@ -1180,11 +1198,11 @@ export default function GiniePanel() {
           {!editingSLTP ? (
             <>
               <span className="text-[10px] text-gray-500">Manual:</span>
-              <span className="text-xs text-yellow-400">{sltpConfig[selectedMode].sl_percent > 0 ? '✓' : '✗'}</span>
+              <span className="text-xs text-yellow-400">{sltpConfig[selectedMode]?.sl_percent > 0 ? '✓' : '✗'}</span>
               <span className="text-[10px] text-gray-500">Trailing:</span>
-              <span className="text-xs text-blue-400">{sltpConfig[selectedMode].trailing_enabled ? '✓' : '✗'}</span>
+              <span className="text-xs text-blue-400">{sltpConfig[selectedMode]?.trailing_enabled ? '✓' : '✗'}</span>
               <span className="text-[10px] text-gray-500">TP Mode:</span>
-              <span className="text-xs text-purple-400">{tpMode.use_single_tp ? 'Single' : 'Multi'}</span>
+              <span className="text-xs text-purple-400">{tpMode?.use_single_tp ? 'Single' : 'Multi'}</span>
             </>
           ) : (
             <></>
@@ -1213,10 +1231,10 @@ export default function GiniePanel() {
                     step="0.1"
                     min="0"
                     max="20"
-                    value={sltpConfig[selectedMode].sl_percent}
+                    value={sltpConfig[selectedMode]?.sl_percent || 0}
                     onChange={(e) => setSltpConfig({
                       ...sltpConfig,
-                      [selectedMode]: {...sltpConfig[selectedMode], sl_percent: parseFloat(e.target.value) || 0}
+                      [selectedMode]: {...(sltpConfig[selectedMode] || {}), sl_percent: parseFloat(e.target.value) || 0}
                     })}
                     className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
@@ -1228,10 +1246,10 @@ export default function GiniePanel() {
                     step="0.1"
                     min="0"
                     max="50"
-                    value={sltpConfig[selectedMode].tp_percent}
+                    value={sltpConfig[selectedMode]?.tp_percent || 0}
                     onChange={(e) => setSltpConfig({
                       ...sltpConfig,
-                      [selectedMode]: {...sltpConfig[selectedMode], tp_percent: parseFloat(e.target.value) || 0}
+                      [selectedMode]: {...(sltpConfig[selectedMode] || {}), tp_percent: parseFloat(e.target.value) || 0}
                     })}
                     className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
@@ -1244,16 +1262,16 @@ export default function GiniePanel() {
               <label className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 mb-2">
                 <input
                   type="checkbox"
-                  checked={sltpConfig[selectedMode].trailing_enabled}
+                  checked={sltpConfig[selectedMode]?.trailing_enabled || false}
                   onChange={(e) => setSltpConfig({
                     ...sltpConfig,
-                    [selectedMode]: {...sltpConfig[selectedMode], trailing_enabled: e.target.checked}
+                    [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_enabled: e.target.checked}
                   })}
                   className="w-3 h-3"
                 />
                 Trailing Stop
               </label>
-              {sltpConfig[selectedMode].trailing_enabled && (
+              {sltpConfig[selectedMode]?.trailing_enabled && (
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[10px] text-gray-400 mb-1">Trailing %</label>
@@ -1262,10 +1280,10 @@ export default function GiniePanel() {
                       step="0.1"
                       min="0"
                       max="10"
-                      value={sltpConfig[selectedMode].trailing_percent}
+                      value={sltpConfig[selectedMode]?.trailing_percent || 0}
                       onChange={(e) => setSltpConfig({
                         ...sltpConfig,
-                        [selectedMode]: {...sltpConfig[selectedMode], trailing_percent: parseFloat(e.target.value) || 0}
+                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_percent: parseFloat(e.target.value) || 0}
                       })}
                       className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
@@ -1277,10 +1295,10 @@ export default function GiniePanel() {
                       step="0.1"
                       min="0"
                       max="20"
-                      value={sltpConfig[selectedMode].trailing_activation}
+                      value={sltpConfig[selectedMode]?.trailing_activation || 0}
                       onChange={(e) => setSltpConfig({
                         ...sltpConfig,
-                        [selectedMode]: {...sltpConfig[selectedMode], trailing_activation: parseFloat(e.target.value) || 0}
+                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_activation: parseFloat(e.target.value) || 0}
                       })}
                       className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
@@ -2498,20 +2516,66 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
             </div>
           </div>
 
-          {/* TP Levels */}
-          <div className="flex gap-2 flex-wrap">
-            {position.take_profits.map((tp) => (
-              <div
-                key={tp.level}
-                className={`px-2 py-1 rounded flex items-center gap-1 ${
-                  tp.status === 'hit' ? 'bg-green-900/50 text-green-400' : 'bg-gray-700 text-gray-400'
-                }`}
-              >
-                <Target className="w-3 h-3" />
-                TP{tp.level}: ${Number(tp.price || 0).toFixed(2)} ({tp.percent}%)
-                {tp.status === 'hit' && <CheckCircle className="w-3 h-3 ml-1" />}
-              </div>
-            ))}
+          {/* TP Levels with Progression */}
+          <div className="space-y-2">
+            <div className="text-gray-500 text-xs font-medium">Take Profit Progression</div>
+            <div className="flex items-center gap-1 flex-wrap">
+              {position.take_profits.map((tp, idx) => {
+                const isHit = tp.status === 'hit';
+                const isActive = position.current_tp_level === tp.level;
+                const isNext = position.current_tp_level + 1 === tp.level;
+
+                return (
+                  <div key={tp.level} className="flex items-center gap-1">
+                    {/* TP Box */}
+                    <div
+                      className={`px-2 py-1.5 rounded text-xs font-bold flex items-center gap-1 transition-colors ${
+                        isHit
+                          ? 'bg-green-900/60 text-green-300 ring-1 ring-green-600'
+                          : isNext
+                            ? 'bg-yellow-900/60 text-yellow-300 ring-1 ring-yellow-600'
+                            : 'bg-gray-700/40 text-gray-400'
+                      }`}
+                    >
+                      <span>TP{tp.level}</span>
+                      {isHit && <CheckCircle className="w-3 h-3" />}
+                      {isNext && !isHit && <AlertCircle className="w-3 h-3 animate-pulse" />}
+                    </div>
+
+                    {/* Arrow between TPs */}
+                    {idx < position.take_profits.length - 1 && (
+                      <div
+                        className={`text-xs font-bold ${
+                          isHit ? 'text-green-400' : isActive || isNext ? 'text-yellow-400' : 'text-gray-600'
+                        }`}
+                      >
+                        →
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* TP Details Row */}
+            <div className="grid grid-cols-4 gap-2 mt-2">
+              {position.take_profits.map((tp) => (
+                <div
+                  key={tp.level}
+                  className={`text-xs p-1.5 rounded text-center ${
+                    tp.status === 'hit'
+                      ? 'bg-green-900/30 text-green-300'
+                      : position.current_tp_level + 1 === tp.level
+                        ? 'bg-yellow-900/30 text-yellow-300'
+                        : 'bg-gray-700/30 text-gray-400'
+                  }`}
+                >
+                  <div className="font-bold">TP{tp.level}</div>
+                  <div className="text-[10px] text-gray-400">${Number(tp.price || 0).toFixed(2)}</div>
+                  <div className="text-[10px] text-gray-500">{tp.percent}%</div>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="text-gray-500">

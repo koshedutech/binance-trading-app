@@ -98,21 +98,31 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 
 	// SAFETY CHECK: Stop Ginie autopilot if running before mode switch
 	// This prevents lock contention and timeouts during client switching
+	// Use non-blocking goroutine with timeout to prevent hangs
 	futuresController := s.getFuturesAutopilot()
 	if futuresController != nil {
-		if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
-			if giniePilot.IsRunning() {
-				log.Println("[MODE-SWITCH] Ginie autopilot is running, stopping it before mode switch...")
-				if err := futuresController.StopGinieAutopilot(); err != nil {
-					log.Printf("[MODE-SWITCH] Warning: Failed to stop Ginie before mode switch: %v\n", err)
-					// Don't fail here - continue with mode switch anyway
-				} else {
-					log.Println("[MODE-SWITCH] Ginie autopilot stopped successfully, waiting for cleanup...")
-					// Wait for cleanup to complete before proceeding
-					time.Sleep(500 * time.Millisecond)
-					log.Println("[MODE-SWITCH] Cleanup complete, proceeding with mode switch")
+		stopDone := make(chan bool, 1)
+		go func() {
+			if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
+				if giniePilot.IsRunning() {
+					log.Println("[MODE-SWITCH] Ginie autopilot is running, stopping it before mode switch...")
+					if err := futuresController.StopGinieAutopilot(); err != nil {
+						log.Printf("[MODE-SWITCH] Warning: Failed to stop Ginie before mode switch: %v\n", err)
+					} else {
+						log.Println("[MODE-SWITCH] Ginie autopilot stopped successfully")
+					}
 				}
 			}
+			stopDone <- true
+		}()
+
+		// Wait max 2 seconds for Ginie to stop, don't block request further
+		select {
+		case <-stopDone:
+			log.Println("[MODE-SWITCH] Ginie stop completed, proceeding with mode switch")
+			time.Sleep(500 * time.Millisecond) // Brief cleanup wait
+		case <-time.After(2 * time.Second):
+			log.Println("[MODE-SWITCH] Ginie stop timeout (2s), proceeding with mode switch anyway")
 		}
 	}
 

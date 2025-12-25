@@ -1384,38 +1384,43 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 		"to_mode", modeStr,
 		"mode_changed", oldMode != enabled)
 
-	// If no mode change, still verify settings consistency and persist
-	if oldMode == enabled {
-		w.logger.Info("Mode change requested but already in desired mode, ensuring persistence", "mode", modeStr)
-		// Always verify and persist settings to ensure consistency across all layers
-		sm := autopilot.GetSettingsManager()
-		settings, err := sm.LoadSettings()
-		if err == nil {
-			// Force mode to requested state in all settings fields
-			settings.DryRunMode = enabled
-			settings.GinieDryRunMode = enabled
-			settings.SpotDryRunMode = enabled
-
-			w.logger.Info("Force-persisting mode settings for consistency",
-				"dry_run", enabled,
-				"ginie_dry_run", enabled,
-				"spot_dry_run", enabled)
-
-			if err := sm.SaveSettings(settings); err != nil {
-				w.logger.Error("Failed to persist mode settings", "error", err)
-				return fmt.Errorf("failed to persist settings: %w", err)
-			}
-
-			w.logger.Info("Mode persistence verified and applied")
-		} else {
-			w.logger.Warn("Failed to load settings for consistency check", "error", err)
-		}
-
-		// Continue with rest of mode switch logic below (don't return early)
-		// This ensures in-memory state is also refreshed
+	// CRITICAL FIX: Load settings ONCE at the start to prevent race condition
+	// Previously we were loading and saving twice, creating a window where
+	// another thread could call LoadSavedSettings() and revert the mode
+	sm := autopilot.GetSettingsManager()
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		w.logger.Warn("Failed to load settings for mode update", "error", err)
+		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	// Update all mode fields FIRST before doing any async operations
+	// Update both main dry run mode and Ginie dry run mode together
+	oldDryRunMode := settings.DryRunMode
+	oldGinieDryRunMode := settings.GinieDryRunMode
+
+	settings.DryRunMode = enabled
+	settings.GinieDryRunMode = enabled
+	settings.SpotDryRunMode = enabled
+
+	w.logger.Info("Updating settings file",
+		"old_dry_run", oldDryRunMode,
+		"new_dry_run", enabled,
+		"old_ginie_dry_run", oldGinieDryRunMode,
+		"new_ginie_dry_run", enabled)
+
+	// Save to persistent storage IMMEDIATELY to prevent LoadSavedSettings from reading stale data
+	if err := sm.SaveSettings(settings); err != nil {
+		w.logger.Error("Failed to save settings after mode change", "error", err)
+		return fmt.Errorf("failed to save settings: %w", err)
+	}
+
+	w.logger.Info("Successfully saved trading mode to settings file",
+		"mode", modeStr,
+		"dry_run", enabled,
+		"dry_run_mode_saved", settings.DryRunMode,
+		"ginie_dry_run_mode_saved", settings.GinieDryRunMode)
+
+	// Update all mode fields AFTER persistent save to prevent race condition
 	w.cfg.TradingConfig.DryRun = enabled
 	w.logger.Info("Updated BotAPIWrapper config", "dry_run", enabled)
 
@@ -1498,58 +1503,6 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 				w.logger.Info("Futures client switch completed successfully")
 			}
 		}
-	}
-
-	// Save settings to persistent storage synchronously to ensure persistence
-	sm := autopilot.GetSettingsManager()
-	settings, err := sm.LoadSettings()
-	if err != nil {
-		w.logger.Warn("Failed to load settings for mode update", "error", err)
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	// Update both main dry run mode and Ginie dry run mode together
-	oldDryRunMode := settings.DryRunMode
-	oldGinieDryRunMode := settings.GinieDryRunMode
-
-	settings.DryRunMode = enabled
-	settings.GinieDryRunMode = enabled
-	settings.SpotDryRunMode = enabled
-
-	w.logger.Info("Updating settings file",
-		"old_dry_run", oldDryRunMode,
-		"new_dry_run", enabled,
-		"old_ginie_dry_run", oldGinieDryRunMode,
-		"new_ginie_dry_run", enabled)
-
-	if err := sm.SaveSettings(settings); err != nil {
-		w.logger.Error("Failed to save settings after mode change", "error", err)
-		return fmt.Errorf("failed to save settings: %w", err)
-	}
-
-	w.logger.Info("Successfully saved trading mode to settings file",
-		"mode", modeStr,
-		"dry_run", enabled,
-		"dry_run_mode_saved", settings.DryRunMode,
-		"ginie_dry_run_mode_saved", settings.GinieDryRunMode)
-
-	// Verify the change was applied
-	verifySettings, err := sm.LoadSettings()
-	if err != nil {
-		w.logger.Warn("Failed to verify settings after mode change", "error", err)
-	} else {
-		if verifySettings.DryRunMode != enabled || verifySettings.GinieDryRunMode != enabled {
-			w.logger.Error("Settings verification FAILED after mode change",
-				"expected_dry_run", enabled,
-				"actual_dry_run", verifySettings.DryRunMode,
-				"expected_ginie_dry_run", enabled,
-				"actual_ginie_dry_run", verifySettings.GinieDryRunMode)
-			return fmt.Errorf("settings verification failed: expected dry_run=%v, got %v (ginie=%v)",
-				enabled, verifySettings.DryRunMode, verifySettings.GinieDryRunMode)
-		}
-		w.logger.Info("Settings verification PASSED after mode change",
-			"verified_dry_run", verifySettings.DryRunMode,
-			"verified_ginie_dry_run", verifySettings.GinieDryRunMode)
 	}
 
 	w.logger.Info("Trading mode changed successfully", "mode", modeStr, "dry_run", enabled)
