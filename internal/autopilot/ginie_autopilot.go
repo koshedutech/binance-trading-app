@@ -4663,6 +4663,75 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			"removed_count", len(positionsToRemove),
 			"remaining_positions", len(ga.positions))
 	}
+
+	// PHASE 2: Add positions that exist on Binance but not in internal tracking
+	// This handles positions opened externally or from previous sessions
+	positionsToAdd := make([]*binance.FuturesPosition, 0)
+
+	for key, exchangePos := range exchangeMap {
+		// Skip if we already have this position tracked
+		if _, exists := ga.positions[key.symbol]; exists {
+			continue
+		}
+
+		// This is a new position on Binance that we're not tracking
+		ga.logger.Info("Position reconciliation: found untracked Binance position",
+			"symbol", key.symbol,
+			"side", key.side,
+			"quantity", math.Abs(exchangePos.PositionAmt),
+			"entry_price", exchangePos.EntryPrice)
+
+		positionsToAdd = append(positionsToAdd, exchangePos)
+	}
+
+	// Add discovered positions to tracking (release lock briefly for placeSLTPOrders)
+	if len(positionsToAdd) > 0 {
+		for _, exchangePos := range positionsToAdd {
+			side := "LONG"
+			if exchangePos.PositionAmt < 0 {
+				side = "SHORT"
+			}
+			qty := math.Abs(exchangePos.PositionAmt)
+
+			// Create internal position entry
+			newPos := &GiniePosition{
+				Symbol:       exchangePos.Symbol,
+				Side:         side,
+				EntryPrice:   exchangePos.EntryPrice,
+				OriginalQty:  qty,
+				RemainingQty: qty,
+				EntryTime:    time.Now(), // Approximate
+				Mode:         GinieModeSwing, // Default to swing for external positions
+				HighestPrice: exchangePos.MarkPrice,
+				LowestPrice:  exchangePos.MarkPrice,
+			}
+
+			ga.positions[exchangePos.Symbol] = newPos
+
+			ga.logger.Info("Position reconciliation: added untracked position to Ginie",
+				"symbol", exchangePos.Symbol,
+				"side", side,
+				"quantity", qty,
+				"entry_price", exchangePos.EntryPrice)
+		}
+
+		// Place SL/TP orders for newly added positions (in background to avoid lock issues)
+		ga.logger.Info("Position reconciliation: placing SL/TP for newly discovered positions",
+			"count", len(positionsToAdd))
+
+		go func() {
+			// Small delay to ensure positions are saved
+			time.Sleep(500 * time.Millisecond)
+			ga.placeSLTPOrdersForSyncedPositions()
+		}()
+	}
+
+	if len(positionsToAdd) > 0 || len(positionsToRemove) > 0 {
+		ga.logger.Info("Position reconciliation summary",
+			"added", len(positionsToAdd),
+			"removed", len(positionsToRemove),
+			"total_tracked", len(ga.positions))
+	}
 }
 
 // ==================== END POSITION RECONCILIATION ====================

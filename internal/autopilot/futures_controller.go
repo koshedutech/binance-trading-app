@@ -2670,6 +2670,7 @@ func (fc *FuturesController) placeTPSLOrders(symbol string, decision *FuturesAut
 
 // placeTPSLOrdersSelective places take profit and/or stop loss orders selectively
 // Use this when you need to place only TP, only SL, or both
+// Includes retry logic and handles "order would immediately trigger" errors
 func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *FuturesAutopilotDecision, positionSide binance.PositionSide, placeTP bool, placeSL bool) {
 	if !placeTP && !placeSL {
 		return
@@ -2690,37 +2691,117 @@ func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *F
 
 	// For closing positions: SELL to close LONG, BUY to close SHORT
 	closeSide := "SELL"
+	isLong := true
 	if positionSide == binance.PositionSideShort {
 		closeSide = "BUY"
+		isLong = false
 	}
+
+	// Get current price for TP trigger check
+	currentPrice, priceErr := fc.futuresClient.GetFuturesCurrentPrice(symbol)
+	if priceErr != nil {
+		fc.logger.Warn("Failed to get current price for TP check (selective)",
+			"symbol", symbol, "error", priceErr)
+		currentPrice = 0
+	}
+
+	// Retry constants
+	const maxRetries = 3
+	retryDelay := 500 * time.Millisecond
 
 	// Place Take Profit order if requested
 	if placeTP && decision.TakeProfit > 0 {
-		tpParams := binance.AlgoOrderParams{
-			Symbol:        symbol,
-			Side:          closeSide,
-			PositionSide:  effectivePositionSide,
-			Type:          binance.FuturesOrderTypeTakeProfitMarket,
-			TriggerPrice:  roundPrice(symbol, decision.TakeProfit),
-			ClosePosition: true,
-			WorkingType:   binance.WorkingTypeMarkPrice,
+		roundedTP := roundPrice(symbol, decision.TakeProfit)
+
+		// Check if price already passed TP - would cause "order would immediately trigger" error
+		tpAlreadyPassed := false
+		if currentPrice > 0 {
+			if isLong && currentPrice >= roundedTP {
+				tpAlreadyPassed = true
+			} else if !isLong && currentPrice <= roundedTP {
+				tpAlreadyPassed = true
+			}
 		}
-		tpResp, tpErr := fc.futuresClient.PlaceAlgoOrder(tpParams)
-		if tpErr != nil {
-			fc.logger.Error("Failed to place take profit order (selective)",
+
+		if tpAlreadyPassed {
+			// Price already passed TP - book profit immediately with market order
+			fc.logger.Info("TP already passed (selective) - executing market order immediately",
 				"symbol", symbol,
-				"trigger_price", decision.TakeProfit,
-				"position_side", effectivePositionSide,
-				"error", tpErr.Error())
-		} else if tpResp != nil {
-			fc.logger.Info("Take profit order placed (selective)",
-				"symbol", symbol,
-				"algo_id", tpResp.AlgoId,
-				"trigger_price", decision.TakeProfit)
+				"current_price", currentPrice,
+				"tp_price", roundedTP,
+				"side", closeSide)
+
+			// Use ClosePosition=true to close entire position
+			orderParams := binance.FuturesOrderParams{
+				Symbol:        symbol,
+				Side:          closeSide,
+				PositionSide:  effectivePositionSide,
+				Type:          binance.FuturesOrderTypeMarket,
+				ClosePosition: true,
+			}
+
+			for attempt := 1; attempt <= maxRetries; attempt++ {
+				order, err := fc.futuresClient.PlaceFuturesOrder(orderParams)
+				if err == nil && order != nil {
+					fc.logger.Info("Immediate TP market order executed (selective)",
+						"symbol", symbol,
+						"order_id", order.OrderId,
+						"attempt", attempt)
+					break
+				}
+				fc.logger.Error("Failed to execute immediate TP market order (selective)",
+					"symbol", symbol,
+					"attempt", attempt,
+					"max_retries", maxRetries,
+					"error", err.Error())
+				if attempt < maxRetries {
+					time.Sleep(retryDelay * time.Duration(attempt))
+				}
+			}
+		} else {
+			// Normal case - place algo order with retry logic
+			tpParams := binance.AlgoOrderParams{
+				Symbol:        symbol,
+				Side:          closeSide,
+				PositionSide:  effectivePositionSide,
+				Type:          binance.FuturesOrderTypeTakeProfitMarket,
+				TriggerPrice:  roundedTP,
+				ClosePosition: true,
+				WorkingType:   binance.WorkingTypeMarkPrice,
+			}
+
+			var tpPlaced bool
+			for attempt := 1; attempt <= maxRetries; attempt++ {
+				tpResp, tpErr := fc.futuresClient.PlaceAlgoOrder(tpParams)
+				if tpErr == nil && tpResp != nil && tpResp.AlgoId > 0 {
+					fc.logger.Info("Take profit order placed (selective)",
+						"symbol", symbol,
+						"algo_id", tpResp.AlgoId,
+						"trigger_price", roundedTP,
+						"attempt", attempt)
+					tpPlaced = true
+					break
+				}
+				fc.logger.Error("Failed to place take profit order (selective)",
+					"symbol", symbol,
+					"trigger_price", roundedTP,
+					"position_side", effectivePositionSide,
+					"attempt", attempt,
+					"max_retries", maxRetries,
+					"error", tpErr.Error())
+				if attempt < maxRetries {
+					time.Sleep(retryDelay * time.Duration(attempt))
+				}
+			}
+			if !tpPlaced {
+				fc.logger.Error("CRITICAL: Take profit order NOT placed after all retries (selective)",
+					"symbol", symbol,
+					"tp_price", roundedTP)
+			}
 		}
 	}
 
-	// Place Stop Loss order if requested
+	// Place Stop Loss order if requested - with retry logic
 	if placeSL && decision.StopLoss > 0 {
 		slParams := binance.AlgoOrderParams{
 			Symbol:        symbol,
@@ -2731,18 +2812,34 @@ func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *F
 			ClosePosition: true,
 			WorkingType:   binance.WorkingTypeMarkPrice,
 		}
-		slResp, slErr := fc.futuresClient.PlaceAlgoOrder(slParams)
-		if slErr != nil {
+
+		var slPlaced bool
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			slResp, slErr := fc.futuresClient.PlaceAlgoOrder(slParams)
+			if slErr == nil && slResp != nil && slResp.AlgoId > 0 {
+				fc.logger.Info("Stop loss order placed (selective)",
+					"symbol", symbol,
+					"algo_id", slResp.AlgoId,
+					"trigger_price", decision.StopLoss,
+					"attempt", attempt)
+				slPlaced = true
+				break
+			}
 			fc.logger.Error("Failed to place stop loss order (selective)",
 				"symbol", symbol,
 				"trigger_price", decision.StopLoss,
 				"position_side", effectivePositionSide,
+				"attempt", attempt,
+				"max_retries", maxRetries,
 				"error", slErr.Error())
-		} else if slResp != nil {
-			fc.logger.Info("Stop loss order placed (selective)",
+			if attempt < maxRetries {
+				time.Sleep(retryDelay * time.Duration(attempt))
+			}
+		}
+		if !slPlaced {
+			fc.logger.Error("CRITICAL: Stop loss order NOT placed after all retries (selective)",
 				"symbol", symbol,
-				"algo_id", slResp.AlgoId,
-				"trigger_price", decision.StopLoss)
+				"sl_price", decision.StopLoss)
 		}
 	}
 }
