@@ -2715,6 +2715,33 @@ func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeF
 			continue
 		}
 
+		// Merge all sub-configs - use defaults for any nil sub-configs
+		// This prevents nil pointer panics when accessing config fields
+		if savedConfig.Timeframe == nil && def.Timeframe != nil {
+			savedConfig.Timeframe = def.Timeframe
+		}
+		if savedConfig.Confidence == nil && def.Confidence != nil {
+			savedConfig.Confidence = def.Confidence
+		}
+		if savedConfig.Size == nil && def.Size != nil {
+			savedConfig.Size = def.Size
+		}
+		if savedConfig.CircuitBreaker == nil && def.CircuitBreaker != nil {
+			savedConfig.CircuitBreaker = def.CircuitBreaker
+		}
+		if savedConfig.Hedge == nil && def.Hedge != nil {
+			savedConfig.Hedge = def.Hedge
+		}
+		if savedConfig.Averaging == nil && def.Averaging != nil {
+			savedConfig.Averaging = def.Averaging
+		}
+		if savedConfig.StaleRelease == nil && def.StaleRelease != nil {
+			savedConfig.StaleRelease = def.StaleRelease
+		}
+		if savedConfig.Assignment == nil && def.Assignment != nil {
+			savedConfig.Assignment = def.Assignment
+		}
+
 		// Merge SLTP config - fill in zero values from defaults
 		if savedConfig.SLTP != nil && def.SLTP != nil {
 			// Only fill in fields that are zero/empty (not explicitly set)

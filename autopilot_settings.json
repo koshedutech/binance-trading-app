@@ -28,10 +28,10 @@
   "ginie_risk_level": "aggressive",
   "ginie_dry_run_mode": false,
   "ginie_auto_start": true,
-  "ginie_max_usd": 500,
-  "ginie_leverage": 5,
-  "ginie_min_confidence": 50,
-  "ginie_max_positions": 10,
+  "ginie_max_usd": 1000,
+  "ginie_leverage": 15,
+  "ginie_min_confidence": 45,
+  "ginie_max_positions": 15,
   "ginie_trend_timeframe_ultrafast": "5m",
   "ginie_trend_timeframe_scalp": "15m",
   "ginie_trend_timeframe_swing": "1h",
@@ -51,26 +51,26 @@
   "ginie_trailing_stop_enabled_scalp": false,
   "ginie_trailing_stop_percent_scalp": 0,
   "ginie_trailing_stop_activation_scalp": 0,
-  "ginie_trailing_stop_enabled_swing": true,
+  "ginie_trailing_stop_enabled_swing": false,
   "ginie_trailing_stop_percent_swing": 1.5,
   "ginie_trailing_stop_activation_swing": 0,
   "ginie_trailing_stop_enabled_position": true,
   "ginie_trailing_stop_percent_position": 2,
   "ginie_trailing_stop_activation_position": 0,
-  "ginie_use_single_tp": true,
+  "ginie_use_single_tp": false,
   "ginie_use_single_tp_ultrafast": true,
   "ginie_use_single_tp_scalp": true,
   "ginie_single_tp_percent": 3.4,
   "ginie_trailing_activation_mode": "after_tp1_and_breakeven",
-  "ginie_tp1_percent": 25,
-  "ginie_tp2_percent": 25,
-  "ginie_tp3_percent": 25,
-  "ginie_tp4_percent": 25,
-  "ginie_total_pnl": 2.5109359400000257,
-  "ginie_daily_pnl": 2.5109359400000257,
-  "ginie_total_trades": 13,
-  "ginie_winning_trades": 2,
-  "ginie_daily_trades": 13,
+  "ginie_tp1_percent": 40,
+  "ginie_tp2_percent": 30,
+  "ginie_tp3_percent": 20,
+  "ginie_tp4_percent": 10,
+  "ginie_total_pnl": 1.056679400000001,
+  "ginie_daily_pnl": 1.056679400000001,
+  "ginie_total_trades": 1,
+  "ginie_winning_trades": 1,
+  "ginie_daily_trades": 1,
   "ginie_pnl_last_update": "2025-12-26",
   "auto_mode_enabled": false,
   "auto_mode_max_positions": 5,
@@ -173,13 +173,13 @@
     "win_rate_cooldown_minutes": 180
   },
   "mode_allocation": {
-    "ultra_fast_scalp_percent": 40,
-    "scalp_percent": 20,
-    "swing_percent": 30,
-    "position_percent": 10,
+    "ultra_fast_scalp_percent": 0,
+    "scalp_percent": 0,
+    "swing_percent": 100,
+    "position_percent": 0,
     "max_ultra_fast_positions": 3,
-    "max_scalp_positions": 4,
-    "max_swing_positions": 3,
+    "max_scalp_positions": 15,
+    "max_swing_positions": 10,
     "max_position_positions": 2,
     "max_ultra_fast_usd_per_position": 200,
     "max_scalp_usd_per_position": 300,
@@ -345,7 +345,7 @@
   "mode_configs": {
     "position": {
       "mode_name": "position",
-      "enabled": true,
+      "enabled": false,
       "timeframe": {
         "trend_timeframe": "4h",
         "entry_timeframe": "1h",
@@ -378,11 +378,17 @@
       "sltp": {
         "stop_loss_percent": 3.5,
         "take_profit_percent": 8,
-        "trailing_stop_enabled": true,
+        "trailing_stop_enabled": false,
         "trailing_stop_percent": 2.5,
         "trailing_stop_activation": 2,
+        "trailing_activation_price": 0,
         "max_hold_duration": "14d",
-        "use_single_tp": false
+        "use_single_tp": false,
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": -15,
+        "roi_take_profit_percent": 30,
+        "margin_type": "ISOLATED",
+        "isolated_margin_percent": 50
       },
       "hedge": {
         "allow_hedge": true,
@@ -437,10 +443,10 @@
         "ultra_confidence": 88
       },
       "size": {
-        "base_size_usd": 200,
-        "max_size_usd": 400,
-        "max_positions": 4,
-        "leverage": 8,
+        "base_size_usd": 400,
+        "max_size_usd": 1400,
+        "max_positions": 15,
+        "leverage": 15,
         "size_multiplier_lo": 1,
         "size_multiplier_hi": 1.8
       },
@@ -458,11 +464,17 @@
       "sltp": {
         "stop_loss_percent": 1.5,
         "take_profit_percent": 3,
-        "trailing_stop_enabled": false,
-        "trailing_stop_percent": 0.5,
-        "trailing_stop_activation": 0.5,
+        "trailing_stop_enabled": true,
+        "trailing_stop_percent": 3,
+        "trailing_stop_activation": 15,
+        "trailing_activation_price": 0,
         "max_hold_duration": "4h",
-        "use_single_tp": true
+        "use_single_tp": true,
+        "use_roi_based_sltp": true,
+        "roi_stop_loss_percent": -8,
+        "roi_take_profit_percent": 15,
+        "margin_type": "CROSS",
+        "isolated_margin_percent": 30
       },
       "hedge": {
         "allow_hedge": true,
@@ -541,8 +553,14 @@
         "trailing_stop_enabled": true,
         "trailing_stop_percent": 1.5,
         "trailing_stop_activation": 1,
+        "trailing_activation_price": 0,
         "max_hold_duration": "3d",
-        "use_single_tp": false
+        "use_single_tp": false,
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": -12,
+        "roi_take_profit_percent": 20,
+        "margin_type": "CROSS",
+        "isolated_margin_percent": 40
       },
       "hedge": {
         "allow_hedge": true,
@@ -585,7 +603,7 @@
     },
     "ultra_fast": {
       "mode_name": "ultra_fast",
-      "enabled": true,
+      "enabled": false,
       "timeframe": {
         "trend_timeframe": "5m",
         "entry_timeframe": "1m",
@@ -619,10 +637,16 @@
         "stop_loss_percent": 1,
         "take_profit_percent": 2,
         "trailing_stop_enabled": false,
-        "trailing_stop_percent": 0,
-        "trailing_stop_activation": 0,
+        "trailing_stop_percent": 3,
+        "trailing_stop_activation": 8,
+        "trailing_activation_price": 0,
         "max_hold_duration": "3s",
-        "use_single_tp": true
+        "use_single_tp": true,
+        "use_roi_based_sltp": true,
+        "roi_stop_loss_percent": -5,
+        "roi_take_profit_percent": 10,
+        "margin_type": "CROSS",
+        "isolated_margin_percent": 25
       },
       "hedge": {
         "allow_hedge": true,
@@ -676,36 +700,36 @@
   },
   "mode_llm_settings": {
     "position": {
-      "llm_enabled": false,
-      "llm_weight": 0.6,
+      "llm_enabled": true,
+      "llm_weight": 0.5,
       "skip_on_timeout": false,
-      "min_llm_confidence": 0,
-      "block_on_disagreement": false,
-      "cache_enabled": true
+      "min_llm_confidence": 65,
+      "block_on_disagreement": true,
+      "cache_enabled": false
     },
     "scalp": {
       "llm_enabled": true,
-      "llm_weight": 0.25,
-      "skip_on_timeout": false,
-      "min_llm_confidence": 0,
+      "llm_weight": 0.2,
+      "skip_on_timeout": true,
+      "min_llm_confidence": 50,
       "block_on_disagreement": false,
-      "cache_enabled": false
+      "cache_enabled": true
     },
     "swing": {
       "llm_enabled": true,
-      "llm_weight": 0,
+      "llm_weight": 0.4,
       "skip_on_timeout": false,
-      "min_llm_confidence": 0,
-      "block_on_disagreement": false,
+      "min_llm_confidence": 60,
+      "block_on_disagreement": true,
       "cache_enabled": false
     },
     "ultra_fast": {
-      "llm_enabled": false,
-      "llm_weight": 0.15,
-      "skip_on_timeout": false,
-      "min_llm_confidence": 45,
+      "llm_enabled": true,
+      "llm_weight": 0.1,
+      "skip_on_timeout": true,
+      "min_llm_confidence": 40,
       "block_on_disagreement": false,
-      "cache_enabled": false
+      "cache_enabled": true
     }
   },
   "adaptive_ai_config": {

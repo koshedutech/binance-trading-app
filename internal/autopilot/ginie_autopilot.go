@@ -4434,6 +4434,80 @@ func (ga *GinieAutopilot) placeSLTPOrdersForSyncedPositions() {
 	ga.logger.Info("Finished placing SL/TP orders for synced positions")
 }
 
+// ensureSLTPOrdersExist checks if SLTP orders exist on Binance for a position
+// and recreates them if missing (e.g., user manually deleted them)
+func (ga *GinieAutopilot) ensureSLTPOrdersExist(symbol string, pos *GiniePosition) {
+	if pos == nil || pos.StopLoss <= 0 {
+		return
+	}
+
+	// Get all algo orders for this symbol from Binance
+	algoOrders, err := ga.futuresClient.GetOpenAlgoOrders(symbol)
+	if err != nil {
+		ga.logger.Debug("Failed to get algo orders for SLTP check",
+			"symbol", symbol,
+			"error", err)
+		return
+	}
+
+	// Check for existing SL and TP orders
+	hasSL := false
+	hasTP := false
+
+	expectedPosSide := pos.Side
+	for _, order := range algoOrders {
+		if order.PositionSide != expectedPosSide {
+			continue
+		}
+
+		// Check if it's a SL order
+		if order.OrderType == "STOP_MARKET" || order.OrderType == "STOP" {
+			hasSL = true
+		}
+
+		// Check if it's a TP order
+		if order.OrderType == "TAKE_PROFIT_MARKET" || order.OrderType == "TAKE_PROFIT" {
+			hasTP = true
+		}
+	}
+
+	// If both exist, nothing to do
+	if hasSL && hasTP {
+		return
+	}
+
+	// Missing orders detected - recreate them
+	if !hasSL || !hasTP {
+		log.Printf("[SLTP-RECONCILE] %s: Missing orders detected (SL=%v, TP=%v) - recreating", symbol, hasSL, hasTP)
+		ga.logger.Warn("Missing SLTP orders detected - recreating",
+			"symbol", symbol,
+			"has_sl", hasSL,
+			"has_tp", hasTP,
+			"position_side", pos.Side)
+
+		// Cancel any partial orders first, then recreate all
+		successCount, failureCount, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
+		if err != nil {
+			ga.logger.Error("Failed to cancel existing algo orders before recreating SLTP",
+				"symbol", symbol,
+				"error", err)
+			return // Don't proceed if cancellation failed
+		}
+		if failureCount > 0 {
+			ga.logger.Warn("Some algo orders failed to cancel",
+				"symbol", symbol,
+				"success_count", successCount,
+				"failure_count", failureCount)
+		}
+
+		// Wait for cancellation to propagate on exchange
+		time.Sleep(200 * time.Millisecond)
+
+		// Recreate SLTP orders
+		ga.placeSLTPOrders(pos)
+	}
+}
+
 // cancelAllAlgoOrdersForSymbol queries Binance for all open algo orders for a symbol and cancels them
 // Returns (successCount, failureCount, error)
 func (ga *GinieAutopilot) cancelAllAlgoOrdersForSymbol(symbol string) (int, int, error) {
@@ -4723,6 +4797,15 @@ func (ga *GinieAutopilot) reconcilePositions() {
 		if exchangePos.MarkPrice > 0 {
 			internalPos.UnrealizedPnL = exchangePos.UnrealizedProfit
 		}
+
+		// CHECK FOR MISSING SLTP ORDERS - FIX: recreate if deleted manually
+		// This runs during reconciliation to ensure positions always have protection
+		// NOTE: We copy the position to avoid race conditions - the original may be modified
+		// by other goroutines during reconciliation
+		posCopy := *internalPos // Create a copy to avoid data race
+		go func(sym string, pos *GiniePosition) {
+			ga.ensureSLTPOrdersExist(sym, pos)
+		}(symbol, &posCopy)
 	}
 
 	// Remove positions that were closed externally
