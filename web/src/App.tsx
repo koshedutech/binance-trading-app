@@ -5,22 +5,27 @@ import { apiService } from './services/api';
 import { wsService } from './services/websocket';
 import { AuthProvider, useAuth, ProtectedRoute } from './contexts/AuthContext';
 import Dashboard from './pages/Dashboard';
-import VisualStrategyDemoEnhanced from './pages/VisualStrategyDemoEnhanced';
+// Temporarily disabled due to @xyflow/react type export issues
+// import VisualStrategyDemoEnhanced from './pages/VisualStrategyDemoEnhanced';
 import PatternScannerPage from './pages/PatternScannerPage';
 import FuturesDashboard from './pages/FuturesDashboard';
 import Investigate from './pages/Investigate';
 import EnhancedStrategyBuilder from './pages/EnhancedStrategyBuilder';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import VerifyEmail from './pages/VerifyEmail';
 import Profile from './pages/Profile';
+import Settings from './pages/Settings';
 import APIKeys from './pages/APIKeys';
+import AIKeys from './pages/AIKeys';
 import Billing from './pages/Billing';
+import AdminSettings from './pages/AdminSettings';
 import Header from './components/Header';
 import ConnectionIndicator from './components/ConnectionIndicator';
 
 // Main app content that requires authentication context
 function AppContent() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, subscriptionEnabled } = useAuth();
   const {
     setConnected,
     setWSConnected,
@@ -176,6 +181,13 @@ function AppContent() {
             isAuthenticated ? <Navigate to="/" replace /> : <Register />
           } />
 
+          {/* Semi-protected route (requires auth but not verification) */}
+          <Route path="/verify-email" element={
+            <ProtectedRoute>
+              <VerifyEmail />
+            </ProtectedRoute>
+          } />
+
           {/* Protected routes */}
           <Route path="/" element={
             <ProtectedRoute>
@@ -202,11 +214,13 @@ function AppContent() {
               <EnhancedStrategyBuilder />
             </ProtectedRoute>
           } />
+          {/* Temporarily disabled due to @xyflow/react type export issues
           <Route path="/visual-strategy-advanced" element={
             <ProtectedRoute>
               <VisualStrategyDemoEnhanced />
             </ProtectedRoute>
           } />
+          */}
           <Route path="/pattern-scanner" element={
             <ProtectedRoute>
               <PatternScannerPage />
@@ -217,14 +231,33 @@ function AppContent() {
               <Profile />
             </ProtectedRoute>
           } />
+          <Route path="/settings" element={
+            <ProtectedRoute>
+              <Settings />
+            </ProtectedRoute>
+          } />
           <Route path="/api-keys" element={
             <ProtectedRoute>
               <APIKeys />
             </ProtectedRoute>
           } />
-          <Route path="/billing" element={
+          <Route path="/ai-keys" element={
             <ProtectedRoute>
-              <Billing />
+              <AIKeys />
+            </ProtectedRoute>
+          } />
+          <Route path="/billing" element={
+            subscriptionEnabled ? (
+              <ProtectedRoute>
+                <Billing />
+              </ProtectedRoute>
+            ) : (
+              <Navigate to="/dashboard" replace />
+            )
+          } />
+          <Route path="/admin" element={
+            <ProtectedRoute requireAdmin>
+              <AdminSettings />
             </ProtectedRoute>
           } />
 

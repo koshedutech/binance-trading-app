@@ -1101,6 +1101,25 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			ga.logger.Info("Ginie canTrade passed, proceeding with scans")
 
+			// Mode Integration Status (Story 2.5 verification)
+			modesEnabled := 0
+			if ga.config.EnableScalpMode {
+				modesEnabled++
+			}
+			if ga.config.EnableSwingMode {
+				modesEnabled++
+			}
+			if ga.config.EnablePositionMode {
+				modesEnabled++
+			}
+			currentSettings := GetSettingsManager().GetCurrentSettings()
+			if currentSettings.UltraFastEnabled {
+				modesEnabled++
+			}
+			if modesEnabled > 1 {
+				log.Printf("[MODE-ORCHESTRATION] Multi-mode trading active: %d modes enabled", modesEnabled)
+			}
+
 			// Scan based on mode intervals
 			if ga.config.EnableScalpMode && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
 				ga.scanForMode(GinieModeScalp)
@@ -1119,7 +1138,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			// Ultra-fast mode: 5-second scan for rapid scalping opportunities
 			// Uses milliseconds for interval, converts to duration
-			currentSettings := GetSettingsManager().GetCurrentSettings()
+			// Note: currentSettings already fetched above for mode counting
 			if currentSettings.UltraFastEnabled {
 				ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
 				if now.Sub(lastUltraFastScan) >= ultraFastInterval {
@@ -1313,6 +1332,10 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 	ga.mu.Unlock()
 
 	ga.logger.Info("Ginie scanning for mode", "mode", mode, "symbols", len(symbols))
+
+	// Mode-specific variables for logging
+	isScalpMode := mode == GinieModeScalp
+	var scalpTrades int // Track successful scalp entries
 
 	// Mode-specific scan cycle logging for debugging (Epic 2 Stories 2.2-2.4)
 	switch mode {
