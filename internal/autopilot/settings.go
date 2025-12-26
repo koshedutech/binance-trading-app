@@ -2783,6 +2783,26 @@ func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig)
 	}
 
 	settings.ModeConfigs[mode] = config
+
+	// CRITICAL: Sync max_positions to ModeAllocation as well
+	// This ensures the allocation system uses the updated limits
+	if config.Size != nil && config.Size.MaxPositions > 0 {
+		if settings.ModeAllocation == nil {
+			settings.ModeAllocation = &ModeAllocationConfig{}
+		}
+		switch mode {
+		case "ultra_fast":
+			settings.ModeAllocation.MaxUltraFastPositions = config.Size.MaxPositions
+		case "scalp":
+			settings.ModeAllocation.MaxScalpPositions = config.Size.MaxPositions
+		case "swing":
+			settings.ModeAllocation.MaxSwingPositions = config.Size.MaxPositions
+		case "position":
+			settings.ModeAllocation.MaxPositionPositions = config.Size.MaxPositions
+		}
+		fmt.Printf("[MODE-CONFIG] Synced max_positions=%d to ModeAllocation for %s\n", config.Size.MaxPositions, mode)
+	}
+
 	return sm.SaveSettings(settings)
 }
 
