@@ -2841,7 +2841,7 @@ func (s *Server) handleApplyRecommendation(c *gin.Context) {
 	}
 
 	// Apply the recommendation
-	result, err := giniePilot.ApplyAdaptiveRecommendation(recID)
+	err := giniePilot.ApplyAdaptiveRecommendation(recID)
 	if err != nil {
 		errorResponse(c, http.StatusBadRequest, "Failed to apply recommendation: "+err.Error())
 		return
@@ -2850,10 +2850,9 @@ func (s *Server) handleApplyRecommendation(c *gin.Context) {
 	log.Printf("[ADAPTIVE-AI] Applied recommendation %s successfully", recID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":          true,
-		"message":          fmt.Sprintf("Recommendation %s applied successfully", recID),
+		"success":           true,
+		"message":           fmt.Sprintf("Recommendation %s applied successfully", recID),
 		"recommendation_id": recID,
-		"updated_settings": result,
 	})
 }
 
@@ -2913,19 +2912,18 @@ func (s *Server) handleApplyAllRecommendations(c *gin.Context) {
 	}
 
 	// Apply all recommendations
-	results, err := giniePilot.ApplyAllAdaptiveRecommendations()
+	appliedCount, err := giniePilot.ApplyAllAdaptiveRecommendations()
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to apply recommendations: "+err.Error())
 		return
 	}
 
-	log.Printf("[ADAPTIVE-AI] Applied %d recommendations", len(results))
+	log.Printf("[ADAPTIVE-AI] Applied %d recommendations", appliedCount)
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":         true,
-		"message":         fmt.Sprintf("Applied %d recommendations", len(results)),
-		"applied_count":   len(results),
-		"applied_changes": results,
+		"success":       true,
+		"message":       fmt.Sprintf("Applied %d recommendations", appliedCount),
+		"applied_count": appliedCount,
 	})
 }
 

@@ -7,6 +7,7 @@ import (
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/logging"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -576,6 +577,9 @@ type GinieAutopilot struct {
 
 	// SLTP Job Queue (for async recalculation)
 	sltpJobQueue *SLTPJobQueue
+
+	// Adaptive AI for dynamic parameter optimization
+	adaptiveAI *AdaptiveAI
 }
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
@@ -635,6 +639,9 @@ func NewGinieAutopilot(
 	// Initialize safety configs and states from settings
 	settingsManager := GetSettingsManager()
 	settings := settingsManager.GetCurrentSettings()
+
+	// Initialize AdaptiveAI for dynamic parameter optimization
+	ga.adaptiveAI = NewAdaptiveAI(settingsManager)
 
 	// Load safety configs
 	ga.modeSafetyConfigs["ultra_fast"] = settings.SafetyUltraFast
@@ -8558,36 +8565,129 @@ func (ga *GinieAutopilot) GetAdaptiveAIData() *AdaptiveAIData {
 		}
 	}
 
-	// Return data (recommendations would come from a future AdaptiveAI engine)
+	// Get real recommendations from AdaptiveAI engine
+	var recommendations []AdaptiveRecommendationData
+	var lastAnalysis time.Time
+	var totalOutcomes int
+
+	if ga.adaptiveAI != nil {
+		// Get pending recommendations from AdaptiveAI
+		pendingRecs := ga.adaptiveAI.GetPendingRecommendations()
+		recommendations = make([]AdaptiveRecommendationData, 0, len(pendingRecs))
+
+		for _, rec := range pendingRecs {
+			// Convert CurrentValue to float64
+			currentVal := 0.0
+			switch v := rec.CurrentValue.(type) {
+			case float64:
+				currentVal = v
+			case float32:
+				currentVal = float64(v)
+			case int:
+				currentVal = float64(v)
+			case int64:
+				currentVal = float64(v)
+			}
+
+			// Convert SuggestedValue to float64
+			suggestedVal := 0.0
+			switch v := rec.SuggestedValue.(type) {
+			case float64:
+				suggestedVal = v
+			case float32:
+				suggestedVal = float64(v)
+			case int:
+				suggestedVal = float64(v)
+			case int64:
+				suggestedVal = float64(v)
+			}
+
+			// Determine status
+			status := "pending"
+			if rec.AppliedAt != nil {
+				status = "applied"
+			} else if rec.Dismissed {
+				status = "dismissed"
+			}
+
+			recommendations = append(recommendations, AdaptiveRecommendationData{
+				ID:             rec.ID,
+				Mode:           string(rec.Mode),
+				Parameter:      rec.Type,
+				CurrentValue:   currentVal,
+				SuggestedValue: suggestedVal,
+				Reasoning:      rec.Reason,
+				Confidence:     0.0, // AdaptiveRecommendation doesn't have confidence field
+				Impact:         rec.ExpectedImprovement,
+				CreatedAt:      rec.CreatedAt,
+				Status:         status,
+			})
+		}
+
+		// Get statistics from AdaptiveAI
+		analysisState := ga.adaptiveAI.GetAnalysisState()
+		if la, ok := analysisState["last_analysis"].(time.Time); ok {
+			lastAnalysis = la
+		} else {
+			lastAnalysis = time.Now()
+		}
+		if to, ok := analysisState["total_outcomes"].(int); ok {
+			totalOutcomes = to
+		} else {
+			totalOutcomes = len(ga.tradeHistory)
+		}
+	} else {
+		recommendations = []AdaptiveRecommendationData{}
+		lastAnalysis = time.Now()
+		totalOutcomes = len(ga.tradeHistory)
+	}
+
 	return &AdaptiveAIData{
-		Recommendations: []AdaptiveRecommendationData{}, // Empty for now - to be populated by AdaptiveAI engine
+		Recommendations: recommendations,
 		Statistics:      statistics,
-		LastAnalysis:    time.Now(),
-		TotalOutcomes:   len(ga.tradeHistory),
+		LastAnalysis:    lastAnalysis,
+		TotalOutcomes:   totalOutcomes,
 	}
 }
 
 // ApplyAdaptiveRecommendation applies a specific recommendation by ID
-func (ga *GinieAutopilot) ApplyAdaptiveRecommendation(recID string) (map[string]interface{}, error) {
-	// TODO: Implement when AdaptiveAI engine is built
-	// For now, return a placeholder response
-	return map[string]interface{}{
-		"recommendation_id": recID,
-		"applied":           false,
-		"message":           "AdaptiveAI engine not yet implemented",
-	}, fmt.Errorf("AdaptiveAI engine not yet implemented")
+func (ga *GinieAutopilot) ApplyAdaptiveRecommendation(recommendationID string) error {
+	if ga.adaptiveAI == nil {
+		return errors.New("AdaptiveAI engine not initialized")
+	}
+	return ga.adaptiveAI.ApplyRecommendation(recommendationID)
 }
 
 // DismissAdaptiveRecommendation dismisses a specific recommendation
-func (ga *GinieAutopilot) DismissAdaptiveRecommendation(recID string) error {
-	// TODO: Implement when AdaptiveAI engine is built
-	return fmt.Errorf("AdaptiveAI engine not yet implemented")
+func (ga *GinieAutopilot) DismissAdaptiveRecommendation(recommendationID string) error {
+	if ga.adaptiveAI == nil {
+		return errors.New("AdaptiveAI engine not initialized")
+	}
+	return ga.adaptiveAI.DismissRecommendation(recommendationID)
 }
 
 // ApplyAllAdaptiveRecommendations applies all pending recommendations
-func (ga *GinieAutopilot) ApplyAllAdaptiveRecommendations() ([]map[string]interface{}, error) {
-	// TODO: Implement when AdaptiveAI engine is built
-	return nil, fmt.Errorf("AdaptiveAI engine not yet implemented")
+func (ga *GinieAutopilot) ApplyAllAdaptiveRecommendations() (int, error) {
+	if ga.adaptiveAI == nil {
+		return 0, errors.New("AdaptiveAI engine not initialized")
+	}
+
+	pending := ga.adaptiveAI.GetPendingRecommendations()
+	applied := 0
+	var lastErr error
+
+	for _, rec := range pending {
+		if err := ga.adaptiveAI.ApplyRecommendation(rec.ID); err != nil {
+			lastErr = err
+		} else {
+			applied++
+		}
+	}
+
+	if applied == 0 && lastErr != nil {
+		return 0, lastErr
+	}
+	return applied, nil
 }
 
 // GetLLMDiagnosticsData returns LLM call statistics
