@@ -99,8 +99,29 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 	// SAFETY CHECK: Stop Ginie autopilot if running before mode switch
 	// This prevents lock contention and timeouts during client switching
 	// Use non-blocking goroutine with timeout to prevent hangs
+	// IMPORTANT: Remember if Ginie was running to restart it after mode switch
 	futuresController := s.getFuturesAutopilot()
+	ginieWasRunning := false
+
+	// Check if Ginie is running BEFORE launching the stop goroutine (avoid race condition)
+	// GinieAutopilot.IsRunning() checks if the trading loop is active
+	// GinieAnalyzer.IsEnabled() checks if the analyzer is enabled
 	if futuresController != nil {
+		if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
+			ginieWasRunning = giniePilot.IsRunning()
+		}
+		// Also check if analyzer is enabled (backup check)
+		if !ginieWasRunning {
+			if ginieAnalyzer := futuresController.GetGinieAnalyzer(); ginieAnalyzer != nil {
+				ginieWasRunning = ginieAnalyzer.IsEnabled()
+			}
+		}
+		if ginieWasRunning {
+			log.Printf("[MODE-SWITCH] Ginie was running/enabled, will restart after mode switch")
+		}
+	}
+
+	if futuresController != nil && ginieWasRunning {
 		stopDone := make(chan bool, 1)
 		go func() {
 			if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
@@ -148,13 +169,37 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		modeLabel = "Paper Trading"
 	}
 
+	// CRITICAL FIX: Restart Ginie autopilot if it was running before mode switch
+	// This ensures autopilot stays ON continuously until explicitly disabled
+	ginieRestarted := false
+	if ginieWasRunning && futuresController != nil {
+		log.Println("[MODE-SWITCH] Ginie was running before mode switch, restarting it...")
+		// Give system a moment to complete mode switch before restart
+		time.Sleep(500 * time.Millisecond)
+
+		// Re-enable the analyzer first
+		if ginieAnalyzer := futuresController.GetGinieAnalyzer(); ginieAnalyzer != nil {
+			ginieAnalyzer.Enable()
+			log.Println("[MODE-SWITCH] Ginie analyzer re-enabled")
+		}
+
+		// Start the autopilot trading loop
+		if err := futuresController.StartGinieAutopilot(); err != nil {
+			log.Printf("[MODE-SWITCH] Warning: Failed to restart Ginie after mode switch: %v\n", err)
+		} else {
+			log.Println("[MODE-SWITCH] Ginie autopilot restarted successfully after mode switch")
+			ginieRestarted = true
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"dry_run":    req.DryRun,
-		"mode":       mode,
-		"mode_label": modeLabel,
-		"can_switch": true,
-		"message":    "Trading mode updated successfully",
+		"success":         true,
+		"dry_run":         req.DryRun,
+		"mode":            mode,
+		"mode_label":      modeLabel,
+		"can_switch":      true,
+		"message":         "Trading mode updated successfully",
+		"ginie_restarted": ginieRestarted,
 	})
 }
 
