@@ -1872,8 +1872,8 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		decisionContext.FinalConfidence = finalConfidence
 		decisionContext.Agreement = agreement
 
-		// Update report confidence score (convert back to 0-1 scale)
-		report.ConfidenceScore = float64(finalConfidence) / 100.0
+		// Update report confidence score (keep 0-100 scale for comparison with thresholds)
+		report.ConfidenceScore = float64(finalConfidence)
 
 		// If LLM and technical disagree strongly, consider adjusting direction
 		if !agreement && llmResponse.Confidence > 70 && technicalConfidence < 50 {
@@ -1900,7 +1900,7 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	} else {
 		// No LLM - use technical only
 		decisionContext.FinalConfidence = technicalConfidence
-		report.ConfidenceScore = float64(technicalConfidence) / 100.0
+		report.ConfidenceScore = float64(technicalConfidence)
 
 		if g.logger != nil {
 			g.logger.Debug("[LLM] Using technical analysis only",
