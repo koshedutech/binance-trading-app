@@ -168,10 +168,10 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		MoveToBreakevenAfterTP1: true,
 		BreakevenBuffer:         0.1, // 0.1% above entry
 
-		// Proactive profit protection (NEW - prevents BCHUSDT-style losses)
+		// Proactive profit protection
 		ProactiveBreakevenPercent:  0.5,  // Move to breakeven when profit >= 0.5% (before TP1)
-		TrailingActivationPercent:  2.0,  // Activate trailing when profit >= 2.0% (increased to align with TP1 gain of 1.5%)
-		TrailingStepPercent:        0.5,  // Trail by 0.5% from highest price
+		TrailingActivationPercent:  0,    // DEPRECATED: Trailing now activates after TP1+breakeven (from settings)
+		TrailingStepPercent:        1.5,  // Default trailing step % (overridden by per-mode settings)
 		TrailingSLUpdateThreshold:  0.2,  // Update Binance order when SL improves by >= 0.2%
 
 		// Scan intervals based on mode (reduced for testing)
@@ -196,12 +196,14 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		CBMaxConsecutiveLosses: 3,    // 3 consecutive losses triggers cooldown
 		CBCooldownMinutes:      30,   // 30 minute cooldown
 
-		// Early profit booking (ROI-based) - book profits when ROI hits threshold (after fees)
+		// Early profit booking - ENABLED, but thresholds come from mode-specific settings
+		// (GinieTPPercentUltrafast, GinieTPPercentScalp, etc. in autopilot_settings.json)
+		// These hardcoded values are DEPRECATED and only used as fallback if settings not loaded
 		EarlyProfitBookingEnabled:  true,
-		UltraFastScalpROIThreshold: 3.0,   // Book at 3%+ ROI (after fees) for ultra-fast scalping
-		ScalpROIThreshold:          5.0,   // Book at 5%+ ROI (after fees) for scalping
-		SwingROIThreshold:          8.0,   // Book at 8%+ ROI (after fees) for swing
-		PositionROIThreshold:       10.0,  // Book at 10%+ ROI (after fees) for position trades
+		UltraFastScalpROIThreshold: 0, // DEPRECATED: Use settings.GinieTPPercentUltrafast × leverage
+		ScalpROIThreshold:          0, // DEPRECATED: Use settings.GinieTPPercentScalp × leverage
+		SwingROIThreshold:          0, // DEPRECATED: Use settings.GinieTPPercentSwing × leverage
+		PositionROIThreshold:       0, // DEPRECATED: Use settings.GinieTPPercentPosition × leverage
 	}
 }
 
@@ -1057,6 +1059,16 @@ func (ga *GinieAutopilot) Stop() error {
 // runMainLoop is the main trading loop that scans for opportunities
 func (ga *GinieAutopilot) runMainLoop() {
 	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in Ginie main loop - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Main loop panic: %v", r)
+			// Restart the loop after a brief delay
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.runMainLoop()
+		}
+	}()
 
 	ga.logger.Info("Ginie main loop started")
 
@@ -1079,11 +1091,13 @@ func (ga *GinieAutopilot) runMainLoop() {
 			now := time.Now()
 
 			// Check if we can trade
-			if !ga.canTrade() {
+			canTrade := ga.canTrade()
+			log.Printf("[GINIE-SCAN] canTrade=%v, positions=%d/%d", canTrade, len(ga.positions), ga.config.MaxPositions)
+			if !canTrade {
 				continue
 			}
 
-			ga.logger.Debug("Ginie canTrade passed, proceeding with scans")
+			ga.logger.Info("Ginie canTrade passed, proceeding with scans")
 
 			// Scan based on mode intervals
 			if ga.config.EnableScalpMode && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
@@ -1178,17 +1192,15 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				continue
 			}
 
-			// Generate decision for this symbol
-			decision, err := ga.analyzer.GenerateDecision(symbol)
+			// Generate decision for this symbol using the specific mode being scanned
+			// This allows each mode (scalp/swing/position) to be evaluated independently
+			decision, err := ga.analyzer.GenerateDecisionForMode(symbol, mode)
 			if err != nil {
-				ga.logger.Error("Ginie decision generation failed", "symbol", symbol, "error", err)
+				ga.logger.Error("Ginie decision generation failed", "symbol", symbol, "mode", mode, "error", err)
 				continue
 			}
 
-			// Check if the mode matches what we're looking for
-			if decision.SelectedMode != mode {
-				continue
-			}
+			// No need to check mode match - we explicitly requested this mode
 
 			// Build signal log entry
 			entryPrice := (decision.TradeExecution.EntryLow + decision.TradeExecution.EntryHigh) / 2
@@ -1729,6 +1741,50 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		actualPrice = fillPrice
 		actualQty = fillQty
 
+		// CRITICAL FIX: Recalculate TPs and SL based on actual fill price
+		// The decision's TP/SL were calculated with pre-execution estimated price
+		// which can differ significantly from actual fill price
+		if actualPrice != price && actualPrice > 0 {
+			isLong := decision.TradeExecution.Action == "LONG"
+			sideForRounding := "LONG"
+			if !isLong {
+				sideForRounding = "SHORT"
+			}
+
+			// Recalculate each TP level with actual fill price (with directional rounding)
+			for i := range takeProfits {
+				gainPct := takeProfits[i].GainPct
+				var rawTP float64
+				if isLong {
+					rawTP = actualPrice * (1 + gainPct/100)
+				} else {
+					rawTP = actualPrice * (1 - gainPct/100)
+				}
+				// Apply Binance directional precision rounding for TP orders
+				takeProfits[i].Price = roundPriceForTP(symbol, rawTP, sideForRounding)
+			}
+
+			// Recalculate SL with actual fill price (with directional rounding)
+			slPct := decision.TradeExecution.StopLossPct
+			if slPct > 0 {
+				var rawSL float64
+				if isLong {
+					rawSL = actualPrice * (1 - slPct/100)
+				} else {
+					rawSL = actualPrice * (1 + slPct/100)
+				}
+				// Apply Binance directional precision rounding for SL orders
+				decision.TradeExecution.StopLoss = roundPriceForSL(symbol, rawSL, sideForRounding)
+			}
+
+			ga.logger.Info("Recalculated TP/SL with actual fill price",
+				"symbol", symbol,
+				"estimated_price", price,
+				"actual_price", actualPrice,
+				"price_diff_pct", ((actualPrice-price)/price)*100,
+				"new_sl", decision.TradeExecution.StopLoss)
+		}
+
 		ga.logger.Info("Ginie trade executed and verified",
 			"symbol", symbol,
 			"order_id", order.OrderId,
@@ -1779,9 +1835,9 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		}
 	}
 
-	// Build TP prices array
-	tpPrices := make([]float64, len(decision.TradeExecution.TakeProfits))
-	for i, tp := range decision.TradeExecution.TakeProfits {
+	// Build TP prices array from recalculated takeProfits (not stale decision values)
+	tpPrices := make([]float64, len(takeProfits))
+	for i, tp := range takeProfits {
 		tpPrices[i] = tp.Price
 	}
 
@@ -1813,7 +1869,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			SignalNames:     signalNames,
 		},
 		EntryParams: &GinieEntryParams{
-			EntryPrice:  price,
+			EntryPrice:  actualPrice, // Use actual fill price, not estimated
 			StopLoss:    decision.TradeExecution.StopLoss,
 			StopLossPct: decision.TradeExecution.StopLossPct,
 			TakeProfits: tpPrices,
@@ -1826,6 +1882,16 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 // runPositionMonitor monitors all positions for TP/SL hits and trailing
 func (ga *GinieAutopilot) runPositionMonitor() {
 	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in Ginie position monitor - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Position monitor panic: %v", r)
+			// Restart the monitor after a brief delay
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.runPositionMonitor()
+		}
+	}()
 
 	log.Printf("[GINIE-MONITOR] Position monitor goroutine started")
 	ga.logger.Info("Ginie position monitor started - will check positions every 5 seconds")
@@ -1938,28 +2004,58 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			ga.updateBinanceSLOrder(pos)
 		}
 
-		// 2. Trailing SL: Activate early trailing when profit >= configured threshold
-		var trailingThreshold float64
-		if pos.TrailingActivationPct > 0 {
-			// Use per-mode configuration if set
-			trailingThreshold = pos.TrailingActivationPct
-		} else {
-			// Fall back to global config default
-			trailingThreshold = ga.config.TrailingActivationPercent
-		}
+		// 2. Trailing SL: Activate ONLY after TP1 hit AND SL moved to breakeven (for swing/position)
+		// Ultra-fast and Scalp modes: NO trailing (disabled in settings)
+		if !pos.TrailingActive {
+			settingsManager := GetSettingsManager()
+			settings := settingsManager.GetCurrentSettings()
 
-		if !pos.TrailingActive && pnlPercent >= trailingThreshold {
-			pos.TrailingActive = true
-			configSource := "global"
-			if pos.TrailingActivationPct > 0 {
-				configSource = "per-mode"
+			// Check if trailing is enabled for this mode
+			var trailingEnabled bool
+			switch pos.Mode {
+			case GinieModeUltraFast:
+				trailingEnabled = settings.GinieTrailingStopEnabledUltrafast
+			case GinieModeScalp:
+				trailingEnabled = settings.GinieTrailingStopEnabledScalp
+			case GinieModeSwing:
+				trailingEnabled = settings.GinieTrailingStopEnabledSwing
+			case GinieModePosition:
+				trailingEnabled = settings.GinieTrailingStopEnabledPosition
+			default:
+				trailingEnabled = false
 			}
-			ga.logger.Info("Early trailing activated",
-				"symbol", pos.Symbol,
-				"pnl_percent", pnlPercent,
-				"threshold", trailingThreshold,
-				"mode", pos.Mode,
-				"config_source", configSource)
+
+			if trailingEnabled {
+				// For swing/position: Only activate after TP1 hit AND SL moved to breakeven
+				// This prevents premature trailing that closes positions too early
+				canActivate := false
+				activationReason := ""
+
+				if pos.Mode == GinieModeSwing || pos.Mode == GinieModePosition {
+					// Strict activation: TP1 must be hit AND SL must be at breakeven
+					if pos.CurrentTPLevel >= 1 && pos.MovedToBreakeven {
+						canActivate = true
+						activationReason = "after_tp1_and_breakeven"
+					}
+				} else {
+					// For other modes (if somehow enabled), use profit threshold
+					if pos.TrailingActivationPct > 0 && pnlPercent >= pos.TrailingActivationPct {
+						canActivate = true
+						activationReason = "profit_threshold"
+					}
+				}
+
+				if canActivate {
+					pos.TrailingActive = true
+					ga.logger.Info("Trailing stop activated",
+						"symbol", pos.Symbol,
+						"mode", pos.Mode,
+						"reason", activationReason,
+						"tp_level", pos.CurrentTPLevel,
+						"at_breakeven", pos.MovedToBreakeven,
+						"pnl_percent", pnlPercent)
+				}
+			}
 		}
 
 		// 3. Trail SL upward: Update SL as price moves favorably
@@ -2140,28 +2236,46 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 					pos.Symbol, symbolSettings.CustomROIPercent)
 			}
 
-			// 3. Fallback to mode-based threshold (existing logic)
-			threshold = ga.config.PositionROIThreshold
-			source = "position_default"
+			// 3. Fallback to mode-based threshold from SETTINGS (not hardcoded)
+			// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
+			settings := settingsManager.GetCurrentSettings()
+			var tpPercent float64
 
 			switch pos.Mode {
 			case GinieModeUltraFast:
-				threshold = ga.config.UltraFastScalpROIThreshold
-				source = "ultra_fast_default"
-				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using ULTRA-FAST mode threshold = %.4f%%\n", pos.Symbol, threshold)
+				tpPercent = settings.GinieTPPercentUltrafast
+				if tpPercent <= 0 {
+					tpPercent = 2.0 // Default 2% if not set
+				}
+				source = "ultra_fast_settings"
 			case GinieModeScalp:
-				threshold = ga.config.ScalpROIThreshold
-				source = "scalp_default"
-				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SCALP mode threshold = %.4f%%\n", pos.Symbol, threshold)
+				tpPercent = settings.GinieTPPercentScalp
+				if tpPercent <= 0 {
+					tpPercent = 3.0 // Default 3% if not set
+				}
+				source = "scalp_settings"
 			case GinieModeSwing:
-				threshold = ga.config.SwingROIThreshold
-				source = "swing_default"
-				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SWING mode threshold = %.4f%%\n", pos.Symbol, threshold)
+				tpPercent = settings.GinieTPPercentSwing
+				if tpPercent <= 0 {
+					tpPercent = 5.0 // Default 5% if not set
+				}
+				source = "swing_settings"
 			case GinieModePosition:
-				threshold = ga.config.PositionROIThreshold
-				source = "position_default"
-				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using POSITION mode threshold = %.4f%%\n", pos.Symbol, threshold)
+				tpPercent = settings.GinieTPPercentPosition
+				if tpPercent <= 0 {
+					tpPercent = 8.0 // Default 8% if not set
+				}
+				source = "position_settings"
+			default:
+				tpPercent = 5.0 // Fallback
+				source = "default"
 			}
+
+			// Convert TP% to ROI threshold: ROI = TP% × leverage
+			// This ensures we book profit when price move reaches the mode's TP target
+			threshold = tpPercent * float64(pos.Leverage)
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × leverage=%d = ROI threshold %.2f%%\n",
+				pos.Symbol, source, tpPercent, pos.Leverage, threshold)
 		}
 	}
 
@@ -3216,6 +3330,15 @@ func (ga *GinieAutopilot) persistTradeToDatabase(result GinieTradeResult) {
 
 func (ga *GinieAutopilot) resetDailyCounters() {
 	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in daily reset goroutine - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Daily reset panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.resetDailyCounters()
+		}
+	}()
 
 	for {
 		now := time.Now()
@@ -4245,6 +4368,15 @@ func (ga *GinieAutopilot) cleanupAllOrphanOrders() {
 // This is critical to prevent order accumulation from repeated position updates
 func (ga *GinieAutopilot) periodicOrphanOrderCleanup() {
 	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in orphan order cleanup - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Orphan order cleanup panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.periodicOrphanOrderCleanup()
+		}
+	}()
 
 	ga.logger.Info("Periodic orphan order cleanup goroutine started - runs every 5 minutes")
 
@@ -4344,6 +4476,15 @@ func (ga *GinieAutopilot) modifySLTPOrders(pos *GiniePosition, newSL float64, ne
 // runAdaptiveSLTPMonitor runs the adaptive SL/TP monitoring loop
 func (ga *GinieAutopilot) runAdaptiveSLTPMonitor() {
 	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in adaptive SLTP monitor - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Adaptive SLTP monitor panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.runAdaptiveSLTPMonitor()
+		}
+	}()
 
 	// Use 10 second base interval, then check mode-specific timing
 	baseTicker := time.NewTicker(10 * time.Second)
@@ -4757,6 +4898,9 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		var manualSLPct, manualTPPct float64
 
 		switch pos.Mode {
+		case GinieModeUltraFast:
+			manualSLPct = settings.GinieSLPercentUltrafast
+			manualTPPct = settings.GinieTPPercentUltrafast
 		case GinieModeScalp:
 			manualSLPct = settings.GinieSLPercentScalp
 			manualTPPct = settings.GinieTPPercentScalp
@@ -4784,6 +4928,11 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			var minSL, maxSL, minTP, maxTP float64
 
 			switch pos.Mode {
+			case GinieModeUltraFast:
+				// Ultra-fast: Very tight SL/TP for quick momentum trades
+				baseSLMult, baseTPMult = 0.3, 0.6
+				minSL, maxSL = 0.3, 1.5
+				minTP, maxTP = 0.5, 3.0
 			case GinieModeScalp:
 				baseSLMult, baseTPMult = 0.5, 1.0
 				minSL, maxSL = 0.2, 0.8
@@ -4847,16 +4996,29 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		pos.OriginalSL = pos.StopLoss
 
 		// Generate TP levels based on TP mode (single vs multi)
-		if settings.GinieUseSingleTP {
-			// Single TP mode: Close 100% at one level
-			singleTPPrice := pos.EntryPrice * (1 + direction*settings.GinieSingleTPPercent/100)
+		// CRITICAL: Check MODE-SPECIFIC single TP settings first, then fall back to global
+		useSingleTP := settings.GinieUseSingleTP
+		switch pos.Mode {
+		case GinieModeUltraFast:
+			useSingleTP = settings.GinieUseSingleTPUltrafast
+		case GinieModeScalp:
+			useSingleTP = settings.GinieUseSingleTPScalp
+		}
+
+		if useSingleTP {
+			// Single TP mode: Close 100% at one level (ultra-fast and scalp modes)
+			// Use mode-specific TP% (from finalTPPct) for the single TP target
+			// This ensures ultra-fast uses GinieTPPercentUltrafast, scalp uses GinieTPPercentScalp
+			singleTPPrice := pos.EntryPrice * (1 + direction*finalTPPct/100)
 			pos.TakeProfits = []GinieTakeProfitLevel{
-				{Level: 1, Percent: 100, GainPct: settings.GinieSingleTPPercent, Price: singleTPPrice, Status: "pending"},
+				{Level: 1, Percent: 100, GainPct: finalTPPct, Price: singleTPPrice, Status: "pending"},
 			}
-			ga.logger.Debug("Single TP mode applied",
+			ga.logger.Info("Single TP mode applied (100% at TP)",
 				"symbol", symbol,
-				"tp_percent", settings.GinieSingleTPPercent,
-				"tp_price", singleTPPrice)
+				"mode", pos.Mode,
+				"tp_percent", finalTPPct,
+				"tp_price", singleTPPrice,
+				"note", "no TP1/TP2/TP3/TP4 split - full position closes at TP")
 		} else {
 			// Multi-TP mode: Use configured allocation (default 25% each)
 			tp1Pct := settings.GinieTP1Percent
@@ -5165,6 +5327,9 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 			Status:  "pending",
 		},
 	}
+
+	// Actually place the SL/TP orders on Binance
+	ga.placeSLTPOrders(pos)
 
 	return nil
 }
@@ -6837,6 +7002,15 @@ func (ga *GinieAutopilot) recordModeTradeClosure(mode GinieTradingMode, symbol s
 // for profit targets and time-based exits
 func (ga *GinieAutopilot) monitorUltraFastPositions() {
 	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in ultra-fast position monitor - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Ultra-fast position monitor panic: %v", r)
+			time.Sleep(2 * time.Second)
+			ga.wg.Add(1)
+			go ga.monitorUltraFastPositions()
+		}
+	}()
 
 	ga.logger.Info("Ultra-fast position monitor started - 500ms polling interval")
 

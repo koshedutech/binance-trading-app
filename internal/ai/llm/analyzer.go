@@ -261,7 +261,7 @@ func NewAnalyzer(config *AnalyzerConfig) *Analyzer {
 		Model:       config.Model,
 		MaxTokens:   config.MaxTokens,
 		Temperature: config.Temperature,
-		Timeout:     30 * time.Second,
+		Timeout:     120 * time.Second, // Increased for complex LLM requests (coin selection)
 	}
 
 	return &Analyzer{

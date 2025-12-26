@@ -35,7 +35,7 @@ func DefaultClientConfig() *ClientConfig {
 		Model:       "claude-sonnet-4-20250514",
 		MaxTokens:   1024,
 		Temperature: 0.3,
-		Timeout:     30 * time.Second,
+		Timeout:     120 * time.Second, // Increased for complex LLM requests (coin selection)
 	}
 }
 
@@ -279,26 +279,31 @@ func (c *Client) completeDeepSeek(systemPrompt string, userPrompt string) (strin
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
+		return "", fmt.Errorf("DeepSeek request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
+		return "", fmt.Errorf("DeepSeek read response failed: %w", err)
+	}
+
+	// Check HTTP status code before parsing JSON
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("DeepSeek API error HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var openAIResp OpenAIResponse
 	if err := json.Unmarshal(respBody, &openAIResp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+		return "", fmt.Errorf("DeepSeek JSON parse failed: %w (body: %.200s)", err, string(respBody))
 	}
 
 	if openAIResp.Error != nil {
-		return "", fmt.Errorf("API error: %s - %s", openAIResp.Error.Type, openAIResp.Error.Message)
+		return "", fmt.Errorf("DeepSeek API error: %s - %s", openAIResp.Error.Type, openAIResp.Error.Message)
 	}
 
 	if len(openAIResp.Choices) == 0 {
-		return "", fmt.Errorf("empty response from DeepSeek")
+		return "", fmt.Errorf("DeepSeek returned empty response")
 	}
 
 	return openAIResp.Choices[0].Message.Content, nil

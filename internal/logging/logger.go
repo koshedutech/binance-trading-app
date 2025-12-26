@@ -236,7 +236,16 @@ func (l *Logger) log(level Level, msg string, args ...interface{}) {
 				}
 				for i := 0; i < len(args); i += 2 {
 					if key, ok := args[i].(string); ok {
-						entry.Fields[key] = args[i+1]
+						// Convert errors to strings for proper JSON serialization
+						if err, isErr := args[i+1].(error); isErr {
+							if err != nil {
+								entry.Fields[key] = err.Error()
+							} else {
+								entry.Fields[key] = nil
+							}
+						} else {
+							entry.Fields[key] = args[i+1]
+						}
 					}
 				}
 			} else {

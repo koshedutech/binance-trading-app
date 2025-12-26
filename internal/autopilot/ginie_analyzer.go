@@ -83,7 +83,7 @@ func NewGinieAnalyzer(
 		llmCoinsCacheTTL: 30 * time.Minute, // Refresh LLM coin list every 30 minutes
 	}
 
-	// Load LLM-selected coins in background (will call DeepSeek for 100 coins)
+	// Load LLM-selected coins in background (will call DeepSeek for 50 coins)
 	go g.LoadLLMSelectedCoins()
 
 	return g
@@ -202,7 +202,7 @@ type UltraFastSignal struct {
 	GeneratedAt      time.Time           `json:"generated_at"`
 }
 
-// LoadLLMSelectedCoins asks DeepSeek to provide 100 coins based on market criteria
+// LoadLLMSelectedCoins asks DeepSeek to provide 50 coins based on market criteria
 func (g *GinieAnalyzer) LoadLLMSelectedCoins() error {
 	// Check cache first
 	if len(g.llmCoinsCache) > 0 && time.Since(g.llmCoinsCacheTime) < g.llmCoinsCacheTTL {
@@ -235,7 +235,7 @@ func (g *GinieAnalyzer) LoadLLMSelectedCoins() error {
 	marketSummary := g.buildMarketSummaryForLLM(tickers)
 
 	systemPrompt := `You are a cryptocurrency trading AI assistant specializing in selecting coins for futures trading on Binance.
-Your task is to analyze current market conditions and select exactly 100 cryptocurrency trading pairs (USDT perpetual futures) based on the following criteria:
+Your task is to analyze current market conditions and select exactly 50 cryptocurrency trading pairs (USDT perpetual futures) based on the following criteria:
 
 Categories to include (aim for roughly equal distribution):
 1. HIGH_VOLUME: Top coins by 24h trading volume (most liquid)
@@ -252,16 +252,16 @@ IMPORTANT RULES:
 - Exclude stablecoins (USDCUSDT, BUSDUSDT, TUSDUSDT, DAIUSDT, FDUSDUSDT)
 - Prioritize coins with daily volume > $1M USD
 - Include major coins (BTC, ETH, BNB, SOL, XRP) regardless of other criteria
-- Return EXACTLY 100 unique coins
+- Return EXACTLY 50 unique coins
 
 Respond ONLY with a valid JSON object in this exact format (no markdown, no explanation):
 {"coins":[{"symbol":"BTCUSDT","category":"high_volume","reason":"highest volume"},...]}`
 
-	userPrompt := fmt.Sprintf(`Based on the current Binance Futures market data below, select 100 coins for trading:
+	userPrompt := fmt.Sprintf(`Based on the current Binance Futures market data below, select 50 coins for trading:
 
 %s
 
-Return EXACTLY 100 unique USDT perpetual futures symbols in the JSON format specified.`, marketSummary)
+Return EXACTLY 50 unique USDT perpetual futures symbols in the JSON format specified.`, marketSummary)
 
 	response, err := g.llmClient.Complete(systemPrompt, userPrompt)
 	if err != nil {
@@ -372,8 +372,8 @@ func (g *GinieAnalyzer) buildMarketSummaryForLLM(tickers []binance.Futures24hrTi
 		return validTickers[i].QuoteVolume > validTickers[j].QuoteVolume
 	})
 
-	// Build summary (limit to top 200 for token efficiency)
-	limit := 200
+	// Build summary (limit to top 75 for faster LLM response)
+	limit := 75
 	if len(validTickers) < limit {
 		limit = len(validTickers)
 	}
@@ -1485,7 +1485,8 @@ func (g *GinieAnalyzer) generatePositionSignals(ss *GinieSignalSet, klines []bin
 	ss.PrimarySignals = append(ss.PrimarySignals, structSignal)
 }
 
-// GenerateDecision generates a full trading decision report
+// GenerateDecision generates a trading decision for a symbol (auto-selects mode based on market conditions)
+// This is the legacy function - use GenerateDecisionForMode for explicit mode control
 func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, error) {
 	// Scan the coin
 	scan, err := g.ScanCoin(symbol)
@@ -1493,14 +1494,33 @@ func (g *GinieAnalyzer) GenerateDecision(symbol string) (*GinieDecisionReport, e
 		return nil, err
 	}
 
+	// Auto-select mode based on market conditions
+	mode := g.SelectMode(scan)
+
+	// Delegate to mode-specific function
+	return g.generateDecisionInternal(symbol, mode, scan)
+}
+
+// GenerateDecisionForMode generates a trading decision for a symbol using a specific mode
+// This allows scanForMode to check each mode independently without auto-selection
+func (g *GinieAnalyzer) GenerateDecisionForMode(symbol string, mode GinieTradingMode) (*GinieDecisionReport, error) {
+	// Scan the coin
+	scan, err := g.ScanCoin(symbol)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use the explicitly provided mode instead of auto-selecting
+	return g.generateDecisionInternal(symbol, mode, scan)
+}
+
+// generateDecisionInternal is the core decision generation logic used by both GenerateDecision and GenerateDecisionForMode
+func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradingMode, scan *GinieCoinScan) (*GinieDecisionReport, error) {
 	// Get klines for signal generation (always 1h)
 	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
 	if err != nil {
 		return nil, err
 	}
-
-	// Select mode
-	mode := g.SelectMode(scan)
 
 	// Determine target trend timeframe based on mode
 	var targetTimeframe string
