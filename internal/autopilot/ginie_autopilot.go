@@ -1314,9 +1314,24 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 	ga.logger.Info("Ginie scanning for mode", "mode", mode, "symbols", len(symbols))
 
+	// Mode-specific scan cycle logging for debugging (Epic 2 Stories 2.2-2.4)
+	switch mode {
+	case GinieModeScalp:
+		log.Printf("[SCALP-SCAN] Starting scalp scan cycle, scanning %d symbols, min_confidence=%.1f%%", len(symbols), ga.config.MinConfidenceToTrade)
+	case GinieModeSwing:
+		log.Printf("[SWING-SCAN] Starting swing scan cycle, scanning %d symbols, min_confidence=%.1f%%", len(symbols), ga.config.MinConfidenceToTrade)
+	case GinieModePosition:
+		log.Printf("[POSITION-SCAN] Starting position scan cycle, scanning %d symbols for long-term opportunities", len(symbols))
+	}
+
+	var scalpSignals, swingSignals, positionSignals int
+
 	for _, symbol := range symbols {
 		select {
 		case <-ga.stopChan:
+			if isScalpMode {
+				log.Printf("[SCALP-SCAN] Scan interrupted by stop signal")
+			}
 			return
 		default:
 			// Skip if we already have a position
@@ -1332,8 +1347,40 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			// This allows each mode (scalp/swing/position) to be evaluated independently
 			decision, err := ga.analyzer.GenerateDecisionForMode(symbol, mode)
 			if err != nil {
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Signal generation failed: %v", symbol, err)
+				}
 				ga.logger.Error("Ginie decision generation failed", "symbol", symbol, "mode", mode, "error", err)
 				continue
+			}
+
+			// Scalp mode: Log detailed signal evaluation per symbol (AC-2.2.2)
+			if isScalpMode {
+				scalpSignals++
+				// Log market conditions overview
+				log.Printf("[SCALP-SCAN] %s: Trend=%s, ADX=%.1f, Volatility=%s, Confidence=%.1f%%, Action=%s, RR=%.2f",
+					symbol,
+					decision.MarketConditions.Trend,
+					decision.MarketConditions.ADX,
+					decision.MarketConditions.Volatility,
+					decision.ConfidenceScore,
+					decision.TradeExecution.Action,
+					decision.TradeExecution.RiskReward)
+				// Log signal summary with all 4 signals evaluated
+				log.Printf("[SCALP-SCAN] %s: Signals %d/%d met - [%s]",
+					symbol,
+					decision.SignalAnalysis.PrimaryMet,
+					decision.SignalAnalysis.PrimaryRequired,
+					decision.SignalAnalysis.SignalStrength)
+				// Log each individual signal status (AC-2.2.2 requirement)
+				for i, sig := range decision.SignalAnalysis.PrimarySignals {
+					statusStr := "NOT_MET"
+					if sig.Met {
+						statusStr = "MET"
+					}
+					log.Printf("[SCALP-SCAN] %s: Signal[%d] %s=%s (value=%.2f, threshold=%.2f, weight=%.1f)",
+						symbol, i+1, sig.Name, statusStr, sig.Value, sig.Threshold, sig.Weight)
+				}
 			}
 
 			// No need to check mode match - we explicitly requested this mode
@@ -1371,8 +1418,53 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				signalLog.CurrentPrice = price
 			}
 
+			// Mode-specific per-symbol signal logging (Epic 2 Stories 2.2-2.4)
+			// NOTE: Scalp mode detailed logging is handled earlier (AC-2.2.2)
+			switch mode {
+			case GinieModeSwing:
+				swingSignals++
+				// AC-2.3.2: Log market conditions overview
+				log.Printf("[SWING-SCAN] %s: Trend=%s, ADX=%.1f, Volatility=%s, Confidence=%.1f%%, Action=%s, RR=%.2f",
+					symbol, decision.MarketConditions.Trend, decision.MarketConditions.ADX,
+					decision.MarketConditions.Volatility, decision.ConfidenceScore,
+					decision.TradeExecution.Action, decision.TradeExecution.RiskReward)
+				// AC-2.3.2: Log signal summary
+				log.Printf("[SWING-SCAN] %s: Signals %d/%d met - [%s]",
+					symbol, decision.SignalAnalysis.PrimaryMet, decision.SignalAnalysis.PrimaryRequired,
+					decision.SignalAnalysis.SignalStrength)
+				// AC-2.3.2: Log each individual signal with detailed values
+				for i, sig := range decision.SignalAnalysis.PrimarySignals {
+					statusStr := "NOT_MET"
+					if sig.Met {
+						statusStr = "MET"
+					}
+					log.Printf("[SWING-SCAN] %s: Signal[%d] %s=%s (value=%.2f, threshold=%.2f, weight=%.1f)",
+						symbol, i+1, sig.Name, statusStr, sig.Value, sig.Threshold, sig.Weight)
+				}
+			case GinieModePosition:
+				positionSignals++
+				log.Printf("[POSITION-SCAN] %s: Trend=%s, ADX=%.1f, Volatility=%s, Confidence=%.1f%%, Action=%s, RR=%.2f",
+					symbol, decision.MarketConditions.Trend, decision.MarketConditions.ADX,
+					decision.MarketConditions.Volatility, decision.ConfidenceScore,
+					decision.TradeExecution.Action, decision.TradeExecution.RiskReward)
+				for i, sig := range decision.SignalAnalysis.PrimarySignals {
+					log.Printf("[POSITION-SCAN] %s: Signal[%d] %s=%s (weight=%.1f)", symbol, i+1, sig.Name, sig.Status, sig.Weight)
+				}
+			}
+
 			// Check recommendation
 			if decision.Recommendation != RecommendationExecute {
+				// Scalp mode: Log recommendation rejection (AC-2.2.2)
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Recommendation=%s, SKIP", symbol, decision.Recommendation)
+				}
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: Not recommended (recommendation=%s), SKIP", symbol, decision.Recommendation)
+				}
+				// Position mode: Log recommendation rejection (AC-2.4.1)
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Not recommended (recommendation=%s), SKIP", symbol, decision.Recommendation)
+				}
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = "not_recommended"
 				ga.LogSignal(signalLog)
@@ -1382,6 +1474,17 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			// Check if symbol is enabled (per-symbol settings)
 			settingsManager := GetSettingsManager()
 			if !settingsManager.IsSymbolEnabled(symbol) {
+				// Scalp mode: Log symbol disabled (AC-2.2.2)
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Symbol disabled, SKIP", symbol)
+				}
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: Symbol disabled, SKIP", symbol)
+				}
+				// Position mode: Log symbol disabled (AC-2.4.1)
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Symbol disabled, SKIP", symbol)
+				}
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = "symbol_disabled"
 				ga.LogSignal(signalLog)
@@ -1393,6 +1496,21 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 			// Check confidence threshold (both are 0-100 format)
 			if decision.ConfidenceScore < effectiveMinConfidence {
+				// Scalp mode: Log confidence rejection (AC-2.2.2)
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
+						symbol, decision.ConfidenceScore, effectiveMinConfidence)
+				}
+				// Swing mode: Log confidence rejection (AC-2.3.2)
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
+						symbol, decision.ConfidenceScore, effectiveMinConfidence)
+				}
+				// Position mode: Log confidence rejection (AC-2.4.1)
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
+						symbol, decision.ConfidenceScore, effectiveMinConfidence)
+				}
 				ga.logger.Debug("Ginie skipping low confidence signal",
 					"symbol", symbol,
 					"confidence", decision.ConfidenceScore,
@@ -1406,10 +1524,41 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 			// Check if coin is blocked
 			if blocked, reason := ga.isCoinBlocked(symbol); blocked {
+				// Scalp mode: Log coin blocked (AC-2.2.2)
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Coin blocked (%s), SKIP", symbol, reason)
+				}
+				// Swing mode: Log coin blocked (AC-2.3.2)
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: Coin blocked (%s), SKIP", symbol, reason)
+				}
+				// Position mode: Log coin blocked (AC-2.4.1)
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Coin blocked (%s), SKIP", symbol, reason)
+				}
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = "coin_blocked: " + reason
 				ga.LogSignal(signalLog)
 				continue
+			}
+
+			// Scalp mode: Log successful entry signal (AC-2.2.2)
+			if isScalpMode {
+				log.Printf("[SCALP-SCAN] %s: ENTRY SIGNAL - Confidence %.1f%% >= %.1f%%, Direction=%s",
+					symbol, decision.ConfidenceScore, effectiveMinConfidence, decision.TradeExecution.Action)
+				scalpTrades++
+			}
+
+			// Swing mode: Log successful entry signal (AC-2.3.2)
+			if mode == GinieModeSwing {
+				log.Printf("[SWING-SCAN] %s: ✓ ENTRY SIGNAL - Confidence %.1f%% >= %.1f%%, Direction=%s",
+					symbol, decision.ConfidenceScore, effectiveMinConfidence, decision.TradeExecution.Action)
+			}
+
+			// Position mode: Log successful entry signal (AC-2.4.1)
+			if mode == GinieModePosition {
+				log.Printf("[POSITION-SCAN] %s: ENTRY SIGNAL - Confidence %.1f%% >= %.1f%%, Direction=%s",
+					symbol, decision.ConfidenceScore, effectiveMinConfidence, decision.TradeExecution.Action)
 			}
 
 			ga.logger.Info("Ginie found tradeable signal - attempting trade",
@@ -1425,7 +1574,32 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 			// Execute the trade
 			ga.executeTrade(decision)
+
+			// Scalp mode: Log trade execution (AC-2.2.2)
+			if isScalpMode {
+				log.Printf("[SCALP-SCAN] %s: Trade execution initiated", symbol)
+			}
+
+			// Swing mode: Log trade execution (AC-2.3.2)
+			if mode == GinieModeSwing {
+				log.Printf("[SWING-SCAN] %s: ✓ Trade execution initiated", symbol)
+			}
+
+			// Position mode: Log trade execution (AC-2.4.1)
+			if mode == GinieModePosition {
+				log.Printf("[POSITION-SCAN] %s: Trade execution initiated", symbol)
+			}
 		}
+	}
+
+	// Mode-specific scan cycle completion summary (Epic 2 Stories 2.2-2.4)
+	switch mode {
+	case GinieModeScalp:
+		log.Printf("[SCALP-SCAN] Scan complete: %d signals evaluated, %d trade attempts", scalpSignals, scalpTrades)
+	case GinieModeSwing:
+		log.Printf("[SWING-SCAN] Scan complete: %d symbols scanned, %d signals evaluated", len(symbols), swingSignals)
+	case GinieModePosition:
+		log.Printf("[POSITION-SCAN] Scan cycle complete: %d symbols scanned, %d signals generated", len(symbols), positionSignals)
 	}
 }
 
@@ -2503,10 +2677,56 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 	// Calculate quantity to close
 	tpConfig := pos.TakeProfits[tpLevel-1]
 	closePercent := tpConfig.Percent / 100.0
-	closeQty := roundQuantity(pos.Symbol, pos.OriginalQty * closePercent)
+	closeQty := roundQuantity(pos.Symbol, pos.OriginalQty*closePercent)
 
 	if closeQty <= 0 || closeQty > pos.RemainingQty {
 		return
+	}
+
+	// CRITICAL FIX: Check if TP algo order was already triggered on Binance
+	// This prevents double-execution when both the algo order triggers AND we detect TP hit via price
+	if len(pos.TakeProfitAlgoIDs) > 0 && pos.TakeProfitAlgoIDs[0] > 0 {
+		algoID := pos.TakeProfitAlgoIDs[0] // Current active TP is always at index 0
+		// Check algo order status on Binance
+		algoOrders, err := ga.futuresClient.GetAllAlgoOrders(pos.Symbol, 100)
+		if err == nil {
+			for _, order := range algoOrders {
+				if order.AlgoId == algoID {
+					if order.AlgoStatus == "TRIGGERED" || order.AlgoStatus == "FILLED" {
+						ga.logger.Info("TP algo order already triggered on Binance - skipping duplicate close order",
+							"symbol", pos.Symbol,
+							"tp_level", tpLevel,
+							"algo_id", algoID,
+							"algo_status", order.AlgoStatus)
+						// Algo already executed - just update internal state without placing another order
+						pos.RemainingQty -= closeQty
+						pos.TakeProfits[tpLevel-1].Status = "hit"
+						// Update PnL tracking (algo order already closed position)
+						var grossPnlAlgo float64
+						if pos.Side == "LONG" {
+							grossPnlAlgo = (currentPrice - pos.EntryPrice) * closeQty
+						} else {
+							grossPnlAlgo = (pos.EntryPrice - currentPrice) * closeQty
+						}
+						exitFeeAlgo := calculateTradingFee(closeQty, currentPrice)
+						pnlAlgo := grossPnlAlgo - exitFeeAlgo
+						pos.RealizedPnL += pnlAlgo
+						ga.dailyPnL += pnlAlgo
+						ga.totalPnL += pnlAlgo
+						// Track for diagnostics
+						ga.mu.Lock()
+						ga.partialClosesLastHour++
+						if pnlAlgo > 0 {
+							ga.winningTrades++
+						} else {
+						}
+						ga.mu.Unlock()
+						return
+					}
+					break
+				}
+			}
+		}
 	}
 
 	// Calculate PnL for this portion (both USD and percentage for circuit breaker)
@@ -2826,23 +3046,44 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		WorkingType:  binance.WorkingTypeMarkPrice,
 	}
 
-	tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
-	if err != nil {
+	// Place TP with retry logic
+	const maxTPRetries = 3
+	tpRetryDelay := 500 * time.Millisecond
+	var tpOrderPlaced bool
+
+	for attempt := 1; attempt <= maxTPRetries; attempt++ {
+		tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
+		if err == nil && tpOrder != nil && tpOrder.AlgoId > 0 {
+			pos.TakeProfitAlgoIDs = append(pos.TakeProfitAlgoIDs, tpOrder.AlgoId)
+			ga.logger.Info("Next take profit order placed",
+				"symbol", pos.Symbol,
+				"tp_level", nextTPIndex+1,
+				"algo_id", tpOrder.AlgoId,
+				"trigger_price", roundedTPPrice,
+				"quantity", tpQty,
+				"attempt", attempt)
+			tpOrderPlaced = true
+			break
+		}
 		ga.logger.Error("Failed to place next take profit order",
 			"symbol", pos.Symbol,
 			"tp_level", nextTPIndex+1,
 			"tp_price", nextTP.Price,
+			"attempt", attempt,
+			"max_retries", maxTPRetries,
 			"error", err.Error())
-		return
+		if attempt < maxTPRetries {
+			time.Sleep(tpRetryDelay * time.Duration(attempt))
+		}
 	}
 
-	pos.TakeProfitAlgoIDs = append(pos.TakeProfitAlgoIDs, tpOrder.AlgoId)
-	ga.logger.Info("Next take profit order placed",
-		"symbol", pos.Symbol,
-		"tp_level", nextTPIndex+1,
-		"algo_id", tpOrder.AlgoId,
-		"trigger_price", roundedTPPrice,
-		"quantity", tpQty)
+	if !tpOrderPlaced {
+		ga.logger.Error("CRITICAL: Next TP order NOT placed after all retries",
+			"symbol", pos.Symbol,
+			"tp_level", nextTPIndex+1,
+			"tp_price", roundedTPPrice)
+		return
+	}
 
 	// CRITICAL FIX: Place a new SL order for remaining quantity
 	// Without this, the remaining position is unprotected after TP placement
@@ -2908,21 +3149,40 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 		WorkingType:  binance.WorkingTypeMarkPrice,
 	}
 
-	slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams)
-	if err != nil {
+	// Place SL with retry logic - CRITICAL for position protection
+	const maxSLRetries = 3
+	slRetryDelay := 500 * time.Millisecond
+	var slOrderPlaced bool
+
+	for attempt := 1; attempt <= maxSLRetries; attempt++ {
+		slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams)
+		if err == nil && slOrder != nil && slOrder.AlgoId > 0 {
+			pos.StopLossAlgoID = slOrder.AlgoId
+			ga.logger.Info("Updated SL order placed",
+				"symbol", pos.Symbol,
+				"new_algo_id", slOrder.AlgoId,
+				"trigger_price", roundedSL,
+				"quantity", roundedQty,
+				"attempt", attempt)
+			slOrderPlaced = true
+			break
+		}
 		ga.logger.Error("Failed to place updated SL order",
 			"symbol", pos.Symbol,
 			"sl_price", roundedSL,
+			"attempt", attempt,
+			"max_retries", maxSLRetries,
 			"error", err.Error())
-		return
+		if attempt < maxSLRetries {
+			time.Sleep(slRetryDelay * time.Duration(attempt))
+		}
 	}
 
-	pos.StopLossAlgoID = slOrder.AlgoId
-	ga.logger.Info("Updated SL order placed",
-		"symbol", pos.Symbol,
-		"new_algo_id", slOrder.AlgoId,
-		"trigger_price", roundedSL,
-		"quantity", roundedQty)
+	if !slOrderPlaced {
+		ga.logger.Error("CRITICAL: Updated SL order NOT placed after all retries - position unprotected!",
+			"symbol", pos.Symbol,
+			"sl_price", roundedSL)
+	}
 }
 
 // checkTrailingStop checks if trailing stop is triggered
@@ -3898,18 +4158,38 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 		WorkingType:  binance.WorkingTypeMarkPrice,
 	}
 
-	slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams)
-	if err != nil {
+	// Place SL with retry logic - CRITICAL for position protection
+	const maxSLRetries = 3
+	slRetryDelay := 500 * time.Millisecond
+	var slOrderPlaced bool
+
+	for attempt := 1; attempt <= maxSLRetries; attempt++ {
+		slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams)
+		if err == nil && slOrder != nil && slOrder.AlgoId > 0 {
+			pos.StopLossAlgoID = slOrder.AlgoId
+			ga.logger.Info("Stop loss order placed",
+				"symbol", pos.Symbol,
+				"algo_id", slOrder.AlgoId,
+				"trigger_price", roundedSL,
+				"attempt", attempt)
+			slOrderPlaced = true
+			break
+		}
 		ga.logger.Error("Failed to place stop loss order",
 			"symbol", pos.Symbol,
 			"sl_price", roundedSL,
+			"attempt", attempt,
+			"max_retries", maxSLRetries,
 			"error", err.Error())
-	} else {
-		pos.StopLossAlgoID = slOrder.AlgoId
-		ga.logger.Info("Stop loss order placed",
+		if attempt < maxSLRetries {
+			time.Sleep(slRetryDelay * time.Duration(attempt))
+		}
+	}
+
+	if !slOrderPlaced {
+		ga.logger.Error("CRITICAL: Stop loss order NOT placed after all retries - position unprotected!",
 			"symbol", pos.Symbol,
-			"algo_id", slOrder.AlgoId,
-			"trigger_price", roundedSL)
+			"sl_price", roundedSL)
 	}
 
 	// Place Take Profit orders for each level (only TP1 initially, others placed as we hit levels)
@@ -4006,21 +4286,41 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 					WorkingType:  binance.WorkingTypeMarkPrice,
 				}
 
-				tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
-				if err != nil {
+				// Place TP with retry logic - CRITICAL for profit protection
+				const maxTPRetries = 3
+				tpRetryDelay := 500 * time.Millisecond
+				var tpOrderPlaced bool
+
+				for attempt := 1; attempt <= maxTPRetries; attempt++ {
+					tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
+					if err == nil && tpOrder != nil && tpOrder.AlgoId > 0 {
+						pos.TakeProfitAlgoIDs = append(pos.TakeProfitAlgoIDs, tpOrder.AlgoId)
+						ga.logger.Info("Take profit order placed",
+							"symbol", pos.Symbol,
+							"tp_level", 1,
+							"algo_id", tpOrder.AlgoId,
+							"trigger_price", roundedTP1,
+							"quantity", tp1Qty,
+							"attempt", attempt)
+						tpOrderPlaced = true
+						break
+					}
 					ga.logger.Error("Failed to place take profit order",
 						"symbol", pos.Symbol,
 						"tp_level", 1,
 						"tp_price", tp1.Price,
+						"attempt", attempt,
+						"max_retries", maxTPRetries,
 						"error", err.Error())
-				} else {
-					pos.TakeProfitAlgoIDs = append(pos.TakeProfitAlgoIDs, tpOrder.AlgoId)
-					ga.logger.Info("Take profit order placed",
+					if attempt < maxTPRetries {
+						time.Sleep(tpRetryDelay * time.Duration(attempt))
+					}
+				}
+
+				if !tpOrderPlaced {
+					ga.logger.Error("CRITICAL: Take profit order NOT placed after all retries - no profit protection!",
 						"symbol", pos.Symbol,
-						"tp_level", 1,
-						"algo_id", tpOrder.AlgoId,
-						"trigger_price", roundedTP1,
-						"quantity", tp1Qty)
+						"tp_price", roundedTP1)
 				}
 			}
 		}
@@ -5235,12 +5535,23 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		posSide := pos.Side
 
 		go func() {
+			// Cancel existing orders with proper error logging
 			if pos.StopLossAlgoID > 0 {
-				_ = ga.futuresClient.CancelAlgoOrder(posSymbol, pos.StopLossAlgoID)
+				if err := ga.futuresClient.CancelAlgoOrder(posSymbol, pos.StopLossAlgoID); err != nil {
+					ga.logger.Warn("SLTP: Failed to cancel existing SL order (may already be cancelled)",
+						"symbol", posSymbol,
+						"algo_id", pos.StopLossAlgoID,
+						"error", err.Error())
+				}
 			}
 			for _, tpID := range pos.TakeProfitAlgoIDs {
 				if tpID > 0 {
-					_ = ga.futuresClient.CancelAlgoOrder(posSymbol, tpID)
+					if err := ga.futuresClient.CancelAlgoOrder(posSymbol, tpID); err != nil {
+						ga.logger.Warn("SLTP: Failed to cancel existing TP order (may already be triggered)",
+							"symbol", posSymbol,
+							"algo_id", tpID,
+							"error", err.Error())
+					}
 				}
 			}
 
@@ -5258,11 +5569,33 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 				ReduceOnly:   true,
 			}
 
-			if slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams); err == nil {
-				pos.StopLossAlgoID = slOrder.AlgoId
-				ga.logger.Info("SLTP: SL order placed", "symbol", posSymbol, "price", slPrice)
-			} else {
-				ga.logger.Error("SLTP: Failed to place SL order", "symbol", posSymbol, "error", err.Error())
+			// Place SL with retry logic - CRITICAL for position protection
+			const maxSLRetries = 3
+			slRetryDelay := 500 * time.Millisecond
+			var slOrderPlaced bool
+
+			for attempt := 1; attempt <= maxSLRetries; attempt++ {
+				if slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams); err == nil && slOrder != nil && slOrder.AlgoId > 0 {
+					pos.StopLossAlgoID = slOrder.AlgoId
+					ga.logger.Info("SLTP: SL order placed", "symbol", posSymbol, "price", slPrice, "attempt", attempt)
+					slOrderPlaced = true
+					break
+				} else {
+					ga.logger.Error("SLTP: Failed to place SL order",
+						"symbol", posSymbol,
+						"attempt", attempt,
+						"max_retries", maxSLRetries,
+						"error", err.Error())
+					if attempt < maxSLRetries {
+						time.Sleep(slRetryDelay * time.Duration(attempt))
+					}
+				}
+			}
+
+			if !slOrderPlaced {
+				ga.logger.Error("CRITICAL: SL order NOT placed after all retries - position unprotected!",
+					"symbol", posSymbol,
+					"sl_price", slPrice)
 			}
 
 			tpSide := "SELL"
@@ -5271,6 +5604,10 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			}
 
 			newTPIDs := []int64{}
+
+			// Place TP orders with retry logic
+			const maxTPRetries = 3
+			tpRetryDelay := 500 * time.Millisecond
 
 			for i, tpPrice := range tpPrices {
 				tpQty := tpQuantities[i]
@@ -5284,11 +5621,31 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 					ReduceOnly:   true,
 				}
 
-				if tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams); err == nil {
-					newTPIDs = append(newTPIDs, tpOrder.AlgoId)
-					ga.logger.Info("SLTP: TP order placed", "symbol", posSymbol, "level", i+1, "price", tpPrice, "qty", tpQty)
-				} else {
-					ga.logger.Error("SLTP: Failed to place TP order", "symbol", posSymbol, "level", i+1, "error", err.Error())
+				var tpOrderPlaced bool
+				for attempt := 1; attempt <= maxTPRetries; attempt++ {
+					if tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams); err == nil && tpOrder != nil && tpOrder.AlgoId > 0 {
+						newTPIDs = append(newTPIDs, tpOrder.AlgoId)
+						ga.logger.Info("SLTP: TP order placed", "symbol", posSymbol, "level", i+1, "price", tpPrice, "qty", tpQty, "attempt", attempt)
+						tpOrderPlaced = true
+						break
+					} else {
+						ga.logger.Error("SLTP: Failed to place TP order",
+							"symbol", posSymbol,
+							"level", i+1,
+							"attempt", attempt,
+							"max_retries", maxTPRetries,
+							"error", err.Error())
+						if attempt < maxTPRetries {
+							time.Sleep(tpRetryDelay * time.Duration(attempt))
+						}
+					}
+				}
+
+				if !tpOrderPlaced {
+					ga.logger.Error("CRITICAL: TP order NOT placed after all retries - missing profit protection!",
+						"symbol", posSymbol,
+						"tp_level", i+1,
+						"tp_price", tpPrice)
 				}
 			}
 

@@ -33,6 +33,20 @@ class FuturesAPIService {
       },
     });
 
+    // Request interceptor to add auth token
+    this.client.interceptors.request.use(
+      (config) => {
+        const token = localStorage.getItem('access_token');
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+
     // Response interceptor for error handling
     this.client.interceptors.response.use(
       (response) => response,
@@ -1322,7 +1336,9 @@ class FuturesAPIService {
       trailing_activation: number;
     };
   }> {
-    const { data } = await this.client.post(`/ginie/sltp/${mode}`, config);
+    // API expects 'ultrafast' without underscore
+    const apiMode = mode === 'ultra_fast' ? 'ultrafast' : mode;
+    const { data } = await this.client.post(`/ginie/sltp/${apiMode}`, config);
     return data;
   }
 

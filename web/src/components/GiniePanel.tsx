@@ -532,7 +532,7 @@ export default function GiniePanel() {
         const apiData = result.timeframes as any;
         setTrendTimeframes({
           ...trendTimeframes,
-          ultra_fast: apiData?.ultra_fast || apiData?.ultrafast || '5m',
+          ultra_fast: apiData?.ultrafast || '5m',
           scalp: apiData?.scalp || '15m',
           swing: apiData?.swing || '1h',
           position: apiData?.position || '4h',
@@ -573,7 +573,7 @@ export default function GiniePanel() {
         // Merge with defaults to ensure all modes are present
         const apiConfig = result.sltp_config as any;
         const mergedConfig = {
-          ultra_fast: apiConfig?.ultra_fast || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.1, trailing_activation: 0.2 },
+          ultra_fast: apiConfig?.ultrafast || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.1, trailing_activation: 0.2 },
           scalp: apiConfig?.scalp || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 0.3, trailing_activation: 0.5 },
           swing: apiConfig?.swing || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 1.5, trailing_activation: 1.0 },
           position: apiConfig?.position || { sl_percent: 0, tp_percent: 0, trailing_enabled: true, trailing_percent: 3.0, trailing_activation: 2.0 },
