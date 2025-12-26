@@ -1,0 +1,25 @@
+# Development Dockerfile
+# =====================
+# Contains all build tools. Source code is mounted via volume.
+# The entrypoint script builds and runs the app.
+
+FROM golang:1.23-alpine
+
+# Install build dependencies
+RUN apk add --no-cache git make nodejs npm
+
+WORKDIR /app
+
+# Copy entrypoint script
+COPY scripts/docker-entrypoint-dev.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Default port
+ENV WEB_PORT=8094
+EXPOSE 8094
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${WEB_PORT}/health || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
