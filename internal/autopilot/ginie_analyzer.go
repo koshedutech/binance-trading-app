@@ -202,7 +202,7 @@ type UltraFastSignal struct {
 	GeneratedAt      time.Time           `json:"generated_at"`
 }
 
-// LoadLLMSelectedCoins asks DeepSeek to provide 50 coins based on market criteria
+// LoadLLMSelectedCoins asks DeepSeek to provide 100 coins based on market criteria
 func (g *GinieAnalyzer) LoadLLMSelectedCoins() error {
 	// Check cache first
 	if len(g.llmCoinsCache) > 0 && time.Since(g.llmCoinsCacheTime) < g.llmCoinsCacheTTL {
@@ -235,7 +235,7 @@ func (g *GinieAnalyzer) LoadLLMSelectedCoins() error {
 	marketSummary := g.buildMarketSummaryForLLM(tickers)
 
 	systemPrompt := `You are a cryptocurrency trading AI assistant specializing in selecting coins for futures trading on Binance.
-Your task is to analyze current market conditions and select exactly 50 cryptocurrency trading pairs (USDT perpetual futures) based on the following criteria:
+Your task is to analyze current market conditions and select exactly 100 cryptocurrency trading pairs (USDT perpetual futures) based on the following criteria:
 
 Categories to include (aim for roughly equal distribution):
 1. HIGH_VOLUME: Top coins by 24h trading volume (most liquid)
@@ -252,16 +252,16 @@ IMPORTANT RULES:
 - Exclude stablecoins (USDCUSDT, BUSDUSDT, TUSDUSDT, DAIUSDT, FDUSDUSDT)
 - Prioritize coins with daily volume > $1M USD
 - Include major coins (BTC, ETH, BNB, SOL, XRP) regardless of other criteria
-- Return EXACTLY 50 unique coins
+- Return EXACTLY 100 unique coins
 
 Respond ONLY with a valid JSON object in this exact format (no markdown, no explanation):
 {"coins":[{"symbol":"BTCUSDT","category":"high_volume","reason":"highest volume"},...]}`
 
-	userPrompt := fmt.Sprintf(`Based on the current Binance Futures market data below, select 50 coins for trading:
+	userPrompt := fmt.Sprintf(`Based on the current Binance Futures market data below, select 100 coins for trading:
 
 %s
 
-Return EXACTLY 50 unique USDT perpetual futures symbols in the JSON format specified.`, marketSummary)
+Return EXACTLY 100 unique USDT perpetual futures symbols in the JSON format specified.`, marketSummary)
 
 	response, err := g.llmClient.Complete(systemPrompt, userPrompt)
 	if err != nil {
@@ -303,7 +303,7 @@ Return EXACTLY 50 unique USDT perpetual futures symbols in the JSON format speci
 	}
 
 	// If we don't have enough, supplement with market movers
-	if len(validCoins) < 50 {
+	if len(validCoins) < 100 {
 		if g.logger != nil {
 			g.logger.Warn("LLM returned insufficient coins, supplementing with market movers", "llm_count", len(validCoins))
 		}
@@ -372,8 +372,8 @@ func (g *GinieAnalyzer) buildMarketSummaryForLLM(tickers []binance.Futures24hrTi
 		return validTickers[i].QuoteVolume > validTickers[j].QuoteVolume
 	})
 
-	// Build summary (limit to top 75 for faster LLM response)
-	limit := 75
+	// Build summary (limit to top 150 to give LLM enough context for 100 coin selection)
+	limit := 150
 	if len(validTickers) < limit {
 		limit = len(validTickers)
 	}
