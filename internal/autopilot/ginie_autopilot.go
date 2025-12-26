@@ -552,9 +552,10 @@ type GinieAutopilot struct {
 	totalPnL      float64
 
 	// Diagnostic tracking
-	lastScalpScan          time.Time
-	lastSwingScan          time.Time
-	lastPositionScan       time.Time
+	lastScalpScan           time.Time
+	lastSwingScan           time.Time
+	lastPositionScan        time.Time
+	lastUltraFastScan       time.Time // Ultra-fast mode: 5-second scan tracking
 	symbolsScannedLastCycle int
 	failedOrdersLastHour   int
 	tpHitsLastHour         int
@@ -1081,6 +1082,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 	lastSwingScan := time.Now()
 	lastPositionScan := time.Now()
 	lastStrategyScan := time.Now()
+	lastUltraFastScan := time.Now() // Ultra-fast mode: 5-second scan interval
 
 	for {
 		select {
@@ -1113,6 +1115,18 @@ func (ga *GinieAutopilot) runMainLoop() {
 			if ga.config.EnablePositionMode && now.Sub(lastPositionScan) >= time.Duration(ga.config.PositionScanInterval)*time.Second {
 				ga.scanForMode(GinieModePosition)
 				lastPositionScan = now
+			}
+
+			// Ultra-fast mode: 5-second scan for rapid scalping opportunities
+			// Uses milliseconds for interval, converts to duration
+			currentSettings := GetSettingsManager().GetCurrentSettings()
+			if currentSettings.UltraFastEnabled {
+				ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
+				if now.Sub(lastUltraFastScan) >= ultraFastInterval {
+					log.Printf("[ULTRA-FAST-SCAN] Starting ultra-fast scan cycle at %s", now.Format("15:04:05.000"))
+					ga.scanForUltraFast()
+					lastUltraFastScan = now
+				}
 			}
 
 			// Scan saved strategies (every 60 seconds)
@@ -1156,6 +1170,128 @@ func (ga *GinieAutopilot) canTrade() bool {
 	}
 
 	return true
+}
+
+// scanForUltraFast scans all watched symbols for ultra-fast scalping opportunities
+// Uses 4-layer signal generation: Trend, Volatility, Entry, Dynamic TP
+// Calls executeUltraFastEntry when confidence >= threshold
+func (ga *GinieAutopilot) scanForUltraFast() {
+	symbols := ga.analyzer.watchSymbols
+	settingsManager := GetSettingsManager()
+	currentSettings := settingsManager.GetCurrentSettings()
+
+	// Track scan time for diagnostics
+	ga.mu.Lock()
+	ga.lastUltraFastScan = time.Now()
+	ga.symbolsScannedLastCycle = len(symbols)
+	ga.mu.Unlock()
+
+	log.Printf("[ULTRA-FAST-SCAN] Scanning %d symbols, min_confidence=%d%%", len(symbols), currentSettings.UltraFastMinConfidence)
+
+	// Count current ultra-fast positions
+	ga.mu.RLock()
+	currentUFCount := 0
+	for _, pos := range ga.positions {
+		if pos.Mode == GinieModeUltraFast {
+			currentUFCount++
+		}
+	}
+	maxUFPositions := currentSettings.UltraFastMaxPositions
+	ga.mu.RUnlock()
+
+	if currentUFCount >= maxUFPositions {
+		log.Printf("[ULTRA-FAST-SCAN] Position limit reached: %d/%d, skipping scan", currentUFCount, maxUFPositions)
+		return
+	}
+
+	// Check daily trade limit
+	if ga.dailyTrades >= currentSettings.UltraFastMaxDailyTrades {
+		log.Printf("[ULTRA-FAST-SCAN] Daily trade limit reached: %d/%d, skipping scan", ga.dailyTrades, currentSettings.UltraFastMaxDailyTrades)
+		return
+	}
+
+	signalsGenerated := 0
+	tradesAttempted := 0
+
+	for _, symbol := range symbols {
+		select {
+		case <-ga.stopChan:
+			log.Printf("[ULTRA-FAST-SCAN] Scan interrupted by stop signal")
+			return
+		default:
+			// Skip if we already have a position for this symbol (any mode)
+			ga.mu.RLock()
+			_, hasPosition := ga.positions[symbol]
+			ga.mu.RUnlock()
+
+			if hasPosition {
+				continue
+			}
+
+			// Generate ultra-fast signal using 4-layer analysis
+			signal, err := ga.analyzer.GenerateUltraFastSignal(symbol)
+			if err != nil {
+				log.Printf("[ULTRA-FAST-SCAN] %s: Signal generation failed: %v", symbol, err)
+				continue
+			}
+
+			signalsGenerated++
+
+			// Log signal details
+			log.Printf("[ULTRA-FAST-SCAN] %s: TrendBias=%s (%.1f%%), EntryConfidence=%.1f%%, VolatilityRegime=%s, MinTP=%.2f%%",
+				symbol,
+				signal.TrendBias,
+				signal.TrendStrength,
+				signal.EntryConfidence,
+				signal.VolatilityRegime.Level,
+				signal.MinProfitTarget)
+
+			// Check confidence threshold
+			minConfidence := float64(currentSettings.UltraFastMinConfidence)
+			if signal.EntryConfidence < minConfidence {
+				log.Printf("[ULTRA-FAST-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
+					symbol, signal.EntryConfidence, minConfidence)
+				continue
+			}
+
+			// Check trend bias (skip NEUTRAL for entries)
+			if signal.TrendBias == "NEUTRAL" {
+				log.Printf("[ULTRA-FAST-SCAN] %s: Neutral trend, SKIP", symbol)
+				continue
+			}
+
+			// Confidence met - attempt entry
+			log.Printf("[ULTRA-FAST-SCAN] %s: ✓ ENTRY SIGNAL - Confidence %.1f%% >= %.1f%%, Direction=%s",
+				symbol, signal.EntryConfidence, minConfidence, signal.TrendBias)
+
+			tradesAttempted++
+
+			// Execute the ultra-fast entry
+			err = ga.executeUltraFastEntry(symbol, signal)
+			if err != nil {
+				log.Printf("[ULTRA-FAST-SCAN] %s: Entry execution failed: %v", symbol, err)
+			} else {
+				log.Printf("[ULTRA-FAST-SCAN] %s: ✓ ENTRY EXECUTED - Now monitoring for exit", symbol)
+
+				// Check if we've hit position limit after this entry
+				ga.mu.RLock()
+				newUFCount := 0
+				for _, pos := range ga.positions {
+					if pos.Mode == GinieModeUltraFast {
+						newUFCount++
+					}
+				}
+				ga.mu.RUnlock()
+
+				if newUFCount >= maxUFPositions {
+					log.Printf("[ULTRA-FAST-SCAN] Position limit reached after entry: %d/%d, stopping scan", newUFCount, maxUFPositions)
+					break
+				}
+			}
+		}
+	}
+
+	log.Printf("[ULTRA-FAST-SCAN] Scan complete: %d signals generated, %d trade attempts", signalsGenerated, tradesAttempted)
 }
 
 // scanForMode scans all watched symbols for a specific trading mode
