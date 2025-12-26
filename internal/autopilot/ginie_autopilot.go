@@ -8435,3 +8435,266 @@ func (ga *GinieAutopilot) ResetModeCircuitBreaker(mode GinieTradingMode) error {
 
 	return nil
 }
+
+// ==================== Adaptive AI & LLM Diagnostics (Story 2.8) ====================
+
+// AdaptiveAIData holds adaptive AI recommendations and statistics
+type AdaptiveAIData struct {
+	Recommendations []AdaptiveRecommendationData `json:"recommendations"`
+	Statistics      map[string]ModeStatisticsData `json:"statistics"`
+	LastAnalysis    time.Time                     `json:"last_analysis"`
+	TotalOutcomes   int                           `json:"total_outcomes"`
+}
+
+// AdaptiveRecommendationData represents a single adaptive AI recommendation
+type AdaptiveRecommendationData struct {
+	ID             string    `json:"id"`
+	Mode           string    `json:"mode"`
+	Parameter      string    `json:"parameter"`
+	CurrentValue   float64   `json:"current_value"`
+	SuggestedValue float64   `json:"suggested_value"`
+	Reasoning      string    `json:"reasoning"`
+	Confidence     float64   `json:"confidence"`
+	Impact         string    `json:"impact"`
+	CreatedAt      time.Time `json:"created_at"`
+	Status         string    `json:"status"`
+}
+
+// ModeStatisticsData represents statistics for a trading mode
+type ModeStatisticsData struct {
+	TotalTrades int       `json:"total_trades"`
+	WinCount    int       `json:"win_count"`
+	LossCount   int       `json:"loss_count"`
+	WinRate     float64   `json:"win_rate"`
+	TotalPnL    float64   `json:"total_pnl"`
+	AvgPnL      float64   `json:"avg_pnl"`
+	AvgHoldTime string    `json:"avg_hold_time"`
+	LLMAccuracy float64   `json:"llm_accuracy"`
+	LastUpdated time.Time `json:"last_updated"`
+}
+
+// LLMDiagnosticsData holds LLM call statistics
+type LLMDiagnosticsData struct {
+	TotalCalls      int64              `json:"total_calls"`
+	CacheHits       int64              `json:"cache_hits"`
+	CacheMisses     int64              `json:"cache_misses"`
+	CacheHitRate    float64            `json:"cache_hit_rate"`
+	AvgLatencyMs    float64            `json:"avg_latency_ms"`
+	ErrorCount      int64              `json:"error_count"`
+	ErrorRate       float64            `json:"error_rate"`
+	CallsByProvider map[string]int64   `json:"calls_by_provider"`
+	RecentErrors    []LLMErrorData     `json:"recent_errors"`
+	LastResetAt     time.Time          `json:"last_reset_at"`
+}
+
+// LLMErrorData represents a recent LLM error
+type LLMErrorData struct {
+	Timestamp time.Time `json:"timestamp"`
+	Provider  string    `json:"provider"`
+	ErrorType string    `json:"error_type"`
+	Message   string    `json:"message"`
+	Symbol    string    `json:"symbol,omitempty"`
+}
+
+// TradeWithAIContextData represents a trade with AI decision context
+type TradeWithAIContextData struct {
+	TradeID       string     `json:"trade_id"`
+	Symbol        string     `json:"symbol"`
+	Side          string     `json:"side"`
+	Mode          string     `json:"mode"`
+	EntryPrice    float64    `json:"entry_price"`
+	ExitPrice     float64    `json:"exit_price,omitempty"`
+	PnL           float64    `json:"pnl"`
+	PnLPercent    float64    `json:"pnl_percent"`
+	Status        string     `json:"status"`
+	OpenedAt      time.Time  `json:"opened_at"`
+	ClosedAt      *time.Time `json:"closed_at,omitempty"`
+	AIReasoning   string     `json:"ai_reasoning"`
+	LLMConfidence float64    `json:"llm_confidence"`
+	LLMProvider   string     `json:"llm_provider,omitempty"`
+	SignalSource  string     `json:"signal_source"`
+}
+
+// GetAdaptiveAIData returns adaptive AI recommendations and statistics
+func (ga *GinieAutopilot) GetAdaptiveAIData() *AdaptiveAIData {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	// Build mode statistics from trade history
+	statistics := make(map[string]ModeStatisticsData)
+	modeTradeCount := make(map[string]int)
+	modeWinCount := make(map[string]int)
+	modePnL := make(map[string]float64)
+
+	for _, trade := range ga.tradeHistory {
+		mode := string(trade.Mode)
+		modeTradeCount[mode]++
+		modePnL[mode] += trade.PnL
+		if trade.PnL > 0 {
+			modeWinCount[mode]++
+		}
+	}
+
+	for mode, count := range modeTradeCount {
+		winRate := 0.0
+		if count > 0 {
+			winRate = float64(modeWinCount[mode]) / float64(count) * 100
+		}
+		avgPnL := 0.0
+		if count > 0 {
+			avgPnL = modePnL[mode] / float64(count)
+		}
+
+		statistics[mode] = ModeStatisticsData{
+			TotalTrades: count,
+			WinCount:    modeWinCount[mode],
+			LossCount:   count - modeWinCount[mode],
+			WinRate:     winRate,
+			TotalPnL:    modePnL[mode],
+			AvgPnL:      avgPnL,
+			AvgHoldTime: "N/A", // TODO: Calculate from trade durations
+			LLMAccuracy: 0,     // TODO: Track LLM prediction accuracy
+			LastUpdated: time.Now(),
+		}
+	}
+
+	// Return data (recommendations would come from a future AdaptiveAI engine)
+	return &AdaptiveAIData{
+		Recommendations: []AdaptiveRecommendationData{}, // Empty for now - to be populated by AdaptiveAI engine
+		Statistics:      statistics,
+		LastAnalysis:    time.Now(),
+		TotalOutcomes:   len(ga.tradeHistory),
+	}
+}
+
+// ApplyAdaptiveRecommendation applies a specific recommendation by ID
+func (ga *GinieAutopilot) ApplyAdaptiveRecommendation(recID string) (map[string]interface{}, error) {
+	// TODO: Implement when AdaptiveAI engine is built
+	// For now, return a placeholder response
+	return map[string]interface{}{
+		"recommendation_id": recID,
+		"applied":           false,
+		"message":           "AdaptiveAI engine not yet implemented",
+	}, fmt.Errorf("AdaptiveAI engine not yet implemented")
+}
+
+// DismissAdaptiveRecommendation dismisses a specific recommendation
+func (ga *GinieAutopilot) DismissAdaptiveRecommendation(recID string) error {
+	// TODO: Implement when AdaptiveAI engine is built
+	return fmt.Errorf("AdaptiveAI engine not yet implemented")
+}
+
+// ApplyAllAdaptiveRecommendations applies all pending recommendations
+func (ga *GinieAutopilot) ApplyAllAdaptiveRecommendations() ([]map[string]interface{}, error) {
+	// TODO: Implement when AdaptiveAI engine is built
+	return nil, fmt.Errorf("AdaptiveAI engine not yet implemented")
+}
+
+// GetLLMDiagnosticsData returns LLM call statistics
+func (ga *GinieAutopilot) GetLLMDiagnosticsData() *LLMDiagnosticsData {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	// Calculate statistics from LLM switch events
+	var totalCalls int64
+	var totalLatency float64
+	callsByProvider := make(map[string]int64)
+
+	for _, event := range ga.llmSwitches {
+		totalCalls++
+		// Use Action as provider category since LLMSwitchEvent doesn't have Provider field
+		callsByProvider[event.Action]++
+		_ = event // Note: Latency not tracked in LLMSwitchEvent currently
+	}
+
+	avgLatency := 0.0
+	if totalCalls > 0 {
+		avgLatency = totalLatency / float64(totalCalls)
+	}
+
+	return &LLMDiagnosticsData{
+		TotalCalls:      totalCalls,
+		CacheHits:       0, // TODO: Track cache hits when caching is implemented
+		CacheMisses:     totalCalls,
+		CacheHitRate:    0,
+		AvgLatencyMs:    avgLatency,
+		ErrorCount:      0, // TODO: Track errors when error tracking is implemented
+		ErrorRate:       0,
+		CallsByProvider: callsByProvider,
+		RecentErrors:    []LLMErrorData{},
+		LastResetAt:     time.Now().Add(-24 * time.Hour), // Placeholder
+	}
+}
+
+// ResetLLMDiagnostics resets LLM diagnostic counters
+func (ga *GinieAutopilot) ResetLLMDiagnostics() {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	// Clear LLM switch history
+	ga.llmSwitches = make([]LLMSwitchEvent, 0)
+
+	ga.logger.Info("LLM diagnostics reset")
+}
+
+// GetTradeHistoryWithAIContext returns trade history with AI decision context
+func (ga *GinieAutopilot) GetTradeHistoryWithAIContext(limit, offset int) []TradeWithAIContextData {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	trades := make([]TradeWithAIContextData, 0)
+
+	// Get trades in reverse order (newest first)
+	historyLen := len(ga.tradeHistory)
+	startIdx := historyLen - 1 - offset
+	endIdx := startIdx - limit
+	if endIdx < -1 {
+		endIdx = -1
+	}
+
+	for i := startIdx; i > endIdx && i >= 0; i-- {
+		trade := ga.tradeHistory[i]
+
+		// Build AI reasoning from signal summary if available
+		aiReasoning := "No AI reasoning available"
+		llmConfidence := trade.Confidence
+		if trade.SignalSummary != nil {
+			aiReasoning = fmt.Sprintf("Signal Strength: %s, Direction: %s", trade.SignalSummary.Strength, trade.SignalSummary.Direction)
+		}
+		if trade.Reason != "" {
+			aiReasoning = trade.Reason
+		}
+
+		// Use Price as both entry and exit for now (trade result only has one price)
+		tradeData := TradeWithAIContextData{
+			TradeID:       fmt.Sprintf("%s-%d", trade.Symbol, trade.Timestamp.Unix()),
+			Symbol:        trade.Symbol,
+			Side:          trade.Side,
+			Mode:          string(trade.Mode),
+			EntryPrice:    trade.Price,
+			ExitPrice:     trade.Price,
+			PnL:           trade.PnL,
+			PnLPercent:    trade.PnLPercent,
+			Status:        "closed",
+			OpenedAt:      trade.Timestamp,
+			AIReasoning:   aiReasoning,
+			LLMConfidence: llmConfidence,
+			SignalSource:  trade.Source,
+		}
+
+		// Mark as closed since trade result represents completed trade
+		closedAt := trade.Timestamp
+		tradeData.ClosedAt = &closedAt
+
+		trades = append(trades, tradeData)
+	}
+
+	return trades
+}
+
+// GetTradeHistoryCount returns total number of trades in history
+func (ga *GinieAutopilot) GetTradeHistoryCount() int {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return len(ga.tradeHistory)
+}

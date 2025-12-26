@@ -233,6 +233,108 @@ type ModeFullConfig struct {
 	Assignment     *ModeAssignmentConfig      `json:"assignment"`
 }
 
+// ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
+
+// LLMConfig holds global LLM provider settings
+type LLMConfig struct {
+	Enabled          bool   `json:"enabled"`
+	Provider         string `json:"provider"`           // deepseek, claude, openai, local
+	Model            string `json:"model"`              // deepseek-chat, claude-3-haiku, gpt-4o-mini
+	FallbackProvider string `json:"fallback_provider"`
+	FallbackModel    string `json:"fallback_model"`
+	TimeoutMs        int    `json:"timeout_ms"`         // default 5000
+	RetryCount       int    `json:"retry_count"`        // default 2
+	CacheDurationSec int    `json:"cache_duration_sec"` // default 300
+}
+
+// ModeLLMSettings holds per-mode LLM settings
+type ModeLLMSettings struct {
+	LLMEnabled          bool    `json:"llm_enabled"`
+	LLMWeight           float64 `json:"llm_weight"`            // 0.0-1.0
+	SkipOnTimeout       bool    `json:"skip_on_timeout"`
+	MinLLMConfidence    int     `json:"min_llm_confidence"`    // 0-100
+	BlockOnDisagreement bool    `json:"block_on_disagreement"`
+	CacheEnabled        bool    `json:"cache_enabled"`
+}
+
+// AdaptiveAIConfig holds adaptive AI learning settings
+type AdaptiveAIConfig struct {
+	Enabled                  bool `json:"enabled"`
+	LearningWindowTrades     int  `json:"learning_window_trades"`      // default 50
+	LearningWindowHours      int  `json:"learning_window_hours"`       // default 24
+	AutoAdjustEnabled        bool `json:"auto_adjust_enabled"`
+	MaxAutoAdjustmentPercent int  `json:"max_auto_adjustment_percent"` // default 10
+	RequireApproval          bool `json:"require_approval"`
+	MinTradesForLearning     int  `json:"min_trades_for_learning"`     // default 20
+	StoreDecisionContext     bool `json:"store_decision_context"`
+}
+
+// DefaultLLMConfig returns the default LLM configuration
+func DefaultLLMConfig() LLMConfig {
+	return LLMConfig{
+		Enabled:          true,
+		Provider:         "deepseek",
+		Model:            "deepseek-chat",
+		FallbackProvider: "claude",
+		FallbackModel:    "claude-3-haiku",
+		TimeoutMs:        5000,
+		RetryCount:       2,
+		CacheDurationSec: 300,
+	}
+}
+
+// DefaultModeLLMSettings returns the default per-mode LLM settings for all modes
+func DefaultModeLLMSettings() map[GinieTradingMode]ModeLLMSettings {
+	return map[GinieTradingMode]ModeLLMSettings{
+		GinieModeUltraFast: {
+			LLMEnabled:          true,
+			LLMWeight:           0.10,
+			SkipOnTimeout:       true,
+			MinLLMConfidence:    40,
+			BlockOnDisagreement: false,
+			CacheEnabled:        true,
+		},
+		GinieModeScalp: {
+			LLMEnabled:          true,
+			LLMWeight:           0.20,
+			SkipOnTimeout:       true,
+			MinLLMConfidence:    50,
+			BlockOnDisagreement: false,
+			CacheEnabled:        true,
+		},
+		GinieModeSwing: {
+			LLMEnabled:          true,
+			LLMWeight:           0.40,
+			SkipOnTimeout:       false,
+			MinLLMConfidence:    60,
+			BlockOnDisagreement: true,
+			CacheEnabled:        false,
+		},
+		GinieModePosition: {
+			LLMEnabled:          true,
+			LLMWeight:           0.50,
+			SkipOnTimeout:       false,
+			MinLLMConfidence:    65,
+			BlockOnDisagreement: true,
+			CacheEnabled:        false,
+		},
+	}
+}
+
+// DefaultAdaptiveAIConfig returns the default adaptive AI configuration
+func DefaultAdaptiveAIConfig() AdaptiveAIConfig {
+	return AdaptiveAIConfig{
+		Enabled:                  true,
+		LearningWindowTrades:     50,
+		LearningWindowHours:      24,
+		AutoAdjustEnabled:        false,
+		MaxAutoAdjustmentPercent: 10,
+		RequireApproval:          true,
+		MinTradesForLearning:     20,
+		StoreDecisionContext:     true,
+	}
+}
+
 // DefaultModeConfigs returns the default configurations for all 4 modes (Story 2.7 defaults)
 func DefaultModeConfigs() map[string]*ModeFullConfig {
 	return map[string]*ModeFullConfig{
@@ -792,6 +894,14 @@ type AutopilotSettings struct {
 	// Full configuration for each trading mode with all settings
 	// User can customize any setting - defaults provided from Story 2.7
 	ModeConfigs map[string]*ModeFullConfig `json:"mode_configs"`
+
+	// ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
+	// Global LLM provider settings
+	LLMConfig LLMConfig `json:"llm_config"`
+	// Per-mode LLM settings
+	ModeLLMSettings map[GinieTradingMode]ModeLLMSettings `json:"mode_llm_settings"`
+	// Adaptive AI learning configuration
+	AdaptiveAIConfig AdaptiveAIConfig `json:"adaptive_ai_config"`
 }
 
 // SettingsManager handles persistent settings storage
@@ -1118,6 +1228,11 @@ func DefaultSettings() *AutopilotSettings {
 
 		// Comprehensive mode configurations (Story 2.7 defaults)
 		ModeConfigs: DefaultModeConfigs(),
+
+		// LLM and Adaptive AI configuration (Story 2.8 defaults)
+		LLMConfig:        DefaultLLMConfig(),
+		ModeLLMSettings:  DefaultModeLLMSettings(),
+		AdaptiveAIConfig: DefaultAdaptiveAIConfig(),
 	}
 }
 
@@ -3059,4 +3174,122 @@ func convertModeFullConfigToGinieModeConfig(mode GinieTradingMode, fc *ModeFullC
 	}
 
 	return config
+}
+
+// ====== LLM AND ADAPTIVE AI CRUD METHODS (Story 2.8) ======
+
+// GetLLMConfig returns the current LLM configuration.
+// If no custom config exists, returns the default configuration.
+func (sm *SettingsManager) GetLLMConfig() LLMConfig {
+	settings := sm.GetCurrentSettings()
+
+	// Check if config is empty (zero value)
+	if settings.LLMConfig.Provider == "" {
+		return DefaultLLMConfig()
+	}
+	return settings.LLMConfig
+}
+
+// UpdateLLMConfig updates the global LLM configuration.
+func (sm *SettingsManager) UpdateLLMConfig(config LLMConfig) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	settings.LLMConfig = config
+	return sm.SaveSettings(settings)
+}
+
+// GetModeLLMSettings returns the LLM settings for a specific trading mode.
+// If no custom settings exist, returns the default settings for that mode.
+func (sm *SettingsManager) GetModeLLMSettings(mode GinieTradingMode) ModeLLMSettings {
+	settings := sm.GetCurrentSettings()
+
+	if settings.ModeLLMSettings != nil {
+		if modeSettings, ok := settings.ModeLLMSettings[mode]; ok {
+			return modeSettings
+		}
+	}
+
+	// Return defaults if no custom settings exist
+	defaults := DefaultModeLLMSettings()
+	if defaultSettings, ok := defaults[mode]; ok {
+		return defaultSettings
+	}
+
+	// Fallback to ultra_fast defaults if mode not found
+	return defaults[GinieModeUltraFast]
+}
+
+// UpdateModeLLMSettings updates the LLM settings for a specific trading mode.
+// Validates LLMWeight (0.0-1.0) and MinLLMConfidence (0-100).
+func (sm *SettingsManager) UpdateModeLLMSettings(mode GinieTradingMode, modeSettings ModeLLMSettings) error {
+	// Validate LLMWeight (0.0-1.0)
+	if modeSettings.LLMWeight < 0.0 || modeSettings.LLMWeight > 1.0 {
+		return fmt.Errorf("LLMWeight must be between 0.0 and 1.0, got %f", modeSettings.LLMWeight)
+	}
+
+	// Validate MinLLMConfidence (0-100)
+	if modeSettings.MinLLMConfidence < 0 || modeSettings.MinLLMConfidence > 100 {
+		return fmt.Errorf("MinLLMConfidence must be between 0 and 100, got %d", modeSettings.MinLLMConfidence)
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	// Initialize map if nil
+	if settings.ModeLLMSettings == nil {
+		settings.ModeLLMSettings = DefaultModeLLMSettings()
+	}
+
+	settings.ModeLLMSettings[mode] = modeSettings
+	return sm.SaveSettings(settings)
+}
+
+// GetAdaptiveAIConfig returns the current adaptive AI configuration.
+// If no custom config exists, returns the default configuration.
+func (sm *SettingsManager) GetAdaptiveAIConfig() AdaptiveAIConfig {
+	settings := sm.GetCurrentSettings()
+
+	// Check if config is empty (zero value) by checking a required field
+	if settings.AdaptiveAIConfig.LearningWindowTrades == 0 &&
+		settings.AdaptiveAIConfig.LearningWindowHours == 0 &&
+		settings.AdaptiveAIConfig.MinTradesForLearning == 0 {
+		return DefaultAdaptiveAIConfig()
+	}
+	return settings.AdaptiveAIConfig
+}
+
+// UpdateAdaptiveAIConfig updates the adaptive AI configuration.
+func (sm *SettingsManager) UpdateAdaptiveAIConfig(config AdaptiveAIConfig) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
+
+	settings.AdaptiveAIConfig = config
+	return sm.SaveSettings(settings)
+}
+
+// GetAllModeLLMSettings returns the LLM settings for all trading modes.
+func (sm *SettingsManager) GetAllModeLLMSettings() map[GinieTradingMode]ModeLLMSettings {
+	settings := sm.GetCurrentSettings()
+
+	if settings.ModeLLMSettings != nil && len(settings.ModeLLMSettings) > 0 {
+		return settings.ModeLLMSettings
+	}
+
+	return DefaultModeLLMSettings()
 }

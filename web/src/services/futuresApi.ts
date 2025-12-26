@@ -1780,6 +1780,65 @@ class FuturesAPIService {
     const { data } = await this.client.post('/ginie/mode-config/reset', {});
     return data;
   }
+
+  // ==================== LLM & ADAPTIVE AI (Story 2.8) ====================
+
+  async getLLMConfig(): Promise<LLMConfigResponse> {
+    const { data } = await this.client.get('/ginie/llm/config');
+    return data;
+  }
+
+  async updateLLMConfig(config: Partial<LLMConfig>): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/ginie/llm/config', config);
+    return data;
+  }
+
+  async updateModeLLMSettings(mode: string, settings: Partial<ModeLLMSettings>): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post(`/ginie/llm/mode/${mode}`, settings);
+    return data;
+  }
+
+  async getAdaptiveRecommendations(): Promise<AdaptiveRecommendationsResponse> {
+    const { data } = await this.client.get('/ginie/adaptive/recommendations');
+    return data;
+  }
+
+  async applyRecommendation(id: string): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post(`/ginie/adaptive/recommendations/${id}/apply`);
+    return data;
+  }
+
+  async dismissRecommendation(id: string): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post(`/ginie/adaptive/recommendations/${id}/dismiss`);
+    return data;
+  }
+
+  async applyAllRecommendations(): Promise<{ success: boolean; applied: string[] }> {
+    const { data } = await this.client.post('/ginie/adaptive/recommendations/apply-all');
+    return data;
+  }
+
+  async getLLMCallDiagnostics(): Promise<LLMCallDiagnostics> {
+    const { data } = await this.client.get('/ginie/llm/diagnostics');
+    return data;
+  }
+
+  async resetLLMCallDiagnostics(): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/ginie/llm/diagnostics/reset');
+    return data;
+  }
+
+  async getTradeHistoryWithAI(limit = 50, offset = 0): Promise<{ trades: TradeWithAI[]; total: number }> {
+    const { data } = await this.client.get('/ginie/trades/with-ai', {
+      params: { limit, offset }
+    });
+    return data;
+  }
+
+  async updateAdaptiveConfig(config: Partial<AdaptiveAIConfig>): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post('/ginie/adaptive/config', config);
+    return data;
+  }
 }
 
 // ==================== MARKET MOVERS TYPES ====================
@@ -2635,6 +2694,114 @@ export interface ModeConfigsResponse {
   success: boolean;
   mode_configs: Record<string, ModeFullConfig>;
   valid_modes: string[];
+}
+
+// ==================== LLM & ADAPTIVE AI TYPES (Story 2.8) ====================
+
+// LLM Configuration
+export interface LLMConfig {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  fallback_provider: string;
+  fallback_model: string;
+  timeout_ms: number;
+  retry_count: number;
+  cache_duration_sec: number;
+}
+
+export interface ModeLLMSettings {
+  llm_enabled: boolean;
+  llm_weight: number;
+  skip_on_timeout: boolean;
+  min_llm_confidence: number;
+  block_on_disagreement: boolean;
+  cache_enabled: boolean;
+}
+
+export interface AdaptiveAIConfig {
+  enabled: boolean;
+  learning_window_trades: number;
+  learning_window_hours: number;
+  auto_adjust_enabled: boolean;
+  max_auto_adjustment_percent: number;
+  require_approval: boolean;
+  min_trades_for_learning: number;
+  store_decision_context: boolean;
+}
+
+export interface LLMConfigResponse {
+  success: boolean;
+  llm_config: LLMConfig;
+  mode_settings: Record<string, ModeLLMSettings>;
+  adaptive_config: AdaptiveAIConfig;
+}
+
+export interface AdaptiveRecommendation {
+  id: string;
+  created_at: string;
+  type: string;
+  mode: string;
+  current_value: any;
+  suggested_value: any;
+  reason: string;
+  expected_improvement: string;
+  applied_at?: string;
+  dismissed: boolean;
+}
+
+export interface ModeStatistics {
+  mode: string;
+  total_trades: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  avg_win_percent: number;
+  avg_loss_percent: number;
+  total_profit: number;
+  agreement_win_rate: number;
+  disagreement_win_rate: number;
+}
+
+export interface AdaptiveRecommendationsResponse {
+  success: boolean;
+  recommendations: AdaptiveRecommendation[];
+  statistics: Record<string, ModeStatistics>;
+  last_analysis: string;
+  total_outcomes_analyzed: number;
+}
+
+export interface DecisionContext {
+  technical_confidence: number;
+  llm_confidence: number;
+  final_confidence: number;
+  technical_direction: string;
+  llm_direction: string;
+  agreement: boolean;
+  llm_reasoning: string;
+  llm_key_factors: string[];
+}
+
+export interface TradeWithAI {
+  trade_id: string;
+  symbol: string;
+  mode: string;
+  direction: string;
+  entry_time: string;
+  exit_time: string;
+  pnl_percent: number;
+  outcome: string;
+  decision_context?: DecisionContext;
+}
+
+export interface LLMCallDiagnostics {
+  total_calls: number;
+  cache_hits: number;
+  cache_misses: number;
+  avg_latency_ms: number;
+  error_rate: number;
+  calls_by_provider: Record<string, number>;
+  recent_errors: string[];
 }
 
 // Export singleton instance

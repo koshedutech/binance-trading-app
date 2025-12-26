@@ -1832,16 +1832,85 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		}
 	}
 
-	// === LLM TREND CONFIRMATION (OPTIONAL FINAL GATE) ===
-	// LLM trend confirmation is optional - if not available, continue with trade
-	// This is a future enhancement for improved accuracy
-	if g.logger != nil {
-		g.logger.Debug("Ginie trend analysis complete - LLM confirmation feature can be enabled in future updates",
-			"symbol", symbol,
-			"mode", mode)
+	// === LLM TRADING ANALYSIS INTEGRATION ===
+	// Perform LLM analysis if enabled for this mode
+	var llmResponse *LLMAnalysisResponse
+	var decisionContext *DecisionContext
+
+	// Calculate base technical confidence
+	technicalConfidence := int(signals.StrengthScore * (scan.Score / 100) * adxPenalty * 100)
+	technicalDirection := signals.Direction
+
+	// Attempt LLM analysis
+	llmResponse, decisionContext, _ = g.PerformLLMAnalysis(symbol, klines, mode)
+
+	// Initialize decision context if not set
+	if decisionContext == nil {
+		decisionContext = &DecisionContext{
+			SkippedLLM: true,
+			SkipReason: "LLM analysis not available",
+		}
 	}
 
-	report.ConfidenceScore = signals.StrengthScore * (scan.Score / 100) * adxPenalty
+	// Store technical values in context
+	decisionContext.TechnicalConfidence = technicalConfidence
+	decisionContext.TechnicalDirection = technicalDirection
+
+	// Fuse confidence if LLM response is available
+	if llmResponse != nil && !decisionContext.SkippedLLM {
+		// LLM weight: 0.3 means 30% LLM, 70% technical
+		// This can be made configurable in settings
+		llmWeight := 0.3
+
+		finalConfidence, finalDirection, agreement := g.FuseConfidence(
+			technicalConfidence,
+			technicalDirection,
+			llmResponse,
+			llmWeight,
+		)
+
+		decisionContext.FinalConfidence = finalConfidence
+		decisionContext.Agreement = agreement
+
+		// Update report confidence score (convert back to 0-1 scale)
+		report.ConfidenceScore = float64(finalConfidence) / 100.0
+
+		// If LLM and technical disagree strongly, consider adjusting direction
+		if !agreement && llmResponse.Confidence > 70 && technicalConfidence < 50 {
+			// LLM has high confidence, technical has low - consider LLM direction
+			if g.logger != nil {
+				g.logger.Info("[LLM] High LLM confidence overriding weak technical signal",
+					"symbol", symbol,
+					"tech_direction", technicalDirection,
+					"llm_direction", llmResponse.Recommendation,
+					"llm_confidence", llmResponse.Confidence)
+			}
+		}
+
+		// Log fusion result
+		if g.logger != nil {
+			g.logger.Info("[LLM] Confidence fusion applied",
+				"symbol", symbol,
+				"tech_confidence", technicalConfidence,
+				"llm_confidence", llmResponse.Confidence,
+				"final_confidence", finalConfidence,
+				"agreement", agreement,
+				"final_direction", finalDirection)
+		}
+	} else {
+		// No LLM - use technical only
+		decisionContext.FinalConfidence = technicalConfidence
+		report.ConfidenceScore = float64(technicalConfidence) / 100.0
+
+		if g.logger != nil {
+			g.logger.Debug("[LLM] Using technical analysis only",
+				"symbol", symbol,
+				"reason", decisionContext.SkipReason)
+		}
+	}
+
+	// Attach decision context to report
+	report.DecisionContext = decisionContext
 
 	// === STRICT COUNTER-TREND FILTER ===
 	// Block counter-trend trades unless they have strong reversal signals
@@ -1939,6 +2008,589 @@ var llmTrendCache = &trendConfirmationCache{
 	lastUpdated: make(map[string]time.Time),
 }
 
+// ===== LLM TRADING ANALYSIS INTEGRATION =====
+
+// cachedLLMResponse stores a cached LLM analysis response with expiry
+type cachedLLMResponse struct {
+	response  *LLMAnalysisResponse
+	timestamp time.Time
+	expiry    time.Duration
+}
+
+// llmAnalysisCache stores cached LLM analysis responses
+type llmAnalysisCache struct {
+	mu    sync.RWMutex
+	cache map[string]*cachedLLMResponse
+}
+
+var llmResponseCache = &llmAnalysisCache{
+	cache: make(map[string]*cachedLLMResponse),
+}
+
+// GetCachedLLMResponse retrieves a cached LLM response for a symbol if not expired
+func (g *GinieAnalyzer) GetCachedLLMResponse(symbol string) (*LLMAnalysisResponse, bool) {
+	llmResponseCache.mu.RLock()
+	defer llmResponseCache.mu.RUnlock()
+
+	cached, exists := llmResponseCache.cache[symbol]
+	if !exists {
+		return nil, false
+	}
+
+	// Check if cache has expired
+	if time.Since(cached.timestamp) > cached.expiry {
+		return nil, false
+	}
+
+	if g.logger != nil {
+		g.logger.Debug("[LLM] Using cached response", "symbol", symbol, "age_seconds", int(time.Since(cached.timestamp).Seconds()))
+	}
+
+	return cached.response, true
+}
+
+// CacheLLMResponse stores an LLM response in the cache with specified duration
+func (g *GinieAnalyzer) CacheLLMResponse(symbol string, response *LLMAnalysisResponse, durationSec int) {
+	llmResponseCache.mu.Lock()
+	defer llmResponseCache.mu.Unlock()
+
+	llmResponseCache.cache[symbol] = &cachedLLMResponse{
+		response:  response,
+		timestamp: time.Now(),
+		expiry:    time.Duration(durationSec) * time.Second,
+	}
+
+	if g.logger != nil {
+		g.logger.Debug("[LLM] Cached response", "symbol", symbol, "expiry_seconds", durationSec)
+	}
+}
+
+// ClearLLMCache clears all cached LLM responses
+func (g *GinieAnalyzer) ClearLLMCache() {
+	llmResponseCache.mu.Lock()
+	defer llmResponseCache.mu.Unlock()
+	llmResponseCache.cache = make(map[string]*cachedLLMResponse)
+	if g.logger != nil {
+		g.logger.Info("[LLM] Cache cleared")
+	}
+}
+
+// BuildLLMPrompt constructs the system and user prompts for LLM trading analysis
+func (g *GinieAnalyzer) BuildLLMPrompt(symbol string, klines []binance.Kline, mode GinieTradingMode) (systemPrompt string, userPrompt string, err error) {
+	if len(klines) < 50 {
+		return "", "", fmt.Errorf("insufficient kline data: need at least 50, got %d", len(klines))
+	}
+
+	// Build system prompt for crypto trading analyst
+	systemPrompt = `You are an expert cryptocurrency trading analyst specializing in technical analysis and market sentiment.
+Your task is to analyze the provided market data and give a clear trading recommendation.
+
+IMPORTANT RULES:
+1. Be conservative with confidence scores - only high confidence (>70) when multiple strong signals align
+2. Always consider risk management - suggest appropriate SL/TP levels
+3. Consider the trading mode when making recommendations
+4. Provide clear, concise reasoning for your decision
+5. Identify the key factors driving your recommendation
+
+Your response must be in valid JSON format with this EXACT structure (no markdown, no explanation):
+{
+  "recommendation": "LONG" | "SHORT" | "HOLD",
+  "confidence": 0-100,
+  "reasoning": "Brief 1-2 sentence explanation",
+  "key_factors": ["factor1", "factor2", "factor3"],
+  "risk_level": "low" | "moderate" | "high",
+  "suggested_sl_percent": 1.5,
+  "suggested_tp_percent": 3.0,
+  "time_horizon": "minutes" | "hours" | "days"
+}
+
+Trading Mode Guidelines:
+- SCALP: Quick 1-15 minute trades, tight SL (0.3-1%), small TP (0.5-2%), high confidence required
+- SWING: 4h-1d trades, moderate SL (1-3%), larger TP (3-10%), look for trend continuation
+- POSITION: 1d+ trades, wider SL (3-10%), larger TP (10-30%), focus on major trend direction`
+
+	// Calculate technical indicators for the prompt
+	currentPrice := klines[len(klines)-1].Close
+	rsi14 := g.calculateRSI(klines, 14)
+	macd, signal, hist := g.calculateMACD(klines)
+	ema20 := g.calculateEMA(klines, 20)
+	ema50 := g.calculateEMA(klines, 50)
+	ema200 := g.calculateEMA(klines, 200)
+	adx, plusDI, minusDI := g.calculateADX(klines, 14)
+	sma20, bbUpper, bbLower := g.calculateBollingerBands(klines, 20, 2)
+	atr14 := g.calculateATR(klines, 14)
+	atrPercent := (atr14 / currentPrice) * 100
+
+	// Calculate price changes
+	priceChange1h := 0.0
+	priceChange4h := 0.0
+	priceChange24h := 0.0
+	if len(klines) >= 2 {
+		priceChange1h = ((currentPrice - klines[len(klines)-2].Close) / klines[len(klines)-2].Close) * 100
+	}
+	if len(klines) >= 5 {
+		priceChange4h = ((currentPrice - klines[len(klines)-5].Close) / klines[len(klines)-5].Close) * 100
+	}
+	if len(klines) >= 25 {
+		priceChange24h = ((currentPrice - klines[len(klines)-25].Close) / klines[len(klines)-25].Close) * 100
+	}
+
+	// Determine trend from EMAs
+	emaAlignment := "neutral"
+	if currentPrice > ema20 && ema20 > ema50 && ema50 > ema200 {
+		emaAlignment = "bullish (price > EMA20 > EMA50 > EMA200)"
+	} else if currentPrice < ema20 && ema20 < ema50 && ema50 < ema200 {
+		emaAlignment = "bearish (price < EMA20 < EMA50 < EMA200)"
+	} else if currentPrice > ema50 {
+		emaAlignment = "bullish bias (price above EMA50)"
+	} else if currentPrice < ema50 {
+		emaAlignment = "bearish bias (price below EMA50)"
+	}
+
+	// MACD signal
+	macdSignal := "neutral"
+	if macd > signal && hist > 0 {
+		macdSignal = "bullish (MACD above signal, positive histogram)"
+	} else if macd < signal && hist < 0 {
+		macdSignal = "bearish (MACD below signal, negative histogram)"
+	} else if hist > 0 {
+		macdSignal = "bullish momentum"
+	} else if hist < 0 {
+		macdSignal = "bearish momentum"
+	}
+
+	// RSI interpretation
+	rsiInterpretation := "neutral"
+	if rsi14 > 70 {
+		rsiInterpretation = "overbought (potential reversal)"
+	} else if rsi14 < 30 {
+		rsiInterpretation = "oversold (potential reversal)"
+	} else if rsi14 > 55 {
+		rsiInterpretation = "bullish momentum"
+	} else if rsi14 < 45 {
+		rsiInterpretation = "bearish momentum"
+	}
+
+	// ADX trend strength
+	trendStrength := "no trend (ranging)"
+	if adx > 40 {
+		trendStrength = "very strong trend"
+	} else if adx > 25 {
+		trendStrength = "strong trend"
+	} else if adx > 20 {
+		trendStrength = "moderate trend"
+	}
+
+	trendDirection := "neutral"
+	if plusDI > minusDI {
+		trendDirection = "bullish"
+	} else if minusDI > plusDI {
+		trendDirection = "bearish"
+	}
+
+	// BB position
+	bbPosition := "middle of bands"
+	bbWidth := ((bbUpper - bbLower) / sma20) * 100
+	if currentPrice > bbUpper {
+		bbPosition = "above upper band (extended)"
+	} else if currentPrice < bbLower {
+		bbPosition = "below lower band (extended)"
+	} else if currentPrice > sma20 {
+		bbPosition = "above middle band (bullish bias)"
+	} else if currentPrice < sma20 {
+		bbPosition = "below middle band (bearish bias)"
+	}
+
+	// Build user prompt with market data
+	userPrompt = fmt.Sprintf(`Analyze this cryptocurrency for a %s trade:
+
+=== SYMBOL & PRICE ===
+Symbol: %s
+Current Price: $%.8f
+Mode: %s
+
+=== PRICE CHANGES ===
+1h Change: %.2f%%
+4h Change: %.2f%%
+24h Change: %.2f%%
+
+=== TECHNICAL INDICATORS ===
+RSI(14): %.2f - %s
+MACD: %.6f, Signal: %.6f, Histogram: %.6f - %s
+EMA Alignment: %s
+  - EMA20: $%.8f (%.2f%% from price)
+  - EMA50: $%.8f (%.2f%% from price)
+  - EMA200: $%.8f (%.2f%% from price)
+ADX(14): %.2f - %s, Direction: %s
+  - +DI: %.2f, -DI: %.2f
+Bollinger Bands: %s
+  - Upper: $%.8f, Middle: $%.8f, Lower: $%.8f
+  - Band Width: %.2f%%
+ATR(14): $%.8f (%.2f%% of price) - Volatility gauge
+
+=== RECENT CANDLES (Last 5) ===
+`,
+		mode, symbol, currentPrice, mode,
+		priceChange1h, priceChange4h, priceChange24h,
+		rsi14, rsiInterpretation,
+		macd, signal, hist, macdSignal,
+		emaAlignment,
+		ema20, ((currentPrice-ema20)/ema20)*100,
+		ema50, ((currentPrice-ema50)/ema50)*100,
+		ema200, ((currentPrice-ema200)/ema200)*100,
+		adx, trendStrength, trendDirection,
+		plusDI, minusDI,
+		bbPosition, bbUpper, sma20, bbLower, bbWidth,
+		atr14, atrPercent,
+	)
+
+	// Add last 5 candles
+	start := len(klines) - 5
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(klines); i++ {
+		k := klines[i]
+		candleType := "NEUTRAL"
+		bodyPercent := math.Abs((k.Close-k.Open)/k.Open) * 100
+		if k.Close > k.Open {
+			candleType = "GREEN"
+		} else if k.Close < k.Open {
+			candleType = "RED"
+		}
+		userPrompt += fmt.Sprintf("  %s: O:%.8f H:%.8f L:%.8f C:%.8f (%.2f%% body)\n",
+			candleType, k.Open, k.High, k.Low, k.Close, bodyPercent)
+	}
+
+	userPrompt += "\nProvide your analysis in the specified JSON format only."
+
+	return systemPrompt, userPrompt, nil
+}
+
+// ParseLLMResponse parses the JSON response from LLM and validates it
+func (g *GinieAnalyzer) ParseLLMResponse(response string) (*LLMAnalysisResponse, error) {
+	// Clean the response - strip markdown code blocks if present
+	response = strings.TrimSpace(response)
+
+	// Handle ```json ... ``` blocks
+	re := regexp.MustCompile("(?s)^```(?:json)?\\s*\\n?(.*?)\\n?```$")
+	if matches := re.FindStringSubmatch(response); len(matches) > 1 {
+		response = strings.TrimSpace(matches[1])
+	}
+
+	// Also try to find JSON within the response if not wrapped in code blocks
+	if !strings.HasPrefix(response, "{") {
+		// Try to extract JSON from the response
+		jsonStart := strings.Index(response, "{")
+		jsonEnd := strings.LastIndex(response, "}")
+		if jsonStart >= 0 && jsonEnd > jsonStart {
+			response = response[jsonStart : jsonEnd+1]
+		}
+	}
+
+	var parsed LLMAnalysisResponse
+	if err := json.Unmarshal([]byte(response), &parsed); err != nil {
+		if g.logger != nil {
+			g.logger.Error("[LLM] Failed to parse response", "error", err, "response_preview", response[:min(200, len(response))])
+		}
+		return nil, fmt.Errorf("failed to parse LLM response as JSON: %w", err)
+	}
+
+	// Validate recommendation
+	parsed.Recommendation = strings.ToUpper(parsed.Recommendation)
+	if parsed.Recommendation != "LONG" && parsed.Recommendation != "SHORT" && parsed.Recommendation != "HOLD" {
+		if g.logger != nil {
+			g.logger.Warn("[LLM] Invalid recommendation, defaulting to HOLD", "got", parsed.Recommendation)
+		}
+		parsed.Recommendation = "HOLD"
+	}
+
+	// Validate confidence (0-100)
+	if parsed.Confidence < 0 {
+		parsed.Confidence = 0
+	}
+	if parsed.Confidence > 100 {
+		parsed.Confidence = 100
+	}
+
+	// Validate reasoning is non-empty
+	if strings.TrimSpace(parsed.Reasoning) == "" {
+		parsed.Reasoning = "No reasoning provided by LLM"
+	}
+
+	// Validate risk level
+	parsed.RiskLevel = strings.ToLower(parsed.RiskLevel)
+	if parsed.RiskLevel != "low" && parsed.RiskLevel != "moderate" && parsed.RiskLevel != "high" {
+		parsed.RiskLevel = "moderate"
+	}
+
+	// Validate SL/TP percentages (must be positive)
+	if parsed.SuggestedSLPercent <= 0 {
+		parsed.SuggestedSLPercent = 2.0 // Default 2%
+	}
+	if parsed.SuggestedTPPercent <= 0 {
+		parsed.SuggestedTPPercent = 4.0 // Default 4%
+	}
+
+	// Validate time horizon
+	parsed.TimeHorizon = strings.ToLower(parsed.TimeHorizon)
+	if parsed.TimeHorizon != "minutes" && parsed.TimeHorizon != "hours" && parsed.TimeHorizon != "days" {
+		parsed.TimeHorizon = "hours"
+	}
+
+	if g.logger != nil {
+		g.logger.Debug("[LLM] Parsed response successfully",
+			"recommendation", parsed.Recommendation,
+			"confidence", parsed.Confidence,
+			"risk_level", parsed.RiskLevel)
+	}
+
+	return &parsed, nil
+}
+
+// FuseConfidence combines technical and LLM confidence using weighted fusion
+// Returns: (finalConfidence, finalDirection, agreement)
+func (g *GinieAnalyzer) FuseConfidence(technicalConfidence int, technicalDirection string, llmResponse *LLMAnalysisResponse, llmWeight float64) (int, string, bool) {
+	if llmResponse == nil {
+		// No LLM response, return technical only
+		return technicalConfidence, technicalDirection, false
+	}
+
+	// Clamp llmWeight to valid range
+	if llmWeight < 0 {
+		llmWeight = 0
+	}
+	if llmWeight > 1 {
+		llmWeight = 1
+	}
+
+	llmConfidence := llmResponse.Confidence
+	llmDirection := strings.ToLower(llmResponse.Recommendation)
+	if llmDirection == "hold" {
+		llmDirection = "neutral"
+	}
+
+	// Normalize technical direction
+	techDir := strings.ToLower(technicalDirection)
+	if techDir != "long" && techDir != "short" {
+		techDir = "neutral"
+	}
+
+	// Calculate base fusion
+	// Formula: base_fusion = (technical × (1 - llm_weight)) + (llm × llm_weight)
+	baseFusion := float64(technicalConfidence)*(1-llmWeight) + float64(llmConfidence)*llmWeight
+
+	// Check for agreement/disagreement
+	agreement := false
+	adjustment := 0.0
+
+	if techDir == llmDirection && techDir != "neutral" {
+		// Directions agree - add bonus
+		agreement = true
+		adjustment = 10.0
+		if g.logger != nil {
+			g.logger.Debug("[LLM] Direction agreement - adding bonus",
+				"tech_direction", techDir,
+				"llm_direction", llmDirection,
+				"bonus", "+10")
+		}
+	} else if (techDir == "long" && llmDirection == "short") || (techDir == "short" && llmDirection == "long") {
+		// Directions conflict - apply penalty
+		agreement = false
+		adjustment = -15.0
+		if g.logger != nil {
+			g.logger.Warn("[LLM] Direction conflict - applying penalty",
+				"tech_direction", techDir,
+				"llm_direction", llmDirection,
+				"penalty", "-15")
+		}
+	}
+
+	// Apply adjustment
+	finalConfidence := baseFusion + adjustment
+
+	// Clamp to 0-100
+	if finalConfidence < 0 {
+		finalConfidence = 0
+	}
+	if finalConfidence > 100 {
+		finalConfidence = 100
+	}
+
+	// Determine final direction
+	// If they agree, use that direction
+	// If they conflict, use the one with higher confidence
+	// If one is neutral, use the non-neutral one
+	finalDirection := techDir
+	if agreement {
+		finalDirection = techDir
+	} else if techDir == "neutral" {
+		finalDirection = llmDirection
+	} else if llmDirection == "neutral" {
+		finalDirection = techDir
+	} else {
+		// Conflict - use higher confidence direction
+		if llmConfidence > technicalConfidence {
+			finalDirection = llmDirection
+		}
+	}
+
+	if g.logger != nil {
+		g.logger.Info("[LLM] Confidence fusion complete",
+			"tech_confidence", technicalConfidence,
+			"llm_confidence", llmConfidence,
+			"llm_weight", llmWeight,
+			"base_fusion", baseFusion,
+			"adjustment", adjustment,
+			"final_confidence", int(finalConfidence),
+			"final_direction", finalDirection,
+			"agreement", agreement)
+	}
+
+	return int(finalConfidence), finalDirection, agreement
+}
+
+// IsLLMEnabledForMode checks if LLM analysis is enabled for the given trading mode
+func (g *GinieAnalyzer) IsLLMEnabledForMode(mode GinieTradingMode) bool {
+	// LLM is enabled if we have a configured client
+	if g.llmClient == nil || !g.llmClient.IsConfigured() {
+		return false
+	}
+
+	// Check settings for mode-specific LLM enablement
+	if g.settings != nil {
+		switch mode {
+		case GinieModeScalp:
+			// Scalping typically needs faster decisions - LLM might add latency
+			// Could be controlled by a setting, but default to enabled
+			return true
+		case GinieModeSwing:
+			// Swing trading benefits from LLM analysis
+			return true
+		case GinieModePosition:
+			// Position trading definitely benefits from LLM analysis
+			return true
+		case GinieModeUltraFast:
+			// Ultra-fast is too quick for LLM - disable by default
+			return false
+		}
+	}
+
+	return true
+}
+
+// GetLLMCacheDuration returns the cache duration in seconds based on trading mode
+func (g *GinieAnalyzer) GetLLMCacheDuration(mode GinieTradingMode) int {
+	switch mode {
+	case GinieModeScalp:
+		return 60 // 1 minute cache for scalp
+	case GinieModeSwing:
+		return 300 // 5 minutes for swing
+	case GinieModePosition:
+		return 900 // 15 minutes for position
+	case GinieModeUltraFast:
+		return 30 // 30 seconds for ultra-fast (if enabled)
+	default:
+		return 120 // 2 minutes default
+	}
+}
+
+// PerformLLMAnalysis performs LLM analysis for a symbol and returns the response
+// Uses caching to avoid redundant API calls
+func (g *GinieAnalyzer) PerformLLMAnalysis(symbol string, klines []binance.Kline, mode GinieTradingMode) (*LLMAnalysisResponse, *DecisionContext, error) {
+	startTime := time.Now()
+	ctx := &DecisionContext{
+		SkippedLLM: true,
+	}
+
+	// Check if LLM is enabled for this mode
+	if !g.IsLLMEnabledForMode(mode) {
+		ctx.SkipReason = fmt.Sprintf("LLM disabled for mode %s", mode)
+		if g.logger != nil {
+			g.logger.Debug("[LLM] Skipping - disabled for mode", "mode", mode)
+		}
+		return nil, ctx, nil
+	}
+
+	// Check cache first
+	if cached, ok := g.GetCachedLLMResponse(symbol); ok {
+		ctx.SkippedLLM = false
+		ctx.UsedCache = true
+		ctx.LLMConfidence = cached.Confidence
+		ctx.LLMDirection = cached.Recommendation
+		ctx.LLMReasoning = cached.Reasoning
+		ctx.LLMKeyFactors = cached.KeyFactors
+		ctx.LLMLatencyMs = 0 // Cache hit has no latency
+		if g.llmClient != nil {
+			ctx.LLMProvider = string(g.llmClient.GetProvider())
+		}
+		return cached, ctx, nil
+	}
+
+	// Build prompt
+	systemPrompt, userPrompt, err := g.BuildLLMPrompt(symbol, klines, mode)
+	if err != nil {
+		ctx.SkipReason = fmt.Sprintf("Failed to build prompt: %v", err)
+		if g.logger != nil {
+			g.logger.Error("[LLM] Failed to build prompt", "symbol", symbol, "error", err)
+		}
+		return nil, ctx, err
+	}
+
+	// Call LLM
+	if g.llmClient == nil {
+		ctx.SkipReason = "LLM client not configured"
+		return nil, ctx, nil
+	}
+
+	if g.logger != nil {
+		g.logger.Info("[LLM] Calling LLM for analysis", "symbol", symbol, "mode", mode)
+	}
+
+	response, err := g.llmClient.Complete(systemPrompt, userPrompt)
+	latencyMs := time.Since(startTime).Milliseconds()
+
+	if err != nil {
+		ctx.SkipReason = fmt.Sprintf("LLM API error: %v", err)
+		ctx.LLMLatencyMs = latencyMs
+		if g.logger != nil {
+			g.logger.Error("[LLM] API call failed", "symbol", symbol, "error", err, "latency_ms", latencyMs)
+		}
+		return nil, ctx, err
+	}
+
+	// Parse response
+	parsed, err := g.ParseLLMResponse(response)
+	if err != nil {
+		ctx.SkipReason = fmt.Sprintf("Failed to parse response: %v", err)
+		ctx.LLMLatencyMs = latencyMs
+		return nil, ctx, err
+	}
+
+	// Cache the response
+	cacheDuration := g.GetLLMCacheDuration(mode)
+	g.CacheLLMResponse(symbol, parsed, cacheDuration)
+
+	// Build context
+	ctx.SkippedLLM = false
+	ctx.UsedCache = false
+	ctx.LLMConfidence = parsed.Confidence
+	ctx.LLMDirection = parsed.Recommendation
+	ctx.LLMReasoning = parsed.Reasoning
+	ctx.LLMKeyFactors = parsed.KeyFactors
+	ctx.LLMLatencyMs = latencyMs
+	ctx.LLMProvider = string(g.llmClient.GetProvider())
+
+	if g.logger != nil {
+		g.logger.Info("[LLM] Analysis complete",
+			"symbol", symbol,
+			"recommendation", parsed.Recommendation,
+			"confidence", parsed.Confidence,
+			"latency_ms", latencyMs)
+	}
+
+	return parsed, ctx, nil
+}
 
 func (g *GinieAnalyzer) checkADXStrengthRequirement(adx float64, mode GinieTradingMode) (bool, float64) {
 	thresholds := map[GinieTradingMode]float64{

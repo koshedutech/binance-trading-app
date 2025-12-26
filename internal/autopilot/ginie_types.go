@@ -230,6 +230,9 @@ type GinieDecisionReport struct {
 	// Divergence Detection
 	TrendDivergence *TrendDivergence `json:"trend_divergence,omitempty"`
 
+	// LLM Decision Context (for analysis tracking)
+	DecisionContext *DecisionContext `json:"decision_context,omitempty"`
+
 	// Final Scores
 	ConfidenceScore    float64             `json:"confidence_score"`
 	Recommendation     GenieRecommendation `json:"recommendation"`
@@ -429,4 +432,50 @@ type ModeCircuitBreaker struct {
 	IsPaused           bool      `json:"is_paused"`            // Whether circuit breaker has tripped
 	PausedUntil        time.Time `json:"paused_until"`         // When the pause will end
 	PauseReason        string    `json:"pause_reason"`         // Reason for the current pause
+}
+
+// ===== LLM INTEGRATION TYPES =====
+
+// LLMAnalysisRequest contains data sent to LLM for trading analysis
+type LLMAnalysisRequest struct {
+	Symbol           string                 `json:"symbol"`
+	CurrentPrice     float64                `json:"current_price"`
+	PriceChange1h    float64                `json:"price_change_1h"`
+	PriceChange24h   float64                `json:"price_change_24h"`
+	Volume24h        float64                `json:"volume_24h"`
+	VolumeChange     float64                `json:"volume_change"`
+	TechnicalSignals map[string]interface{} `json:"technical_signals"`
+	MarketContext    map[string]interface{} `json:"market_context"`
+	RecentNews       []string               `json:"recent_news"`
+}
+
+// LLMAnalysisResponse contains the parsed response from LLM trading analysis
+type LLMAnalysisResponse struct {
+	Recommendation     string   `json:"recommendation"`       // LONG, SHORT, HOLD
+	Confidence         int      `json:"confidence"`           // 0-100
+	Reasoning          string   `json:"reasoning"`
+	KeyFactors         []string `json:"key_factors"`
+	RiskLevel          string   `json:"risk_level"`           // low, moderate, high
+	SuggestedSLPercent float64  `json:"suggested_sl_percent"`
+	SuggestedTPPercent float64  `json:"suggested_tp_percent"`
+	TimeHorizon        string   `json:"time_horizon"`
+}
+
+// DecisionContext stores the context and reasoning behind a trading decision
+// This is used for tracking, analysis, and audit purposes
+type DecisionContext struct {
+	TechnicalConfidence int      `json:"technical_confidence"`
+	LLMConfidence       int      `json:"llm_confidence"`
+	FinalConfidence     int      `json:"final_confidence"`
+	TechnicalDirection  string   `json:"technical_direction"`
+	LLMDirection        string   `json:"llm_direction"`
+	Agreement           bool     `json:"agreement"`
+	LLMReasoning        string   `json:"llm_reasoning"`
+	LLMKeyFactors       []string `json:"llm_key_factors"`
+	LLMProvider         string   `json:"llm_provider"`
+	LLMModel            string   `json:"llm_model"`
+	LLMLatencyMs        int64    `json:"llm_latency_ms"`
+	UsedCache           bool     `json:"used_cache"`
+	SkippedLLM          bool     `json:"skipped_llm"`
+	SkipReason          string   `json:"skip_reason,omitempty"`
 }

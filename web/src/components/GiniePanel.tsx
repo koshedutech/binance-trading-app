@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics } from '../services/futuresApi';
 import {
   Sparkles, Power, PowerOff, RefreshCw, Shield, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
-  ListChecks, AlertCircle
+  ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 
@@ -118,6 +118,18 @@ export default function GiniePanel() {
   const [savingModeConfig, setSavingModeConfig] = useState(false);
   const [resettingModes, setResettingModes] = useState(false);
   const [modeConfigErrors, setModeConfigErrors] = useState<Record<string, string>>({});
+
+  // LLM & Adaptive AI state (Story 2.8)
+  const [llmConfig, setLlmConfig] = useState<LLMConfig | null>(null);
+  const [modeLLMSettings, setModeLLMSettings] = useState<Record<string, ModeLLMSettings>>({});
+  const [adaptiveConfig, setAdaptiveConfig] = useState<AdaptiveAIConfig | null>(null);
+  const [recommendations, setRecommendations] = useState<AdaptiveRecommendation[]>([]);
+  const [modeStatistics, setModeStatistics] = useState<Record<string, ModeStatistics>>({});
+  const [llmCallDiagnostics, setLlmCallDiagnostics] = useState<LLMCallDiagnostics | null>(null);
+  const [showLLMSettings, setShowLLMSettings] = useState(false);
+  const [savingLLMConfig, setSavingLLMConfig] = useState(false);
+  const [applyingRecommendation, setApplyingRecommendation] = useState<string | null>(null);
+  const [selectedLLMMode, setSelectedLLMMode] = useState<'ultra_fast' | 'scalp' | 'swing' | 'position'>('swing');
 
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -777,6 +789,124 @@ export default function GiniePanel() {
     });
     // Clear any validation error when user makes changes
     setModeConfigErrors({ ...modeConfigErrors, [mode]: '' });
+  };
+
+  // LLM & Adaptive AI functions (Story 2.8)
+  const fetchLLMConfig = async () => {
+    try {
+      const result = await futuresApi.getLLMConfig();
+      if (result.success) {
+        setLlmConfig(result.llm_config);
+        setModeLLMSettings(result.mode_settings || {});
+        setAdaptiveConfig(result.adaptive_config);
+      }
+    } catch (err) {
+      console.error('Failed to fetch LLM config:', err);
+    }
+  };
+
+  const fetchAdaptiveRecommendations = async () => {
+    try {
+      const result = await futuresApi.getAdaptiveRecommendations();
+      if (result.success) {
+        setRecommendations(result.recommendations || []);
+        setModeStatistics(result.statistics || {});
+      }
+    } catch (err) {
+      console.error('Failed to fetch adaptive recommendations:', err);
+    }
+  };
+
+  const fetchLLMCallDiagnostics = async () => {
+    try {
+      const result = await futuresApi.getLLMCallDiagnostics();
+      setLlmCallDiagnostics(result);
+    } catch (err) {
+      console.error('Failed to fetch LLM diagnostics:', err);
+    }
+  };
+
+  const handleUpdateLLMConfig = async (updates: Partial<LLMConfig>) => {
+    setSavingLLMConfig(true);
+    try {
+      await futuresApi.updateLLMConfig(updates);
+      setSuccessMsg('LLM configuration updated');
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchLLMConfig();
+    } catch (err) {
+      setError('Failed to update LLM configuration');
+    } finally {
+      setSavingLLMConfig(false);
+    }
+  };
+
+  const handleUpdateModeLLMSettings = async (mode: string, settings: Partial<ModeLLMSettings>) => {
+    setSavingLLMConfig(true);
+    try {
+      await futuresApi.updateModeLLMSettings(mode, settings);
+      setSuccessMsg(`${mode} LLM settings updated`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchLLMConfig();
+    } catch (err) {
+      setError('Failed to update mode LLM settings');
+    } finally {
+      setSavingLLMConfig(false);
+    }
+  };
+
+  const handleApplyRecommendation = async (id: string) => {
+    setApplyingRecommendation(id);
+    try {
+      await futuresApi.applyRecommendation(id);
+      setSuccessMsg('Recommendation applied');
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchAdaptiveRecommendations();
+    } catch (err) {
+      setError('Failed to apply recommendation');
+    } finally {
+      setApplyingRecommendation(null);
+    }
+  };
+
+  const handleDismissRecommendation = async (id: string) => {
+    setApplyingRecommendation(id);
+    try {
+      await futuresApi.dismissRecommendation(id);
+      setSuccessMsg('Recommendation dismissed');
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchAdaptiveRecommendations();
+    } catch (err) {
+      setError('Failed to dismiss recommendation');
+    } finally {
+      setApplyingRecommendation(null);
+    }
+  };
+
+  const handleApplyAllRecommendations = async () => {
+    if (!window.confirm('Apply all pending recommendations?')) return;
+    setSavingLLMConfig(true);
+    try {
+      const result = await futuresApi.applyAllRecommendations();
+      setSuccessMsg(`Applied ${result.applied.length} recommendations`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchAdaptiveRecommendations();
+    } catch (err) {
+      setError('Failed to apply all recommendations');
+    } finally {
+      setSavingLLMConfig(false);
+    }
+  };
+
+  const handleResetLLMCallDiagnostics = async () => {
+    if (!window.confirm('Reset LLM diagnostics?')) return;
+    try {
+      await futuresApi.resetLLMCallDiagnostics();
+      setSuccessMsg('LLM diagnostics reset');
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchLLMCallDiagnostics();
+    } catch (err) {
+      setError('Failed to reset LLM diagnostics');
+    }
   };
 
   const getModeColor = (mode: string) => {
@@ -2014,6 +2144,397 @@ export default function GiniePanel() {
             {/* Help Text */}
             <div className="px-2 py-1.5 bg-indigo-900/20 border border-indigo-700/30 rounded text-[10px] text-indigo-400">
               Configure each trading mode independently. Ultra-Fast for quick scalps, Scalp for short-term, Swing for medium-term, Position for long-term trades.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* LLM & Adaptive AI Section (Story 2.8) */}
+      <div className="space-y-2 mb-3">
+        <div
+          className="flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+          onClick={() => {
+            setShowLLMSettings(!showLLMSettings);
+            if (!showLLMSettings) {
+              fetchLLMConfig();
+              fetchAdaptiveRecommendations();
+              fetchLLMCallDiagnostics();
+            }
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <Brain className="w-3.5 h-3.5 text-cyan-400 flex-shrink-0" />
+            <span className="text-xs text-gray-300 font-medium">LLM & Adaptive AI</span>
+            {llmConfig?.enabled && (
+              <span className="px-1 py-0.5 bg-cyan-900/50 text-cyan-400 rounded text-[10px]">ON</span>
+            )}
+            {adaptiveConfig?.enabled && (
+              <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px]">LEARN</span>
+            )}
+            {recommendations.filter(r => !r.dismissed && !r.applied_at).length > 0 && (
+              <span className="px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 rounded text-[10px] font-medium">
+                {recommendations.filter(r => !r.dismissed && !r.applied_at).length} recs
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {showLLMSettings ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+          </div>
+        </div>
+
+        {showLLMSettings && (
+          <div className="px-2 py-2 bg-gray-800/50 border border-gray-600 rounded space-y-4">
+            {/* LLM Provider Configuration */}
+            <div className="border border-gray-700 rounded p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Gauge className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="text-xs text-gray-300 font-medium">LLM Provider</span>
+                </div>
+                <button
+                  onClick={() => handleUpdateLLMConfig({ enabled: !llmConfig?.enabled })}
+                  disabled={savingLLMConfig}
+                  className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                    llmConfig?.enabled
+                      ? 'bg-cyan-900/50 text-cyan-400 border border-cyan-700'
+                      : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+                  }`}
+                >
+                  {llmConfig?.enabled ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+
+              {llmConfig?.enabled && (
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Provider</label>
+                    <select
+                      value={llmConfig?.provider || 'deepseek'}
+                      onChange={(e) => handleUpdateLLMConfig({ provider: e.target.value })}
+                      className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    >
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="claude">Claude</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="local">Local</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Model</label>
+                    <input
+                      type="text"
+                      value={llmConfig?.model || ''}
+                      onChange={(e) => handleUpdateLLMConfig({ model: e.target.value })}
+                      className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      placeholder="e.g. deepseek-chat"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Timeout (ms)</label>
+                    <input
+                      type="number"
+                      min="1000"
+                      max="30000"
+                      step="1000"
+                      value={llmConfig?.timeout_ms || 10000}
+                      onChange={(e) => handleUpdateLLMConfig({ timeout_ms: Number(e.target.value) })}
+                      className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Cache Duration (sec)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="3600"
+                      step="60"
+                      value={llmConfig?.cache_duration_sec || 300}
+                      onChange={(e) => handleUpdateLLMConfig({ cache_duration_sec: Number(e.target.value) })}
+                      className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Mode LLM Weight Sliders */}
+            {llmConfig?.enabled && (
+              <div className="border border-gray-700 rounded p-2 space-y-2">
+                <div className="flex items-center gap-2 mb-2">
+                  <Settings className="w-3.5 h-3.5 text-purple-400" />
+                  <span className="text-xs text-gray-300 font-medium">Mode LLM Settings</span>
+                </div>
+
+                {/* Mode Tabs */}
+                <div className="flex gap-1 mb-2">
+                  {(['ultra_fast', 'scalp', 'swing', 'position'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => setSelectedLLMMode(mode)}
+                      className={`flex-1 px-2 py-0.5 rounded text-[10px] transition-colors ${
+                        selectedLLMMode === mode
+                          ? 'bg-purple-900/50 text-purple-400 border border-purple-700'
+                          : 'bg-gray-700/30 text-gray-400 border border-gray-600'
+                      }`}
+                    >
+                      {mode === 'ultra_fast' ? 'UF' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+                    </button>
+                  ))}
+                </div>
+
+                {modeLLMSettings[selectedLLMMode] && (
+                  <div className="space-y-2">
+                    {/* LLM Enable for mode */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-gray-400">Enable LLM for {selectedLLMMode}</span>
+                      <button
+                        onClick={() => handleUpdateModeLLMSettings(selectedLLMMode, {
+                          llm_enabled: !modeLLMSettings[selectedLLMMode]?.llm_enabled
+                        })}
+                        disabled={savingLLMConfig}
+                        className={`px-1.5 py-0.5 rounded text-[10px] ${
+                          modeLLMSettings[selectedLLMMode]?.llm_enabled
+                            ? 'bg-green-900/50 text-green-400'
+                            : 'bg-gray-700 text-gray-400'
+                        }`}
+                      >
+                        {modeLLMSettings[selectedLLMMode]?.llm_enabled ? 'ON' : 'OFF'}
+                      </button>
+                    </div>
+
+                    {/* LLM Weight Slider */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] text-gray-400">LLM Weight</span>
+                        <span className="text-[10px] text-purple-400 font-medium">
+                          {Math.round((modeLLMSettings[selectedLLMMode]?.llm_weight || 0) * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="100"
+                        value={Math.round((modeLLMSettings[selectedLLMMode]?.llm_weight || 0) * 100)}
+                        onChange={(e) => handleUpdateModeLLMSettings(selectedLLMMode, {
+                          llm_weight: Number(e.target.value) / 100
+                        })}
+                        className="w-full h-1.5 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                    </div>
+
+                    {/* Min LLM Confidence */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-gray-400">Min LLM Confidence</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="5"
+                        value={Math.round((modeLLMSettings[selectedLLMMode]?.min_llm_confidence || 0) * 100)}
+                        onChange={(e) => handleUpdateModeLLMSettings(selectedLLMMode, {
+                          min_llm_confidence: Number(e.target.value) / 100
+                        })}
+                        className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px] text-center"
+                      />
+                    </div>
+
+                    {/* Toggles */}
+                    <div className="flex flex-wrap gap-2">
+                      <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                        <input
+                          type="checkbox"
+                          checked={modeLLMSettings[selectedLLMMode]?.skip_on_timeout || false}
+                          onChange={(e) => handleUpdateModeLLMSettings(selectedLLMMode, {
+                            skip_on_timeout: e.target.checked
+                          })}
+                          className="w-3 h-3"
+                        />
+                        Skip on timeout
+                      </label>
+                      <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                        <input
+                          type="checkbox"
+                          checked={modeLLMSettings[selectedLLMMode]?.block_on_disagreement || false}
+                          onChange={(e) => handleUpdateModeLLMSettings(selectedLLMMode, {
+                            block_on_disagreement: e.target.checked
+                          })}
+                          className="w-3 h-3"
+                        />
+                        Block on disagreement
+                      </label>
+                      <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                        <input
+                          type="checkbox"
+                          checked={modeLLMSettings[selectedLLMMode]?.cache_enabled || false}
+                          onChange={(e) => handleUpdateModeLLMSettings(selectedLLMMode, {
+                            cache_enabled: e.target.checked
+                          })}
+                          className="w-3 h-3"
+                        />
+                        Cache enabled
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Adaptive AI Recommendations */}
+            <div className="border border-gray-700 rounded p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Lightbulb className="w-3.5 h-3.5 text-yellow-400" />
+                  <span className="text-xs text-gray-300 font-medium">Adaptive Recommendations</span>
+                  {recommendations.filter(r => !r.dismissed && !r.applied_at).length > 0 && (
+                    <span className="px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 rounded text-[10px]">
+                      {recommendations.filter(r => !r.dismissed && !r.applied_at).length}
+                    </span>
+                  )}
+                </div>
+                {recommendations.filter(r => !r.dismissed && !r.applied_at).length > 1 && (
+                  <button
+                    onClick={handleApplyAllRecommendations}
+                    disabled={savingLLMConfig}
+                    className="px-1.5 py-0.5 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded text-[10px] disabled:opacity-50"
+                  >
+                    Apply All
+                  </button>
+                )}
+              </div>
+
+              {recommendations.filter(r => !r.dismissed && !r.applied_at).length === 0 ? (
+                <div className="text-[10px] text-gray-500 py-2 text-center">
+                  No pending recommendations
+                </div>
+              ) : (
+                <div className="space-y-1 max-h-40 overflow-y-auto">
+                  {recommendations.filter(r => !r.dismissed && !r.applied_at).map(rec => (
+                    <div key={rec.id} className="bg-gray-700/30 rounded p-1.5 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-yellow-400 font-medium">{rec.type}</span>
+                          <span className="text-[9px] text-gray-500">({rec.mode})</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleApplyRecommendation(rec.id)}
+                            disabled={applyingRecommendation === rec.id}
+                            className="p-0.5 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded disabled:opacity-50"
+                            title="Apply"
+                          >
+                            <Check className="w-3 h-3" />
+                          </button>
+                          <button
+                            onClick={() => handleDismissRecommendation(rec.id)}
+                            disabled={applyingRecommendation === rec.id}
+                            className="p-0.5 bg-red-900/50 hover:bg-red-900/70 text-red-400 rounded disabled:opacity-50"
+                            title="Dismiss"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 text-[9px]">
+                        <span className="text-gray-500">Current:</span>
+                        <span className="text-red-400">{JSON.stringify(rec.current_value)}</span>
+                        <span className="text-gray-500">-&gt;</span>
+                        <span className="text-green-400">{JSON.stringify(rec.suggested_value)}</span>
+                      </div>
+                      <div className="text-[9px] text-gray-400">{rec.reason}</div>
+                      {rec.expected_improvement && (
+                        <div className="text-[9px] text-cyan-400">Expected: {rec.expected_improvement}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Mode Statistics */}
+              {Object.keys(modeStatistics).length > 0 && (
+                <div className="mt-2 pt-2 border-t border-gray-700">
+                  <div className="text-[10px] text-gray-400 mb-1">Mode Statistics</div>
+                  <div className="grid grid-cols-4 gap-1">
+                    {Object.entries(modeStatistics).map(([mode, stats]) => (
+                      <div key={mode} className="bg-gray-700/30 rounded p-1 text-center">
+                        <div className="text-[9px] text-gray-500 capitalize">{mode}</div>
+                        <div className={`text-[10px] font-medium ${stats.win_rate >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+                          {stats.win_rate.toFixed(0)}% WR
+                        </div>
+                        <div className="text-[9px] text-gray-500">{stats.total_trades} trades</div>
+                        {stats.agreement_win_rate > 0 && (
+                          <div className="text-[9px] text-cyan-400" title="Agreement vs Disagreement win rate">
+                            {stats.agreement_win_rate.toFixed(0)}% vs {stats.disagreement_win_rate.toFixed(0)}%
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* LLM Diagnostics */}
+            <div className="border border-gray-700 rounded p-2 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Stethoscope className="w-3.5 h-3.5 text-blue-400" />
+                  <span className="text-xs text-gray-300 font-medium">LLM Diagnostics</span>
+                </div>
+                <button
+                  onClick={handleResetLLMCallDiagnostics}
+                  className="px-1.5 py-0.5 bg-orange-900/50 hover:bg-orange-900/70 text-orange-400 rounded text-[10px]"
+                >
+                  Reset
+                </button>
+              </div>
+
+              {llmCallDiagnostics && (
+                <div className="grid grid-cols-4 gap-2 text-center">
+                  <div className="bg-gray-700/30 rounded p-1.5">
+                    <div className="text-[9px] text-gray-500">Total Calls</div>
+                    <div className="text-xs text-white font-medium">{llmCallDiagnostics.total_calls}</div>
+                  </div>
+                  <div className="bg-gray-700/30 rounded p-1.5">
+                    <div className="text-[9px] text-gray-500">Cache Hits</div>
+                    <div className="text-xs text-green-400 font-medium">
+                      {llmCallDiagnostics.cache_hits > 0
+                        ? Math.round((llmCallDiagnostics.cache_hits / (llmCallDiagnostics.cache_hits + llmCallDiagnostics.cache_misses)) * 100)
+                        : 0}%
+                    </div>
+                  </div>
+                  <div className="bg-gray-700/30 rounded p-1.5">
+                    <div className="text-[9px] text-gray-500">Avg Latency</div>
+                    <div className={`text-xs font-medium ${llmCallDiagnostics.avg_latency_ms > 3000 ? 'text-yellow-400' : 'text-white'}`}>
+                      {llmCallDiagnostics.avg_latency_ms.toFixed(0)}ms
+                    </div>
+                  </div>
+                  <div className="bg-gray-700/30 rounded p-1.5">
+                    <div className="text-[9px] text-gray-500">Error Rate</div>
+                    <div className={`text-xs font-medium ${llmCallDiagnostics.error_rate > 0.1 ? 'text-red-400' : 'text-white'}`}>
+                      {(llmCallDiagnostics.error_rate * 100).toFixed(1)}%
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Recent Errors */}
+              {llmCallDiagnostics?.recent_errors && llmCallDiagnostics.recent_errors.length > 0 && (
+                <div className="mt-2">
+                  <div className="text-[10px] text-gray-400 mb-1">Recent Errors</div>
+                  <div className="space-y-0.5 max-h-20 overflow-y-auto">
+                    {llmCallDiagnostics.recent_errors.slice(0, 5).map((err, idx) => (
+                      <div key={idx} className="text-[9px] text-red-400 truncate" title={err}>
+                        {err}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Help Text */}
+            <div className="px-2 py-1.5 bg-cyan-900/20 border border-cyan-700/30 rounded text-[10px] text-cyan-400">
+              LLM enhances trading decisions with AI analysis. Adaptive AI learns from outcomes to improve recommendations.
             </div>
           </div>
         )}

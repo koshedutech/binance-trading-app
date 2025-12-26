@@ -175,6 +175,11 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/ginie/decisions":                 true,
 		"/api/futures/ginie/blocked-coins":             true,
 		"/api/futures/ginie/risk-level":                true,
+		// LLM & Adaptive AI endpoints (internal state only - Story 2.8)
+		"/api/futures/ginie/llm-config":                true,
+		"/api/futures/ginie/adaptive-recommendations":  true,
+		"/api/futures/ginie/llm-diagnostics-v2":        true,
+		"/api/futures/ginie/trade-history-ai":          true,
 		// Autopilot status endpoints (internal state)
 		"/api/futures/autopilot/status":                true,
 		"/api/futures/autopilot/circuit-breaker/status": true,
@@ -655,6 +660,18 @@ func (s *Server) setupRoutes() {
 			// Mode Performance endpoints (per-mode performance metrics)
 			futures.GET("/modes/performance", s.handleGetModePerformance)
 			futures.GET("/modes/performance/:mode", s.handleGetModePerformanceSingle)
+
+			// LLM & Adaptive AI endpoints (Story 2.8)
+			futures.GET("/ginie/llm-config", s.handleGetLLMConfig)
+			futures.PUT("/ginie/llm-config", s.handleUpdateLLMConfig)
+			futures.PUT("/ginie/llm-config/:mode", s.handleUpdateModeLLMSettings)
+			futures.GET("/ginie/adaptive-recommendations", s.handleGetAdaptiveRecommendations)
+			futures.POST("/ginie/adaptive-recommendations/:id/apply", s.handleApplyRecommendation)
+			futures.POST("/ginie/adaptive-recommendations/:id/dismiss", s.handleDismissRecommendation)
+			futures.POST("/ginie/adaptive-recommendations/apply-all", s.handleApplyAllRecommendations)
+			futures.GET("/ginie/llm-diagnostics-v2", s.handleGetLLMDiagnosticsV2)
+			futures.POST("/ginie/llm-diagnostics-v2/reset", s.handleResetLLMDiagnosticsV2)
+			futures.GET("/ginie/trade-history-ai", s.handleGetTradeHistoryWithAI)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

@@ -2397,3 +2397,697 @@ func (s *Server) handleResetGinieLLMDiagnostics(c *gin.Context) {
 		"message": "LLM diagnostic data cleared",
 	})
 }
+
+// ==================== LLM & Adaptive AI Endpoints (Story 2.8) ====================
+
+// LLMConfig represents global LLM configuration
+type LLMConfig struct {
+	Provider     string `json:"provider"`      // deepseek, claude, openai, local
+	Model        string `json:"model"`         // Model name/ID
+	TimeoutMs    int    `json:"timeout_ms"`    // 1000-30000
+	MaxRetries   int    `json:"max_retries"`   // Number of retries on failure
+	FallbackEnabled bool `json:"fallback_enabled"` // Use fallback provider on failure
+	FallbackProvider string `json:"fallback_provider"` // Fallback provider name
+}
+
+// ModeLLMSettings represents LLM settings for a specific trading mode
+type ModeLLMSettings struct {
+	Mode               string  `json:"mode"`                 // ultra_fast, scalp, swing, position
+	LLMEnabled         bool    `json:"llm_enabled"`          // Enable LLM for this mode
+	LLMWeight          float64 `json:"llm_weight"`           // 0.0-1.0 weight in decision
+	SkipOnTimeout      bool    `json:"skip_on_timeout"`      // Skip LLM if timeout
+	MinLLMConfidence   int     `json:"min_llm_confidence"`   // 0-100 minimum confidence
+	BlockOnDisagreement bool   `json:"block_on_disagreement"` // Block trade if LLM disagrees
+	CacheEnabled       bool    `json:"cache_enabled"`        // Cache LLM responses
+	CacheTTLSeconds    int     `json:"cache_ttl_seconds"`    // Cache TTL
+}
+
+// AdaptiveConfig represents adaptive AI configuration
+type AdaptiveConfig struct {
+	Enabled              bool    `json:"enabled"`
+	LearningRate         float64 `json:"learning_rate"`          // 0.0-1.0
+	MinSampleSize        int     `json:"min_sample_size"`        // Minimum trades before adapting
+	AnalysisWindowDays   int     `json:"analysis_window_days"`   // Days to analyze
+	AutoApplyRecommend   bool    `json:"auto_apply_recommendations"` // Auto-apply approved recommendations
+	ConfidenceThreshold  float64 `json:"confidence_threshold"`   // Min confidence for recommendations
+}
+
+// AdaptiveRecommendation represents a single recommendation from AdaptiveAI
+type AdaptiveRecommendation struct {
+	ID           string    `json:"id"`
+	Mode         string    `json:"mode"`          // ultra_fast, scalp, swing, position
+	Parameter    string    `json:"parameter"`     // Parameter being adjusted
+	CurrentValue float64   `json:"current_value"` // Current setting value
+	SuggestedValue float64 `json:"suggested_value"` // Recommended new value
+	Reasoning    string    `json:"reasoning"`     // Why this change is recommended
+	Confidence   float64   `json:"confidence"`    // 0-100 confidence in recommendation
+	Impact       string    `json:"impact"`        // Expected impact description
+	CreatedAt    time.Time `json:"created_at"`
+	Status       string    `json:"status"`        // pending, applied, dismissed
+}
+
+// ModeStatistics represents statistics for a trading mode
+type ModeStatistics struct {
+	Mode          string  `json:"mode"`
+	TotalTrades   int     `json:"total_trades"`
+	WinCount      int     `json:"win_count"`
+	LossCount     int     `json:"loss_count"`
+	WinRate       float64 `json:"win_rate"`
+	TotalPnL      float64 `json:"total_pnl"`
+	AvgPnL        float64 `json:"avg_pnl"`
+	AvgHoldTime   string  `json:"avg_hold_time"`
+	LLMAccuracy   float64 `json:"llm_accuracy"`
+	LastUpdated   time.Time `json:"last_updated"`
+}
+
+// LLMDiagnostics represents LLM call statistics
+type LLMDiagnostics struct {
+	TotalCalls       int64              `json:"total_calls"`
+	CacheHits        int64              `json:"cache_hits"`
+	CacheMisses      int64              `json:"cache_misses"`
+	CacheHitRate     float64            `json:"cache_hit_rate"`
+	AvgLatencyMs     float64            `json:"avg_latency_ms"`
+	ErrorCount       int64              `json:"error_count"`
+	ErrorRate        float64            `json:"error_rate"`
+	CallsByProvider  map[string]int64   `json:"calls_by_provider"`
+	RecentErrors     []LLMError         `json:"recent_errors"`
+	LastResetAt      time.Time          `json:"last_reset_at"`
+}
+
+// LLMError represents a recent LLM error
+type LLMError struct {
+	Timestamp   time.Time `json:"timestamp"`
+	Provider    string    `json:"provider"`
+	ErrorType   string    `json:"error_type"`
+	Message     string    `json:"message"`
+	Symbol      string    `json:"symbol,omitempty"`
+}
+
+// TradeWithAIContext represents a trade with its AI decision context
+type TradeWithAIContext struct {
+	TradeID       string    `json:"trade_id"`
+	Symbol        string    `json:"symbol"`
+	Side          string    `json:"side"`           // LONG or SHORT
+	Mode          string    `json:"mode"`           // ultra_fast, scalp, swing, position
+	EntryPrice    float64   `json:"entry_price"`
+	ExitPrice     float64   `json:"exit_price,omitempty"`
+	PnL           float64   `json:"pnl"`
+	PnLPercent    float64   `json:"pnl_percent"`
+	Status        string    `json:"status"`         // open, closed, liquidated
+	OpenedAt      time.Time `json:"opened_at"`
+	ClosedAt      *time.Time `json:"closed_at,omitempty"`
+	AIReasoning   string    `json:"ai_reasoning"`
+	LLMConfidence float64   `json:"llm_confidence"`
+	LLMProvider   string    `json:"llm_provider,omitempty"`
+	SignalSource  string    `json:"signal_source"`  // ai, strategy, manual
+}
+
+// Valid LLM providers
+var validLLMProviders = map[string]bool{
+	"deepseek": true,
+	"claude":   true,
+	"openai":   true,
+	"local":    true,
+}
+
+// handleGetLLMConfig returns global LLM config and all mode settings
+// GET /api/futures/ginie/llm-config
+func (s *Server) handleGetLLMConfig(c *gin.Context) {
+	log.Println("[LLM-CONFIG] Getting LLM configuration")
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Get the nested LLMConfig from settings
+	llmCfg := settings.LLMConfig
+
+	// Build global LLM config for response
+	llmConfig := LLMConfig{
+		Provider:         llmCfg.Provider,
+		Model:            llmCfg.Model,
+		TimeoutMs:        llmCfg.TimeoutMs,
+		MaxRetries:       llmCfg.RetryCount,
+		FallbackEnabled:  llmCfg.FallbackProvider != "",
+		FallbackProvider: llmCfg.FallbackProvider,
+	}
+
+	// Build mode-specific settings from the map
+	modeSettings := make(map[string]ModeLLMSettings)
+
+	// Get mode settings from the settings map, with defaults if not present
+	modeLLM := settings.ModeLLMSettings
+	if modeLLM == nil {
+		modeLLM = autopilot.DefaultModeLLMSettings()
+	}
+
+	for mode, modeSetting := range modeLLM {
+		modeSettings[string(mode)] = ModeLLMSettings{
+			Mode:               string(mode),
+			LLMEnabled:         modeSetting.LLMEnabled,
+			LLMWeight:          modeSetting.LLMWeight,
+			SkipOnTimeout:      modeSetting.SkipOnTimeout,
+			MinLLMConfidence:   modeSetting.MinLLMConfidence,
+			BlockOnDisagreement: modeSetting.BlockOnDisagreement,
+			CacheEnabled:       modeSetting.CacheEnabled,
+			CacheTTLSeconds:    llmCfg.CacheDurationSec, // Use global cache duration
+		}
+	}
+
+	// Ensure all modes are present
+	for _, mode := range []string{"ultra_fast", "scalp", "swing", "position"} {
+		if _, exists := modeSettings[mode]; !exists {
+			defaults := autopilot.DefaultModeLLMSettings()
+			if def, ok := defaults[autopilot.GinieTradingMode(mode)]; ok {
+				modeSettings[mode] = ModeLLMSettings{
+					Mode:               mode,
+					LLMEnabled:         def.LLMEnabled,
+					LLMWeight:          def.LLMWeight,
+					SkipOnTimeout:      def.SkipOnTimeout,
+					MinLLMConfidence:   def.MinLLMConfidence,
+					BlockOnDisagreement: def.BlockOnDisagreement,
+					CacheEnabled:       def.CacheEnabled,
+					CacheTTLSeconds:    llmCfg.CacheDurationSec,
+				}
+			}
+		}
+	}
+
+	// Build adaptive config from nested struct
+	adaptiveCfg := settings.AdaptiveAIConfig
+
+	adaptiveConfig := AdaptiveConfig{
+		Enabled:             adaptiveCfg.Enabled,
+		LearningRate:        float64(adaptiveCfg.MaxAutoAdjustmentPercent) / 100.0, // Convert to 0-1 scale
+		MinSampleSize:       adaptiveCfg.MinTradesForLearning,
+		AnalysisWindowDays:  adaptiveCfg.LearningWindowHours / 24, // Convert hours to days
+		AutoApplyRecommend:  adaptiveCfg.AutoAdjustEnabled,
+		ConfidenceThreshold: 70.0, // Default confidence threshold
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"llm_config":      llmConfig,
+		"mode_settings":   modeSettings,
+		"adaptive_config": adaptiveConfig,
+	})
+}
+
+// handleUpdateLLMConfig updates global LLM configuration
+// PUT /api/futures/ginie/llm-config
+func (s *Server) handleUpdateLLMConfig(c *gin.Context) {
+	log.Println("[LLM-CONFIG] Updating global LLM configuration")
+
+	var req LLMConfig
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate provider
+	if req.Provider != "" && !validLLMProviders[req.Provider] {
+		errorResponse(c, http.StatusBadRequest,
+			fmt.Sprintf("Invalid provider '%s': must be deepseek, claude, openai, or local", req.Provider))
+		return
+	}
+
+	// Validate timeout
+	if req.TimeoutMs > 0 && (req.TimeoutMs < 1000 || req.TimeoutMs > 30000) {
+		errorResponse(c, http.StatusBadRequest, "Timeout must be between 1000-30000ms")
+		return
+	}
+
+	// Validate fallback provider if specified
+	if req.FallbackEnabled && req.FallbackProvider != "" && !validLLMProviders[req.FallbackProvider] {
+		errorResponse(c, http.StatusBadRequest,
+			fmt.Sprintf("Invalid fallback provider '%s': must be deepseek, claude, openai, or local", req.FallbackProvider))
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Update the nested LLMConfig struct
+	if req.Provider != "" {
+		settings.LLMConfig.Provider = req.Provider
+	}
+	if req.Model != "" {
+		settings.LLMConfig.Model = req.Model
+	}
+	if req.TimeoutMs > 0 {
+		settings.LLMConfig.TimeoutMs = req.TimeoutMs
+	}
+	if req.MaxRetries >= 0 {
+		settings.LLMConfig.RetryCount = req.MaxRetries
+	}
+	if req.FallbackEnabled {
+		if req.FallbackProvider != "" {
+			settings.LLMConfig.FallbackProvider = req.FallbackProvider
+		}
+	} else {
+		settings.LLMConfig.FallbackProvider = ""
+	}
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save LLM config: "+err.Error())
+		return
+	}
+
+	log.Printf("[LLM-CONFIG] Updated global LLM config: provider=%s, model=%s, timeout=%dms",
+		settings.LLMConfig.Provider, settings.LLMConfig.Model, settings.LLMConfig.TimeoutMs)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Global LLM configuration updated",
+		"config": LLMConfig{
+			Provider:         settings.LLMConfig.Provider,
+			Model:            settings.LLMConfig.Model,
+			TimeoutMs:        settings.LLMConfig.TimeoutMs,
+			MaxRetries:       settings.LLMConfig.RetryCount,
+			FallbackEnabled:  settings.LLMConfig.FallbackProvider != "",
+			FallbackProvider: settings.LLMConfig.FallbackProvider,
+		},
+	})
+}
+
+// handleUpdateModeLLMSettings updates LLM settings for a specific mode
+// PUT /api/futures/ginie/llm-config/:mode
+func (s *Server) handleUpdateModeLLMSettings(c *gin.Context) {
+	mode := c.Param("mode")
+	log.Printf("[LLM-CONFIG] Updating LLM settings for mode: %s", mode)
+
+	// Validate mode using the Ginie trading mode types
+	validModes := map[string]autopilot.GinieTradingMode{
+		"ultra_fast": autopilot.GinieModeUltraFast,
+		"scalp":      autopilot.GinieModeScalp,
+		"swing":      autopilot.GinieModeSwing,
+		"position":   autopilot.GinieModePosition,
+	}
+
+	ginieMode, valid := validModes[mode]
+	if !valid {
+		errorResponse(c, http.StatusBadRequest,
+			fmt.Sprintf("Invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode))
+		return
+	}
+
+	var req ModeLLMSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate llm_weight
+	if req.LLMWeight < 0.0 || req.LLMWeight > 1.0 {
+		errorResponse(c, http.StatusBadRequest, "LLM weight must be between 0.0 and 1.0")
+		return
+	}
+
+	// Validate min_llm_confidence
+	if req.MinLLMConfidence < 0 || req.MinLLMConfidence > 100 {
+		errorResponse(c, http.StatusBadRequest, "Min LLM confidence must be between 0 and 100")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Initialize the map if nil
+	if settings.ModeLLMSettings == nil {
+		settings.ModeLLMSettings = autopilot.DefaultModeLLMSettings()
+	}
+
+	// Update the mode-specific settings in the map
+	settings.ModeLLMSettings[ginieMode] = autopilot.ModeLLMSettings{
+		LLMEnabled:          req.LLMEnabled,
+		LLMWeight:           req.LLMWeight,
+		SkipOnTimeout:       req.SkipOnTimeout,
+		MinLLMConfidence:    req.MinLLMConfidence,
+		BlockOnDisagreement: req.BlockOnDisagreement,
+		CacheEnabled:        req.CacheEnabled,
+	}
+
+	// Update global cache duration if specified
+	if req.CacheTTLSeconds > 0 {
+		settings.LLMConfig.CacheDurationSec = req.CacheTTLSeconds
+	}
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save mode LLM settings: "+err.Error())
+		return
+	}
+
+	log.Printf("[LLM-CONFIG] Updated LLM settings for mode %s: enabled=%v, weight=%.2f, min_confidence=%d",
+		mode, req.LLMEnabled, req.LLMWeight, req.MinLLMConfidence)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"message":  fmt.Sprintf("LLM settings updated for %s mode", mode),
+		"mode":     mode,
+		"settings": req,
+	})
+}
+
+// handleGetAdaptiveRecommendations returns pending recommendations from AdaptiveAI
+// GET /api/futures/ginie/adaptive-recommendations
+func (s *Server) handleGetAdaptiveRecommendations(c *gin.Context) {
+	log.Println("[ADAPTIVE-AI] Getting adaptive recommendations")
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Get recommendations from AdaptiveAI (if available)
+	recommendations := make([]AdaptiveRecommendation, 0)
+	statistics := make(map[string]ModeStatistics)
+	var lastAnalysis time.Time
+	var totalOutcomes int
+
+	// Try to get adaptive AI data from autopilot
+	adaptiveData := giniePilot.GetAdaptiveAIData()
+	if adaptiveData != nil {
+		// Convert to our response types
+		for _, rec := range adaptiveData.Recommendations {
+			recommendations = append(recommendations, AdaptiveRecommendation{
+				ID:             rec.ID,
+				Mode:           rec.Mode,
+				Parameter:      rec.Parameter,
+				CurrentValue:   rec.CurrentValue,
+				SuggestedValue: rec.SuggestedValue,
+				Reasoning:      rec.Reasoning,
+				Confidence:     rec.Confidence,
+				Impact:         rec.Impact,
+				CreatedAt:      rec.CreatedAt,
+				Status:         rec.Status,
+			})
+		}
+
+		for mode, stats := range adaptiveData.Statistics {
+			statistics[mode] = ModeStatistics{
+				Mode:        mode,
+				TotalTrades: stats.TotalTrades,
+				WinCount:    stats.WinCount,
+				LossCount:   stats.LossCount,
+				WinRate:     stats.WinRate,
+				TotalPnL:    stats.TotalPnL,
+				AvgPnL:      stats.AvgPnL,
+				AvgHoldTime: stats.AvgHoldTime,
+				LLMAccuracy: stats.LLMAccuracy,
+				LastUpdated: stats.LastUpdated,
+			}
+		}
+
+		lastAnalysis = adaptiveData.LastAnalysis
+		totalOutcomes = adaptiveData.TotalOutcomes
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":                true,
+		"recommendations":        recommendations,
+		"statistics":             statistics,
+		"last_analysis":          lastAnalysis,
+		"total_outcomes_analyzed": totalOutcomes,
+	})
+}
+
+// handleApplyRecommendation applies a specific recommendation by ID
+// POST /api/futures/ginie/adaptive-recommendations/:id/apply
+func (s *Server) handleApplyRecommendation(c *gin.Context) {
+	recID := c.Param("id")
+	log.Printf("[ADAPTIVE-AI] Applying recommendation: %s", recID)
+
+	if recID == "" {
+		errorResponse(c, http.StatusBadRequest, "Recommendation ID is required")
+		return
+	}
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Apply the recommendation
+	result, err := giniePilot.ApplyAdaptiveRecommendation(recID)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "Failed to apply recommendation: "+err.Error())
+		return
+	}
+
+	log.Printf("[ADAPTIVE-AI] Applied recommendation %s successfully", recID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":          true,
+		"message":          fmt.Sprintf("Recommendation %s applied successfully", recID),
+		"recommendation_id": recID,
+		"updated_settings": result,
+	})
+}
+
+// handleDismissRecommendation dismisses a specific recommendation
+// POST /api/futures/ginie/adaptive-recommendations/:id/dismiss
+func (s *Server) handleDismissRecommendation(c *gin.Context) {
+	recID := c.Param("id")
+	log.Printf("[ADAPTIVE-AI] Dismissing recommendation: %s", recID)
+
+	if recID == "" {
+		errorResponse(c, http.StatusBadRequest, "Recommendation ID is required")
+		return
+	}
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Dismiss the recommendation
+	if err := giniePilot.DismissAdaptiveRecommendation(recID); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Failed to dismiss recommendation: "+err.Error())
+		return
+	}
+
+	log.Printf("[ADAPTIVE-AI] Dismissed recommendation %s", recID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":          true,
+		"message":          fmt.Sprintf("Recommendation %s dismissed", recID),
+		"recommendation_id": recID,
+	})
+}
+
+// handleApplyAllRecommendations applies all pending recommendations
+// POST /api/futures/ginie/adaptive-recommendations/apply-all
+func (s *Server) handleApplyAllRecommendations(c *gin.Context) {
+	log.Println("[ADAPTIVE-AI] Applying all pending recommendations")
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Apply all recommendations
+	results, err := giniePilot.ApplyAllAdaptiveRecommendations()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to apply recommendations: "+err.Error())
+		return
+	}
+
+	log.Printf("[ADAPTIVE-AI] Applied %d recommendations", len(results))
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"message":         fmt.Sprintf("Applied %d recommendations", len(results)),
+		"applied_count":   len(results),
+		"applied_changes": results,
+	})
+}
+
+// handleGetLLMDiagnosticsV2 returns LLM call statistics (Story 2.8 version)
+// GET /api/futures/ginie/llm-diagnostics (enhanced version)
+func (s *Server) handleGetLLMDiagnosticsV2(c *gin.Context) {
+	log.Println("[LLM-DIAG] Getting LLM diagnostics")
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Get LLM diagnostics from autopilot
+	diagData := giniePilot.GetLLMDiagnosticsData()
+
+	var diagnostics LLMDiagnostics
+	if diagData != nil {
+		recentErrors := make([]LLMError, 0, len(diagData.RecentErrors))
+		for _, e := range diagData.RecentErrors {
+			recentErrors = append(recentErrors, LLMError{
+				Timestamp: e.Timestamp,
+				Provider:  e.Provider,
+				ErrorType: e.ErrorType,
+				Message:   e.Message,
+				Symbol:    e.Symbol,
+			})
+		}
+
+		diagnostics = LLMDiagnostics{
+			TotalCalls:      diagData.TotalCalls,
+			CacheHits:       diagData.CacheHits,
+			CacheMisses:     diagData.CacheMisses,
+			CacheHitRate:    diagData.CacheHitRate,
+			AvgLatencyMs:    diagData.AvgLatencyMs,
+			ErrorCount:      diagData.ErrorCount,
+			ErrorRate:       diagData.ErrorRate,
+			CallsByProvider: diagData.CallsByProvider,
+			RecentErrors:    recentErrors,
+			LastResetAt:     diagData.LastResetAt,
+		}
+	} else {
+		// Return empty diagnostics if not available
+		diagnostics = LLMDiagnostics{
+			CallsByProvider: make(map[string]int64),
+			RecentErrors:    make([]LLMError, 0),
+			LastResetAt:     time.Now(),
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"diagnostics": diagnostics,
+	})
+}
+
+// handleResetLLMDiagnosticsV2 resets LLM diagnostic counters (Story 2.8 version)
+// POST /api/futures/ginie/llm-diagnostics/reset
+func (s *Server) handleResetLLMDiagnosticsV2(c *gin.Context) {
+	log.Println("[LLM-DIAG] Resetting LLM diagnostics")
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Reset diagnostics
+	giniePilot.ResetLLMDiagnostics()
+
+	log.Println("[LLM-DIAG] LLM diagnostics reset successfully")
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"message":   "LLM diagnostics reset successfully",
+		"reset_at":  time.Now(),
+	})
+}
+
+// handleGetTradeHistoryWithAI returns recent trade outcomes with AI decision context
+// GET /api/futures/ginie/trade-history-ai
+func (s *Server) handleGetTradeHistoryWithAI(c *gin.Context) {
+	log.Println("[TRADE-HISTORY] Getting trade history with AI context")
+
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Parse pagination parameters
+	limit := 20
+	offset := 0
+
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Get trades with AI context
+	tradesData := giniePilot.GetTradeHistoryWithAIContext(limit, offset)
+
+	trades := make([]TradeWithAIContext, 0, len(tradesData))
+	for _, t := range tradesData {
+		trade := TradeWithAIContext{
+			TradeID:       t.TradeID,
+			Symbol:        t.Symbol,
+			Side:          t.Side,
+			Mode:          t.Mode,
+			EntryPrice:    t.EntryPrice,
+			ExitPrice:     t.ExitPrice,
+			PnL:           t.PnL,
+			PnLPercent:    t.PnLPercent,
+			Status:        t.Status,
+			OpenedAt:      t.OpenedAt,
+			AIReasoning:   t.AIReasoning,
+			LLMConfidence: t.LLMConfidence,
+			LLMProvider:   t.LLMProvider,
+			SignalSource:  t.SignalSource,
+		}
+		if t.ClosedAt != nil {
+			trade.ClosedAt = t.ClosedAt
+		}
+		trades = append(trades, trade)
+	}
+
+	// Get total count for pagination
+	totalCount := giniePilot.GetTradeHistoryCount()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":     true,
+		"trades":      trades,
+		"count":       len(trades),
+		"total_count": totalCount,
+		"limit":       limit,
+		"offset":      offset,
+		"has_more":    offset+len(trades) < totalCount,
+	})
+}
