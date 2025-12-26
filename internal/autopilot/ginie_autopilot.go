@@ -5849,24 +5849,51 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 		pos.StopLoss = pos.EntryPrice * (1 + finalSLPct/100)
 	}
 
-	// Calculate TP levels - use simple single TP for async version
-	// (Full RecalculateAdaptiveSLTP handles complex multi-TP logic)
-	tpPrice := 0.0
-	if pos.Side == "LONG" {
-		tpPrice = pos.EntryPrice * (1 + finalTPPct/100)
-	} else {
-		tpPrice = pos.EntryPrice * (1 - finalTPPct/100)
+	// Calculate TP levels based on TP mode (single vs multi)
+	// Direction: +1 for LONG (price goes up for profit), -1 for SHORT (price goes down)
+	direction := 1.0
+	if pos.Side == "SHORT" {
+		direction = -1.0
 	}
 
-	// Create single TP level
-	pos.TakeProfits = []GinieTakeProfitLevel{
-		{
-			Level:   1,
-			Price:   tpPrice,
-			Percent: 100,
-			GainPct: finalTPPct,
-			Status:  "pending",
-		},
+	// Check single vs multi TP mode based on position mode
+	useSingleTP := settings.GinieUseSingleTP
+	switch mode {
+	case "ultrafast":
+		useSingleTP = settings.GinieUseSingleTPUltrafast
+	case "scalp":
+		useSingleTP = settings.GinieUseSingleTPScalp
+	}
+
+	if useSingleTP {
+		// Single TP mode: Close 100% at one level
+		tpPrice := pos.EntryPrice * (1 + direction*finalTPPct/100)
+		pos.TakeProfits = []GinieTakeProfitLevel{
+			{Level: 1, Percent: 100, GainPct: finalTPPct, Price: tpPrice, Status: "pending"},
+		}
+		ga.logger.Debug("Single TP mode applied (async)",
+			"symbol", pos.Symbol, "mode", mode, "tp_price", tpPrice)
+	} else {
+		// Multi-TP mode: Use configured allocation
+		tp1Pct := settings.GinieTP1Percent
+		tp2Pct := settings.GinieTP2Percent
+		tp3Pct := settings.GinieTP3Percent
+		tp4Pct := settings.GinieTP4Percent
+
+		// Calculate actual gain % for each level based on allocation
+		tp1Gain := finalTPPct * (tp1Pct / 100)
+		tp2Gain := finalTPPct * (tp2Pct / 100)
+		tp3Gain := finalTPPct * (tp3Pct / 100)
+		tp4Gain := finalTPPct * (tp4Pct / 100)
+
+		pos.TakeProfits = []GinieTakeProfitLevel{
+			{Level: 1, Percent: tp1Pct, GainPct: tp1Gain, Price: pos.EntryPrice * (1 + direction*tp1Gain/100), Status: "pending"},
+			{Level: 2, Percent: tp2Pct, GainPct: tp2Gain, Price: pos.EntryPrice * (1 + direction*tp2Gain/100), Status: "pending"},
+			{Level: 3, Percent: tp3Pct, GainPct: tp3Gain, Price: pos.EntryPrice * (1 + direction*tp3Gain/100), Status: "pending"},
+			{Level: 4, Percent: tp4Pct, GainPct: tp4Gain, Price: pos.EntryPrice * (1 + direction*tp4Gain/100), Status: "pending"},
+		}
+		ga.logger.Debug("Multi-TP mode applied (async)",
+			"symbol", pos.Symbol, "allocation", fmt.Sprintf("%.0f%%/%.0f%%/%.0f%%/%.0f%%", tp1Pct, tp2Pct, tp3Pct, tp4Pct))
 	}
 
 	// Actually place the SL/TP orders on Binance
