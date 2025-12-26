@@ -2384,19 +2384,29 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			}
 
 			if trailingEnabled {
-				// For swing/position: Only activate after TP1 hit AND SL moved to breakeven
-				// This prevents premature trailing that closes positions too early
+				// Trailing activation conditions (multiple paths):
+				// 1. TP1 hit AND breakeven moved (conservative)
+				// 2. OR profit threshold reached (if TrailingActivationPct > 0)
 				canActivate := false
 				activationReason := ""
 
 				if pos.Mode == GinieModeSwing || pos.Mode == GinieModePosition {
-					// Strict activation: TP1 must be hit AND SL must be at breakeven
+					// Allow activation via multiple conditions:
+					// 1. TP1 hit AND breakeven moved (conservative - protects after partial TP)
+					// 2. OR profit threshold reached (respects user's TrailingActivationPct setting)
 					if pos.CurrentTPLevel >= 1 && pos.MovedToBreakeven {
 						canActivate = true
 						activationReason = "after_tp1_and_breakeven"
+					} else if pos.TrailingActivationPct > 0 && pnlPercent >= pos.TrailingActivationPct {
+						// FIX: Allow profit-threshold activation even before TP1
+						// This prevents scenarios where price runs up significantly but trailing never activates
+						canActivate = true
+						activationReason = "profit_threshold"
+						log.Printf("[GINIE-TRAILING] %s: Activating via profit threshold (%.2f%% >= %.2f%%)",
+							symbol, pnlPercent, pos.TrailingActivationPct)
 					}
 				} else {
-					// For other modes (if somehow enabled), use profit threshold
+					// For other modes (ultra-fast/scalp if enabled), use profit threshold
 					if pos.TrailingActivationPct > 0 && pnlPercent >= pos.TrailingActivationPct {
 						canActivate = true
 						activationReason = "profit_threshold"
