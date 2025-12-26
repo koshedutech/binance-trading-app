@@ -1837,8 +1837,9 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	var llmResponse *LLMAnalysisResponse
 	var decisionContext *DecisionContext
 
-	// Calculate base technical confidence
-	technicalConfidence := int(signals.StrengthScore * (scan.Score / 100) * adxPenalty * 100)
+	// Calculate base technical confidence (0-100 scale)
+	// StrengthScore is already 0-100, scan.Score is 0-100, adxPenalty is 0-1
+	technicalConfidence := int(signals.StrengthScore * (scan.Score / 100) * adxPenalty)
 	technicalDirection := signals.Direction
 
 	// Attempt LLM analysis
@@ -1858,9 +1859,15 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 	// Fuse confidence if LLM response is available
 	if llmResponse != nil && !decisionContext.SkippedLLM {
-		// LLM weight: 0.3 means 30% LLM, 70% technical
-		// This can be made configurable in settings
-		llmWeight := 0.3
+		// Get mode-specific LLM weight from SettingsManager
+		sm := GetSettingsManager()
+		modeLLMSettings := sm.GetModeLLMSettings(mode)
+		llmWeight := modeLLMSettings.LLMWeight
+		if g.logger != nil {
+			g.logger.Debug("[LLM] Using mode-specific LLM weight",
+				"mode", mode,
+				"llm_weight", llmWeight)
+		}
 
 		finalConfidence, finalDirection, agreement := g.FuseConfidence(
 			technicalConfidence,
