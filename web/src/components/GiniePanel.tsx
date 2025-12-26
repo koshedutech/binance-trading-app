@@ -2023,53 +2023,147 @@ export default function GiniePanel() {
                     {expandedModeSection === 'sltp' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                   </button>
                   {expandedModeSection === 'sltp' && modeConfigs[selectedModeConfig]?.sltp && (
-                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Stop Loss %</label>
-                          <div className="flex items-center gap-1">
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-3">
+                      {/* Margin Type Selection */}
+                      <div className="flex items-center gap-3 pb-2 border-b border-gray-700">
+                        <label className="text-[10px] text-gray-400">Margin:</label>
+                        <div className="flex gap-2">
+                          <label className="flex items-center gap-1 text-[10px]">
                             <input
-                              type="number"
-                              min="0"
-                              max="50"
-                              step="0.1"
-                              value={modeConfigs[selectedModeConfig]?.sltp?.stop_loss_percent || 1.5}
-                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.stop_loss_percent', Number(e.target.value))}
-                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              type="radio"
+                              name={`margin-${selectedModeConfig}`}
+                              checked={(modeConfigs[selectedModeConfig]?.sltp?.margin_type || 'CROSS') === 'CROSS'}
+                              onChange={() => updateModeConfig(selectedModeConfig, 'sltp.margin_type', 'CROSS')}
+                              className="w-3 h-3"
                             />
-                            <span className="text-[10px] text-gray-500">%</span>
-                          </div>
+                            <span className="text-blue-400">Cross</span>
+                          </label>
+                          <label className="flex items-center gap-1 text-[10px]">
+                            <input
+                              type="radio"
+                              name={`margin-${selectedModeConfig}`}
+                              checked={(modeConfigs[selectedModeConfig]?.sltp?.margin_type || 'CROSS') === 'ISOLATED'}
+                              onChange={() => updateModeConfig(selectedModeConfig, 'sltp.margin_type', 'ISOLATED')}
+                              className="w-3 h-3"
+                            />
+                            <span className="text-yellow-400">Isolated</span>
+                          </label>
                         </div>
-                        <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Take Profit %</label>
+                        {(modeConfigs[selectedModeConfig]?.sltp?.margin_type || 'CROSS') === 'ISOLATED' && (
                           <div className="flex items-center gap-1">
                             <input
                               type="number"
-                              min="0"
+                              min="10"
                               max="100"
-                              step="0.1"
-                              value={modeConfigs[selectedModeConfig]?.sltp?.take_profit_percent || 3.0}
-                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.take_profit_percent', Number(e.target.value))}
-                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              step="5"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.isolated_margin_percent || 50}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.isolated_margin_percent', Number(e.target.value))}
+                              className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">%</span>
                           </div>
-                        </div>
+                        )}
                       </div>
-                      <div className="flex items-center gap-3">
-                        <label className="flex items-center gap-1 text-[10px] text-gray-400">
+
+                      {/* ROI-based SL/TP Toggle */}
+                      <div className="pb-2 border-b border-gray-700">
+                        <label className="flex items-center gap-2 text-[10px] text-gray-400 mb-2">
+                          <input
+                            type="checkbox"
+                            checked={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp || false}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.use_roi_based_sltp', e.target.checked)}
+                            className="w-3 h-3"
+                          />
+                          <span className="text-purple-400 font-medium">Use ROI-Based SL/TP</span>
+                          <span className="text-gray-500">(instead of price %)</span>
+                        </label>
+                        {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp && (
+                          <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                              <label className="block text-[10px] text-gray-400 mb-1">ROI Stop Loss %</label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min="-100"
+                                  max="0"
+                                  step="1"
+                                  value={modeConfigs[selectedModeConfig]?.sltp?.roi_stop_loss_percent || -10}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.roi_stop_loss_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-1 bg-gray-700 border border-red-600/50 rounded text-red-400 text-xs"
+                                />
+                                <span className="text-[10px] text-gray-500">%</span>
+                              </div>
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-gray-400 mb-1">ROI Take Profit %</label>
+                              <div className="flex items-center gap-1">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="500"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.sltp?.roi_take_profit_percent || 25}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.roi_take_profit_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-1 bg-gray-700 border border-green-600/50 rounded text-green-400 text-xs"
+                                />
+                                <span className="text-[10px] text-gray-500">%</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Price-based SL/TP */}
+                      {!modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp && (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1">Stop Loss %</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.1"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.stop_loss_percent || 1.5}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.stop_loss_percent', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1">Take Profit %</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="0.1"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.take_profit_percent || 3.0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.take_profit_percent', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Trailing Stop */}
+                      <div className="space-y-2">
+                        <label className="flex items-center gap-2 text-[10px] text-gray-400">
                           <input
                             type="checkbox"
                             checked={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled || false}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_enabled', e.target.checked)}
                             className="w-3 h-3"
                           />
-                          Trailing Stop
+                          <span className="text-cyan-400 font-medium">Trailing Stop</span>
                         </label>
                         {modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled && (
-                          <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1">
-                              <span className="text-[10px] text-gray-500">Trail:</span>
+                          <div className="grid grid-cols-3 gap-2 ml-4">
+                            <div>
+                              <label className="block text-[10px] text-gray-500 mb-1">Trail %</label>
                               <input
                                 type="number"
                                 min="0"
@@ -2077,9 +2171,32 @@ export default function GiniePanel() {
                                 step="0.1"
                                 value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_percent || 1.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_percent', Number(e.target.value))}
-                                className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
-                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-gray-500 mb-1">Activate @ %</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_activation || 1.0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_activation', Number(e.target.value))}
+                                className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-gray-500 mb-1">Activate @ Price</label>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                placeholder="0 = use %"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.trailing_activation_price || 0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_activation_price', Number(e.target.value))}
+                                className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
                             </div>
                           </div>
                         )}

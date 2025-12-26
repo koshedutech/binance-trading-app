@@ -2674,8 +2674,16 @@ export interface ModeSLTPConfig {
   trailing_stop_enabled: boolean;     // Enable trailing
   trailing_stop_percent: number;      // Trail distance
   trailing_stop_activation: number;   // Activate at profit %
+  trailing_activation_price: number;  // Activate at specific price (0 = use profit %)
   max_hold_duration: string;          // Force exit after (e.g., "3s", "4h", "3d")
   use_single_tp: boolean;             // true = 100% at TP, false = multi-level
+  // ROI-based SL/TP
+  use_roi_based_sltp: boolean;        // Use ROI % instead of price %
+  roi_stop_loss_percent: number;      // Close at this ROI % loss (e.g., -10)
+  roi_take_profit_percent: number;    // Close at this ROI % profit (e.g., 25)
+  // Margin configuration
+  margin_type: string;                // "CROSS" or "ISOLATED"
+  isolated_margin_percent: number;    // Margin % for isolated mode (10-100)
 }
 
 export interface ModeFullConfig {

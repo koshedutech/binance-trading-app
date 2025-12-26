@@ -392,7 +392,18 @@ type GinieModeConfig struct {
 	TakeProfitPercent float64 `json:"take_profit_percent"` // Take profit percentage from entry
 	TrailingEnabled   bool    `json:"trailing_enabled"`    // Whether trailing stop is enabled
 	TrailingPercent   float64 `json:"trailing_percent"`    // Trailing stop percentage
+	TrailingActivation float64 `json:"trailing_activation"` // Profit % to activate trailing (e.g., 1.0 = activate after 1% profit)
+	TrailingActivationPrice float64 `json:"trailing_activation_price"` // Specific price to activate trailing (0 = use profit %)
 	MaxHoldDuration   string  `json:"max_hold_duration"`   // Maximum time to hold position (e.g., "4h", "1d")
+
+	// ROI-based SL/TP (alternative to price-based)
+	UseROIBasedSLTP      bool    `json:"use_roi_based_sltp"`       // Use ROI % instead of price % for SL/TP
+	ROIStopLossPercent   float64 `json:"roi_stop_loss_percent"`    // Close at this ROI % loss (e.g., -10 = -10% ROI)
+	ROITakeProfitPercent float64 `json:"roi_take_profit_percent"`  // Close at this ROI % profit (e.g., 25 = +25% ROI)
+
+	// Margin Configuration
+	MarginType            string  `json:"margin_type"`              // "CROSS" or "ISOLATED" (default: "CROSS")
+	IsolatedMarginPercent float64 `json:"isolated_margin_percent"`  // Margin % for isolated mode (10-100%)
 
 	// Circuit Breaker - nested struct for mode-specific circuit breaker configuration
 	CircuitBreaker ModeCircuitBreaker `json:"circuit_breaker"`

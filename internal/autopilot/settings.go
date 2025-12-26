@@ -166,8 +166,16 @@ type ModeSLTPConfig struct {
 	TrailingStopEnabled    bool    `json:"trailing_stop_enabled"`     // Enable trailing (e.g., false, false, true, true)
 	TrailingStopPercent    float64 `json:"trailing_stop_percent"`     // Trail distance (e.g., N/A, 0.5, 1.5, 2.5)
 	TrailingStopActivation float64 `json:"trailing_stop_activation"`  // Activate at profit % (e.g., N/A, 0.5, 1.0, 2.0)
+	TrailingActivationPrice float64 `json:"trailing_activation_price"` // Activate at specific price (0 = disabled)
 	MaxHoldDuration        string  `json:"max_hold_duration"`         // Force exit after (e.g., "3s", "4h", "3d", "14d")
 	UseSingleTP            bool    `json:"use_single_tp"`             // true = 100% at TP, false = multi-level
+	// ROI-based SL/TP settings
+	UseROIBasedSLTP        bool    `json:"use_roi_based_sltp"`        // true = use ROI-based SL/TP instead of price %
+	ROIStopLossPercent     float64 `json:"roi_stop_loss_percent"`     // SL based on ROI % (e.g., -5 = close at -5% ROI)
+	ROITakeProfitPercent   float64 `json:"roi_take_profit_percent"`   // TP based on ROI % (e.g., 10 = close at +10% ROI)
+	// Margin type settings
+	MarginType             string  `json:"margin_type"`               // "CROSS" or "ISOLATED" (default: "CROSS")
+	IsolatedMarginPercent  float64 `json:"isolated_margin_percent"`   // Margin % for isolated mode (10-100%)
 }
 
 // HedgeModeConfig holds hedge mode settings for a mode (LONG + SHORT simultaneously)
@@ -371,13 +379,19 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				MinWinRate:           45.0,
 			},
 			SLTP: &ModeSLTPConfig{
-				StopLossPercent:        1.0,
-				TakeProfitPercent:      2.0,
-				TrailingStopEnabled:    false,
-				TrailingStopPercent:    0,
-				TrailingStopActivation: 0,
-				MaxHoldDuration:        "3s",
-				UseSingleTP:            true,
+				StopLossPercent:         1.0,
+				TakeProfitPercent:       2.0,
+				TrailingStopEnabled:     false,
+				TrailingStopPercent:     0,
+				TrailingStopActivation:  0,
+				TrailingActivationPrice: 0,
+				MaxHoldDuration:         "3s",
+				UseSingleTP:             true,
+				UseROIBasedSLTP:         false,
+				ROIStopLossPercent:      -5,
+				ROITakeProfitPercent:    10,
+				MarginType:              "CROSS",
+				IsolatedMarginPercent:   25,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true,
@@ -451,13 +465,19 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				MinWinRate:           50.0,
 			},
 			SLTP: &ModeSLTPConfig{
-				StopLossPercent:        1.5,
-				TakeProfitPercent:      3.0,
-				TrailingStopEnabled:    false,
-				TrailingStopPercent:    0.5,
-				TrailingStopActivation: 0.5,
-				MaxHoldDuration:        "4h",
-				UseSingleTP:            true,
+				StopLossPercent:         1.5,
+				TakeProfitPercent:       3.0,
+				TrailingStopEnabled:     false,
+				TrailingStopPercent:     0.5,
+				TrailingStopActivation:  0.5,
+				TrailingActivationPrice: 0,
+				MaxHoldDuration:         "4h",
+				UseSingleTP:             true,
+				UseROIBasedSLTP:         false,
+				ROIStopLossPercent:      -8,
+				ROITakeProfitPercent:    15,
+				MarginType:              "CROSS",
+				IsolatedMarginPercent:   30,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true,
@@ -531,13 +551,19 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				MinWinRate:           55.0,
 			},
 			SLTP: &ModeSLTPConfig{
-				StopLossPercent:        2.5,
-				TakeProfitPercent:      5.0,
-				TrailingStopEnabled:    true,
-				TrailingStopPercent:    1.5,
-				TrailingStopActivation: 1.0,
-				MaxHoldDuration:        "3d",
-				UseSingleTP:            false,
+				StopLossPercent:         2.5,
+				TakeProfitPercent:       5.0,
+				TrailingStopEnabled:     true,
+				TrailingStopPercent:     1.5,
+				TrailingStopActivation:  1.0,
+				TrailingActivationPrice: 0,
+				MaxHoldDuration:         "3d",
+				UseSingleTP:             false,
+				UseROIBasedSLTP:         false,
+				ROIStopLossPercent:      -12,
+				ROITakeProfitPercent:    20,
+				MarginType:              "CROSS",
+				IsolatedMarginPercent:   40,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true,
@@ -611,13 +637,19 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				MinWinRate:           60.0,
 			},
 			SLTP: &ModeSLTPConfig{
-				StopLossPercent:        3.5,
-				TakeProfitPercent:      8.0,
-				TrailingStopEnabled:    true,
-				TrailingStopPercent:    2.5,
-				TrailingStopActivation: 2.0,
-				MaxHoldDuration:        "14d",
-				UseSingleTP:            false,
+				StopLossPercent:         3.5,
+				TakeProfitPercent:       8.0,
+				TrailingStopEnabled:     true,
+				TrailingStopPercent:     2.5,
+				TrailingStopActivation:  2.0,
+				TrailingActivationPrice: 0,
+				MaxHoldDuration:         "14d",
+				UseSingleTP:             false,
+				UseROIBasedSLTP:         false,
+				ROIStopLossPercent:      -15,
+				ROITakeProfitPercent:    30,
+				MarginType:              "ISOLATED", // Position mode uses isolated for safety
+				IsolatedMarginPercent:   50,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true, // Cautious
@@ -2659,7 +2691,56 @@ func (sm *SettingsManager) GetAllModeConfigs() map[string]*ModeFullConfig {
 	if settings.ModeConfigs == nil || len(settings.ModeConfigs) == 0 {
 		return DefaultModeConfigs()
 	}
-	return settings.ModeConfigs
+	// Merge with defaults to ensure new fields have proper values
+	return mergeWithDefaultConfigs(settings.ModeConfigs)
+}
+
+// mergeWithDefaultConfigs ensures saved configs have new fields populated from defaults
+func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeFullConfig {
+	defaults := DefaultModeConfigs()
+	result := make(map[string]*ModeFullConfig)
+
+	for mode, savedConfig := range saved {
+		if savedConfig == nil {
+			if def, ok := defaults[mode]; ok {
+				result[mode] = def
+			}
+			continue
+		}
+
+		// Get default for this mode
+		def, ok := defaults[mode]
+		if !ok {
+			result[mode] = savedConfig
+			continue
+		}
+
+		// Merge SLTP config - fill in zero values from defaults
+		if savedConfig.SLTP != nil && def.SLTP != nil {
+			// Only fill in fields that are zero/empty (not explicitly set)
+			if savedConfig.SLTP.MarginType == "" {
+				savedConfig.SLTP.MarginType = def.SLTP.MarginType
+			}
+			if savedConfig.SLTP.IsolatedMarginPercent == 0 {
+				savedConfig.SLTP.IsolatedMarginPercent = def.SLTP.IsolatedMarginPercent
+			}
+			// Note: ROI fields default to 0/false which is valid, so only set MarginType default
+			// TrailingActivationPrice 0 means disabled, which is valid default
+		} else if savedConfig.SLTP == nil && def.SLTP != nil {
+			savedConfig.SLTP = def.SLTP
+		}
+
+		result[mode] = savedConfig
+	}
+
+	// Add any modes that exist in defaults but not in saved
+	for mode, defConfig := range defaults {
+		if _, exists := result[mode]; !exists {
+			result[mode] = defConfig
+		}
+	}
+
+	return result
 }
 
 // GetModeConfig returns the configuration for a specific mode
@@ -2764,7 +2845,18 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			TakeProfitPercent: 2.0,
 			TrailingEnabled:   false,
 			TrailingPercent:   0,
+			TrailingActivation: 0.5,
+			TrailingActivationPrice: 0, // Use profit % based
 			MaxHoldDuration:   "3s",
+
+			// ROI-based SL/TP (disabled by default, uses price % above)
+			UseROIBasedSLTP:      false,
+			ROIStopLossPercent:   -10, // -10% ROI
+			ROITakeProfitPercent: 20,  // +20% ROI
+
+			// Margin - cross by default for ultra-fast
+			MarginType:            "CROSS",
+			IsolatedMarginPercent: 50,
 
 			// Circuit Breaker - aggressive limits for high-frequency trading
 			CircuitBreaker: ModeCircuitBreaker{
@@ -2808,7 +2900,18 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			TakeProfitPercent: 3.0,
 			TrailingEnabled:   false,
 			TrailingPercent:   0.5,
+			TrailingActivation: 1.0,
+			TrailingActivationPrice: 0,
 			MaxHoldDuration:   "4h",
+
+			// ROI-based SL/TP
+			UseROIBasedSLTP:      false,
+			ROIStopLossPercent:   -12,
+			ROITakeProfitPercent: 24,
+
+			// Margin
+			MarginType:            "CROSS",
+			IsolatedMarginPercent: 50,
 
 			// Circuit Breaker - balanced for frequent trading
 			CircuitBreaker: ModeCircuitBreaker{
@@ -2852,7 +2955,18 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			TakeProfitPercent: 5.0,
 			TrailingEnabled:   true,
 			TrailingPercent:   1.5,
+			TrailingActivation: 2.0,
+			TrailingActivationPrice: 0,
 			MaxHoldDuration:   "3d",
+
+			// ROI-based SL/TP
+			UseROIBasedSLTP:      false,
+			ROIStopLossPercent:   -15,
+			ROITakeProfitPercent: 25,
+
+			// Margin
+			MarginType:            "CROSS",
+			IsolatedMarginPercent: 40,
 
 			// Circuit Breaker - conservative for swing trading
 			CircuitBreaker: ModeCircuitBreaker{
@@ -2896,7 +3010,18 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			TakeProfitPercent: 8.0,
 			TrailingEnabled:   true,
 			TrailingPercent:   2.5,
+			TrailingActivation: 3.0,
+			TrailingActivationPrice: 0,
 			MaxHoldDuration:   "14d",
+
+			// ROI-based SL/TP
+			UseROIBasedSLTP:      false,
+			ROIStopLossPercent:   -20,
+			ROITakeProfitPercent: 40,
+
+			// Margin - isolated by default for position (safer)
+			MarginType:            "ISOLATED",
+			IsolatedMarginPercent: 30,
 
 			// Circuit Breaker - very conservative for position trading
 			CircuitBreaker: ModeCircuitBreaker{

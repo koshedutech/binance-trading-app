@@ -1951,12 +1951,12 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		}
 	}
 
-	// Final recommendation (ConfidenceScore is 0-1, thresholds are 0-1)
+	// Final recommendation (ConfidenceScore is 0-100, thresholds are 0-100)
 	// Execute if >= 30%, Wait if >= 20%, otherwise Skip
-	if report.ConfidenceScore >= 0.30 {
+	if report.ConfidenceScore >= 30.0 {
 		report.Recommendation = RecommendationExecute
 		report.RecommendationNote = "Strong signals with good market conditions"
-	} else if report.ConfidenceScore >= 0.20 {
+	} else if report.ConfidenceScore >= 20.0 {
 		report.Recommendation = RecommendationWait
 		report.RecommendationNote = "Signals present but consider waiting for better entry"
 	} else {
