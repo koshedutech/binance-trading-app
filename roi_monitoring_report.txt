@@ -1,0 +1,184 @@
+================================================================================
+GINIE AUTOPILOT - ROI MONITORING REPORT
+Generated: 2025-12-24 14:33:00
+================================================================================
+
+LEVERAGE-AWARE ROI CALCULATION VERIFIED
+================================================================================
+
+After fixing the ROI calculation to account for leverage, the system now
+correctly calculates position returns based on actual collateral risk.
+
+Formula: ROI% = (Net PnL * Leverage / Notional Value) * 100
+
+This accounts for:
+✓ Gross profit/loss based on price movement
+✓ Binance taker fees (0.04% on entry and exit)
+✓ Leverage amplification factor
+
+CRITICAL FIX VERIFICATION: SQDUSDT Position
+================================================================================
+
+BEFORE (incorrect): -0.24% ROI
+- Did not account for 5x leverage
+- Massively underestimated actual returns
+
+AFTER (correct): 7.61% ROI
+- Entry: 0.0561359690 | Current: 0.0570353500 | Leverage: 5x
+- Price move: 1.602% (very small move)
+- With 5x leverage: 1.602% * 5 = 8.01% effective return
+- After fees: 7.61% net ROI
+
+This aligns with user's observation of better performance on Binance!
+
+CURRENT POSITION MONITORING STATUS
+================================================================================
+
+Total Active Positions: 8
+All in SWING Mode (8.0% ROI threshold required)
+
+Position Details:
+================================================================================
+
+1. SQDUSDT (LONG) - CLOSEST TO THRESHOLD
+   Entry: 0.0561359690 | Current: 0.0570353500
+   ROI: 7.61% | Threshold: 8.0% | Gap: 0.4% (NEARLY HIT!)
+   Status: Waiting for 0.4% more favorable price move
+   Action: Will trigger automatic position close when ROI >= 8.0%
+
+2. GUAUSDT (SHORT)
+   Entry: 0.1134506548 | Current: 0.1127397800
+   ROI: 2.73% | Threshold: 8.0% | Gap: 5.3%
+   Status: Moderate profit, needs stronger move
+
+3. BNBUSDT (SHORT)
+   Entry: 840.0900 | Current: 837.0363
+   ROI: 1.42% | Threshold: 8.0% | Gap: 6.6%
+   Status: Small profit, awaiting larger move
+
+4. HYPEUSDT (SHORT)
+   Entry: 23.8394 | Current: 23.7138
+   ROI: 2.24% | Threshold: 8.0% | Gap: 5.8%
+   Status: Small profit, awaiting larger move
+
+5. ADAUSDT (SHORT)
+   Entry: 0.3568 | Current: 0.3559
+   ROI: 0.85% | Threshold: 8.0% | Gap: 7.2%
+   Status: Marginal profit, needs strong move
+
+6. NIGHTUSDT (SHORT)
+   Entry: 0.07421 | Current: 0.07420
+   ROI: -0.32% | Threshold: 8.0% | Gap: 8.3%
+   Status: SLIGHTLY NEGATIVE, stop-loss may trigger first
+
+7. 1000PEPEUSDT (SHORT)
+   Entry: 0.0038741 | Current: 0.0038726
+   ROI: -0.21% | Threshold: 8.0% | Gap: 8.2%
+   Status: SLIGHTLY NEGATIVE, stop-loss may trigger first
+
+8. SOLUSDT (SHORT)
+   Entry: 121.46 | Current: 121.39
+   ROI: -0.13% | Threshold: 8.0% | Gap: 8.1%
+   Status: SLIGHTLY NEGATIVE, stop-loss may trigger first
+
+PORTFOLIO SUMMARY
+================================================================================
+
+Total Positions:              8
+Profitable:                   5 (62.5% win rate)
+Losing:                       3 (37.5%)
+Average ROI:                  1.77%
+
+Positions Meeting ROI Threshold:  0 (waiting for favorable moves)
+Positions Close to Threshold:     1 (SQDUSDT at 7.61%)
+
+EARLY PROFIT BOOKING STATUS
+================================================================================
+
+Feature Status: ✓ ACTIVE & FULLY OPERATIONAL
+
+Current Situation:
+- SQDUSDT is EXTREMELY CLOSE to triggering at just 0.4% more ROI
+- Most other positions require 5-8% additional favorable price movement
+- 3 positions are at slight losses where stop-loss may trigger first
+
+Expected Behavior When ROI Threshold Hit:
+1. Position ROI calculated continuously every 5 seconds
+2. When ROI >= 8.0% (for swing mode):
+   - Position automatically CLOSED
+   - Reason: "early_profit_booking"
+   - Event logged with ROI percentage and mode
+   - Trade recorded in position history
+3. Profit is realized and added to account balance
+
+MONITORING RECOMMENDATIONS
+================================================================================
+
+1. WATCH SQDUSDT CLOSELY
+   - Currently at 7.61% ROI, needs only 0.4% more
+   - Any favorable price move will trigger automatic exit
+   - This will be the first position to demonstrate early profit booking
+
+2. MONITOR PRICE ACTION
+   - Watch for price moves in favorable direction for SHORT positions
+   - Watch for upside for SQDUSDT LONG position
+   - Each 1% price move = ~5% ROI change due to 5x leverage
+
+3. POSITION CLOSURE TRACKING
+   - When position closes via early_profit_booking:
+     * Check logs for entry: "Booking profit early based on ROI threshold"
+     * Review realized PnL recorded in position history
+     * System will automatically rebalance and potentially open new trades
+
+TECHNICAL IMPLEMENTATION DETAILS
+================================================================================
+
+Files Modified:
+✓ internal/autopilot/ginie_autopilot.go - Leverage-aware ROI calculation
+✓ internal/autopilot/ginie_autopilot.go - shouldBookEarlyProfit() method
+✓ main.go - Application successfully rebuilt with new logic
+
+Function: calculateROIAfterFees()
+- Takes: entry_price, current_price, quantity, side, leverage
+- Calculates: Gross PnL → Deduct Fees → Apply Leverage → ROI%
+- Returns: ROI percentage (e.g., 7.61 for 7.61% ROI)
+
+Integration Point: monitorAllPositions() loop
+- Runs every 5 seconds
+- Checks each position ROI before TP/SL/trailing checks
+- Highest priority: Early profit booking triggers before other exits
+- Reason priority: early_profit_booking > tp_hit > sl_hit > trailing
+
+MODE-SPECIFIC THRESHOLDS
+================================================================================
+
+Ultra-Fast Scalp: 3.0% ROI after fees
+Scalp:            5.0% ROI after fees
+Swing:            8.0% ROI after fees (current mode for all positions)
+Position:        10.0% ROI after fees
+
+Configuration: autopilot_settings.json
+- All thresholds active and configurable
+- Can be adjusted to be more aggressive or conservative
+
+NEXT STEPS
+================================================================================
+
+1. Continue monitoring for ROI threshold hits
+2. Verify first position closes with "early_profit_booking" reason
+3. Check position history for correctly recorded trades
+4. Monitor for consistency in ROI calculations
+5. When favorable price moves occur, expect automatic exits at thresholds
+6. Track profitability impact of early profit booking vs letting trades run
+
+Expected Outcome:
+- Early profit booking prevents the scenario: "good profit mid-trade → loss at close"
+- Protects capital by locking in gains before reversal
+- Effective risk management tool for volatile markets
+
+================================================================================
+SUMMARY: ROI MONITORING SYSTEM OPERATIONAL
+All 8 positions are actively monitored with leverage-aware ROI calculations.
+SQDUSDT is closest to threshold and expected to trigger first.
+System ready for early profit booking exits when thresholds are hit.
+================================================================================
