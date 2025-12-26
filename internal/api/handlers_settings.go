@@ -160,14 +160,17 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 
 // handleGetWalletBalance returns the wallet balance from Binance
 func (s *Server) handleGetWalletBalance(c *gin.Context) {
+	log.Printf("[WALLET-BALANCE-DEBUG] handleGetWalletBalance called")
 	// Check if we're in dry run mode via settings API
 	settingsAPI := s.getSettingsAPI()
 	isSimulated := true
 	if settingsAPI != nil {
 		isSimulated = settingsAPI.GetDryRunMode()
 	}
+	log.Printf("[WALLET-BALANCE-DEBUG] isSimulated=%v", isSimulated)
 
-	client := s.getBinanceClient()
+	client := s.getBinanceClientForUser(c)
+	log.Printf("[WALLET-BALANCE-DEBUG] client=%v", client != nil)
 	if client == nil {
 		// Return mock balance if no client available
 		c.JSON(http.StatusOK, gin.H{
@@ -515,6 +518,58 @@ func (s *Server) getBinanceClient() binance.BinanceClient {
 	if client, ok := clientIface.(binance.BinanceClient); ok {
 		return client
 	}
+	return nil
+}
+
+// getBinanceClientForUser returns a Binance client for the authenticated user
+// User must have API keys configured in the database - no global fallback
+// Returns nil if user has no API keys (caller should return error to user)
+func (s *Server) getBinanceClientForUser(c *gin.Context) binance.BinanceClient {
+	log.Printf("[DEBUG] getBinanceClientForUser: authEnabled=%v, apiKeyService=%v", s.authEnabled, s.apiKeyService != nil)
+
+	// Check if in paper trading mode - use mock client
+	if s.botAPI != nil {
+		if settingsAPI, ok := s.botAPI.(SettingsAPI); ok {
+			if settingsAPI.GetDryRunMode() {
+				log.Printf("[DEBUG] getBinanceClientForUser: Paper trading mode, using mock client")
+				return s.getBinanceClient() // Returns mock client in paper mode
+			}
+		}
+	}
+
+	// Live mode - must use user-specific keys from database
+	if s.authEnabled && s.apiKeyService != nil {
+		userID := s.getUserID(c)
+		log.Printf("[DEBUG] getBinanceClientForUser: userID=%s", userID)
+		if userID != "" {
+			ctx := c.Request.Context()
+			// Try mainnet first, then testnet
+			keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
+			if err != nil {
+				log.Printf("[DEBUG] getBinanceClientForUser: mainnet key lookup failed: %v", err)
+				// Try testnet
+				keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
+			}
+			if err == nil && keys != nil && keys.APIKey != "" && keys.SecretKey != "" {
+				log.Printf("[DEBUG] getBinanceClientForUser: Found user keys for %s (testnet=%v, keyLen=%d)", userID, keys.IsTestnet, len(keys.APIKey))
+				// Create user-specific spot client
+				baseURL := "https://api.binance.com"
+				if keys.IsTestnet {
+					baseURL = "https://testnet.binance.vision"
+				}
+				client := binance.NewClient(keys.APIKey, keys.SecretKey, baseURL)
+				if client != nil {
+					log.Printf("[DEBUG] getBinanceClientForUser: Created user-specific client for %s", userID)
+					return client
+				}
+			} else {
+				log.Printf("[DEBUG] getBinanceClientForUser: No keys found for user %s, err=%v", userID, err)
+			}
+		}
+	}
+
+	// No user API keys found - return nil (caller should return error)
+	log.Printf("[DEBUG] getBinanceClientForUser: No user API keys - user must configure keys in Settings")
 	return nil
 }
 

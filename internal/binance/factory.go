@@ -11,14 +11,11 @@ import (
 )
 
 // ClientFactory creates and manages per-user Binance clients
+// NOTE: All API keys are per-user, stored in database. No global/master API keys.
 type ClientFactory struct {
 	vault          *vault.Client
 	config         config.BinanceConfig
 	futuresConfig  config.FuturesConfig
-
-	// Master account credentials (for platform-managed trading)
-	masterClient        BinanceClient
-	masterFuturesClient FuturesClient
 
 	// Per-user client caches
 	spotClients    sync.Map // userID -> *clientEntry
@@ -45,6 +42,7 @@ type futuresClientEntry struct {
 }
 
 // NewClientFactory creates a new client factory
+// NOTE: All API keys are per-user, stored in database. No global/master API keys.
 func NewClientFactory(
 	vaultClient *vault.Client,
 	cfg config.BinanceConfig,
@@ -56,18 +54,6 @@ func NewClientFactory(
 		futuresConfig: futuresCfg,
 		clientTTL:     30 * time.Minute,
 		stopCleanup:   make(chan struct{}),
-	}
-
-	// Create master clients if credentials are provided
-	if cfg.APIKey != "" && cfg.SecretKey != "" {
-		masterClient := NewClient(cfg.APIKey, cfg.SecretKey, cfg.BaseURL)
-		factory.masterClient = masterClient
-
-		if futuresCfg.Enabled {
-			// Create master futures client
-			masterFuturesClient := NewFuturesClient(cfg.APIKey, cfg.SecretKey, futuresCfg.TestNet)
-			factory.masterFuturesClient = masterFuturesClient
-		}
 	}
 
 	// Start cleanup goroutine
@@ -149,24 +135,28 @@ func (f *ClientFactory) GetFuturesClientForUser(ctx context.Context, userID stri
 	return client, nil
 }
 
-// GetMasterClient returns the master spot client (for platform operations)
+// GetMasterClient is deprecated - all API keys are per-user
+// Returns nil to indicate no global/master client
 func (f *ClientFactory) GetMasterClient() BinanceClient {
-	return f.masterClient
+	return nil
 }
 
-// GetMasterFuturesClient returns the master futures client (for platform operations)
+// GetMasterFuturesClient is deprecated - all API keys are per-user
+// Returns nil to indicate no global/master client
 func (f *ClientFactory) GetMasterFuturesClient() FuturesClient {
-	return f.masterFuturesClient
+	return nil
 }
 
-// HasMasterClient returns true if a master client is configured
+// HasMasterClient is deprecated - always returns false
+// All API keys are per-user, stored in database
 func (f *ClientFactory) HasMasterClient() bool {
-	return f.masterClient != nil
+	return false
 }
 
-// HasMasterFuturesClient returns true if a master futures client is configured
+// HasMasterFuturesClient is deprecated - always returns false
+// All API keys are per-user, stored in database
 func (f *ClientFactory) HasMasterFuturesClient() bool {
-	return f.masterFuturesClient != nil
+	return false
 }
 
 // InvalidateClient removes a client from the cache
@@ -270,8 +260,6 @@ func (f *ClientFactory) Stats() FactoryStats {
 	return FactoryStats{
 		CachedSpotClients:    spotCount,
 		CachedFuturesClients: futuresCount,
-		HasMasterClient:      f.masterClient != nil,
-		HasMasterFutures:     f.masterFuturesClient != nil,
 		VaultEnabled:         f.vault.IsEnabled(),
 	}
 }
@@ -280,8 +268,6 @@ func (f *ClientFactory) Stats() FactoryStats {
 type FactoryStats struct {
 	CachedSpotClients    int  `json:"cached_spot_clients"`
 	CachedFuturesClients int  `json:"cached_futures_clients"`
-	HasMasterClient      bool `json:"has_master_client"`
-	HasMasterFutures     bool `json:"has_master_futures"`
 	VaultEnabled         bool `json:"vault_enabled"`
 }
 
@@ -324,22 +310,18 @@ func (m *UserClientManager) GetFuturesClient(ctx context.Context, userID string)
 	return client, nil
 }
 
-// GetMasterSpotClient returns the master spot client
+// GetMasterSpotClient is deprecated - all API keys are per-user
+// Returns mock client in dev mode, nil otherwise
 func (m *UserClientManager) GetMasterSpotClient() BinanceClient {
-	if m.factory.HasMasterClient() {
-		return m.factory.GetMasterClient()
-	}
 	if m.devMode {
 		return m.factory.GetOrCreateMockClient()
 	}
 	return nil
 }
 
-// GetMasterFuturesClient returns the master futures client
+// GetMasterFuturesClient is deprecated - all API keys are per-user
+// Returns mock client in dev mode, nil otherwise
 func (m *UserClientManager) GetMasterFuturesClient() FuturesClient {
-	if m.factory.HasMasterFuturesClient() {
-		return m.factory.GetMasterFuturesClient()
-	}
 	if m.devMode {
 		return m.factory.GetOrCreateMockFuturesClient()
 	}

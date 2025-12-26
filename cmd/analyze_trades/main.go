@@ -3,12 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"binance-trading-bot/internal/binance"
-
-	"github.com/joho/godotenv"
 )
 
 type SymbolStats struct {
@@ -25,26 +22,23 @@ type SymbolStats struct {
 }
 
 func main() {
-	// Get the executable directory and try loading .env from there
-	exe, _ := os.Executable()
-	exeDir := filepath.Dir(exe)
-
-	// Try multiple locations for .env
-	godotenv.Load()
-	godotenv.Load(".env")
-	godotenv.Load(filepath.Join(exeDir, ".env"))
-	godotenv.Load(filepath.Join(exeDir, "..", "..", ".env"))
-	godotenv.Load("D:\\Apps\\binance-trading-bot\\.env")
-
-	apiKey := os.Getenv("BINANCE_API_KEY")
-	apiSecret := os.Getenv("BINANCE_SECRET_KEY") // Note: .env uses SECRET_KEY not API_SECRET
-	testnet := os.Getenv("BINANCE_TESTNET") == "true" || os.Getenv("FUTURES_TESTNET") == "true"
-
-	if apiKey == "" || apiSecret == "" {
-		fmt.Println("❌ BINANCE_API_KEY and BINANCE_SECRET_KEY required in .env")
-		fmt.Printf("   API Key found: %v, Secret found: %v\n", apiKey != "", apiSecret != "")
+	// API keys are now per-user in the main application
+	// This CLI tool requires API keys as command-line arguments for standalone analysis
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: analyze_trades <API_KEY> <SECRET_KEY> [--testnet]")
+		fmt.Println("")
+		fmt.Println("NOTE: The main trading bot uses per-user API keys stored in the database.")
+		fmt.Println("      This is a standalone analysis tool that requires your keys directly.")
+		fmt.Println("")
+		fmt.Println("Example:")
+		fmt.Println("  analyze_trades your_api_key your_secret_key")
+		fmt.Println("  analyze_trades your_api_key your_secret_key --testnet")
 		os.Exit(1)
 	}
+
+	apiKey := os.Args[1]
+	apiSecret := os.Args[2]
+	testnet := len(os.Args) > 3 && os.Args[3] == "--testnet"
 
 	fmt.Println("=" + string(make([]byte, 79)))
 	fmt.Println("📊 BINANCE FUTURES TRADE HISTORY ANALYSIS")

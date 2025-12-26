@@ -307,234 +307,126 @@ type RedisConfig struct {
 }
 
 func Load() (*Config, error) {
-	// Try to load from environment variables first
-	apiKey := os.Getenv("BINANCE_API_KEY")
-	secretKey := os.Getenv("BINANCE_SECRET_KEY")
-
-	if apiKey == "" || secretKey == "" {
-		// Try to load from config file
-		return loadFromFile("config.json")
+	// First try to load base config from file
+	cfg, err := loadFromFile("config.json")
+	if err != nil {
+		// If no config file, start with empty config
+		cfg = &Config{}
 	}
 
-	// Create config from environment variables
-	return &Config{
-		BinanceConfig: BinanceConfig{
-			APIKey:    apiKey,
-			SecretKey: secretKey,
-			BaseURL:   getEnvOrDefault("BINANCE_BASE_URL", "https://api.binance.com"),
-			TestNet:   getEnvOrDefault("BINANCE_TESTNET", "false") == "true",
-			MockMode:  getEnvOrDefault("MOCK_MODE", "false") == "true",
-		},
-		ScreenerConfig: ScreenerConfig{
-			Enabled:           true,
-			Interval:          "15m",
-			MinVolume:         100000, // $100k
-			MinPriceChange:    2.0,    // 2%
-			QuoteCurrency:     "USDT",
-			MaxSymbols:        50,
-			ScreeningInterval: 60, // 1 minute
-		},
-		TradingConfig: TradingConfig{
-			MaxOpenPositions: 5,
-			MaxRiskPerTrade:  2.0, // 2%
-			DryRun:           getEnvOrDefault("TRADING_DRY_RUN", "false") == "true",
-		},
-		ScannerConfig: ScannerConfig{
-			Enabled:          getEnvOrDefault("SCANNER_ENABLED", "true") == "true",
-			ScanInterval:     60,   // 1 minute for live trading
-			MaxSymbols:       20,   // Reduced to minimize API calls
-			IncludeWatchlist: true,
-			CacheTTL:         300,  // 5 minutes cache
-			WorkerCount:      5,    // Reduced workers
-		},
-		NotificationConfig: NotificationConfig{
-			Enabled: getEnvOrDefault("NOTIFICATIONS_ENABLED", "false") == "true",
-			Telegram: TelegramConfig{
-				Enabled:  getEnvOrDefault("TELEGRAM_ENABLED", "false") == "true",
-				BotToken: getEnvOrDefault("TELEGRAM_BOT_TOKEN", ""),
-				ChatID:   getEnvOrDefault("TELEGRAM_CHAT_ID", ""),
-			},
-			Discord: DiscordConfig{
-				Enabled:    getEnvOrDefault("DISCORD_ENABLED", "false") == "true",
-				WebhookURL: getEnvOrDefault("DISCORD_WEBHOOK_URL", ""),
-			},
-		},
-		RiskConfig: RiskConfig{
-			MaxRiskPerTrade:        2.0,       // 2% per trade
-			MaxDailyDrawdown:       5.0,       // 5% max daily drawdown
-			MaxOpenPositions:       5,
-			PositionSizeMethod:     "percent", // Use percentage-based sizing
-			FixedPositionSize:      100.0,     // $100 if using fixed
-			UseTrailingStop:        true,
-			TrailingStopPercent:    1.0,       // 1% trailing distance
-			TrailingStopActivation: 1.5,       // Activate after 1.5% profit
-		},
-		LoggingConfig: LoggingConfig{
-			Level:       getEnvOrDefault("LOG_LEVEL", "INFO"),
-			Output:      getEnvOrDefault("LOG_OUTPUT", "stdout"),
-			JSONFormat:  getEnvOrDefault("LOG_JSON", "true") == "true",
-			IncludeFile: getEnvOrDefault("LOG_INCLUDE_FILE", "false") == "true",
-		},
-		AIConfig: AIConfig{
-			Enabled:          getEnvOrDefault("AI_ENABLED", "true") == "true",
-			LLMProvider:      getEnvOrDefault("AI_LLM_PROVIDER", "claude"),
-			ClaudeAPIKey:     getEnvOrDefault("AI_CLAUDE_API_KEY", ""),
-			OpenAIAPIKey:     getEnvOrDefault("AI_OPENAI_API_KEY", ""),
-			DeepSeekAPIKey:   getEnvOrDefault("AI_DEEPSEEK_API_KEY", ""),
-			LLMModel:         getEnvOrDefault("AI_LLM_MODEL", "claude-3-haiku-20240307"),
-			MLEnabled:        getEnvOrDefault("AI_ML_ENABLED", "true") == "true",
-			SentimentEnabled: getEnvOrDefault("AI_SENTIMENT_ENABLED", "false") == "true",
-		},
-		AutopilotConfig: AutopilotConfig{
-			Enabled:                 getEnvOrDefault("AUTOPILOT_ENABLED", "false") == "true",
-			RiskLevel:               getEnvOrDefault("AUTOPILOT_RISK_LEVEL", "moderate"),
-			MaxDailyTrades:          getEnvIntOrDefault("AUTOPILOT_MAX_DAILY_TRADES", 100),
-			MaxDailyLoss:            getEnvFloatOrDefault("AUTOPILOT_MAX_DAILY_LOSS", 5.0),
-			MaxPositionSize:         getEnvFloatOrDefault("AUTOPILOT_MAX_POSITION_SIZE", 2.0),
-			MinConfidence:           getEnvFloatOrDefault("AUTOPILOT_MIN_CONFIDENCE", 0.7),
-			RequireConfluence:       getEnvIntOrDefault("AUTOPILOT_REQUIRE_CONFLUENCE", 1),
-			MaxUSDAllocation:        getEnvFloatOrDefault("AUTOPILOT_MAX_USD_ALLOCATION", 1000.0),
-			ProfitReinvestPercent:   getEnvFloatOrDefault("AUTOPILOT_PROFIT_REINVEST_PERCENT", 50.0),
-			ProfitReinvestRiskLevel: getEnvOrDefault("AUTOPILOT_PROFIT_REINVEST_RISK", "aggressive"),
-		},
-		FuturesAutopilotConfig: FuturesAutopilotConfig{
-			Enabled:              getEnvOrDefault("FUTURES_AUTOPILOT_ENABLED", "false") == "true",
-			RiskLevel:            getEnvOrDefault("FUTURES_AUTOPILOT_RISK_LEVEL", "moderate"),
-			MaxDailyTrades:       getEnvIntOrDefault("FUTURES_AUTOPILOT_MAX_DAILY_TRADES", 50),
-			MaxDailyLoss:         getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_DAILY_LOSS", 3.0),
-			MaxPositionSize:      getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_POSITION_SIZE", 5.0),
-			MinConfidence:        getEnvFloatOrDefault("FUTURES_AUTOPILOT_MIN_CONFIDENCE", 0.7),
-			RequireConfluence:    getEnvIntOrDefault("FUTURES_AUTOPILOT_REQUIRE_CONFLUENCE", 1),
-			DefaultLeverage:      getEnvIntOrDefault("FUTURES_AUTOPILOT_DEFAULT_LEVERAGE", 5),
-			MaxLeverage:          getEnvIntOrDefault("FUTURES_AUTOPILOT_MAX_LEVERAGE", 20),
-			MarginType:           getEnvOrDefault("FUTURES_AUTOPILOT_MARGIN_TYPE", "CROSSED"),
-			PositionMode:         getEnvOrDefault("FUTURES_AUTOPILOT_POSITION_MODE", "ONE_WAY"),
-			LiquidationBuffer:    getEnvFloatOrDefault("FUTURES_AUTOPILOT_LIQUIDATION_BUFFER", 10.0),
-			MaxFundingRate:       getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_FUNDING_RATE", 0.1),
-			AllowShorts:          getEnvOrDefault("FUTURES_AUTOPILOT_ALLOW_SHORTS", "true") == "true",
-			AutoReduceRisk:       getEnvOrDefault("FUTURES_AUTOPILOT_AUTO_REDUCE_RISK", "true") == "true",
-			TakeProfitPercent:     getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT", 2.0),
-			TakeProfitPercent1:    getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT_1", 10.0),
-			TakeProfitPercent2:    getEnvFloatOrDefault("FUTURES_AUTOPILOT_TAKE_PROFIT_2", 30.0),
-			StopLossPercent:       getEnvFloatOrDefault("FUTURES_AUTOPILOT_STOP_LOSS", 12.0),
-			TrailingStopEnabled:   getEnvOrDefault("FUTURES_AUTOPILOT_TRAILING_STOP_ENABLED", "true") == "true",
-			TrailingStopPercent:   getEnvFloatOrDefault("FUTURES_AUTOPILOT_TRAILING_STOP_PERCENT", 8.0),
-			TrailingStopActivationPercent: getEnvFloatOrDefault("FUTURES_AUTOPILOT_TRAILING_ACTIVATION_PERCENT", 60.0),
-			DecisionIntervalSecs: getEnvIntOrDefault("FUTURES_AUTOPILOT_DECISION_INTERVAL", 5),
-			// New allocation and profit reinvestment settings
-			MaxUSDAllocation:        getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_USD_ALLOCATION", 2500.0),
-			ProfitReinvestPercent:   getEnvFloatOrDefault("FUTURES_AUTOPILOT_PROFIT_REINVEST_PERCENT", 50.0),
-			ProfitReinvestRiskLevel: getEnvOrDefault("FUTURES_AUTOPILOT_PROFIT_REINVEST_RISK", "aggressive"),
-			// Position averaging settings
-			AveragingEnabled:         getEnvOrDefault("FUTURES_AUTOPILOT_AVERAGING_ENABLED", "true") == "true",
-			MaxEntriesPerPosition:    getEnvIntOrDefault("FUTURES_AUTOPILOT_MAX_ENTRIES", 3),
-			AveragingMinConfidence:   getEnvFloatOrDefault("FUTURES_AUTOPILOT_AVG_MIN_CONFIDENCE", 0.80),
-			AveragingMinPriceImprove: getEnvFloatOrDefault("FUTURES_AUTOPILOT_AVG_MIN_PRICE_IMPROVE", 1.0),
-			AveragingCooldownMins:    getEnvIntOrDefault("FUTURES_AUTOPILOT_AVG_COOLDOWN", 15),
-			AveragingNewsWeight:      getEnvFloatOrDefault("FUTURES_AUTOPILOT_AVG_NEWS_WEIGHT", 0.3),
-			// Default popular trading symbols for futures autopilot
-			AllowedSymbols: []string{
-				"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-				"DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT",
-				"DOTUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "NEARUSDT",
-			},
-		},
-		ScalpingConfig: ScalpingConfig{
-			Enabled:          getEnvOrDefault("SCALPING_ENABLED", "true") == "true",
-			Timeframes:       []string{"1s", "2s", "5s", "10s", "30s", "60s"},
-			MinProfitPercent: getEnvFloatOrDefault("SCALPING_MIN_PROFIT", 0.05),
-			MaxLossPercent:   getEnvFloatOrDefault("SCALPING_MAX_LOSS", 0.1),
-			MaxHoldSeconds:   getEnvIntOrDefault("SCALPING_MAX_HOLD_TIME", 60),
-			MaxConcurrent:    getEnvIntOrDefault("SCALPING_MAX_CONCURRENT", 3),
-			MinVolume:        getEnvFloatOrDefault("SCALPING_MIN_VOLUME", 100000),
-			UseMLPrediction:  getEnvOrDefault("SCALPING_USE_ML", "true") == "true",
-		},
-		BigCandleConfig: BigCandleConfig{
-			Enabled:            getEnvOrDefault("BIG_CANDLE_ENABLED", "true") == "true",
-			SizeMultiplier:     getEnvFloatOrDefault("BIG_CANDLE_MULTIPLIER", 1.5),
-			LookbackPeriod:     getEnvIntOrDefault("BIG_CANDLE_LOOKBACK", 20),
-			VolumeConfirmation: getEnvOrDefault("BIG_CANDLE_VOLUME_CONFIRM", "true") == "true",
-			ReactImmediately:   getEnvOrDefault("BIG_CANDLE_REACT_IMMEDIATELY", "true") == "true",
-			MinVolumeRatio:     getEnvFloatOrDefault("BIG_CANDLE_MIN_VOLUME_RATIO", 1.5),
-		},
-		CircuitBreakerConfig: CircuitBreakerConfig{
-			Enabled:              getEnvOrDefault("CIRCUIT_ENABLED", "true") == "true",
-			MaxLossPerHour:       getEnvFloatOrDefault("CIRCUIT_MAX_LOSS_PER_HOUR", 3.0),
-			MaxConsecutiveLosses: getEnvIntOrDefault("CIRCUIT_MAX_CONSECUTIVE_LOSSES", 5),
-			CooldownMinutes:      getEnvIntOrDefault("CIRCUIT_COOLDOWN_MINUTES", 30),
-			MaxTradesPerMinute:   getEnvIntOrDefault("CIRCUIT_MAX_TRADES_PER_MINUTE", 10),
-			MaxDailyLoss:         getEnvFloatOrDefault("CIRCUIT_MAX_DAILY_LOSS", 5.0),
-			MaxDailyTrades:       getEnvIntOrDefault("CIRCUIT_MAX_DAILY_TRADES", 100),
-		},
-		FuturesConfig: FuturesConfig{
-			Enabled:           getEnvOrDefault("FUTURES_ENABLED", "false") == "true",
-			TestNet:           getEnvOrDefault("FUTURES_TESTNET", "true") == "true",
-			DefaultLeverage:   getEnvIntOrDefault("FUTURES_DEFAULT_LEVERAGE", 10),
-			DefaultMarginType: getEnvOrDefault("FUTURES_DEFAULT_MARGIN_TYPE", "CROSSED"),
-			PositionMode:      getEnvOrDefault("FUTURES_POSITION_MODE", "ONE_WAY"),
-			MaxLeverage:       getEnvIntOrDefault("FUTURES_MAX_LEVERAGE", 125),
-		},
-		// Multi-tenant SaaS configs
-		ServerConfig: ServerConfig{
-			Port:            getEnvIntOrDefault("SERVER_PORT", 8080),
-			Host:            getEnvOrDefault("SERVER_HOST", "0.0.0.0"),
-			AllowedOrigins:  getEnvOrDefault("SERVER_ALLOWED_ORIGINS", "*"),
-			TLSEnabled:      getEnvOrDefault("SERVER_TLS_ENABLED", "false") == "true",
-			TLSCertFile:     getEnvOrDefault("SERVER_TLS_CERT", ""),
-			TLSKeyFile:      getEnvOrDefault("SERVER_TLS_KEY", ""),
-			ReadTimeout:     getEnvIntOrDefault("SERVER_READ_TIMEOUT", 30),
-			WriteTimeout:    getEnvIntOrDefault("SERVER_WRITE_TIMEOUT", 30),
-			ShutdownTimeout: getEnvIntOrDefault("SERVER_SHUTDOWN_TIMEOUT", 10),
-		},
-		AuthConfig: AuthConfig{
-			Enabled:                  getEnvOrDefault("AUTH_ENABLED", "false") == "true",
-			JWTSecret:                getEnvOrDefault("AUTH_JWT_SECRET", ""),
-			AccessTokenDuration:      getEnvDurationOrDefault("AUTH_ACCESS_TOKEN_DURATION", 15*time.Minute),
-			RefreshTokenDuration:     getEnvDurationOrDefault("AUTH_REFRESH_TOKEN_DURATION", 7*24*time.Hour),
-			PasswordResetDuration:    getEnvDurationOrDefault("AUTH_PASSWORD_RESET_DURATION", 1*time.Hour),
-			MinPasswordLength:        getEnvIntOrDefault("AUTH_MIN_PASSWORD_LENGTH", 8),
-			RequireEmailVerification: getEnvOrDefault("AUTH_REQUIRE_EMAIL_VERIFICATION", "false") == "true",
-			MaxLoginAttempts:         getEnvIntOrDefault("AUTH_MAX_LOGIN_ATTEMPTS", 5),
-			LockoutDuration:          getEnvDurationOrDefault("AUTH_LOCKOUT_DURATION", 15*time.Minute),
-			SessionCleanupInterval:   getEnvDurationOrDefault("AUTH_SESSION_CLEANUP_INTERVAL", 1*time.Hour),
-			AllowMultipleSessions:    getEnvOrDefault("AUTH_ALLOW_MULTIPLE_SESSIONS", "true") == "true",
-			MaxSessionsPerUser:       getEnvIntOrDefault("AUTH_MAX_SESSIONS_PER_USER", 10),
-		},
-		VaultConfig: VaultConfig{
-			Enabled:    getEnvOrDefault("VAULT_ENABLED", "false") == "true",
-			Address:    getEnvOrDefault("VAULT_ADDR", "http://localhost:8200"),
-			Token:      getEnvOrDefault("VAULT_TOKEN", ""),
-			MountPath:  getEnvOrDefault("VAULT_MOUNT_PATH", "secret"),
-			SecretPath: getEnvOrDefault("VAULT_SECRET_PATH", "trading-bot/api-keys"),
-			TLSEnabled: getEnvOrDefault("VAULT_TLS_ENABLED", "false") == "true",
-			CACert:     getEnvOrDefault("VAULT_CA_CERT", ""),
-		},
-		BillingConfig: BillingConfig{
-			Enabled:               getEnvOrDefault("BILLING_ENABLED", "false") == "true",
-			StripeSecretKey:       getEnvOrDefault("STRIPE_SECRET_KEY", ""),
-			StripePublishableKey:  getEnvOrDefault("STRIPE_PUBLISHABLE_KEY", ""),
-			StripeWebhookSecret:   getEnvOrDefault("STRIPE_WEBHOOK_SECRET", ""),
-			CryptoPaymentsEnabled: getEnvOrDefault("BILLING_CRYPTO_ENABLED", "false") == "true",
-			CryptoWalletAddress:   getEnvOrDefault("BILLING_CRYPTO_WALLET", ""),
-			SettlementDayOfWeek:   getEnvIntOrDefault("BILLING_SETTLEMENT_DAY", 0), // Sunday
-			SettlementHourUTC:     getEnvIntOrDefault("BILLING_SETTLEMENT_HOUR", 0),
-			MinimumPayout:         getEnvFloatOrDefault("BILLING_MIN_PAYOUT", 10.0),
-			GracePeriodDays:       getEnvIntOrDefault("BILLING_GRACE_PERIOD_DAYS", 7),
-			LateFeePercent:        getEnvFloatOrDefault("BILLING_LATE_FEE_PERCENT", 5.0),
-			FreeTierProfitShare:   getEnvFloatOrDefault("BILLING_FREE_PROFIT_SHARE", 30.0),
-			TraderTierProfitShare: getEnvFloatOrDefault("BILLING_TRADER_PROFIT_SHARE", 20.0),
-			ProTierProfitShare:    getEnvFloatOrDefault("BILLING_PRO_PROFIT_SHARE", 12.0),
-			WhaleTierProfitShare:  getEnvFloatOrDefault("BILLING_WHALE_PROFIT_SHARE", 5.0),
-		},
-		RedisConfig: RedisConfig{
-			Enabled:  getEnvOrDefault("REDIS_ENABLED", "false") == "true",
-			Address:  getEnvOrDefault("REDIS_ADDR", "localhost:6379"),
-			Password: getEnvOrDefault("REDIS_PASSWORD", ""),
-			DB:       getEnvIntOrDefault("REDIS_DB", 0),
-			PoolSize: getEnvIntOrDefault("REDIS_POOL_SIZE", 10),
-		},
-	}, nil
+	// Apply environment variable overrides (these take precedence)
+	applyEnvOverrides(cfg)
+
+	return cfg, nil
 }
+
+// applyEnvOverrides applies environment variable overrides to the config
+// Note: BINANCE_API_KEY and BINANCE_SECRET_KEY are NOT read from environment.
+// All API keys are per-user and stored in the database.
+func applyEnvOverrides(cfg *Config) {
+	// Binance config - only non-credential settings from environment
+	cfg.BinanceConfig.BaseURL = getEnvOrDefault("BINANCE_BASE_URL", cfg.BinanceConfig.BaseURL)
+	if cfg.BinanceConfig.BaseURL == "" {
+		cfg.BinanceConfig.BaseURL = "https://api.binance.com"
+	}
+	cfg.BinanceConfig.TestNet = getEnvOrDefault("BINANCE_TESTNET", "false") == "true"
+	cfg.BinanceConfig.MockMode = getEnvOrDefault("MOCK_MODE", "false") == "true"
+
+	// Trading config
+	cfg.TradingConfig.DryRun = getEnvOrDefault("TRADING_DRY_RUN", "false") == "true"
+
+	// Scanner config
+	cfg.ScannerConfig.Enabled = getEnvOrDefault("SCANNER_ENABLED", "true") == "true"
+
+	// Notification config
+	cfg.NotificationConfig.Enabled = getEnvOrDefault("NOTIFICATIONS_ENABLED", "false") == "true"
+	cfg.NotificationConfig.Telegram.Enabled = getEnvOrDefault("TELEGRAM_ENABLED", "false") == "true"
+	cfg.NotificationConfig.Telegram.BotToken = getEnvOrDefault("TELEGRAM_BOT_TOKEN", cfg.NotificationConfig.Telegram.BotToken)
+	cfg.NotificationConfig.Telegram.ChatID = getEnvOrDefault("TELEGRAM_CHAT_ID", cfg.NotificationConfig.Telegram.ChatID)
+	cfg.NotificationConfig.Discord.Enabled = getEnvOrDefault("DISCORD_ENABLED", "false") == "true"
+	cfg.NotificationConfig.Discord.WebhookURL = getEnvOrDefault("DISCORD_WEBHOOK_URL", cfg.NotificationConfig.Discord.WebhookURL)
+
+	// Logging config
+	cfg.LoggingConfig.Level = getEnvOrDefault("LOG_LEVEL", "INFO")
+	cfg.LoggingConfig.Output = getEnvOrDefault("LOG_OUTPUT", "stdout")
+	cfg.LoggingConfig.JSONFormat = getEnvOrDefault("LOG_JSON", "true") == "true"
+	cfg.LoggingConfig.IncludeFile = getEnvOrDefault("LOG_INCLUDE_FILE", "false") == "true"
+
+	// AI config
+	cfg.AIConfig.Enabled = getEnvOrDefault("AI_ENABLED", "true") == "true"
+	cfg.AIConfig.LLMProvider = getEnvOrDefault("AI_LLM_PROVIDER", "claude")
+	cfg.AIConfig.ClaudeAPIKey = getEnvOrDefault("AI_CLAUDE_API_KEY", cfg.AIConfig.ClaudeAPIKey)
+	cfg.AIConfig.OpenAIAPIKey = getEnvOrDefault("AI_OPENAI_API_KEY", cfg.AIConfig.OpenAIAPIKey)
+	cfg.AIConfig.DeepSeekAPIKey = getEnvOrDefault("AI_DEEPSEEK_API_KEY", cfg.AIConfig.DeepSeekAPIKey)
+	cfg.AIConfig.LLMModel = getEnvOrDefault("AI_LLM_MODEL", "claude-3-haiku-20240307")
+	cfg.AIConfig.MLEnabled = getEnvOrDefault("AI_ML_ENABLED", "true") == "true"
+	cfg.AIConfig.SentimentEnabled = getEnvOrDefault("AI_SENTIMENT_ENABLED", "true") == "true"
+
+	// Server config
+	cfg.ServerConfig.Port = getEnvIntOrDefault("WEB_PORT", 8080)
+	cfg.ServerConfig.Host = getEnvOrDefault("WEB_HOST", "0.0.0.0")
+	cfg.ServerConfig.AllowedOrigins = getEnvOrDefault("SERVER_ALLOWED_ORIGINS", "*")
+	cfg.ServerConfig.TLSEnabled = getEnvOrDefault("SERVER_TLS_ENABLED", "false") == "true"
+	cfg.ServerConfig.TLSCertFile = getEnvOrDefault("SERVER_TLS_CERT", "")
+	cfg.ServerConfig.TLSKeyFile = getEnvOrDefault("SERVER_TLS_KEY", "")
+	cfg.ServerConfig.ReadTimeout = getEnvIntOrDefault("SERVER_READ_TIMEOUT", 30)
+	cfg.ServerConfig.WriteTimeout = getEnvIntOrDefault("SERVER_WRITE_TIMEOUT", 30)
+	cfg.ServerConfig.ShutdownTimeout = getEnvIntOrDefault("SERVER_SHUTDOWN_TIMEOUT", 10)
+
+	// Auth config - ALWAYS apply from environment
+	cfg.AuthConfig.Enabled = getEnvOrDefault("AUTH_ENABLED", "false") == "true"
+	cfg.AuthConfig.JWTSecret = getEnvOrDefault("AUTH_JWT_SECRET", cfg.AuthConfig.JWTSecret)
+	cfg.AuthConfig.AccessTokenDuration = getEnvDurationOrDefault("AUTH_ACCESS_TOKEN_DURATION", 15*time.Minute)
+	cfg.AuthConfig.RefreshTokenDuration = getEnvDurationOrDefault("AUTH_REFRESH_TOKEN_DURATION", 7*24*time.Hour)
+	cfg.AuthConfig.PasswordResetDuration = getEnvDurationOrDefault("AUTH_PASSWORD_RESET_DURATION", 1*time.Hour)
+	cfg.AuthConfig.MinPasswordLength = getEnvIntOrDefault("AUTH_MIN_PASSWORD_LENGTH", 8)
+	cfg.AuthConfig.RequireEmailVerification = getEnvOrDefault("AUTH_REQUIRE_EMAIL_VERIFICATION", "false") == "true"
+	cfg.AuthConfig.MaxLoginAttempts = getEnvIntOrDefault("AUTH_MAX_LOGIN_ATTEMPTS", 5)
+	cfg.AuthConfig.LockoutDuration = getEnvDurationOrDefault("AUTH_LOCKOUT_DURATION", 15*time.Minute)
+	cfg.AuthConfig.SessionCleanupInterval = getEnvDurationOrDefault("AUTH_SESSION_CLEANUP_INTERVAL", 1*time.Hour)
+	cfg.AuthConfig.AllowMultipleSessions = getEnvOrDefault("AUTH_ALLOW_MULTIPLE_SESSIONS", "true") == "true"
+	cfg.AuthConfig.MaxSessionsPerUser = getEnvIntOrDefault("AUTH_MAX_SESSIONS_PER_USER", 10)
+
+	// Vault config
+	cfg.VaultConfig.Enabled = getEnvOrDefault("VAULT_ENABLED", "false") == "true"
+	cfg.VaultConfig.Address = getEnvOrDefault("VAULT_ADDR", "http://localhost:8200")
+	cfg.VaultConfig.Token = getEnvOrDefault("VAULT_TOKEN", cfg.VaultConfig.Token)
+	cfg.VaultConfig.MountPath = getEnvOrDefault("VAULT_MOUNT_PATH", "secret")
+	cfg.VaultConfig.SecretPath = getEnvOrDefault("VAULT_SECRET_PATH", "trading-bot/api-keys")
+	cfg.VaultConfig.TLSEnabled = getEnvOrDefault("VAULT_TLS_ENABLED", "false") == "true"
+
+	// Futures config
+	cfg.FuturesConfig.Enabled = getEnvOrDefault("FUTURES_ENABLED", "true") == "true"
+	cfg.FuturesConfig.TestNet = getEnvOrDefault("FUTURES_TESTNET", "false") == "true"
+	cfg.FuturesConfig.DefaultLeverage = getEnvIntOrDefault("FUTURES_DEFAULT_LEVERAGE", 10)
+	cfg.FuturesConfig.DefaultMarginType = getEnvOrDefault("FUTURES_DEFAULT_MARGIN_TYPE", "CROSSED")
+	cfg.FuturesConfig.PositionMode = getEnvOrDefault("FUTURES_POSITION_MODE", "ONE_WAY")
+	cfg.FuturesConfig.MaxLeverage = getEnvIntOrDefault("FUTURES_MAX_LEVERAGE", 125)
+
+	// Futures autopilot config
+	cfg.FuturesAutopilotConfig.Enabled = getEnvOrDefault("FUTURES_AUTOPILOT_ENABLED", "true") == "true"
+	cfg.FuturesAutopilotConfig.RiskLevel = getEnvOrDefault("FUTURES_AUTOPILOT_RISK_LEVEL", "moderate")
+	cfg.FuturesAutopilotConfig.MaxDailyTrades = getEnvIntOrDefault("FUTURES_AUTOPILOT_MAX_DAILY_TRADES", 10)
+	cfg.FuturesAutopilotConfig.MaxDailyLoss = getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_DAILY_LOSS", 3.0)
+	cfg.FuturesAutopilotConfig.MaxPositionSize = getEnvFloatOrDefault("FUTURES_AUTOPILOT_MAX_POSITION_SIZE", 5.0)
+	cfg.FuturesAutopilotConfig.MinConfidence = getEnvFloatOrDefault("FUTURES_AUTOPILOT_MIN_CONFIDENCE", 0.6)
+	cfg.FuturesAutopilotConfig.DefaultLeverage = getEnvIntOrDefault("FUTURES_AUTOPILOT_DEFAULT_LEVERAGE", 5)
+	cfg.FuturesAutopilotConfig.MaxLeverage = getEnvIntOrDefault("FUTURES_AUTOPILOT_MAX_LEVERAGE", 20)
+
+	// Circuit breaker config
+	cfg.CircuitBreakerConfig.Enabled = getEnvOrDefault("CIRCUIT_BREAKER_ENABLED", "true") == "true"
+	cfg.CircuitBreakerConfig.MaxLossPerHour = getEnvFloatOrDefault("CIRCUIT_MAX_LOSS_PER_HOUR", 3.0)
+	cfg.CircuitBreakerConfig.MaxConsecutiveLosses = getEnvIntOrDefault("CIRCUIT_MAX_CONSECUTIVE_LOSSES", 5)
+	cfg.CircuitBreakerConfig.CooldownMinutes = getEnvIntOrDefault("CIRCUIT_COOLDOWN_MINUTES", 30)
+
+	// Billing config
+	cfg.BillingConfig.Enabled = getEnvOrDefault("BILLING_ENABLED", "false") == "true"
+	cfg.BillingConfig.StripeSecretKey = getEnvOrDefault("STRIPE_SECRET_KEY", cfg.BillingConfig.StripeSecretKey)
+	cfg.BillingConfig.StripePublishableKey = getEnvOrDefault("STRIPE_PUBLISHABLE_KEY", cfg.BillingConfig.StripePublishableKey)
+	cfg.BillingConfig.StripeWebhookSecret = getEnvOrDefault("STRIPE_WEBHOOK_SECRET", cfg.BillingConfig.StripeWebhookSecret)
+
+}
+
 
 func loadFromFile(filename string) (*Config, error) {
 	file, err := os.ReadFile(filename)

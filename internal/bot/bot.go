@@ -55,25 +55,15 @@ type Order struct {
 }
 
 func NewTradingBot(cfg *config.Config, repo *database.Repository, eventBus *events.EventBus) (*TradingBot, error) {
+	// NOTE: TradingBot is the legacy spot trading implementation.
+	// All API keys are per-user and stored in the database.
+	// For real trading, use Ginie Futures Autopilot which creates clients per-request from user keys.
+	// This legacy bot always uses mock client for paper trading simulation.
 	var client binance.BinanceClient
 
-	if cfg.BinanceConfig.MockMode {
-		// Use mock client for development/testing when Binance API is unavailable
-		log.Println("Using MOCK MODE - Binance API calls will use simulated data")
-		client = binance.NewMockClient()
-	} else {
-		// Use real Binance client
-		baseURL := cfg.BinanceConfig.BaseURL
-		if cfg.BinanceConfig.TestNet {
-			baseURL = "https://testnet.binance.vision"
-		}
-
-		client = binance.NewClient(
-			cfg.BinanceConfig.APIKey,
-			cfg.BinanceConfig.SecretKey,
-			baseURL,
-		)
-	}
+	log.Println("TradingBot: Using mock client (legacy spot bot)")
+	log.Println("TradingBot: For real trading, use Ginie Futures Autopilot with your API keys from Settings")
+	client = binance.NewMockClient()
 
 	return &TradingBot{
 		client:            client,

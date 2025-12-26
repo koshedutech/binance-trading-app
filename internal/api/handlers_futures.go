@@ -113,7 +113,7 @@ type SetPositionModeRequest struct {
 
 // handleGetFuturesAccountInfo returns futures account information
 func (s *Server) handleGetFuturesAccountInfo(c *gin.Context) {
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -130,7 +130,7 @@ func (s *Server) handleGetFuturesAccountInfo(c *gin.Context) {
 
 // handleGetFuturesPositions returns all futures positions
 func (s *Server) handleGetFuturesPositions(c *gin.Context) {
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -235,7 +235,7 @@ func (s *Server) handleSetLeverage(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -266,7 +266,7 @@ func (s *Server) handleSetMarginType(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -296,7 +296,7 @@ func (s *Server) handleSetPositionMode(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -318,7 +318,7 @@ func (s *Server) handleSetPositionMode(c *gin.Context) {
 
 // handleGetPositionMode gets current position mode
 func (s *Server) handleGetPositionMode(c *gin.Context) {
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -355,7 +355,7 @@ func (s *Server) handlePlaceFuturesOrder(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -481,7 +481,7 @@ func (s *Server) handleCancelFuturesOrder(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -500,7 +500,7 @@ func (s *Server) handleCancelFuturesOrder(c *gin.Context) {
 func (s *Server) handleCancelAllFuturesOrders(c *gin.Context) {
 	symbol := c.Param("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -519,7 +519,7 @@ func (s *Server) handleCancelAllFuturesOrders(c *gin.Context) {
 func (s *Server) handleGetFuturesOpenOrders(c *gin.Context) {
 	symbol := c.Query("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -536,7 +536,7 @@ func (s *Server) handleGetFuturesOpenOrders(c *gin.Context) {
 
 // handleGetAllFuturesOrders returns all open orders (regular + conditional/algo)
 func (s *Server) handleGetAllFuturesOrders(c *gin.Context) {
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -567,7 +567,7 @@ func (s *Server) handleGetAllFuturesOrders(c *gin.Context) {
 func (s *Server) handleCloseFuturesPosition(c *gin.Context) {
 	symbol := c.Param("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -626,7 +626,7 @@ func (s *Server) handleCloseFuturesPosition(c *gin.Context) {
 func (s *Server) handleGetPositionOrders(c *gin.Context) {
 	symbol := c.Param("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -761,7 +761,7 @@ func (s *Server) handleCancelAlgoOrder(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -784,7 +784,7 @@ func (s *Server) handleCancelAlgoOrder(c *gin.Context) {
 func (s *Server) handleCancelAllAlgoOrders(c *gin.Context) {
 	symbol := c.Param("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -818,7 +818,7 @@ func (s *Server) handleSetPositionTPSL(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -945,7 +945,7 @@ func (s *Server) handleSetPositionTPSL(c *gin.Context) {
 func (s *Server) handleGetFundingRate(c *gin.Context) {
 	symbol := c.Param("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -970,7 +970,7 @@ func (s *Server) handleGetOrderBookDepth(c *gin.Context) {
 		limit = 20
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -987,7 +987,7 @@ func (s *Server) handleGetOrderBookDepth(c *gin.Context) {
 
 // handleGetFuturesSymbols returns available futures symbols
 func (s *Server) handleGetFuturesSymbols(c *gin.Context) {
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1088,7 +1088,7 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1282,7 +1282,7 @@ func (s *Server) handleGetTradeSourceStats(c *gin.Context) {
 	}
 
 	// Get futures client to fetch actual trades from Binance
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusOK, gin.H{
 			"ai":       stats["ai"],
@@ -1407,7 +1407,7 @@ func (s *Server) handleGetFuturesAccountSettings(c *gin.Context) {
 func (s *Server) handleGetMarkPrice(c *gin.Context) {
 	symbol := c.Param("symbol")
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1435,7 +1435,7 @@ func (s *Server) handleGetFuturesKlines(c *gin.Context) {
 
 	limit, _ := strconv.Atoi(limitStr)
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1459,7 +1459,7 @@ func (s *Server) handleGetFuturesWalletBalance(c *gin.Context) {
 		isSimulated = settingsAPI.GetDryRunMode()
 	}
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1498,7 +1498,7 @@ func (s *Server) handleGetFuturesWalletBalance(c *gin.Context) {
 
 // handleCloseAllFuturesPositions closes all open futures positions (PANIC BUTTON)
 func (s *Server) handleCloseAllFuturesPositions(c *gin.Context) {
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1586,7 +1586,7 @@ func (s *Server) handleGetFuturesAccountTrades(c *gin.Context) {
 	limitStr := c.DefaultQuery("limit", "50")
 	limit, _ := strconv.Atoi(limitStr)
 
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
 		return
@@ -1646,10 +1646,58 @@ func (s *Server) handleGetFuturesAccountTrades(c *gin.Context) {
 // ==================== HELPER FUNCTIONS ====================
 
 // getFuturesClient returns the futures client from botAPI if available
+// This uses the global client configured at startup
 func (s *Server) getFuturesClient() binance.FuturesClient {
 	if futuresAPI, ok := s.botAPI.(FuturesAPI); ok {
 		return futuresAPI.GetFuturesClient()
 	}
+	return nil
+}
+
+// getFuturesClientForUser returns a futures client for the authenticated user
+// User must have API keys configured in the database - no global fallback
+// Returns nil if user has no API keys (caller should return error to user)
+func (s *Server) getFuturesClientForUser(c *gin.Context) binance.FuturesClient {
+	// Check if in paper trading mode - use mock client
+	if s.botAPI != nil {
+		if settingsAPI, ok := s.botAPI.(SettingsAPI); ok {
+			if settingsAPI.GetDryRunMode() {
+				log.Printf("[DEBUG] getFuturesClientForUser: Paper trading mode, using mock client")
+				return s.getFuturesClient() // Returns mock client in paper mode
+			}
+		}
+	}
+
+	// Live mode - must use user-specific keys from database
+	if s.authEnabled && s.apiKeyService != nil {
+		userID := s.getUserID(c)
+		log.Printf("[DEBUG] getFuturesClientForUser: authEnabled=%v, userID=%s", s.authEnabled, userID)
+		if userID != "" {
+			ctx := c.Request.Context()
+			// Try mainnet first, then testnet
+			keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
+			if err != nil {
+				log.Printf("[DEBUG] getFuturesClientForUser: mainnet key lookup failed: %v, trying testnet", err)
+				// Try testnet
+				keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
+			}
+			if err == nil && keys != nil && keys.APIKey != "" && keys.SecretKey != "" {
+				log.Printf("[DEBUG] getFuturesClientForUser: Found user keys, creating client (testnet=%v, keyLen=%d)", keys.IsTestnet, len(keys.APIKey))
+				// Create user-specific futures client
+				client := binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
+				if client != nil {
+					return client
+				}
+			} else {
+				log.Printf("[DEBUG] getFuturesClientForUser: No valid keys found, err=%v, keys=%v", err, keys != nil)
+			}
+		}
+	} else {
+		log.Printf("[DEBUG] getFuturesClientForUser: auth not enabled or no apiKeyService (authEnabled=%v, hasService=%v)", s.authEnabled, s.apiKeyService != nil)
+	}
+
+	// No user API keys found - return nil (caller should return error)
+	log.Printf("[DEBUG] getFuturesClientForUser: No user API keys - user must configure keys in Settings")
 	return nil
 }
 

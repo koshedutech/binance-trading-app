@@ -10,13 +10,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/joho/godotenv"
-
 	"binance-trading-bot/config"
 	"binance-trading-bot/internal/ai/llm"
 	"binance-trading-bot/internal/ai/ml"
 	"binance-trading-bot/internal/ai/sentiment"
 	"binance-trading-bot/internal/api"
+	"binance-trading-bot/internal/apikeys"
 	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/billing"
@@ -25,6 +24,7 @@ import (
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/continuous"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/email"
 	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/license"
 	"binance-trading-bot/internal/logging"
@@ -38,14 +38,7 @@ import (
 )
 
 func main() {
-	// Load .env file if it exists
-	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, using environment variables")
-	} else {
-		log.Println(".env file loaded successfully")
-	}
-
-	// Load configuration
+	// Load configuration from environment variables
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
@@ -152,20 +145,32 @@ func main() {
 			log.Printf("Warning: Multi-tenant migrations failed: %v", err)
 		}
 		logger.Info("Multi-tenant migrations completed")
+
+		// Seed admin user with proper password
+		if err := auth.SeedAdminUser(ctx, db); err != nil {
+			log.Printf("Warning: Failed to seed admin user: %v", err)
+		} else {
+			logger.Info("Admin user seeded successfully")
+		}
 	}
 
-	// Initialize Futures clients - create both mock and real for dynamic switching
-	var futuresMockClient, futuresRealClient binance.FuturesClient
+	// Create repository early for API key service
+	earlyRepo := database.NewRepository(db)
+
+	// Initialize API Key Service for user-specific keys from database
+	_ = apikeys.NewService(earlyRepo) // Used by api.Server internally, just validate it works
+	logger.Info("API Key Service initialized (using user-stored keys from database)")
+
+	// Initialize Futures clients - NO GLOBAL API KEYS
+	// All API keys are per-user and stored in the database
+	// Real client will be created per-request based on user's stored keys
+	var futuresMockClient binance.FuturesClient
 	if cfg.FuturesConfig.Enabled {
-		// Always create mock client for paper trading
+		logger.Info("Futures enabled - real client will be created per-request from user database keys")
+
+		// Create mock client for paper trading mode
 		priceProvider := func(symbol string) (float64, error) {
-			// Try to get real price from real client if available
-			if futuresRealClient != nil {
-				if price, err := futuresRealClient.GetFuturesCurrentPrice(symbol); err == nil {
-					return price, nil
-				}
-			}
-			// Fallback to default mock prices
+			// Default mock prices for paper trading
 			mockPrices := map[string]float64{
 				"BTCUSDT": 45000.0,
 				"ETHUSDT": 2500.0,
@@ -178,20 +183,6 @@ func main() {
 		}
 		futuresMockClient = binance.NewFuturesMockClient(10000.0, priceProvider)
 		logger.Info("Futures mock client initialized for paper trading")
-
-		// Always create real client for live trading (if API keys are provided)
-		if cfg.BinanceConfig.APIKey != "" && cfg.BinanceConfig.SecretKey != "" {
-			futuresRealClient = binance.NewFuturesClient(
-				cfg.BinanceConfig.APIKey,
-				cfg.BinanceConfig.SecretKey,
-				cfg.FuturesConfig.TestNet,
-			)
-			logger.Info("Futures real client initialized",
-				"testnet", cfg.FuturesConfig.TestNet,
-				"default_leverage", cfg.FuturesConfig.DefaultLeverage)
-		} else {
-			logger.Warn("Futures real client not initialized - API keys not provided")
-		}
 	}
 
 	// Initialize Market Data Cache for WebSocket data
@@ -201,26 +192,15 @@ func main() {
 		logger.Info("Market data cache initialized")
 	}
 
-	// Initialize Spot clients - create both mock and real for dynamic switching
-	var spotMockClient, spotRealClient binance.BinanceClient
+	// Initialize Spot clients - NO GLOBAL API KEYS
+	// Real client will be created per-request from user database keys
+	var spotMockClient binance.BinanceClient
 	spotMockClient = binance.NewMockClient()
 	logger.Info("Spot mock client initialized for paper trading")
+	logger.Info("Spot enabled - real client will be created per-request from user database keys")
 
-	if cfg.BinanceConfig.APIKey != "" && cfg.BinanceConfig.SecretKey != "" {
-		baseURL := cfg.BinanceConfig.BaseURL
-		if cfg.BinanceConfig.TestNet {
-			baseURL = "https://testnet.binance.vision"
-		}
-		spotRealClient = binance.NewClient(
-			cfg.BinanceConfig.APIKey,
-			cfg.BinanceConfig.SecretKey,
-			baseURL,
-		)
-		logger.Info("Spot real client initialized")
-	}
-
-	// Create repository
-	repo := database.NewRepository(db)
+	// Create repository (reuse earlyRepo from above)
+	repo := earlyRepo
 
 	// Run License migrations
 	if err := repo.CreateLicenseTable(ctx); err != nil {
@@ -267,77 +247,11 @@ func main() {
 		logger.Info("ML Predictor initialized")
 	}
 
-	// Initialize LLM Analyzer (Claude, OpenAI, or DeepSeek)
+	// Initialize LLM Analyzer - NO GLOBAL KEYS
+	// LLM Analyzer will be initialized per-user based on their stored AI keys in database
+	// The llmAnalyzer will be nil at startup and injected per-request when user logs in
 	var llmAnalyzer *llm.Analyzer
-	if cfg.AIConfig.Enabled {
-		var provider llm.Provider
-		var apiKey string
-		var model string
-
-		// Select provider based on config or available API key
-		switch cfg.AIConfig.LLMProvider {
-		case "deepseek":
-			if cfg.AIConfig.DeepSeekAPIKey != "" {
-				provider = llm.ProviderDeepSeek
-				apiKey = cfg.AIConfig.DeepSeekAPIKey
-				model = cfg.AIConfig.LLMModel
-				if model == "" || model == "claude-3-haiku-20240307" {
-					model = "deepseek-chat" // Default DeepSeek model
-				}
-			}
-		case "openai":
-			if cfg.AIConfig.OpenAIAPIKey != "" {
-				provider = llm.ProviderOpenAI
-				apiKey = cfg.AIConfig.OpenAIAPIKey
-				model = cfg.AIConfig.LLMModel
-				if model == "" || model == "claude-3-haiku-20240307" {
-					model = "gpt-4o-mini" // Default OpenAI model
-				}
-			}
-		default: // "claude" or default
-			if cfg.AIConfig.ClaudeAPIKey != "" {
-				provider = llm.ProviderClaude
-				apiKey = cfg.AIConfig.ClaudeAPIKey
-				model = cfg.AIConfig.LLMModel
-			}
-		}
-
-		// Fallback: try other providers if preferred one is not configured
-		if apiKey == "" {
-			if cfg.AIConfig.DeepSeekAPIKey != "" {
-				provider = llm.ProviderDeepSeek
-				apiKey = cfg.AIConfig.DeepSeekAPIKey
-				model = "deepseek-chat"
-			} else if cfg.AIConfig.OpenAIAPIKey != "" {
-				provider = llm.ProviderOpenAI
-				apiKey = cfg.AIConfig.OpenAIAPIKey
-				model = "gpt-4o-mini"
-			} else if cfg.AIConfig.ClaudeAPIKey != "" {
-				provider = llm.ProviderClaude
-				apiKey = cfg.AIConfig.ClaudeAPIKey
-				model = cfg.AIConfig.LLMModel
-			}
-		}
-
-		if apiKey != "" {
-			llmConfig := &llm.AnalyzerConfig{
-				Enabled:         true,
-				Provider:        provider,
-				APIKey:          apiKey,
-				Model:           model,
-				MaxTokens:       1024,
-				Temperature:     0.3,
-				MinConfidence:   cfg.AutopilotConfig.MinConfidence,
-				CacheDuration:   5 * time.Minute,
-				RateLimitPerMin: 10,
-				EnablePatterns:  true,
-				EnableRiskCheck: true,
-				EnableBigCandle: true,
-			}
-			llmAnalyzer = llm.NewAnalyzer(llmConfig)
-			logger.Info("LLM Analyzer initialized", "provider", string(provider), "model", model)
-		}
-	}
+	logger.Info("Global LLM Analyzer disabled - using user-specific AI keys from database per-request")
 
 	// Initialize Sentiment Analyzer
 	var sentimentAnalyzer *sentiment.Analyzer
@@ -510,13 +424,16 @@ func main() {
 		})
 
 		// Get the active futures client based on mode
+		// Note: Real client is created per-request from user database keys
+		// At startup, we only have mock client available
 		var activeFuturesClient binance.FuturesClient
 		if cfg.TradingConfig.DryRun {
 			activeFuturesClient = futuresMockClient
-		} else if futuresRealClient != nil {
-			activeFuturesClient = futuresRealClient
 		} else {
+			// For live mode, start with mock but real client will be injected per-request
+			// based on user's API keys from database
 			activeFuturesClient = futuresMockClient
+			logger.Info("Live mode: real client will be injected per-request from user API keys")
 		}
 
 		// Wrap with cached client if cache is available (for WebSocket data)
@@ -560,9 +477,8 @@ func main() {
 
 			if actualDryRun {
 				futuresAutopilotController.SetFuturesClient(futuresMockClient)
-			} else if futuresRealClient != nil {
-				futuresAutopilotController.SetFuturesClient(futuresRealClient)
 			}
+			// For live mode, real client is injected per-request from user API keys
 
 			// CRITICAL FIX: Update cfg to match the actual dry_run mode from saved settings
 			// This ensures GetDryRunMode() returns the correct persisted mode, not the config file default
@@ -680,15 +596,19 @@ func main() {
 		mlPredictor:                mlPredictor,
 		llmAnalyzer:                llmAnalyzer,
 		sentimentAnalyzer:          sentimentAnalyzer,
-		// Futures trading - both clients for dynamic switching
+		// Futures trading - mock for paper, real created per-request from user keys
 		futuresMockClient: futuresMockClient,
-		futuresRealClient: futuresRealClient,
-		// Spot trading - both clients for dynamic switching
+		futuresRealClient: nil, // No global real client - created per-request from user API keys
+		// Spot trading - mock for paper, real created per-request from user keys
 		spotMockClient: spotMockClient,
-		spotRealClient: spotRealClient,
+		spotRealClient: nil, // No global real client - created per-request from user API keys
 		// Market data cache
 		marketDataCache: marketDataCache,
 	}
+
+	// Initialize email service
+	emailService := email.NewService(repo)
+	logger.Info("Email service initialized")
 
 	// Initialize auth service if enabled
 	var authService *auth.Service
@@ -705,7 +625,7 @@ func main() {
 			RequireEmailVerification: cfg.AuthConfig.RequireEmailVerification,
 			MaxSessionsPerUser:       cfg.AuthConfig.MaxSessionsPerUser,
 		}
-		authService = auth.NewService(repo, authConfig)
+		authService = auth.NewServiceWithEmail(repo, authConfig, emailService)
 		logger.Info("Authentication service initialized", "email_verification", cfg.AuthConfig.RequireEmailVerification)
 	} else {
 		logger.Info("Authentication disabled - running in single-user mode")
@@ -1320,14 +1240,15 @@ func (w *BotAPIWrapper) GetFuturesClient() binance.FuturesClient {
 		}
 	}
 
-	// Fallback: Get base client based on dry_run mode
+	// Get base client based on dry_run mode
+	// In live mode, real client must be created per-request from user API keys
 	var baseClient binance.FuturesClient
 	if w.cfg.TradingConfig.DryRun {
 		baseClient = w.futuresMockClient
-	} else if w.futuresRealClient != nil {
-		baseClient = w.futuresRealClient
 	} else {
-		baseClient = w.futuresMockClient
+		// Live mode but no user-specific client was found
+		// Return nil to indicate user must configure API keys
+		return nil
 	}
 
 	// Wrap with cached client if cache is available
@@ -1343,11 +1264,9 @@ func (w *BotAPIWrapper) GetSpotClient() binance.BinanceClient {
 	if w.cfg.TradingConfig.DryRun {
 		return w.spotMockClient
 	}
-	// Return real client if available, otherwise fall back to mock
-	if w.spotRealClient != nil {
-		return w.spotRealClient
-	}
-	return w.spotMockClient
+	// Live mode - real client must be created per-request from user API keys
+	// Return nil to indicate user must configure API keys
+	return nil
 }
 
 // SettingsAPI interface implementation
@@ -1456,15 +1375,10 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 					w.logger.Info("Selecting mock client for PAPER mode")
 				}
 			} else {
-				// Switching to LIVE mode - use real client
-				if w.futuresRealClient != nil {
-					newClient = w.futuresRealClient
-					w.logger.Info("Selecting real client for LIVE mode")
-				} else if w.futuresMockClient != nil {
-					// Fallback to mock if real not available
-					newClient = w.futuresMockClient
-					w.logger.Warn("Real futures client not available, using mock client for LIVE mode")
-				}
+				// Switching to LIVE mode - real client comes from user API keys per-request
+				// Do not set a global client here - handlers will create user-specific client
+				w.logger.Info("LIVE mode enabled - real client will be created per-request from user API keys")
+				newClient = nil // No global client for live mode
 			}
 
 			// Wrap with cache if available

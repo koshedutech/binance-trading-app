@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -20,26 +18,23 @@ services:
       timeout: 5s
       retries: 5
 
-  # Trading Bot with Web Interface
+  # Trading Bot with Web Interface (DEVELOPMENT)
   trading-bot:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: binance-trading-bot
+      dockerfile: Dockerfile.dev
+    container_name: binance-trading-bot-dev
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # License Key (required for commercial use)
-      - LICENSE_KEY=${LICENSE_KEY}
-      # Binance API
-      - BINANCE_API_KEY=${BINANCE_API_KEY}
-      - BINANCE_SECRET_KEY=${BINANCE_SECRET_KEY}
-      - BINANCE_BASE_URL=${BINANCE_BASE_URL:-https://testnet.binance.vision}
-      - BINANCE_TESTNET=${BINANCE_TESTNET:-true}
-      - MOCK_MODE=${MOCK_MODE:-false}
-      - TRADING_DRY_RUN=${TRADING_DRY_RUN:-false}
+      # Binance API - All API keys are per-user, stored in database via Settings UI
+      # No global/environment API keys supported
+      - BINANCE_BASE_URL=https://fapi.binance.com
+      - BINANCE_TESTNET=false
+      - MOCK_MODE=false
+      - TRADING_DRY_RUN=false
       # Database
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -47,110 +42,109 @@ services:
       - DB_PASSWORD=trading_bot_password
       - DB_NAME=trading_bot
       - DB_SSLMODE=disable
-      # Web Server
-      - WEB_PORT=8090
+      # Web Server (Development uses port 8094)
+      - WEB_PORT=8094
       - WEB_HOST=0.0.0.0
       # Notifications
-      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
-      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-false}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-      - DISCORD_ENABLED=${DISCORD_ENABLED:-false}
-      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - NOTIFICATIONS_ENABLED=false
+      - TELEGRAM_ENABLED=false
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - DISCORD_ENABLED=false
+      - DISCORD_WEBHOOK_URL=
       # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LOG_OUTPUT=${LOG_OUTPUT:-stdout}
-      - LOG_JSON=${LOG_JSON:-true}
-      - LOG_INCLUDE_FILE=${LOG_INCLUDE_FILE:-false}
+      - LOG_LEVEL=INFO
+      - LOG_OUTPUT=stdout
+      - LOG_JSON=true
+      - LOG_INCLUDE_FILE=false
       # AI/ML Configuration
-      - AI_ENABLED=${AI_ENABLED:-true}
-      - AI_LLM_ENABLED=${AI_LLM_ENABLED:-true}
-      - AI_ML_ENABLED=${AI_ML_ENABLED:-true}
-      - AI_SENTIMENT_ENABLED=${AI_SENTIMENT_ENABLED:-true}
-      - AI_LLM_PROVIDER=${AI_LLM_PROVIDER:-claude}
-      - AI_CLAUDE_API_KEY=${AI_CLAUDE_API_KEY:-}
-      - AI_OPENAI_API_KEY=${AI_OPENAI_API_KEY:-}
-      - AI_DEEPSEEK_API_KEY=${AI_DEEPSEEK_API_KEY:-}
-      - AI_LLM_MODEL=${AI_LLM_MODEL:-claude-sonnet-4-20250514}
-      - AI_MIN_CONFIDENCE=${AI_MIN_CONFIDENCE:-0.65}
-      - CRYPTONEWS_API_KEY=${CRYPTONEWS_API_KEY:-}
+      - AI_ENABLED=true
+      - AI_LLM_ENABLED=true
+      - AI_ML_ENABLED=true
+      - AI_SENTIMENT_ENABLED=true
+      - AI_LLM_PROVIDER=deepseek
+      - AI_LLM_MODEL=deepseek-chat
+      - AI_MIN_CONFIDENCE=0.65
       # Autopilot Configuration
-      - AUTOPILOT_ENABLED=${AUTOPILOT_ENABLED:-false}
-      - AUTOPILOT_RISK_LEVEL=${AUTOPILOT_RISK_LEVEL:-moderate}
-      - AUTOPILOT_MIN_CONFIDENCE=${AUTOPILOT_MIN_CONFIDENCE:-0.65}
-      - AUTOPILOT_MAX_DAILY_LOSS=${AUTOPILOT_MAX_DAILY_LOSS:-5.0}
-      - AUTOPILOT_REQUIRE_MULTI_SIGNAL=${AUTOPILOT_REQUIRE_MULTI_SIGNAL:-true}
+      - AUTOPILOT_ENABLED=false
+      - AUTOPILOT_RISK_LEVEL=moderate
+      - AUTOPILOT_MIN_CONFIDENCE=0.65
+      - AUTOPILOT_MAX_DAILY_LOSS=5.0
+      - AUTOPILOT_REQUIRE_MULTI_SIGNAL=true
       # Scalping Configuration
-      - SCALPING_ENABLED=${SCALPING_ENABLED:-true}
-      - SCALPING_MIN_PROFIT=${SCALPING_MIN_PROFIT:-0.05}
-      - SCALPING_MAX_LOSS=${SCALPING_MAX_LOSS:-0.1}
-      - SCALPING_MAX_HOLD_SECONDS=${SCALPING_MAX_HOLD_SECONDS:-60}
+      - SCALPING_ENABLED=true
+      - SCALPING_MIN_PROFIT=0.05
+      - SCALPING_MAX_LOSS=0.1
+      - SCALPING_MAX_HOLD_SECONDS=60
       # Big Candle Configuration
-      - BIG_CANDLE_ENABLED=${BIG_CANDLE_ENABLED:-true}
-      - BIG_CANDLE_SIZE_MULTIPLIER=${BIG_CANDLE_SIZE_MULTIPLIER:-1.5}
-      - BIG_CANDLE_VOLUME_CONFIRMATION=${BIG_CANDLE_VOLUME_CONFIRMATION:-true}
+      - BIG_CANDLE_ENABLED=true
+      - BIG_CANDLE_SIZE_MULTIPLIER=1.5
+      - BIG_CANDLE_VOLUME_CONFIRMATION=true
       # Circuit Breaker Configuration
-      - CIRCUIT_BREAKER_ENABLED=${CIRCUIT_BREAKER_ENABLED:-true}
-      - CIRCUIT_MAX_LOSS_PER_HOUR=${CIRCUIT_MAX_LOSS_PER_HOUR:-3.0}
-      - CIRCUIT_MAX_CONSECUTIVE_LOSSES=${CIRCUIT_MAX_CONSECUTIVE_LOSSES:-5}
-      - CIRCUIT_COOLDOWN_MINUTES=${CIRCUIT_COOLDOWN_MINUTES:-30}
+      - CIRCUIT_BREAKER_ENABLED=true
+      - CIRCUIT_MAX_LOSS_PER_HOUR=3.0
+      - CIRCUIT_MAX_CONSECUTIVE_LOSSES=5
+      - CIRCUIT_COOLDOWN_MINUTES=30
       # Futures Trading Configuration
-      - FUTURES_ENABLED=${FUTURES_ENABLED:-true}
-      - FUTURES_TESTNET=${FUTURES_TESTNET:-true}
-      - FUTURES_DEFAULT_LEVERAGE=${FUTURES_DEFAULT_LEVERAGE:-10}
-      - FUTURES_DEFAULT_MARGIN_TYPE=${FUTURES_DEFAULT_MARGIN_TYPE:-CROSSED}
-      - FUTURES_POSITION_MODE=${FUTURES_POSITION_MODE:-ONE_WAY}
-      - FUTURES_MAX_LEVERAGE=${FUTURES_MAX_LEVERAGE:-125}
+      - FUTURES_ENABLED=true
+      - FUTURES_TESTNET=false
+      - FUTURES_DEFAULT_LEVERAGE=10
+      - FUTURES_DEFAULT_MARGIN_TYPE=CROSSED
+      - FUTURES_POSITION_MODE=ONE_WAY
+      - FUTURES_MAX_LEVERAGE=125
       # Futures Autopilot Configuration
-      - FUTURES_AUTOPILOT_ENABLED=${FUTURES_AUTOPILOT_ENABLED:-false}
-      - FUTURES_AUTOPILOT_RISK_LEVEL=${FUTURES_AUTOPILOT_RISK_LEVEL:-moderate}
-      - FUTURES_AUTOPILOT_MAX_DAILY_TRADES=${FUTURES_AUTOPILOT_MAX_DAILY_TRADES:-50}
-      - FUTURES_AUTOPILOT_MAX_DAILY_LOSS=${FUTURES_AUTOPILOT_MAX_DAILY_LOSS:-3.0}
-      - FUTURES_AUTOPILOT_MAX_POSITION_SIZE=${FUTURES_AUTOPILOT_MAX_POSITION_SIZE:-5.0}
-      - FUTURES_AUTOPILOT_MIN_CONFIDENCE=${FUTURES_AUTOPILOT_MIN_CONFIDENCE:-0.35}
-      - FUTURES_AUTOPILOT_REQUIRE_CONFLUENCE=${FUTURES_AUTOPILOT_REQUIRE_CONFLUENCE:-1}
-      - FUTURES_AUTOPILOT_DEFAULT_LEVERAGE=${FUTURES_AUTOPILOT_DEFAULT_LEVERAGE:-5}
-      - FUTURES_AUTOPILOT_MAX_LEVERAGE=${FUTURES_AUTOPILOT_MAX_LEVERAGE:-20}
-      - FUTURES_AUTOPILOT_MARGIN_TYPE=${FUTURES_AUTOPILOT_MARGIN_TYPE:-CROSSED}
-      - FUTURES_AUTOPILOT_POSITION_MODE=${FUTURES_AUTOPILOT_POSITION_MODE:-ONE_WAY}
-      - FUTURES_AUTOPILOT_ALLOW_SHORTS=${FUTURES_AUTOPILOT_ALLOW_SHORTS:-true}
-      - FUTURES_AUTOPILOT_TAKE_PROFIT=${FUTURES_AUTOPILOT_TAKE_PROFIT:-2.0}
-      - FUTURES_AUTOPILOT_STOP_LOSS=${FUTURES_AUTOPILOT_STOP_LOSS:-1.0}
-      - FUTURES_AUTOPILOT_TRAILING_STOP_ENABLED=${FUTURES_AUTOPILOT_TRAILING_STOP_ENABLED:-true}
-      - FUTURES_AUTOPILOT_TRAILING_STOP_PERCENT=${FUTURES_AUTOPILOT_TRAILING_STOP_PERCENT:-0.5}
-      - FUTURES_AUTOPILOT_DECISION_INTERVAL=${FUTURES_AUTOPILOT_DECISION_INTERVAL:-5}
-      - FUTURES_AUTOPILOT_ALLOWED_SYMBOLS=${FUTURES_AUTOPILOT_ALLOWED_SYMBOLS:-BTCUSDT,ETHUSDT}
-      # WebSocket (automatically enabled with futures for real-time data)
-      # Reduces REST API calls by using WebSocket streams for mark price and klines
+      - FUTURES_AUTOPILOT_ENABLED=true
+      - FUTURES_AUTOPILOT_RISK_LEVEL=moderate
+      - FUTURES_AUTOPILOT_MAX_DAILY_TRADES=50
+      - FUTURES_AUTOPILOT_MAX_DAILY_LOSS=3.0
+      - FUTURES_AUTOPILOT_MAX_POSITION_SIZE=5.0
+      - FUTURES_AUTOPILOT_MIN_CONFIDENCE=0.35
+      - FUTURES_AUTOPILOT_REQUIRE_CONFLUENCE=1
+      - FUTURES_AUTOPILOT_DEFAULT_LEVERAGE=5
+      - FUTURES_AUTOPILOT_MAX_LEVERAGE=20
+      - FUTURES_AUTOPILOT_MARGIN_TYPE=CROSSED
+      - FUTURES_AUTOPILOT_POSITION_MODE=ONE_WAY
+      - FUTURES_AUTOPILOT_ALLOW_SHORTS=true
+      - FUTURES_AUTOPILOT_TAKE_PROFIT=2.0
+      - FUTURES_AUTOPILOT_STOP_LOSS=1.0
+      - FUTURES_AUTOPILOT_TRAILING_STOP_ENABLED=true
+      - FUTURES_AUTOPILOT_TRAILING_STOP_PERCENT=0.5
+      - FUTURES_AUTOPILOT_DECISION_INTERVAL=5
+      - FUTURES_AUTOPILOT_ALLOWED_SYMBOLS=BTCUSDT,ETHUSDT
+      # Authentication Configuration
+      - AUTH_ENABLED=true
+      - AUTH_JWT_SECRET=binance-trading-bot-jwt-secret-key-2025-change-in-prod
+      - AUTH_REQUIRE_EMAIL_VERIFICATION=false
+      - AUTH_ACCESS_TOKEN_DURATION=15m
+      - AUTH_REFRESH_TOKEN_DURATION=168h
+      # Subscription Configuration
+      - SUBSCRIPTION_ENABLED=false
     volumes:
-      # Mount config file (optional, can use env vars instead)
-      - ./config.json:/app/config.json:ro
+      # Mount source code for development (builds inside container)
+      - .:/app
+      # Exclude node_modules (use container's version)
+      - /app/web/node_modules
+      # Cache Go modules to avoid re-downloading
+      - go-mod-cache:/go/pkg/mod
+      # Cache Go build cache
+      - go-build-cache:/root/.cache/go-build
       # Mount logs directory
       - ./logs:/app/logs
     ports:
-      - "8090:8090"
+      - "8094:8094"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8094/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
 
-  # Optional: pgAdmin for database management
-  # Uncomment to enable web-based PostgreSQL management
-  # pgadmin:
-  #   image: dpage/pgadmin4:latest
-  #   container_name: binance-bot-pgadmin
-  #   restart: unless-stopped
-  #   environment:
-  #     - PGADMIN_DEFAULT_EMAIL=admin@admin.com
-  #     - PGADMIN_DEFAULT_PASSWORD=admin
-  #   ports:
-  #     - "5050:80"
-  #   volumes:
-  #     - pgadmin-data:/var/lib/pgadmin
-  #   depends_on:
-  #     - postgres
-
 volumes:
   postgres-data:
-  # pgadmin-data:
+  go-mod-cache:
+  go-build-cache:
