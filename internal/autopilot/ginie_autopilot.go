@@ -1579,6 +1579,24 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				continue
 			}
 
+
+			// CRITICAL: Skip if action is WAIT or CLOSE - these are not entry signals
+			tradeAction := decision.TradeExecution.Action
+			if tradeAction != "LONG" && tradeAction != "SHORT" {
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Action=%s (not LONG/SHORT), SKIP", symbol, tradeAction)
+				}
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: Action=%s (not LONG/SHORT), SKIP", symbol, tradeAction)
+				}
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Action=%s (not LONG/SHORT), SKIP", symbol, tradeAction)
+				}
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = fmt.Sprintf("invalid_action: %s", tradeAction)
+				ga.LogSignal(signalLog)
+				continue
+			}
 			// Scalp mode: Log successful entry signal (AC-2.2.2)
 			if isScalpMode {
 				log.Printf("[SCALP-SCAN] %s: ENTRY SIGNAL - Confidence %.1f%% >= %.1f%%, Direction=%s",
@@ -1957,8 +1975,18 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		return
 	}
 
+	// CRITICAL: Skip trades where action is WAIT or CLOSE - these are not entry signals
+	action := decision.TradeExecution.Action
+	if action != "LONG" && action != "SHORT" {
+		ga.logger.Warn("Ginie skipping trade - action is not LONG or SHORT",
+			"symbol", symbol,
+			"action", action,
+			"confidence", decision.ConfidenceScore)
+		return
+	}
+
 	// Check funding rate before entry - avoid high fees near funding time
-	isLong := decision.TradeExecution.Action == "LONG"
+	isLong := action == "LONG"
 	if blocked, reason := ga.checkFundingRate(symbol, isLong); blocked {
 		ga.logger.Warn("Ginie skipping trade - funding rate concern",
 			"symbol", symbol,
