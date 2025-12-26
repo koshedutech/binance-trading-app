@@ -27,6 +27,15 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 	// Get total capital from controller balance
 	allocationsMap := ginie.GetModeAllocationStatus()
 
+	// Fee constants for Binance Futures
+	const (
+		takerFeePercent      = 0.05  // 0.05% taker fee
+		makerFeePercent      = 0.02  // 0.02% maker fee
+		roundTripFeePercent  = 0.10  // 0.10% total (taker open + taker close)
+		minRecommendedUSD    = 100.0 // Minimum recommended position size in USD
+		optimalMinUSD        = 200.0 // Optimal minimum for better fee ratio
+	)
+
 	// Convert map to array format expected by frontend
 	allocationsArray := make([]gin.H, 0, len(allocationsMap))
 	modeOrder := []string{"ultra_fast", "scalp", "swing", "position"}
@@ -48,15 +57,77 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 					}
 				}
 
+				// Get allocated USD for fee calculations
+				var allocatedUSD float64 = 0
+				if au, exists := allocMap["allocated_usd"]; exists && au != nil {
+					switch v := au.(type) {
+					case float64:
+						allocatedUSD = v
+					case int:
+						allocatedUSD = float64(v)
+					case int64:
+						allocatedUSD = float64(v)
+					}
+				}
+
+				// Calculate fee impact
+				roundTripFeeUSD := allocatedUSD * roundTripFeePercent / 100
+				breakEvenMovePercent := roundTripFeePercent // Need this % move just to break even
+
+				// Get max positions for per-position calculation
+				var maxPositions int = 1
+				if mp, exists := allocMap["max_positions"]; exists && mp != nil {
+					switch v := mp.(type) {
+					case float64:
+						maxPositions = int(v)
+					case int:
+						maxPositions = v
+					case int64:
+						maxPositions = int(v)
+					}
+				}
+				if maxPositions < 1 {
+					maxPositions = 1
+				}
+
+				// Per-position size
+				perPositionUSD := allocatedUSD / float64(maxPositions)
+				perPositionFeeUSD := perPositionUSD * roundTripFeePercent / 100
+
+				// Generate warning if position size is too small
+				var positionWarning string
+				var warningLevel string
+				if perPositionUSD < minRecommendedUSD {
+					warningLevel = "critical"
+					positionWarning = "Position size too small! Fees will consume most profits. Increase allocation or reduce max positions."
+				} else if perPositionUSD < optimalMinUSD {
+					warningLevel = "warning"
+					positionWarning = "Position size below optimal. Consider increasing allocation for better fee efficiency."
+				} else {
+					warningLevel = "ok"
+					positionWarning = ""
+				}
+
 				allocationsArray = append(allocationsArray, gin.H{
-					"mode":                 mode,
-					"allocated_percent":    allocMap["allocated_percent"],
-					"allocated_usd":        allocMap["allocated_usd"],
-					"used_usd":             allocMap["used_usd"],
-					"available_usd":        allocMap["available_usd"],
-					"current_positions":    allocMap["current_positions"],
-					"max_positions":        allocMap["max_positions"],
-					"capacity_percent":     capacityPercent,  // Explicitly convert to float64
+					"mode":                    mode,
+					"allocated_percent":       allocMap["allocated_percent"],
+					"allocated_usd":           allocMap["allocated_usd"],
+					"used_usd":                allocMap["used_usd"],
+					"available_usd":           allocMap["available_usd"],
+					"current_positions":       allocMap["current_positions"],
+					"max_positions":           allocMap["max_positions"],
+					"capacity_percent":        capacityPercent,
+					// Fee information
+					"per_position_usd":        perPositionUSD,
+					"round_trip_fee_percent":  roundTripFeePercent,
+					"round_trip_fee_usd":      roundTripFeeUSD,
+					"per_position_fee_usd":    perPositionFeeUSD,
+					"break_even_move_percent": breakEvenMovePercent,
+					"min_recommended_usd":     minRecommendedUSD,
+					"optimal_min_usd":         optimalMinUSD,
+					// Warning
+					"warning_level":           warningLevel,
+					"position_warning":        positionWarning,
 				})
 			}
 		}
@@ -66,6 +137,15 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 		"success":      true,
 		"allocations":  allocationsArray,
 		"total_modes":  len(allocationsMap),
+		// Global fee info
+		"fee_info": gin.H{
+			"taker_fee_percent":       takerFeePercent,
+			"maker_fee_percent":       makerFeePercent,
+			"round_trip_fee_percent":  roundTripFeePercent,
+			"min_recommended_usd":     minRecommendedUSD,
+			"optimal_min_usd":         optimalMinUSD,
+			"fee_note":                "Fees shown are for taker orders. Round-trip = open + close fees. Minimum $100/position recommended to ensure fees don't consume profits.",
+		},
 	})
 }
 

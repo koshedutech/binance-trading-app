@@ -382,10 +382,15 @@ type GinieModeConfig struct {
 
 	// Position Sizing
 	BaseSizeUSD    float64 `json:"base_size_usd"`    // Base position size in USD
+	MinSizeUSD     float64 `json:"min_size_usd"`     // Minimum recommended position size in USD (to cover fees)
 	MaxSizeUSD     float64 `json:"max_size_usd"`     // Maximum position size in USD
 	MaxPositions   int     `json:"max_positions"`    // Maximum concurrent positions for this mode
 	Leverage       int     `json:"leverage"`         // Leverage to use for positions
 	SizeMultiplier float64 `json:"size_multiplier"`  // Multiplier applied based on confidence
+
+	// Fee Configuration (for user awareness)
+	TakerFeePercent float64 `json:"taker_fee_percent"` // Taker fee percentage (default 0.05%)
+	MakerFeePercent float64 `json:"maker_fee_percent"` // Maker fee percentage (default 0.02%)
 
 	// SL/TP Configuration
 	StopLossPercent   float64 `json:"stop_loss_percent"`   // Stop loss percentage from entry
