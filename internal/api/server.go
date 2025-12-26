@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"binance-trading-bot/internal/apikeys"
 	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/billing"
 	"binance-trading-bot/internal/database"
@@ -74,7 +77,8 @@ type Server struct {
 	vaultClient    *vault.Client
 	billingService *billing.StripeService
 	licenseInfo    *license.LicenseInfo
-	rateLimiter    *RateLimiter // API rate limiter to prevent Binance bans
+	rateLimiter    *RateLimiter        // API rate limiter to prevent Binance bans
+	apiKeyService  *apikeys.Service    // Service to get user-specific API keys
 }
 
 // ServerConfig holds server configuration
@@ -145,6 +149,7 @@ func NewServer(
 		billingService: billingService,
 		licenseInfo:    licenseInfo,
 		rateLimiter:    NewRateLimiter(120, time.Minute), // 120 requests per minute per endpoint (Binance allows 1200/min)
+		apiKeyService:  apikeys.NewService(repo),         // Service for user-specific API keys
 	}
 
 	server.setupRoutes()
@@ -239,19 +244,25 @@ func (s *Server) setupRoutes() {
 
 	// Auth status endpoint (always available, returns whether auth is enabled)
 	s.router.GET("/api/auth/status", func(c *gin.Context) {
+		subscriptionEnabled := os.Getenv("SUBSCRIPTION_ENABLED")
+		isSubscriptionEnabled := subscriptionEnabled != "" && strings.ToLower(subscriptionEnabled) == "true"
+
 		c.JSON(200, gin.H{
-			"auth_enabled": s.authEnabled,
+			"auth_enabled":         s.authEnabled,
+			"subscription_enabled": isSubscriptionEnabled,
 		})
 	})
 
-	// API routes
+	// Public API endpoints (no auth required)
+	s.router.GET("/api/health/status", s.handleGetAPIHealthStatus)
+
+	// API routes (protected when auth is enabled)
 	api := s.router.Group("/api")
 
 	// Apply auth middleware if enabled
 	if s.authEnabled {
-		// Optional auth middleware for most routes (allows both authenticated and unauthenticated access)
-		// This sets user context if token is present but doesn't require it
-		api.Use(auth.OptionalMiddleware(s.authService.GetJWTManager()))
+		// Required auth middleware - all API routes require authentication
+		api.Use(auth.Middleware(s.authService.GetJWTManager()))
 	}
 
 	{
@@ -361,6 +372,16 @@ func (s *Server) setupRoutes() {
 			user.POST("/api-keys", s.handleAddAPIKey)
 			user.DELETE("/api-keys/:id", s.handleDeleteAPIKey)
 			user.POST("/api-keys/:id/test", s.handleTestAPIKey)
+
+			// AI API Keys
+			user.GET("/ai-keys", s.handleGetAIKeys)
+			user.POST("/ai-keys", s.handleAddAIKey)
+			user.DELETE("/ai-keys/:id", s.handleDeleteAIKey)
+			user.POST("/ai-keys/:id/test", s.handleTestAIKey)
+
+			// User utilities
+			user.GET("/ip-address", s.handleGetUserIPAddress)
+			user.GET("/api-status", s.handleGetUserAPIStatus)
 		}
 
 		// Billing endpoints (requires auth)
@@ -612,6 +633,13 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/positions/filter", s.handleGetPositionsBySource)
 			futures.GET("/ginie/history/filter", s.handleGetTradeHistoryBySource)
 
+			// Mode Configuration CRUD endpoints (Story 2.7 Task 2.7.10)
+			futures.GET("/ginie/mode-configs", s.handleGetModeConfigs)
+			futures.GET("/ginie/mode-config/:mode", s.handleGetModeConfig)
+			futures.PUT("/ginie/mode-config/:mode", s.handleUpdateModeConfig)
+			futures.POST("/ginie/mode-config/reset", s.handleResetModeConfigs)
+			futures.GET("/ginie/mode-circuit-breaker-status", s.handleGetModeCircuitBreakerStatus)
+
 			// Mode Allocation endpoints (per-mode capital management)
 			futures.GET("/modes/allocations", s.handleGetModeAllocations)
 			futures.POST("/modes/allocations", s.handleUpdateModeAllocations)
@@ -670,6 +698,9 @@ func (s *Server) setupRoutes() {
 	admin := api.Group("/admin")
 	admin.Use(s.adminMiddleware())
 	{
+		// User management
+		admin.GET("/users", s.handleAdminListUsers)
+
 		// License management
 		admin.POST("/licenses/generate", s.handleAdminGenerateLicense)
 		admin.POST("/licenses/bulk-generate", s.handleAdminBulkGenerateLicenses)
@@ -680,10 +711,16 @@ func (s *Server) setupRoutes() {
 		admin.POST("/licenses/:id/deactivate", s.handleAdminDeactivateLicense)
 		admin.DELETE("/licenses/:id", s.handleAdminDeleteLicense)
 		admin.POST("/licenses/validate", s.handleAdminValidateLicense)
-	}
 
-	// Health check endpoint
-	api.GET("/health/status", s.handleGetAPIHealthStatus)
+		// System settings management
+		admin.GET("/settings", s.handleAdminGetAllSettings)
+		admin.GET("/settings/smtp", s.handleAdminGetSMTPSettings)
+		admin.PUT("/settings/smtp", s.handleAdminUpdateSMTPSettings)
+		admin.POST("/settings/smtp/test", s.handleAdminTestSMTP)
+		admin.GET("/settings/:key", s.handleAdminGetSetting)
+		admin.PUT("/settings/:key", s.handleAdminUpdateSetting)
+		admin.DELETE("/settings/:key", s.handleAdminDeleteSetting)
+	}
 
 	// WebSocket endpoint
 	s.router.GET("/ws", s.handleWebSocket)

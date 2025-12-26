@@ -118,6 +118,447 @@ type SafetyTradeResult struct {
 	Mode        string
 }
 
+// ====== COMPREHENSIVE MODE-SPECIFIC CONFIGURATION (Story 2.7) ======
+// Each mode (ultra_fast, scalp, swing, position) has independent settings
+// All defaults are from Story 2.7 and can be customized by users
+
+// ModeTimeframeConfig holds timeframe settings for a mode
+type ModeTimeframeConfig struct {
+	TrendTimeframe    string `json:"trend_timeframe"`    // Higher TF for trend (e.g., "5m", "15m", "1h", "4h")
+	EntryTimeframe    string `json:"entry_timeframe"`    // Signal timing TF (e.g., "1m", "5m", "15m", "1h")
+	AnalysisTimeframe string `json:"analysis_timeframe"` // Pattern detection TF (e.g., "1m", "15m", "4h", "1d")
+}
+
+// ModeConfidenceConfig holds confidence thresholds for a mode
+type ModeConfidenceConfig struct {
+	MinConfidence   float64 `json:"min_confidence"`   // Minimum to enter (e.g., 50, 60, 65, 75)
+	HighConfidence  float64 `json:"high_confidence"`  // Threshold for size multiplier (e.g., 70, 75, 80, 85)
+	UltraConfidence float64 `json:"ultra_confidence"` // Threshold for max size (e.g., 85, 88, 90, 92)
+}
+
+// ModeSizeConfig holds position sizing settings for a mode
+type ModeSizeConfig struct {
+	BaseSizeUSD      float64 `json:"base_size_usd"`       // Base position size (e.g., $100, $200, $400, $600)
+	MaxSizeUSD       float64 `json:"max_size_usd"`        // Max with multiplier (e.g., $200, $400, $750, $1000)
+	MaxPositions     int     `json:"max_positions"`       // Max concurrent (e.g., 5, 4, 3, 2)
+	Leverage         int     `json:"leverage"`            // Default leverage (e.g., 10, 8, 5, 3)
+	SizeMultiplierLo float64 `json:"size_multiplier_lo"`  // Min multiplier (1.0)
+	SizeMultiplierHi float64 `json:"size_multiplier_hi"`  // Max multiplier on high conf (e.g., 1.5, 1.8, 2.0, 2.5)
+}
+
+// ModeCircuitBreakerConfig holds circuit breaker settings for a mode
+type ModeCircuitBreakerConfig struct {
+	MaxLossPerHour       float64 `json:"max_loss_per_hour"`       // e.g., $20, $40, $80, $150
+	MaxLossPerDay        float64 `json:"max_loss_per_day"`        // e.g., $50, $100, $200, $400
+	MaxConsecutiveLosses int     `json:"max_consecutive_losses"`  // e.g., 3, 5, 7, 10
+	CooldownMinutes      int     `json:"cooldown_minutes"`        // e.g., 15, 30, 60, 120
+	MaxTradesPerMinute   int     `json:"max_trades_per_minute"`   // e.g., 5, 3, 2, 1
+	MaxTradesPerHour     int     `json:"max_trades_per_hour"`     // e.g., 30, 20, 10, 5
+	MaxTradesPerDay      int     `json:"max_trades_per_day"`      // e.g., 100, 50, 20, 10
+	WinRateCheckAfter    int     `json:"win_rate_check_after"`    // Trades before evaluation (e.g., 10, 15, 20, 25)
+	MinWinRate           float64 `json:"min_win_rate"`            // Threshold % (e.g., 45, 50, 55, 60)
+}
+
+// ModeSLTPConfig holds SL/TP settings for a mode
+type ModeSLTPConfig struct {
+	StopLossPercent        float64 `json:"stop_loss_percent"`         // Default SL % (e.g., 1.0, 1.5, 2.5, 3.5)
+	TakeProfitPercent      float64 `json:"take_profit_percent"`       // Default TP % (e.g., 2.0, 3.0, 5.0, 8.0)
+	TrailingStopEnabled    bool    `json:"trailing_stop_enabled"`     // Enable trailing (e.g., false, false, true, true)
+	TrailingStopPercent    float64 `json:"trailing_stop_percent"`     // Trail distance (e.g., N/A, 0.5, 1.5, 2.5)
+	TrailingStopActivation float64 `json:"trailing_stop_activation"`  // Activate at profit % (e.g., N/A, 0.5, 1.0, 2.0)
+	MaxHoldDuration        string  `json:"max_hold_duration"`         // Force exit after (e.g., "3s", "4h", "3d", "14d")
+	UseSingleTP            bool    `json:"use_single_tp"`             // true = 100% at TP, false = multi-level
+}
+
+// HedgeModeConfig holds hedge mode settings for a mode (LONG + SHORT simultaneously)
+type HedgeModeConfig struct {
+	AllowHedge                bool    `json:"allow_hedge"`                  // Enable hedging for this mode
+	MinConfidenceForHedge     float64 `json:"min_confidence_for_hedge"`     // Min confidence to open hedge (e.g., 70, 75, 80, 85)
+	ExistingMustBeInProfit    float64 `json:"existing_must_be_in_profit"`   // Existing position profit threshold (e.g., 0, 0, 1, 2 %)
+	MaxHedgeSizePercent       float64 `json:"max_hedge_size_percent"`       // Max hedge size vs original (e.g., 100, 75, 50, 50 %)
+	AllowSameModeHedge        bool    `json:"allow_same_mode_hedge"`        // Allow hedge within same mode (default: false)
+	MaxTotalExposureMultiplier float64 `json:"max_total_exposure_multiplier"` // Cap total exposure (default: 2.0 = 2x normal)
+}
+
+// PositionAveragingConfig holds position averaging settings for a mode
+type PositionAveragingConfig struct {
+	AllowAveraging         bool    `json:"allow_averaging"`           // Enable averaging for this mode
+	AverageUpProfitPercent float64 `json:"average_up_profit_percent"` // Add when profit exceeds (e.g., 0.5, 1.0, 2.0 %)
+	AverageDownLossPercent float64 `json:"average_down_loss_percent"` // Add when loss within (e.g., -1, -1.5, -2 %)
+	AddSizePercent         float64 `json:"add_size_percent"`          // Size to add (e.g., 50, 50, 30 % of original)
+	MaxAverages            int     `json:"max_averages"`              // Max times to average (e.g., 0, 2, 3, 2)
+	MinConfidenceForAverage float64 `json:"min_confidence_for_average"` // Min confidence for new signal
+}
+
+// StalePositionReleaseConfig holds stale position release (capital liberation) settings
+type StalePositionReleaseConfig struct {
+	Enabled              bool    `json:"enabled"`                 // Enable stale position release
+	MaxHoldDuration      string  `json:"max_hold_duration"`       // Max hold time (e.g., "10s", "6h", "5d", "21d")
+	MinProfitToKeep      float64 `json:"min_profit_to_keep"`      // Min profit % to keep position (e.g., 0.3, 0.5, 1.0, 2.0)
+	MaxLossToForceClose  float64 `json:"max_loss_to_force_close"` // Max loss % to force close (e.g., -0.5, -1.0, -1.5, -2.0)
+	StaleZoneLo          float64 `json:"stale_zone_lo"`           // Stale zone lower bound (e.g., -0.3, -0.5, -1.0, -1.5)
+	StaleZoneHi          float64 `json:"stale_zone_hi"`           // Stale zone upper bound (e.g., +0.3, +0.5, +1.0, +1.5)
+	StaleZoneCloseAction string  `json:"stale_zone_close_action"` // Action: "close" or "reduce_50" or "wait_signal"
+}
+
+// ModeAssignmentConfig holds mode assignment criteria from analyzer
+type ModeAssignmentConfig struct {
+	VolatilityMin       string  `json:"volatility_min"`        // "low", "medium", "high", "extreme"
+	VolatilityMax       string  `json:"volatility_max"`        // "low", "medium", "high", "extreme"
+	ExpectedHoldMin     string  `json:"expected_hold_min"`     // Min expected hold (e.g., "0", "15m", "4h", "3d")
+	ExpectedHoldMax     string  `json:"expected_hold_max"`     // Max expected hold (e.g., "5m", "4h", "3d", "30d")
+	ConfidenceMin       float64 `json:"confidence_min"`        // Min confidence for assignment (e.g., 50, 60, 65, 75)
+	ConfidenceMax       float64 `json:"confidence_max"`        // Max confidence (e.g., 70, 75, 85, 100)
+	RiskScoreMax        int     `json:"risk_score_max"`        // Max risk score to allow (e.g., 50, 45, 40, 30)
+	ProfitPotentialMin  float64 `json:"profit_potential_min"`  // Min profit % potential (e.g., 0.5, 1, 3, 5)
+	ProfitPotentialMax  float64 `json:"profit_potential_max"`  // Max profit % (e.g., 2, 3, 8, 15)
+	RequiresTrendAlign  bool    `json:"requires_trend_align"`  // Require trend alignment
+	PriorityWeight      float64 `json:"priority_weight"`       // For conflict resolution (e.g., 0.8, 1.0, 1.2, 1.5)
+}
+
+// ModeFullConfig holds ALL settings for a single trading mode
+type ModeFullConfig struct {
+	ModeName       string `json:"mode_name"` // "ultra_fast", "scalp", "swing", "position"
+	Enabled        bool   `json:"enabled"`   // Enable this mode
+
+	// Sub-configurations
+	Timeframe      *ModeTimeframeConfig       `json:"timeframe"`
+	Confidence     *ModeConfidenceConfig      `json:"confidence"`
+	Size           *ModeSizeConfig            `json:"size"`
+	CircuitBreaker *ModeCircuitBreakerConfig  `json:"circuit_breaker"`
+	SLTP           *ModeSLTPConfig            `json:"sltp"`
+	Hedge          *HedgeModeConfig           `json:"hedge"`
+	Averaging      *PositionAveragingConfig   `json:"averaging"`
+	StaleRelease   *StalePositionReleaseConfig `json:"stale_release"`
+	Assignment     *ModeAssignmentConfig      `json:"assignment"`
+}
+
+// DefaultModeConfigs returns the default configurations for all 4 modes (Story 2.7 defaults)
+func DefaultModeConfigs() map[string]*ModeFullConfig {
+	return map[string]*ModeFullConfig{
+		"ultra_fast": {
+			ModeName: "ultra_fast",
+			Enabled:  true,
+			Timeframe: &ModeTimeframeConfig{
+				TrendTimeframe:    "5m",
+				EntryTimeframe:    "1m",
+				AnalysisTimeframe: "1m",
+			},
+			Confidence: &ModeConfidenceConfig{
+				MinConfidence:   50.0,
+				HighConfidence:  70.0,
+				UltraConfidence: 85.0,
+			},
+			Size: &ModeSizeConfig{
+				BaseSizeUSD:      100.0,
+				MaxSizeUSD:       200.0,
+				MaxPositions:     5,
+				Leverage:         10,
+				SizeMultiplierLo: 1.0,
+				SizeMultiplierHi: 1.5,
+			},
+			CircuitBreaker: &ModeCircuitBreakerConfig{
+				MaxLossPerHour:       20.0,
+				MaxLossPerDay:        50.0,
+				MaxConsecutiveLosses: 3,
+				CooldownMinutes:      15,
+				MaxTradesPerMinute:   5,
+				MaxTradesPerHour:     30,
+				MaxTradesPerDay:      100,
+				WinRateCheckAfter:    10,
+				MinWinRate:           45.0,
+			},
+			SLTP: &ModeSLTPConfig{
+				StopLossPercent:        1.0,
+				TakeProfitPercent:      2.0,
+				TrailingStopEnabled:    false,
+				TrailingStopPercent:    0,
+				TrailingStopActivation: 0,
+				MaxHoldDuration:        "3s",
+				UseSingleTP:            true,
+			},
+			Hedge: &HedgeModeConfig{
+				AllowHedge:                true,
+				MinConfidenceForHedge:     70.0,
+				ExistingMustBeInProfit:    0, // Any
+				MaxHedgeSizePercent:       100.0,
+				AllowSameModeHedge:        false,
+				MaxTotalExposureMultiplier: 2.0,
+			},
+			Averaging: &PositionAveragingConfig{
+				AllowAveraging:         false, // Ultra-fast: NO averaging
+				AverageUpProfitPercent: 0,
+				AverageDownLossPercent: 0,
+				AddSizePercent:         0,
+				MaxAverages:            0,
+				MinConfidenceForAverage: 0,
+			},
+			StaleRelease: &StalePositionReleaseConfig{
+				Enabled:              true,
+				MaxHoldDuration:      "10s",
+				MinProfitToKeep:      0.3,
+				MaxLossToForceClose:  -0.5,
+				StaleZoneLo:          -0.3,
+				StaleZoneHi:          0.3,
+				StaleZoneCloseAction: "close",
+			},
+			Assignment: &ModeAssignmentConfig{
+				VolatilityMin:       "high",
+				VolatilityMax:       "extreme",
+				ExpectedHoldMin:     "0",
+				ExpectedHoldMax:     "5m",
+				ConfidenceMin:       50.0,
+				ConfidenceMax:       70.0,
+				RiskScoreMax:        50,
+				ProfitPotentialMin:  0.5,
+				ProfitPotentialMax:  2.0,
+				RequiresTrendAlign:  false,
+				PriorityWeight:      0.8,
+			},
+		},
+		"scalp": {
+			ModeName: "scalp",
+			Enabled:  true,
+			Timeframe: &ModeTimeframeConfig{
+				TrendTimeframe:    "15m",
+				EntryTimeframe:    "5m",
+				AnalysisTimeframe: "15m",
+			},
+			Confidence: &ModeConfidenceConfig{
+				MinConfidence:   60.0,
+				HighConfidence:  75.0,
+				UltraConfidence: 88.0,
+			},
+			Size: &ModeSizeConfig{
+				BaseSizeUSD:      200.0,
+				MaxSizeUSD:       400.0,
+				MaxPositions:     4,
+				Leverage:         8,
+				SizeMultiplierLo: 1.0,
+				SizeMultiplierHi: 1.8,
+			},
+			CircuitBreaker: &ModeCircuitBreakerConfig{
+				MaxLossPerHour:       40.0,
+				MaxLossPerDay:        100.0,
+				MaxConsecutiveLosses: 5,
+				CooldownMinutes:      30,
+				MaxTradesPerMinute:   3,
+				MaxTradesPerHour:     20,
+				MaxTradesPerDay:      50,
+				WinRateCheckAfter:    15,
+				MinWinRate:           50.0,
+			},
+			SLTP: &ModeSLTPConfig{
+				StopLossPercent:        1.5,
+				TakeProfitPercent:      3.0,
+				TrailingStopEnabled:    false,
+				TrailingStopPercent:    0.5,
+				TrailingStopActivation: 0.5,
+				MaxHoldDuration:        "4h",
+				UseSingleTP:            true,
+			},
+			Hedge: &HedgeModeConfig{
+				AllowHedge:                true,
+				MinConfidenceForHedge:     75.0,
+				ExistingMustBeInProfit:    0.0, // > 0%
+				MaxHedgeSizePercent:       75.0,
+				AllowSameModeHedge:        false,
+				MaxTotalExposureMultiplier: 2.0,
+			},
+			Averaging: &PositionAveragingConfig{
+				AllowAveraging:         true,
+				AverageUpProfitPercent: 0.5, // Add when profit > 0.5%
+				AverageDownLossPercent: -1.0, // Or loss < -1%
+				AddSizePercent:         50.0, // Add 50% of original
+				MaxAverages:            2,
+				MinConfidenceForAverage: 65.0,
+			},
+			StaleRelease: &StalePositionReleaseConfig{
+				Enabled:              true,
+				MaxHoldDuration:      "6h",
+				MinProfitToKeep:      0.5,
+				MaxLossToForceClose:  -1.0,
+				StaleZoneLo:          -0.5,
+				StaleZoneHi:          0.5,
+				StaleZoneCloseAction: "close",
+			},
+			Assignment: &ModeAssignmentConfig{
+				VolatilityMin:       "medium",
+				VolatilityMax:       "high",
+				ExpectedHoldMin:     "15m",
+				ExpectedHoldMax:     "4h",
+				ConfidenceMin:       60.0,
+				ConfidenceMax:       75.0,
+				RiskScoreMax:        45,
+				ProfitPotentialMin:  1.0,
+				ProfitPotentialMax:  3.0,
+				RequiresTrendAlign:  false,
+				PriorityWeight:      1.0,
+			},
+		},
+		"swing": {
+			ModeName: "swing",
+			Enabled:  true,
+			Timeframe: &ModeTimeframeConfig{
+				TrendTimeframe:    "1h",
+				EntryTimeframe:    "15m",
+				AnalysisTimeframe: "4h",
+			},
+			Confidence: &ModeConfidenceConfig{
+				MinConfidence:   65.0,
+				HighConfidence:  80.0,
+				UltraConfidence: 90.0,
+			},
+			Size: &ModeSizeConfig{
+				BaseSizeUSD:      400.0,
+				MaxSizeUSD:       750.0,
+				MaxPositions:     3,
+				Leverage:         5,
+				SizeMultiplierLo: 1.0,
+				SizeMultiplierHi: 2.0,
+			},
+			CircuitBreaker: &ModeCircuitBreakerConfig{
+				MaxLossPerHour:       80.0,
+				MaxLossPerDay:        200.0,
+				MaxConsecutiveLosses: 7,
+				CooldownMinutes:      60,
+				MaxTradesPerMinute:   2,
+				MaxTradesPerHour:     10,
+				MaxTradesPerDay:      20,
+				WinRateCheckAfter:    20,
+				MinWinRate:           55.0,
+			},
+			SLTP: &ModeSLTPConfig{
+				StopLossPercent:        2.5,
+				TakeProfitPercent:      5.0,
+				TrailingStopEnabled:    true,
+				TrailingStopPercent:    1.5,
+				TrailingStopActivation: 1.0,
+				MaxHoldDuration:        "3d",
+				UseSingleTP:            false,
+			},
+			Hedge: &HedgeModeConfig{
+				AllowHedge:                true,
+				MinConfidenceForHedge:     80.0,
+				ExistingMustBeInProfit:    1.0, // > 1%
+				MaxHedgeSizePercent:       50.0,
+				AllowSameModeHedge:        false,
+				MaxTotalExposureMultiplier: 2.0,
+			},
+			Averaging: &PositionAveragingConfig{
+				AllowAveraging:         true,
+				AverageUpProfitPercent: 1.0, // Add when profit > 1%
+				AverageDownLossPercent: -1.5, // Or loss < -1.5%
+				AddSizePercent:         50.0,
+				MaxAverages:            3,
+				MinConfidenceForAverage: 70.0,
+			},
+			StaleRelease: &StalePositionReleaseConfig{
+				Enabled:              true,
+				MaxHoldDuration:      "5d",
+				MinProfitToKeep:      1.0,
+				MaxLossToForceClose:  -1.5,
+				StaleZoneLo:          -1.0,
+				StaleZoneHi:          1.0,
+				StaleZoneCloseAction: "close",
+			},
+			Assignment: &ModeAssignmentConfig{
+				VolatilityMin:       "low",
+				VolatilityMax:       "medium",
+				ExpectedHoldMin:     "4h",
+				ExpectedHoldMax:     "3d",
+				ConfidenceMin:       65.0,
+				ConfidenceMax:       85.0,
+				RiskScoreMax:        40,
+				ProfitPotentialMin:  3.0,
+				ProfitPotentialMax:  8.0,
+				RequiresTrendAlign:  true,
+				PriorityWeight:      1.2,
+			},
+		},
+		"position": {
+			ModeName: "position",
+			Enabled:  true,
+			Timeframe: &ModeTimeframeConfig{
+				TrendTimeframe:    "4h",
+				EntryTimeframe:    "1h",
+				AnalysisTimeframe: "1d",
+			},
+			Confidence: &ModeConfidenceConfig{
+				MinConfidence:   75.0,
+				HighConfidence:  85.0,
+				UltraConfidence: 92.0,
+			},
+			Size: &ModeSizeConfig{
+				BaseSizeUSD:      600.0,
+				MaxSizeUSD:       1000.0,
+				MaxPositions:     2,
+				Leverage:         3,
+				SizeMultiplierLo: 1.0,
+				SizeMultiplierHi: 2.5,
+			},
+			CircuitBreaker: &ModeCircuitBreakerConfig{
+				MaxLossPerHour:       150.0,
+				MaxLossPerDay:        400.0,
+				MaxConsecutiveLosses: 10,
+				CooldownMinutes:      120,
+				MaxTradesPerMinute:   1,
+				MaxTradesPerHour:     5,
+				MaxTradesPerDay:      10,
+				WinRateCheckAfter:    25,
+				MinWinRate:           60.0,
+			},
+			SLTP: &ModeSLTPConfig{
+				StopLossPercent:        3.5,
+				TakeProfitPercent:      8.0,
+				TrailingStopEnabled:    true,
+				TrailingStopPercent:    2.5,
+				TrailingStopActivation: 2.0,
+				MaxHoldDuration:        "14d",
+				UseSingleTP:            false,
+			},
+			Hedge: &HedgeModeConfig{
+				AllowHedge:                true, // Cautious
+				MinConfidenceForHedge:     85.0,
+				ExistingMustBeInProfit:    2.0, // > 2%
+				MaxHedgeSizePercent:       50.0,
+				AllowSameModeHedge:        false,
+				MaxTotalExposureMultiplier: 2.0,
+			},
+			Averaging: &PositionAveragingConfig{
+				AllowAveraging:         true,
+				AverageUpProfitPercent: 2.0, // Add when profit > 2%
+				AverageDownLossPercent: -2.0, // Or loss < -2%
+				AddSizePercent:         30.0, // Add 30% of original
+				MaxAverages:            2,
+				MinConfidenceForAverage: 80.0,
+			},
+			StaleRelease: &StalePositionReleaseConfig{
+				Enabled:              true,
+				MaxHoldDuration:      "21d",
+				MinProfitToKeep:      2.0,
+				MaxLossToForceClose:  -2.0,
+				StaleZoneLo:          -1.5,
+				StaleZoneHi:          1.5,
+				StaleZoneCloseAction: "close",
+			},
+			Assignment: &ModeAssignmentConfig{
+				VolatilityMin:       "low",
+				VolatilityMax:       "low",
+				ExpectedHoldMin:     "3d",
+				ExpectedHoldMax:     "30d",
+				ConfidenceMin:       75.0,
+				ConfidenceMax:       100.0,
+				RiskScoreMax:        30,
+				ProfitPotentialMin:  5.0,
+				ProfitPotentialMax:  15.0,
+				RequiresTrendAlign:  true,
+				PriorityWeight:      1.5,
+			},
+		},
+	}
+}
+
 // SymbolSettings holds per-symbol trading configuration
 type SymbolSettings struct {
 	Symbol              string                    `json:"symbol"`
@@ -240,9 +681,14 @@ type AutopilotSettings struct {
 	GinieTrailingStopPercentPosition        float64 `json:"ginie_trailing_stop_percent_position"`    // e.g., 3.0%
 	GinieTrailingStopActivationPosition     float64 `json:"ginie_trailing_stop_activation_position"` // e.g., 2.0% profit
 
-	// TP mode configuration
-	GinieUseSingleTP      bool    `json:"ginie_use_single_tp"`       // true = 100% at TP1, false = 4-level
-	GinieSingleTPPercent  float64 `json:"ginie_single_tp_percent"`   // If single TP, this is the gain %
+	// TP mode configuration (global and per-mode)
+	GinieUseSingleTP          bool    `json:"ginie_use_single_tp"`           // true = 100% at TP1, false = 4-level (global fallback)
+	GinieUseSingleTPUltrafast bool    `json:"ginie_use_single_tp_ultrafast"` // Ultra-fast: always single TP
+	GinieUseSingleTPScalp     bool    `json:"ginie_use_single_tp_scalp"`     // Scalp: single TP mode
+	GinieSingleTPPercent      float64 `json:"ginie_single_tp_percent"`       // If single TP, this is the gain %
+
+	// Trailing stop activation mode: "immediate" (default), "after_tp1", "after_breakeven", "after_tp1_and_breakeven"
+	GinieTrailingActivationMode string `json:"ginie_trailing_activation_mode"` // When to activate trailing
 
 	// TP allocation for multi-TP mode (if not using single TP)
 	GinieTP1Percent float64 `json:"ginie_tp1_percent"` // e.g., 25.0 (25%)
@@ -341,6 +787,11 @@ type AutopilotSettings struct {
 	// Default adjustments for each performance category
 	CategoryConfidenceBoost  map[string]float64 `json:"category_confidence_boost"`  // Extra confidence required by category
 	CategorySizeMultiplier   map[string]float64 `json:"category_size_multiplier"`   // Size multiplier by category
+
+	// ====== COMPREHENSIVE MODE CONFIGURATIONS (Story 2.7) ======
+	// Full configuration for each trading mode with all settings
+	// User can customize any setting - defaults provided from Story 2.7
+	ModeConfigs map[string]*ModeFullConfig `json:"mode_configs"`
 }
 
 // SettingsManager handles persistent settings storage
@@ -461,13 +912,13 @@ func DefaultSettings() *AutopilotSettings {
 		GinieTPPercentPosition:     0,   // Disabled, use ATR/LLM
 
 		// Ginie trailing stop defaults (match current hardcoded values)
-		GinieTrailingStopEnabledUltrafast:       true,
-		GinieTrailingStopPercentUltrafast:       0.1,  // 0.1%
-		GinieTrailingStopActivationUltrafast:    0.2,  // After 0.2% profit
+		GinieTrailingStopEnabledUltrafast:       false, // Ultra-fast: NO trailing, only SL/TP
+		GinieTrailingStopPercentUltrafast:       0,    // Disabled
+		GinieTrailingStopActivationUltrafast:    0,    // Disabled
 
-		GinieTrailingStopEnabledScalp:           true,
-		GinieTrailingStopPercentScalp:           0.3,  // 0.3%
-		GinieTrailingStopActivationScalp:        0.5,  // After 0.5% profit
+		GinieTrailingStopEnabledScalp:           false, // Scalp: NO trailing, only SL/TP
+		GinieTrailingStopPercentScalp:           0,     // Disabled
+		GinieTrailingStopActivationScalp:        0,     // Disabled
 
 		GinieTrailingStopEnabledSwing:           true,
 		GinieTrailingStopPercentSwing:           1.5,  // 1.5%
@@ -477,9 +928,14 @@ func DefaultSettings() *AutopilotSettings {
 		GinieTrailingStopPercentPosition:        3.0,  // 3.0%
 		GinieTrailingStopActivationPosition:     2.0,  // After 2% profit
 
-		// Ginie TP mode (default to 4-level system)
-		GinieUseSingleTP:     false, // Use multi-TP
-		GinieSingleTPPercent: 5.0,   // If single TP enabled, 5% gain
+		// Ginie TP mode (per-mode single TP settings)
+		GinieUseSingleTP:          false, // Global fallback: Use multi-TP
+		GinieUseSingleTPUltrafast: true,  // Ultra-fast: ALWAYS single TP (100% at TP)
+		GinieUseSingleTPScalp:     true,  // Scalp: Single TP for quick exits
+		GinieSingleTPPercent:      5.0,   // If single TP enabled, 5% gain
+
+		// Trailing activation mode: trailing only activates after TP1 AND breakeven
+		GinieTrailingActivationMode: "after_tp1_and_breakeven",
 
 		// Ginie TP allocation (current default: 25% each)
 		GinieTP1Percent: 25.0,
@@ -659,6 +1115,9 @@ func DefaultSettings() *AutopilotSettings {
 			"worst":     0.25, // 75% smaller positions for worst performers
 			"blacklist": 0.0,  // No positions
 		},
+
+		// Comprehensive mode configurations (Story 2.7 defaults)
+		ModeConfigs: DefaultModeConfigs(),
 	}
 }
 
@@ -1970,4 +2429,634 @@ func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital floa
 		PositionUtilization: posUtil,
 		LastAllocation:      time.Now(),
 	}
+}
+
+// === MODE CONFIGURATION METHODS (Story 2.7 Task 2.7.10) ===
+
+// ValidModes lists all valid trading mode names
+var ValidModes = map[string]bool{
+	"ultra_fast": true,
+	"scalp":      true,
+	"swing":      true,
+	"position":   true,
+}
+
+// ValidateModeConfig validates a ModeFullConfig for consistency and bounds
+func ValidateModeConfig(config *ModeFullConfig) error {
+	if config == nil {
+		return fmt.Errorf("mode config cannot be nil")
+	}
+
+	// Validate mode name
+	if !ValidModes[config.ModeName] {
+		return fmt.Errorf("invalid mode name '%s': must be ultra_fast, scalp, swing, or position", config.ModeName)
+	}
+
+	// Validate timeframe config if present
+	if config.Timeframe != nil {
+		if config.Timeframe.TrendTimeframe != "" {
+			if err := ValidateTimeframe(config.Timeframe.TrendTimeframe); err != nil {
+				return fmt.Errorf("timeframe.trend_timeframe: %w", err)
+			}
+		}
+		if config.Timeframe.EntryTimeframe != "" {
+			if err := ValidateTimeframe(config.Timeframe.EntryTimeframe); err != nil {
+				return fmt.Errorf("timeframe.entry_timeframe: %w", err)
+			}
+		}
+		if config.Timeframe.AnalysisTimeframe != "" {
+			if err := ValidateTimeframe(config.Timeframe.AnalysisTimeframe); err != nil {
+				return fmt.Errorf("timeframe.analysis_timeframe: %w", err)
+			}
+		}
+	}
+
+	// Validate confidence config if present
+	if config.Confidence != nil {
+		if config.Confidence.MinConfidence < 0 || config.Confidence.MinConfidence > 100 {
+			return fmt.Errorf("confidence.min_confidence must be between 0 and 100")
+		}
+		if config.Confidence.HighConfidence < 0 || config.Confidence.HighConfidence > 100 {
+			return fmt.Errorf("confidence.high_confidence must be between 0 and 100")
+		}
+		if config.Confidence.UltraConfidence < 0 || config.Confidence.UltraConfidence > 100 {
+			return fmt.Errorf("confidence.ultra_confidence must be between 0 and 100")
+		}
+	}
+
+	// Validate size config if present
+	if config.Size != nil {
+		if config.Size.BaseSizeUSD < 0 {
+			return fmt.Errorf("size.base_size_usd must be positive")
+		}
+		if config.Size.MaxSizeUSD < 0 {
+			return fmt.Errorf("size.max_size_usd must be positive")
+		}
+		if config.Size.MaxPositions < 0 {
+			return fmt.Errorf("size.max_positions must be non-negative")
+		}
+		if config.Size.Leverage < 1 || config.Size.Leverage > 125 {
+			return fmt.Errorf("size.leverage must be between 1 and 125")
+		}
+	}
+
+	// Validate circuit breaker config if present
+	if config.CircuitBreaker != nil {
+		if config.CircuitBreaker.MaxLossPerHour < 0 {
+			return fmt.Errorf("circuit_breaker.max_loss_per_hour must be non-negative")
+		}
+		if config.CircuitBreaker.MaxLossPerDay < 0 {
+			return fmt.Errorf("circuit_breaker.max_loss_per_day must be non-negative")
+		}
+		if config.CircuitBreaker.MaxConsecutiveLosses < 0 {
+			return fmt.Errorf("circuit_breaker.max_consecutive_losses must be non-negative")
+		}
+		if config.CircuitBreaker.CooldownMinutes < 0 {
+			return fmt.Errorf("circuit_breaker.cooldown_minutes must be non-negative")
+		}
+		if config.CircuitBreaker.MinWinRate < 0 || config.CircuitBreaker.MinWinRate > 100 {
+			return fmt.Errorf("circuit_breaker.min_win_rate must be between 0 and 100")
+		}
+	}
+
+	// Validate SLTP config if present
+	if config.SLTP != nil {
+		if config.SLTP.StopLossPercent < 0 || config.SLTP.StopLossPercent > 100 {
+			return fmt.Errorf("sltp.stop_loss_percent must be between 0 and 100")
+		}
+		if config.SLTP.TakeProfitPercent < 0 || config.SLTP.TakeProfitPercent > 100 {
+			return fmt.Errorf("sltp.take_profit_percent must be between 0 and 100")
+		}
+		if config.SLTP.TrailingStopPercent < 0 || config.SLTP.TrailingStopPercent > 100 {
+			return fmt.Errorf("sltp.trailing_stop_percent must be between 0 and 100")
+		}
+		if config.SLTP.TrailingStopActivation < 0 || config.SLTP.TrailingStopActivation > 100 {
+			return fmt.Errorf("sltp.trailing_stop_activation must be between 0 and 100")
+		}
+	}
+
+	return nil
+}
+
+// GetAllModeConfigs returns all 4 mode configurations
+func (sm *SettingsManager) GetAllModeConfigs() map[string]*ModeFullConfig {
+	settings := sm.GetCurrentSettings()
+	if settings.ModeConfigs == nil || len(settings.ModeConfigs) == 0 {
+		return DefaultModeConfigs()
+	}
+	return settings.ModeConfigs
+}
+
+// GetModeConfig returns the configuration for a specific mode
+func (sm *SettingsManager) GetModeConfig(mode string) (*ModeFullConfig, error) {
+	if !ValidModes[mode] {
+		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode)
+	}
+
+	configs := sm.GetAllModeConfigs()
+	if config, exists := configs[mode]; exists {
+		return config, nil
+	}
+
+	// Return default if not found
+	defaults := DefaultModeConfigs()
+	if config, exists := defaults[mode]; exists {
+		return config, nil
+	}
+
+	return nil, fmt.Errorf("mode config not found for '%s'", mode)
+}
+
+// UpdateModeConfig updates the configuration for a specific mode
+func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig) error {
+	if !ValidModes[mode] {
+		return fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode)
+	}
+
+	// Ensure mode name matches
+	config.ModeName = mode
+
+	// Validate the config
+	if err := ValidateModeConfig(config); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
+
+	settings := sm.GetCurrentSettings()
+	if settings.ModeConfigs == nil {
+		settings.ModeConfigs = DefaultModeConfigs()
+	}
+
+	settings.ModeConfigs[mode] = config
+	return sm.SaveSettings(settings)
+}
+
+// ResetModeConfigs resets all mode configurations to defaults
+func (sm *SettingsManager) ResetModeConfigs() error {
+	settings := sm.GetCurrentSettings()
+	settings.ModeConfigs = DefaultModeConfigs()
+	return sm.SaveSettings(settings)
+}
+
+// GetModeCircuitBreakerStatus returns circuit breaker status for all modes
+// This is a read-only status view, not runtime state
+func (sm *SettingsManager) GetModeCircuitBreakerConfigs() map[string]*ModeCircuitBreakerConfig {
+	configs := sm.GetAllModeConfigs()
+	result := make(map[string]*ModeCircuitBreakerConfig)
+
+	for mode, config := range configs {
+		if config.CircuitBreaker != nil {
+			result[mode] = config.CircuitBreaker
+		}
+	}
+
+	return result
+}
+
+// ============================================================================
+// GINIE MODE CONFIG MANAGEMENT WITH GinieTradingMode AND GinieModeConfig TYPES
+// (Story 2.7 Task 2.7.2)
+// ============================================================================
+
+// GetDefaultModeConfig returns the default GinieModeConfig for a specific GinieTradingMode.
+// Each mode (ultra_fast, scalp, swing, position) has tailored defaults optimized
+// for its trading style, timeframe, and risk profile.
+func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
+	switch mode {
+	case GinieModeUltraFast:
+		return GinieModeConfig{
+			Mode:    GinieModeUltraFast,
+			Enabled: true,
+
+			// Timeframes - very short for ultra-fast scalping
+			TrendTimeframe:    "5m",
+			EntryTimeframe:    "1m",
+			AnalysisTimeframe: "1m",
+
+			// Confidence - lower thresholds for quick entry
+			MinConfidence:   50,
+			HighConfidence:  70,
+			UltraConfidence: 85,
+
+			// Position Sizing - small, leveraged positions
+			BaseSizeUSD:    100,
+			MaxSizeUSD:     200,
+			MaxPositions:   5,
+			Leverage:       10,
+			SizeMultiplier: 1.5,
+
+			// SL/TP - tight stops, quick targets
+			StopLossPercent:   1.0,
+			TakeProfitPercent: 2.0,
+			TrailingEnabled:   false,
+			TrailingPercent:   0,
+			MaxHoldDuration:   "3s",
+
+			// Circuit Breaker - aggressive limits for high-frequency trading
+			CircuitBreaker: ModeCircuitBreaker{
+				MaxLossPerHour:     20,
+				MaxLossPerDay:      50,
+				MaxConsecutiveLoss: 3,
+				MaxTradesPerMinute: 5,
+				MaxTradesPerHour:   30,
+				MaxTradesPerDay:    100,
+				WinRateCheckAfter:  10,
+				MinWinRatePercent:  45,
+				CooldownMinutes:    15,
+				AutoRecovery:       true,
+			},
+		}
+
+	case GinieModeScalp:
+		return GinieModeConfig{
+			Mode:    GinieModeScalp,
+			Enabled: true,
+
+			// Timeframes - short-term scalping
+			TrendTimeframe:    "15m",
+			EntryTimeframe:    "5m",
+			AnalysisTimeframe: "15m",
+
+			// Confidence - moderate thresholds
+			MinConfidence:   60,
+			HighConfidence:  75,
+			UltraConfidence: 88,
+
+			// Position Sizing - moderate positions
+			BaseSizeUSD:    200,
+			MaxSizeUSD:     400,
+			MaxPositions:   4,
+			Leverage:       8,
+			SizeMultiplier: 1.8,
+
+			// SL/TP - reasonable stops and targets
+			StopLossPercent:   1.5,
+			TakeProfitPercent: 3.0,
+			TrailingEnabled:   false,
+			TrailingPercent:   0.5,
+			MaxHoldDuration:   "4h",
+
+			// Circuit Breaker - balanced for frequent trading
+			CircuitBreaker: ModeCircuitBreaker{
+				MaxLossPerHour:     40,
+				MaxLossPerDay:      100,
+				MaxConsecutiveLoss: 5,
+				MaxTradesPerMinute: 3,
+				MaxTradesPerHour:   20,
+				MaxTradesPerDay:    50,
+				WinRateCheckAfter:  15,
+				MinWinRatePercent:  50,
+				CooldownMinutes:    30,
+				AutoRecovery:       true,
+			},
+		}
+
+	case GinieModeSwing:
+		return GinieModeConfig{
+			Mode:    GinieModeSwing,
+			Enabled: true,
+
+			// Timeframes - medium-term swing trading
+			TrendTimeframe:    "1h",
+			EntryTimeframe:    "15m",
+			AnalysisTimeframe: "4h",
+
+			// Confidence - higher thresholds for quality trades
+			MinConfidence:   65,
+			HighConfidence:  80,
+			UltraConfidence: 90,
+
+			// Position Sizing - larger positions, lower leverage
+			BaseSizeUSD:    400,
+			MaxSizeUSD:     750,
+			MaxPositions:   3,
+			Leverage:       5,
+			SizeMultiplier: 2.0,
+
+			// SL/TP - wider stops with trailing
+			StopLossPercent:   2.5,
+			TakeProfitPercent: 5.0,
+			TrailingEnabled:   true,
+			TrailingPercent:   1.5,
+			MaxHoldDuration:   "3d",
+
+			// Circuit Breaker - conservative for swing trading
+			CircuitBreaker: ModeCircuitBreaker{
+				MaxLossPerHour:     80,
+				MaxLossPerDay:      200,
+				MaxConsecutiveLoss: 7,
+				MaxTradesPerMinute: 2,
+				MaxTradesPerHour:   10,
+				MaxTradesPerDay:    20,
+				WinRateCheckAfter:  20,
+				MinWinRatePercent:  55,
+				CooldownMinutes:    60,
+				AutoRecovery:       true,
+			},
+		}
+
+	case GinieModePosition:
+		return GinieModeConfig{
+			Mode:    GinieModePosition,
+			Enabled: true,
+
+			// Timeframes - long-term position trading
+			TrendTimeframe:    "4h",
+			EntryTimeframe:    "1h",
+			AnalysisTimeframe: "1d",
+
+			// Confidence - highest thresholds for conviction trades
+			MinConfidence:   75,
+			HighConfidence:  85,
+			UltraConfidence: 92,
+
+			// Position Sizing - largest positions, lowest leverage
+			BaseSizeUSD:    600,
+			MaxSizeUSD:     1000,
+			MaxPositions:   2,
+			Leverage:       3,
+			SizeMultiplier: 2.5,
+
+			// SL/TP - widest stops with trailing
+			StopLossPercent:   3.5,
+			TakeProfitPercent: 8.0,
+			TrailingEnabled:   true,
+			TrailingPercent:   2.5,
+			MaxHoldDuration:   "14d",
+
+			// Circuit Breaker - very conservative for position trading
+			CircuitBreaker: ModeCircuitBreaker{
+				MaxLossPerHour:     150,
+				MaxLossPerDay:      400,
+				MaxConsecutiveLoss: 10,
+				MaxTradesPerMinute: 1,
+				MaxTradesPerHour:   5,
+				MaxTradesPerDay:    10,
+				WinRateCheckAfter:  25,
+				MinWinRatePercent:  60,
+				CooldownMinutes:    120,
+				AutoRecovery:       false,
+			},
+		}
+
+	default:
+		// Return scalp as default if unknown mode
+		return GetDefaultModeConfig(GinieModeScalp)
+	}
+}
+
+// GetAllDefaultModeConfigs returns a map of all 4 trading mode configurations with their defaults.
+// This is useful for displaying all mode configurations in the UI or for initialization.
+// Returns map keyed by GinieTradingMode containing GinieModeConfig values.
+func GetAllDefaultModeConfigs() map[GinieTradingMode]GinieModeConfig {
+	return map[GinieTradingMode]GinieModeConfig{
+		GinieModeUltraFast: GetDefaultModeConfig(GinieModeUltraFast),
+		GinieModeScalp:     GetDefaultModeConfig(GinieModeScalp),
+		GinieModeSwing:     GetDefaultModeConfig(GinieModeSwing),
+		GinieModePosition:  GetDefaultModeConfig(GinieModePosition),
+	}
+}
+
+// UpdateGinieModeConfig saves a custom GinieModeConfig for a specific GinieTradingMode.
+// This allows users to override the defaults with their own settings.
+// The configuration is validated before saving.
+func (sm *SettingsManager) UpdateGinieModeConfig(mode GinieTradingMode, config GinieModeConfig) error {
+	// Validate mode
+	if mode != GinieModeUltraFast && mode != GinieModeScalp && mode != GinieModeSwing && mode != GinieModePosition {
+		return fmt.Errorf("invalid trading mode: %s", mode)
+	}
+
+	// Validate timeframes
+	if config.TrendTimeframe != "" {
+		if err := ValidateTimeframe(config.TrendTimeframe); err != nil {
+			return fmt.Errorf("invalid trend timeframe: %w", err)
+		}
+	}
+	if config.EntryTimeframe != "" {
+		if err := ValidateTimeframe(config.EntryTimeframe); err != nil {
+			return fmt.Errorf("invalid entry timeframe: %w", err)
+		}
+	}
+	if config.AnalysisTimeframe != "" {
+		if err := ValidateTimeframe(config.AnalysisTimeframe); err != nil {
+			return fmt.Errorf("invalid analysis timeframe: %w", err)
+		}
+	}
+
+	// Validate confidence thresholds
+	if config.MinConfidence < 0 || config.MinConfidence > 100 {
+		return fmt.Errorf("min_confidence must be between 0 and 100, got: %.2f", config.MinConfidence)
+	}
+	if config.HighConfidence < 0 || config.HighConfidence > 100 {
+		return fmt.Errorf("high_confidence must be between 0 and 100, got: %.2f", config.HighConfidence)
+	}
+	if config.UltraConfidence < 0 || config.UltraConfidence > 100 {
+		return fmt.Errorf("ultra_confidence must be between 0 and 100, got: %.2f", config.UltraConfidence)
+	}
+	if config.MinConfidence > config.HighConfidence {
+		return fmt.Errorf("min_confidence (%.2f) cannot be greater than high_confidence (%.2f)", config.MinConfidence, config.HighConfidence)
+	}
+	if config.HighConfidence > config.UltraConfidence {
+		return fmt.Errorf("high_confidence (%.2f) cannot be greater than ultra_confidence (%.2f)", config.HighConfidence, config.UltraConfidence)
+	}
+
+	// Validate position sizing
+	if config.BaseSizeUSD < 0 {
+		return fmt.Errorf("base_size_usd cannot be negative: %.2f", config.BaseSizeUSD)
+	}
+	if config.MaxSizeUSD < 0 {
+		return fmt.Errorf("max_size_usd cannot be negative: %.2f", config.MaxSizeUSD)
+	}
+	if config.BaseSizeUSD > config.MaxSizeUSD && config.MaxSizeUSD > 0 {
+		return fmt.Errorf("base_size_usd (%.2f) cannot be greater than max_size_usd (%.2f)", config.BaseSizeUSD, config.MaxSizeUSD)
+	}
+	if config.MaxPositions < 0 {
+		return fmt.Errorf("max_positions cannot be negative: %d", config.MaxPositions)
+	}
+	if config.Leverage < 1 || config.Leverage > 125 {
+		return fmt.Errorf("leverage must be between 1 and 125, got: %d", config.Leverage)
+	}
+	if config.SizeMultiplier < 0 {
+		return fmt.Errorf("size_multiplier cannot be negative: %.2f", config.SizeMultiplier)
+	}
+
+	// Validate SL/TP
+	if config.StopLossPercent < 0 || config.StopLossPercent > 100 {
+		return fmt.Errorf("stop_loss_percent must be between 0 and 100, got: %.2f", config.StopLossPercent)
+	}
+	if config.TakeProfitPercent < 0 || config.TakeProfitPercent > 100 {
+		return fmt.Errorf("take_profit_percent must be between 0 and 100, got: %.2f", config.TakeProfitPercent)
+	}
+	if config.TrailingPercent < 0 || config.TrailingPercent > 100 {
+		return fmt.Errorf("trailing_percent must be between 0 and 100, got: %.2f", config.TrailingPercent)
+	}
+
+	// Validate circuit breaker
+	cb := config.CircuitBreaker
+	if cb.MaxLossPerHour < 0 {
+		return fmt.Errorf("circuit_breaker.max_loss_per_hour cannot be negative: %.2f", cb.MaxLossPerHour)
+	}
+	if cb.MaxLossPerDay < 0 {
+		return fmt.Errorf("circuit_breaker.max_loss_per_day cannot be negative: %.2f", cb.MaxLossPerDay)
+	}
+	if cb.MaxConsecutiveLoss < 0 {
+		return fmt.Errorf("circuit_breaker.max_consecutive_loss cannot be negative: %d", cb.MaxConsecutiveLoss)
+	}
+	if cb.MaxTradesPerMinute < 0 {
+		return fmt.Errorf("circuit_breaker.max_trades_per_minute cannot be negative: %d", cb.MaxTradesPerMinute)
+	}
+	if cb.MaxTradesPerHour < 0 {
+		return fmt.Errorf("circuit_breaker.max_trades_per_hour cannot be negative: %d", cb.MaxTradesPerHour)
+	}
+	if cb.MaxTradesPerDay < 0 {
+		return fmt.Errorf("circuit_breaker.max_trades_per_day cannot be negative: %d", cb.MaxTradesPerDay)
+	}
+	if cb.WinRateCheckAfter < 0 {
+		return fmt.Errorf("circuit_breaker.win_rate_check_after cannot be negative: %d", cb.WinRateCheckAfter)
+	}
+	if cb.MinWinRatePercent < 0 || cb.MinWinRatePercent > 100 {
+		return fmt.Errorf("circuit_breaker.min_win_rate_percent must be between 0 and 100, got: %.2f", cb.MinWinRatePercent)
+	}
+	if cb.CooldownMinutes < 0 {
+		return fmt.Errorf("circuit_breaker.cooldown_minutes cannot be negative: %d", cb.CooldownMinutes)
+	}
+
+	// Ensure mode is set correctly
+	config.Mode = mode
+
+	// Get current settings and update the mode config
+	settings := sm.GetCurrentSettings()
+
+	// Initialize ModeConfigs if nil
+	if settings.ModeConfigs == nil {
+		settings.ModeConfigs = DefaultModeConfigs()
+	}
+
+	// Convert GinieModeConfig to ModeFullConfig for storage
+	modeStr := string(mode)
+	if settings.ModeConfigs[modeStr] == nil {
+		settings.ModeConfigs[modeStr] = &ModeFullConfig{ModeName: modeStr}
+	}
+
+	fullConfig := settings.ModeConfigs[modeStr]
+	fullConfig.Enabled = config.Enabled
+
+	// Update Timeframe
+	if fullConfig.Timeframe == nil {
+		fullConfig.Timeframe = &ModeTimeframeConfig{}
+	}
+	fullConfig.Timeframe.TrendTimeframe = config.TrendTimeframe
+	fullConfig.Timeframe.EntryTimeframe = config.EntryTimeframe
+	fullConfig.Timeframe.AnalysisTimeframe = config.AnalysisTimeframe
+
+	// Update Confidence
+	if fullConfig.Confidence == nil {
+		fullConfig.Confidence = &ModeConfidenceConfig{}
+	}
+	fullConfig.Confidence.MinConfidence = config.MinConfidence
+	fullConfig.Confidence.HighConfidence = config.HighConfidence
+	fullConfig.Confidence.UltraConfidence = config.UltraConfidence
+
+	// Update Size
+	if fullConfig.Size == nil {
+		fullConfig.Size = &ModeSizeConfig{}
+	}
+	fullConfig.Size.BaseSizeUSD = config.BaseSizeUSD
+	fullConfig.Size.MaxSizeUSD = config.MaxSizeUSD
+	fullConfig.Size.MaxPositions = config.MaxPositions
+	fullConfig.Size.Leverage = config.Leverage
+	fullConfig.Size.SizeMultiplierHi = config.SizeMultiplier
+
+	// Update SLTP
+	if fullConfig.SLTP == nil {
+		fullConfig.SLTP = &ModeSLTPConfig{}
+	}
+	fullConfig.SLTP.StopLossPercent = config.StopLossPercent
+	fullConfig.SLTP.TakeProfitPercent = config.TakeProfitPercent
+	fullConfig.SLTP.TrailingStopEnabled = config.TrailingEnabled
+	fullConfig.SLTP.TrailingStopPercent = config.TrailingPercent
+	fullConfig.SLTP.MaxHoldDuration = config.MaxHoldDuration
+
+	// Update CircuitBreaker
+	if fullConfig.CircuitBreaker == nil {
+		fullConfig.CircuitBreaker = &ModeCircuitBreakerConfig{}
+	}
+	fullConfig.CircuitBreaker.MaxLossPerHour = config.CircuitBreaker.MaxLossPerHour
+	fullConfig.CircuitBreaker.MaxLossPerDay = config.CircuitBreaker.MaxLossPerDay
+	fullConfig.CircuitBreaker.MaxConsecutiveLosses = config.CircuitBreaker.MaxConsecutiveLoss
+	fullConfig.CircuitBreaker.MaxTradesPerMinute = config.CircuitBreaker.MaxTradesPerMinute
+	fullConfig.CircuitBreaker.MaxTradesPerHour = config.CircuitBreaker.MaxTradesPerHour
+	fullConfig.CircuitBreaker.MaxTradesPerDay = config.CircuitBreaker.MaxTradesPerDay
+	fullConfig.CircuitBreaker.WinRateCheckAfter = config.CircuitBreaker.WinRateCheckAfter
+	fullConfig.CircuitBreaker.MinWinRate = config.CircuitBreaker.MinWinRatePercent
+	fullConfig.CircuitBreaker.CooldownMinutes = config.CircuitBreaker.CooldownMinutes
+
+	return sm.SaveSettings(settings)
+}
+
+// GetGinieModeConfig retrieves the current GinieModeConfig for a specific GinieTradingMode.
+// If no custom config exists, returns the default configuration.
+func (sm *SettingsManager) GetGinieModeConfig(mode GinieTradingMode) GinieModeConfig {
+	settings := sm.GetCurrentSettings()
+
+	modeStr := string(mode)
+	if settings.ModeConfigs != nil && settings.ModeConfigs[modeStr] != nil {
+		fullConfig := settings.ModeConfigs[modeStr]
+		return convertModeFullConfigToGinieModeConfig(mode, fullConfig)
+	}
+
+	// Return defaults if no custom config exists
+	return GetDefaultModeConfig(mode)
+}
+
+// convertModeFullConfigToGinieModeConfig converts ModeFullConfig to GinieModeConfig
+func convertModeFullConfigToGinieModeConfig(mode GinieTradingMode, fc *ModeFullConfig) GinieModeConfig {
+	config := GinieModeConfig{
+		Mode:    mode,
+		Enabled: fc.Enabled,
+	}
+
+	if fc.Timeframe != nil {
+		config.TrendTimeframe = fc.Timeframe.TrendTimeframe
+		config.EntryTimeframe = fc.Timeframe.EntryTimeframe
+		config.AnalysisTimeframe = fc.Timeframe.AnalysisTimeframe
+	}
+
+	if fc.Confidence != nil {
+		config.MinConfidence = fc.Confidence.MinConfidence
+		config.HighConfidence = fc.Confidence.HighConfidence
+		config.UltraConfidence = fc.Confidence.UltraConfidence
+	}
+
+	if fc.Size != nil {
+		config.BaseSizeUSD = fc.Size.BaseSizeUSD
+		config.MaxSizeUSD = fc.Size.MaxSizeUSD
+		config.MaxPositions = fc.Size.MaxPositions
+		config.Leverage = fc.Size.Leverage
+		config.SizeMultiplier = fc.Size.SizeMultiplierHi
+	}
+
+	if fc.SLTP != nil {
+		config.StopLossPercent = fc.SLTP.StopLossPercent
+		config.TakeProfitPercent = fc.SLTP.TakeProfitPercent
+		config.TrailingEnabled = fc.SLTP.TrailingStopEnabled
+		config.TrailingPercent = fc.SLTP.TrailingStopPercent
+		config.MaxHoldDuration = fc.SLTP.MaxHoldDuration
+	}
+
+	if fc.CircuitBreaker != nil {
+		config.CircuitBreaker = ModeCircuitBreaker{
+			MaxLossPerHour:     fc.CircuitBreaker.MaxLossPerHour,
+			MaxLossPerDay:      fc.CircuitBreaker.MaxLossPerDay,
+			MaxConsecutiveLoss: fc.CircuitBreaker.MaxConsecutiveLosses,
+			MaxTradesPerMinute: fc.CircuitBreaker.MaxTradesPerMinute,
+			MaxTradesPerHour:   fc.CircuitBreaker.MaxTradesPerHour,
+			MaxTradesPerDay:    fc.CircuitBreaker.MaxTradesPerDay,
+			WinRateCheckAfter:  fc.CircuitBreaker.WinRateCheckAfter,
+			MinWinRatePercent:  fc.CircuitBreaker.MinWinRate,
+			CooldownMinutes:    fc.CircuitBreaker.CooldownMinutes,
+			AutoRecovery:       true, // Default to true
+		}
+	}
+
+	return config
 }

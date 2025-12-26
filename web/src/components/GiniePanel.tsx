@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig } from '../services/futuresApi';
 import {
   Sparkles, Power, PowerOff, RefreshCw, Shield, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
@@ -110,8 +110,17 @@ export default function GiniePanel() {
   // Performance metrics with live data
   const [performanceMetrics, setPerformanceMetrics] = useState<any>(null);
   const [loadingPerformance, setLoadingPerformance] = useState(false);
+  // Mode Configuration state (Story 2.7 Task 2.7.9)
+  const [modeConfigs, setModeConfigs] = useState<Record<string, ModeFullConfig>>({});
+  const [showModeConfig, setShowModeConfig] = useState(false);
+  const [selectedModeConfig, setSelectedModeConfig] = useState<'ultra_fast' | 'scalp' | 'swing' | 'position'>('ultra_fast');
+  const [expandedModeSection, setExpandedModeSection] = useState<string | null>(null);
+  const [savingModeConfig, setSavingModeConfig] = useState(false);
+  const [resettingModes, setResettingModes] = useState(false);
+  const [modeConfigErrors, setModeConfigErrors] = useState<Record<string, string>>({});
 
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
+  const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
 
   const isRunning = autopilotStatus?.stats?.running ?? false;
   const isDryRun = autopilotStatus?.config?.dry_run ?? true;
@@ -226,6 +235,7 @@ export default function GiniePanel() {
     fetchTradeHistory(); // Fetch trade history
     fetchPerformanceMetrics(); // Fetch performance metrics
     fetchLLMSwitches(); // Fetch LLM diagnostics
+    fetchModeConfigs(); // Fetch mode configurations (Story 2.7)
     syncPositionsOnLoad(); // Auto-sync positions on mount
     const interval = setInterval(() => {
       fetchStatus();
@@ -659,6 +669,114 @@ export default function GiniePanel() {
     } catch (err) {
       setError('Failed to reset LLM diagnostics');
     }
+  };
+
+  // Mode Configuration functions (Story 2.7 Task 2.7.9)
+  const fetchModeConfigs = async () => {
+    try {
+      const result = await futuresApi.getModeConfigs();
+      if (result.success && result.mode_configs) {
+        setModeConfigs(result.mode_configs);
+      }
+    } catch (err) {
+      console.error('Failed to fetch mode configurations:', err);
+    }
+  };
+
+  const validateModeConfig = (_mode: string, config: ModeFullConfig): string | null => {
+    if (config.confidence) {
+      if (config.confidence.min_confidence < 0 || config.confidence.min_confidence > 100) {
+        return 'Min Confidence must be between 0 and 100';
+      }
+      if (config.confidence.high_confidence < config.confidence.min_confidence) {
+        return 'High Confidence must be >= Min Confidence';
+      }
+      if (config.confidence.ultra_confidence < config.confidence.high_confidence) {
+        return 'Ultra Confidence must be >= High Confidence';
+      }
+    }
+    if (config.size) {
+      if (config.size.base_size_usd < 0) return 'Base Size must be positive';
+      if (config.size.max_size_usd < config.size.base_size_usd) {
+        return 'Max Size must be >= Base Size';
+      }
+      if (config.size.leverage < 1 || config.size.leverage > 125) {
+        return 'Leverage must be between 1 and 125';
+      }
+    }
+    if (config.sltp) {
+      if (config.sltp.stop_loss_percent < 0 || config.sltp.stop_loss_percent > 50) {
+        return 'Stop Loss must be between 0 and 50%';
+      }
+      if (config.sltp.take_profit_percent < 0 || config.sltp.take_profit_percent > 100) {
+        return 'Take Profit must be between 0 and 100%';
+      }
+    }
+    return null;
+  };
+
+  const handleSaveModeConfig = async (mode: string) => {
+    const config = modeConfigs[mode];
+    if (!config) return;
+
+    const validationError = validateModeConfig(mode, config);
+    if (validationError) {
+      setModeConfigErrors({ ...modeConfigErrors, [mode]: validationError });
+      return;
+    }
+    setModeConfigErrors({ ...modeConfigErrors, [mode]: '' });
+
+    setSavingModeConfig(true);
+    try {
+      await futuresApi.updateModeConfig(mode, config);
+      setSuccessMsg(`${mode} configuration saved`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+      await fetchModeConfigs();
+    } catch (err) {
+      setError(`Failed to save ${mode} configuration`);
+    } finally {
+      setSavingModeConfig(false);
+    }
+  };
+
+  const handleResetModeConfigs = async () => {
+    if (!window.confirm('Reset all mode configurations to defaults? This cannot be undone.')) return;
+    setResettingModes(true);
+    try {
+      const result = await futuresApi.resetModeConfigs();
+      if (result.success && result.mode_configs) {
+        setModeConfigs(result.mode_configs);
+      }
+      setSuccessMsg('All mode configurations reset to defaults');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to reset mode configurations');
+    } finally {
+      setResettingModes(false);
+    }
+  };
+
+  const updateModeConfig = (mode: string, path: string, value: any) => {
+    setModeConfigs(prev => {
+      const updated = { ...prev };
+      const config = { ...updated[mode] };
+      const parts = path.split('.');
+
+      if (parts.length === 1) {
+        (config as any)[parts[0]] = value;
+      } else if (parts.length === 2) {
+        const section = parts[0] as keyof ModeFullConfig;
+        if (!config[section]) {
+          (config as any)[section] = {};
+        }
+        (config[section] as any)[parts[1]] = value;
+      }
+
+      updated[mode] = config;
+      return updated;
+    });
+    // Clear any validation error when user makes changes
+    setModeConfigErrors({ ...modeConfigErrors, [mode]: '' });
   };
 
   const getModeColor = (mode: string) => {
@@ -1487,6 +1605,415 @@ export default function GiniePanel() {
             </div>
             <div className="text-[10px] text-gray-400 mt-2">
               💡 Best performers get larger positions (e.g. 1.5x), worst performers get smaller positions (e.g. 0.25x)
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Mode Configuration Section (Story 2.7 Task 2.7.9) */}
+      <div className="space-y-2 mb-3">
+        <div
+          className="flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+          onClick={() => setShowModeConfig(!showModeConfig)}
+        >
+          <div className="flex items-center gap-2">
+            <Settings className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" />
+            <span className="text-xs text-gray-300 font-medium">Mode Configuration</span>
+            <span className="text-[10px] text-gray-500">
+              ({Object.values(modeConfigs).filter(c => c.enabled).length}/4 enabled)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleResetModeConfigs(); }}
+              disabled={resettingModes}
+              className="px-1.5 py-0.5 bg-orange-900/50 hover:bg-orange-900/70 text-orange-400 rounded text-[10px] transition-colors disabled:opacity-50"
+              title="Reset All Modes to Defaults"
+            >
+              {resettingModes ? '...' : 'Reset All'}
+            </button>
+            {showModeConfig ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+          </div>
+        </div>
+
+        {showModeConfig && (
+          <div className="px-2 py-2 bg-gray-800/50 border border-gray-600 rounded space-y-3">
+            {/* Mode Tabs */}
+            <div className="flex gap-1 border-b border-gray-700 pb-2">
+              {(['ultra_fast', 'scalp', 'swing', 'position'] as const).map(mode => {
+                const config = modeConfigs[mode];
+                const modeColors: Record<string, string> = {
+                  ultra_fast: 'text-red-400 bg-red-900/30 border-red-700',
+                  scalp: 'text-yellow-400 bg-yellow-900/30 border-yellow-700',
+                  swing: 'text-blue-400 bg-blue-900/30 border-blue-700',
+                  position: 'text-purple-400 bg-purple-900/30 border-purple-700',
+                };
+                const inactiveColors = 'text-gray-400 bg-gray-700/30 border-gray-600';
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => setSelectedModeConfig(mode)}
+                    className={`flex-1 px-2 py-1 rounded text-[10px] font-medium border transition-colors ${
+                      selectedModeConfig === mode ? modeColors[mode] : inactiveColors
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-1">
+                      {mode === 'ultra_fast' ? 'Ultra-Fast' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+                      {config?.enabled ? (
+                        <CheckCircle className="w-2.5 h-2.5" />
+                      ) : (
+                        <XCircle className="w-2.5 h-2.5 opacity-50" />
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Selected Mode Configuration */}
+            {modeConfigs[selectedModeConfig] && (
+              <div className="space-y-3">
+                {/* Enable/Disable Toggle */}
+                <div className="flex items-center justify-between">
+                  <label className="text-xs text-gray-300 font-medium">Enable {selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode</label>
+                  <button
+                    onClick={() => updateModeConfig(selectedModeConfig, 'enabled', !modeConfigs[selectedModeConfig]?.enabled)}
+                    className={`px-2 py-1 rounded text-[10px] transition-colors ${
+                      modeConfigs[selectedModeConfig]?.enabled
+                        ? 'bg-green-900/50 text-green-400 border border-green-700'
+                        : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+                    }`}
+                  >
+                    {modeConfigs[selectedModeConfig]?.enabled ? 'Enabled' : 'Disabled'}
+                  </button>
+                </div>
+
+                {/* Collapsible Sections */}
+                {/* Timeframe Settings */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'timeframe' ? null : 'timeframe')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Timeframe Settings</span>
+                    {expandedModeSection === 'timeframe' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'timeframe' && modeConfigs[selectedModeConfig]?.timeframe && (
+                    <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">Trend TF</label>
+                        <select
+                          value={modeConfigs[selectedModeConfig]?.timeframe?.trend_timeframe || '1h'}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'timeframe.trend_timeframe', e.target.value)}
+                          className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        >
+                          {timeframeOptions.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">Entry TF</label>
+                        <select
+                          value={modeConfigs[selectedModeConfig]?.timeframe?.entry_timeframe || '15m'}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'timeframe.entry_timeframe', e.target.value)}
+                          className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        >
+                          {timeframeOptions.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">Analysis TF</label>
+                        <select
+                          value={modeConfigs[selectedModeConfig]?.timeframe?.analysis_timeframe || '4h'}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'timeframe.analysis_timeframe', e.target.value)}
+                          className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        >
+                          {timeframeOptions.map(tf => <option key={tf} value={tf}>{tf}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Confidence Thresholds */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'confidence' ? null : 'confidence')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Confidence Thresholds</span>
+                    {expandedModeSection === 'confidence' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'confidence' && modeConfigs[selectedModeConfig]?.confidence && (
+                    <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">Min Confidence</label>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="5"
+                            value={modeConfigs[selectedModeConfig]?.confidence?.min_confidence || 50}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'confidence.min_confidence', Number(e.target.value))}
+                            className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">High Confidence</label>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="5"
+                            value={modeConfigs[selectedModeConfig]?.confidence?.high_confidence || 75}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'confidence.high_confidence', Number(e.target.value))}
+                            className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-400 mb-1">Ultra Confidence</label>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="5"
+                            value={modeConfigs[selectedModeConfig]?.confidence?.ultra_confidence || 90}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'confidence.ultra_confidence', Number(e.target.value))}
+                            className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Position Sizing */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'size' ? null : 'size')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Position Sizing</span>
+                    {expandedModeSection === 'size' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'size' && modeConfigs[selectedModeConfig]?.size && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Base Size</label>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-gray-500">$</span>
+                            <input
+                              type="number"
+                              min="10"
+                              max="10000"
+                              step="50"
+                              value={modeConfigs[selectedModeConfig]?.size?.base_size_usd || 100}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.base_size_usd', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Max Size</label>
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-gray-500">$</span>
+                            <input
+                              type="number"
+                              min="10"
+                              max="50000"
+                              step="50"
+                              value={modeConfigs[selectedModeConfig]?.size?.max_size_usd || 500}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.max_size_usd', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Max Positions</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="20"
+                            value={modeConfigs[selectedModeConfig]?.size?.max_positions || 3}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'size.max_positions', Number(e.target.value))}
+                            className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Leverage</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="1"
+                              max="125"
+                              value={modeConfigs[selectedModeConfig]?.size?.leverage || 5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.leverage', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">x</span>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Size Multiplier</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="1"
+                              max="5"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.size?.size_multiplier_hi || 1.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.size_multiplier_hi', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">x</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* SL/TP Settings */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'sltp' ? null : 'sltp')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">SL/TP Settings</span>
+                    {expandedModeSection === 'sltp' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'sltp' && modeConfigs[selectedModeConfig]?.sltp && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Stop Loss %</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="50"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.stop_loss_percent || 1.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.stop_loss_percent', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">%</span>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1">Take Profit %</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.take_profit_percent || 3.0}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.take_profit_percent', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">%</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                          <input
+                            type="checkbox"
+                            checked={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled || false}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_enabled', e.target.checked)}
+                            className="w-3 h-3"
+                          />
+                          Trailing Stop
+                        </label>
+                        {modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled && (
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-gray-500">Trail:</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max="20"
+                                step="0.1"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_percent || 1.0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_percent', Number(e.target.value))}
+                                className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Circuit Breaker Preview */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'circuit' ? null : 'circuit')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Circuit Breaker Preview</span>
+                    {expandedModeSection === 'circuit' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'circuit' && modeConfigs[selectedModeConfig]?.circuit_breaker && (
+                    <div className="px-2 py-2 border-t border-gray-700">
+                      <div className="grid grid-cols-3 gap-2 text-[10px]">
+                        <div className="bg-gray-700/30 rounded p-1.5">
+                          <div className="text-gray-500">Max Loss/Day</div>
+                          <div className="text-red-400 font-medium">${modeConfigs[selectedModeConfig]?.circuit_breaker?.max_loss_per_day || 100}</div>
+                        </div>
+                        <div className="bg-gray-700/30 rounded p-1.5">
+                          <div className="text-gray-500">Max Consec. Loss</div>
+                          <div className="text-yellow-400 font-medium">{modeConfigs[selectedModeConfig]?.circuit_breaker?.max_consecutive_losses || 5}</div>
+                        </div>
+                        <div className="bg-gray-700/30 rounded p-1.5">
+                          <div className="text-gray-500">Cooldown</div>
+                          <div className="text-blue-400 font-medium">{modeConfigs[selectedModeConfig]?.circuit_breaker?.cooldown_minutes || 30} min</div>
+                        </div>
+                      </div>
+                      <div className="text-[9px] text-gray-500 mt-1.5 text-center">
+                        Circuit breaker settings are read-only in this view
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Validation Errors */}
+                {modeConfigErrors[selectedModeConfig] && (
+                  <div className="px-2 py-1.5 bg-red-900/30 border border-red-700 rounded text-[10px] text-red-400 flex items-center gap-1">
+                    <AlertCircle className="w-3 h-3" />
+                    {modeConfigErrors[selectedModeConfig]}
+                  </div>
+                )}
+
+                {/* Save Button */}
+                <div className="flex justify-end pt-1">
+                  <button
+                    onClick={() => handleSaveModeConfig(selectedModeConfig)}
+                    disabled={savingModeConfig}
+                    className="px-3 py-1 bg-indigo-900/50 hover:bg-indigo-900/70 text-indigo-400 rounded text-xs transition-colors disabled:opacity-50"
+                  >
+                    {savingModeConfig ? 'Saving...' : `Save ${selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Config`}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Help Text */}
+            <div className="px-2 py-1.5 bg-indigo-900/20 border border-indigo-700/30 rounded text-[10px] text-indigo-400">
+              Configure each trading mode independently. Ultra-Fast for quick scalps, Scalp for short-term, Swing for medium-term, Position for long-term trades.
             </div>
           </div>
         )}

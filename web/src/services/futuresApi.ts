@@ -1745,6 +1745,41 @@ class FuturesAPIService {
     const { data } = await this.client.post('/ginie/llm-diagnostics/reset', {});
     return data;
   }
+
+  // ==================== MODE CONFIGURATION (Story 2.7) ====================
+
+  async getModeConfigs(): Promise<ModeConfigsResponse> {
+    const { data } = await this.client.get('/ginie/mode-configs');
+    return data;
+  }
+
+  async getModeConfig(mode: string): Promise<{
+    success: boolean;
+    mode: string;
+    config: ModeFullConfig;
+  }> {
+    const { data } = await this.client.get(`/ginie/mode-config/${mode}`);
+    return data;
+  }
+
+  async updateModeConfig(mode: string, config: ModeFullConfig): Promise<{
+    success: boolean;
+    message: string;
+    mode: string;
+    config: ModeFullConfig;
+  }> {
+    const { data } = await this.client.put(`/ginie/mode-config/${mode}`, config);
+    return data;
+  }
+
+  async resetModeConfigs(): Promise<{
+    success: boolean;
+    message: string;
+    mode_configs: Record<string, ModeFullConfig>;
+  }> {
+    const { data } = await this.client.post('/ginie/mode-config/reset', {});
+    return data;
+  }
 }
 
 // ==================== MARKET MOVERS TYPES ====================
@@ -2537,6 +2572,69 @@ export interface SymbolPerformanceReport {
   max_position_usd: number;
   size_multiplier: number;
   enabled: boolean;
+}
+
+// ==================== MODE CONFIGURATION TYPES (Story 2.7) ====================
+
+export interface ModeTimeframeConfig {
+  trend_timeframe: string;    // e.g., "5m", "15m", "1h", "4h"
+  entry_timeframe: string;    // e.g., "1m", "5m", "15m", "1h"
+  analysis_timeframe: string; // e.g., "1m", "15m", "4h", "1d"
+}
+
+export interface ModeConfidenceConfig {
+  min_confidence: number;    // Minimum to enter (e.g., 50, 60, 65, 75)
+  high_confidence: number;   // Threshold for size multiplier (e.g., 70, 75, 80, 85)
+  ultra_confidence: number;  // Threshold for max size (e.g., 85, 88, 90, 92)
+}
+
+export interface ModeSizeConfig {
+  base_size_usd: number;       // Base position size
+  max_size_usd: number;        // Max with multiplier
+  max_positions: number;       // Max concurrent positions
+  leverage: number;            // Default leverage
+  size_multiplier_lo: number;  // Min multiplier
+  size_multiplier_hi: number;  // Max multiplier on high confidence
+}
+
+export interface ModeCircuitBreakerConfig {
+  max_loss_per_hour: number;       // e.g., $20, $40, $80, $150
+  max_loss_per_day: number;        // e.g., $50, $100, $200, $400
+  max_consecutive_losses: number;  // e.g., 3, 5, 7, 10
+  cooldown_minutes: number;        // e.g., 15, 30, 60, 120
+  max_trades_per_minute: number;   // e.g., 5, 3, 2, 1
+  max_trades_per_hour: number;     // e.g., 30, 20, 10, 5
+  max_trades_per_day: number;      // e.g., 100, 50, 20, 10
+  win_rate_check_after: number;    // Trades before evaluation
+  min_win_rate: number;            // Threshold %
+}
+
+export interface ModeSLTPConfig {
+  stop_loss_percent: number;          // Default SL %
+  take_profit_percent: number;        // Default TP %
+  trailing_stop_enabled: boolean;     // Enable trailing
+  trailing_stop_percent: number;      // Trail distance
+  trailing_stop_activation: number;   // Activate at profit %
+  max_hold_duration: string;          // Force exit after (e.g., "3s", "4h", "3d")
+  use_single_tp: boolean;             // true = 100% at TP, false = multi-level
+}
+
+export interface ModeFullConfig {
+  mode_name: string;  // "ultra_fast", "scalp", "swing", "position"
+  enabled: boolean;   // Enable this mode
+
+  // Sub-configurations
+  timeframe?: ModeTimeframeConfig;
+  confidence?: ModeConfidenceConfig;
+  size?: ModeSizeConfig;
+  circuit_breaker?: ModeCircuitBreakerConfig;
+  sltp?: ModeSLTPConfig;
+}
+
+export interface ModeConfigsResponse {
+  success: boolean;
+  mode_configs: Record<string, ModeFullConfig>;
+  valid_modes: string[];
 }
 
 // Export singleton instance

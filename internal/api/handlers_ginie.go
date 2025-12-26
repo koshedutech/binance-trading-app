@@ -19,6 +19,9 @@ func (s *Server) handleGetGinieStatus(c *gin.Context) {
 		return
 	}
 
+	// Initialize user-specific clients (LLM + Binance) from database
+	s.tryInitializeUserClients(c, controller)
+
 	ginie := controller.GetGinieAnalyzer()
 	if ginie == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
@@ -84,6 +87,9 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 		return
 	}
 
+	// Initialize user-specific clients (LLM + Binance) from database BEFORE operations
+	s.tryInitializeUserClients(c, controller)
+
 	ginie := controller.GetGinieAnalyzer()
 	if ginie == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
@@ -131,6 +137,9 @@ func (s *Server) handleGinieScanCoin(c *gin.Context) {
 		return
 	}
 
+	// Initialize user-specific clients (LLM + Binance) from database
+	s.tryInitializeUserClients(c, controller)
+
 	ginie := controller.GetGinieAnalyzer()
 	if ginie == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
@@ -159,6 +168,9 @@ func (s *Server) handleGinieGenerateDecision(c *gin.Context) {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Initialize user-specific clients (LLM + Binance) from database
+	s.tryInitializeUserClients(c, controller)
 
 	ginie := controller.GetGinieAnalyzer()
 	if ginie == nil {
@@ -826,7 +838,7 @@ func (s *Server) handleSyncGiniePositions(c *gin.Context) {
 	}
 
 	// Get the current futures client based on mode (paper/live)
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 
 	// Force full resync: clear all positions and reimport from exchange
 	// Pass the client directly to ensure we use the right one
@@ -1894,6 +1906,133 @@ func (s *Server) handleUpdateGinieTPMode(c *gin.Context) {
 // parseIntParam is a helper to parse integer query parameters
 func parseIntParam(s string) (int, error) {
 	return strconv.Atoi(s)
+}
+
+// ==================== Mode Configuration CRUD Handlers (Story 2.7 Task 2.7.10) ====================
+
+// handleGetModeConfigs returns all 4 mode configurations (ultrafast, scalp, swing, position)
+// GET /api/futures/ginie/mode-configs
+func (s *Server) handleGetModeConfigs(c *gin.Context) {
+	log.Println("[MODE-CONFIG] Getting all mode configurations")
+
+	sm := autopilot.GetSettingsManager()
+	configs := sm.GetAllModeConfigs()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":      true,
+		"mode_configs": configs,
+		"valid_modes":  []string{"ultra_fast", "scalp", "swing", "position"},
+	})
+}
+
+// handleGetModeConfig returns configuration for a specific mode
+// GET /api/futures/ginie/mode-config/:mode
+func (s *Server) handleGetModeConfig(c *gin.Context) {
+	mode := c.Param("mode")
+	log.Printf("[MODE-CONFIG] Getting configuration for mode: %s", mode)
+
+	sm := autopilot.GetSettingsManager()
+	config, err := sm.GetModeConfig(mode)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"mode":    mode,
+		"config":  config,
+	})
+}
+
+// handleUpdateModeConfig updates configuration for a specific mode
+// PUT /api/futures/ginie/mode-config/:mode
+func (s *Server) handleUpdateModeConfig(c *gin.Context) {
+	mode := c.Param("mode")
+	log.Printf("[MODE-CONFIG] Updating configuration for mode: %s", mode)
+
+	// Validate mode parameter
+	if !autopilot.ValidModes[mode] {
+		errorResponse(c, http.StatusBadRequest,
+			fmt.Sprintf("Invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode))
+		return
+	}
+
+	var config autopilot.ModeFullConfig
+	if err := c.ShouldBindJSON(&config); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Ensure mode name matches URL parameter
+	config.ModeName = mode
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateModeConfig(mode, &config); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Failed to update mode config: "+err.Error())
+		return
+	}
+
+	log.Printf("[MODE-CONFIG] Successfully updated configuration for mode: %s", mode)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("Mode configuration updated for %s", mode),
+		"mode":    mode,
+		"config":  config,
+	})
+}
+
+// handleResetModeConfigs resets all modes to default configurations
+// POST /api/futures/ginie/mode-config/reset
+func (s *Server) handleResetModeConfigs(c *gin.Context) {
+	log.Println("[MODE-CONFIG] Resetting all mode configurations to defaults")
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.ResetModeConfigs(); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to reset mode configs: "+err.Error())
+		return
+	}
+
+	configs := sm.GetAllModeConfigs()
+
+	log.Println("[MODE-CONFIG] Successfully reset all mode configurations to defaults")
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":      true,
+		"message":      "All mode configurations reset to defaults",
+		"mode_configs": configs,
+	})
+}
+
+// handleGetModeCircuitBreakerStatus returns current circuit breaker state for all modes
+// GET /api/futures/ginie/mode-circuit-breaker-status
+func (s *Server) handleGetModeCircuitBreakerStatus(c *gin.Context) {
+	log.Println("[MODE-CONFIG] Getting circuit breaker status for all modes")
+
+	sm := autopilot.GetSettingsManager()
+	cbConfigs := sm.GetModeCircuitBreakerConfigs()
+
+	// Get runtime state from Ginie autopilot if available
+	controller := s.getFuturesAutopilot()
+	var runtimeStatus map[string]interface{}
+
+	if controller != nil {
+		giniePilot := controller.GetGinieAutopilot()
+		if giniePilot != nil {
+			// Get runtime circuit breaker status if method exists
+			runtimeStatus = map[string]interface{}{
+				"ginie_cb_status": giniePilot.GetCircuitBreakerStatus(),
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":                  true,
+		"circuit_breaker_configs":  cbConfigs,
+		"runtime_status":           runtimeStatus,
+		"valid_modes":              []string{"ultra_fast", "scalp", "swing", "position"},
+	})
 }
 
 // ====== ULTRAFAST SCALPING MODE ======

@@ -358,3 +358,75 @@ type GinieStatus struct {
 	WatchedSymbols    []string          `json:"watched_symbols"`
 	ScannedSymbols    int               `json:"scanned_symbols"`
 }
+
+// GinieModeConfig defines the complete configuration for a specific trading mode.
+// Each mode (scalp, swing, position, ultra_fast) has its own configuration that
+// controls timeframes, thresholds, position sizing, risk management, and circuit breakers.
+type GinieModeConfig struct {
+	// Mode Identity
+	Mode    GinieTradingMode `json:"mode"`    // The trading mode this config applies to
+	Enabled bool             `json:"enabled"` // Whether this mode is enabled
+
+	// Timeframe Configuration
+	TrendTimeframe    string `json:"trend_timeframe"`    // Timeframe for trend analysis (e.g., "4h", "1d")
+	EntryTimeframe    string `json:"entry_timeframe"`    // Timeframe for entry signals (e.g., "15m", "1h")
+	AnalysisTimeframe string `json:"analysis_timeframe"` // Timeframe for detailed analysis
+
+	// Confidence Thresholds
+	MinConfidence   float64 `json:"min_confidence"`   // Minimum confidence to consider a trade (0-100)
+	HighConfidence  float64 `json:"high_confidence"`  // Threshold for high confidence trades
+	UltraConfidence float64 `json:"ultra_confidence"` // Threshold for maximum confidence trades
+
+	// Position Sizing
+	BaseSizeUSD    float64 `json:"base_size_usd"`    // Base position size in USD
+	MaxSizeUSD     float64 `json:"max_size_usd"`     // Maximum position size in USD
+	MaxPositions   int     `json:"max_positions"`    // Maximum concurrent positions for this mode
+	Leverage       int     `json:"leverage"`         // Leverage to use for positions
+	SizeMultiplier float64 `json:"size_multiplier"`  // Multiplier applied based on confidence
+
+	// SL/TP Configuration
+	StopLossPercent   float64 `json:"stop_loss_percent"`   // Stop loss percentage from entry
+	TakeProfitPercent float64 `json:"take_profit_percent"` // Take profit percentage from entry
+	TrailingEnabled   bool    `json:"trailing_enabled"`    // Whether trailing stop is enabled
+	TrailingPercent   float64 `json:"trailing_percent"`    // Trailing stop percentage
+	MaxHoldDuration   string  `json:"max_hold_duration"`   // Maximum time to hold position (e.g., "4h", "1d")
+
+	// Circuit Breaker - nested struct for mode-specific circuit breaker configuration
+	CircuitBreaker ModeCircuitBreaker `json:"circuit_breaker"`
+}
+
+// ModeCircuitBreaker provides comprehensive risk management and rate limiting
+// for a specific trading mode. It tracks losses, trade counts, win rates,
+// and can automatically pause trading when limits are exceeded.
+type ModeCircuitBreaker struct {
+	// Loss Limits - maximum allowed losses before pausing
+	MaxLossPerHour      float64 `json:"max_loss_per_hour"`      // Maximum USD loss allowed per hour
+	MaxLossPerDay       float64 `json:"max_loss_per_day"`       // Maximum USD loss allowed per day
+	MaxConsecutiveLoss  int     `json:"max_consecutive_loss"`   // Maximum consecutive losing trades before pause
+
+	// Rate Limits - maximum trades allowed in time windows
+	MaxTradesPerMinute int `json:"max_trades_per_minute"` // Maximum trades per minute
+	MaxTradesPerHour   int `json:"max_trades_per_hour"`   // Maximum trades per hour
+	MaxTradesPerDay    int `json:"max_trades_per_day"`    // Maximum trades per day
+
+	// Win Rate Monitoring - minimum win rate requirements
+	WinRateCheckAfter int     `json:"win_rate_check_after"` // Number of trades before checking win rate
+	MinWinRatePercent float64 `json:"min_win_rate_percent"` // Minimum acceptable win rate percentage
+
+	// Cooldown & Recovery - pause and resume configuration
+	CooldownMinutes int  `json:"cooldown_minutes"` // Minutes to pause after circuit breaker trips
+	AutoRecovery    bool `json:"auto_recovery"`    // Whether to automatically resume after cooldown
+
+	// Current State (tracked at runtime) - these fields track the current circuit breaker state
+	CurrentHourLoss    float64   `json:"current_hour_loss"`    // Current hour's cumulative loss
+	CurrentDayLoss     float64   `json:"current_day_loss"`     // Current day's cumulative loss
+	ConsecutiveLosses  int       `json:"consecutive_losses"`   // Current consecutive loss count
+	TradesThisMinute   int       `json:"trades_this_minute"`   // Trades executed this minute
+	TradesThisHour     int       `json:"trades_this_hour"`     // Trades executed this hour
+	TradesThisDay      int       `json:"trades_this_day"`      // Trades executed today
+	TotalWins          int       `json:"total_wins"`           // Total winning trades (for win rate)
+	TotalTrades        int       `json:"total_trades"`         // Total trades executed (for win rate)
+	IsPaused           bool      `json:"is_paused"`            // Whether circuit breaker has tripped
+	PausedUntil        time.Time `json:"paused_until"`         // When the pause will end
+	PauseReason        string    `json:"pause_reason"`         // Reason for the current pause
+}

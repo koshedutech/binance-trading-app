@@ -546,6 +546,9 @@ type GinieAutopilot struct {
 	modeSafetyConfigs map[string]*ModeSafetyConfig // Safety config per mode
 	lastDayReset      time.Time                     // When daily counters were last reset
 
+	// Per-mode circuit breaker tracking (Story 2.7 Task 2.7.4)
+	modeCircuitBreakers map[GinieTradingMode]*ModeCircuitBreaker // Mode-specific circuit breaker state
+
 	// Performance stats
 	totalTrades   int
 	winningTrades int
@@ -626,6 +629,7 @@ func NewGinieAutopilot(
 		modeSafetyStates:     make(map[string]*ModeSafetyState),
 		modeSafetyConfigs:    make(map[string]*ModeSafetyConfig),
 		lastDayReset:         time.Now().Truncate(24 * time.Hour),
+		modeCircuitBreakers:  make(map[GinieTradingMode]*ModeCircuitBreaker),
 	}
 
 	// Initialize safety configs and states from settings
@@ -661,6 +665,9 @@ func NewGinieAutopilot(
 
 	// Initialize SLTP job queue (keep last 50 jobs)
 	ga.sltpJobQueue = NewSLTPJobQueue(50)
+
+	// Initialize mode circuit breakers from default configs (Story 2.7 Task 2.7.4)
+	ga.initModeCircuitBreakers()
 
 	return ga
 }
@@ -1590,6 +1597,17 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				"min_required", effectiveMinConfidence,
 				"action", decision.TradeExecution.Action,
 				"mode", decision.SelectedMode)
+
+			// Check mode-specific circuit breaker before executing (Story 2.7 Task 2.7.4)
+			canTrade, cbReason := ga.CheckModeCircuitBreaker(mode)
+			if !canTrade {
+				// Mode circuit breaker is blocking trades
+				log.Printf("[MODE-CIRCUIT-BREAKER] %s: Trade for %s BLOCKED - %s", mode, symbol, cbReason)
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = fmt.Sprintf("mode_circuit_breaker: %s", cbReason)
+				ga.LogSignal(signalLog)
+				continue
+			}
 
 			// Log as executed (will be attempted)
 			signalLog.Status = "executed"
@@ -7995,6 +8013,425 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 	ga.logger.Info("Ultra-fast position opened successfully",
 		"symbol", symbol,
 		"position_id", fmt.Sprintf("%s_%d", symbol, time.Now().UnixNano()))
+
+	return nil
+}
+
+// ========== Mode-Specific Circuit Breaker Methods (Story 2.7 Task 2.7.4) ==========
+
+// initModeCircuitBreakers initializes mode circuit breakers from default configs
+func (ga *GinieAutopilot) initModeCircuitBreakers() {
+	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition}
+
+	for _, mode := range modes {
+		config := ga.GetDefaultModeConfig(mode)
+		if config != nil && config.CircuitBreaker != nil {
+			ga.modeCircuitBreakers[mode] = &ModeCircuitBreaker{
+				// Copy configuration values
+				MaxLossPerHour:     config.CircuitBreaker.MaxLossPerHour,
+				MaxLossPerDay:      config.CircuitBreaker.MaxLossPerDay,
+				MaxConsecutiveLoss: config.CircuitBreaker.MaxConsecutiveLosses,
+				MaxTradesPerMinute: config.CircuitBreaker.MaxTradesPerMinute,
+				MaxTradesPerHour:   config.CircuitBreaker.MaxTradesPerHour,
+				MaxTradesPerDay:    config.CircuitBreaker.MaxTradesPerDay,
+				WinRateCheckAfter:  config.CircuitBreaker.WinRateCheckAfter,
+				MinWinRatePercent:  config.CircuitBreaker.MinWinRate,
+				CooldownMinutes:    config.CircuitBreaker.CooldownMinutes,
+				AutoRecovery:       true,
+				// Initialize state values
+				CurrentHourLoss:   0,
+				CurrentDayLoss:    0,
+				ConsecutiveLosses: 0,
+				TradesThisMinute:  0,
+				TradesThisHour:    0,
+				TradesThisDay:     0,
+				TotalWins:         0,
+				TotalTrades:       0,
+				IsPaused:          false,
+			}
+			log.Printf("[MODE-CIRCUIT-BREAKER] Initialized for mode %s: MaxLoss/hr=$%.2f, MaxLoss/day=$%.2f, MaxConsecLoss=%d, Cooldown=%dm",
+				mode, config.CircuitBreaker.MaxLossPerHour, config.CircuitBreaker.MaxLossPerDay,
+				config.CircuitBreaker.MaxConsecutiveLosses, config.CircuitBreaker.CooldownMinutes)
+		}
+	}
+}
+
+// GetDefaultModeConfig returns the default configuration for a trading mode
+// This retrieves the mode config from DefaultModeConfigs() in settings.go
+func (ga *GinieAutopilot) GetDefaultModeConfig(mode GinieTradingMode) *ModeFullConfig {
+	configs := DefaultModeConfigs()
+	modeStr := string(mode)
+	if config, exists := configs[modeStr]; exists {
+		return config
+	}
+	return nil
+}
+
+// getModeCircuitBreaker returns the circuit breaker for a mode, creating if needed
+func (ga *GinieAutopilot) getModeCircuitBreaker(mode GinieTradingMode) *ModeCircuitBreaker {
+	if cb, exists := ga.modeCircuitBreakers[mode]; exists {
+		return cb
+	}
+
+	// Create default circuit breaker if not exists
+	config := ga.GetDefaultModeConfig(mode)
+	if config == nil || config.CircuitBreaker == nil {
+		// Fallback defaults
+		return &ModeCircuitBreaker{
+			MaxLossPerHour:     100.0,
+			MaxLossPerDay:      300.0,
+			MaxConsecutiveLoss: 5,
+			MaxTradesPerMinute: 5,
+			MaxTradesPerHour:   30,
+			MaxTradesPerDay:    100,
+			WinRateCheckAfter:  10,
+			MinWinRatePercent:  45.0,
+			CooldownMinutes:    30,
+			AutoRecovery:       true,
+		}
+	}
+
+	cb := &ModeCircuitBreaker{
+		MaxLossPerHour:     config.CircuitBreaker.MaxLossPerHour,
+		MaxLossPerDay:      config.CircuitBreaker.MaxLossPerDay,
+		MaxConsecutiveLoss: config.CircuitBreaker.MaxConsecutiveLosses,
+		MaxTradesPerMinute: config.CircuitBreaker.MaxTradesPerMinute,
+		MaxTradesPerHour:   config.CircuitBreaker.MaxTradesPerHour,
+		MaxTradesPerDay:    config.CircuitBreaker.MaxTradesPerDay,
+		WinRateCheckAfter:  config.CircuitBreaker.WinRateCheckAfter,
+		MinWinRatePercent:  config.CircuitBreaker.MinWinRate,
+		CooldownMinutes:    config.CircuitBreaker.CooldownMinutes,
+		AutoRecovery:       true,
+	}
+	ga.modeCircuitBreakers[mode] = cb
+	return cb
+}
+
+// CheckModeCircuitBreaker checks if the mode's circuit breaker allows trading
+// Returns (true, "") if trading is allowed, (false, reason) if blocked
+func (ga *GinieAutopilot) CheckModeCircuitBreaker(mode GinieTradingMode) (canTrade bool, reason string) {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	cb := ga.getModeCircuitBreaker(mode)
+	if cb == nil {
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: No circuit breaker found, allowing trade", mode)
+		return true, ""
+	}
+
+	// Check if mode is currently paused
+	if cb.IsPaused {
+		if time.Now().Before(cb.PausedUntil) {
+			remainingTime := time.Until(cb.PausedUntil).Round(time.Second)
+			reason := fmt.Sprintf("mode_paused: %s (remaining: %v)", cb.PauseReason, remainingTime)
+			log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+			return false, reason
+		}
+		// Auto-recovery: pause has expired
+		if cb.AutoRecovery {
+			log.Printf("[MODE-CIRCUIT-BREAKER] %s: Auto-recovering from pause (was: %s)", mode, cb.PauseReason)
+			cb.IsPaused = false
+			cb.PauseReason = ""
+		}
+	}
+
+	// Check trades per minute limit
+	if cb.MaxTradesPerMinute > 0 && cb.TradesThisMinute >= cb.MaxTradesPerMinute {
+		reason := fmt.Sprintf("max_trades_per_minute: %d/%d", cb.TradesThisMinute, cb.MaxTradesPerMinute)
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		return false, reason
+	}
+
+	// Check trades per hour limit
+	if cb.MaxTradesPerHour > 0 && cb.TradesThisHour >= cb.MaxTradesPerHour {
+		reason := fmt.Sprintf("max_trades_per_hour: %d/%d", cb.TradesThisHour, cb.MaxTradesPerHour)
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		return false, reason
+	}
+
+	// Check trades per day limit
+	if cb.MaxTradesPerDay > 0 && cb.TradesThisDay >= cb.MaxTradesPerDay {
+		reason := fmt.Sprintf("max_trades_per_day: %d/%d", cb.TradesThisDay, cb.MaxTradesPerDay)
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		return false, reason
+	}
+
+	// Check hourly loss limit
+	if cb.MaxLossPerHour > 0 && cb.CurrentHourLoss >= cb.MaxLossPerHour {
+		reason := fmt.Sprintf("max_loss_per_hour: $%.2f/$%.2f", cb.CurrentHourLoss, cb.MaxLossPerHour)
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		return false, reason
+	}
+
+	// Check daily loss limit
+	if cb.MaxLossPerDay > 0 && cb.CurrentDayLoss >= cb.MaxLossPerDay {
+		reason := fmt.Sprintf("max_loss_per_day: $%.2f/$%.2f", cb.CurrentDayLoss, cb.MaxLossPerDay)
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		return false, reason
+	}
+
+	// Check consecutive losses limit
+	if cb.MaxConsecutiveLoss > 0 && cb.ConsecutiveLosses >= cb.MaxConsecutiveLoss {
+		reason := fmt.Sprintf("max_consecutive_losses: %d/%d", cb.ConsecutiveLosses, cb.MaxConsecutiveLoss)
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		return false, reason
+	}
+
+	// Check win rate after sufficient trades
+	if cb.WinRateCheckAfter > 0 && cb.TotalTrades >= cb.WinRateCheckAfter {
+		winRate := 0.0
+		if cb.TotalTrades > 0 {
+			winRate = float64(cb.TotalWins) / float64(cb.TotalTrades) * 100.0
+		}
+		if cb.MinWinRatePercent > 0 && winRate < cb.MinWinRatePercent {
+			reason := fmt.Sprintf("low_win_rate: %.1f%% < %.1f%% (after %d trades)", winRate, cb.MinWinRatePercent, cb.TotalTrades)
+			log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+			return false, reason
+		}
+	}
+
+	// All checks passed
+	log.Printf("[MODE-CIRCUIT-BREAKER] %s: ALLOWED - trades=%d/%d (min), loss=$%.2f/$%.2f (hr), consec=%d/%d",
+		mode, cb.TradesThisMinute, cb.MaxTradesPerMinute, cb.CurrentHourLoss, cb.MaxLossPerHour,
+		cb.ConsecutiveLosses, cb.MaxConsecutiveLoss)
+	return true, ""
+}
+
+// TriggerModeCircuitBreaker triggers the circuit breaker for a mode
+func (ga *GinieAutopilot) TriggerModeCircuitBreaker(mode GinieTradingMode, reason string) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	cb := ga.getModeCircuitBreaker(mode)
+	if cb == nil {
+		log.Printf("[CIRCUIT-BREAKER-TRIGGERED] %s: Cannot trigger - no circuit breaker found", mode)
+		return
+	}
+
+	// Get cooldown duration from config
+	cooldownMinutes := cb.CooldownMinutes
+	if cooldownMinutes <= 0 {
+		cooldownMinutes = 30 // Default 30 minutes
+	}
+
+	cb.IsPaused = true
+	cb.PausedUntil = time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
+	cb.PauseReason = reason
+
+	log.Printf("[CIRCUIT-BREAKER-TRIGGERED] Mode=%s, Reason=%s, PausedUntil=%s, CooldownMinutes=%d",
+		mode, reason, cb.PausedUntil.Format(time.RFC3339), cooldownMinutes)
+
+	ga.logger.Warn("Mode circuit breaker triggered",
+		"mode", mode,
+		"reason", reason,
+		"paused_until", cb.PausedUntil,
+		"cooldown_minutes", cooldownMinutes)
+}
+
+// RecordModeTradeResult records a trade result and updates the circuit breaker state
+func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float64) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	cb := ga.getModeCircuitBreaker(mode)
+	if cb == nil {
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Cannot record trade - no circuit breaker found", mode)
+		return
+	}
+
+	// Update trade counters
+	cb.TradesThisMinute++
+	cb.TradesThisHour++
+	cb.TradesThisDay++
+	cb.TotalTrades++
+
+	// Update win/loss tracking
+	if pnl > 0 {
+		// Winning trade
+		cb.TotalWins++
+		cb.ConsecutiveLosses = 0
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Recorded WIN +$%.2f (wins=%d, total=%d, consec_loss=0)",
+			mode, pnl, cb.TotalWins, cb.TotalTrades)
+	} else if pnl < 0 {
+		// Losing trade
+		cb.ConsecutiveLosses++
+		absLoss := -pnl // Convert to positive for loss tracking
+		cb.CurrentHourLoss += absLoss
+		cb.CurrentDayLoss += absLoss
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Recorded LOSS -$%.2f (hr_loss=$%.2f, day_loss=$%.2f, consec=%d)",
+			mode, absLoss, cb.CurrentHourLoss, cb.CurrentDayLoss, cb.ConsecutiveLosses)
+	}
+
+	// Check if any threshold is now exceeded and trigger circuit breaker if needed
+	triggered := false
+	triggerReason := ""
+
+	// Check consecutive losses
+	if cb.MaxConsecutiveLoss > 0 && cb.ConsecutiveLosses >= cb.MaxConsecutiveLoss {
+		triggered = true
+		triggerReason = fmt.Sprintf("max_consecutive_losses_exceeded: %d/%d", cb.ConsecutiveLosses, cb.MaxConsecutiveLoss)
+	}
+
+	// Check hourly loss
+	if !triggered && cb.MaxLossPerHour > 0 && cb.CurrentHourLoss >= cb.MaxLossPerHour {
+		triggered = true
+		triggerReason = fmt.Sprintf("max_hourly_loss_exceeded: $%.2f/$%.2f", cb.CurrentHourLoss, cb.MaxLossPerHour)
+	}
+
+	// Check daily loss
+	if !triggered && cb.MaxLossPerDay > 0 && cb.CurrentDayLoss >= cb.MaxLossPerDay {
+		triggered = true
+		triggerReason = fmt.Sprintf("max_daily_loss_exceeded: $%.2f/$%.2f", cb.CurrentDayLoss, cb.MaxLossPerDay)
+	}
+
+	// Check win rate after sufficient trades
+	if !triggered && cb.WinRateCheckAfter > 0 && cb.TotalTrades >= cb.WinRateCheckAfter {
+		winRate := 0.0
+		if cb.TotalTrades > 0 {
+			winRate = float64(cb.TotalWins) / float64(cb.TotalTrades) * 100.0
+		}
+		if cb.MinWinRatePercent > 0 && winRate < cb.MinWinRatePercent {
+			triggered = true
+			triggerReason = fmt.Sprintf("low_win_rate: %.1f%% < %.1f%%", winRate, cb.MinWinRatePercent)
+		}
+	}
+
+	if triggered {
+		// Trigger without lock since we already hold it
+		cooldownMinutes := cb.CooldownMinutes
+		if cooldownMinutes <= 0 {
+			cooldownMinutes = 30
+		}
+		cb.IsPaused = true
+		cb.PausedUntil = time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
+		cb.PauseReason = triggerReason
+
+		log.Printf("[CIRCUIT-BREAKER-TRIGGERED] Mode=%s, Reason=%s, PausedUntil=%s",
+			mode, triggerReason, cb.PausedUntil.Format(time.RFC3339))
+
+		ga.logger.Warn("Mode circuit breaker auto-triggered after trade",
+			"mode", mode,
+			"reason", triggerReason,
+			"paused_until", cb.PausedUntil)
+	}
+}
+
+// ResetModeCircuitBreakerStats resets circuit breaker stats for a mode based on period
+// period can be: "minute", "hour", "day"
+func (ga *GinieAutopilot) ResetModeCircuitBreakerStats(mode GinieTradingMode, period string) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	cb := ga.getModeCircuitBreaker(mode)
+	if cb == nil {
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Cannot reset stats - no circuit breaker found", mode)
+		return
+	}
+
+	switch period {
+	case "minute":
+		oldValue := cb.TradesThisMinute
+		cb.TradesThisMinute = 0
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset minute stats (trades_this_minute: %d -> 0)", mode, oldValue)
+
+	case "hour":
+		oldTrades := cb.TradesThisHour
+		oldLoss := cb.CurrentHourLoss
+		cb.TradesThisHour = 0
+		cb.CurrentHourLoss = 0
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset hour stats (trades: %d -> 0, loss: $%.2f -> $0)", mode, oldTrades, oldLoss)
+
+	case "day":
+		oldTrades := cb.TradesThisDay
+		oldLoss := cb.CurrentDayLoss
+		oldWins := cb.TotalWins
+		oldTotal := cb.TotalTrades
+		cb.TradesThisDay = 0
+		cb.CurrentDayLoss = 0
+		cb.TotalWins = 0
+		cb.TotalTrades = 0
+		// Also reset consecutive losses at day reset
+		cb.ConsecutiveLosses = 0
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset day stats (trades: %d -> 0, loss: $%.2f -> $0, wins: %d -> 0, total: %d -> 0)",
+			mode, oldTrades, oldLoss, oldWins, oldTotal)
+
+	default:
+		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Unknown reset period '%s' (valid: minute, hour, day)", mode, period)
+	}
+}
+
+// GetModeCircuitBreakerStatus returns the current status of a mode's circuit breaker
+func (ga *GinieAutopilot) GetModeCircuitBreakerStatus(mode GinieTradingMode) map[string]interface{} {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	cb := ga.getModeCircuitBreaker(mode)
+	if cb == nil {
+		return map[string]interface{}{
+			"mode":    string(mode),
+			"enabled": false,
+			"error":   "circuit breaker not initialized",
+		}
+	}
+
+	winRate := 0.0
+	if cb.TotalTrades > 0 {
+		winRate = float64(cb.TotalWins) / float64(cb.TotalTrades) * 100.0
+	}
+
+	cooldownRemaining := ""
+	if cb.IsPaused && time.Now().Before(cb.PausedUntil) {
+		cooldownRemaining = time.Until(cb.PausedUntil).Round(time.Second).String()
+	}
+
+	return map[string]interface{}{
+		"mode":               string(mode),
+		"enabled":            true,
+		"is_paused":          cb.IsPaused,
+		"pause_reason":       cb.PauseReason,
+		"paused_until":       cb.PausedUntil,
+		"cooldown_remaining": cooldownRemaining,
+		"limits": map[string]interface{}{
+			"max_trades_per_minute": cb.MaxTradesPerMinute,
+			"max_trades_per_hour":   cb.MaxTradesPerHour,
+			"max_trades_per_day":    cb.MaxTradesPerDay,
+			"max_loss_per_hour":     cb.MaxLossPerHour,
+			"max_loss_per_day":      cb.MaxLossPerDay,
+			"max_consecutive_loss":  cb.MaxConsecutiveLoss,
+			"min_win_rate":          cb.MinWinRatePercent,
+			"win_rate_check_after":  cb.WinRateCheckAfter,
+			"cooldown_minutes":      cb.CooldownMinutes,
+		},
+		"current_state": map[string]interface{}{
+			"trades_this_minute":  cb.TradesThisMinute,
+			"trades_this_hour":    cb.TradesThisHour,
+			"trades_this_day":     cb.TradesThisDay,
+			"current_hour_loss":   cb.CurrentHourLoss,
+			"current_day_loss":    cb.CurrentDayLoss,
+			"consecutive_losses":  cb.ConsecutiveLosses,
+			"total_wins":          cb.TotalWins,
+			"total_trades":        cb.TotalTrades,
+			"current_win_rate":    winRate,
+		},
+	}
+}
+
+// ResetModeCircuitBreaker manually resets a mode's circuit breaker (clears pause)
+func (ga *GinieAutopilot) ResetModeCircuitBreaker(mode GinieTradingMode) error {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	cb := ga.getModeCircuitBreaker(mode)
+	if cb == nil {
+		return fmt.Errorf("circuit breaker not found for mode %s", mode)
+	}
+
+	cb.IsPaused = false
+	cb.PauseReason = ""
+	cb.PausedUntil = time.Time{}
+
+	log.Printf("[MODE-CIRCUIT-BREAKER] %s: Manually reset - trading resumed", mode)
+	ga.logger.Info("Mode circuit breaker manually reset", "mode", mode)
 
 	return nil
 }
