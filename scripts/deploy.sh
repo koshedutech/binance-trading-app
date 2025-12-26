@@ -116,7 +116,7 @@ fi
 
 # Stop autopilot
 log "Stopping autopilot (if enabled)..."
-if curl -s -X POST "http://localhost:8090/api/futures/autopilot/stop" \
+if curl -s -X POST "http://localhost:8095/api/futures/autopilot/stop" \
     -H "Content-Type: application/json" \
     > /dev/null 2>&1; then
     log "✓ Autopilot stopped"
@@ -127,7 +127,7 @@ fi
 
 # Build new images
 log "Building Docker images..."
-if docker compose -f docker-compose.yml -f docker-compose.oracle.yml build >> "$LOG_FILE" 2>&1; then
+if docker compose -f docker-compose.prod.yml build >> "$LOG_FILE" 2>&1; then
     log "✓ Docker build completed"
 else
     error "Docker build failed"
@@ -135,7 +135,7 @@ fi
 
 # Stop running services
 log "Stopping running services..."
-if docker compose -f docker-compose.yml -f docker-compose.oracle.yml down >> "$LOG_FILE" 2>&1; then
+if docker compose -f docker-compose.prod.yml down >> "$LOG_FILE" 2>&1; then
     log "✓ Services stopped"
 else
     warning "Could not stop services cleanly"
@@ -143,7 +143,7 @@ fi
 
 # Start new services
 log "Starting new services..."
-if docker compose -f docker-compose.yml -f docker-compose.oracle.yml up -d >> "$LOG_FILE" 2>&1; then
+if docker compose -f docker-compose.prod.yml up -d >> "$LOG_FILE" 2>&1; then
     log "✓ Services started"
 else
     error "Failed to start services"
@@ -173,7 +173,7 @@ done
 # Check application health
 log "Checking application health..."
 for i in {1..60}; do
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:8090/api/health" 2>/dev/null || echo "000")
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://localhost:8095/api/health" 2>/dev/null || echo "000")
     if [ "$http_code" = "200" ]; then
         log "✓ Application is healthy (HTTP 200)"
         break

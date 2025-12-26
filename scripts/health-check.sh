@@ -15,7 +15,7 @@ set -e
 
 # Configuration
 DOCKER_COMPOSE_DIR="/opt/trading-bot"
-HEALTH_ENDPOINT="http://localhost:8090/api/health"
+HEALTH_ENDPOINT="http://localhost:8095/api/health"
 LOG_FILE="/opt/trading-bot/logs/health-check.log"
 ALERT_LOG="/opt/trading-bot/logs/health-alerts.log"
 TIMEOUT=10
@@ -55,7 +55,7 @@ HEALTH_OK=true
 check_containers() {
     log "Checking Docker containers status..."
 
-    if ! docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.yml" ps | grep -q "postgres.*Up"; then
+    if ! docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.prod.yml" ps | grep -q "postgres.*Up"; then
         log "ERROR: PostgreSQL container is not running"
         alert "PostgreSQL container is down!" "ERROR"
         HEALTH_OK=false
@@ -63,7 +63,7 @@ check_containers() {
     fi
     log "✓ PostgreSQL container is running"
 
-    if ! docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.yml" ps | grep -q "trading-bot.*Up"; then
+    if ! docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.prod.yml" ps | grep -q "trading-bot.*Up"; then
         log "ERROR: Trading Bot container is not running"
         alert "Trading Bot container is down!" "ERROR"
         HEALTH_OK=false
@@ -107,7 +107,7 @@ check_health_endpoint() {
 check_database() {
     log "Checking database connectivity..."
 
-    if docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.yml" exec -T postgres \
+    if docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.prod.yml" exec -T postgres \
         psql -U trading_bot -d trading_bot -c "SELECT NOW();" > /dev/null 2>&1; then
         log "✓ Database connectivity OK"
         return 0
@@ -125,8 +125,7 @@ restart_services() {
         log "Health check failed, attempting to restart services..."
         alert "Attempting to restart trading bot services..." "WARNING"
 
-        if docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.yml" \
-            -f "$DOCKER_COMPOSE_DIR/docker-compose.oracle.yml" \
+        if docker compose -f "$DOCKER_COMPOSE_DIR/docker-compose.prod.yml" \
             up -d >> "$LOG_FILE" 2>&1; then
             log "Services restarted successfully"
             alert "Services restarted successfully" "INFO"

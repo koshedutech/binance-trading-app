@@ -343,9 +343,9 @@ func (r *Repository) DeleteExpiredSessions(ctx context.Context) error {
 func (r *Repository) CreateAPIKey(ctx context.Context, apiKey *UserAPIKey) error {
 	query := `
 		INSERT INTO user_api_keys (
-			user_id, exchange, vault_secret_path, api_key_last_four, label,
-			is_testnet, is_active, permissions, validation_status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			user_id, exchange, vault_secret_path, encrypted_api_key, encrypted_secret_key,
+			api_key_last_four, label, is_testnet, is_active, permissions, validation_status
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at, updated_at
 	`
 
@@ -353,6 +353,8 @@ func (r *Repository) CreateAPIKey(ctx context.Context, apiKey *UserAPIKey) error
 		apiKey.UserID,
 		apiKey.Exchange,
 		apiKey.VaultSecretPath,
+		apiKey.EncryptedAPIKey,
+		apiKey.EncryptedSecretKey,
 		apiKey.APIKeyLastFour,
 		apiKey.Label,
 		apiKey.IsTestnet,
@@ -371,9 +373,11 @@ func (r *Repository) CreateAPIKey(ctx context.Context, apiKey *UserAPIKey) error
 // GetAPIKeysByUserID retrieves all API keys for a user
 func (r *Repository) GetAPIKeysByUserID(ctx context.Context, userID string) ([]*UserAPIKey, error) {
 	query := `
-		SELECT id, user_id, exchange, vault_secret_path, api_key_last_four, label,
-			is_testnet, is_active, permissions, last_validated_at, validation_status,
-			validation_error, created_at, updated_at
+		SELECT id, user_id, exchange, vault_secret_path,
+			COALESCE(api_key_last_four, ''), COALESCE(label, ''),
+			is_testnet, is_active, COALESCE(permissions, '{}')::jsonb,
+			last_validated_at, validation_status, COALESCE(validation_error, ''),
+			created_at, updated_at
 		FROM user_api_keys
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -406,9 +410,12 @@ func (r *Repository) GetAPIKeysByUserID(ctx context.Context, userID string) ([]*
 // GetActiveAPIKey retrieves the active API key for a user/exchange combination
 func (r *Repository) GetActiveAPIKey(ctx context.Context, userID, exchange string, testnet bool) (*UserAPIKey, error) {
 	query := `
-		SELECT id, user_id, exchange, vault_secret_path, api_key_last_four, label,
-			is_testnet, is_active, permissions, last_validated_at, validation_status,
-			validation_error, created_at, updated_at
+		SELECT id, user_id, exchange, COALESCE(vault_secret_path, ''),
+			COALESCE(encrypted_api_key, ''), COALESCE(encrypted_secret_key, ''),
+			COALESCE(api_key_last_four, ''), COALESCE(label, ''),
+			is_testnet, is_active, COALESCE(permissions, '{}')::jsonb,
+			last_validated_at, validation_status, COALESCE(validation_error, ''),
+			created_at, updated_at
 		FROM user_api_keys
 		WHERE user_id = $1 AND exchange = $2 AND is_testnet = $3 AND is_active = true
 		LIMIT 1
@@ -416,8 +423,9 @@ func (r *Repository) GetActiveAPIKey(ctx context.Context, userID, exchange strin
 
 	key := &UserAPIKey{}
 	err := r.db.Pool.QueryRow(ctx, query, userID, exchange, testnet).Scan(
-		&key.ID, &key.UserID, &key.Exchange, &key.VaultSecretPath, &key.APIKeyLastFour,
-		&key.Label, &key.IsTestnet, &key.IsActive, &key.Permissions,
+		&key.ID, &key.UserID, &key.Exchange, &key.VaultSecretPath,
+		&key.EncryptedAPIKey, &key.EncryptedSecretKey,
+		&key.APIKeyLastFour, &key.Label, &key.IsTestnet, &key.IsActive, &key.Permissions,
 		&key.LastValidatedAt, &key.ValidationStatus, &key.ValidationError,
 		&key.CreatedAt, &key.UpdatedAt,
 	)
@@ -730,9 +738,11 @@ func (r *Repository) DeleteUserAPIKey(ctx context.Context, keyID, userID string)
 // GetUserAPIKeyByID retrieves a specific API key ensuring it belongs to the user
 func (r *Repository) GetUserAPIKeyByID(ctx context.Context, keyID, userID string) (*UserAPIKey, error) {
 	query := `
-		SELECT id, user_id, exchange, vault_secret_path, api_key_last_four, label,
-			is_testnet, is_active, permissions, last_validated_at, validation_status,
-			validation_error, created_at, updated_at
+		SELECT id, user_id, exchange, vault_secret_path,
+			COALESCE(api_key_last_four, ''), COALESCE(label, ''),
+			is_testnet, is_active, COALESCE(permissions, '{}')::jsonb,
+			last_validated_at, validation_status, COALESCE(validation_error, ''),
+			created_at, updated_at
 		FROM user_api_keys
 		WHERE id = $1 AND user_id = $2
 	`
@@ -868,4 +878,264 @@ func (r *Repository) UpdateUserSubscription(ctx context.Context, userID string, 
 		return fmt.Errorf("failed to update subscription: %w", err)
 	}
 	return nil
+}
+
+// =====================================================
+// EMAIL VERIFICATION CODE OPERATIONS
+// =====================================================
+
+// CreateEmailVerificationCode creates a new verification code
+func (r *Repository) CreateEmailVerificationCode(ctx context.Context, code *EmailVerificationCode) error {
+	query := `
+		INSERT INTO email_verification_codes (user_id, code, expires_at)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`
+	err := r.db.Pool.QueryRow(ctx, query,
+		code.UserID,
+		code.Code,
+		code.ExpiresAt,
+	).Scan(&code.ID, &code.CreatedAt)
+
+	if err != nil {
+		return fmt.Errorf("failed to create verification code: %w", err)
+	}
+	return nil
+}
+
+// GetLatestVerificationCode retrieves the latest unused verification code for a user
+func (r *Repository) GetLatestVerificationCode(ctx context.Context, userID string) (*EmailVerificationCode, error) {
+	query := `
+		SELECT id, user_id, code, expires_at, used_at, created_at
+		FROM email_verification_codes
+		WHERE user_id = $1 AND used_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+
+	code := &EmailVerificationCode{}
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(
+		&code.ID, &code.UserID, &code.Code, &code.ExpiresAt, &code.UsedAt, &code.CreatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get verification code: %w", err)
+	}
+
+	return code, nil
+}
+
+// VerifyEmailCode verifies and marks a code as used
+func (r *Repository) VerifyEmailCode(ctx context.Context, userID, code string) (bool, error) {
+	// Find matching code
+	query := `
+		SELECT id, expires_at, used_at
+		FROM email_verification_codes
+		WHERE user_id = $1 AND code = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+
+	var id string
+	var expiresAt time.Time
+	var usedAt *time.Time
+
+	err := r.db.Pool.QueryRow(ctx, query, userID, code).Scan(&id, &expiresAt, &usedAt)
+	if err == pgx.ErrNoRows {
+		return false, nil // Code not found
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to lookup verification code: %w", err)
+	}
+
+	// Check if already used
+	if usedAt != nil {
+		return false, nil
+	}
+
+	// Check if expired
+	if time.Now().After(expiresAt) {
+		return false, nil
+	}
+
+	// Mark as used
+	updateQuery := `UPDATE email_verification_codes SET used_at = CURRENT_TIMESTAMP WHERE id = $1`
+	_, err = r.db.Pool.Exec(ctx, updateQuery, id)
+	if err != nil {
+		return false, fmt.Errorf("failed to mark code as used: %w", err)
+	}
+
+	// Mark email as verified
+	if err := r.SetEmailVerified(ctx, userID); err != nil {
+		return false, fmt.Errorf("failed to verify email: %w", err)
+	}
+
+	return true, nil
+}
+
+// DeleteExpiredVerificationCodes removes expired verification codes (cleanup)
+func (r *Repository) DeleteExpiredVerificationCodes(ctx context.Context) error {
+	query := `DELETE FROM email_verification_codes WHERE expires_at < CURRENT_TIMESTAMP`
+	_, err := r.db.Pool.Exec(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to delete expired codes: %w", err)
+	}
+	return nil
+}
+
+// =====================================================
+// AI API KEY CRUD OPERATIONS
+// =====================================================
+
+// GetUserAIKeys retrieves all AI API keys for a user
+func (r *Repository) GetUserAIKeys(ctx context.Context, userID string) ([]*UserAIKey, error) {
+	query := `
+		SELECT id, user_id, provider, encrypted_key, key_last_four, is_active, created_at, updated_at
+		FROM user_ai_keys
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query AI keys: %w", err)
+	}
+	defer rows.Close()
+
+	var keys []*UserAIKey
+	for rows.Next() {
+		key := &UserAIKey{}
+		err := rows.Scan(
+			&key.ID, &key.UserID, &key.Provider, &key.EncryptedKey,
+			&key.KeyLastFour, &key.IsActive, &key.CreatedAt, &key.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan AI key: %w", err)
+		}
+		keys = append(keys, key)
+	}
+
+	return keys, nil
+}
+
+// GetUserAIKey retrieves a specific AI key for a user and provider
+func (r *Repository) GetUserAIKey(ctx context.Context, userID string, provider AIProvider) (*UserAIKey, error) {
+	query := `
+		SELECT id, user_id, provider, encrypted_key, key_last_four, is_active, created_at, updated_at
+		FROM user_ai_keys
+		WHERE user_id = $1 AND provider = $2
+	`
+
+	key := &UserAIKey{}
+	err := r.db.Pool.QueryRow(ctx, query, userID, provider).Scan(
+		&key.ID, &key.UserID, &key.Provider, &key.EncryptedKey,
+		&key.KeyLastFour, &key.IsActive, &key.CreatedAt, &key.UpdatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AI key: %w", err)
+	}
+
+	return key, nil
+}
+
+// CreateUserAIKey creates a new AI API key for a user
+func (r *Repository) CreateUserAIKey(ctx context.Context, key *UserAIKey) error {
+	query := `
+		INSERT INTO user_ai_keys (user_id, provider, encrypted_key, key_last_four, is_active)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id, provider) DO UPDATE SET
+			encrypted_key = EXCLUDED.encrypted_key,
+			key_last_four = EXCLUDED.key_last_four,
+			is_active = EXCLUDED.is_active,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING id, created_at, updated_at
+	`
+
+	err := r.db.Pool.QueryRow(ctx, query,
+		key.UserID,
+		key.Provider,
+		key.EncryptedKey,
+		key.KeyLastFour,
+		key.IsActive,
+	).Scan(&key.ID, &key.CreatedAt, &key.UpdatedAt)
+
+	if err != nil {
+		return fmt.Errorf("failed to create AI key: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteUserAIKey deletes an AI API key ensuring it belongs to the user
+func (r *Repository) DeleteUserAIKey(ctx context.Context, keyID, userID string) error {
+	query := `DELETE FROM user_ai_keys WHERE id = $1 AND user_id = $2`
+	result, err := r.db.Pool.Exec(ctx, query, keyID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete AI key: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("AI key not found or not owned by user")
+	}
+	return nil
+}
+
+// UpdateUserAIKey updates an AI API key
+func (r *Repository) UpdateUserAIKey(ctx context.Context, key *UserAIKey) error {
+	query := `
+		UPDATE user_ai_keys SET
+			encrypted_key = $3,
+			key_last_four = $4,
+			is_active = $5,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1 AND user_id = $2
+	`
+
+	result, err := r.db.Pool.Exec(ctx, query,
+		key.ID,
+		key.UserID,
+		key.EncryptedKey,
+		key.KeyLastFour,
+		key.IsActive,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to update AI key: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("AI key not found or not owned by user")
+	}
+
+	return nil
+}
+
+// GetUserAIKeyByID retrieves a specific AI key by ID ensuring it belongs to the user
+func (r *Repository) GetUserAIKeyByID(ctx context.Context, keyID, userID string) (*UserAIKey, error) {
+	query := `
+		SELECT id, user_id, provider, encrypted_key, key_last_four, is_active, created_at, updated_at
+		FROM user_ai_keys
+		WHERE id = $1 AND user_id = $2
+	`
+
+	key := &UserAIKey{}
+	err := r.db.Pool.QueryRow(ctx, query, keyID, userID).Scan(
+		&key.ID, &key.UserID, &key.Provider, &key.EncryptedKey,
+		&key.KeyLastFour, &key.IsActive, &key.CreatedAt, &key.UpdatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AI key: %w", err)
+	}
+
+	return key, nil
 }

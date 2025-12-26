@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
 )
 
 type TradeWithConfidence struct {
@@ -31,9 +30,7 @@ type ConfidenceBucket struct {
 }
 
 func main() {
-	// Load .env
-	godotenv.Load()
-
+	// Read from environment variables directly
 	// Build connection string
 	dbHost := getEnv("DB_HOST", "localhost")
 	dbPort := getEnv("DB_PORT", "5432")

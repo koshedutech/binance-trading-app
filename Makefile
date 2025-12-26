@@ -1,6 +1,7 @@
-.PHONY: help build run test clean install dev config docker-build docker-run \
-        prod-build prod-up prod-down prod-logs prod-restart frontend-build \
-        db-backup db-restore lint fmt test-coverage
+.PHONY: help dev dev-down dev-logs dev-shell dev-rebuild \
+        prod prod-down prod-logs prod-restart prod-status \
+        db-backup db-restore db-shell db-reset \
+        test lint fmt
 
 # Default target
 .DEFAULT_GOAL := help
@@ -8,137 +9,88 @@
 # Variables
 APP_NAME := binance-trading-bot
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
 help: ## Show this help message
 	@echo '╔══════════════════════════════════════════════════════════════════╗'
-	@echo '║           Binance Trading Bot - Build Commands                    ║'
+	@echo '║     Binance Trading Bot - Docker-Only Build Commands             ║'
 	@echo '╚══════════════════════════════════════════════════════════════════╝'
 	@echo ''
-	@echo 'Development:'
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | grep -E "build|run|dev|test|install|clean|config|lint|fmt"
+	@echo 'DEVELOPMENT (Port 8094):'
+	@echo '  make dev          Start development environment'
+	@echo '  make dev-rebuild  Rebuild and restart (use after code changes)'
+	@echo '  make dev-down     Stop development containers'
+	@echo '  make dev-logs     View development logs'
+	@echo '  make dev-shell    Open shell in container'
 	@echo ''
-	@echo 'Docker (Development):'
-	@awk 'BEGIN {FS = ":.*?## "} /^docker-[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo 'PRODUCTION (Port 8095):'
+	@echo '  make prod         Start production environment'
+	@echo '  make prod-down    Stop production containers'
+	@echo '  make prod-logs    View production logs'
+	@echo '  make prod-restart Restart production container'
+	@echo '  make prod-status  Show production status'
 	@echo ''
-	@echo 'Production:'
-	@awk 'BEGIN {FS = ":.*?## "} /^prod-[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo 'DATABASE:'
+	@echo '  make db-backup    Backup database'
+	@echo '  make db-restore   Restore database (FILE=path/to/backup.sql)'
+	@echo '  make db-shell     Open PostgreSQL shell'
+	@echo '  make db-reset     Reset database (WARNING: deletes all data)'
 	@echo ''
-	@echo 'Database:'
-	@awk 'BEGIN {FS = ":.*?## "} /^db-[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo 'UTILITIES:'
+	@echo '  make test         Run tests inside container'
+	@echo '  make lint         Run linter inside container'
+	@echo '  make fmt          Format code inside container'
+	@echo ''
 
 # ============================================================================
-# Development Commands
+# DEVELOPMENT COMMANDS (Port 8094)
 # ============================================================================
 
-build: ## Build the trading bot binary
-	@echo "🔨 Building $(APP_NAME) $(VERSION)..."
-	@mkdir -p bin
-	@go build $(LDFLAGS) -o bin/$(APP_NAME) main.go
-	@echo "✅ Build complete: bin/$(APP_NAME)"
+dev: ## Start development environment (port 8094)
+	@echo "🐳 Starting development environment..."
+	@./scripts/docker-dev.sh -d
+	@echo ""
+	@echo "✅ Development environment started!"
+	@echo "   Web UI: http://localhost:8094"
+	@echo "   Logs:   make dev-logs"
 
-run: ## Run the trading bot locally
-	@echo "🚀 Starting trading bot..."
-	@go run main.go
+dev-rebuild: ## Rebuild and restart development (use after ANY code changes)
+	@echo "🔄 Rebuilding development environment..."
+	@./scripts/docker-dev.sh
+	@echo ""
+	@echo "✅ Rebuild complete!"
+	@echo "   Web UI: http://localhost:8094"
 
-dev: ## Run with auto-reload (requires: go install github.com/cosmtrek/air@latest)
-	@air
-
-test: ## Run all tests
-	@echo "🧪 Running tests..."
-	@go test -v ./...
-
-test-coverage: ## Run tests with coverage report
-	@echo "🧪 Running tests with coverage..."
-	@go test -v -coverprofile=coverage.out ./...
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo "📊 Coverage report: coverage.html"
-
-install: ## Install Go dependencies
-	@echo "📦 Installing dependencies..."
-	@go mod download
-	@go mod tidy
-	@echo "✅ Dependencies installed"
-
-clean: ## Clean build artifacts
-	@echo "🧹 Cleaning..."
-	@rm -rf bin/
-	@rm -f coverage.out coverage.html
-	@echo "✅ Clean complete"
-
-config: ## Generate sample configuration files
-	@echo "📝 Generating configuration files..."
-	@cp -n config.json.example config.json 2>/dev/null || true
-	@cp -n .env.example .env 2>/dev/null || true
-	@echo "✅ Configuration files created. Edit with your API keys."
-
-lint: ## Run linter (requires: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)
-	@echo "🔍 Running linter..."
-	@golangci-lint run
-
-fmt: ## Format Go code
-	@echo "✨ Formatting code..."
-	@go fmt ./...
-	@echo "✅ Code formatted"
-
-frontend-build: ## Build React frontend
-	@echo "🎨 Building frontend..."
-	@cd web && npm install && npm run build
-	@echo "✅ Frontend built: web/dist/"
-
-# ============================================================================
-# Docker Development Commands
-# ============================================================================
-
-docker-build: ## Build Docker image for development
-	@echo "🐳 Building Docker image..."
-	@docker build -t $(APP_NAME):dev .
-	@echo "✅ Image built: $(APP_NAME):dev"
-
-docker-run: ## Run development containers
-	@echo "🐳 Starting development containers..."
-	@docker-compose up -d
-	@echo "✅ Containers started. Web UI: http://localhost:8088"
-
-docker-stop: ## Stop development containers
-	@echo "🛑 Stopping containers..."
+dev-down: ## Stop development containers
+	@echo "🛑 Stopping development containers..."
 	@docker-compose down
-	@echo "✅ Containers stopped"
+	@echo "✅ Development containers stopped"
 
-docker-logs: ## View container logs
+dev-logs: ## View development logs
 	@docker-compose logs -f trading-bot
 
-docker-shell: ## Open shell in trading-bot container
+dev-shell: ## Open shell in development container
 	@docker-compose exec trading-bot /bin/sh
 
 # ============================================================================
-# Production Commands
+# PRODUCTION COMMANDS (Port 8095)
 # ============================================================================
 
-prod-build: ## Build production Docker image
-	@echo "🏭 Building production image..."
-	@docker build -t $(APP_NAME):$(VERSION) -t $(APP_NAME):latest .
-	@echo "✅ Production image built: $(APP_NAME):$(VERSION)"
-
-prod-up: ## Start production environment
+prod: ## Start production environment (port 8095)
 	@echo ""
 	@echo "⚠️  ════════════════════════════════════════════════════════════"
 	@echo "⚠️  WARNING: Starting PRODUCTION mode with REAL MONEY!"
 	@echo "⚠️  ════════════════════════════════════════════════════════════"
 	@echo ""
 	@echo "Checking required environment variables..."
-	@test -n "$(BINANCE_API_KEY)" || (echo "❌ BINANCE_API_KEY is required" && exit 1)
-	@test -n "$(BINANCE_SECRET_KEY)" || (echo "❌ BINANCE_SECRET_KEY is required" && exit 1)
-	@test -n "$(DB_PASSWORD)" || (echo "❌ DB_PASSWORD is required" && exit 1)
-	@echo "✅ Environment variables OK"
+	@test -f .env || (echo "❌ .env file is required" && exit 1)
+	@echo "✅ Environment file found"
 	@echo ""
 	@echo "Starting in 5 seconds... Press Ctrl+C to cancel."
 	@sleep 5
-	@docker-compose -f docker-compose.prod.yml up -d
+	@docker-compose -f docker-compose.prod.yml up -d --build
 	@echo ""
 	@echo "✅ Production environment started!"
-	@echo "   Web UI: http://localhost:8088"
+	@echo "   Web UI: http://localhost:8095"
 	@echo "   Logs:   make prod-logs"
 
 prod-down: ## Stop production environment
@@ -151,22 +103,17 @@ prod-logs: ## View production logs
 
 prod-restart: ## Restart production trading bot
 	@echo "🔄 Restarting production trading bot..."
-	@docker-compose -f docker-compose.prod.yml restart trading-bot
+	@docker-compose -f docker-compose.prod.yml down
+	@docker-compose -f docker-compose.prod.yml up -d --build
 	@echo "✅ Trading bot restarted"
+	@echo "   Web UI: http://localhost:8095"
 
 prod-status: ## Show production status
 	@echo "📊 Production Status:"
 	@docker-compose -f docker-compose.prod.yml ps
 
-prod-pull: ## Pull latest images
-	@docker-compose -f docker-compose.prod.yml pull
-
-prod-backup: ## Run database backup now
-	@echo "💾 Running database backup..."
-	@docker-compose -f docker-compose.prod.yml --profile with-backup run --rm backup
-
 # ============================================================================
-# Database Commands
+# DATABASE COMMANDS
 # ============================================================================
 
 db-backup: ## Backup database to backups/ directory
@@ -192,14 +139,18 @@ db-reset: ## Reset database (WARNING: deletes all data)
 	@echo "✅ Database reset complete"
 
 # ============================================================================
-# Quick Start
+# UTILITY COMMANDS (Run inside container)
 # ============================================================================
 
-quick-start: config docker-build docker-run ## Quick start for first-time setup
-	@echo ""
-	@echo "🎉 Quick start complete!"
-	@echo ""
-	@echo "Next steps:"
-	@echo "  1. Edit .env with your Binance API keys"
-	@echo "  2. Restart: make docker-run"
-	@echo "  3. Open: http://localhost:8088"
+test: ## Run tests inside development container
+	@echo "🧪 Running tests..."
+	@docker-compose exec trading-bot go test -v ./...
+
+lint: ## Run linter inside development container
+	@echo "🔍 Running linter..."
+	@docker-compose exec trading-bot golangci-lint run || echo "Note: golangci-lint may not be installed in container"
+
+fmt: ## Format code inside development container
+	@echo "✨ Formatting code..."
+	@docker-compose exec trading-bot go fmt ./...
+	@echo "✅ Code formatted"

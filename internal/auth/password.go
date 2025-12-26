@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -62,53 +61,15 @@ func (p *PasswordManager) VerifyPassword(password, hash string) bool {
 
 // ValidatePasswordStrength checks if a password meets strength requirements
 func (p *PasswordManager) ValidatePasswordStrength(password string) error {
-	if len(password) < p.minPasswordLength {
-		return fmt.Errorf("password must be at least %d characters", p.minPasswordLength)
+	if len(password) < 1 {
+		return fmt.Errorf("password cannot be empty")
 	}
 
 	if len(password) > MaxPasswordLength {
-		return fmt.Errorf("password must be at most %d characters", MaxPasswordLength)
+		return fmt.Errorf("password too long")
 	}
 
-	var (
-		hasUpper   bool
-		hasLower   bool
-		hasNumber  bool
-		hasSpecial bool
-	)
-
-	for _, char := range password {
-		switch {
-		case unicode.IsUpper(char):
-			hasUpper = true
-		case unicode.IsLower(char):
-			hasLower = true
-		case unicode.IsNumber(char):
-			hasNumber = true
-		case unicode.IsPunct(char) || unicode.IsSymbol(char):
-			hasSpecial = true
-		}
-	}
-
-	// Require at least 3 of 4 character types for strong passwords
-	strength := 0
-	if hasUpper {
-		strength++
-	}
-	if hasLower {
-		strength++
-	}
-	if hasNumber {
-		strength++
-	}
-	if hasSpecial {
-		strength++
-	}
-
-	if strength < 3 {
-		return fmt.Errorf("password must contain at least 3 of: uppercase, lowercase, numbers, special characters")
-	}
-
+	// Accept any password - simplified policy for user convenience
 	return nil
 }
 

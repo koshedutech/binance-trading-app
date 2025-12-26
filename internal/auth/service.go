@@ -6,21 +6,34 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	mathrand "math/rand"
 	"time"
 
 	"binance-trading-bot/internal/database"
 )
+
+// EmailService interface for sending emails
+type EmailService interface {
+	IsSMTPConfigured(ctx context.Context) bool
+	SendVerificationEmail(ctx context.Context, to, code string) error
+}
 
 // Service handles authentication operations
 type Service struct {
 	repo            *database.Repository
 	jwtManager      *JWTManager
 	passwordManager *PasswordManager
+	emailService    EmailService
 	config          Config
 }
 
 // NewService creates a new authentication service
 func NewService(repo *database.Repository, config Config) *Service {
+	return NewServiceWithEmail(repo, config, nil)
+}
+
+// NewServiceWithEmail creates a new authentication service with email support
+func NewServiceWithEmail(repo *database.Repository, config Config, emailService EmailService) *Service {
 	if config.JWTSecret == "" {
 		log.Fatal("JWT secret is required")
 	}
@@ -36,6 +49,7 @@ func NewService(repo *database.Repository, config Config) *Service {
 		repo:            repo,
 		jwtManager:      NewJWTManager(config.JWTSecret, config.AccessTokenDuration, config.RefreshTokenDuration),
 		passwordManager: NewPasswordManager(DefaultBcryptCost, config.MinPasswordLength),
+		emailService:    emailService,
 		config:          config,
 	}
 }
@@ -47,6 +61,14 @@ func (s *Service) GetJWTManager() *JWTManager {
 
 // Register creates a new user account
 func (s *Service) Register(ctx context.Context, req RegisterRequest) (*database.User, error) {
+	// Only check SMTP if email verification is required
+	if s.config.RequireEmailVerification && s.emailService != nil && !s.emailService.IsSMTPConfigured(ctx) {
+		return nil, AuthError{
+			Code:    "SMTP_NOT_CONFIGURED",
+			Message: "Email service is not configured. Please contact administrator.",
+		}
+	}
+
 	// Check if email exists
 	exists, err := s.repo.EmailExists(ctx, req.Email)
 	if err != nil {
@@ -85,36 +107,39 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*database.
 		}
 	}
 
-	// Create user
+	// Determine if email verification is required
+	requiresVerification := s.emailService != nil && s.config.RequireEmailVerification
+
+	// Create user - All users get Whale tier (no restrictions, subscriptions bypassed)
 	user := &database.User{
 		Email:              req.Email,
 		PasswordHash:       passwordHash,
 		Name:               req.Name,
-		SubscriptionTier:   database.TierFree,
+		SubscriptionTier:   database.TierWhale, // All users are Whale tier
 		SubscriptionStatus: database.StatusActive,
 		APIKeyMode:         database.APIKeyModeUserProvided,
-		ProfitSharePct:     30.0, // Free tier default
+		ProfitSharePct:     5.0, // Whale tier profit share
 		ReferralCode:       referralCode,
 		ReferredBy:         referredBy,
-		EmailVerified:      !s.config.RequireEmailVerification,
+		EmailVerified:      !requiresVerification,
 	}
 
 	if err := s.repo.CreateUser(ctx, user); err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
-	// Create default trading config
+	// Create default trading config - Whale tier (unlimited access)
 	tradingConfig := &database.UserTradingConfig{
 		UserID:                   user.ID,
-		MaxOpenPositions:         3, // Free tier limit
-		MaxRiskPerTrade:          2.0,
+		MaxOpenPositions:         -1, // Unlimited for Whale tier
+		MaxRiskPerTrade:          5.0,
 		DefaultStopLossPercent:   2.0,
 		DefaultTakeProfitPercent: 5.0,
 		EnableSpot:               true,
-		EnableFutures:            false, // Free tier
-		FuturesDefaultLeverage:   5,
+		EnableFutures:            true, // Whale tier gets futures
+		FuturesDefaultLeverage:   10,
 		FuturesMarginType:        "CROSSED",
-		AutopilotEnabled:         false,
+		AutopilotEnabled:         true, // Whale tier gets autopilot
 		AutopilotRiskLevel:       "moderate",
 		AutopilotMinConfidence:   0.65,
 		NotificationEmail:        true,
@@ -123,6 +148,18 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*database.
 
 	if err := s.repo.UpsertUserTradingConfig(ctx, tradingConfig); err != nil {
 		log.Printf("Warning: failed to create trading config for user %s: %v", user.ID, err)
+	}
+
+	// Send verification email if required
+	if requiresVerification {
+		code, err := s.GenerateVerificationCode(ctx, user.ID)
+		if err != nil {
+			log.Printf("Warning: failed to generate verification code: %v", err)
+		} else {
+			if err := s.emailService.SendVerificationEmail(ctx, user.Email, code); err != nil {
+				log.Printf("Warning: failed to send verification email: %v", err)
+			}
+		}
 	}
 
 	return user, nil
@@ -430,4 +467,78 @@ func generateReferralCode() (string, error) {
 // CleanupExpiredSessions removes expired sessions from the database
 func (s *Service) CleanupExpiredSessions(ctx context.Context) error {
 	return s.repo.DeleteExpiredSessions(ctx)
+}
+
+// GenerateVerificationCode generates a 6-digit verification code
+func (s *Service) GenerateVerificationCode(ctx context.Context, userID string) (string, error) {
+	// Generate 6-digit code
+	mathrand.Seed(time.Now().UnixNano())
+	code := fmt.Sprintf("%06d", mathrand.Intn(1000000))
+
+	// Store code in database
+	verificationCode := &database.EmailVerificationCode{
+		UserID:    userID,
+		Code:      code,
+		ExpiresAt: time.Now().Add(15 * time.Minute), // 15 minute expiry
+	}
+
+	if err := s.repo.CreateEmailVerificationCode(ctx, verificationCode); err != nil {
+		return "", fmt.Errorf("failed to store verification code: %w", err)
+	}
+
+	return code, nil
+}
+
+// VerifyEmailWithCode verifies an email using a 6-digit code
+func (s *Service) VerifyEmailWithCode(ctx context.Context, userID, code string) error {
+	verified, err := s.repo.VerifyEmailCode(ctx, userID, code)
+	if err != nil {
+		return fmt.Errorf("failed to verify code: %w", err)
+	}
+
+	if !verified {
+		return AuthError{
+			Code:    "INVALID_CODE",
+			Message: "Invalid or expired verification code",
+		}
+	}
+
+	return nil
+}
+
+// ResendVerificationCode generates and sends a new verification code
+func (s *Service) ResendVerificationCode(ctx context.Context, userID string) error {
+	if s.emailService == nil {
+		return AuthError{
+			Code:    "EMAIL_DISABLED",
+			Message: "Email service is not configured",
+		}
+	}
+
+	// Get user
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil || user == nil {
+		return ErrUserNotFound
+	}
+
+	// Check if already verified
+	if user.EmailVerified {
+		return AuthError{
+			Code:    "ALREADY_VERIFIED",
+			Message: "Email is already verified",
+		}
+	}
+
+	// Generate new code
+	code, err := s.GenerateVerificationCode(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("failed to generate code: %w", err)
+	}
+
+	// Send email
+	if err := s.emailService.SendVerificationEmail(ctx, user.Email, code); err != nil {
+		return fmt.Errorf("failed to send verification email: %w", err)
+	}
+
+	return nil
 }

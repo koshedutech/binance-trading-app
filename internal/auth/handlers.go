@@ -277,19 +277,31 @@ func (h *Handlers) ResetPassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "password reset successfully"})
 }
 
-// VerifyEmail handles email verification
-// GET /api/auth/verify-email?token=xxx
+// VerifyEmail handles email verification with 6-digit code
+// POST /api/auth/verify-email
 func (h *Handlers) VerifyEmail(c *gin.Context) {
-	token := c.Query("token")
-	if token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "VALIDATION_ERROR",
-			"message": "token is required",
+	userID := GetUserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   ErrUnauthorized.Code,
+			"message": ErrUnauthorized.Message,
 		})
 		return
 	}
 
-	if err := h.service.VerifyEmail(c.Request.Context(), token); err != nil {
+	var req struct {
+		Code string `json:"code" binding:"required,len=6"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "VALIDATION_ERROR",
+			"message": "6-digit code is required",
+		})
+		return
+	}
+
+	if err := h.service.VerifyEmailWithCode(c.Request.Context(), userID, req.Code); err != nil {
 		if authErr, ok := err.(AuthError); ok {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   authErr.Code,
@@ -307,7 +319,7 @@ func (h *Handlers) VerifyEmail(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "email verified successfully"})
 }
 
-// ResendVerification resends verification email
+// ResendVerification resends verification email with new 6-digit code
 // POST /api/auth/resend-verification
 func (h *Handlers) ResendVerification(c *gin.Context) {
 	userID := GetUserID(c)
@@ -319,19 +331,23 @@ func (h *Handlers) ResendVerification(c *gin.Context) {
 		return
 	}
 
-	token, err := h.service.GenerateEmailVerificationToken(c.Request.Context(), userID)
+	err := h.service.ResendVerificationCode(c.Request.Context(), userID)
 	if err != nil {
+		if authErr, ok := err.(AuthError); ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   authErr.Code,
+				"message": authErr.Message,
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "INTERNAL_ERROR",
-			"message": "failed to generate verification token",
+			"message": "failed to resend verification code",
 		})
 		return
 	}
 
-	// TODO: Send email with token
-	_ = token
-
-	c.JSON(http.StatusOK, gin.H{"message": "verification email sent"})
+	c.JSON(http.StatusOK, gin.H{"message": "verification code sent to your email"})
 }
 
 // GetMe returns the current user's profile
@@ -378,7 +394,6 @@ func (h *Handlers) RegisterRoutes(router *gin.RouterGroup, jwtManager *JWTManage
 	router.POST("/logout", h.Logout)
 	router.POST("/forgot-password", h.ForgotPassword)
 	router.POST("/reset-password", h.ResetPassword)
-	router.GET("/verify-email", h.VerifyEmail)
 
 	// Protected routes (auth required)
 	protected := router.Group("")
@@ -387,6 +402,7 @@ func (h *Handlers) RegisterRoutes(router *gin.RouterGroup, jwtManager *JWTManage
 		protected.GET("/me", h.GetMe)
 		protected.POST("/logout-all", h.LogoutAll)
 		protected.POST("/change-password", h.ChangePassword)
+		protected.POST("/verify-email", h.VerifyEmail)
 		protected.POST("/resend-verification", h.ResendVerification)
 	}
 }

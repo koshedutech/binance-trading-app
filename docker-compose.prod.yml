@@ -1,7 +1,6 @@
-version: '3.8'
-
 # Production Docker Compose Configuration
 # Usage: docker-compose -f docker-compose.prod.yml up -d
+# IMPORTANT: Edit the environment variables below before deploying!
 
 services:
   # PostgreSQL Database with production settings
@@ -10,16 +9,16 @@ services:
     container_name: binance-bot-postgres-prod
     restart: always
     environment:
-      - POSTGRES_USER=${DB_USER:-trading_bot}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
-      - POSTGRES_DB=${DB_NAME:-trading_bot}
+      - POSTGRES_USER=trading_bot
+      - POSTGRES_PASSWORD=trading_bot_password
+      - POSTGRES_DB=trading_bot
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./backups:/backups
     networks:
       - trading-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-trading_bot}"]
+      test: ["CMD-SHELL", "pg_isready -U trading_bot"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -42,39 +41,77 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # Binance API - PRODUCTION
-      - BINANCE_API_KEY=${BINANCE_API_KEY:?BINANCE_API_KEY is required}
-      - BINANCE_SECRET_KEY=${BINANCE_SECRET_KEY:?BINANCE_SECRET_KEY is required}
-      - BINANCE_BASE_URL=https://api.binance.com
+      # Binance API - Keys are stored per-user in database
+      - BINANCE_BASE_URL=https://fapi.binance.com
       - BINANCE_TESTNET=false
+      - MOCK_MODE=false
+      - TRADING_DRY_RUN=false
       # Database
       - DB_HOST=postgres
       - DB_PORT=5432
-      - DB_USER=${DB_USER:-trading_bot}
-      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
-      - DB_NAME=${DB_NAME:-trading_bot}
+      - DB_USER=trading_bot
+      - DB_PASSWORD=trading_bot_password
+      - DB_NAME=trading_bot
       - DB_SSLMODE=disable
-      # Web Server
-      - WEB_PORT=8088
+      # Web Server (Production uses port 8095)
+      - WEB_PORT=8095
       - WEB_HOST=0.0.0.0
       # Notifications (recommended for production)
-      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-true}
-      - TELEGRAM_ENABLED=${TELEGRAM_ENABLED:-false}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
-      - DISCORD_ENABLED=${DISCORD_ENABLED:-false}
-      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+      - NOTIFICATIONS_ENABLED=true
+      - TELEGRAM_ENABLED=false
+      - TELEGRAM_BOT_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - DISCORD_ENABLED=false
+      - DISCORD_WEBHOOK_URL=
       # Logging - Production settings
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_LEVEL=INFO
       - LOG_OUTPUT=stdout
       - LOG_JSON=true
       - LOG_INCLUDE_FILE=false
+      # AI Configuration
+      - AI_ENABLED=true
+      - AI_LLM_ENABLED=true
+      - AI_ML_ENABLED=true
+      - AI_SENTIMENT_ENABLED=true
+      - AI_LLM_PROVIDER=deepseek
+      - AI_LLM_MODEL=deepseek-chat
+      - AI_MIN_CONFIDENCE=0.65
+      # Futures Trading
+      - FUTURES_ENABLED=true
+      - FUTURES_TESTNET=false
+      - FUTURES_DEFAULT_LEVERAGE=10
+      - FUTURES_DEFAULT_MARGIN_TYPE=CROSSED
+      - FUTURES_POSITION_MODE=ONE_WAY
+      - FUTURES_MAX_LEVERAGE=125
+      # Futures Autopilot
+      - FUTURES_AUTOPILOT_ENABLED=true
+      - FUTURES_AUTOPILOT_RISK_LEVEL=moderate
+      - FUTURES_AUTOPILOT_MAX_DAILY_TRADES=50
+      - FUTURES_AUTOPILOT_MAX_DAILY_LOSS=3.0
+      - FUTURES_AUTOPILOT_MAX_POSITION_SIZE=5.0
+      - FUTURES_AUTOPILOT_MIN_CONFIDENCE=0.35
+      - FUTURES_AUTOPILOT_DEFAULT_LEVERAGE=5
+      - FUTURES_AUTOPILOT_MAX_LEVERAGE=20
+      # Circuit Breaker
+      - CIRCUIT_BREAKER_ENABLED=true
+      - CIRCUIT_MAX_LOSS_PER_HOUR=3.0
+      - CIRCUIT_MAX_CONSECUTIVE_LOSSES=5
+      - CIRCUIT_COOLDOWN_MINUTES=30
+      # Authentication Configuration
+      - AUTH_ENABLED=true
+      - AUTH_JWT_SECRET=prod-jwt-secret-key-2025-binance-bot-secure
+      - AUTH_REQUIRE_EMAIL_VERIFICATION=false
+      - AUTH_ACCESS_TOKEN_DURATION=15m
+      - AUTH_REFRESH_TOKEN_DURATION=168h
+      # Subscription Configuration
+      - SUBSCRIPTION_ENABLED=false
     volumes:
       - ./logs:/app/logs
+      - ./config.json:/app/config.json:ro
     networks:
       - trading-network
     ports:
-      - "8088:8088"
+      - "8095:8095"
     logging:
       driver: "json-file"
       options:
@@ -87,7 +124,7 @@ services:
         reservations:
           memory: 512M
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8088/api/health"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8095/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -119,9 +156,9 @@ services:
       - postgres
     environment:
       - PGHOST=postgres
-      - PGUSER=${DB_USER:-trading_bot}
-      - PGPASSWORD=${DB_PASSWORD}
-      - PGDATABASE=${DB_NAME:-trading_bot}
+      - PGUSER=trading_bot
+      - PGPASSWORD=trading_bot_password
+      - PGDATABASE=trading_bot
     volumes:
       - ./backups:/backups
     networks:

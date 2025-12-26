@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -115,6 +116,7 @@ func RequireAdmin() gin.HandlerFunc {
 }
 
 // RequireTier middleware ensures the user has at least the specified tier
+// When SUBSCRIPTION_ENABLED=false, this check is bypassed (all users treated as Whale tier)
 func RequireTier(minTier string) gin.HandlerFunc {
 	tierOrder := map[string]int{
 		"free":   0,
@@ -124,6 +126,15 @@ func RequireTier(minTier string) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		// Check if subscription enforcement is disabled
+		subscriptionEnabled := os.Getenv("SUBSCRIPTION_ENABLED")
+		if subscriptionEnabled == "" || strings.ToLower(subscriptionEnabled) == "false" {
+			// Subscription disabled - bypass tier check (treat as Whale tier)
+			c.Next()
+			return
+		}
+
+		// Subscription enabled - enforce tier check
 		userTier, exists := c.Get(ContextKeyTier)
 		if !exists {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{

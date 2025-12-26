@@ -921,3 +921,32 @@ func (r *Repository) GetModePerformanceStats(ctx context.Context, mode string) (
 func (r *Repository) GetAllModePerformanceStats(ctx context.Context) (map[string]*ModePerformanceStats, error) {
 	return r.db.GetAllModePerformanceStats(ctx)
 }
+
+// ============================================================================
+// SYSTEM SETTINGS - WRAPPER METHODS
+// ============================================================================
+
+// GetSystemSetting retrieves a single system setting by key
+func (r *Repository) GetSystemSetting(ctx context.Context, key string) (*SystemSetting, error) {
+	return r.db.GetSystemSetting(ctx, key)
+}
+
+// GetAllSystemSettings retrieves all system settings
+func (r *Repository) GetAllSystemSettings(ctx context.Context) ([]SystemSetting, error) {
+	return r.db.GetAllSystemSettings(ctx)
+}
+
+// UpsertSystemSetting creates or updates a system setting
+func (r *Repository) UpsertSystemSetting(ctx context.Context, setting *SystemSetting) error {
+	return r.db.UpsertSystemSetting(ctx, setting)
+}
+
+// DeleteSystemSetting deletes a system setting by key
+func (r *Repository) DeleteSystemSetting(ctx context.Context, key string) error {
+	return r.db.DeleteSystemSetting(ctx, key)
+}
+
+// GetSMTPSettings retrieves all SMTP-related settings
+func (r *Repository) GetSMTPSettings(ctx context.Context) (map[string]string, error) {
+	return r.db.GetSMTPSettings(ctx)
+}

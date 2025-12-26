@@ -293,6 +293,11 @@ func (db *DB) RunMultiTenantMigrations(ctx context.Context) error {
 		// Update unique constraint
 		`ALTER TABLE futures_account_settings DROP CONSTRAINT IF EXISTS futures_account_settings_symbol_key`,
 
+		// Add encrypted API key columns for direct database storage (no Vault dependency)
+		`ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS encrypted_api_key TEXT`,
+		`ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS encrypted_secret_key TEXT`,
+		`ALTER TABLE user_api_keys ALTER COLUMN vault_secret_path DROP NOT NULL`,
+
 		// =====================================================
 		// TRIGGERS FOR updated_at
 		// =====================================================
@@ -310,19 +315,56 @@ func (db *DB) RunMultiTenantMigrations(ctx context.Context) error {
 		FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()`,
 
 		// =====================================================
+		// SYSTEM SETTINGS TABLE (for SMTP, encryption keys, etc.)
+		// =====================================================
+
+		`CREATE TABLE IF NOT EXISTS system_settings (
+			key VARCHAR(100) PRIMARY KEY,
+			value TEXT NOT NULL,
+			is_encrypted BOOLEAN DEFAULT FALSE,
+			description TEXT,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_by UUID REFERENCES users(id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_system_settings_encrypted ON system_settings(is_encrypted)`,
+
+		// =====================================================
+		// EMAIL VERIFICATION CODES TABLE
+		// =====================================================
+
+		`CREATE TABLE IF NOT EXISTS email_verification_codes (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			code VARCHAR(6) NOT NULL,
+			expires_at TIMESTAMP NOT NULL,
+			used_at TIMESTAMP,
+			created_at TIMESTAMP DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_verification_user ON email_verification_codes(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_verification_code ON email_verification_codes(code)`,
+		`CREATE INDEX IF NOT EXISTS idx_verification_expires ON email_verification_codes(expires_at)`,
+
+		// =====================================================
 		// CREATE DEFAULT ADMIN USER (for existing data migration)
 		// =====================================================
 
-		`INSERT INTO users (id, email, password_hash, name, subscription_tier, is_admin, profit_share_pct)
+		// Create admin user with email admin@binance-bot.local and password Weber@#2025
+		// bcrypt hash generated with cost 12 for: Weber@#2025
+		`INSERT INTO users (id, email, password_hash, name, subscription_tier, is_admin, profit_share_pct, email_verified)
 		VALUES (
 			'00000000-0000-0000-0000-000000000000',
-			'admin@localhost',
-			'$2a$10$placeholder_hash_change_me',
-			'Admin',
+			'admin@binance-bot.local',
+			'$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.G1zGrNrQ1L5Ymu',
+			'Administrator',
 			'whale',
 			TRUE,
-			5.00
-		) ON CONFLICT (id) DO NOTHING`,
+			5.00,
+			TRUE
+		) ON CONFLICT (id) DO UPDATE SET
+			email = 'admin@binance-bot.local',
+			password_hash = '$2a$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.G1zGrNrQ1L5Ymu',
+			name = 'Administrator',
+			email_verified = TRUE`,
 
 		// Assign existing data to admin user
 		`UPDATE trades SET user_id = '00000000-0000-0000-0000-000000000000' WHERE user_id IS NULL`,
@@ -345,6 +387,32 @@ func (db *DB) RunMultiTenantMigrations(ctx context.Context) error {
 		`INSERT INTO user_trading_configs (user_id, max_open_positions, enable_futures, autopilot_enabled)
 		VALUES ('00000000-0000-0000-0000-000000000000', 100, TRUE, TRUE)
 		ON CONFLICT (user_id) DO NOTHING`,
+
+		// =====================================================
+		// AI API KEYS TABLE
+		// =====================================================
+
+		// Create user AI keys table for per-user AI provider API keys
+		`CREATE TABLE IF NOT EXISTS user_ai_keys (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			provider VARCHAR(50) NOT NULL,
+			encrypted_key TEXT NOT NULL,
+			key_last_four VARCHAR(4),
+			is_active BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			CONSTRAINT valid_ai_provider CHECK (provider IN ('claude', 'openai', 'deepseek')),
+			UNIQUE(user_id, provider)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_keys_user ON user_ai_keys(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_keys_provider ON user_ai_keys(provider)`,
+		`CREATE INDEX IF NOT EXISTS idx_ai_keys_active ON user_ai_keys(is_active)`,
+
+		// Trigger for updated_at on user_ai_keys
+		`DROP TRIGGER IF EXISTS update_user_ai_keys_updated_at ON user_ai_keys`,
+		`CREATE TRIGGER update_user_ai_keys_updated_at BEFORE UPDATE ON user_ai_keys
+		FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()`,
 	}
 
 	for i, migration := range migrations {

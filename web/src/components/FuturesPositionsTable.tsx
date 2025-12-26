@@ -103,19 +103,16 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   useEffect(() => {
     const fetchGinieROI = async () => {
       try {
-        const response = await fetch('/api/futures/ginie/autopilot/positions');
-        if (response.ok) {
-          const data = await response.json();
-          const roiMap: Record<string, number | null> = {};
-          if (data.positions && Array.isArray(data.positions)) {
-            for (const pos of data.positions) {
-              if ((pos as any).custom_roi_percent !== undefined) {
-                roiMap[pos.symbol] = (pos as any).custom_roi_percent;
-              }
+        const data = await futuresApi.getGinieAutopilotPositions();
+        const roiMap: Record<string, number | null> = {};
+        if (data.positions && Array.isArray(data.positions)) {
+          for (const pos of data.positions) {
+            if ((pos as any).custom_roi_percent !== undefined) {
+              roiMap[pos.symbol] = (pos as any).custom_roi_percent;
             }
           }
-          setRoiFromGinie(roiMap);
         }
+        setRoiFromGinie(roiMap);
       } catch (err) {
         console.error('Error fetching Ginie ROI:', err);
       }

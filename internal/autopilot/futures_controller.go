@@ -693,6 +693,24 @@ func (fc *FuturesController) SetLLMAnalyzer(a *llm.Analyzer) {
 	}
 }
 
+// HasLLMAnalyzer returns true if an LLM analyzer is configured
+func (fc *FuturesController) HasLLMAnalyzer() bool {
+	return fc.llmAnalyzer != nil
+}
+
+// GetLLMProvider returns the current LLM provider name (e.g., "claude", "openai", "deepseek")
+// Returns empty string if no LLM analyzer is configured
+func (fc *FuturesController) GetLLMProvider() string {
+	if fc.llmAnalyzer == nil {
+		return ""
+	}
+	client := fc.llmAnalyzer.GetClient()
+	if client == nil {
+		return ""
+	}
+	return string(client.GetProvider())
+}
+
 // SetSentimentAnalyzer sets the sentiment analyzer
 func (fc *FuturesController) SetSentimentAnalyzer(a *sentiment.Analyzer) {
 	fc.sentimentAnalyzer = a

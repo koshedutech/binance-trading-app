@@ -1,9 +1,13 @@
 package api
 
 import (
+	"binance-trading-bot/internal/ai/llm"
 	"binance-trading-bot/internal/autopilot"
+	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/circuit"
+	"binance-trading-bot/internal/database"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -26,6 +30,9 @@ func (s *Server) handleGetFuturesAutopilotStatus(c *gin.Context) {
 		return
 	}
 
+	// Initialize user-specific clients (LLM + Binance) from database
+	s.tryInitializeUserClients(c, controller)
+
 	status := controller.GetStatus()
 	c.JSON(http.StatusOK, status)
 }
@@ -47,6 +54,9 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures autopilot not configured")
 		return
 	}
+
+	// Initialize user-specific clients (LLM + Binance) from database BEFORE any operations
+	s.tryInitializeUserClients(c, controller)
 
 	if req.Enabled {
 		if controller.IsRunning() {
@@ -687,7 +697,7 @@ func (s *Server) handleGetAPIHealthStatus(c *gin.Context) {
 	}
 
 	// Check futures API
-	futuresClient := s.getFuturesClient()
+	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient != nil {
 		_, err := futuresClient.GetFuturesAccountInfo()
 		if err != nil {
@@ -1018,8 +1028,142 @@ func (s *Server) handleGetInvestigateStatus(c *gin.Context) {
 		return
 	}
 
+	// Try to initialize user-specific clients if not already set
+	s.tryInitializeUserClients(c, controller)
+
 	status := controller.GetInvestigateStatus()
 	c.JSON(http.StatusOK, status)
+}
+
+// tryInitializeUserClients attempts to initialize both LLM analyzer and Binance client
+// with user's credentials stored in the database
+func (s *Server) tryInitializeUserClients(c *gin.Context, controller *autopilot.FuturesController) {
+	// Initialize LLM analyzer
+	s.tryInitializeLLMAnalyzer(c, controller)
+
+	// Initialize Binance Futures client with user's keys
+	s.tryInitializeFuturesClient(c, controller)
+}
+
+// tryInitializeFuturesClient attempts to set the user's Binance Futures client on the controller
+// This allows the background Ginie autopilot to use user-specific API keys
+func (s *Server) tryInitializeFuturesClient(c *gin.Context, controller *autopilot.FuturesController) {
+	// Get user ID from context
+	userID := s.getUserID(c)
+	if userID == "" {
+		return
+	}
+
+	// Check if controller already has a valid client (skip if dry_run mode)
+	if controller.GetDryRun() {
+		return // In paper mode, no need to use real API keys
+	}
+
+	ctx := c.Request.Context()
+
+	// Get user's Binance API keys from database
+	if s.apiKeyService == nil {
+		return
+	}
+
+	// Try mainnet first, then testnet
+	keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
+	if err != nil {
+		keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
+	}
+
+	if err != nil || keys == nil || keys.APIKey == "" || keys.SecretKey == "" {
+		log.Printf("[FUTURES-CLIENT-INIT] No Binance keys found for user %s", userID)
+		return
+	}
+
+	// Create user-specific Futures client
+	client := binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
+	if client != nil {
+		controller.SetFuturesClient(client)
+		log.Printf("[FUTURES-CLIENT-INIT] Injected user %s's Binance Futures client into controller (testnet=%v)", userID, keys.IsTestnet)
+	}
+}
+
+// tryInitializeLLMAnalyzer attempts to initialize LLM analyzer with user's AI key
+// This allows using per-user AI keys stored in the database
+// It will also RE-INITIALIZE if the user changed their provider (e.g., from Claude to DeepSeek)
+func (s *Server) tryInitializeLLMAnalyzer(c *gin.Context, controller *autopilot.FuturesController) {
+	// Get user ID from context
+	userID := s.getUserID(c)
+	if userID == "" {
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get user's AI keys from database
+	aiKeys, err := s.repo.GetUserAIKeys(ctx, userID)
+	if err != nil {
+		log.Printf("[LLM-INIT] Error getting AI keys for user %s: %v", userID, err)
+		return
+	}
+
+	// Find an active AI key
+	for _, key := range aiKeys {
+		if !key.IsActive {
+			continue
+		}
+
+		// Determine provider and model
+		var provider llm.Provider
+		var model string
+		switch key.Provider {
+		case database.AIProviderClaude:
+			provider = llm.ProviderClaude
+			model = "claude-3-haiku-20240307" // Default to fast model
+		case database.AIProviderOpenAI:
+			provider = llm.ProviderOpenAI
+			model = "gpt-4o-mini" // Default to fast model
+		case database.AIProviderDeepSeek:
+			provider = llm.ProviderDeepSeek
+			model = "deepseek-chat"
+		default:
+			log.Printf("[LLM-INIT] Unknown AI provider: %s", key.Provider)
+			continue
+		}
+
+		// Check if current analyzer matches the user's preferred provider
+		// If already initialized with the SAME provider, skip re-initialization
+		if controller.HasLLMAnalyzer() {
+			currentProvider := controller.GetLLMProvider()
+			if currentProvider == string(provider) {
+				// Same provider, no need to re-initialize
+				return
+			}
+			// Different provider - user changed their AI key, need to re-initialize
+			log.Printf("[LLM-INIT] Provider changed from %s to %s, re-initializing LLM analyzer", currentProvider, provider)
+		}
+
+		// Decrypt the API key
+		decryptedKey, err := decryptAPIKey(key.EncryptedKey)
+		if err != nil {
+			log.Printf("[LLM-INIT] Error decrypting AI key: %v", err)
+			continue
+		}
+
+		// Create LLM analyzer config
+		config := &llm.AnalyzerConfig{
+			Provider:  provider,
+			APIKey:    decryptedKey,
+			Model:     model,
+			Enabled:   true,
+			MaxTokens: 4096,
+		}
+
+		// Create and set the LLM analyzer
+		analyzer := llm.NewAnalyzer(config)
+		if analyzer != nil {
+			controller.SetLLMAnalyzer(analyzer)
+			log.Printf("[LLM-INIT] Dynamically initialized LLM analyzer with user %s's %s key", userID, key.Provider)
+			return
+		}
+	}
 }
 
 // handleClearFlipFlopCooldown clears the flip-flop cooldown

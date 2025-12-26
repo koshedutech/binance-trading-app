@@ -3,6 +3,7 @@ package binance
 import (
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -11,6 +12,7 @@ type MockClient struct {
 	baseClient *Client
 	prices     map[string]float64
 	lastUpdate time.Time
+	mu         sync.RWMutex // Protects prices map and lastUpdate
 }
 
 // NewMockClient creates a new mock client
@@ -51,6 +53,9 @@ func NewMockClient() *MockClient {
 
 // updatePrices adds small random variations to simulate market movement
 func (mc *MockClient) updatePrices() {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
 	if time.Since(mc.lastUpdate) < time.Second {
 		return
 	}
@@ -67,7 +72,9 @@ func (mc *MockClient) updatePrices() {
 func (mc *MockClient) GetKlines(symbol, interval string, limit int) ([]Kline, error) {
 	mc.updatePrices()
 
+	mc.mu.RLock()
 	basePrice, ok := mc.prices[symbol]
+	mc.mu.RUnlock()
 	if !ok {
 		basePrice = 100.0
 	}
@@ -135,6 +142,9 @@ func (mc *MockClient) GetKlines(symbol, interval string, limit int) ([]Kline, er
 func (mc *MockClient) Get24hrTickers() ([]Ticker24hr, error) {
 	mc.updatePrices()
 
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
 	tickers := make([]Ticker24hr, 0, len(mc.prices))
 	now := time.Now()
 
@@ -167,7 +177,11 @@ func (mc *MockClient) Get24hrTickers() ([]Ticker24hr, error) {
 func (mc *MockClient) GetCurrentPrice(symbol string) (float64, error) {
 	mc.updatePrices()
 
-	if price, ok := mc.prices[symbol]; ok {
+	mc.mu.RLock()
+	price, ok := mc.prices[symbol]
+	mc.mu.RUnlock()
+
+	if ok {
 		return price, nil
 	}
 	return 100.0, nil
@@ -175,6 +189,9 @@ func (mc *MockClient) GetCurrentPrice(symbol string) (float64, error) {
 
 // GetExchangeInfo returns simulated exchange info
 func (mc *MockClient) GetExchangeInfo() (*ExchangeInfo, error) {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
 	symbols := make([]SymbolInfo, 0, len(mc.prices))
 
 	for symbol := range mc.prices {
@@ -193,6 +210,9 @@ func (mc *MockClient) GetExchangeInfo() (*ExchangeInfo, error) {
 
 // GetAllSymbols returns all mock trading pairs
 func (mc *MockClient) GetAllSymbols() ([]string, error) {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
 	symbols := make([]string, 0, len(mc.prices))
 	for symbol := range mc.prices {
 		symbols = append(symbols, symbol)

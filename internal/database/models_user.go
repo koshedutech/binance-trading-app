@@ -1,6 +1,8 @@
 package database
 
 import (
+	"os"
+	"strings"
 	"time"
 )
 
@@ -81,20 +83,22 @@ const (
 
 // UserAPIKey represents a user's exchange API key reference
 type UserAPIKey struct {
-	ID               string                 `json:"id"`
-	UserID           string                 `json:"user_id"`
-	Exchange         string                 `json:"exchange"`
-	VaultSecretPath  string                 `json:"-"` // Never expose vault path
-	APIKeyLastFour   string                 `json:"api_key_last_four,omitempty"`
-	Label            string                 `json:"label,omitempty"`
-	IsTestnet        bool                   `json:"is_testnet"`
-	IsActive         bool                   `json:"is_active"`
-	Permissions      map[string]interface{} `json:"permissions,omitempty"`
-	LastValidatedAt  *time.Time             `json:"last_validated_at,omitempty"`
-	ValidationStatus ValidationStatus       `json:"validation_status"`
-	ValidationError  string                 `json:"validation_error,omitempty"`
-	CreatedAt        time.Time              `json:"created_at"`
-	UpdatedAt        time.Time              `json:"updated_at"`
+	ID                 string                 `json:"id"`
+	UserID             string                 `json:"user_id"`
+	Exchange           string                 `json:"exchange"`
+	VaultSecretPath    string                 `json:"-"` // Never expose vault path
+	EncryptedAPIKey    string                 `json:"-"` // Never expose encrypted key
+	EncryptedSecretKey string                 `json:"-"` // Never expose encrypted secret
+	APIKeyLastFour     string                 `json:"api_key_last_four,omitempty"`
+	Label              string                 `json:"label,omitempty"`
+	IsTestnet          bool                   `json:"is_testnet"`
+	IsActive           bool                   `json:"is_active"`
+	Permissions        map[string]interface{} `json:"permissions,omitempty"`
+	LastValidatedAt    *time.Time             `json:"last_validated_at,omitempty"`
+	ValidationStatus   ValidationStatus       `json:"validation_status"`
+	ValidationError    string                 `json:"validation_error,omitempty"`
+	CreatedAt          time.Time              `json:"created_at"`
+	UpdatedAt          time.Time              `json:"updated_at"`
 }
 
 // UserTradingConfig represents per-user trading configuration
@@ -120,6 +124,16 @@ type UserTradingConfig struct {
 	TelegramChatID            string   `json:"telegram_chat_id,omitempty"`
 	CreatedAt                 time.Time `json:"created_at"`
 	UpdatedAt                 time.Time `json:"updated_at"`
+}
+
+// SystemSetting represents a system-wide configuration setting
+type SystemSetting struct {
+	Key         string    `json:"key"`
+	Value       string    `json:"value"`
+	IsEncrypted bool      `json:"is_encrypted"`
+	Description string    `json:"description,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	UpdatedBy   *string   `json:"updated_by,omitempty"`
 }
 
 // SettlementStatus for profit tracking
@@ -316,9 +330,49 @@ var TierConfigs = map[SubscriptionTier]TierConfig{
 }
 
 // GetTierConfig returns the configuration for a given tier
+// When SUBSCRIPTION_ENABLED=false, always returns Whale tier config
 func GetTierConfig(tier SubscriptionTier) TierConfig {
+	// Check if subscription enforcement is disabled
+	subscriptionEnabled := os.Getenv("SUBSCRIPTION_ENABLED")
+	if subscriptionEnabled == "" || strings.ToLower(subscriptionEnabled) == "false" {
+		// Subscription disabled - always return Whale tier (unlimited access)
+		return TierConfigs[TierWhale]
+	}
+
+	// Subscription enabled - return actual tier config
 	if config, ok := TierConfigs[tier]; ok {
 		return config
 	}
 	return TierConfigs[TierFree]
+}
+
+// EmailVerificationCode represents a 6-digit email verification code
+type EmailVerificationCode struct {
+	ID        string     `json:"id"`
+	UserID    string     `json:"user_id"`
+	Code      string     `json:"code"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	UsedAt    *time.Time `json:"used_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// AIProvider represents supported AI providers
+type AIProvider string
+
+const (
+	AIProviderClaude   AIProvider = "claude"
+	AIProviderOpenAI   AIProvider = "openai"
+	AIProviderDeepSeek AIProvider = "deepseek"
+)
+
+// UserAIKey represents a user's AI provider API key
+type UserAIKey struct {
+	ID           string     `json:"id"`
+	UserID       string     `json:"user_id"`
+	Provider     AIProvider `json:"provider"`
+	EncryptedKey string     `json:"-"` // Never expose encrypted key
+	KeyLastFour  string     `json:"key_last_four,omitempty"`
+	IsActive     bool       `json:"is_active"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }

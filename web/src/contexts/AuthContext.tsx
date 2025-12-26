@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { Navigate, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
 
 // Types
@@ -31,8 +32,9 @@ interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  subscriptionEnabled: boolean;
   login: (credentials: LoginCredentials) => Promise<void>;
-  register: (data: RegisterData) => Promise<void>;
+  register: (data: RegisterData) => Promise<User>;
   logout: () => Promise<void>;
   refreshAuth: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -100,6 +102,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [user, setUser] = useState<User | null>(getStoredUser);
   const [isLoading, setIsLoading] = useState(true);
   const [authDisabled, setAuthDisabled] = useState(false);
+  const [subscriptionDisabled, setSubscriptionDisabled] = useState(false);
 
   // Check if user is authenticated (or auth is disabled)
   const isAuthenticated = !!user || authDisabled;
@@ -117,6 +120,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           setIsLoading(false);
           return;
         }
+        // Check subscription status
+        setSubscriptionDisabled(statusResponse.data?.subscription_enabled === false);
       } catch {
         // If /auth/status fails, continue with normal auth flow
       }
@@ -164,7 +169,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }, []);
 
   // Register function
-  const register = useCallback(async (data: RegisterData) => {
+  const register = useCallback(async (data: RegisterData): Promise<User> => {
     // First register the user
     await api.post('/auth/register', data);
 
@@ -180,6 +185,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setStoredTokens(access_token, refresh_token);
     setStoredUser(userData);
     setUser(userData);
+
+    return userData;
   }, []);
 
   // Logout function
@@ -233,6 +240,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     user,
     isAuthenticated,
     isLoading,
+    subscriptionEnabled: !subscriptionDisabled,
     login,
     register,
     logout,
@@ -268,7 +276,8 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   requiredTier,
   requireAdmin = false,
 }) => {
-  const { user, isAuthenticated, isLoading } = useAuth();
+  const { user, isAuthenticated, isLoading, subscriptionEnabled } = useAuth();
+  const location = useLocation();
 
   if (isLoading) {
     return (
@@ -279,9 +288,8 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
   }
 
   if (!isAuthenticated) {
-    // Redirect to login
-    window.location.href = '/login';
-    return null;
+    // Redirect to login, preserving the intended destination
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   }
 
   if (requireAdmin && !user?.is_admin) {
@@ -295,7 +303,8 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
     );
   }
 
-  if (requiredTier && user && !requiredTier.includes(user.subscription_tier)) {
+  // Only enforce tier checks if subscription is enabled
+  if (subscriptionEnabled && requiredTier && user && !requiredTier.includes(user.subscription_tier)) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="text-center">

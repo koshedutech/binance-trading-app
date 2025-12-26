@@ -268,7 +268,6 @@
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/futures/ginie/autopilot/positions\")",
       "Bash(ConvertFrom-Json)",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/futures/ginie/autopilot/status\")",
-      "Bash(defined for this asset.\" when splitting quantities into 4 TP levels.\n\nRoot Cause: Dividing position quantities by 4.0 created floating point numbers \nwith excessive decimal places that exceeded Binance''s precision limits for \ndifferent symbols \\(e.g., 0.10025 instead of 0.1 for symbols that only allow \nwhole numbers or 2 decimal precision\\).\n\nSolution:\n1. Round all SL/TP prices using roundPrice\\(symbol, price\\) to match symbol''s \n   price precision before placing orders\n2. Round position quantities using roundQuantity\\(symbol, qty\\) to match symbol''s \n   quantity precision before placing orders\n3. Round TP quantities after division by 4 using roundQuantity\\(\\) to ensure \n   proper precision after scaling\n4. Enhanced error logging to show actual error messages \\(was showing empty \n   objects\\) using err.Error\\(\\)\n5. Added info log when SL order is successfully placed\n\nResult: SLTP orders now respect Binance''s asset-specific precision requirements \nand place successfully without precision errors.\n\nFiles modified:\n- internal/autopilot/ginie_autopilot.go: Rounding implementation in \n  RecalculateAdaptiveSLTP\\(\\) function\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/futures/positions\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 15 \"http://localhost:8094/api/futures/ginie/autopilot/status\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/futures/autopilot/config\")",
@@ -508,7 +507,6 @@
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 5 -X POST \"http://localhost:8094/api/settings/trading-mode\" -H \"Content-Type: application/json\" -d '{\"\"dry_run\"\":false}')",
       "Bash(do echo \"=== Switch $i: LIVE -> PAPER ===\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 5 -X POST \"http://localhost:8094/api/settings/trading-mode\" -H \"Content-Type: application/json\" -d '{\"\"dry_run\"\":true}')",
-      "Bash(powershell -Command \"\\(Get-Content .\\\\.claude\\\\settings.local.json\\) | Select-String -Pattern ''Bash\\\\\\('' | head -20\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/account\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 5 \"http://localhost:8094/api/futures/orders/all\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/positions/history?limit=10&offset=0&include_ai=true\")",
@@ -549,7 +547,10 @@
       "Bash(Select-Object -Last 20)",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 10 \"http://localhost:8094/api/futures/orders\")",
       "Bash(\"C:\\\\Windows\\\\System32\\\\curl.exe\" -s --max-time 3 \"http://localhost:8094/api/health/status\")",
-      "Bash(wmic process where \"ProcessId=14284\" call terminate)"
+      "Bash(wmic process where \"ProcessId=14284\" call terminate)",
+      "Bash(\"cd /d D:\\\\Apps\\\\binance-trading-bot && start /B binance-trading-bot.exe\")",
+      "Bash(wmic process where \"name=''binance-trading-bot.exe''\" list brief)",
+      "Bash(start /B \"\" \"D:\\\\Apps\\\\binance-trading-bot\\\\binance-trading-bot.exe\")"
     ]
   }
 }

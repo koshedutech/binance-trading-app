@@ -130,6 +130,12 @@ class APIService {
     return { data: response.data };
   }
 
+  // Generic put method for any API endpoint
+  async put<T = unknown>(url: string, data?: unknown): Promise<{ data: T }> {
+    const response = await this.client.put<T>(url, data);
+    return { data: response.data };
+  }
+
   // Bot endpoints
   async getBotStatus(): Promise<BotStatus> {
     const { data } = await this.client.get<APIResponse<BotStatus>>('/bot/status');
@@ -642,6 +648,35 @@ class APIService {
     return data;
   }
 
+  // ==================== AI API Keys Endpoints ====================
+
+  async getAIKeys(): Promise<Array<{
+    id: string;
+    provider: string;
+    key_last_four: string;
+    is_active: boolean;
+    created_at: string;
+  }>> {
+    const { data } = await this.client.get<APIResponse<any[]>>('/user/ai-keys');
+    return data.data || [];
+  }
+
+  async addAIKey(keyData: {
+    provider: string;
+    api_key: string;
+  }): Promise<void> {
+    await this.client.post('/user/ai-keys', keyData);
+  }
+
+  async deleteAIKey(keyId: string): Promise<void> {
+    await this.client.delete(`/user/ai-keys/${keyId}`);
+  }
+
+  async testAIKey(keyId: string): Promise<{ success: boolean; message: string }> {
+    const { data } = await this.client.post(`/user/ai-keys/${keyId}/test`);
+    return data;
+  }
+
   // ==================== Billing Endpoints ====================
 
   async getProfitHistory(): Promise<Array<{
@@ -695,6 +730,31 @@ class APIService {
     };
   }> {
     const { data } = await this.client.get('/health/status');
+    return data;
+  }
+
+  // ==================== User Utilities ====================
+
+  async getUserIPAddress(): Promise<{
+    success: boolean;
+    ip_address: string;
+    message: string;
+  }> {
+    const { data } = await this.client.get('/user/ip-address');
+    return data;
+  }
+
+  async getUserAPIStatus(): Promise<{
+    success: boolean;
+    healthy: boolean;
+    services: {
+      binance_spot: { status: string; message: string };
+      binance_futures: { status: string; message: string };
+      ai_service: { status: string; message: string };
+      database: { status: string; message: string };
+    };
+  }> {
+    const { data } = await this.client.get('/user/api-status');
     return data;
   }
 }

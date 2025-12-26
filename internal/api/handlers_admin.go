@@ -286,6 +286,42 @@ func (s *Server) handleAdminGetLicenseStats(c *gin.Context) {
 	})
 }
 
+// handleAdminListUsers returns a list of all users (admin only)
+func (s *Server) handleAdminListUsers(c *gin.Context) {
+	limit := 100
+	offset := 0
+	tier := "" // all tiers
+
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
+			limit = parsed
+		}
+	}
+	if o := c.Query("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+	if t := c.Query("tier"); t != "" {
+		tier = t
+	}
+
+	ctx := c.Request.Context()
+	users, total, err := s.repo.ListUsers(ctx, limit, offset, tier)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to fetch users: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    users,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+	})
+}
+
 // handleAdminBulkGenerateLicenses generates multiple licenses
 func (s *Server) handleAdminBulkGenerateLicenses(c *gin.Context) {
 	var req struct {

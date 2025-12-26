@@ -16,7 +16,7 @@ COPY web/ ./
 RUN npm run build
 
 # Backend build stage
-FROM golang:1.21-alpine AS backend-builder
+FROM golang:1.23-alpine AS backend-builder
 
 # Install build dependencies
 RUN apk add --no-cache git make
@@ -64,12 +64,16 @@ RUN chown -R appuser:appuser /app
 # Switch to non-root user
 USER appuser
 
-# Expose web interface port
-EXPOSE 8090
+# Default port (overridden by WEB_PORT env var in docker-compose)
+# Development: 8094, Production: 8095
+ENV WEB_PORT=8094
 
-# Health check
+# Expose both possible ports (actual port determined by WEB_PORT env var)
+EXPOSE 8094 8095
+
+# Health check uses the WEB_PORT environment variable
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8090/api/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:${WEB_PORT}/api/health || exit 1
 
 # Run the application
 CMD ["./trading-bot"]

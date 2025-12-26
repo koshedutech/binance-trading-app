@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useAuth, TIER_INFO } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 
 const Register: React.FC = () => {
   const [formData, setFormData] = useState({
@@ -46,13 +46,19 @@ const Register: React.FC = () => {
     setIsLoading(true);
 
     try {
-      await register({
+      const user = await register({
         email: formData.email,
         password: formData.password,
         name: formData.name,
         referral_code: formData.referralCode || undefined,
       });
-      navigate('/dashboard', { replace: true });
+
+      // Redirect to verification page if email not verified
+      if (user && !user.email_verified) {
+        navigate('/verify-email', { replace: true });
+      } else {
+        navigate('/dashboard', { replace: true });
+      }
     } catch (err: unknown) {
       const errorMessage = err instanceof Error
         ? err.message
@@ -130,7 +136,7 @@ const Register: React.FC = () => {
                 autoComplete="new-password"
                 required
                 className="appearance-none relative block w-full px-3 py-2 border border-gray-700 placeholder-gray-500 text-white bg-gray-800 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
-                placeholder="Minimum 8 characters"
+                placeholder="Enter your password"
                 value={formData.password}
                 onChange={handleChange}
               />
@@ -190,16 +196,19 @@ const Register: React.FC = () => {
           </div>
         </form>
 
-        {/* Free tier info */}
-        <div className="mt-6 bg-gray-800 rounded-lg p-4">
-          <h3 className="text-lg font-medium text-white mb-2">Start with Free Tier</h3>
-          <ul className="text-sm text-gray-400 space-y-1">
-            <li>- Up to {TIER_INFO.free.maxPositions} open positions</li>
-            <li>- {TIER_INFO.free.profitShare}% profit share</li>
-            <li>- {TIER_INFO.free.features.join(', ')}</li>
+        {/* Whale tier info - All users get full access */}
+        <div className="mt-6 bg-gradient-to-r from-purple-900/50 to-indigo-900/50 rounded-lg p-4 border border-purple-500/30">
+          <h3 className="text-lg font-medium text-white mb-2 flex items-center gap-2">
+            <span className="text-2xl">🐋</span> Full Access Account
+          </h3>
+          <ul className="text-sm text-gray-300 space-y-1">
+            <li className="flex items-center gap-2"><span className="text-green-400">✓</span> Unlimited open positions</li>
+            <li className="flex items-center gap-2"><span className="text-green-400">✓</span> Spot + Futures trading</li>
+            <li className="flex items-center gap-2"><span className="text-green-400">✓</span> AI Autopilot enabled</li>
+            <li className="flex items-center gap-2"><span className="text-green-400">✓</span> All premium features included</li>
           </ul>
-          <p className="mt-2 text-xs text-gray-500">
-            Upgrade anytime to unlock more features and lower profit share rates.
+          <p className="mt-2 text-xs text-purple-300">
+            Every account gets full Whale tier access - no restrictions!
           </p>
         </div>
 

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search } from 'lucide-react';
-import { Link, useLocation } from 'react-router-dom';
+import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain } from 'lucide-react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { useAuth, TIER_INFO } from '../contexts/AuthContext';
 import { PositionsHeader } from './PositionsHeader';
@@ -18,10 +18,27 @@ export default function Header() {
   const { botStatus } = useStore();
   const { user, logout } = useAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [subscriptionEnabled, setSubscriptionEnabled] = useState(true);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const isActive = (path: string) => location.pathname === path;
+
+  // Check if subscription is enabled on mount
+  useEffect(() => {
+    const checkSubscriptionStatus = async () => {
+      try {
+        const response = await fetch('/api/auth/status');
+        const data = await response.json();
+        setSubscriptionEnabled(data.subscription_enabled ?? true);
+      } catch (error) {
+        // Default to enabled if check fails
+        setSubscriptionEnabled(true);
+      }
+    };
+    checkSubscriptionStatus();
+  }, []);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -34,9 +51,11 @@ export default function Header() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setDropdownOpen(false);
-    logout();
+    await logout();
+    // Navigate to login page after logout
+    navigate('/login', { replace: true });
   };
 
   const tierColor = tierColors[user?.subscription_tier || 'free'] || tierColors.free;
@@ -177,16 +196,16 @@ export default function Header() {
                     </div>
 
                     <Link
-                      to="/profile"
+                      to="/settings"
                       onClick={() => setDropdownOpen(false)}
                       className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-dark-600 hover:text-white transition-colors"
                     >
                       <User className="w-4 h-4" />
-                      Profile Settings
+                      Settings
                     </Link>
 
                     <Link
-                      to="/api-keys"
+                      to="/settings?tab=binance"
                       onClick={() => setDropdownOpen(false)}
                       className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-dark-600 hover:text-white transition-colors"
                     >
@@ -195,13 +214,36 @@ export default function Header() {
                     </Link>
 
                     <Link
-                      to="/billing"
+                      to="/settings?tab=ai"
                       onClick={() => setDropdownOpen(false)}
                       className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-dark-600 hover:text-white transition-colors"
                     >
-                      <CreditCard className="w-4 h-4" />
-                      Billing & Subscription
+                      <Brain className="w-4 h-4" />
+                      AI Keys
                     </Link>
+
+                    {/* Only show Billing menu when subscription is enabled */}
+                    {subscriptionEnabled && (
+                      <Link
+                        to="/billing"
+                        onClick={() => setDropdownOpen(false)}
+                        className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-dark-600 hover:text-white transition-colors"
+                      >
+                        <CreditCard className="w-4 h-4" />
+                        Billing & Subscription
+                      </Link>
+                    )}
+
+                    {user.is_admin && (
+                      <Link
+                        to="/admin"
+                        onClick={() => setDropdownOpen(false)}
+                        className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-dark-600 hover:text-white transition-colors"
+                      >
+                        <Shield className="w-4 h-4" />
+                        Admin Panel
+                      </Link>
+                    )}
 
                     <div className="border-t border-dark-600 mt-1 pt-1">
                       <button
