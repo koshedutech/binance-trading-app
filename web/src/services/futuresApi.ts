@@ -1789,12 +1789,12 @@ class FuturesAPIService {
   }
 
   async updateLLMConfig(config: Partial<LLMConfig>): Promise<{ success: boolean; message: string }> {
-    const { data } = await this.client.post('/ginie/llm/config', config);
+    const { data } = await this.client.put('/ginie/llm-config', config);
     return data;
   }
 
   async updateModeLLMSettings(mode: string, settings: Partial<ModeLLMSettings>): Promise<{ success: boolean; message: string }> {
-    const { data } = await this.client.post(`/ginie/llm/mode/${mode}`, settings);
+    const { data } = await this.client.put(`/ginie/llm-config/${mode}`, settings);
     return data;
   }
 
