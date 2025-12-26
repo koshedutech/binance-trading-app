@@ -4731,3 +4731,127 @@ The LLM & Adaptive AI Decision Engine integrates Large Language Models (LLM) wit
 *Epic created by BMAD Party Mode - Bob (SM), Mary (Analyst), Winston (Architect), John (PM)*
 *Date: 2025-12-26*
 *Last Updated: 2025-12-26 - Added UI Wireframes for Story 2.8*
+
+---
+
+## Story 2.9: Advanced Mode Configuration - ROI SL/TP, Trailing Activation & Margin Type
+
+### Story Description
+As a trader, I want to configure advanced SL/TP options per trading mode including ROI-based stops, trailing stop activation price, and margin type (cross/isolated) so that I can fine-tune risk management for each trading style.
+
+### Status: ✅ COMPLETED
+
+### Acceptance Criteria
+- [x] Each mode supports ROI-based SL/TP as alternative to price-percentage-based stops
+- [x] Trailing stop can be activated at a specific price (not just profit %)
+- [x] Each mode can be configured with CROSS or ISOLATED margin
+- [x] Isolated margin percentage is configurable per mode
+- [x] All settings persist to autopilot_settings.json
+- [x] API endpoints support get/update/reset for all new fields
+- [x] Frontend UI displays controls for all new options
+- [x] Default values are sensible per mode type
+
+### Technical Implementation
+
+#### 1. New Fields Added to ModeSLTPConfig (settings.go)
+
+```go
+type ModeSLTPConfig struct {
+    // Existing fields...
+    StopLossPercent         float64 `json:"stop_loss_percent"`
+    TakeProfitPercent       float64 `json:"take_profit_percent"`
+    TrailingStopEnabled     bool    `json:"trailing_stop_enabled"`
+    TrailingStopPercent     float64 `json:"trailing_stop_percent"`
+    TrailingStopActivation  float64 `json:"trailing_stop_activation"`
+    MaxHoldDuration         string  `json:"max_hold_duration"`
+    UseSingleTP             bool    `json:"use_single_tp"`
+    
+    // NEW: Trailing activation at specific price
+    TrailingActivationPrice float64 `json:"trailing_activation_price"` // 0 = disabled
+    
+    // NEW: ROI-based SL/TP (alternative to price %)
+    UseROIBasedSLTP        bool    `json:"use_roi_based_sltp"`
+    ROIStopLossPercent     float64 `json:"roi_stop_loss_percent"`     // e.g., -12 = close at -12% ROI
+    ROITakeProfitPercent   float64 `json:"roi_take_profit_percent"`   // e.g., 20 = close at +20% ROI
+    
+    // NEW: Margin type per mode
+    MarginType             string  `json:"margin_type"`               // "CROSS" or "ISOLATED"
+    IsolatedMarginPercent  float64 `json:"isolated_margin_percent"`   // Margin % for isolated mode
+}
+```
+
+#### 2. Default Values Per Mode
+
+| Mode | Margin Type | Isolated % | ROI SL | ROI TP | Trail @ Price |
+|------|-------------|------------|--------|--------|---------------|
+| ultra_fast | CROSS | 25% | -5% | +10% | 0 (disabled) |
+| scalp | CROSS | 30% | -8% | +15% | 0 (disabled) |
+| swing | CROSS | 40% | -12% | +20% | 0 (disabled) |
+| position | ISOLATED | 50% | -15% | +30% | 0 (disabled) |
+
+#### 3. Bug Fix: Confidence Threshold Comparison
+
+Fixed threshold comparison in `ginie_analyzer.go` where confidence was on 0-100 scale but thresholds were 0-1:
+
+```go
+// Before (incorrect):
+if report.ConfidenceScore >= 0.30 { ... }
+
+// After (correct):
+if report.ConfidenceScore >= 30.0 { ... }
+```
+
+#### 4. Merge Function for Saved Configs
+
+Added `mergeWithDefaultConfigs()` to ensure saved configs get new field defaults:
+
+```go
+func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeFullConfig {
+    defaults := DefaultModeConfigs()
+    // Merge logic ensures new fields get defaults if missing
+}
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/futures/ginie/mode-configs` | GET | Get all 4 mode configurations |
+| `/api/futures/ginie/mode-config/:mode` | GET | Get specific mode config |
+| `/api/futures/ginie/mode-config/:mode` | PUT | Update specific mode config |
+| `/api/futures/ginie/mode-config/reset` | POST | Reset all modes to defaults |
+
+### Frontend UI Updates (GiniePanel.tsx)
+
+Added new controls in Mode Configuration panel:
+- **Margin Type**: Radio buttons for CROSS/ISOLATED with conditional isolated margin % input
+- **ROI-based SL/TP Toggle**: Enable/disable with conditional ROI SL% and ROI TP% inputs
+- **Trailing Stop Section**: Added "Activate @ Price" field alongside existing "Activate @ %" 
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `internal/autopilot/settings.go` | Added 6 new fields to ModeSLTPConfig, updated DefaultModeConfigs(), added mergeWithDefaultConfigs() |
+| `internal/autopilot/ginie_types.go` | Added matching fields to GinieModeConfig struct |
+| `internal/autopilot/ginie_analyzer.go` | Fixed confidence threshold comparison (0.30 → 30.0) |
+| `web/src/services/futuresApi.ts` | Updated TypeScript ModeSLTPConfig interface |
+| `web/src/components/GiniePanel.tsx` | Added UI controls for margin type, ROI SL/TP, trailing activation price |
+
+### Testing
+
+All API tests passed:
+1. ✅ Get all mode configs - returns new fields with defaults
+2. ✅ Update mode config - new fields saved correctly
+3. ✅ Verify persistence - values stored in autopilot_settings.json
+4. ✅ Reset to defaults - all values restored correctly
+
+### Commits
+
+- `6f8b127` - feat: Add mode configuration options for ROI-based SL/TP, trailing activation price, and margin type
+- `2132e0a` - fix: Correct confidence score scale to 0-100 for threshold comparison
+
+---
+
+*Story completed: 2025-12-26*
+*Implementation by: Claude Code*
