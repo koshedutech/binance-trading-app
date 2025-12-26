@@ -4521,6 +4521,98 @@ func (ga *GinieAutopilot) cancelAllAlgoOrdersForSymbol(symbol string) (int, int,
 // This prevents orphan orders from triggering and opening unwanted positions
 // ==================== POSITION RECONCILIATION ====================
 
+// getClosingPnLFromBinance fetches actual closing trades from Binance to calculate realized PnL
+// Returns: closePrice, realizedPnL, pnlPercent
+func (ga *GinieAutopilot) getClosingPnLFromBinance(symbol string, pos *GiniePosition) (float64, float64, float64) {
+	// Default values if we can't get trade history
+	closePrice := 0.0
+	realizedPnL := 0.0
+	pnlPercent := 0.0
+
+	// Fetch recent trades from Binance for this symbol
+	trades, err := ga.futuresClient.GetTradeHistory(symbol, 50)
+	if err != nil {
+		ga.logger.Warn("Failed to fetch trade history for PnL calculation",
+			"symbol", symbol,
+			"error", err)
+		return closePrice, realizedPnL, pnlPercent
+	}
+
+	if len(trades) == 0 {
+		ga.logger.Debug("No trades found for symbol", "symbol", symbol)
+		return closePrice, realizedPnL, pnlPercent
+	}
+
+	// Find closing trades (trades that reduce position)
+	// For LONG positions: closing trades are SELL
+	// For SHORT positions: closing trades are BUY
+	closingSide := "SELL"
+	if pos.Side == "SHORT" {
+		closingSide = "BUY"
+	}
+
+	// Calculate time window: look for trades in the last 5 minutes
+	// Position reconciliation runs every minute, so recent trades are relevant
+	cutoffTime := time.Now().Add(-5 * time.Minute).UnixMilli()
+
+	totalCloseQty := 0.0
+	weightedPriceSum := 0.0
+
+	for _, trade := range trades {
+		// Check if this is a recent closing trade
+		if trade.Time < cutoffTime {
+			continue
+		}
+
+		// Match position side and closing direction
+		expectedPosSide := pos.Side
+		if trade.PositionSide != expectedPosSide {
+			continue
+		}
+
+		if trade.Side != closingSide {
+			continue
+		}
+
+		// This is a closing trade - accumulate PnL
+		realizedPnL += trade.RealizedPnl
+		totalCloseQty += trade.Qty
+		weightedPriceSum += trade.Price * trade.Qty
+
+		ga.logger.Debug("Found closing trade",
+			"symbol", symbol,
+			"trade_id", trade.ID,
+			"side", trade.Side,
+			"qty", trade.Qty,
+			"price", trade.Price,
+			"realized_pnl", trade.RealizedPnl)
+	}
+
+	// Calculate weighted average close price
+	if totalCloseQty > 0 {
+		closePrice = weightedPriceSum / totalCloseQty
+
+		// Calculate PnL percentage based on entry price and close price
+		if pos.EntryPrice > 0 {
+			if pos.Side == "LONG" {
+				pnlPercent = ((closePrice - pos.EntryPrice) / pos.EntryPrice) * 100
+			} else {
+				pnlPercent = ((pos.EntryPrice - closePrice) / pos.EntryPrice) * 100
+			}
+		}
+	}
+
+	ga.logger.Info("Calculated closing PnL from Binance trades",
+		"symbol", symbol,
+		"close_price", closePrice,
+		"realized_pnl", realizedPnL,
+		"pnl_percent", pnlPercent,
+		"trades_found", len(trades),
+		"closing_trades_qty", totalCloseQty)
+
+	return closePrice, realizedPnL, pnlPercent
+}
+
 // reconcilePositions syncs internal position state with Binance exchange
 // This handles cases where positions are closed manually or modified externally
 func (ga *GinieAutopilot) reconcilePositions() {
@@ -4627,17 +4719,39 @@ func (ga *GinieAutopilot) reconcilePositions() {
 	for _, symbol := range positionsToRemove {
 		pos := ga.positions[symbol]
 
-		// Record as closed (with unknown close price - use 0)
+		// Fetch actual closing price and PnL from Binance trade history
+		closePrice, realizedPnL, pnlPercent := ga.getClosingPnLFromBinance(symbol, pos)
+
+		// Determine close reason based on trade data
+		closeReason := "Position closed externally (reconciliation)"
+		if realizedPnL != 0 {
+			if realizedPnL > 0 {
+				closeReason = fmt.Sprintf("take_profit (reconciliation, PnL: $%.2f)", realizedPnL)
+			} else {
+				closeReason = fmt.Sprintf("stop_loss (reconciliation, PnL: $%.2f)", realizedPnL)
+			}
+		}
+
+		// Record with actual close price and PnL from Binance
 		ga.recordTrade(GinieTradeResult{
-			Symbol:    symbol,
-			Action:    "close",
-			Side:      pos.Side,
-			Quantity:  pos.RemainingQty,
-			Price:     0, // Unknown - closed externally
-			Reason:    "Position closed externally (reconciliation)",
-			Timestamp: time.Now(),
-			Mode:      pos.Mode,
+			Symbol:     symbol,
+			Action:     "full_close",
+			Side:       pos.Side,
+			Quantity:   pos.RemainingQty,
+			Price:      closePrice,
+			PnL:        realizedPnL,
+			PnLPercent: pnlPercent,
+			Reason:     closeReason,
+			Timestamp:  time.Now(),
+			Mode:       pos.Mode,
 		})
+
+		ga.logger.Info("Position reconciliation: recorded close with actual PnL",
+			"symbol", symbol,
+			"side", pos.Side,
+			"close_price", closePrice,
+			"realized_pnl", realizedPnL,
+			"pnl_percent", pnlPercent)
 
 		delete(ga.positions, symbol)
 
