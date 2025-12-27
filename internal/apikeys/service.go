@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"binance-trading-bot/internal/database"
@@ -197,7 +198,9 @@ func (s *Service) decryptKey(ciphertext string) (string, error) {
 		return "", fmt.Errorf("failed to decrypt: %w", err)
 	}
 
-	return string(plaintext), nil
+	// Trim any whitespace that may have been added during storage/retrieval
+	// This is critical for API keys and secrets which must be exact
+	return strings.TrimSpace(string(plaintext)), nil
 }
 
 // getDefaultModel returns the default model for each AI provider

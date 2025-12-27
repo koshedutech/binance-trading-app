@@ -45,9 +45,10 @@ func NewFuturesClient(apiKey, secretKey string, testnet bool) *FuturesClientImpl
 		baseURL = FuturesTestnetURL
 	}
 
+	// Trim any whitespace from keys - critical for signature generation
 	return &FuturesClientImpl{
-		apiKey:     apiKey,
-		secretKey:  secretKey,
+		apiKey:     strings.TrimSpace(apiKey),
+		secretKey:  strings.TrimSpace(secretKey),
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 	}
@@ -1005,8 +1006,9 @@ func (c *FuturesClientImpl) signedGet(endpoint string, params map[string]string)
 			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
 		}
 
-		// Refresh timestamp for each attempt
+		// Refresh timestamp for each attempt and set recvWindow for clock skew tolerance
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+		params["recvWindow"] = "10000" // 10 seconds tolerance for clock skew
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s?%s", c.baseURL, endpoint, query)
 
@@ -1082,11 +1084,12 @@ func (c *FuturesClientImpl) signedPost(endpoint string, params map[string]string
 			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
 		}
 
-		// Refresh timestamp for each attempt
+		// Refresh timestamp for each attempt and set recvWindow for clock skew tolerance
 		if params == nil {
 			params = make(map[string]string)
 		}
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+		params["recvWindow"] = "10000" // 10 seconds tolerance for clock skew
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
 
@@ -1163,7 +1166,9 @@ func (c *FuturesClientImpl) signedPut(endpoint string, params map[string]string)
 			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
 		}
 
+		// Refresh timestamp for each attempt and set recvWindow for clock skew tolerance
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+		params["recvWindow"] = "10000" // 10 seconds tolerance for clock skew
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
 
@@ -1240,7 +1245,9 @@ func (c *FuturesClientImpl) signedDelete(endpoint string, params map[string]stri
 			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
 		}
 
+		// Refresh timestamp for each attempt and set recvWindow for clock skew tolerance
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+		params["recvWindow"] = "10000" // 10 seconds tolerance for clock skew
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
 
