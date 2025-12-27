@@ -301,15 +301,9 @@ func (s *Server) handleGinieAnalyzeAll(c *gin.Context) {
 
 // handleGetGinieAutopilotStatus returns current Ginie autopilot status
 func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
+	autopilot := s.getGinieAutopilotForUser(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -335,15 +329,9 @@ func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
 
 // handleGetGinieAutopilotConfig returns Ginie autopilot configuration
 func (s *Server) handleGetGinieAutopilotConfig(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
+	autopilot := s.getGinieAutopilotForUser(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -353,15 +341,9 @@ func (s *Server) handleGetGinieAutopilotConfig(c *gin.Context) {
 
 // handleUpdateGinieAutopilotConfig updates Ginie autopilot configuration
 func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -484,8 +466,10 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 		} else {
 			// Fallback: if getSettingsAPI() is nil, directly update FuturesController
 			fmt.Printf("[GINIE-MODE] WARNING: getSettingsAPI() returned nil, using fallback method\n")
-			controller.SetDryRun(newDryRunValue)
-			fmt.Printf("[GINIE-MODE] Called SetDryRun directly\n")
+			if controller := s.getFuturesAutopilot(); controller != nil {
+				controller.SetDryRun(newDryRunValue)
+				fmt.Printf("[GINIE-MODE] Called SetDryRun directly\n")
+			}
 
 			// Also persist to settings file
 			sm := autopilot.GetSettingsManager()
@@ -519,16 +503,15 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 
 // handleStartGinieAutopilot starts the Ginie autonomous trading
 func (s *Server) handleStartGinieAutopilot(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
-	// Get Ginie autopilot to check its mode
-	giniePilot := controller.GetGinieAutopilot()
-	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
 
@@ -563,6 +546,12 @@ func (s *Server) handleStartGinieAutopilot(c *gin.Context) {
 
 // handleStopGinieAutopilot stops the Ginie autonomous trading
 func (s *Server) handleStopGinieAutopilot(c *gin.Context) {
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
+	}
+
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
@@ -591,15 +580,9 @@ func (s *Server) handleStopGinieAutopilot(c *gin.Context) {
 
 // handleGetGinieAutopilotPositions returns active Ginie positions
 func (s *Server) handleGetGinieAutopilotPositions(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
+	autopilot := s.getGinieAutopilotForUser(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -613,15 +596,9 @@ func (s *Server) handleGetGinieAutopilotPositions(c *gin.Context) {
 
 // handleGetGinieAutopilotTradeHistory returns Ginie trade history
 func (s *Server) handleGetGinieAutopilotTradeHistory(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
+	autopilot := s.getGinieAutopilotForUser(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -635,15 +612,9 @@ func (s *Server) handleGetGinieAutopilotTradeHistory(c *gin.Context) {
 
 // handleClearGinieAutopilotPositions clears all tracked positions
 func (s *Server) handleClearGinieAutopilotPositions(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
+	autopilot := s.getGinieAutopilotForUser(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 

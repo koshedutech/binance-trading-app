@@ -2,6 +2,7 @@ package api
 
 import (
 	"binance-trading-bot/internal/autopilot"
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,11 +10,15 @@ import (
 
 // handleGetHedgingStatus returns the current hedging status
 func (s *Server) handleGetHedgingStatus(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Log user access for read operation
+	log.Printf("User %s accessing hedging status", userID)
 
 	hm := controller.GetHedgingManager()
 	if hm == nil {
@@ -28,11 +33,15 @@ func (s *Server) handleGetHedgingStatus(c *gin.Context) {
 // handleGetHedgingConfig returns the hedging configuration
 // Note: This uses the GetHedgeStatus which includes config info
 func (s *Server) handleGetHedgingConfig(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Log user access for read operation
+	log.Printf("User %s accessing hedging config", userID)
 
 	hm := controller.GetHedgingManager()
 	if hm == nil {
@@ -61,9 +70,17 @@ type UpdateHedgingConfigRequest struct {
 
 // handleUpdateHedgingConfig updates the hedging configuration
 func (s *Server) handleUpdateHedgingConfig(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Check ownership for write operation
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 
@@ -107,9 +124,17 @@ type ManualHedgeRequest struct {
 
 // handleExecuteManualHedge manually executes a hedge on a position
 func (s *Server) handleExecuteManualHedge(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Check ownership for write operation
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 
@@ -190,9 +215,17 @@ type CloseHedgeRequest struct {
 
 // handleCloseHedge closes a hedge position
 func (s *Server) handleCloseHedge(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Check ownership for write operation
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 
@@ -234,9 +267,17 @@ func (s *Server) handleCloseHedge(c *gin.Context) {
 
 // handleEnableHedgeMode enables Binance HEDGE position mode
 func (s *Server) handleEnableHedgeMode(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Check ownership for write operation
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 
@@ -260,9 +301,17 @@ func (s *Server) handleEnableHedgeMode(c *gin.Context) {
 
 // handleClearAllHedges closes all active hedges
 func (s *Server) handleClearAllHedges(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Check ownership for write operation
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 
@@ -286,11 +335,15 @@ func (s *Server) handleClearAllHedges(c *gin.Context) {
 
 // handleGetHedgeHistory returns hedge history for a symbol
 func (s *Server) handleGetHedgeHistory(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Log user access for read operation
+	log.Printf("User %s accessing hedge history", userID)
 
 	hm := controller.GetHedgingManager()
 	if hm == nil {

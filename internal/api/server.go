@@ -758,8 +758,11 @@ func (s *Server) setupRoutes() {
 		admin.DELETE("/settings/:key", s.handleAdminDeleteSetting)
 	}
 
-	// WebSocket endpoint
+	// WebSocket endpoints
+	// Legacy public WebSocket (for price updates, market data - no user-specific data)
 	s.router.GET("/ws", s.handleWebSocket)
+	// User-authenticated WebSocket (for user-specific data: positions, balance, PnL)
+	s.router.GET("/ws/user", AuthenticatedWSHandler(s))
 
 	// Stripe webhook endpoint (no auth required - uses signature verification)
 	s.router.POST("/api/billing/webhook", s.handleStripeWebhook)

@@ -3,6 +3,7 @@ package api
 import (
 	"binance-trading-bot/internal/autopilot"
 	"context"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,11 +13,15 @@ import (
 
 // handleGetModeAllocations returns current capital allocation for all modes
 func (s *Server) handleGetModeAllocations(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Log user access for read operation
+	log.Printf("User %s accessing mode allocations", userID)
 
 	ginie := controller.GetGinieAutopilot()
 	if ginie == nil {
@@ -151,9 +156,17 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 
 // handleUpdateModeAllocations updates capital allocation percentages for modes
 func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Add ownership check for write operations
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 
@@ -243,6 +256,7 @@ func (s *Server) handleGetModeAllocationHistory(c *gin.Context) {
 
 // handleGetModeAllocationStatus returns current allocation state for a specific mode
 func (s *Server) handleGetModeAllocationStatus(c *gin.Context) {
+	userID := s.getUserID(c)
 	mode := c.Param("mode")
 
 	controller := s.getFuturesAutopilot()
@@ -250,6 +264,9 @@ func (s *Server) handleGetModeAllocationStatus(c *gin.Context) {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Log user access for read operation
+	log.Printf("User %s accessing mode allocation status for %s", userID, mode)
 
 	ginie := controller.GetGinieAutopilot()
 	if ginie == nil {
@@ -281,11 +298,15 @@ func (s *Server) handleGetModeAllocationStatus(c *gin.Context) {
 
 // handleGetModeSafetyStatus returns current safety status for all modes
 func (s *Server) handleGetModeSafetyStatus(c *gin.Context) {
+	userID := s.getUserID(c)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
+
+	// Log user access for read operation
+	log.Printf("User %s accessing mode safety status", userID)
 
 	ginie := controller.GetGinieAutopilot()
 	if ginie == nil {
@@ -342,11 +363,19 @@ func (s *Server) handleGetModeSafetyStatus(c *gin.Context) {
 
 // handleResumeMode manually resumes a paused mode
 func (s *Server) handleResumeMode(c *gin.Context) {
+	userID := s.getUserID(c)
 	mode := c.Param("mode")
 
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	// Add ownership check for write operations
+	ownerID := controller.GetOwnerUserID()
+	if ownerID != "" && ownerID != userID {
+		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
 		return
 	}
 

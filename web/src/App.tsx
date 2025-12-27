@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store';
+import { useFuturesStore } from './store/futuresStore';
 import { apiService } from './services/api';
 import { wsService } from './services/websocket';
 import { AuthProvider, useAuth, ProtectedRoute } from './contexts/AuthContext';
@@ -152,10 +153,13 @@ function AppContent() {
     }, 15000); // Poll every 15 seconds (reduced from 1s to avoid rate limits)
 
     // Cleanup - reset all state when user logs out
+    // CRITICAL: Reset ALL state to prevent data leakage between users
     return () => {
       clearInterval(pollInterval);
+      wsService.reset();  // Clear all WebSocket callbacks first - prevents cross-user data leakage
       wsService.disconnect();
-      resetState();
+      resetState();  // Reset main store
+      useFuturesStore.getState().resetState();  // Reset futures store - CRITICAL for multi-user isolation
     };
   }, [isAuthenticated, isLoading]);
 

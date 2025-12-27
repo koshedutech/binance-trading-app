@@ -3,21 +3,50 @@ import type { WSEvent } from '../types';
 type EventCallback = (event: WSEvent) => void;
 type ConnectionCallback = () => void;
 
+const ACCESS_TOKEN_KEY = 'trading_bot_access_token';
+
 class WebSocketService {
   private ws: WebSocket | null = null;
-  private url: string;
+  private baseUrl: string;
   private reconnectInterval = 5000;
   private reconnectTimer: number | null = null;
   private isConnecting = false;
   private eventCallbacks: Map<string, EventCallback[]> = new Map();
   private onConnectCallbacks: ConnectionCallback[] = [];
   private onDisconnectCallbacks: ConnectionCallback[] = [];
+  private useAuthenticatedEndpoint = true;
 
   constructor() {
     // Determine WebSocket URL based on current location
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
-    this.url = `${protocol}//${host}/ws`;
+    this.baseUrl = `${protocol}//${host}`;
+  }
+
+  /**
+   * Reset all callbacks and state - MUST be called on logout
+   * to prevent data leakage between users
+   */
+  reset(): void {
+    console.log('WebSocket: Resetting all callbacks and state');
+    this.eventCallbacks.clear();
+    this.onConnectCallbacks = [];
+    this.onDisconnectCallbacks = [];
+  }
+
+  /**
+   * Get the WebSocket URL with auth token for authenticated endpoint
+   */
+  private getUrl(): string {
+    if (this.useAuthenticatedEndpoint) {
+      const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+      if (token) {
+        // Use authenticated endpoint with token as query param
+        return `${this.baseUrl}/ws/user?token=${encodeURIComponent(token)}`;
+      }
+    }
+    // Fallback to public endpoint (only for market data)
+    return `${this.baseUrl}/ws`;
   }
 
   connect(): void {
@@ -26,10 +55,11 @@ class WebSocketService {
     }
 
     this.isConnecting = true;
-    console.log('Connecting to WebSocket:', this.url);
+    const url = this.getUrl();
+    console.log('Connecting to WebSocket:', url.replace(/token=[^&]+/, 'token=***'));
 
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = new WebSocket(url);
 
       this.ws.onopen = () => {
         console.log('WebSocket connected');

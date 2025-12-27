@@ -161,6 +161,7 @@ interface FuturesState {
   updateOrderForm: (updates: Partial<OrderFormState>) => void;
   resetOrderForm: () => void;
   setError: (error: string | null) => void;
+  resetState: () => void;  // Reset all state on logout - CRITICAL for multi-user isolation
 
   // Actions - WebSocket Updates
   updateOrderBook: (orderBook: OrderBookDepth) => void;
@@ -592,6 +593,36 @@ export const useFuturesStore = create<FuturesState>((set, get) => ({
   },
 
   setError: (error: string | null) => set({ error }),
+
+  // Reset all state on logout - CRITICAL for multi-user data isolation
+  resetState: () => {
+    console.log('FuturesStore: Resetting all state for user logout');
+    set({
+      isLoading: false,
+      error: null,
+      tradingMode: {
+        dryRun: true,
+        mode: 'paper',
+        modeLabel: 'PAPER',
+        canSwitch: true,
+      },
+      accountInfo: null,
+      positionMode: 'ONE_WAY',
+      positions: [],
+      openOrders: [],
+      selectedSymbol: 'BTCUSDT',
+      orderBook: null,
+      markPrice: null,
+      fundingRate: null,
+      symbols: [],
+      tradeHistory: [],
+      fundingFees: [],
+      transactions: [],
+      accountSettings: {},
+      metrics: null,
+      orderForm: defaultOrderForm,
+    });
+  },
 
   // ==================== WEBSOCKET UPDATES ====================
 

@@ -356,11 +356,33 @@ func GetUserWSHub() *UserWSHub {
 }
 
 // AuthenticatedWSHandler creates a WebSocket handler that requires authentication
+// Supports both Authorization header and query param token for WebSocket connections
 func AuthenticatedWSHandler(s *Server) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Check if user is authenticated
 		if s.authEnabled {
 			userID := auth.GetUserID(c)
+
+			// If not authenticated via header, try query param token (for WebSocket)
+			if userID == "" {
+				token := c.Query("token")
+				if token != "" && s.authService != nil {
+					// Validate token from query param
+					claims, err := s.authService.GetJWTManager().ValidateAccessToken(token)
+					if err == nil && claims != nil {
+						// Set user context from validated token
+						c.Set(auth.ContextKeyUserID, claims.UserID)
+						c.Set(auth.ContextKeyEmail, claims.Email)
+						c.Set(auth.ContextKeyTier, claims.SubscriptionTier)
+						c.Set(auth.ContextKeyAPIMode, claims.APIKeyMode)
+						c.Set(auth.ContextKeyIsAdmin, claims.IsAdmin)
+						c.Set(auth.ContextKeyClaims, claims)
+						userID = claims.UserID
+						log.Printf("[WS-AUTH] User %s authenticated via query token", userID)
+					}
+				}
+			}
+
 			if userID == "" {
 				c.JSON(401, gin.H{
 					"error":   "UNAUTHORIZED",

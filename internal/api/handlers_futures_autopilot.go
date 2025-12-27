@@ -907,6 +907,54 @@ func (s *Server) getFuturesAutopilot() *autopilot.FuturesController {
 	return nil
 }
 
+// getGinieAutopilotForUser returns the GinieAutopilot for the current user.
+// In multi-user mode, it returns a per-user instance.
+// In legacy mode, it falls back to the shared controller's GinieAutopilot.
+// This is the PREFERRED method for handlers that need GinieAutopilot.
+func (s *Server) getGinieAutopilotForUser(c *gin.Context) *autopilot.GinieAutopilot {
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// MULTI-USER MODE: Use per-user autopilot if manager is available
+	if s.userAutopilotManager != nil && userID != "" {
+		instance, err := s.userAutopilotManager.GetOrCreateInstance(ctx, userID)
+		if err == nil && instance != nil && instance.Autopilot != nil {
+			instance.TouchLastActive()
+			return instance.Autopilot
+		}
+		// Log error but continue to fallback
+		log.Printf("[MULTI-USER] Failed to get autopilot for user %s: %v, falling back to shared", userID, err)
+	}
+
+	// LEGACY MODE: Fall back to shared controller's GinieAutopilot
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		return nil
+	}
+	return controller.GetGinieAutopilot()
+}
+
+// getFuturesControllerForUser returns the FuturesController for the current user.
+// In multi-user mode, handlers should prefer getGinieAutopilotForUser when only
+// GinieAutopilot functionality is needed.
+// This method is for handlers that need the full FuturesController (e.g., hedging, circuit breaker).
+// NOTE: FuturesController is currently shared - full per-user isolation requires
+// creating per-user FuturesController instances (future enhancement).
+func (s *Server) getFuturesControllerForUser(c *gin.Context) *autopilot.FuturesController {
+	userID := s.getUserID(c)
+
+	// For now, return the shared controller but log the access for audit
+	controller := s.getFuturesAutopilot()
+	if controller != nil && userID != "" {
+		// Check ownership for write operations (handlers should check isOwner)
+		ownerID := controller.GetOwnerUserID()
+		if ownerID != "" && ownerID != userID {
+			log.Printf("[MULTI-USER-WARN] User %s accessing controller owned by %s", userID, ownerID)
+		}
+	}
+	return controller
+}
+
 // ==================== SENTIMENT & NEWS ====================
 
 // handleGetSentimentNews returns recent crypto news with sentiment
