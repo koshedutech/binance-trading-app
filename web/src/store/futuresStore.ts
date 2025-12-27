@@ -618,10 +618,10 @@ export const selectTotalUnrealizedPnl = (state: FuturesState) =>
   state.positions.reduce((sum, p) => sum + safeNumber(p.unRealizedProfit), 0);
 
 export const selectTotalMarginUsed = (state: FuturesState) =>
-  safeNumber(state.accountInfo?.totalPositionInitialMargin);
+  safeNumber(state.accountInfo?.total_position_initial_margin);
 
 export const selectAvailableBalance = (state: FuturesState) =>
-  safeNumber(state.accountInfo?.availableBalance);
+  safeNumber(state.accountInfo?.available_balance);
 
 export const selectOrderBookSpread = (state: FuturesState) => {
   if (!state.orderBook?.bids?.length || !state.orderBook?.asks?.length) {

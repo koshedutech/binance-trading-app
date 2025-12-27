@@ -110,7 +110,7 @@ export default function FuturesDashboard() {
     return isNaN(num) ? 0 : num;
   };
 
-  const walletBalance = safeNum(accountInfo?.totalWalletBalance);
+  const walletBalance = safeNum(accountInfo?.total_wallet_balance);
   const currentPrice = safeNum(markPrice?.markPrice);
   const priceChange24h = 0; // Would come from ticker data
   const currentFundingRate = safeNum(fundingRate?.fundingRate);

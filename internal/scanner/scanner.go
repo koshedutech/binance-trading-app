@@ -59,7 +59,14 @@ func (sc *Scanner) Start() {
 func (sc *Scanner) runScanLoop() {
 	defer sc.wg.Done()
 
-	ticker := time.NewTicker(sc.config.ScanInterval)
+	// Ensure scan interval is positive to avoid panic
+	interval := sc.config.ScanInterval
+	if interval <= 0 {
+		interval = 5 * time.Minute // Default to 5 minutes if not configured
+		log.Printf("Scanner interval not set, defaulting to %v", interval)
+	}
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Run immediately
