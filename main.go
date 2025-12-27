@@ -137,6 +137,12 @@ func main() {
 			log.Printf("Warning: Futures migrations failed (table may already exist): %v", err)
 		}
 		logger.Info("Futures migrations completed")
+
+		// Run Trade Lifecycle migrations for detailed trade event tracking
+		if err := db.RunTradeLifecycleMigrations(ctx); err != nil {
+			log.Printf("Warning: Trade lifecycle migrations failed: %v", err)
+		}
+		logger.Info("Trade lifecycle migrations completed")
 	}
 
 	// Run Multi-Tenant migrations if auth is enabled
@@ -534,40 +540,79 @@ func main() {
 
 	// Initialize Futures WebSocket client for real-time market data
 	var futuresWSClient *api.FuturesWSClient
+	var klineSubscriptionManager *binance.KlineSubscriptionManager
 	if cfg.FuturesConfig.Enabled && marketDataCache != nil {
 		futuresWSClient = api.InitFuturesWebSocket(cfg.FuturesConfig.TestNet, wsHub)
 		futuresWSClient.SetMarketDataCache(marketDataCache)
+
+		// Initialize kline subscription manager for multi-timeframe support
+		klineSubscriptionManager = binance.NewKlineSubscriptionManager()
+		klineSubscriptionManager.SetSubscriber(futuresWSClient)
 
 		// Build stream list based on allowed symbols
 		var streams []string
 		// Subscribe to all mark prices stream for real-time price updates
 		streams = append(streams, "!markPrice@arr")
 
-		// Subscribe to klines for monitored symbols
+		// Subscribe to klines for monitored symbols - now with multiple timeframes!
 		symbols := cfg.FuturesAutopilotConfig.AllowedSymbols
 		if len(symbols) == 0 {
 			symbols = []string{"BTCUSDT", "ETHUSDT"} // Default symbols
 		}
+
+		// Use subscription manager to build multi-timeframe stream list
+		// This subscribes to 1m, 5m, 15m, 1h, 4h for each symbol
+		klineStreams := klineSubscriptionManager.BuildStreamList(symbols)
+		streams = append(streams, klineStreams...)
+
+		// Track subscriptions in the manager for later dynamic updates
 		for _, symbol := range symbols {
-			// Use lowercase for WebSocket streams
-			lowerSymbol := ""
-			for _, c := range symbol {
-				if c >= 'A' && c <= 'Z' {
-					lowerSymbol += string(c + 32)
-				} else {
-					lowerSymbol += string(c)
-				}
-			}
-			streams = append(streams, lowerSymbol+"@kline_1m")
+			klineSubscriptionManager.SubscribeSymbol(symbol)
 		}
 
 		// Connect to streams
 		if err := futuresWSClient.Connect(streams); err != nil {
 			logger.Warn("Failed to connect Futures WebSocket", "error", err)
 		} else {
-			logger.Info("Futures WebSocket connected",
+			logger.Info("Futures WebSocket connected with multi-timeframe klines",
 				"streams", len(streams),
-				"symbols", len(symbols))
+				"symbols", len(symbols),
+				"timeframes", []string{"1m", "5m", "15m", "1h", "4h"})
+		}
+	}
+
+	// Initialize User Data Stream for real-time account/position/order updates
+	// This eliminates REST API polling for position changes
+	var userDataStream *binance.UserDataStream
+	if cfg.FuturesConfig.Enabled && futuresAutopilotController != nil {
+		// Get the active futures client from the controller
+		activeClient := futuresAutopilotController.GetFuturesClient()
+		if activeClient != nil {
+			userDataStream = binance.NewUserDataStream(activeClient, cfg.FuturesConfig.TestNet)
+
+			// Wire up callbacks to Ginie autopilot controller
+			userDataStream.SetPositionUpdateCallback(func(update *binance.PositionUpdateEvent) {
+				futuresAutopilotController.HandleStreamPositionUpdate(update)
+			})
+
+			userDataStream.SetOrderUpdateCallback(func(update *binance.OrderUpdateEvent) {
+				futuresAutopilotController.HandleStreamOrderUpdate(update)
+			})
+
+			userDataStream.SetAccountUpdateCallback(func(update *binance.AccountUpdateEvent) {
+				futuresAutopilotController.HandleStreamAccountUpdate(update)
+			})
+
+			// Start the stream (non-blocking)
+			if err := userDataStream.Start(); err != nil {
+				logger.Warn("Failed to start User Data Stream",
+					"error", err,
+					"dry_run", cfg.TradingConfig.DryRun)
+			} else {
+				logger.Info("User Data Stream started for real-time updates",
+					"testnet", cfg.FuturesConfig.TestNet,
+					"dry_run", cfg.TradingConfig.DryRun)
+			}
 		}
 	}
 
@@ -751,6 +796,12 @@ func main() {
 	if sentimentAnalyzer != nil {
 		sentimentAnalyzer.Stop()
 		logger.Info("Sentiment analyzer stopped")
+	}
+
+	// Stop User Data Stream
+	if userDataStream != nil {
+		userDataStream.Stop()
+		logger.Info("User Data Stream stopped")
 	}
 
 	// Stop Futures WebSocket

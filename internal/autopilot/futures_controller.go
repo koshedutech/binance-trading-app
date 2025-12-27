@@ -4476,3 +4476,129 @@ func (fc *FuturesController) formatNewsItems(news []sentiment.NewsItem) []map[st
 
 	return result
 }
+
+// ==================== USER DATA STREAM INTEGRATION ====================
+
+// HandleStreamPositionUpdate processes real-time position updates from User Data Stream
+// This avoids REST API polling for position changes
+func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.PositionUpdateEvent) {
+	if update == nil {
+		return
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	symbol := update.Symbol
+	positionKey := symbol
+
+	// Position is closed when amount is 0
+	if update.PositionAmt == 0 {
+		if existingPos, exists := fc.activePositions[positionKey]; exists {
+			fc.logger.Info("Stream: Position closed",
+				"symbol", symbol,
+				"side", existingPos.Side,
+				"entry_price", existingPos.EntryPrice)
+			delete(fc.activePositions, positionKey)
+		}
+		return
+	}
+
+	// Determine side from position amount (positive = LONG, negative = SHORT)
+	side := "LONG"
+	positionAmt := update.PositionAmt
+	if positionAmt < 0 {
+		side = "SHORT"
+		positionAmt = -positionAmt // Make positive for storage
+	}
+
+	// Check if position exists
+	if existingPos, exists := fc.activePositions[positionKey]; exists {
+		// Update existing position
+		existingPos.Quantity = positionAmt
+		existingPos.EntryPrice = update.EntryPrice
+		fc.logger.Debug("Stream: Position updated",
+			"symbol", symbol,
+			"side", side,
+			"qty", positionAmt,
+			"entry", update.EntryPrice,
+			"pnl", update.UnrealizedPnL)
+	} else {
+		// New position detected - sync from stream
+		fc.logger.Info("Stream: New position detected",
+			"symbol", symbol,
+			"side", side,
+			"qty", positionAmt,
+			"entry", update.EntryPrice)
+
+		// Create minimal position tracking (SL/TP will be set by RecalculateSLTP)
+		fc.activePositions[positionKey] = &FuturesAutopilotPosition{
+			Symbol:     symbol,
+			Side:       side,
+			EntryPrice: update.EntryPrice,
+			Quantity:   positionAmt,
+			Leverage:   fc.config.DefaultLeverage,
+			EntryTime:  time.Now(),
+			EntryCount: 1,
+		}
+	}
+}
+
+// HandleStreamOrderUpdate processes real-time order updates from User Data Stream
+func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdateEvent) {
+	if update == nil {
+		return
+	}
+
+	order := update.Order
+
+	// Log important order events
+	switch order.ExecutionType {
+	case "NEW":
+		fc.logger.Debug("Stream: Order created",
+			"symbol", order.Symbol,
+			"type", order.OrderType,
+			"side", order.Side,
+			"qty", order.OriginalQuantity)
+
+	case "TRADE":
+		fc.logger.Info("Stream: Order filled",
+			"symbol", order.Symbol,
+			"type", order.OrderType,
+			"side", order.Side,
+			"qty", order.LastFilledQty,
+			"price", order.LastFilledPrice,
+			"pnl", order.RealizedProfit)
+
+		// Record trade in circuit breaker if profit is significant
+		if fc.circuitBreaker != nil && order.RealizedProfit != 0 {
+			// Calculate PnL as percentage (rough estimate)
+			if order.AveragePrice > 0 {
+				pnlPercent := (order.RealizedProfit / (order.AveragePrice * order.CumulativeFilledQty)) * 100
+				fc.circuitBreaker.RecordTrade(pnlPercent)
+			}
+		}
+
+	case "CANCELED", "EXPIRED":
+		fc.logger.Debug("Stream: Order cancelled/expired",
+			"symbol", order.Symbol,
+			"type", order.OrderType,
+			"status", order.OrderStatus)
+	}
+}
+
+// HandleStreamAccountUpdate processes real-time account updates from User Data Stream
+func (fc *FuturesController) HandleStreamAccountUpdate(update *binance.AccountUpdateEvent) {
+	if update == nil {
+		return
+	}
+
+	// Log balance changes
+	for _, balance := range update.AccountUpdate.Balances {
+		if balance.Asset == "USDT" && balance.BalanceChange != 0 {
+			fc.logger.Info("Stream: USDT balance changed",
+				"wallet_balance", balance.WalletBalance,
+				"change", balance.BalanceChange)
+		}
+	}
+}

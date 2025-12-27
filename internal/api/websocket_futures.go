@@ -186,6 +186,12 @@ func (c *FuturesWSClient) SubscribeKline(symbol, interval string) error {
 	return c.subscribe(stream)
 }
 
+// UnsubscribeKline unsubscribes from a kline/candlestick stream
+func (c *FuturesWSClient) UnsubscribeKline(symbol, interval string) error {
+	stream := fmt.Sprintf("%s@kline_%s", normalizeSymbol(symbol), interval)
+	return c.Unsubscribe(stream)
+}
+
 // Unsubscribe removes a stream subscription
 func (c *FuturesWSClient) Unsubscribe(stream string) error {
 	c.mu.Lock()
