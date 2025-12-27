@@ -36,3 +36,12 @@ docker-compose.override.yml
 Thumbs.db
 *.md
 !README.md
+
+# BMAD workflow files (not needed for runtime)
+_bmad/
+.bmad/
+.agentvibes/
+.claude/
+
+# Output files
+_bmad-output/

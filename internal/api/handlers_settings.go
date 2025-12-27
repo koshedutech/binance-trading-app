@@ -238,8 +238,20 @@ func (s *Server) handleGetWalletBalance(c *gin.Context) {
 		return
 	}
 
-	// Calculate balances
-	var totalUSDT, freeUSDT, lockedUSDT float64
+	// Stablecoins that are treated as 1:1 with USD
+	stablecoins := map[string]bool{
+		"USDT": true,
+		"USDC": true,
+		"BUSD": true,
+		"TUSD": true,
+		"USDP": true,
+		"DAI":  true,
+		"FDUSD": true,
+	}
+
+	// Calculate balances - convert all assets to USD equivalent
+	var totalUSD, freeUSD, lockedUSD float64
+	var freeUSDT, lockedUSDT float64 // Keep track of USDT specifically for available/locked
 	assets := make([]gin.H, 0)
 
 	for _, balance := range account.Balances {
@@ -247,25 +259,55 @@ func (s *Server) handleGetWalletBalance(c *gin.Context) {
 		locked := parseFloat(balance.Locked)
 
 		if free > 0 || locked > 0 {
+			totalBalance := free + locked
+			var usdValue float64
+
+			if stablecoins[balance.Asset] {
+				// Stablecoins are 1:1 with USD
+				usdValue = totalBalance
+				if balance.Asset == "USDT" {
+					freeUSDT = free
+					lockedUSDT = locked
+				}
+			} else {
+				// Try to get price in USDT
+				price, err := client.GetCurrentPrice(balance.Asset + "USDT")
+				if err != nil {
+					// Try BUSD pair as fallback
+					price, err = client.GetCurrentPrice(balance.Asset + "BUSD")
+					if err != nil {
+						// If no price available, skip this asset for USD calculation
+						log.Printf("[WALLET-BALANCE] Could not get price for %s: %v", balance.Asset, err)
+						price = 0
+					}
+				}
+				usdValue = totalBalance * price
+			}
+
 			assets = append(assets, gin.H{
-				"asset":  balance.Asset,
-				"free":   free,
-				"locked": locked,
+				"asset":     balance.Asset,
+				"free":      free,
+				"locked":    locked,
+				"usd_value": usdValue,
 			})
 
-			if balance.Asset == "USDT" {
-				freeUSDT = free
-				lockedUSDT = locked
-				totalUSDT = free + locked
-			}
+			totalUSD += usdValue
+			freeUSD += free * (usdValue / totalBalance) // Proportional free value
+			lockedUSD += locked * (usdValue / totalBalance) // Proportional locked value
 		}
 	}
 
+	// If no USDT specifically, use total USD values
+	if freeUSDT == 0 && lockedUSDT == 0 {
+		freeUSDT = freeUSD
+		lockedUSDT = lockedUSD
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"total_balance":     totalUSDT,
+		"total_balance":     totalUSD,
 		"available_balance": freeUSDT,
 		"locked_balance":    lockedUSDT,
-		"currency":          "USDT",
+		"currency":          "USD",
 		"is_simulated":      isSimulated,
 		"assets":            assets,
 	})

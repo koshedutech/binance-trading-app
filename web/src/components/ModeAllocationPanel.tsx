@@ -11,6 +11,16 @@ interface ModeAllocation {
   current_positions: number;
   max_positions: number;
   capacity_percent: number;
+  // Position size warning fields
+  per_position_usd?: number;
+  round_trip_fee_percent?: number;
+  round_trip_fee_usd?: number;
+  per_position_fee_usd?: number;
+  break_even_move_percent?: number;
+  min_recommended_usd?: number;
+  optimal_min_usd?: number;
+  warning_level?: 'critical' | 'warning' | 'ok';
+  position_warning?: string;
 }
 
 interface ModeAllocations {
@@ -141,52 +151,77 @@ export default function ModeAllocationPanel() {
     const capacity = alloc?.capacity_percent || 0;
     const currentPos = alloc?.current_positions || 0;
     const maxPos = alloc?.max_positions || 0;
+    const perPositionUsd = alloc?.per_position_usd || 0;
+    const warningLevel = alloc?.warning_level || 'ok';
+    const positionWarning = alloc?.position_warning || '';
+    const breakEvenMove = alloc?.break_even_move_percent || 0;
+
+    const borderColor = warningLevel === 'critical' ? 'border-red-700' : warningLevel === 'warning' ? 'border-yellow-700' : 'border-gray-700';
 
     return (
-      <div key={mode} className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+      <div key={mode} className={`bg-gray-800 rounded-lg p-4 border ${borderColor}`}>
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <div className={`p-2 bg-gradient-to-br ${modeColors[mode]} rounded text-white`}>
               {modeIcons[mode]}
             </div>
             <div>
-              <h3 className="font-semibold text-white">{modeNames[mode]}</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold text-white">{modeNames[mode]}</h3>
+                {warningLevel === 'critical' && (
+                  <span className="px-2 py-0.5 text-xs font-medium bg-red-900 text-red-300 rounded-full border border-red-700">⚠️ Too Small</span>
+                )}
+                {warningLevel === 'warning' && (
+                  <span className="px-2 py-0.5 text-xs font-medium bg-yellow-900 text-yellow-300 rounded-full border border-yellow-700">⚡ Small</span>
+                )}
+              </div>
               <p className="text-sm text-gray-400">{percent.toFixed(1)}% allocation</p>
             </div>
           </div>
         </div>
 
         <div className="space-y-2">
-          {/* Capital utilization bar */}
           <div>
             <div className="flex justify-between text-sm mb-1">
               <span className="text-gray-300">Capital Used</span>
               <span className="text-gray-400">{formatUSD(used)} / {formatUSD(used + available)}</span>
             </div>
             <div className="w-full bg-gray-700 rounded-full h-2">
-              <div
-                className={`bg-gradient-to-r ${modeColors[mode]} h-2 rounded-full`}
-                style={{ width: `${Math.min((used / (used + available)) * 100, 100)}%` }}
-              />
+              <div className={`bg-gradient-to-r ${modeColors[mode]} h-2 rounded-full`} style={{ width: `${Math.min((used / (used + available)) * 100, 100)}%` }} />
             </div>
           </div>
 
-          {/* Position utilization bar */}
           <div>
             <div className="flex justify-between text-sm mb-1">
               <span className="text-gray-300">Positions</span>
               <span className="text-gray-400">{currentPos} / {maxPos}</span>
             </div>
             <div className="w-full bg-gray-700 rounded-full h-2">
-              <div
-                className={`bg-gradient-to-r ${modeColors[mode]} h-2 rounded-full`}
-                style={{ width: `${Math.min((currentPos / maxPos) * 100, 100)}%` }}
-              />
+              <div className={`bg-gradient-to-r ${modeColors[mode]} h-2 rounded-full`} style={{ width: `${Math.min((currentPos / maxPos) * 100, 100)}%` }} />
             </div>
           </div>
 
-          {/* Available capital indicator */}
           <div className="pt-2 border-t border-gray-700">
+            <div className="flex justify-between text-xs mb-1">
+              <span className="text-gray-400">Per Position:</span>
+              <span className={warningLevel === 'critical' ? 'text-red-400' : warningLevel === 'warning' ? 'text-yellow-400' : 'text-green-400'}>{formatUSD(perPositionUsd)}</span>
+            </div>
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>Break-even:</span>
+              <span>{breakEvenMove.toFixed(3)}%</span>
+            </div>
+          </div>
+
+          {positionWarning && (
+            <div className={`p-2 rounded text-xs ${warningLevel === 'critical' ? 'bg-red-900/50 text-red-300 border border-red-800' : 'bg-yellow-900/50 text-yellow-300 border border-yellow-800'}`}>
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                <span>{positionWarning}</span>
+              </div>
+            </div>
+          )}
+
+          <div className="pt-1">
             <p className="text-xs text-gray-400">Available: {formatUSD(available)}</p>
             {capacity > 80 && (
               <div className="mt-2 flex items-center gap-2 text-xs text-yellow-400">
