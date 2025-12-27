@@ -2847,13 +2847,15 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 			ga.tpHitsLastHour++
 			ga.mu.Unlock()
 
-			// Handle TP1-3: partial close
-			if tpLevel <= 3 {
-				ga.executePartialClose(pos, currentPrice, tpLevel)
-			} else {
-				// TP4: activate trailing for remaining position
+			// Handle all TP levels: partial close for each
+			// CRITICAL FIX: TP4 now also executes partial close instead of just activating trailing
+			// This prevents residual quantity from being left unsold
+			ga.executePartialClose(pos, currentPrice, tpLevel)
+
+			// After TP4 (final level), activate trailing for any dust remaining due to rounding
+			if tpLevel >= 4 && pos.RemainingQty > 0 {
 				pos.TrailingActive = true
-				ga.logger.Info("Ginie TP4 hit - trailing activated",
+				ga.logger.Info("Ginie TP4 hit - closed portion and activated trailing for dust",
 					"symbol", pos.Symbol,
 					"price", currentPrice,
 					"remaining_qty", pos.RemainingQty)
@@ -3257,14 +3259,36 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 	}
 
 	// Normal case - place TP algo order
-	tpParams := binance.AlgoOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         closeSide,
-		PositionSide: positionSide,
-		Type:         binance.FuturesOrderTypeTakeProfitMarket,
-		Quantity:     tpQty,
-		TriggerPrice: roundedTPPrice,
-		WorkingType:  binance.WorkingTypeMarkPrice,
+	// CRITICAL FIX: For final TP level, use ClosePosition=true to prevent residual quantity
+	isFinalTPLevel := nextTPIndex >= len(pos.TakeProfits)-1
+
+	var tpParams binance.AlgoOrderParams
+	if isFinalTPLevel {
+		// Final TP level - close entire remaining position
+		ga.logger.Info("Placing final TP with ClosePosition=true",
+			"symbol", pos.Symbol,
+			"tp_level", nextTPIndex+1,
+			"trigger_price", roundedTPPrice)
+		tpParams = binance.AlgoOrderParams{
+			Symbol:        pos.Symbol,
+			Side:          closeSide,
+			PositionSide:  positionSide,
+			Type:          binance.FuturesOrderTypeTakeProfitMarket,
+			ClosePosition: true, // Close entire remaining position
+			TriggerPrice:  roundedTPPrice,
+			WorkingType:   binance.WorkingTypeMarkPrice,
+		}
+	} else {
+		// Intermediate TP level - use calculated quantity
+		tpParams = binance.AlgoOrderParams{
+			Symbol:       pos.Symbol,
+			Side:         closeSide,
+			PositionSide: positionSide,
+			Type:         binance.FuturesOrderTypeTakeProfitMarket,
+			Quantity:     tpQty,
+			TriggerPrice: roundedTPPrice,
+			WorkingType:  binance.WorkingTypeMarkPrice,
+		}
 	}
 
 	// Place TP with retry logic
@@ -3276,13 +3300,23 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
 		if err == nil && tpOrder != nil && tpOrder.AlgoId > 0 {
 			pos.TakeProfitAlgoIDs = append(pos.TakeProfitAlgoIDs, tpOrder.AlgoId)
-			ga.logger.Info("Next take profit order placed",
-				"symbol", pos.Symbol,
-				"tp_level", nextTPIndex+1,
-				"algo_id", tpOrder.AlgoId,
-				"trigger_price", roundedTPPrice,
-				"quantity", tpQty,
-				"attempt", attempt)
+			if isFinalTPLevel {
+				ga.logger.Info("Final take profit order placed (ClosePosition=true)",
+					"symbol", pos.Symbol,
+					"tp_level", nextTPIndex+1,
+					"algo_id", tpOrder.AlgoId,
+					"trigger_price", roundedTPPrice,
+					"close_position", true,
+					"attempt", attempt)
+			} else {
+				ga.logger.Info("Next take profit order placed",
+					"symbol", pos.Symbol,
+					"tp_level", nextTPIndex+1,
+					"algo_id", tpOrder.AlgoId,
+					"trigger_price", roundedTPPrice,
+					"quantity", tpQty,
+					"attempt", attempt)
+			}
 			tpOrderPlaced = true
 			break
 		}
@@ -3348,6 +3382,7 @@ func (ga *GinieAutopilot) updateBinanceSLOrder(pos *GiniePosition) {
 }
 
 // placeSLOrder places a new SL algo order (helper for updateBinanceSLOrder)
+// CRITICAL: Uses ClosePosition=true to ensure the ENTIRE position is closed regardless of quantity tracking
 func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 	closeSide := "SELL"
 	positionSide := binance.PositionSideLong
@@ -3358,16 +3393,18 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 
 	// Round SL price with directional rounding to ensure trigger protects capital
 	roundedSL := roundPriceForSL(pos.Symbol, pos.StopLoss, pos.Side)
-	roundedQty := roundQuantity(pos.Symbol, pos.RemainingQty)
 
+	// CRITICAL FIX: Use ClosePosition=true instead of specifying quantity
+	// This ensures Binance closes the ENTIRE position on the exchange, avoiding residual quantity issues
+	// caused by rounding mismatches between internal tracking and actual exchange position
 	slParams := binance.AlgoOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         closeSide,
-		PositionSide: positionSide,
-		Type:         binance.FuturesOrderTypeStopMarket,
-		Quantity:     roundedQty,
-		TriggerPrice: roundedSL,
-		WorkingType:  binance.WorkingTypeMarkPrice,
+		Symbol:        pos.Symbol,
+		Side:          closeSide,
+		PositionSide:  positionSide,
+		Type:          binance.FuturesOrderTypeStopMarket,
+		ClosePosition: true, // Close entire position - no quantity needed
+		TriggerPrice:  roundedSL,
+		WorkingType:   binance.WorkingTypeMarkPrice,
 	}
 
 	// Place SL with retry logic - CRITICAL for position protection
@@ -3379,11 +3416,11 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 		slOrder, err := ga.futuresClient.PlaceAlgoOrder(slParams)
 		if err == nil && slOrder != nil && slOrder.AlgoId > 0 {
 			pos.StopLossAlgoID = slOrder.AlgoId
-			ga.logger.Info("Updated SL order placed",
+			ga.logger.Info("Updated SL order placed (ClosePosition=true)",
 				"symbol", pos.Symbol,
 				"new_algo_id", slOrder.AlgoId,
 				"trigger_price", roundedSL,
-				"quantity", roundedQty,
+				"close_position", true,
 				"attempt", attempt)
 			slOrderPlaced = true
 			break
@@ -5166,32 +5203,53 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 		positionSide = binance.PositionSideShort
 	}
 
-	tpQty := roundQuantity(pos.Symbol, pos.RemainingQty*(tp.Percent/100.0))
-	if tpQty <= 0 {
-		// CRITICAL FIX: For small positions, use full remaining quantity (single TP mode)
-		// This handles cases like VETUSDT where 40% of 1 unit = 0.4 which rounds to 0
-		tpQty = roundQuantity(pos.Symbol, pos.RemainingQty)
-		if tpQty <= 0 {
-			log.Printf("[PROTECTION-TP] %s: Even full quantity rounds to 0 (remainingQty=%.8f)", pos.Symbol, pos.RemainingQty)
-			return
-		}
-		log.Printf("[PROTECTION-TP] %s: Using full remaining qty for TP (small position, %.8f -> %.8f)",
-			pos.Symbol, pos.RemainingQty, tpQty)
-	}
-
-	log.Printf("[PROTECTION-TP] %s: Placing TP order (level=%d, price=%.8f, qty=%.8f, side=%s)",
-		pos.Symbol, tpLevel, tp.Price, tpQty, closeSide)
+	// Determine if this is the final TP level - use ClosePosition=true to avoid residual
+	isFinalTPLevel := tpLevel >= len(pos.TakeProfits)-1
 
 	roundedTP := roundPriceForTP(pos.Symbol, tp.Price, pos.Side)
 
-	tpParams := binance.AlgoOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         closeSide,
-		PositionSide: positionSide,
-		Type:         binance.FuturesOrderTypeTakeProfitMarket,
-		Quantity:     tpQty,
-		TriggerPrice: roundedTP,
-		WorkingType:  binance.WorkingTypeMarkPrice,
+	var tpParams binance.AlgoOrderParams
+
+	if isFinalTPLevel {
+		// CRITICAL FIX: For final TP level, use ClosePosition=true to close entire remaining position
+		// This prevents residual quantity issues from rounding mismatches
+		log.Printf("[PROTECTION-TP] %s: Final TP level %d - using ClosePosition=true",
+			pos.Symbol, tpLevel)
+		tpParams = binance.AlgoOrderParams{
+			Symbol:        pos.Symbol,
+			Side:          closeSide,
+			PositionSide:  positionSide,
+			Type:          binance.FuturesOrderTypeTakeProfitMarket,
+			ClosePosition: true, // Close entire remaining position
+			TriggerPrice:  roundedTP,
+			WorkingType:   binance.WorkingTypeMarkPrice,
+		}
+	} else {
+		// For intermediate TP levels (TP1-3), calculate quantity for partial close
+		tpQty := roundQuantity(pos.Symbol, pos.RemainingQty*(tp.Percent/100.0))
+		if tpQty <= 0 {
+			// For small positions, use full remaining quantity (converts to single TP mode)
+			tpQty = roundQuantity(pos.Symbol, pos.RemainingQty)
+			if tpQty <= 0 {
+				log.Printf("[PROTECTION-TP] %s: Even full quantity rounds to 0 (remainingQty=%.8f)", pos.Symbol, pos.RemainingQty)
+				return
+			}
+			log.Printf("[PROTECTION-TP] %s: Using full remaining qty for TP (small position, %.8f -> %.8f)",
+				pos.Symbol, pos.RemainingQty, tpQty)
+		}
+
+		log.Printf("[PROTECTION-TP] %s: Placing TP order (level=%d, price=%.8f, qty=%.8f, side=%s)",
+			pos.Symbol, tpLevel, tp.Price, tpQty, closeSide)
+
+		tpParams = binance.AlgoOrderParams{
+			Symbol:       pos.Symbol,
+			Side:         closeSide,
+			PositionSide: positionSide,
+			Type:         binance.FuturesOrderTypeTakeProfitMarket,
+			Quantity:     tpQty,
+			TriggerPrice: roundedTP,
+			WorkingType:  binance.WorkingTypeMarkPrice,
+		}
 	}
 
 	tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
