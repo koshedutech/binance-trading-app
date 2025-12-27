@@ -892,34 +892,79 @@ func (c *FuturesClientImpl) signParams(params map[string]string) string {
 	return query + "&signature=" + signature
 }
 
-// publicGet performs an unauthenticated GET request
+// publicGet performs an unauthenticated GET request with rate limiting and retry
 func (c *FuturesClientImpl) publicGet(endpoint string, params map[string]string) ([]byte, error) {
-	values := url.Values{}
-	for k, v := range params {
-		values.Set(k, v)
+	rateLimiter := GetRateLimiter()
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check rate limiter before making request
+		if !rateLimiter.WaitForSlot(endpoint, 30*time.Second) {
+			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
+		}
+
+		values := url.Values{}
+		for k, v := range params {
+			values.Set(k, v)
+		}
+
+		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
+		if len(values) > 0 {
+			reqURL = fmt.Sprintf("%s?%s", reqURL, values.Encode())
+		}
+
+		resp, err := c.httpClient.Get(reqURL)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				delay := calculateRetryDelay(attempt)
+				log.Printf("[BINANCE] Public GET %s failed (attempt %d/%d): %v, retrying in %v",
+					endpoint, attempt+1, maxRetries+1, err, delay)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, err
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		// Update rate limiter from headers
+		if usedWeight := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); usedWeight != "" {
+			if weight, err := strconv.Atoi(usedWeight); err == nil {
+				rateLimiter.UpdateFromHeaders(0, weight)
+			}
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("API error: %s", string(body))
+
+			// Check for rate limit error and trigger circuit breaker
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 ||
+				strings.Contains(string(body), "-1003") {
+				banUntil := ParseBanUntilFromError(string(body))
+				rateLimiter.RecordRateLimitError(banUntil)
+			}
+
+			if isRetryableError(resp.StatusCode, string(body)) && attempt < maxRetries {
+				delay := calculateRetryDelay(attempt)
+				log.Printf("[BINANCE] Public GET %s returned %d (attempt %d/%d): %s, retrying in %v",
+					endpoint, resp.StatusCode, attempt+1, maxRetries+1, string(body), delay)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Record successful request
+		rateLimiter.RecordRequest(endpoint)
+		return body, nil
 	}
 
-	reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
-	if len(values) > 0 {
-		reqURL = fmt.Sprintf("%s?%s", reqURL, values.Encode())
-	}
-
-	resp, err := c.httpClient.Get(reqURL)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %s", string(body))
-	}
-
-	return body, nil
+	return nil, lastErr
 }
 
 // isRetryableError checks if an error is transient and should be retried
@@ -949,11 +994,17 @@ func calculateRetryDelay(attempt int) time.Duration {
 	return delay + jitter - (delay / 4)
 }
 
-// signedGet performs an authenticated GET request with retry logic
+// signedGet performs an authenticated GET request with rate limiting and retry logic
 func (c *FuturesClientImpl) signedGet(endpoint string, params map[string]string) ([]byte, error) {
+	rateLimiter := GetRateLimiter()
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check rate limiter before making request
+		if !rateLimiter.WaitForSlot(endpoint, 30*time.Second) {
+			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
+		}
+
 		// Refresh timestamp for each attempt
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
 		query := c.signParams(params)
@@ -985,8 +1036,23 @@ func (c *FuturesClientImpl) signedGet(endpoint string, params map[string]string)
 			return nil, err
 		}
 
+		// Update rate limiter from headers
+		if usedWeight := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); usedWeight != "" {
+			if weight, err := strconv.Atoi(usedWeight); err == nil {
+				rateLimiter.UpdateFromHeaders(0, weight)
+			}
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("API error: %s", string(body))
+
+			// Check for rate limit error and trigger circuit breaker
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 ||
+				strings.Contains(string(body), "-1003") {
+				banUntil := ParseBanUntilFromError(string(body))
+				rateLimiter.RecordRateLimitError(banUntil)
+			}
+
 			if isRetryableError(resp.StatusCode, string(body)) && attempt < maxRetries {
 				delay := calculateRetryDelay(attempt)
 				log.Printf("[BINANCE] GET %s returned %d (attempt %d/%d): %s, retrying in %v",
@@ -997,18 +1063,29 @@ func (c *FuturesClientImpl) signedGet(endpoint string, params map[string]string)
 			return nil, lastErr
 		}
 
+		// Record successful request
+		rateLimiter.RecordRequest(endpoint)
 		return body, nil
 	}
 
 	return nil, lastErr
 }
 
-// signedPost performs an authenticated POST request with retry logic
+// signedPost performs an authenticated POST request with rate limiting and retry logic
 func (c *FuturesClientImpl) signedPost(endpoint string, params map[string]string) ([]byte, error) {
+	rateLimiter := GetRateLimiter()
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check rate limiter before making request
+		if !rateLimiter.WaitForSlot(endpoint, 30*time.Second) {
+			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
+		}
+
 		// Refresh timestamp for each attempt
+		if params == nil {
+			params = make(map[string]string)
+		}
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
@@ -1040,8 +1117,23 @@ func (c *FuturesClientImpl) signedPost(endpoint string, params map[string]string
 			return nil, err
 		}
 
+		// Update rate limiter from headers
+		if usedWeight := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); usedWeight != "" {
+			if weight, err := strconv.Atoi(usedWeight); err == nil {
+				rateLimiter.UpdateFromHeaders(0, weight)
+			}
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("API error: %s", string(body))
+
+			// Check for rate limit error and trigger circuit breaker
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 ||
+				strings.Contains(string(body), "-1003") {
+				banUntil := ParseBanUntilFromError(string(body))
+				rateLimiter.RecordRateLimitError(banUntil)
+			}
+
 			if isRetryableError(resp.StatusCode, string(body)) && attempt < maxRetries {
 				delay := calculateRetryDelay(attempt)
 				log.Printf("[BINANCE] POST %s returned %d (attempt %d/%d): %s, retrying in %v",
@@ -1052,17 +1144,25 @@ func (c *FuturesClientImpl) signedPost(endpoint string, params map[string]string
 			return nil, lastErr
 		}
 
+		// Record successful request
+		rateLimiter.RecordRequest(endpoint)
 		return body, nil
 	}
 
 	return nil, lastErr
 }
 
-// signedPut performs an authenticated PUT request with retry logic
+// signedPut performs an authenticated PUT request with rate limiting and retry logic
 func (c *FuturesClientImpl) signedPut(endpoint string, params map[string]string) ([]byte, error) {
+	rateLimiter := GetRateLimiter()
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check rate limiter before making request
+		if !rateLimiter.WaitForSlot(endpoint, 30*time.Second) {
+			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
+		}
+
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
@@ -1094,8 +1194,23 @@ func (c *FuturesClientImpl) signedPut(endpoint string, params map[string]string)
 			return nil, err
 		}
 
+		// Update rate limiter from headers
+		if usedWeight := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); usedWeight != "" {
+			if weight, err := strconv.Atoi(usedWeight); err == nil {
+				rateLimiter.UpdateFromHeaders(0, weight)
+			}
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("API error: %s", string(body))
+
+			// Check for rate limit error and trigger circuit breaker
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 ||
+				strings.Contains(string(body), "-1003") {
+				banUntil := ParseBanUntilFromError(string(body))
+				rateLimiter.RecordRateLimitError(banUntil)
+			}
+
 			if isRetryableError(resp.StatusCode, string(body)) && attempt < maxRetries {
 				delay := calculateRetryDelay(attempt)
 				log.Printf("[BINANCE] PUT %s returned %d (attempt %d/%d): %s, retrying in %v",
@@ -1106,17 +1221,25 @@ func (c *FuturesClientImpl) signedPut(endpoint string, params map[string]string)
 			return nil, lastErr
 		}
 
+		// Record successful request
+		rateLimiter.RecordRequest(endpoint)
 		return body, nil
 	}
 
 	return nil, lastErr
 }
 
-// signedDelete performs an authenticated DELETE request with retry logic
+// signedDelete performs an authenticated DELETE request with rate limiting and retry logic
 func (c *FuturesClientImpl) signedDelete(endpoint string, params map[string]string) ([]byte, error) {
+	rateLimiter := GetRateLimiter()
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Check rate limiter before making request
+		if !rateLimiter.WaitForSlot(endpoint, 30*time.Second) {
+			return nil, fmt.Errorf("rate limit: circuit breaker open, request blocked")
+		}
+
 		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
 		query := c.signParams(params)
 		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
@@ -1148,8 +1271,23 @@ func (c *FuturesClientImpl) signedDelete(endpoint string, params map[string]stri
 			return nil, err
 		}
 
+		// Update rate limiter from headers
+		if usedWeight := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); usedWeight != "" {
+			if weight, err := strconv.Atoi(usedWeight); err == nil {
+				rateLimiter.UpdateFromHeaders(0, weight)
+			}
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("API error: %s", string(body))
+
+			// Check for rate limit error and trigger circuit breaker
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 ||
+				strings.Contains(string(body), "-1003") {
+				banUntil := ParseBanUntilFromError(string(body))
+				rateLimiter.RecordRateLimitError(banUntil)
+			}
+
 			if isRetryableError(resp.StatusCode, string(body)) && attempt < maxRetries {
 				delay := calculateRetryDelay(attempt)
 				log.Printf("[BINANCE] DELETE %s returned %d (attempt %d/%d): %s, retrying in %v",
@@ -1160,6 +1298,8 @@ func (c *FuturesClientImpl) signedDelete(endpoint string, params map[string]stri
 			return nil, lastErr
 		}
 
+		// Record successful request
+		rateLimiter.RecordRequest(endpoint)
 		return body, nil
 	}
 
