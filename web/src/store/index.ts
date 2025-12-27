@@ -33,6 +33,7 @@ interface AppState {
   // Actions
   setConnected: (connected: boolean) => void;
   setWSConnected: (connected: boolean) => void;
+  resetState: () => void;
   setBotStatus: (status: BotStatus) => void;
   setPositions: (positions: Position[]) => void;
   updatePosition: (symbol: string, updates: Partial<Position>) => void;
@@ -64,6 +65,18 @@ export const useStore = create<AppState>((set) => ({
   // Actions
   setConnected: (connected) => set({ isConnected: connected }),
   setWSConnected: (connected) => set({ isWSConnected: connected }),
+  resetState: () => set({
+    isConnected: false,
+    isWSConnected: false,
+    botStatus: null,
+    positions: [],
+    activeOrders: [],
+    strategies: [],
+    recentSignals: [],
+    screenerResults: [],
+    metrics: null,
+    error: null,
+  }),
   setBotStatus: (status) => set({ botStatus: status }),
   setPositions: (positions) => set({ positions }),
   updatePosition: (symbol, updates) =>

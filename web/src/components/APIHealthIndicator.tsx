@@ -25,6 +25,11 @@ export default function APIHealthIndicator() {
   const { isAuthenticated } = useAuth();
 
   useEffect(() => {
+    // Reset state immediately when auth changes to prevent showing stale status
+    setHealth(null);
+    setLoading(true);
+    setShowDetails(false);
+
     const fetchHealth = async () => {
       try {
         // Use user-specific API status when authenticated to show correct status

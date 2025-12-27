@@ -37,6 +37,7 @@ function AppContent() {
     setScreenerResults,
     setMetrics,
     updatePosition,
+    resetState,
   } = useStore();
 
   useEffect(() => {
@@ -150,10 +151,11 @@ function AppContent() {
       }
     }, 15000); // Poll every 15 seconds (reduced from 1s to avoid rate limits)
 
-    // Cleanup
+    // Cleanup - reset all state when user logs out
     return () => {
       clearInterval(pollInterval);
       wsService.disconnect();
+      resetState();
     };
   }, [isAuthenticated, isLoading]);
 
