@@ -3,6 +3,7 @@ package autopilot
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -179,7 +180,10 @@ type ModeSLTPConfig struct {
 	TrailingActivationPrice float64   `json:"trailing_activation_price"`  // Activate at specific price (0 = disabled)
 	MaxHoldDuration         string    `json:"max_hold_duration"`          // Force exit after (e.g., "3s", "4h", "3d", "14d")
 	UseSingleTP             bool      `json:"use_single_tp"`              // true = 100% at TP, false = multi-level
-	TPGainLevels            []float64 `json:"tp_gain_levels"`             // Multi-level TP gains (e.g., [0.3, 0.6, 1.0, 1.5])
+	SingleTPPercent         float64   `json:"single_tp_percent"`          // Gain % for single TP mode (e.g., 3.0 = 3%)
+	TPGainLevels            []float64 `json:"tp_gain_levels"`             // Multi-level TP price gains (e.g., [0.3, 0.6, 1.0, 1.5])
+	TPAllocation            []float64 `json:"tp_allocation"`              // Multi-level TP qty allocation (e.g., [50, 50, 0, 0] = 50% at TP1, 50% at TP2)
+	TrailingActivationMode  string    `json:"trailing_activation_mode"`   // "immediate", "after_tp1", "after_breakeven", "after_tp1_and_breakeven"
 	// ROI-based SL/TP settings
 	UseROIBasedSLTP      bool    `json:"use_roi_based_sltp"`       // true = use ROI-based SL/TP instead of price %
 	ROIStopLossPercent   float64 `json:"roi_stop_loss_percent"`    // SL based on ROI % (e.g., -5 = close at -5% ROI)
@@ -441,6 +445,9 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				TrailingActivationPrice: 0,
 				MaxHoldDuration:         "3s",
 				UseSingleTP:             true,
+				SingleTPPercent:         2.0,
+				TPAllocation:            []float64{100, 0, 0, 0}, // 100% at TP1 (single TP mode)
+				TrailingActivationMode:  "immediate",
 				UseROIBasedSLTP:         false,
 				ROIStopLossPercent:      -5,
 				ROITakeProfitPercent:    10,
@@ -528,6 +535,9 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				TrailingActivationPrice: 0,
 				MaxHoldDuration:         "4h",
 				UseSingleTP:             true,
+				SingleTPPercent:         3.0,
+				TPAllocation:            []float64{100, 0, 0, 0}, // 100% at TP1 (single TP mode)
+				TrailingActivationMode:  "after_tp1",
 				UseROIBasedSLTP:         false,
 				ROIStopLossPercent:      -8,
 				ROITakeProfitPercent:    15,
@@ -615,6 +625,9 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				TrailingActivationPrice: 0,
 				MaxHoldDuration:         "3d",
 				UseSingleTP:             false,
+				SingleTPPercent:         5.0,
+				TPAllocation:            []float64{50, 50, 0, 0}, // 50% at TP1, 50% at TP2
+				TrailingActivationMode:  "after_tp1_and_breakeven",
 				UseROIBasedSLTP:         false,
 				ROIStopLossPercent:      -12,
 				ROITakeProfitPercent:    20,
@@ -702,6 +715,9 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				TrailingActivationPrice: 0,
 				MaxHoldDuration:         "14d",
 				UseSingleTP:             false,
+				SingleTPPercent:         8.0,
+				TPAllocation:            []float64{40, 30, 20, 10}, // 40% TP1, 30% TP2, 20% TP3, 10% TP4
+				TrailingActivationMode:  "after_tp1_and_breakeven",
 				UseROIBasedSLTP:         false,
 				ROIStopLossPercent:      -15,
 				ROITakeProfitPercent:    30,
@@ -1365,14 +1381,79 @@ const (
 	SettingsVersionConsolidated = 2 // Consolidated ModeConfigs structure
 )
 
+// patchMigrateTPAllocation is a patch migration that runs on v2 settings to add the
+// TPAllocation field which was added after initial v2 migration.
+// This ensures existing v2 settings get TPAllocation populated from global settings.
+func patchMigrateTPAllocation(settings *AutopilotSettings) bool {
+	if settings.ModeConfigs == nil {
+		return false
+	}
+
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	migrated := false
+
+	// Build global TP allocation from global settings
+	globalTPAllocation := []float64{
+		settings.GinieTP1Percent,
+		settings.GinieTP2Percent,
+		settings.GinieTP3Percent,
+		settings.GinieTP4Percent,
+	}
+
+	// Default allocations per mode (if global is all zeros)
+	defaultAllocations := map[string][]float64{
+		"ultra_fast": {100, 0, 0, 0},  // 100% at TP1
+		"scalp":      {100, 0, 0, 0},  // 100% at TP1
+		"swing":      {50, 50, 0, 0},  // 50% at TP1, 50% at TP2
+		"position":   {40, 30, 20, 10}, // Multi-level
+	}
+
+	hasGlobalAllocation := settings.GinieTP1Percent > 0 || settings.GinieTP2Percent > 0 ||
+		settings.GinieTP3Percent > 0 || settings.GinieTP4Percent > 0
+
+	for _, mode := range modes {
+		cfg := settings.ModeConfigs[mode]
+		if cfg == nil || cfg.SLTP == nil {
+			continue
+		}
+
+		// Check if TPAllocation is missing or empty
+		if cfg.SLTP.TPAllocation == nil || len(cfg.SLTP.TPAllocation) == 0 {
+			if hasGlobalAllocation {
+				// Use global allocation for multi-TP modes
+				if !cfg.SLTP.UseSingleTP {
+					cfg.SLTP.TPAllocation = globalTPAllocation
+					log.Printf("[PATCH-MIGRATION] Applied global TPAllocation to %s: %v", mode, globalTPAllocation)
+					migrated = true
+				} else {
+					// For single-TP modes, set 100% at TP1
+					cfg.SLTP.TPAllocation = []float64{100, 0, 0, 0}
+					log.Printf("[PATCH-MIGRATION] Applied single-TP allocation to %s: [100, 0, 0, 0]", mode)
+					migrated = true
+				}
+			} else {
+				// Use defaults for each mode
+				cfg.SLTP.TPAllocation = defaultAllocations[mode]
+				log.Printf("[PATCH-MIGRATION] Applied default TPAllocation to %s: %v", mode, defaultAllocations[mode])
+				migrated = true
+			}
+		}
+	}
+
+	return migrated
+}
+
 // migrateSettings migrates legacy autopilot_settings.json to the consolidated ModeConfigs structure.
 // This function is idempotent - safe to run multiple times.
 // Legacy fields remain populated for rollback safety.
 // Returns true if migration was performed, false if already migrated or no migration needed.
 func migrateSettings(settings *AutopilotSettings) bool {
-	// Already migrated to v2 or higher - no migration needed
+	// Always run patch migrations to fix missing fields in v2
+	patchMigrated := patchMigrateTPAllocation(settings)
+
+	// Already migrated to v2 or higher - no full migration needed
 	if settings.SettingsVersion >= SettingsVersionConsolidated {
-		return false
+		return patchMigrated
 	}
 
 	// Ensure ModeConfigs map exists
@@ -1484,6 +1565,58 @@ func migrateSettings(settings *AutopilotSettings) bool {
 		settings.ModeConfigs["position"].SLTP.UseSingleTP = settings.GinieUseSingleTP
 	}
 
+	// ====== MIGRATE SINGLE TP PERCENT (new field) ======
+	if settings.GinieSingleTPPercent > 0 {
+		// Apply to all modes as fallback (will be overwritten by mode-specific TP% below)
+		for _, mode := range modes {
+			if settings.ModeConfigs[mode].SLTP.SingleTPPercent == 0 {
+				settings.ModeConfigs[mode].SLTP.SingleTPPercent = settings.GinieSingleTPPercent
+			}
+		}
+	}
+	// Override with mode-specific TP percentages
+	if settings.GinieTPPercentUltrafast > 0 {
+		settings.ModeConfigs["ultra_fast"].SLTP.SingleTPPercent = settings.GinieTPPercentUltrafast
+	}
+	if settings.GinieTPPercentScalp > 0 {
+		settings.ModeConfigs["scalp"].SLTP.SingleTPPercent = settings.GinieTPPercentScalp
+	}
+	if settings.GinieTPPercentSwing > 0 {
+		settings.ModeConfigs["swing"].SLTP.SingleTPPercent = settings.GinieTPPercentSwing
+	}
+	if settings.GinieTPPercentPosition > 0 {
+		settings.ModeConfigs["position"].SLTP.SingleTPPercent = settings.GinieTPPercentPosition
+	}
+
+	// ====== MIGRATE TRAILING ACTIVATION MODE (new field) ======
+	if settings.GinieTrailingActivationMode != "" {
+		for _, mode := range modes {
+			if settings.ModeConfigs[mode].SLTP.TrailingActivationMode == "" {
+				settings.ModeConfigs[mode].SLTP.TrailingActivationMode = settings.GinieTrailingActivationMode
+			}
+		}
+	}
+
+	// ====== MIGRATE TP ALLOCATION (new field) ======
+	// Convert global TP1/TP2/TP3/TP4 percent to per-mode TPAllocation array
+	if settings.GinieTP1Percent > 0 || settings.GinieTP2Percent > 0 ||
+		settings.GinieTP3Percent > 0 || settings.GinieTP4Percent > 0 {
+		globalTPAllocation := []float64{
+			settings.GinieTP1Percent,
+			settings.GinieTP2Percent,
+			settings.GinieTP3Percent,
+			settings.GinieTP4Percent,
+		}
+		// Apply to modes that use multi-TP and don't have allocation set
+		for _, mode := range modes {
+			if !settings.ModeConfigs[mode].SLTP.UseSingleTP &&
+				(settings.ModeConfigs[mode].SLTP.TPAllocation == nil ||
+					len(settings.ModeConfigs[mode].SLTP.TPAllocation) == 0) {
+				settings.ModeConfigs[mode].SLTP.TPAllocation = globalTPAllocation
+			}
+		}
+	}
+
 	// Bump version to v2 after successful migration
 	settings.SettingsVersion = SettingsVersionConsolidated
 
@@ -1526,6 +1659,7 @@ func ensureModeSubConfigs(config *ModeFullConfig) {
 
 // LoadSettings loads settings from file, returns defaults if file doesn't exist.
 // If migration is needed, it performs migration and saves the updated settings.
+// Also runs patch migrations to fix missing fields in existing v2 settings.
 func (sm *SettingsManager) LoadSettings() (*AutopilotSettings, error) {
 	// First, try to load with read lock to check if migration is needed
 	settings, needsMigration, err := sm.loadSettingsInternal()
@@ -1533,9 +1667,20 @@ func (sm *SettingsManager) LoadSettings() (*AutopilotSettings, error) {
 		return settings, err
 	}
 
-	// If migration is needed, perform it with write lock and save
+	// If full migration is needed (v1 -> v2), perform it with write lock and save
 	if needsMigration {
 		return sm.loadAndMigrateSettings()
+	}
+
+	// Even if version is already v2, run patch migrations for missing fields
+	// This handles the case where new fields were added after initial v2 migration
+	patchMigrated := patchMigrateTPAllocation(settings)
+	if patchMigrated {
+		// Need to save the patch-migrated settings
+		log.Println("[SETTINGS] Patch migration applied, saving updated settings...")
+		if saveErr := sm.SaveSettings(settings); saveErr != nil {
+			log.Printf("[SETTINGS] Warning: Failed to save patch-migrated settings: %v", saveErr)
+		}
 	}
 
 	return settings, nil

@@ -7249,11 +7249,36 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 				"tp_price", singleTPPrice,
 				"note", "no TP1/TP2/TP3/TP4 split - full position closes at TP")
 		} else {
-			// Multi-TP mode: Use configured allocation (default 25% each)
-			tp1Pct := settings.GinieTP1Percent
-			tp2Pct := settings.GinieTP2Percent
-			tp3Pct := settings.GinieTP3Percent
-			tp4Pct := settings.GinieTP4Percent
+			// Multi-TP mode: Use per-mode TPAllocation from mode_configs, fallback to global settings
+			var tp1Pct, tp2Pct, tp3Pct, tp4Pct float64
+
+			// Try to get from mode_configs first
+			modeConfig := ga.getModeConfig(pos.Mode)
+			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
+				tp1Pct = modeConfig.SLTP.TPAllocation[0]
+				tp2Pct = modeConfig.SLTP.TPAllocation[1]
+				tp3Pct = modeConfig.SLTP.TPAllocation[2]
+				tp4Pct = modeConfig.SLTP.TPAllocation[3]
+				ga.logger.Debug("Using mode_configs TPAllocation",
+					"symbol", symbol,
+					"mode", pos.Mode,
+					"allocation", modeConfig.SLTP.TPAllocation)
+			} else {
+				// Fallback to global settings
+				tp1Pct = settings.GinieTP1Percent
+				tp2Pct = settings.GinieTP2Percent
+				tp3Pct = settings.GinieTP3Percent
+				tp4Pct = settings.GinieTP4Percent
+			}
+
+			// Ensure allocation sums to 100%
+			totalAlloc := tp1Pct + tp2Pct + tp3Pct + tp4Pct
+			if totalAlloc < 99 || totalAlloc > 101 {
+				ga.logger.Warn("TP allocation doesn't sum to 100%, using defaults",
+					"symbol", symbol,
+					"total", totalAlloc)
+				tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
+			}
 
 			// Calculate actual gain % for each level based on allocation
 			tp1Gain := finalTPPct * (tp1Pct / 100)
@@ -7619,11 +7644,36 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 		ga.logger.Debug("Single TP mode applied (async)",
 			"symbol", pos.Symbol, "mode", mode, "tp_price", tpPrice)
 	} else {
-		// Multi-TP mode: Use configured allocation
-		tp1Pct := settings.GinieTP1Percent
-		tp2Pct := settings.GinieTP2Percent
-		tp3Pct := settings.GinieTP3Percent
-		tp4Pct := settings.GinieTP4Percent
+		// Multi-TP mode: Use per-mode TPAllocation from mode_configs, fallback to global settings
+		var tp1Pct, tp2Pct, tp3Pct, tp4Pct float64
+
+		// Try to get from mode_configs first
+		modeConfig := ga.getModeConfig(pos.Mode)
+		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
+			tp1Pct = modeConfig.SLTP.TPAllocation[0]
+			tp2Pct = modeConfig.SLTP.TPAllocation[1]
+			tp3Pct = modeConfig.SLTP.TPAllocation[2]
+			tp4Pct = modeConfig.SLTP.TPAllocation[3]
+			ga.logger.Debug("Using mode_configs TPAllocation (async)",
+				"symbol", pos.Symbol,
+				"mode", pos.Mode,
+				"allocation", modeConfig.SLTP.TPAllocation)
+		} else {
+			// Fallback to global settings
+			tp1Pct = settings.GinieTP1Percent
+			tp2Pct = settings.GinieTP2Percent
+			tp3Pct = settings.GinieTP3Percent
+			tp4Pct = settings.GinieTP4Percent
+		}
+
+		// Ensure allocation sums to 100%
+		totalAlloc := tp1Pct + tp2Pct + tp3Pct + tp4Pct
+		if totalAlloc < 99 || totalAlloc > 101 {
+			ga.logger.Warn("TP allocation doesn't sum to 100%, using defaults (async)",
+				"symbol", pos.Symbol,
+				"total", totalAlloc)
+			tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
+		}
 
 		// Calculate actual gain % for each level based on allocation
 		tp1Gain := finalTPPct * (tp1Pct / 100)

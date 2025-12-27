@@ -81,7 +81,7 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS trades (
 			id SERIAL PRIMARY KEY,
 			symbol VARCHAR(20) NOT NULL,
-			side VARCHAR(4) NOT NULL,
+			side VARCHAR(10) NOT NULL,
 			entry_price DECIMAL(20, 8) NOT NULL,
 			exit_price DECIMAL(20, 8),
 			quantity DECIMAL(20, 8) NOT NULL,
@@ -105,7 +105,7 @@ func (db *DB) RunMigrations(ctx context.Context) error {
 			id BIGINT PRIMARY KEY,
 			symbol VARCHAR(20) NOT NULL,
 			order_type VARCHAR(20) NOT NULL,
-			side VARCHAR(4) NOT NULL,
+			side VARCHAR(10) NOT NULL,
 			price DECIMAL(20, 8),
 			quantity DECIMAL(20, 8) NOT NULL,
 			executed_qty DECIMAL(20, 8) DEFAULT 0,
