@@ -18,9 +18,11 @@ import {
   BarChart3,
   Sparkles,
   Activity,
+  GitBranch,
 } from 'lucide-react';
+import TradeLifecycleEvents from './TradeLifecycleEvents';
 
-type TabType = 'orders' | 'history' | 'ai_trades';
+type TabType = 'orders' | 'history' | 'ai_trades' | 'lifecycle';
 
 interface RegularOrder {
   orderId: number;
@@ -197,6 +199,7 @@ export default function FuturesOrdersHistory() {
     { id: 'orders' as TabType, label: 'Open Orders', icon: FileText, count: regularOrders.length + algoOrders.length },
     { id: 'history' as TabType, label: 'Trade History', icon: History },
     { id: 'ai_trades' as TabType, label: 'AI Decisions', icon: Brain, count: aiDecisions.length > 0 ? aiDecisions.length : undefined },
+    { id: 'lifecycle' as TabType, label: 'Trade Events', icon: GitBranch },
   ];
 
   return (
@@ -266,6 +269,17 @@ export default function FuturesOrdersHistory() {
         )}
         {activeTab === 'ai_trades' && (
           <AIDecisionsContent decisions={aiDecisions} loading={loading} />
+        )}
+        {activeTab === 'lifecycle' && (
+          <div className="p-0">
+            <TradeLifecycleEvents
+              limit={limit}
+              compact={true}
+              showSummary={false}
+              autoRefresh={true}
+              refreshInterval={30000}
+            />
+          </div>
         )}
       </div>
     </div>

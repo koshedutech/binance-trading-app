@@ -144,6 +144,16 @@ type ModeSizeConfig struct {
 	Leverage         int     `json:"leverage"`            // Default leverage (e.g., 10, 8, 5, 3)
 	SizeMultiplierLo float64 `json:"size_multiplier_lo"`  // Min multiplier (1.0)
 	SizeMultiplierHi float64 `json:"size_multiplier_hi"`  // Max multiplier on high conf (e.g., 1.5, 1.8, 2.0, 2.5)
+
+	// Position sizing fallbacks (Story 5: Mode-specific position sizing)
+	SafetyMargin               float64 `json:"safety_margin"`                  // Default: 0.90 - Reserve 10% of balance for safety
+	MinBalanceUSD              float64 `json:"min_balance_usd"`                // Default: 25.0 - Minimum balance required to trade
+	MinPositionSizeUSD         float64 `json:"min_position_size_usd"`          // Default: 10.0 - Minimum position size
+	RiskMultiplierConservative float64 `json:"risk_multiplier_conservative"`   // Default: 0.6 - Conservative risk scaling
+	RiskMultiplierModerate     float64 `json:"risk_multiplier_moderate"`       // Default: 0.8 - Moderate risk scaling
+	RiskMultiplierAggressive   float64 `json:"risk_multiplier_aggressive"`     // Default: 1.0 - Aggressive risk scaling
+	ConfidenceMultiplierBase   float64 `json:"confidence_multiplier_base"`     // Default: 0.5 - Base multiplier for confidence scaling
+	ConfidenceMultiplierScale  float64 `json:"confidence_multiplier_scale"`    // Default: 0.7 - Additional multiplier per confidence level
 }
 
 // ModeCircuitBreakerConfig holds circuit breaker settings for a mode
@@ -161,21 +171,31 @@ type ModeCircuitBreakerConfig struct {
 
 // ModeSLTPConfig holds SL/TP settings for a mode
 type ModeSLTPConfig struct {
-	StopLossPercent        float64 `json:"stop_loss_percent"`         // Default SL % (e.g., 1.0, 1.5, 2.5, 3.5)
-	TakeProfitPercent      float64 `json:"take_profit_percent"`       // Default TP % (e.g., 2.0, 3.0, 5.0, 8.0)
-	TrailingStopEnabled    bool    `json:"trailing_stop_enabled"`     // Enable trailing (e.g., false, false, true, true)
-	TrailingStopPercent    float64 `json:"trailing_stop_percent"`     // Trail distance (e.g., N/A, 0.5, 1.5, 2.5)
-	TrailingStopActivation float64 `json:"trailing_stop_activation"`  // Activate at profit % (e.g., N/A, 0.5, 1.0, 2.0)
-	TrailingActivationPrice float64 `json:"trailing_activation_price"` // Activate at specific price (0 = disabled)
-	MaxHoldDuration        string  `json:"max_hold_duration"`         // Force exit after (e.g., "3s", "4h", "3d", "14d")
-	UseSingleTP            bool    `json:"use_single_tp"`             // true = 100% at TP, false = multi-level
+	StopLossPercent         float64   `json:"stop_loss_percent"`          // Default SL % (e.g., 1.0, 1.5, 2.5, 3.5)
+	TakeProfitPercent       float64   `json:"take_profit_percent"`        // Default TP % (e.g., 2.0, 3.0, 5.0, 8.0)
+	TrailingStopEnabled     bool      `json:"trailing_stop_enabled"`      // Enable trailing (e.g., false, false, true, true)
+	TrailingStopPercent     float64   `json:"trailing_stop_percent"`      // Trail distance (e.g., N/A, 0.5, 1.5, 2.5)
+	TrailingStopActivation  float64   `json:"trailing_stop_activation"`   // Activate at profit % (e.g., N/A, 0.5, 1.0, 2.0)
+	TrailingActivationPrice float64   `json:"trailing_activation_price"`  // Activate at specific price (0 = disabled)
+	MaxHoldDuration         string    `json:"max_hold_duration"`          // Force exit after (e.g., "3s", "4h", "3d", "14d")
+	UseSingleTP             bool      `json:"use_single_tp"`              // true = 100% at TP, false = multi-level
+	TPGainLevels            []float64 `json:"tp_gain_levels"`             // Multi-level TP gains (e.g., [0.3, 0.6, 1.0, 1.5])
 	// ROI-based SL/TP settings
-	UseROIBasedSLTP        bool    `json:"use_roi_based_sltp"`        // true = use ROI-based SL/TP instead of price %
-	ROIStopLossPercent     float64 `json:"roi_stop_loss_percent"`     // SL based on ROI % (e.g., -5 = close at -5% ROI)
-	ROITakeProfitPercent   float64 `json:"roi_take_profit_percent"`   // TP based on ROI % (e.g., 10 = close at +10% ROI)
+	UseROIBasedSLTP      bool    `json:"use_roi_based_sltp"`       // true = use ROI-based SL/TP instead of price %
+	ROIStopLossPercent   float64 `json:"roi_stop_loss_percent"`    // SL based on ROI % (e.g., -5 = close at -5% ROI)
+	ROITakeProfitPercent float64 `json:"roi_take_profit_percent"`  // TP based on ROI % (e.g., 10 = close at +10% ROI)
 	// Margin type settings
-	MarginType             string  `json:"margin_type"`               // "CROSS" or "ISOLATED" (default: "CROSS")
-	IsolatedMarginPercent  float64 `json:"isolated_margin_percent"`   // Margin % for isolated mode (10-100%)
+	MarginType            string  `json:"margin_type"`              // "CROSS" or "ISOLATED" (default: "CROSS")
+	IsolatedMarginPercent float64 `json:"isolated_margin_percent"`  // Margin % for isolated mode (10-100%)
+	// ATR-based SL/TP settings (for LLM/ATR blending)
+	ATRSLMultiplier float64 `json:"atr_sl_multiplier"` // ATR multiplier for stop-loss
+	ATRTPMultiplier float64 `json:"atr_tp_multiplier"` // ATR multiplier for take-profit
+	ATRSLMin        float64 `json:"atr_sl_min"`        // Min SL distance (ATR-based)
+	ATRSLMax        float64 `json:"atr_sl_max"`        // Max SL distance (ATR-based)
+	ATRTPMin        float64 `json:"atr_tp_min"`        // Min TP distance (ATR-based)
+	ATRTPMax        float64 `json:"atr_tp_max"`        // Max TP distance (ATR-based)
+	LLMWeight       float64 `json:"llm_weight"`        // Weight for LLM-suggested SL/TP
+	ATRWeight       float64 `json:"atr_weight"`        // Weight for ATR-calculated SL/TP
 }
 
 // HedgeModeConfig holds hedge mode settings for a mode (LONG + SHORT simultaneously)
@@ -196,6 +216,7 @@ type PositionAveragingConfig struct {
 	AddSizePercent         float64 `json:"add_size_percent"`          // Size to add (e.g., 50, 50, 30 % of original)
 	MaxAverages            int     `json:"max_averages"`              // Max times to average (e.g., 0, 2, 3, 2)
 	MinConfidenceForAverage float64 `json:"min_confidence_for_average"` // Min confidence for new signal
+	UseLLMForAveraging     bool    `json:"use_llm_for_averaging"`     // Use LLM to decide if averaging is wise
 }
 
 // StalePositionReleaseConfig holds stale position release (capital liberation) settings
@@ -224,21 +245,54 @@ type ModeAssignmentConfig struct {
 	PriorityWeight      float64 `json:"priority_weight"`       // For conflict resolution (e.g., 0.8, 1.0, 1.2, 1.5)
 }
 
+// ModeFundingRateConfig holds funding rate awareness settings for a mode
+type ModeFundingRateConfig struct {
+	Enabled               bool    `json:"enabled"`                  // Enable funding rate awareness for this mode
+	MaxFundingRate        float64 `json:"max_funding_rate"`         // Max funding rate threshold (e.g., 0.001 = 0.1%)
+	ExitTimeMinutes       int     `json:"exit_time_minutes"`        // Minutes before funding to consider exit
+	FeeThresholdPercent   float64 `json:"fee_threshold_percent"`    // Exit if fee > this % of profit
+	ExtremeFundingRate    float64 `json:"extreme_funding_rate"`     // Extreme rate threshold for forced exit
+	HighRateReduction     float64 `json:"high_rate_reduction"`      // Size reduction multiplier for high rates
+	ElevatedRateReduction float64 `json:"elevated_rate_reduction"`  // Size reduction multiplier for elevated rates
+	BlockTimeMinutes      int     `json:"block_time_minutes"`       // Minutes before funding to block new trades
+}
+
+// ModeRiskConfig holds risk management settings for a mode
+type ModeRiskConfig struct {
+	RiskLevel                  string  `json:"risk_level"`                   // "conservative"/"moderate"/"aggressive"
+	RiskMultiplierConservative float64 `json:"risk_multiplier_conservative"` // 0.6
+	RiskMultiplierModerate     float64 `json:"risk_multiplier_moderate"`     // 0.8
+	RiskMultiplierAggressive   float64 `json:"risk_multiplier_aggressive"`   // 1.0
+	MaxDrawdownPercent         float64 `json:"max_drawdown_percent"`         // Max allowed drawdown
+	MaxDailyLossPercent        float64 `json:"max_daily_loss_percent"`       // Max daily loss limit
+}
+
+// ModeTrendDivergenceConfig holds trend divergence detection settings
+type ModeTrendDivergenceConfig struct {
+	Enabled              bool    `json:"enabled"`                // Enable trend divergence checks
+	MinDivergencePercent float64 `json:"min_divergence_percent"` // Min divergence to detect
+	BlockOnDivergence    bool    `json:"block_on_divergence"`    // Block trades on strong divergence
+	DivergenceWeight     float64 `json:"divergence_weight"`      // Weight in signal scoring
+}
+
 // ModeFullConfig holds ALL settings for a single trading mode
 type ModeFullConfig struct {
 	ModeName       string `json:"mode_name"` // "ultra_fast", "scalp", "swing", "position"
 	Enabled        bool   `json:"enabled"`   // Enable this mode
 
 	// Sub-configurations
-	Timeframe      *ModeTimeframeConfig       `json:"timeframe"`
-	Confidence     *ModeConfidenceConfig      `json:"confidence"`
-	Size           *ModeSizeConfig            `json:"size"`
-	CircuitBreaker *ModeCircuitBreakerConfig  `json:"circuit_breaker"`
-	SLTP           *ModeSLTPConfig            `json:"sltp"`
-	Hedge          *HedgeModeConfig           `json:"hedge"`
-	Averaging      *PositionAveragingConfig   `json:"averaging"`
-	StaleRelease   *StalePositionReleaseConfig `json:"stale_release"`
-	Assignment     *ModeAssignmentConfig      `json:"assignment"`
+	Timeframe       *ModeTimeframeConfig        `json:"timeframe"`
+	Confidence      *ModeConfidenceConfig       `json:"confidence"`
+	Size            *ModeSizeConfig             `json:"size"`
+	CircuitBreaker  *ModeCircuitBreakerConfig   `json:"circuit_breaker"`
+	SLTP            *ModeSLTPConfig             `json:"sltp"`
+	Hedge           *HedgeModeConfig            `json:"hedge"`
+	Averaging       *PositionAveragingConfig    `json:"averaging"`
+	StaleRelease    *StalePositionReleaseConfig `json:"stale_release"`
+	Assignment      *ModeAssignmentConfig       `json:"assignment"`
+	FundingRate     *ModeFundingRateConfig      `json:"funding_rate"`
+	Risk            *ModeRiskConfig             `json:"risk"`
+	TrendDivergence *ModeTrendDivergenceConfig  `json:"trend_divergence"`
 }
 
 // ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
@@ -408,6 +462,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				AddSizePercent:         0,
 				MaxAverages:            0,
 				MinConfidenceForAverage: 0,
+				UseLLMForAveraging:     false,
 			},
 			StaleRelease: &StalePositionReleaseConfig{
 				Enabled:              true,
@@ -494,6 +549,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				AddSizePercent:         50.0, // Add 50% of original
 				MaxAverages:            2,
 				MinConfidenceForAverage: 65.0,
+				UseLLMForAveraging:     true,
 			},
 			StaleRelease: &StalePositionReleaseConfig{
 				Enabled:              true,
@@ -580,6 +636,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				AddSizePercent:         50.0,
 				MaxAverages:            3,
 				MinConfidenceForAverage: 70.0,
+				UseLLMForAveraging:     true,
 			},
 			StaleRelease: &StalePositionReleaseConfig{
 				Enabled:              true,
@@ -666,6 +723,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				AddSizePercent:         30.0, // Add 30% of original
 				MaxAverages:            2,
 				MinConfidenceForAverage: 80.0,
+				UseLLMForAveraging:     true,
 			},
 			StaleRelease: &StalePositionReleaseConfig{
 				Enabled:              true,
@@ -736,6 +794,9 @@ type SymbolPerformanceReport struct {
 
 // AutopilotSettings holds persistent settings that survive restarts
 type AutopilotSettings struct {
+	// Settings version for migration (v1=legacy, v2=consolidated ModeConfigs)
+	SettingsVersion int `json:"settings_version"`
+
 	// Dynamic SL/TP settings
 	DynamicSLTPEnabled  bool    `json:"dynamic_sltp_enabled"`
 	ATRPeriod           int     `json:"atr_period"`
@@ -771,6 +832,7 @@ type AutopilotSettings struct {
 	ProfitReinvestRiskLevel string  `json:"profit_reinvest_risk_level"` // Risk level for reinvested profits
 
 	// Ginie-specific settings
+	// Deprecated: Use ModeConfigs[mode].Risk.RiskLevel instead. Will be migrated automatically.
 	GinieRiskLevel     string  `json:"ginie_risk_level"`      // conservative/moderate/aggressive
 	GinieDryRunMode    bool    `json:"ginie_dry_run_mode"`    // Paper trading mode for Ginie
 	GinieAutoStart     bool    `json:"ginie_auto_start"`      // Auto-start Ginie on server restart
@@ -780,39 +842,64 @@ type AutopilotSettings struct {
 	GinieMaxPositions  int     `json:"ginie_max_positions"`   // Max concurrent positions for Ginie
 
 	// Ginie trend detection timeframes (per mode)
+	// Deprecated: Use ModeConfigs["ultrafast"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
 	GinieTrendTimeframeUltrafast string `json:"ginie_trend_timeframe_ultrafast"` // e.g., "5m"
+	// Deprecated: Use ModeConfigs["scalp"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
 	GinieTrendTimeframeScalp    string `json:"ginie_trend_timeframe_scalp"`    // e.g., "15m"
+	// Deprecated: Use ModeConfigs["swing"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
 	GinieTrendTimeframeSwing    string `json:"ginie_trend_timeframe_swing"`    // e.g., "1h"
+	// Deprecated: Use ModeConfigs["position"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
 	GinieTrendTimeframePosition string `json:"ginie_trend_timeframe_position"` // e.g., "4h"
 
 	// Ginie divergence detection
+	// Deprecated: Use ModeConfigs[mode].TrendDivergence.BlockOnDivergence instead. Will be migrated automatically.
 	GinieBlockOnDivergence bool `json:"ginie_block_on_divergence"` // Block trades when timeframe divergence detected
 
 	// Ginie SL/TP manual overrides (per mode) - if set (> 0), override ATR/LLM calculations
+	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.StopLossPercent instead. Will be migrated automatically.
 	GinieSLPercentUltrafast    float64 `json:"ginie_sl_percent_ultrafast"`    // e.g., 0.5 (0.5%)
+	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
 	GinieTPPercentUltrafast    float64 `json:"ginie_tp_percent_ultrafast"`    // e.g., 1.0 (1%)
+	// Deprecated: Use ModeConfigs["scalp"].SLTP.StopLossPercent instead. Will be migrated automatically.
 	GinieSLPercentScalp        float64 `json:"ginie_sl_percent_scalp"`        // e.g., 1.0 (1%)
+	// Deprecated: Use ModeConfigs["scalp"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
 	GinieTPPercentScalp        float64 `json:"ginie_tp_percent_scalp"`        // e.g., 2.0 (2%)
+	// Deprecated: Use ModeConfigs["swing"].SLTP.StopLossPercent instead. Will be migrated automatically.
 	GinieSLPercentSwing        float64 `json:"ginie_sl_percent_swing"`        // e.g., 2.0 (2%)
+	// Deprecated: Use ModeConfigs["swing"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
 	GinieTPPercentSwing        float64 `json:"ginie_tp_percent_swing"`        // e.g., 6.0 (6%)
+	// Deprecated: Use ModeConfigs["position"].SLTP.StopLossPercent instead. Will be migrated automatically.
 	GinieSLPercentPosition     float64 `json:"ginie_sl_percent_position"`     // e.g., 3.0 (3%)
+	// Deprecated: Use ModeConfigs["position"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
 	GinieTPPercentPosition     float64 `json:"ginie_tp_percent_position"`     // e.g., 10.0 (10%)
 
 	// Trailing stop configuration (per mode)
+	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
 	GinieTrailingStopEnabledUltrafast       bool    `json:"ginie_trailing_stop_enabled_ultrafast"`
+	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
 	GinieTrailingStopPercentUltrafast       float64 `json:"ginie_trailing_stop_percent_ultrafast"`       // e.g., 0.1%
+	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
 	GinieTrailingStopActivationUltrafast    float64 `json:"ginie_trailing_stop_activation_ultrafast"`    // e.g., 0.2% profit
 
+	// Deprecated: Use ModeConfigs["scalp"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
 	GinieTrailingStopEnabledScalp           bool    `json:"ginie_trailing_stop_enabled_scalp"`
+	// Deprecated: Use ModeConfigs["scalp"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
 	GinieTrailingStopPercentScalp           float64 `json:"ginie_trailing_stop_percent_scalp"`       // e.g., 0.3%
+	// Deprecated: Use ModeConfigs["scalp"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
 	GinieTrailingStopActivationScalp        float64 `json:"ginie_trailing_stop_activation_scalp"`    // e.g., 0.5% profit
 
+	// Deprecated: Use ModeConfigs["swing"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
 	GinieTrailingStopEnabledSwing           bool    `json:"ginie_trailing_stop_enabled_swing"`
+	// Deprecated: Use ModeConfigs["swing"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
 	GinieTrailingStopPercentSwing           float64 `json:"ginie_trailing_stop_percent_swing"`       // e.g., 1.5%
+	// Deprecated: Use ModeConfigs["swing"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
 	GinieTrailingStopActivationSwing        float64 `json:"ginie_trailing_stop_activation_swing"`    // e.g., 1.0% profit
 
+	// Deprecated: Use ModeConfigs["position"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
 	GinieTrailingStopEnabledPosition        bool    `json:"ginie_trailing_stop_enabled_position"`
+	// Deprecated: Use ModeConfigs["position"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
 	GinieTrailingStopPercentPosition        float64 `json:"ginie_trailing_stop_percent_position"`    // e.g., 3.0%
+	// Deprecated: Use ModeConfigs["position"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
 	GinieTrailingStopActivationPosition     float64 `json:"ginie_trailing_stop_activation_position"` // e.g., 2.0% profit
 
 	// TP mode configuration (global and per-mode)
@@ -991,6 +1078,9 @@ func getSettingsFilePath() string {
 // DefaultSettings returns the default settings
 func DefaultSettings() *AutopilotSettings {
 	return &AutopilotSettings{
+		// Settings version (v2 = consolidated ModeConfigs)
+		SettingsVersion: SettingsVersionConsolidated,
+
 		// Dynamic SL/TP defaults
 		DynamicSLTPEnabled:  false,
 		ATRPeriod:           14,
@@ -1100,7 +1190,7 @@ func DefaultSettings() *AutopilotSettings {
 		// Ultra-fast scalping defaults (1-3 second exits)
 		UltraFastEnabled:         false, // Disabled by default - high risk mode
 		UltraFastScanInterval:    5000,  // Scan every 5 seconds
-		UltraFastMonitorInterval: 500,   // Monitor every 500ms for exits
+		UltraFastMonitorInterval: 2000,  // Monitor every 2 seconds for exits (reduced from 500ms to lower API load)
 		UltraFastMaxPositions:    3,     // Conservative - max 3 concurrent positions
 		UltraFastMaxUSDPerPos:    200,   // Conservative - $200 per position
 		UltraFastMinConfidence:   50.0,  // Lower confidence for quick moves
@@ -1268,8 +1358,191 @@ func DefaultSettings() *AutopilotSettings {
 	}
 }
 
-// LoadSettings loads settings from file, returns defaults if file doesn't exist
+// ====== SETTINGS MIGRATION (Story 12) ======
+// Migration constants
+const (
+	SettingsVersionLegacy       = 1 // Original flat structure with GinieTrailing*, GinieTrendTimeframe*, etc.
+	SettingsVersionConsolidated = 2 // Consolidated ModeConfigs structure
+)
+
+// migrateSettings migrates legacy autopilot_settings.json to the consolidated ModeConfigs structure.
+// This function is idempotent - safe to run multiple times.
+// Legacy fields remain populated for rollback safety.
+// Returns true if migration was performed, false if already migrated or no migration needed.
+func migrateSettings(settings *AutopilotSettings) bool {
+	// Already migrated to v2 or higher - no migration needed
+	if settings.SettingsVersion >= SettingsVersionConsolidated {
+		return false
+	}
+
+	// Ensure ModeConfigs map exists
+	if settings.ModeConfigs == nil {
+		settings.ModeConfigs = make(map[string]*ModeFullConfig)
+	}
+
+	// Initialize mode configs if they don't exist
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	for _, mode := range modes {
+		if settings.ModeConfigs[mode] == nil {
+			settings.ModeConfigs[mode] = &ModeFullConfig{
+				ModeName: mode,
+				Enabled:  true,
+			}
+		}
+		// Ensure sub-configs exist
+		ensureModeSubConfigs(settings.ModeConfigs[mode])
+	}
+
+	// ====== MIGRATE TRAILING STOP SETTINGS ======
+	// Scalp trailing stop
+	if settings.GinieTrailingStopPercentScalp > 0 {
+		settings.ModeConfigs["scalp"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentScalp
+	}
+	if settings.GinieTrailingStopActivationScalp > 0 {
+		settings.ModeConfigs["scalp"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationScalp
+	}
+	settings.ModeConfigs["scalp"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledScalp
+
+	// Swing trailing stop
+	if settings.GinieTrailingStopPercentSwing > 0 {
+		settings.ModeConfigs["swing"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentSwing
+	}
+	if settings.GinieTrailingStopActivationSwing > 0 {
+		settings.ModeConfigs["swing"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationSwing
+	}
+	settings.ModeConfigs["swing"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledSwing
+
+	// Position trailing stop
+	if settings.GinieTrailingStopPercentPosition > 0 {
+		settings.ModeConfigs["position"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentPosition
+	}
+	if settings.GinieTrailingStopActivationPosition > 0 {
+		settings.ModeConfigs["position"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationPosition
+	}
+	settings.ModeConfigs["position"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledPosition
+
+	// Ultra-fast trailing stop
+	if settings.GinieTrailingStopPercentUltrafast > 0 {
+		settings.ModeConfigs["ultra_fast"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentUltrafast
+	}
+	if settings.GinieTrailingStopActivationUltrafast > 0 {
+		settings.ModeConfigs["ultra_fast"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationUltrafast
+	}
+	settings.ModeConfigs["ultra_fast"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledUltrafast
+
+	// ====== MIGRATE TIMEFRAME SETTINGS ======
+	// Scalp timeframe -> TrendTimeframe
+	if settings.GinieTrendTimeframeScalp != "" {
+		settings.ModeConfigs["scalp"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframeScalp
+	}
+	// Swing timeframe -> TrendTimeframe
+	if settings.GinieTrendTimeframeSwing != "" {
+		settings.ModeConfigs["swing"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframeSwing
+	}
+	// Position timeframe -> TrendTimeframe
+	if settings.GinieTrendTimeframePosition != "" {
+		settings.ModeConfigs["position"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframePosition
+	}
+	// Ultra-fast timeframe -> TrendTimeframe
+	if settings.GinieTrendTimeframeUltrafast != "" {
+		settings.ModeConfigs["ultra_fast"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframeUltrafast
+	}
+
+	// ====== MIGRATE SL/TP PERCENT SETTINGS ======
+	// These override ATR/LLM calculations if set (> 0)
+	if settings.GinieSLPercentScalp > 0 {
+		settings.ModeConfigs["scalp"].SLTP.StopLossPercent = settings.GinieSLPercentScalp
+	}
+	if settings.GinieTPPercentScalp > 0 {
+		settings.ModeConfigs["scalp"].SLTP.TakeProfitPercent = settings.GinieTPPercentScalp
+	}
+	if settings.GinieSLPercentSwing > 0 {
+		settings.ModeConfigs["swing"].SLTP.StopLossPercent = settings.GinieSLPercentSwing
+	}
+	if settings.GinieTPPercentSwing > 0 {
+		settings.ModeConfigs["swing"].SLTP.TakeProfitPercent = settings.GinieTPPercentSwing
+	}
+	if settings.GinieSLPercentPosition > 0 {
+		settings.ModeConfigs["position"].SLTP.StopLossPercent = settings.GinieSLPercentPosition
+	}
+	if settings.GinieTPPercentPosition > 0 {
+		settings.ModeConfigs["position"].SLTP.TakeProfitPercent = settings.GinieTPPercentPosition
+	}
+	if settings.GinieSLPercentUltrafast > 0 {
+		settings.ModeConfigs["ultra_fast"].SLTP.StopLossPercent = settings.GinieSLPercentUltrafast
+	}
+	if settings.GinieTPPercentUltrafast > 0 {
+		settings.ModeConfigs["ultra_fast"].SLTP.TakeProfitPercent = settings.GinieTPPercentUltrafast
+	}
+
+	// ====== MIGRATE SINGLE TP MODE SETTINGS ======
+	settings.ModeConfigs["ultra_fast"].SLTP.UseSingleTP = settings.GinieUseSingleTPUltrafast
+	settings.ModeConfigs["scalp"].SLTP.UseSingleTP = settings.GinieUseSingleTPScalp
+	// Swing and position default to multi-TP, but can be overridden by global setting
+	if settings.GinieUseSingleTP {
+		settings.ModeConfigs["swing"].SLTP.UseSingleTP = settings.GinieUseSingleTP
+		settings.ModeConfigs["position"].SLTP.UseSingleTP = settings.GinieUseSingleTP
+	}
+
+	// Bump version to v2 after successful migration
+	settings.SettingsVersion = SettingsVersionConsolidated
+
+	return true
+}
+
+// ensureModeSubConfigs ensures all sub-configurations exist for a mode
+func ensureModeSubConfigs(config *ModeFullConfig) {
+	if config.Timeframe == nil {
+		config.Timeframe = &ModeTimeframeConfig{}
+	}
+	if config.Confidence == nil {
+		config.Confidence = &ModeConfidenceConfig{}
+	}
+	if config.Size == nil {
+		config.Size = &ModeSizeConfig{}
+	}
+	if config.CircuitBreaker == nil {
+		config.CircuitBreaker = &ModeCircuitBreakerConfig{}
+	}
+	if config.SLTP == nil {
+		config.SLTP = &ModeSLTPConfig{}
+	}
+	if config.Hedge == nil {
+		config.Hedge = &HedgeModeConfig{}
+	}
+	if config.Averaging == nil {
+		config.Averaging = &PositionAveragingConfig{}
+	}
+	if config.StaleRelease == nil {
+		config.StaleRelease = &StalePositionReleaseConfig{}
+	}
+	if config.Assignment == nil {
+		config.Assignment = &ModeAssignmentConfig{}
+	}
+	if config.FundingRate == nil {
+		config.FundingRate = &ModeFundingRateConfig{}
+	}
+}
+
+// LoadSettings loads settings from file, returns defaults if file doesn't exist.
+// If migration is needed, it performs migration and saves the updated settings.
 func (sm *SettingsManager) LoadSettings() (*AutopilotSettings, error) {
+	// First, try to load with read lock to check if migration is needed
+	settings, needsMigration, err := sm.loadSettingsInternal()
+	if err != nil {
+		return settings, err
+	}
+
+	// If migration is needed, perform it with write lock and save
+	if needsMigration {
+		return sm.loadAndMigrateSettings()
+	}
+
+	return settings, nil
+}
+
+// loadSettingsInternal loads settings and returns whether migration is needed
+func (sm *SettingsManager) loadSettingsInternal() (*AutopilotSettings, bool, error) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
@@ -1278,7 +1551,33 @@ func (sm *SettingsManager) LoadSettings() (*AutopilotSettings, error) {
 	data, err := os.ReadFile(sm.settingsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// File doesn't exist, return defaults
+			// File doesn't exist, return defaults (already at latest version)
+			return settings, false, nil
+		}
+		return settings, false, err
+	}
+
+	if err := json.Unmarshal(data, settings); err != nil {
+		return DefaultSettings(), false, err
+	}
+
+	// Check if migration is needed (version < 2 means legacy settings)
+	needsMigration := settings.SettingsVersion < SettingsVersionConsolidated
+
+	return settings, needsMigration, nil
+}
+
+// loadAndMigrateSettings loads settings with write lock, performs migration, and saves
+func (sm *SettingsManager) loadAndMigrateSettings() (*AutopilotSettings, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	settings := DefaultSettings()
+
+	data, err := os.ReadFile(sm.settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist, return defaults with latest version
 			return settings, nil
 		}
 		return settings, err
@@ -1286,6 +1585,32 @@ func (sm *SettingsManager) LoadSettings() (*AutopilotSettings, error) {
 
 	if err := json.Unmarshal(data, settings); err != nil {
 		return DefaultSettings(), err
+	}
+
+	// Perform migration (idempotent - safe to run multiple times)
+	migrated := migrateSettings(settings)
+	if migrated {
+		// Save the migrated settings to persist the version bump
+		// We already hold the write lock, so we can save directly
+		saveData, marshalErr := json.MarshalIndent(settings, "", "  ")
+		if marshalErr != nil {
+			// Migration succeeded but save failed - still return migrated settings
+			// Next load will re-migrate (idempotent)
+			return settings, nil
+		}
+
+		// Atomic write: temp file + rename
+		tempPath := sm.settingsPath + ".tmp"
+		if writeErr := os.WriteFile(tempPath, saveData, 0644); writeErr != nil {
+			// Save failed - still return migrated settings
+			return settings, nil
+		}
+
+		if renameErr := os.Rename(tempPath, sm.settingsPath); renameErr != nil {
+			os.Remove(tempPath) // Clean up temp file
+			// Save failed - still return migrated settings
+			return settings, nil
+		}
 	}
 
 	return settings, nil
@@ -1507,6 +1832,9 @@ func (sm *SettingsManager) UpdateProfitReinvest(percent float64, riskLevel strin
 }
 
 // UpdateGinieRiskLevel updates Ginie risk level and related settings
+// Deprecated: This function updates deprecated legacy fields. Use UpdateGinieModeConfig to update
+// ModeConfigs[mode].Risk.RiskLevel instead. Legacy fields are kept for backwards compatibility
+// and will be migrated to ModeConfigs automatically.
 func (sm *SettingsManager) UpdateGinieRiskLevel(riskLevel string) error {
 	settings := sm.GetCurrentSettings()
 	settings.GinieRiskLevel = riskLevel
@@ -1590,6 +1918,9 @@ func ValidateTimeframe(tf string) error {
 }
 
 // UpdateGinieTrendTimeframes updates the trend timeframe settings for each mode
+// Deprecated: This function updates deprecated legacy fields. Use UpdateGinieModeConfig to update
+// ModeConfigs[mode].Timeframe.TrendTimeframe and ModeConfigs[mode].TrendDivergence.BlockOnDivergence
+// instead. Legacy fields are kept for backwards compatibility and will be migrated automatically.
 func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 	ultrafastTF string,
 	scalpTF string,
@@ -1667,6 +1998,9 @@ func ValidateTPAllocation(tp1, tp2, tp3, tp4 float64) error {
 }
 
 // UpdateGinieSLTPSettings updates SL/TP configuration for a specific mode
+// Deprecated: This function updates deprecated legacy fields. Use UpdateGinieModeConfig to update
+// ModeConfigs[mode].SLTP settings instead. Legacy fields are kept for backwards compatibility
+// and will be migrated to ModeConfigs automatically.
 func (sm *SettingsManager) UpdateGinieSLTPSettings(
 	mode string, // "scalp", "swing", "position"
 	slPercent, tpPercent float64,

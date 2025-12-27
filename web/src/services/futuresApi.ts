@@ -1846,6 +1846,48 @@ class FuturesAPIService {
     const { data } = await this.client.get('/ginie/protection/status');
     return data;
   }
+
+  // ==================== TRADE LIFECYCLE EVENTS ====================
+
+  /**
+   * Get all lifecycle events for a specific trade
+   */
+  async getTradeLifecycleEvents(tradeId: number): Promise<TradeLifecycleEventsResponse> {
+    const { data } = await this.client.get(`/trades/${tradeId}/events`);
+    return data;
+  }
+
+  /**
+   * Get an aggregated summary of a trade's lifecycle
+   */
+  async getTradeLifecycleSummary(tradeId: number): Promise<TradeLifecycleSummaryResponse> {
+    const { data } = await this.client.get(`/trades/${tradeId}/lifecycle-summary`);
+    return data;
+  }
+
+  /**
+   * Get lifecycle events of a specific type for a trade
+   */
+  async getTradeLifecycleEventsByType(tradeId: number, eventType: string): Promise<TradeLifecycleEventsResponse> {
+    const { data } = await this.client.get(`/trades/${tradeId}/events/${eventType}`);
+    return data;
+  }
+
+  /**
+   * Get recent lifecycle events across all trades
+   */
+  async getRecentTradeLifecycleEvents(limit = 50): Promise<RecentTradeEventsResponse> {
+    const { data } = await this.client.get('/trade-events/recent', { params: { limit } });
+    return data;
+  }
+
+  /**
+   * Get the number of SL revisions for a trade
+   */
+  async getTradeSLRevisionCount(tradeId: number): Promise<SLRevisionCountResponse> {
+    const { data } = await this.client.get(`/trades/${tradeId}/sl-revisions`);
+    return data;
+  }
 }
 
 // ==================== MARKET MOVERS TYPES ====================
@@ -2661,6 +2703,15 @@ export interface ModeSizeConfig {
   leverage: number;            // Default leverage
   size_multiplier_lo: number;  // Min multiplier
   size_multiplier_hi: number;  // Max multiplier on high confidence
+  // Additional sizing parameters
+  safety_margin?: number;                 // 0.90
+  min_balance_usd?: number;               // 25.0
+  min_position_size_usd?: number;         // 10.0
+  risk_multiplier_conservative?: number;  // 0.6
+  risk_multiplier_moderate?: number;      // 0.8
+  risk_multiplier_aggressive?: number;    // 1.0
+  confidence_multiplier_base?: number;    // 0.5
+  confidence_multiplier_scale?: number;   // 0.7
 }
 
 export interface ModeCircuitBreakerConfig {
@@ -2691,6 +2742,59 @@ export interface ModeSLTPConfig {
   // Margin configuration
   margin_type: string;                // "CROSS" or "ISOLATED"
   isolated_margin_percent: number;    // Margin % for isolated mode (10-100)
+  // ATR/LLM blending parameters
+  atr_sl_multiplier?: number;         // Base SL × ATR
+  atr_tp_multiplier?: number;         // Base TP × ATR
+  atr_sl_min?: number;                // Min SL % bound
+  atr_sl_max?: number;                // Max SL % bound
+  atr_tp_min?: number;                // Min TP % bound
+  atr_tp_max?: number;                // Max TP % bound
+  llm_weight?: number;                // LLM blend weight (0.7)
+  atr_weight?: number;                // ATR blend weight (0.3)
+  tp_gain_levels?: number[];          // Multi-TP levels per mode
+}
+
+export interface ModeRiskConfig {
+  risk_level: string;                    // "conservative" | "moderate" | "aggressive"
+  risk_multiplier_conservative: number;  // 0.6
+  risk_multiplier_moderate: number;      // 0.8
+  risk_multiplier_aggressive: number;    // 1.0
+  max_drawdown_percent: number;          // 5.0 for scalp, 15.0 for position
+  daily_loss_limit_percent: number;      // 3.0
+  weekly_loss_limit_percent: number;     // 10.0
+  max_portfolio_risk_percent: number;    // 2.0 per trade
+  correlation_penalty: number;           // 0.5 reduce size for correlated positions
+}
+
+export interface ModeTrendDivergenceConfig {
+  enabled: boolean;                  // Enable divergence checking
+  block_on_divergence: boolean;      // Block trades on divergence
+  timeframes_to_check: string[];     // ["5m", "15m", "1h", "4h"]
+  min_aligned_timeframes: number;    // 2 = at least 2 must agree
+  adx_threshold: number;             // 25.0 = min trend strength
+  counter_trend_penalty: number;     // 0.5 = reduce confidence by 50%
+  allow_counter_trend: boolean;      // false for swing, true for scalp
+}
+
+export interface ModeFundingRateConfig {
+  enabled: boolean;
+  max_funding_rate: number;          // 0.001 = 0.1%
+  block_time_minutes: number;        // 30
+  exit_time_minutes: number;         // 10
+  fee_threshold_percent: number;     // 0.3 = 30%
+  extreme_funding_rate: number;      // 0.003 = 0.3%
+  high_rate_reduction: number;       // 0.5 = 50%
+  elevated_rate_reduction: number;   // 0.75 = 75%
+}
+
+export interface PositionAveragingConfig {
+  allow_averaging?: boolean;           // Enable position averaging
+  average_up_profit_percent?: number;  // Add when position is in profit by X%
+  average_down_loss_percent?: number;  // Add when position is in loss by X%
+  add_size_percent?: number;           // Size of add as % of original position
+  max_averages?: number;               // Maximum number of averaging entries
+  min_confidence_for_average?: number; // Minimum confidence to average
+  use_llm_for_averaging?: boolean;     // Use AI to decide averaging
 }
 
 export interface ModeFullConfig {
@@ -2703,6 +2807,10 @@ export interface ModeFullConfig {
   size?: ModeSizeConfig;
   circuit_breaker?: ModeCircuitBreakerConfig;
   sltp?: ModeSLTPConfig;
+  risk?: ModeRiskConfig;
+  trend_divergence?: ModeTrendDivergenceConfig;
+  funding_rate?: ModeFundingRateConfig;
+  averaging?: PositionAveragingConfig;
 }
 
 export interface ModeConfigsResponse {
@@ -2817,6 +2925,87 @@ export interface LLMCallDiagnostics {
   error_rate: number;
   calls_by_provider: Record<string, number>;
   recent_errors: string[];
+}
+
+// ==================== TRADE LIFECYCLE EVENT TYPES ====================
+
+export type TradeLifecycleEventType =
+  | 'position_opened'
+  | 'sltp_placed'
+  | 'sl_revised'
+  | 'moved_to_breakeven'
+  | 'tp_hit'
+  | 'trailing_activated'
+  | 'trailing_updated'
+  | 'position_closed'
+  | 'external_close'
+  | 'sl_hit';
+
+export type TradeLifecycleEventSource = 'ginie' | 'trailing' | 'manual' | 'external' | 'system';
+
+export interface TradeLifecycleEvent {
+  id: number;
+  futures_trade_id?: number;
+  event_type: TradeLifecycleEventType;
+  event_subtype?: string;
+  timestamp: string;
+  trigger_price?: number;
+  old_value?: number;
+  new_value?: number;
+  mode?: string;
+  source: TradeLifecycleEventSource;
+  sl_revision_count?: number;
+  tp_level?: number;
+  quantity_closed?: number;
+  pnl_realized?: number;
+  pnl_percent?: number;
+  reason?: string;
+  conditions_met?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+}
+
+export interface TradeLifecycleSummary {
+  trade_id: number;
+  symbol: string;
+  mode: string;
+  entry_time: string;
+  entry_price: number;
+  exit_time?: string;
+  exit_price?: number;
+  total_events: number;
+  sl_revisions: number;
+  tp_hits: number;
+  trailing_updates: number;
+  final_pnl?: number;
+  final_pnl_percent?: number;
+  close_reason?: string;
+  events_by_type: Record<TradeLifecycleEventType, number>;
+}
+
+export interface TradeLifecycleEventsResponse {
+  success: boolean;
+  trade_id: number;
+  events: TradeLifecycleEvent[];
+  count: number;
+  event_type?: string;
+}
+
+export interface TradeLifecycleSummaryResponse {
+  success: boolean;
+  summary: TradeLifecycleSummary;
+}
+
+export interface RecentTradeEventsResponse {
+  success: boolean;
+  events: TradeLifecycleEvent[];
+  count: number;
+  limit: number;
+}
+
+export interface SLRevisionCountResponse {
+  success: boolean;
+  trade_id: number;
+  sl_revisions: number;
 }
 
 // Export singleton instance

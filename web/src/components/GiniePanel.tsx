@@ -1232,7 +1232,7 @@ export default function GiniePanel() {
             <div className="border-t border-gray-700/50 p-2 space-y-2">
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] text-gray-400">Max Loss/Hour ($)</label>
+                  <label className="text-[10px] text-gray-400" title="Maximum loss in USD per hour. Catches rapid losing streaks quickly.">Max Loss/Hour ($)</label>
                   <input
                     type="number"
                     value={cbConfig.max_loss_per_hour}
@@ -1243,7 +1243,7 @@ export default function GiniePanel() {
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-400">Max Daily Loss ($)</label>
+                  <label className="text-[10px] text-gray-400" title="Maximum loss in USD allowed per day before circuit breaker triggers.">Max Daily Loss ($)</label>
                   <input
                     type="number"
                     value={cbConfig.max_daily_loss}
@@ -1254,7 +1254,7 @@ export default function GiniePanel() {
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-400">Max Consecutive Losses</label>
+                  <label className="text-[10px] text-gray-400" title="Number of consecutive losing trades before pause. Prevents revenge trading.">Max Consecutive Losses</label>
                   <input
                     type="number"
                     value={cbConfig.max_consecutive_losses}
@@ -1265,7 +1265,7 @@ export default function GiniePanel() {
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-400">Cooldown (minutes)</label>
+                  <label className="text-[10px] text-gray-400" title="How long to pause trading after circuit breaker triggers. Allows market conditions to change.">Cooldown (minutes)</label>
                   <input
                     type="number"
                     value={cbConfig.cooldown_minutes}
@@ -1530,7 +1530,7 @@ export default function GiniePanel() {
               </h4>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[10px] text-gray-400 mb-1">Stop Loss %</label>
+                  <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss percentage from entry price. Position closes if price moves against you by this amount.">Stop Loss %</label>
                   <input
                     type="number"
                     step="0.1"
@@ -1545,7 +1545,7 @@ export default function GiniePanel() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] text-gray-400 mb-1">Take Profit %</label>
+                  <label className="block text-[10px] text-gray-400 mb-1" title="Take profit percentage from entry price. Position closes when price moves in your favor by this amount.">Take Profit %</label>
                   <input
                     type="number"
                     step="0.1"
@@ -1564,7 +1564,7 @@ export default function GiniePanel() {
 
             {/* Trailing Stop */}
             <div>
-              <label className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 mb-2">
+              <label className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 mb-2" title="Enable trailing stop that follows price movement. Locks in profits as price moves favorably instead of fixed TP.">
                 <input
                   type="checkbox"
                   checked={sltpConfig[selectedMode]?.trailing_enabled || false}
@@ -1579,7 +1579,7 @@ export default function GiniePanel() {
               {sltpConfig[selectedMode]?.trailing_enabled && (
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Trailing %</label>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Trailing stop distance as percentage. Stop follows peak price by this amount (e.g., 1% = stop trails 1% below highest price reached).">Trailing %</label>
                     <input
                       type="number"
                       step="0.1"
@@ -1594,7 +1594,7 @@ export default function GiniePanel() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Activation %</label>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Profit level required before trailing stop activates. E.g., 0.5% = trailing starts after 0.5% profit is reached.">Activation %</label>
                     <input
                       type="number"
                       step="0.1"
@@ -1614,7 +1614,7 @@ export default function GiniePanel() {
 
             {/* TP Mode Selection */}
             <div>
-              <label className="block text-[11px] font-semibold text-gray-400 mb-2">Take Profit Mode</label>
+              <label className="block text-[11px] font-semibold text-gray-400 mb-2" title="Choose how to take profits. Single TP closes entire position at one level. Multi TP takes partial profits at multiple levels (e.g., 25% at TP1, 25% at TP2, etc.).">Take Profit Mode</label>
               <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={() => setTpMode({...tpMode, use_single_tp: true})}
@@ -1640,7 +1640,7 @@ export default function GiniePanel() {
 
               {tpMode.use_single_tp ? (
                 <div className="mt-2">
-                  <label className="block text-[10px] text-gray-400 mb-1">Close at % gain</label>
+                  <label className="block text-[10px] text-gray-400 mb-1" title="Percentage gain at which to close the entire position. E.g., 3% = close position when profit reaches 3%.">Close at % gain</label>
                   <input
                     type="number"
                     step="0.1"
@@ -1653,9 +1653,9 @@ export default function GiniePanel() {
                 </div>
               ) : (
                 <div className="mt-2 grid grid-cols-4 gap-1">
-                  {(['tp1', 'tp2', 'tp3', 'tp4'] as const).map((level) => (
+                  {(['tp1', 'tp2', 'tp3', 'tp4'] as const).map((level, idx) => (
                     <div key={level}>
-                      <label className="block text-[10px] text-gray-400 mb-1">{level.toUpperCase()}</label>
+                      <label className="block text-[10px] text-gray-400 mb-1" title={`Take profit level ${idx + 1} percentage. Position size allocated to this TP level. All 4 levels should sum to 100%.`}>{level.toUpperCase()}</label>
                       <input
                         type="number"
                         step="0.1"
@@ -1774,7 +1774,7 @@ export default function GiniePanel() {
             <div className="grid grid-cols-5 gap-2">
               {Object.entries(categoryMultipliers).map(([category, value]) => (
                 <div key={category}>
-                  <label className="text-[10px] text-gray-400 block mb-1 capitalize">{category}</label>
+                  <label className="text-[10px] text-gray-400 block mb-1 capitalize" title={`Size multiplier for ${category} category coins. 1.0=normal, 1.5=50% larger positions, 0.5=50% smaller positions.`}>{category}</label>
                   <div className="flex items-center gap-1">
                     <input
                       type="number"
@@ -1862,7 +1862,7 @@ export default function GiniePanel() {
               <div className="space-y-3">
                 {/* Enable/Disable Toggle */}
                 <div className="flex items-center justify-between">
-                  <label className="text-xs text-gray-300 font-medium">Enable {selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode</label>
+                  <label className="text-xs text-gray-300 font-medium" title="Enable or disable this trading mode. When disabled, no new positions will be opened using this mode's parameters.">Enable {selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode</label>
                   <button
                     onClick={() => updateModeConfig(selectedModeConfig, 'enabled', !modeConfigs[selectedModeConfig]?.enabled)}
                     className={`px-2 py-1 rounded text-[10px] transition-colors ${
@@ -1888,7 +1888,7 @@ export default function GiniePanel() {
                   {expandedModeSection === 'timeframe' && modeConfigs[selectedModeConfig]?.timeframe && (
                     <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-3 gap-2">
                       <div>
-                        <label className="block text-[10px] text-gray-400 mb-1">Trend TF</label>
+                        <label className="block text-[10px] text-gray-400 mb-1" title="Higher timeframe used to determine overall trend direction. Typically 2-4x the primary timeframe.">Trend TF</label>
                         <select
                           value={modeConfigs[selectedModeConfig]?.timeframe?.trend_timeframe || '1h'}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'timeframe.trend_timeframe', e.target.value)}
@@ -1898,7 +1898,7 @@ export default function GiniePanel() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[10px] text-gray-400 mb-1">Entry TF</label>
+                        <label className="block text-[10px] text-gray-400 mb-1" title="Timeframe used for precise entry timing. Usually same as or lower than primary timeframe.">Entry TF</label>
                         <select
                           value={modeConfigs[selectedModeConfig]?.timeframe?.entry_timeframe || '15m'}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'timeframe.entry_timeframe', e.target.value)}
@@ -1908,7 +1908,7 @@ export default function GiniePanel() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[10px] text-gray-400 mb-1">Analysis TF</label>
+                        <label className="block text-[10px] text-gray-400 mb-1" title="Timeframe used for pattern and structure analysis. Can be higher for better context.">Analysis TF</label>
                         <select
                           value={modeConfigs[selectedModeConfig]?.timeframe?.analysis_timeframe || '4h'}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'timeframe.analysis_timeframe', e.target.value)}
@@ -1933,7 +1933,7 @@ export default function GiniePanel() {
                   {expandedModeSection === 'confidence' && modeConfigs[selectedModeConfig]?.confidence && (
                     <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-3 gap-2">
                       <div>
-                        <label className="block text-[10px] text-gray-400 mb-1">Min Confidence</label>
+                        <label className="block text-[10px] text-gray-400 mb-1" title="Minimum AI confidence required to enter a trade. Below this = skip trade. 45-55 for more trades, 65-75 for quality.">Min Confidence</label>
                         <div className="flex items-center gap-1">
                           <input
                             type="number"
@@ -1948,7 +1948,7 @@ export default function GiniePanel() {
                         </div>
                       </div>
                       <div>
-                        <label className="block text-[10px] text-gray-400 mb-1">High Confidence</label>
+                        <label className="block text-[10px] text-gray-400 mb-1" title="Confidence level considered 'high quality'. Positions may get larger size multiplier above this threshold.">High Confidence</label>
                         <div className="flex items-center gap-1">
                           <input
                             type="number"
@@ -1963,7 +1963,7 @@ export default function GiniePanel() {
                         </div>
                       </div>
                       <div>
-                        <label className="block text-[10px] text-gray-400 mb-1">Ultra Confidence</label>
+                        <label className="block text-[10px] text-gray-400 mb-1" title="Exceptional confidence level. May trigger maximum position size and priority execution.">Ultra Confidence</label>
                         <div className="flex items-center gap-1">
                           <input
                             type="number"
@@ -1994,7 +1994,7 @@ export default function GiniePanel() {
                     <div className="px-2 py-2 border-t border-gray-700 space-y-2">
                       <div className="grid grid-cols-2 gap-2">
                         <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Base Size</label>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Starting position size in USD before adjustments. The actual size may be larger based on confidence and risk settings.">Base Size</label>
                           <div className="flex items-center gap-1">
                             <span className="text-[10px] text-gray-500">$</span>
                             <input
@@ -2009,7 +2009,7 @@ export default function GiniePanel() {
                           </div>
                         </div>
                         <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Max Size</label>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Maximum position size cap in USD. Positions will never exceed this amount regardless of other multipliers.">Max Size</label>
                           <div className="flex items-center gap-1">
                             <span className="text-[10px] text-gray-500">$</span>
                             <input
@@ -2026,7 +2026,7 @@ export default function GiniePanel() {
                       </div>
                       <div className="grid grid-cols-3 gap-2">
                         <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Max Positions</label>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Maximum concurrent positions allowed for this mode. New trades are blocked when limit is reached.">Max Positions</label>
                           <input
                             type="number"
                             min="1"
@@ -2037,7 +2037,7 @@ export default function GiniePanel() {
                           />
                         </div>
                         <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Leverage</label>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Leverage multiplier for this mode. Higher leverage = higher risk and potential reward. Recommended: 3-5x for swing, 10-20x for scalp.">Leverage</label>
                           <div className="flex items-center gap-1">
                             <input
                               type="number"
@@ -2051,7 +2051,7 @@ export default function GiniePanel() {
                           </div>
                         </div>
                         <div>
-                          <label className="block text-[10px] text-gray-400 mb-1">Size Multiplier</label>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Position size scaling range. Lo=minimum multiplier, Hi=maximum multiplier based on signal strength.">Size Multiplier</label>
                           <div className="flex items-center gap-1">
                             <input
                               type="number"
@@ -2065,6 +2065,76 @@ export default function GiniePanel() {
                             <span className="text-[10px] text-gray-500">x</span>
                           </div>
                         </div>
+                      </div>
+
+                      {/* Fallback & Safety Settings */}
+                      <div className="mt-2 pt-2 border-t border-gray-600">
+                        <span className="text-gray-400 text-[10px] block mb-2">Fallback & Safety Settings</span>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px]" title="Only use this percentage of available balance. 0.90 = use 90%, leaving 10% buffer for fees and slippage.">Safety Margin</span>
+                            <input
+                              type="number"
+                              min="0.5"
+                              max="1"
+                              step="0.05"
+                              value={modeConfigs[selectedModeConfig]?.size?.safety_margin ?? 0.9}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.safety_margin', Number(e.target.value))}
+                              className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px]" title="Minimum account balance required to trade. Trading is blocked if balance falls below this threshold.">Min Balance $</span>
+                            <input
+                              type="number"
+                              min="10"
+                              max="500"
+                              step="10"
+                              value={modeConfigs[selectedModeConfig]?.size?.min_balance_usd ?? 50}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.min_balance_usd', Number(e.target.value))}
+                              className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px]" title="Minimum position size. Trades smaller than this are rejected to avoid high fee percentage impact.">Min Pos Size $</span>
+                            <input
+                              type="number"
+                              min="5"
+                              max="100"
+                              step="5"
+                              value={modeConfigs[selectedModeConfig]?.size?.min_position_size_usd ?? 10}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.min_position_size_usd', Number(e.target.value))}
+                              className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px]" title="Base multiplier for confidence-based sizing. Lower = more conservative base positions.">Conf Mult Base</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.size?.confidence_multiplier_base ?? 0.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.confidence_multiplier_base', Number(e.target.value))}
+                              className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
+                            />
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-gray-500 text-[10px]" title="How much AI confidence affects position size. Higher = more aggressive scaling with high confidence signals.">Conf Mult Scale</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.size?.confidence_multiplier_scale ?? 0.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'size.confidence_multiplier_scale', Number(e.target.value))}
+                              className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
+                            />
+                          </div>
+                        </div>
+                        <p className="text-gray-500 text-[9px] mt-1">
+                          Fallback values used when mode-specific config is not set.
+                        </p>
                       </div>
                     </div>
                   )}
@@ -2083,9 +2153,9 @@ export default function GiniePanel() {
                     <div className="px-2 py-2 border-t border-gray-700 space-y-3">
                       {/* Margin Type Selection */}
                       <div className="flex items-center gap-3 pb-2 border-b border-gray-700">
-                        <label className="text-[10px] text-gray-400">Margin:</label>
+                        <label className="text-[10px] text-gray-400" title="Margin type for positions. Cross uses entire balance as collateral. Isolated limits risk to assigned margin only.">Margin:</label>
                         <div className="flex gap-2">
-                          <label className="flex items-center gap-1 text-[10px]">
+                          <label className="flex items-center gap-1 text-[10px]" title="Cross margin: Uses entire wallet balance as collateral. Lower liquidation risk but entire balance at stake.">
                             <input
                               type="radio"
                               name={`margin-${selectedModeConfig}`}
@@ -2095,7 +2165,7 @@ export default function GiniePanel() {
                             />
                             <span className="text-blue-400">Cross</span>
                           </label>
-                          <label className="flex items-center gap-1 text-[10px]">
+                          <label className="flex items-center gap-1 text-[10px]" title="Isolated margin: Only assigned margin at risk. Higher liquidation risk but protects rest of balance.">
                             <input
                               type="radio"
                               name={`margin-${selectedModeConfig}`}
@@ -2124,7 +2194,7 @@ export default function GiniePanel() {
 
                       {/* ROI-based SL/TP Toggle */}
                       <div className="pb-2 border-b border-gray-700">
-                        <label className="flex items-center gap-2 text-[10px] text-gray-400 mb-2">
+                        <label className="flex items-center gap-2 text-[10px] text-gray-400 mb-2" title="Use Return on Investment (ROI) percentage instead of price percentage. ROI accounts for leverage. E.g., 10x leverage with 1% price move = 10% ROI.">
                           <input
                             type="checkbox"
                             checked={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp || false}
@@ -2137,7 +2207,7 @@ export default function GiniePanel() {
                         {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp && (
                           <div className="grid grid-cols-2 gap-2 mt-2">
                             <div>
-                              <label className="block text-[10px] text-gray-400 mb-1">ROI Stop Loss %</label>
+                              <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss based on ROI (Return on Investment). Negative value. E.g., -10% = close if ROI drops to -10%. Accounts for leverage.">ROI Stop Loss %</label>
                               <div className="flex items-center gap-1">
                                 <input
                                   type="number"
@@ -2152,7 +2222,7 @@ export default function GiniePanel() {
                               </div>
                             </div>
                             <div>
-                              <label className="block text-[10px] text-gray-400 mb-1">ROI Take Profit %</label>
+                              <label className="block text-[10px] text-gray-400 mb-1" title="Take profit based on ROI (Return on Investment). E.g., 25% = close when ROI reaches 25%. With 10x leverage, 2.5% price move = 25% ROI.">ROI Take Profit %</label>
                               <div className="flex items-center gap-1">
                                 <input
                                   type="number"
@@ -2174,7 +2244,7 @@ export default function GiniePanel() {
                       {!modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp && (
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="block text-[10px] text-gray-400 mb-1">Stop Loss %</label>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss percentage from entry price. Position closes if price moves against you by this amount.">Stop Loss %</label>
                             <div className="flex items-center gap-1">
                               <input
                                 type="number"
@@ -2189,7 +2259,7 @@ export default function GiniePanel() {
                             </div>
                           </div>
                           <div>
-                            <label className="block text-[10px] text-gray-400 mb-1">Take Profit %</label>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Take profit percentage from entry price. Position closes when price moves in your favor by this amount.">Take Profit %</label>
                             <div className="flex items-center gap-1">
                               <input
                                 type="number"
@@ -2208,7 +2278,7 @@ export default function GiniePanel() {
 
                       {/* Trailing Stop */}
                       <div className="space-y-2">
-                        <label className="flex items-center gap-2 text-[10px] text-gray-400">
+                        <label className="flex items-center gap-2 text-[10px] text-gray-400" title="Enable trailing stop that follows price movement. Locks in profits as price moves favorably.">
                           <input
                             type="checkbox"
                             checked={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled || false}
@@ -2220,7 +2290,7 @@ export default function GiniePanel() {
                         {modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled && (
                           <div className="grid grid-cols-3 gap-2 ml-4">
                             <div>
-                              <label className="block text-[10px] text-gray-500 mb-1">Trail %</label>
+                              <label className="block text-[10px] text-gray-500 mb-1" title="Trailing stop distance as percentage. Stop follows price by this amount (e.g., 1% = stop trails 1% below peak).">Trail %</label>
                               <input
                                 type="number"
                                 min="0"
@@ -2232,7 +2302,7 @@ export default function GiniePanel() {
                               />
                             </div>
                             <div>
-                              <label className="block text-[10px] text-gray-500 mb-1">Activate @ %</label>
+                              <label className="block text-[10px] text-gray-500 mb-1" title="Profit level required before trailing stop activates. E.g., 0.5% = trailing starts after 0.5% profit.">Activate @ %</label>
                               <input
                                 type="number"
                                 min="0"
@@ -2244,7 +2314,7 @@ export default function GiniePanel() {
                               />
                             </div>
                             <div>
-                              <label className="block text-[10px] text-gray-500 mb-1">Activate @ Price</label>
+                              <label className="block text-[10px] text-gray-500 mb-1" title="Absolute price level at which trailing activates. Use 0 to use percentage instead.">Activate @ Price</label>
                               <input
                                 type="number"
                                 min="0"
@@ -2257,6 +2327,430 @@ export default function GiniePanel() {
                             </div>
                           </div>
                         )}
+                      </div>
+
+                      {/* ATR/LLM Blending Settings */}
+                      <div className="pt-2 border-t border-gray-700">
+                        <div className="text-[10px] text-purple-400 font-medium mb-2">ATR/LLM Blending</div>
+
+                        {/* ATR Multipliers */}
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Multiplier for ATR-based stop loss. Higher = wider stops based on volatility. E.g., 1.5 = SL at 1.5x ATR.">ATR SL Multiplier</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="5"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.atr_sl_multiplier ?? 1.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_sl_multiplier', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Multiplier for ATR-based take profit. Higher = larger profit targets. E.g., 3.0 = TP at 3x ATR.">ATR TP Multiplier</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="10"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.atr_tp_multiplier ?? 3.0}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_tp_multiplier', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        {/* ATR SL Bounds */}
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Minimum bound for ATR-calculated stop loss percentage. Prevents SL from being too tight.">ATR SL Min %</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="10"
+                                step="0.1"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.atr_sl_min ?? 0.5}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_sl_min', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Maximum bound for ATR-calculated stop loss percentage. Prevents SL from being too wide.">ATR SL Max %</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="10"
+                                step="0.1"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.atr_sl_max ?? 5.0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_sl_max', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* ATR TP Bounds */}
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Minimum bound for ATR-calculated take profit percentage. Keeps TP within reasonable minimum.">ATR TP Min %</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.atr_tp_min ?? 1.0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_tp_min', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Maximum bound for ATR-calculated take profit percentage. Keeps TP within reasonable range.">ATR TP Max %</label>
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={modeConfigs[selectedModeConfig]?.sltp?.atr_tp_max ?? 15.0}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_tp_max', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                              />
+                              <span className="text-[10px] text-gray-500">%</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* LLM/ATR Weights */}
+                        <div className="grid grid-cols-2 gap-2 mb-2">
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Weight given to AI/LLM suggested SL/TP levels. 0.7 = 70% AI, 30% ATR calculation.">LLM Weight</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.llm_weight ?? 0.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.llm_weight', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-gray-400 mb-1" title="Weight given to ATR-based SL/TP calculation. Should sum to 1.0 with LLM weight.">ATR Weight</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.sltp?.atr_weight ?? 0.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_weight', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        {/* TP Gain Levels - Individual inputs */}
+                        <div className="space-y-1">
+                          <span className="text-gray-400 text-[10px] block">Take Profit Levels (%)</span>
+                          <div className="grid grid-cols-4 gap-1">
+                            <div className="text-center">
+                              <label className="text-gray-500 text-[9px]" title="Take profit level 1 as percentage of full TP. Partial close at this level.">TP1</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[0] ?? 0.25) * 100).toFixed(1)}
+                                onChange={(e) => {
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
+                                  levels[0] = Number(e.target.value) / 100;
+                                  updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
+                                }}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
+                              />
+                            </div>
+                            <div className="text-center">
+                              <label className="text-gray-500 text-[9px]" title="Take profit level 2 as percentage of full TP. Partial close at this level.">TP2</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[1] ?? 0.5) * 100).toFixed(1)}
+                                onChange={(e) => {
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
+                                  levels[1] = Number(e.target.value) / 100;
+                                  updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
+                                }}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
+                              />
+                            </div>
+                            <div className="text-center">
+                              <label className="text-gray-500 text-[9px]" title="Take profit level 3 as percentage of full TP. Partial close at this level.">TP3</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[2] ?? 0.75) * 100).toFixed(1)}
+                                onChange={(e) => {
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
+                                  levels[2] = Number(e.target.value) / 100;
+                                  updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
+                                }}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
+                              />
+                            </div>
+                            <div className="text-center">
+                              <label className="text-gray-500 text-[9px]" title="Take profit level 4 as percentage of full TP. Final close at this level.">TP4</label>
+                              <input
+                                type="number"
+                                min="0"
+                                max="50"
+                                step="0.5"
+                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[3] ?? 1.0) * 100).toFixed(1)}
+                                onChange={(e) => {
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
+                                  levels[3] = Number(e.target.value) / 100;
+                                  updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
+                                }}
+                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
+                              />
+                            </div>
+                          </div>
+                          <div className="text-[9px] text-gray-500 mt-1">Percentage gains for each TP level (e.g., 25%, 50%, 75%, 100%)</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Risk Configuration */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'risk' ? null : 'risk')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Risk Settings</span>
+                    {expandedModeSection === 'risk' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'risk' && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      {/* Risk Level */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Overall risk tolerance. Conservative=smaller positions &amp; tighter stops. Aggressive=larger positions &amp; wider stops.">Risk Level</span>
+                        <select
+                          value={modeConfigs[selectedModeConfig]?.risk?.risk_level || 'moderate'}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.risk_level', e.target.value)}
+                          className="w-24 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        >
+                          <option value="conservative">Conservative</option>
+                          <option value="moderate">Moderate</option>
+                          <option value="aggressive">Aggressive</option>
+                        </select>
+                      </div>
+
+                      {/* Max Drawdown % */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Maximum allowed account drawdown before trading pauses. E.g., 10% = stop trading if account drops 10% from peak.">Max Drawdown %</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="50"
+                            step="0.5"
+                            value={modeConfigs[selectedModeConfig]?.risk?.max_drawdown_percent || 10}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.max_drawdown_percent', Number(e.target.value))}
+                            className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+
+                      {/* Daily Loss Limit % */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Maximum loss allowed per day as percentage of account. Trading pauses when limit is hit, resets next day.">Daily Loss Limit %</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="20"
+                            step="0.5"
+                            value={modeConfigs[selectedModeConfig]?.risk?.daily_loss_limit_percent || 3}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.daily_loss_limit_percent', Number(e.target.value))}
+                            className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+
+                      {/* Weekly Loss Limit % */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Maximum loss allowed per week. Provides longer-term protection against losing streaks.">Weekly Loss Limit %</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="50"
+                            step="1"
+                            value={modeConfigs[selectedModeConfig]?.risk?.weekly_loss_limit_percent || 10}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.weekly_loss_limit_percent', Number(e.target.value))}
+                            className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+
+                      {/* Max Portfolio Risk % */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Maximum risk per single trade as percentage of portfolio. E.g., 2% = never risk more than 2% on one trade.">Max Portfolio Risk %</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min="0"
+                            max="10"
+                            step="0.5"
+                            value={modeConfigs[selectedModeConfig]?.risk?.max_portfolio_risk_percent || 2}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.max_portfolio_risk_percent', Number(e.target.value))}
+                            className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                          <span className="text-[10px] text-gray-500">%</span>
+                        </div>
+                      </div>
+
+                      {/* Correlation Penalty */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Reduce position size when opening correlated positions. 0.5 = reduce by 50% if similar position exists.">Correlation Penalty</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.1"
+                          value={modeConfigs[selectedModeConfig]?.risk?.correlation_penalty || 0.5}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.correlation_penalty', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Trend Divergence Configuration */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'trend_divergence' ? null : 'trend_divergence')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Trend Divergence</span>
+                    {expandedModeSection === 'trend_divergence' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'trend_divergence' && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      {/* Enabled Toggle */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Enable multi-timeframe trend divergence checking before entering trades.">Enabled</span>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.trend_divergence?.enabled || false}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.enabled', e.target.checked)}
+                          className="w-4 h-4 rounded"
+                        />
+                      </div>
+
+                      {/* Block on Divergence */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Completely block trades when timeframes disagree on trend direction. Strict mode for trend-following.">Block on Divergence</span>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.trend_divergence?.block_on_divergence || false}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.block_on_divergence', e.target.checked)}
+                          className="w-4 h-4 rounded"
+                        />
+                      </div>
+
+                      {/* Timeframes to Check */}
+                      <div className="space-y-1">
+                        <span className="text-[10px] text-gray-400" title="Which timeframes to analyze for trend agreement. More timeframes = stricter filtering.">Timeframes to Check</span>
+                        <div className="flex flex-wrap gap-1">
+                          {['5m', '15m', '1h', '4h'].map((tf) => (
+                            <label key={tf} className="flex items-center gap-1 text-[10px] text-gray-300" title={`Include ${tf} timeframe in trend divergence analysis. Check multiple timeframes for stricter trend confirmation.`}>
+                              <input
+                                type="checkbox"
+                                checked={(modeConfigs[selectedModeConfig]?.trend_divergence?.timeframes_to_check || ['15m', '1h']).includes(tf)}
+                                onChange={(e) => {
+                                  const current = modeConfigs[selectedModeConfig]?.trend_divergence?.timeframes_to_check || ['15m', '1h'];
+                                  const updated = e.target.checked
+                                    ? [...current, tf]
+                                    : current.filter(t => t !== tf);
+                                  updateModeConfig(selectedModeConfig, 'trend_divergence.timeframes_to_check', updated);
+                                }}
+                                className="w-3 h-3 rounded"
+                              />
+                              {tf}
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Min Aligned Timeframes */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Minimum number of timeframes that must agree on trend direction. E.g., 2 = at least 2 of 4 must align.">Min Aligned Timeframes</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="4"
+                          step="1"
+                          value={modeConfigs[selectedModeConfig]?.trend_divergence?.min_aligned_timeframes || 2}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.min_aligned_timeframes', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* ADX Threshold */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Minimum ADX value to confirm trend strength. Below threshold = ranging market, skip trade. 25+ = trending.">ADX Threshold</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={modeConfigs[selectedModeConfig]?.trend_divergence?.adx_threshold || 25}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.adx_threshold', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Counter-Trend Penalty */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Reduce confidence when trading against the higher timeframe trend. 0.5 = reduce confidence by 50%.">Counter-Trend Penalty</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="1"
+                          step="0.1"
+                          value={modeConfigs[selectedModeConfig]?.trend_divergence?.counter_trend_penalty || 0.5}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.counter_trend_penalty', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Allow Counter-Trend */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Allow trades against the prevailing trend. Enable for mean-reversion strategies, disable for trend-following.">Allow Counter-Trend</span>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.trend_divergence?.allow_counter_trend || false}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.allow_counter_trend', e.target.checked)}
+                          className="w-4 h-4 rounded"
+                        />
                       </div>
                     </div>
                   )}
@@ -2290,6 +2784,259 @@ export default function GiniePanel() {
                       <div className="text-[9px] text-gray-500 mt-1.5 text-center">
                         Circuit breaker settings are read-only in this view
                       </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Funding Rate Configuration */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'funding' ? null : 'funding')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Funding Rate Awareness</span>
+                    {expandedModeSection === 'funding' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'funding' && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      {/* Enabled toggle */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Enable funding rate awareness. Avoids entering positions with unfavorable funding and considers exit before funding.">Enabled</span>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.funding_rate?.enabled ?? true}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.enabled', e.target.checked)}
+                          className="w-4 h-4 rounded bg-gray-700 border-gray-600"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        {/* Max Funding Rate */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Maximum acceptable funding rate. Block new positions if funding exceeds this. 0.001 = 0.1% per 8 hours.">Max Rate</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="0.01"
+                              step="0.0001"
+                              value={modeConfigs[selectedModeConfig]?.funding_rate?.max_funding_rate ?? 0.001}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.max_funding_rate', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.max_funding_rate ?? 0.001) * 100).toFixed(2)}%)</span>
+                          </div>
+                        </div>
+
+                        {/* Block Time */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Minutes before funding to block new positions. E.g., 30 = don't open new positions within 30 min of funding.">Block Time</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="120"
+                            step="1"
+                            value={modeConfigs[selectedModeConfig]?.funding_rate?.block_time_minutes ?? 30}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.block_time_minutes', Number(e.target.value))}
+                            className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                        </div>
+
+                        {/* Exit Time */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Minutes before funding to consider exiting positions with minimal profit. Avoids paying high funding fees.">Exit Time</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="60"
+                            step="1"
+                            value={modeConfigs[selectedModeConfig]?.funding_rate?.exit_time_minutes ?? 10}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.exit_time_minutes', Number(e.target.value))}
+                            className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                          />
+                        </div>
+
+                        {/* Fee Threshold % */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Exit if funding would consume more than this percentage of current profit. 30 = exit if funding > 30% of profit.">Fee Threshold %</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="1"
+                              value={(modeConfigs[selectedModeConfig]?.funding_rate?.fee_threshold_percent ?? 0.3) * 100}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.fee_threshold_percent', Number(e.target.value) / 100)}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">%</span>
+                          </div>
+                        </div>
+
+                        {/* Extreme Funding Rate */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Funding rate considered extreme. Positions with extreme funding are prioritized for exit. 0.003 = 0.3%.">Extreme Rate</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="0.01"
+                              step="0.0001"
+                              value={modeConfigs[selectedModeConfig]?.funding_rate?.extreme_funding_rate ?? 0.003}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.extreme_funding_rate', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.extreme_funding_rate ?? 0.003) * 100).toFixed(2)}%)</span>
+                          </div>
+                        </div>
+
+                        {/* High Rate Reduction */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Reduce position size when funding is high but not extreme. 0.5 = reduce position by 50%.">High Reduction</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.funding_rate?.high_rate_reduction ?? 0.5}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.high_rate_reduction', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.high_rate_reduction ?? 0.5) * 100).toFixed(0)}%)</span>
+                          </div>
+                        </div>
+
+                        {/* Elevated Rate Reduction */}
+                        <div>
+                          <label className="block text-[10px] text-gray-400 mb-1" title="Reduce position size when funding is elevated. 0.75 = reduce position by 25% (keep 75%).">Elevated Reduction</label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={modeConfigs[selectedModeConfig]?.funding_rate?.elevated_rate_reduction ?? 0.75}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.elevated_rate_reduction', Number(e.target.value))}
+                              className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                            />
+                            <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.elevated_rate_reduction ?? 0.75) * 100).toFixed(0)}%)</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="text-[9px] text-gray-500 mt-1">
+                        Controls how funding rates affect position sizing. High rates reduce position sizes proportionally.
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Position Averaging */}
+                <div className="border border-gray-700 rounded">
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'averaging' ? null : 'averaging')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium">Position Averaging</span>
+                    {expandedModeSection === 'averaging' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'averaging' && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      {/* Allow Averaging toggle */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Enable adding to existing positions when conditions are met. Can improve average entry or increase winners.">Allow Averaging</span>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.averaging?.allow_averaging ?? false}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.allow_averaging', e.target.checked)}
+                          className="w-4 h-4"
+                        />
+                      </div>
+
+                      {/* Max Averages (total count) */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Maximum number of times to add to a position. E.g., 3 = can add up to 3 times to original position.">Max Averages</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="10"
+                          value={modeConfigs[selectedModeConfig]?.averaging?.max_averages ?? 2}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.max_averages', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Average Up Profit % - when to add on profit */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Add to position when profit exceeds this percentage. Pyramiding into winners. E.g., 1.0 = add when up 1%.">Add on Profit &gt; %</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="20"
+                          step="0.5"
+                          value={modeConfigs[selectedModeConfig]?.averaging?.average_up_profit_percent ?? 1.0}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.average_up_profit_percent', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Average Down Loss % - when to add on loss */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Add to position when loss exceeds this percentage. Dollar-cost averaging. E.g., -1.0 = add when down 1%. Use with caution!">Add on Loss &lt; %</span>
+                        <input
+                          type="number"
+                          min="-20"
+                          max="0"
+                          step="0.5"
+                          value={modeConfigs[selectedModeConfig]?.averaging?.average_down_loss_percent ?? -1.0}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.average_down_loss_percent', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Add Size % */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Size of each add as percentage of original position. 50 = each add is half the original size.">Add Size %</span>
+                        <input
+                          type="number"
+                          min="10"
+                          max="100"
+                          step="10"
+                          value={modeConfigs[selectedModeConfig]?.averaging?.add_size_percent ?? 50}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.add_size_percent', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Min Confidence for Average */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Minimum AI confidence required to average into position. Prevents averaging on weak signals.">Min Confidence %</span>
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="5"
+                          value={modeConfigs[selectedModeConfig]?.averaging?.min_confidence_for_average ?? 70}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.min_confidence_for_average', Number(e.target.value))}
+                          className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                        />
+                      </div>
+
+                      {/* Use LLM for Averaging */}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-400" title="Let AI decide whether averaging is wise based on market conditions, momentum, and risk factors.">Use AI for Decisions</span>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.averaging?.use_llm_for_averaging ?? true}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.use_llm_for_averaging', e.target.checked)}
+                          className="w-4 h-4"
+                        />
+                      </div>
+
+                      <p className="text-gray-500 text-[9px] mt-1">
+                        When enabled, adds to position when profit/loss thresholds hit. AI can override.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -2381,7 +3128,7 @@ export default function GiniePanel() {
               {llmConfig?.enabled && (
                 <div className="grid grid-cols-2 gap-2 mt-2">
                   <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Provider</label>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="AI provider for trade analysis. DeepSeek=cost-effective, Claude=high quality, OpenAI=GPT models, Local=self-hosted.">Provider</label>
                     <select
                       value={llmConfig?.provider || 'deepseek'}
                       onChange={(e) => handleUpdateLLMConfig({ provider: e.target.value })}
@@ -2394,7 +3141,7 @@ export default function GiniePanel() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Model</label>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Specific model to use. Examples: deepseek-chat, gpt-4o, claude-3-5-sonnet. Check provider docs for available models.">Model</label>
                     <input
                       type="text"
                       value={llmConfig?.model || ''}
@@ -2404,7 +3151,7 @@ export default function GiniePanel() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Timeout (ms)</label>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Maximum time to wait for AI response in milliseconds. Trades skip AI analysis if timeout exceeded. 10000=10 seconds.">Timeout (ms)</label>
                     <input
                       type="number"
                       min="1000"
@@ -2416,7 +3163,7 @@ export default function GiniePanel() {
                     />
                   </div>
                   <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Cache Duration (sec)</label>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="How long to cache AI responses in seconds. Reduces API calls for same symbol. 300=5 minutes. Use 0 to disable caching.">Cache Duration (sec)</label>
                     <input
                       type="number"
                       min="0"
@@ -2514,7 +3261,7 @@ export default function GiniePanel() {
 
                     {/* Toggles */}
                     <div className="flex flex-wrap gap-2">
-                      <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                      <label className="flex items-center gap-1 text-[10px] text-gray-400" title="If AI analysis times out, skip the trade instead of proceeding without AI input. Safer but may miss opportunities.">
                         <input
                           type="checkbox"
                           checked={modeLLMSettings[selectedLLMMode]?.skip_on_timeout || false}
@@ -2525,7 +3272,7 @@ export default function GiniePanel() {
                         />
                         Skip on timeout
                       </label>
-                      <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                      <label className="flex items-center gap-1 text-[10px] text-gray-400" title="Block trade if AI recommendation disagrees with technical signals. More conservative but higher quality trades.">
                         <input
                           type="checkbox"
                           checked={modeLLMSettings[selectedLLMMode]?.block_on_disagreement || false}
@@ -2536,7 +3283,7 @@ export default function GiniePanel() {
                         />
                         Block on disagreement
                       </label>
-                      <label className="flex items-center gap-1 text-[10px] text-gray-400">
+                      <label className="flex items-center gap-1 text-[10px] text-gray-400" title="Cache AI responses for this mode. Reduces API calls and costs but may use slightly stale analysis.">
                         <input
                           type="checkbox"
                           checked={modeLLMSettings[selectedLLMMode]?.cache_enabled || false}

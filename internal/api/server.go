@@ -176,6 +176,7 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/ginie/decisions":                 true,
 		"/api/futures/ginie/blocked-coins":             true,
 		"/api/futures/ginie/risk-level":                true,
+		"/api/futures/ginie/rate-limiter/status":       true,
 		// LLM & Adaptive AI endpoints (internal state only - Story 2.8)
 		"/api/futures/ginie/llm-config":                true,
 		"/api/futures/ginie/adaptive-recommendations":  true,
@@ -446,6 +447,13 @@ func (s *Server) setupRoutes() {
 			futures.GET("/trade-source-stats", s.handleGetTradeSourceStats)
 			futures.GET("/position-trade-sources", s.handleGetPositionTradeSources)
 
+			// Trade lifecycle events endpoints
+			futures.GET("/trades/:tradeId/events", s.handleGetTradeLifecycleEvents)
+			futures.GET("/trades/:tradeId/events/:eventType", s.handleGetTradeLifecycleEventsByType)
+			futures.GET("/trades/:tradeId/lifecycle-summary", s.handleGetTradeLifecycleSummary)
+			futures.GET("/trades/:tradeId/sl-revisions", s.handleGetTradeSLRevisionCount)
+			futures.GET("/trade-events/recent", s.handleGetRecentTradeLifecycleEvents)
+
 			// Autopilot endpoints
 			futures.GET("/autopilot/status", s.handleGetFuturesAutopilotStatus)
 			futures.POST("/autopilot/toggle", s.handleToggleFuturesAutopilot)
@@ -612,6 +620,9 @@ func (s *Server) setupRoutes() {
 
 			// Ginie Diagnostics endpoint
 			futures.GET("/ginie/diagnostics", s.handleGetGinieDiagnostics)
+
+			// Ginie Rate Limiter status endpoint
+			futures.GET("/ginie/rate-limiter/status", s.handleGetRateLimiterStatus)
 
 			// Ginie Trend Timeframes endpoints (multi-timeframe divergence detection)
 			futures.GET("/ginie/trend-timeframes", s.handleGetGinieTrendTimeframes)

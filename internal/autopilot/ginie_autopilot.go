@@ -317,6 +317,7 @@ type GiniePosition struct {
 	RealizedPnL      float64 `json:"realized_pnl"`     // From partial closes
 	UnrealizedPnL    float64 `json:"unrealized_pnl"`
 	DecisionReport   *GinieDecisionReport `json:"decision_report,omitempty"`
+	FuturesTradeID   int64   `json:"futures_trade_id,omitempty"` // Database trade ID for lifecycle events
 
 	// Trade Source Tracking
 	Source       string  `json:"source"`                   // "ai" or "strategy"
@@ -555,6 +556,7 @@ type GinieAutopilot struct {
 	futuresClient binance.FuturesClient
 	logger        *logging.Logger
 	repo          *database.Repository // Database for trade persistence
+	eventLogger   *TradeEventLogger    // Trade lifecycle event logging
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -681,6 +683,7 @@ func NewGinieAutopilot(
 		futuresClient:     futuresClient,
 		logger:            logger,
 		repo:              repo,
+		eventLogger:       NewTradeEventLogger(repo.GetDB()),
 		circuitBreaker:    circuit.NewCircuitBreaker(cbConfig),
 		currentRiskLevel:  config.RiskLevel,
 		stopChan:          make(chan struct{}),
@@ -1797,7 +1800,11 @@ func (ga *GinieAutopilot) getAvailableBalance() (float64, error) {
 // 4. Risk level setting
 // 5. Safety margin to avoid over-allocation
 // 6. Per-symbol performance category (size multiplier)
-func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidence float64, currentPositionCount int) (positionUSD float64, canTrade bool, reason string) {
+// 7. Mode-specific configuration overrides
+func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidence float64, currentPositionCount int, mode GinieTradingMode) (positionUSD float64, canTrade bool, reason string) {
+	// Get mode configuration for mode-specific sizing parameters
+	modeConfig := ga.getModeConfig(mode)
+
 	// Get actual available balance from Binance
 	availableBalance, err := ga.getAvailableBalance()
 	if err != nil {
@@ -1805,18 +1812,28 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		return 0, false, "cannot fetch balance"
 	}
 
-	// Safety margin: only use 90% of available balance to avoid margin issues
+	// Safety margin: use mode config or fallback to 0.90 (only use 90% of available balance)
 	safetyMargin := 0.90
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.SafetyMargin > 0 {
+		safetyMargin = modeConfig.Size.SafetyMargin
+	}
 	usableBalance := availableBalance * safetyMargin
 
-	// Check minimum balance threshold
-	minBalanceRequired := 25.0 // At least $25 to trade
+	// Check minimum balance threshold: use mode config or fallback to $25
+	minBalanceRequired := 25.0
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinBalanceUSD > 0 {
+		minBalanceRequired = modeConfig.Size.MinBalanceUSD
+	}
 	if usableBalance < minBalanceRequired {
 		return 0, false, fmt.Sprintf("insufficient balance: $%.2f (need $%.2f)", usableBalance, minBalanceRequired)
 	}
 
 	// Use position count passed from caller (captured while holding lock)
+	// Use mode-specific max positions if available, otherwise global config
 	maxPositions := ga.config.MaxPositions
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
+		maxPositions = modeConfig.Size.MaxPositions
+	}
 	availableSlots := maxPositions - currentPositionCount
 
 	if availableSlots <= 0 {
@@ -1827,20 +1844,48 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 	// Divide usable balance across available slots
 	baseAllocationPerPosition := usableBalance / float64(availableSlots)
 
-	// Adjust based on risk level
-	riskMultiplier := 1.0
+	// Get risk multipliers from mode config with fallbacks
+	riskMultiplierConservative := 0.6
+	riskMultiplierModerate := 0.8
+	riskMultiplierAggressive := 1.0
+	if modeConfig != nil && modeConfig.Size != nil {
+		if modeConfig.Size.RiskMultiplierConservative > 0 {
+			riskMultiplierConservative = modeConfig.Size.RiskMultiplierConservative
+		}
+		if modeConfig.Size.RiskMultiplierModerate > 0 {
+			riskMultiplierModerate = modeConfig.Size.RiskMultiplierModerate
+		}
+		if modeConfig.Size.RiskMultiplierAggressive > 0 {
+			riskMultiplierAggressive = modeConfig.Size.RiskMultiplierAggressive
+		}
+	}
+
+	// Adjust based on risk level using mode-specific multipliers
+	riskMultiplier := riskMultiplierAggressive
 	switch ga.currentRiskLevel {
 	case "conservative":
-		riskMultiplier = 0.6 // 60% of base allocation
+		riskMultiplier = riskMultiplierConservative
 	case "moderate":
-		riskMultiplier = 0.8 // 80% of base allocation
+		riskMultiplier = riskMultiplierModerate
 	case "aggressive":
-		riskMultiplier = 1.0 // 100% of base allocation
+		riskMultiplier = riskMultiplierAggressive
+	}
+
+	// Get confidence multipliers from mode config with fallbacks
+	confidenceBase := 0.5
+	confidenceScale := 0.7
+	if modeConfig != nil && modeConfig.Size != nil {
+		if modeConfig.Size.ConfidenceMultiplierBase > 0 {
+			confidenceBase = modeConfig.Size.ConfidenceMultiplierBase
+		}
+		if modeConfig.Size.ConfidenceMultiplierScale > 0 {
+			confidenceScale = modeConfig.Size.ConfidenceMultiplierScale
+		}
 	}
 
 	// Adjust based on confidence (higher confidence = more allocation)
 	// Scale: 65% confidence = 0.8x, 80% confidence = 1.0x, 95% confidence = 1.15x
-	confidenceMultiplier := 0.5 + (confidence / 100.0 * 0.7) // Range: 0.5 to 1.2
+	confidenceMultiplier := confidenceBase + (confidence / 100.0 * confidenceScale)
 
 	// Get per-symbol size multiplier based on performance category
 	settingsManager := GetSettingsManager()
@@ -1850,34 +1895,50 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 	// Calculate final position size
 	positionUSD = baseAllocationPerPosition * riskMultiplier * confidenceMultiplier
 
-	// Cap at effective max USD per position (adjusted for symbol performance)
-	if positionUSD > effectiveMaxUSD {
-		positionUSD = effectiveMaxUSD
+	// Cap at mode-specific MaxSizeUSD if configured, otherwise use effective max USD
+	maxSizeUSD := effectiveMaxUSD
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxSizeUSD > 0 {
+		// Use mode-specific max, but still respect per-symbol adjustments (take the lower)
+		if modeConfig.Size.MaxSizeUSD < maxSizeUSD {
+			maxSizeUSD = modeConfig.Size.MaxSizeUSD
+		}
+	}
+	if positionUSD > maxSizeUSD {
+		positionUSD = maxSizeUSD
 	}
 
-	// Log per-symbol adjustment if different from global
-	if effectiveMaxUSD != ga.config.MaxUSDPerPosition {
-		ga.logger.Debug("Per-symbol size adjustment applied",
+	// Log per-symbol or mode adjustment if different from global
+	if maxSizeUSD != ga.config.MaxUSDPerPosition {
+		ga.logger.Debug("Position size cap applied",
 			"symbol", symbol,
+			"mode", mode,
 			"category", symbolSettings.Category,
 			"global_max_usd", ga.config.MaxUSDPerPosition,
-			"effective_max_usd", effectiveMaxUSD)
+			"effective_max_usd", maxSizeUSD)
 	}
 
-	// Minimum position size check
-	minPositionSize := 10.0 // At least $10 per position
+	// Minimum position size check: use mode config or fallback to $10
+	minPositionSize := 10.0
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinPositionSizeUSD > 0 {
+		minPositionSize = modeConfig.Size.MinPositionSizeUSD
+	}
 	if positionUSD < minPositionSize {
 		return 0, false, fmt.Sprintf("calculated position too small: $%.2f (min $%.2f)", positionUSD, minPositionSize)
 	}
 
 	ga.logger.Info("Adaptive position sizing",
+		"mode", mode,
 		"available_balance", fmt.Sprintf("$%.2f", availableBalance),
 		"usable_balance", fmt.Sprintf("$%.2f", usableBalance),
+		"safety_margin", fmt.Sprintf("%.0f%%", safetyMargin*100),
 		"current_positions", currentPositionCount,
 		"available_slots", availableSlots,
 		"base_allocation", fmt.Sprintf("$%.2f", baseAllocationPerPosition),
 		"risk_level", ga.currentRiskLevel,
+		"risk_multiplier", fmt.Sprintf("%.2f", riskMultiplier),
 		"confidence", fmt.Sprintf("%.1f%%", confidence),
+		"confidence_multiplier", fmt.Sprintf("%.2f", confidenceMultiplier),
+		"max_size_usd", fmt.Sprintf("$%.2f", maxSizeUSD),
 		"final_position_usd", fmt.Sprintf("$%.2f", positionUSD))
 
 	return positionUSD, true, ""
@@ -1886,14 +1947,32 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 // ==================== FUNDING RATE AWARENESS ====================
 
 // checkFundingRate checks if trade should be blocked due to high funding rate near funding time
+// Uses mode-specific funding rate configuration if available
 // Returns (shouldBlock bool, reason string)
-func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool) (bool, string) {
+func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool, mode GinieTradingMode) (bool, string) {
 	fundingRate, err := ga.futuresClient.GetFundingRate(symbol)
 	if err != nil || fundingRate == nil {
 		return false, "" // Allow if can't check
 	}
 
-	maxRate := 0.001 // 0.1% threshold
+	// Get mode-specific funding rate config with fallback defaults
+	var maxRate float64 = 0.001       // 0.1% threshold (fallback)
+	var blockTimeMinutes int = 30      // Block within 30 minutes of funding (fallback)
+
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.FundingRate != nil {
+		// Check if funding rate awareness is disabled for this mode
+		if !modeConfig.FundingRate.Enabled {
+			return false, "" // Funding rate checks disabled for this mode
+		}
+		// Use config values if set
+		if modeConfig.FundingRate.MaxFundingRate > 0 {
+			maxRate = modeConfig.FundingRate.MaxFundingRate
+		}
+		if modeConfig.FundingRate.BlockTimeMinutes > 0 {
+			blockTimeMinutes = modeConfig.FundingRate.BlockTimeMinutes
+		}
+	}
 
 	// Calculate cost for our direction
 	// Positive rate = longs pay shorts, negative rate = shorts pay longs
@@ -1907,8 +1986,9 @@ func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool) (bool, st
 	nextFunding := time.Unix(fundingRate.NextFundingTime/1000, 0)
 	timeToFunding := nextFunding.Sub(now)
 
-	// Block if funding costs us money AND rate is high AND near funding time (30 min)
-	if fundingCost > maxRate && timeToFunding > 0 && timeToFunding < 30*time.Minute {
+	// Block if funding costs us money AND rate is high AND near funding time
+	blockDuration := time.Duration(blockTimeMinutes) * time.Minute
+	if fundingCost > maxRate && timeToFunding > 0 && timeToFunding < blockDuration {
 		return true, fmt.Sprintf("High funding %.4f%% costs us in %v", fundingCost*100, timeToFunding.Round(time.Minute))
 	}
 
@@ -1916,6 +1996,7 @@ func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool) (bool, st
 }
 
 // shouldExitBeforeFunding checks if we should close position to avoid funding fee
+// Uses mode-specific funding rate configuration from the position's mode
 // Returns (shouldExit bool, reason string)
 func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, string) {
 	fundingRate, err := ga.futuresClient.GetFundingRate(pos.Symbol)
@@ -1923,12 +2004,36 @@ func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, str
 		return false, ""
 	}
 
+	// Get mode-specific funding rate config with fallback defaults
+	var exitTimeMinutes int = 10           // Only consider exit within 10 minutes (fallback)
+	var feeThresholdPercent float64 = 0.3  // Exit if fee > 30% of profit (fallback)
+	var extremeFundingRate float64 = 0.003 // 0.3% extreme rate (fallback)
+
+	modeConfig := ga.getModeConfig(pos.Mode)
+	if modeConfig != nil && modeConfig.FundingRate != nil {
+		// Check if funding rate awareness is disabled for this mode
+		if !modeConfig.FundingRate.Enabled {
+			return false, "" // Funding rate checks disabled for this mode
+		}
+		// Use config values if set
+		if modeConfig.FundingRate.ExitTimeMinutes > 0 {
+			exitTimeMinutes = modeConfig.FundingRate.ExitTimeMinutes
+		}
+		if modeConfig.FundingRate.FeeThresholdPercent > 0 {
+			feeThresholdPercent = modeConfig.FundingRate.FeeThresholdPercent
+		}
+		if modeConfig.FundingRate.ExtremeFundingRate > 0 {
+			extremeFundingRate = modeConfig.FundingRate.ExtremeFundingRate
+		}
+	}
+
 	now := time.Now().UTC()
 	nextFunding := time.Unix(fundingRate.NextFundingTime/1000, 0)
 	timeToFunding := nextFunding.Sub(now)
 
-	// Only consider if within 10 minutes of funding
-	if timeToFunding > 10*time.Minute || timeToFunding < 0 {
+	// Only consider if within exit time window before funding
+	exitDuration := time.Duration(exitTimeMinutes) * time.Minute
+	if timeToFunding > exitDuration || timeToFunding < 0 {
 		return false, ""
 	}
 
@@ -1944,14 +2049,14 @@ func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, str
 		positionValue := pos.EntryPrice * pos.RemainingQty
 		fundingFee := positionValue * fundingCost
 
-		// Exit if profitable AND funding fee would eat >30% of profit
-		if currentPnL > 0 && fundingFee > currentPnL*0.3 {
+		// Exit if profitable AND funding fee would eat more than threshold % of profit
+		if currentPnL > 0 && fundingFee > currentPnL*feeThresholdPercent {
 			return true, fmt.Sprintf("Exit before funding: PnL $%.2f, fee would be $%.4f (%.1f%% of profit)",
 				currentPnL, fundingFee, (fundingFee/currentPnL)*100)
 		}
 
-		// Exit if funding rate is extreme (>0.3%)
-		if fundingCost > 0.003 {
+		// Exit if funding rate is extreme
+		if fundingCost > extremeFundingRate {
 			return true, fmt.Sprintf("Exit: extreme funding rate %.4f%% in %v", fundingCost*100, timeToFunding.Round(time.Minute))
 		}
 	}
@@ -1960,10 +2065,34 @@ func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, str
 }
 
 // adjustSizeForFunding reduces position size when funding rate is costly
-func (ga *GinieAutopilot) adjustSizeForFunding(symbol string, baseSize float64, isLong bool) float64 {
+// Uses mode-specific funding rate configuration if available
+func (ga *GinieAutopilot) adjustSizeForFunding(symbol string, baseSize float64, isLong bool, mode GinieTradingMode) float64 {
 	fundingRate, err := ga.futuresClient.GetFundingRate(symbol)
 	if err != nil || fundingRate == nil {
 		return baseSize
+	}
+
+	// Get mode-specific funding rate config with fallback defaults
+	var maxFundingRate float64 = 0.001       // 0.1% elevated threshold (fallback)
+	var highRateReduction float64 = 0.5      // 50% reduction for high rates (fallback)
+	var elevatedRateReduction float64 = 0.75 // 75% (25% reduction) for elevated rates (fallback)
+
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.FundingRate != nil {
+		// Check if funding rate awareness is disabled for this mode
+		if !modeConfig.FundingRate.Enabled {
+			return baseSize // Funding rate adjustments disabled for this mode
+		}
+		// Use config values if set
+		if modeConfig.FundingRate.MaxFundingRate > 0 {
+			maxFundingRate = modeConfig.FundingRate.MaxFundingRate
+		}
+		if modeConfig.FundingRate.HighRateReduction > 0 {
+			highRateReduction = modeConfig.FundingRate.HighRateReduction
+		}
+		if modeConfig.FundingRate.ElevatedRateReduction > 0 {
+			elevatedRateReduction = modeConfig.FundingRate.ElevatedRateReduction
+		}
 	}
 
 	fundingCost := fundingRate.FundingRate
@@ -1973,15 +2102,20 @@ func (ga *GinieAutopilot) adjustSizeForFunding(symbol string, baseSize float64, 
 
 	// Only adjust if funding costs us money
 	if fundingCost > 0 {
-		if fundingCost > 0.002 { // > 0.2%
-			ga.logger.Info("Funding rate high - reducing position 50%",
-				"symbol", symbol, "funding_rate", fundingCost*100, "original_size", baseSize)
-			return baseSize * 0.5
+		// High rate threshold = 2x the max funding rate (e.g., 0.2% if max is 0.1%)
+		highRateThreshold := maxFundingRate * 2
+		if fundingCost > highRateThreshold {
+			ga.logger.Info("Funding rate high - reducing position",
+				"symbol", symbol, "mode", mode, "funding_rate", fundingCost*100,
+				"reduction", fmt.Sprintf("%.0f%%", (1-highRateReduction)*100), "original_size", baseSize)
+			return baseSize * highRateReduction
 		}
-		if fundingCost > 0.001 { // > 0.1%
-			ga.logger.Info("Funding rate elevated - reducing position 25%",
-				"symbol", symbol, "funding_rate", fundingCost*100, "original_size", baseSize)
-			return baseSize * 0.75
+		// Elevated rate = at or above max funding rate
+		if fundingCost > maxFundingRate {
+			ga.logger.Info("Funding rate elevated - reducing position",
+				"symbol", symbol, "mode", mode, "funding_rate", fundingCost*100,
+				"reduction", fmt.Sprintf("%.0f%%", (1-elevatedRateReduction)*100), "original_size", baseSize)
+			return baseSize * elevatedRateReduction
 		}
 	}
 
@@ -2098,9 +2232,11 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 
 	// Check funding rate before entry - avoid high fees near funding time
 	isLong := action == "LONG"
-	if blocked, reason := ga.checkFundingRate(symbol, isLong); blocked {
+	selectedMode := decision.SelectedMode
+	if blocked, reason := ga.checkFundingRate(symbol, isLong, selectedMode); blocked {
 		ga.logger.Warn("Ginie skipping trade - funding rate concern",
 			"symbol", symbol,
+			"mode", selectedMode,
 			"reason", reason,
 			"side", decision.TradeExecution.Action)
 		return
@@ -2117,7 +2253,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	// Use adaptive position sizing based on available balance (human-like approach)
 	// Need to unlock temporarily for API call to get balance
 	ga.mu.Unlock()
-	positionUSD, canTrade, reason := ga.calculateAdaptivePositionSize(symbol, decision.ConfidenceScore, currentPositionCount)
+	positionUSD, canTrade, reason := ga.calculateAdaptivePositionSize(symbol, decision.ConfidenceScore, currentPositionCount, selectedMode)
 	ga.mu.Lock()
 
 	// CRITICAL: Re-check position doesn't exist after re-acquiring lock
@@ -2137,7 +2273,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	}
 
 	// Adjust position size based on funding rate (reduce if funding costs us money)
-	positionUSD = ga.adjustSizeForFunding(symbol, positionUSD, isLong)
+	positionUSD = ga.adjustSizeForFunding(symbol, positionUSD, isLong, selectedMode)
 
 	// Get current price
 	price, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
@@ -2329,6 +2465,50 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	ga.positions[symbol] = position
 	ga.dailyTrades++
 	ga.totalTrades++
+
+	// Create initial futures trade record in database for lifecycle tracking
+	if ga.repo != nil {
+		trade := &database.FuturesTrade{
+			Symbol:       symbol,
+			PositionSide: decision.TradeExecution.Action,
+			Side:         decision.TradeExecution.Action,
+			EntryPrice:   actualPrice,
+			Quantity:     actualQty,
+			Leverage:     leverage,
+			MarginType:   "CROSSED",
+			Status:       "OPEN",
+			EntryTime:    time.Now(),
+			TradeSource:  "ginie",
+		}
+		if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+			ga.logger.Warn("Failed to create futures trade record", "error", err, "symbol", symbol)
+		} else {
+			position.FuturesTradeID = trade.ID
+			ga.logger.Debug("Futures trade record created", "symbol", symbol, "trade_id", trade.ID)
+
+			// Log position opened event to lifecycle
+			if ga.eventLogger != nil {
+				conditionsMet := make(map[string]interface{})
+				for _, sig := range decision.SignalAnalysis.PrimarySignals {
+					if sig.Met {
+						conditionsMet[sig.Name] = sig.Value
+					}
+				}
+				go ga.eventLogger.LogPositionOpened(
+					context.Background(),
+					trade.ID,
+					symbol,
+					decision.TradeExecution.Action,
+					string(decision.SelectedMode),
+					actualPrice,
+					actualQty,
+					leverage,
+					decision.ConfidenceScore,
+					conditionsMet,
+				)
+			}
+		}
+	}
 
 	// Place SL/TP orders on Binance (if not dry run)
 	if !ga.config.DryRun {
@@ -2585,6 +2765,20 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 						"tp_level", pos.CurrentTPLevel,
 						"at_breakeven", pos.MovedToBreakeven,
 						"pnl_percent", pnlPercent)
+
+					// Log trailing activation to trade lifecycle
+					if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+						go ga.eventLogger.LogTrailingActivated(
+							context.Background(),
+							pos.FuturesTradeID,
+							pos.Symbol,
+							string(pos.Mode),
+							activationReason,
+							currentPrice,
+							pnlPercent,
+							pos.CurrentTPLevel,
+						)
+					}
 				}
 			}
 		}
@@ -2608,15 +2802,19 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 			// Only move SL in profitable direction (never lower for longs, never higher for shorts)
 			slImproved := false
+			var trailingOldSL float64
+			var trailingImprovement float64
+
 			if pos.Side == "LONG" && newTrailingSL > pos.StopLoss {
 				slImprovement := (newTrailingSL - pos.StopLoss) / pos.EntryPrice * 100
 				if slImprovement >= ga.config.TrailingSLUpdateThreshold {
-					oldSL := pos.StopLoss
+					trailingOldSL = pos.StopLoss
+					trailingImprovement = slImprovement
 					pos.StopLoss = newTrailingSL
 					slImproved = true
 					ga.logger.Info("Trailing SL moved up (LONG)",
 						"symbol", pos.Symbol,
-						"old_sl", oldSL,
+						"old_sl", trailingOldSL,
 						"new_sl", newTrailingSL,
 						"highest_price", pos.HighestPrice,
 						"improvement_pct", slImprovement)
@@ -2624,12 +2822,13 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			} else if pos.Side == "SHORT" && newTrailingSL < pos.StopLoss {
 				slImprovement := (pos.StopLoss - newTrailingSL) / pos.EntryPrice * 100
 				if slImprovement >= ga.config.TrailingSLUpdateThreshold {
-					oldSL := pos.StopLoss
+					trailingOldSL = pos.StopLoss
+					trailingImprovement = slImprovement
 					pos.StopLoss = newTrailingSL
 					slImproved = true
 					ga.logger.Info("Trailing SL moved down (SHORT)",
 						"symbol", pos.Symbol,
-						"old_sl", oldSL,
+						"old_sl", trailingOldSL,
 						"new_sl", newTrailingSL,
 						"lowest_price", pos.LowestPrice,
 						"improvement_pct", slImprovement)
@@ -2639,6 +2838,24 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			// Update Binance order if SL improved significantly
 			if slImproved {
 				ga.updateBinanceSLOrder(pos)
+
+				// Log trailing update to trade lifecycle
+				if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+					highWaterMark := pos.HighestPrice
+					if pos.Side == "SHORT" {
+						highWaterMark = pos.LowestPrice
+					}
+					go ga.eventLogger.LogTrailingUpdated(
+						context.Background(),
+						pos.FuturesTradeID,
+						pos.Symbol,
+						pos.Side,
+						trailingOldSL,
+						pos.StopLoss,
+						highWaterMark,
+						trailingImprovement,
+					)
+				}
 			}
 		}
 		// === END PROACTIVE PROFIT PROTECTION ===
@@ -2888,6 +3105,29 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 					"trailing_active", pos.TrailingActive)
 			}
 
+			// Log TP hit to trade lifecycle
+			if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+				// Calculate PnL for this TP level
+				tpConfig := pos.TakeProfits[tpLevel-1]
+				closeQty := pos.OriginalQty * (tpConfig.Percent / 100.0)
+				var tpPnL float64
+				if pos.Side == "LONG" {
+					tpPnL = (currentPrice - pos.EntryPrice) * closeQty
+				} else {
+					tpPnL = (pos.EntryPrice - currentPrice) * closeQty
+				}
+				go ga.eventLogger.LogTPHit(
+					context.Background(),
+					pos.FuturesTradeID,
+					pos.Symbol,
+					tpLevel,
+					currentPrice,
+					closeQty,
+					tpPnL,
+					pnlPercent,
+				)
+			}
+
 			return tpLevel
 		}
 	}
@@ -3095,6 +3335,18 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition) {
 		"entry", pos.EntryPrice,
 		"new_sl", pos.StopLoss,
 		"buffer", ga.config.BreakevenBuffer)
+
+	// Log breakeven event to trade lifecycle
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+		go ga.eventLogger.LogMovedToBreakeven(
+			context.Background(),
+			pos.FuturesTradeID,
+			pos.Symbol,
+			pos.EntryPrice,
+			pos.StopLoss,
+			ga.config.BreakevenBuffer,
+		)
+	}
 }
 
 // placeNextTPOrder places the next TP order on Binance after a TP level is hit
@@ -3506,6 +3758,21 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 		"fees", totalFee,
 		"net_pnl", pnl,
 		"total_pnl", totalPnL)
+
+	// Log position closed to trade lifecycle
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+		go ga.eventLogger.LogPositionClosed(
+			context.Background(),
+			pos.FuturesTradeID,
+			symbol,
+			currentPrice,
+			pos.RemainingQty,
+			totalPnL,
+			pnlPercent,
+			reason,
+			database.EventSourceGinie,
+		)
+	}
 
 	if !ga.config.DryRun && pos.RemainingQty > 0 {
 		// Place close order using LIMIT to avoid slippage on SL/Trailing closes
@@ -3983,6 +4250,19 @@ func (ga *GinieAutopilot) getTPPercent(level int) float64 {
 	}
 }
 
+// getModeConfig retrieves the mode configuration from SettingsManager with fallback to nil
+// This is a helper method that provides a unified way to get mode-specific configuration
+func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
+	sm := GetSettingsManager()
+	if sm != nil {
+		modeStr := string(mode)
+		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil {
+			return modeConfig
+		}
+	}
+	return nil
+}
+
 // getTrailingPercent reads trailing stop percent from Mode Config
 // Falls back to defaults if Mode Config is unavailable
 func (ga *GinieAutopilot) getTrailingPercent(mode GinieTradingMode) float64 {
@@ -4058,16 +4338,29 @@ func (ga *GinieAutopilot) isTrailingEnabled(mode GinieTradingMode) bool {
 
 func (ga *GinieAutopilot) generateDefaultTPs(entryPrice float64, mode GinieTradingMode, isLong bool) []GinieTakeProfitLevel {
 	var gains []float64
-	switch mode {
-	case GinieModeScalp:
-		gains = []float64{0.3, 0.6, 1.0, 1.5}
-	case GinieModeSwing:
-		gains = []float64{3.0, 6.0, 10.0, 15.0}
-	case GinieModePosition:
-		gains = []float64{10.0, 20.0, 35.0, 50.0}
+
+	// Try to get TP gain levels from mode config first
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) > 0 {
+		gains = modeConfig.SLTP.TPGainLevels
+	} else {
+		// Fallback to hardcoded defaults if config not available
+		switch mode {
+		case GinieModeUltraFast:
+			gains = []float64{0.15, 0.3, 0.5, 0.8}
+		case GinieModeScalp:
+			gains = []float64{0.3, 0.6, 1.0, 1.5}
+		case GinieModeSwing:
+			gains = []float64{3.0, 6.0, 10.0, 15.0}
+		case GinieModePosition:
+			gains = []float64{10.0, 20.0, 35.0, 50.0}
+		default:
+			gains = []float64{3.0, 6.0, 10.0, 15.0} // Default to swing
+		}
 	}
 
-	tps := make([]GinieTakeProfitLevel, 4)
+	// Create TP levels based on gains (variable number of levels)
+	tps := make([]GinieTakeProfitLevel, len(gains))
 	for i, gain := range gains {
 		var price float64
 		if isLong {
@@ -4783,6 +5076,22 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 	}
 
 	pos.LastLLMUpdate = time.Now()
+
+	// Log SL/TP placed event to trade lifecycle
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && slOrderPlaced {
+		tpLevels := make([]float64, len(pos.TakeProfits))
+		for i, tp := range pos.TakeProfits {
+			tpLevels[i] = tp.Price
+		}
+		go ga.eventLogger.LogSLTPPlaced(
+			context.Background(),
+			pos.FuturesTradeID,
+			pos.Symbol,
+			string(pos.Mode),
+			roundedSL,
+			tpLevels,
+		)
+	}
 }
 
 // placeSLTPOrdersForSyncedPositions places SL/TP orders for all synced positions
@@ -5647,6 +5956,19 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			"realized_pnl", realizedPnL,
 			"pnl_percent", pnlPercent)
 
+		// Log external close to trade lifecycle
+		if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+			go ga.eventLogger.LogExternalClose(
+				context.Background(),
+				pos.FuturesTradeID,
+				symbol,
+				closePrice,
+				pos.RemainingQty,
+				realizedPnL,
+				pnlPercent,
+			)
+		}
+
 		delete(ga.positions, symbol)
 
 		// Cancel any remaining algo orders
@@ -6369,6 +6691,20 @@ func (ga *GinieAutopilot) updatePositionSLTPFromLLM(symbol string, pos *GiniePos
 			"new_tps", newTPs,
 			"action", sltpAnalysis.Action,
 			"confidence", sltpAnalysis.Confidence)
+
+		// Log SL revised event to trade lifecycle (only if SL was actually updated)
+		if newSL > 0 && ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+			revisionCount, _ := ga.repo.GetDB().CountSLRevisions(context.Background(), pos.FuturesTradeID)
+			go ga.eventLogger.LogSLRevised(
+				context.Background(),
+				pos.FuturesTradeID,
+				symbol,
+				pos.OriginalSL, // Use original SL as old value for reference
+				newSL,
+				fmt.Sprintf("LLM adaptive update (confidence: %.1f%%)", sltpAnalysis.Confidence),
+				revisionCount+1,
+			)
+		}
 	} else {
 		// Update timestamp even if no changes to prevent continuous retry
 		ga.mu.Lock()
@@ -6484,47 +6820,148 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 				"sl_pct", finalSLPct,
 				"tp_pct", finalTPPct)
 		} else {
-			// Mode-specific limits for ATR/LLM blend
+			// Mode-specific limits for ATR/LLM blend - read from ModeConfig with fallback defaults
 			var baseSLMult, baseTPMult float64
 			var minSL, maxSL, minTP, maxTP float64
+			var llmWeight, atrWeight float64
 
-			switch pos.Mode {
-			case GinieModeUltraFast:
-				// Ultra-fast: Very tight SL/TP for quick momentum trades
-				baseSLMult, baseTPMult = 0.3, 0.6
-				minSL, maxSL = 0.3, 1.5
-				minTP, maxTP = 0.5, 3.0
-			case GinieModeScalp:
-				baseSLMult, baseTPMult = 0.5, 1.0
-				minSL, maxSL = 0.2, 0.8
-				minTP, maxTP = 0.3, 2.0
-			case GinieModeSwing:
-				baseSLMult, baseTPMult = 1.5, 3.0
-				minSL, maxSL = 1.0, 5.0
-				minTP, maxTP = 2.0, 15.0
-			case GinieModePosition:
-				baseSLMult, baseTPMult = 2.5, 5.0
-				minSL, maxSL = 3.0, 15.0
-				minTP, maxTP = 5.0, 50.0
-			default:
-				// Default to swing
-				baseSLMult, baseTPMult = 1.5, 3.0
-				minSL, maxSL = 1.0, 5.0
-				minTP, maxTP = 2.0, 15.0
+			// Try to get mode config for ATR/LLM blending parameters
+			modeConfig := ga.getModeConfig(pos.Mode)
+			if modeConfig != nil && modeConfig.SLTP != nil {
+				// Use config values if available
+				baseSLMult = modeConfig.SLTP.ATRSLMultiplier
+				baseTPMult = modeConfig.SLTP.ATRTPMultiplier
+				minSL = modeConfig.SLTP.ATRSLMin
+				maxSL = modeConfig.SLTP.ATRSLMax
+				minTP = modeConfig.SLTP.ATRTPMin
+				maxTP = modeConfig.SLTP.ATRTPMax
+				llmWeight = modeConfig.SLTP.LLMWeight
+				atrWeight = modeConfig.SLTP.ATRWeight
+			}
+
+			// Apply fallback defaults if config values are zero/not set
+			if baseSLMult == 0 || baseTPMult == 0 || maxSL == 0 || maxTP == 0 {
+				switch pos.Mode {
+				case GinieModeUltraFast:
+					// Ultra-fast: Very tight SL/TP for quick momentum trades
+					if baseSLMult == 0 {
+						baseSLMult = 0.3
+					}
+					if baseTPMult == 0 {
+						baseTPMult = 0.6
+					}
+					if minSL == 0 {
+						minSL = 0.3
+					}
+					if maxSL == 0 {
+						maxSL = 1.5
+					}
+					if minTP == 0 {
+						minTP = 0.5
+					}
+					if maxTP == 0 {
+						maxTP = 3.0
+					}
+				case GinieModeScalp:
+					if baseSLMult == 0 {
+						baseSLMult = 0.5
+					}
+					if baseTPMult == 0 {
+						baseTPMult = 1.0
+					}
+					if minSL == 0 {
+						minSL = 0.2
+					}
+					if maxSL == 0 {
+						maxSL = 0.8
+					}
+					if minTP == 0 {
+						minTP = 0.3
+					}
+					if maxTP == 0 {
+						maxTP = 2.0
+					}
+				case GinieModeSwing:
+					if baseSLMult == 0 {
+						baseSLMult = 1.5
+					}
+					if baseTPMult == 0 {
+						baseTPMult = 3.0
+					}
+					if minSL == 0 {
+						minSL = 1.0
+					}
+					if maxSL == 0 {
+						maxSL = 5.0
+					}
+					if minTP == 0 {
+						minTP = 2.0
+					}
+					if maxTP == 0 {
+						maxTP = 15.0
+					}
+				case GinieModePosition:
+					if baseSLMult == 0 {
+						baseSLMult = 2.5
+					}
+					if baseTPMult == 0 {
+						baseTPMult = 5.0
+					}
+					if minSL == 0 {
+						minSL = 3.0
+					}
+					if maxSL == 0 {
+						maxSL = 15.0
+					}
+					if minTP == 0 {
+						minTP = 5.0
+					}
+					if maxTP == 0 {
+						maxTP = 50.0
+					}
+				default:
+					// Default to swing
+					if baseSLMult == 0 {
+						baseSLMult = 1.5
+					}
+					if baseTPMult == 0 {
+						baseTPMult = 3.0
+					}
+					if minSL == 0 {
+						minSL = 1.0
+					}
+					if maxSL == 0 {
+						maxSL = 5.0
+					}
+					if minTP == 0 {
+						minTP = 2.0
+					}
+					if maxTP == 0 {
+						maxTP = 15.0
+					}
+				}
+			}
+
+			// Apply fallback defaults for LLM/ATR weights if not configured
+			if llmWeight == 0 {
+				llmWeight = 0.7 // Default 70% LLM weight
+			}
+			if atrWeight == 0 {
+				atrWeight = 0.3 // Default 30% ATR weight
 			}
 
 			// Calculate ATR-based SL/TP
 			atrSLPct := atrPct * baseSLMult
 			atrTPPct := atrPct * baseTPMult
 
-			// Blend LLM and ATR (70% LLM, 30% ATR if LLM available)
+			// Blend LLM and ATR using configured weights (default: 70% LLM, 30% ATR if LLM available)
 			if llmUsed && llmSLPct > 0 {
-				finalSLPct = llmSLPct*0.7 + atrSLPct*0.3
+				finalSLPct = llmSLPct*llmWeight + atrSLPct*atrWeight
 			} else {
 				finalSLPct = atrSLPct
 			}
 			if llmUsed && llmTPPct > 0 {
-				finalTPPct = llmTPPct*0.7 + atrTPPct*0.3
+				finalTPPct = llmTPPct*llmWeight + atrTPPct*atrWeight
 			} else {
 				finalTPPct = atrTPPct
 			}
@@ -7986,12 +8423,14 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		return
 	}
 
-	// Check funding rate before entry
+	// Check funding rate before entry (strategy trades default to swing mode)
 	isLong := signal.Side == "LONG"
-	if blocked, reason := ga.checkFundingRate(symbol, isLong); blocked {
+	strategyMode := GinieModeSwing // Strategy trades use swing mode for funding checks
+	if blocked, reason := ga.checkFundingRate(symbol, isLong, strategyMode); blocked {
 		ga.logger.Warn("Strategy trade skipped - funding rate concern",
 			"symbol", symbol,
 			"strategy", signal.StrategyName,
+			"mode", strategyMode,
 			"reason", reason,
 			"side", signal.Side)
 		return
@@ -8644,7 +9083,7 @@ func (ga *GinieAutopilot) recordModeTradeClosure(mode GinieTradingMode, symbol s
 
 // === ULTRA-FAST SCALPING MODE METHODS ===
 
-// monitorUltraFastPositions runs a 500ms polling loop to monitor ultra-fast positions
+// monitorUltraFastPositions runs a configurable polling loop to monitor ultra-fast positions
 // for profit targets and time-based exits
 func (ga *GinieAutopilot) monitorUltraFastPositions() {
 	defer ga.wg.Done()
@@ -8658,10 +9097,16 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 		}
 	}()
 
-	ga.logger.Info("Ultra-fast position monitor started - 500ms polling interval")
+	// Get configurable interval from settings (default 2000ms)
+	settings := GetSettingsManager().GetCurrentSettings()
+	monitorInterval := settings.UltraFastMonitorInterval
+	if monitorInterval <= 0 {
+		monitorInterval = 2000 // Default to 2 seconds
+	}
 
-	// 500ms ticker for rapid exit checking
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ga.logger.Info("Ultra-fast position monitor started", "interval_ms", monitorInterval)
+
+	ticker := time.NewTicker(time.Duration(monitorInterval) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -8670,6 +9115,11 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 			ga.logger.Info("Ultra-fast position monitor stopping")
 			return
 		case <-ticker.C:
+			// Check rate limiter - skip if circuit breaker is open
+			if binance.GetRateLimiter().IsCircuitOpen() {
+				log.Printf("[ULTRA-FAST] Skipping cycle - rate limiter circuit breaker is open")
+				continue
+			}
 			ga.checkUltraFastExits()
 		}
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"binance-trading-bot/internal/autopilot"
+	"binance-trading-bot/internal/binance"
 	"fmt"
 	"log"
 	"net/http"
@@ -3155,4 +3156,10 @@ func calculateHealthPercent(protected, total int) float64 {
 		return 100.0 // No positions = 100% healthy
 	}
 	return float64(protected) / float64(total) * 100.0
+}
+
+// handleGetRateLimiterStatus returns the current rate limiter status
+func (s *Server) handleGetRateLimiterStatus(c *gin.Context) {
+	status := binance.GetRateLimiter().GetStatus()
+	c.JSON(http.StatusOK, status)
 }
