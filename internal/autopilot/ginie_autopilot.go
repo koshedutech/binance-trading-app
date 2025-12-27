@@ -4708,6 +4708,48 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			Protection: NewProtectionStatus(),
 		}
 
+		// Create FuturesTrade record in database for lifecycle tracking
+		if ga.repo != nil {
+			trade := &database.FuturesTrade{
+				Symbol:       symbol,
+				PositionSide: side,
+				Side:         side,
+				EntryPrice:   pos.EntryPrice,
+				Quantity:     qty,
+				Leverage:     pos.Leverage,
+				MarginType:   "CROSSED",
+				Status:       "OPEN",
+				EntryTime:    time.Now(),
+				TradeSource:  "force_sync", // Mark as force synced from exchange
+			}
+			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+				ga.logger.Warn("Failed to create futures trade record for force-synced position", "error", err, "symbol", symbol)
+			} else {
+				position.FuturesTradeID = trade.ID
+				ga.logger.Debug("Created futures trade record for force-synced position", "symbol", symbol, "trade_id", trade.ID)
+
+				// Log position synced event to lifecycle
+				if ga.eventLogger != nil {
+					conditionsMet := map[string]interface{}{
+						"source":      "force_sync",
+						"sync_reason": "manual_force_sync",
+					}
+					go ga.eventLogger.LogPositionOpened(
+						context.Background(),
+						trade.ID,
+						symbol,
+						side,
+						string(GinieModeSwing), // Force-synced positions default to swing mode
+						pos.EntryPrice,
+						qty,
+						pos.Leverage,
+						0, // No confidence score for synced positions
+						conditionsMet,
+					)
+				}
+			}
+		}
+
 		ga.positions[symbol] = position
 		synced++
 
@@ -4715,7 +4757,8 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			"symbol", symbol,
 			"side", side,
 			"qty", qty,
-			"entry_price", pos.EntryPrice)
+			"entry_price", pos.EntryPrice,
+			"trade_id", position.FuturesTradeID)
 	}
 
 	ga.logger.Info("Force sync completed", "synced_count", synced)
@@ -4840,6 +4883,48 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			Protection: NewProtectionStatus(),
 		}
 
+		// Create FuturesTrade record in database for lifecycle tracking
+		if ga.repo != nil {
+			trade := &database.FuturesTrade{
+				Symbol:       symbol,
+				PositionSide: side,
+				Side:         side,
+				EntryPrice:   pos.EntryPrice,
+				Quantity:     qty,
+				Leverage:     pos.Leverage,
+				MarginType:   "CROSSED",
+				Status:       "OPEN",
+				EntryTime:    time.Now(),
+				TradeSource:  "sync", // Mark as synced from exchange
+			}
+			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+				ga.logger.Warn("Failed to create futures trade record for synced position", "error", err, "symbol", symbol)
+			} else {
+				position.FuturesTradeID = trade.ID
+				ga.logger.Debug("Created futures trade record for synced position", "symbol", symbol, "trade_id", trade.ID)
+
+				// Log position synced event to lifecycle
+				if ga.eventLogger != nil {
+					conditionsMet := map[string]interface{}{
+						"source":      "exchange_sync",
+						"sync_reason": "app_restart_or_manual_position",
+					}
+					go ga.eventLogger.LogPositionOpened(
+						context.Background(),
+						trade.ID,
+						symbol,
+						side,
+						string(GinieModeSwing), // Synced positions default to swing mode
+						pos.EntryPrice,
+						qty,
+						pos.Leverage,
+						0, // No confidence score for synced positions
+						conditionsMet,
+					)
+				}
+			}
+		}
+
 		ga.positions[symbol] = position
 		synced++
 
@@ -4848,7 +4933,8 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			"side", side,
 			"qty", qty,
 			"entry_price", pos.EntryPrice,
-			"unrealized_pnl", pos.UnrealizedProfit)
+			"unrealized_pnl", pos.UnrealizedProfit,
+			"trade_id", position.FuturesTradeID)
 	}
 
 	if synced > 0 {
