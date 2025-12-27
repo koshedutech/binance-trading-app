@@ -288,12 +288,18 @@ type FuturesController struct {
 	// Ginie autopilot (autonomous multi-mode trading)
 	ginieAutopilot   *GinieAutopilot
 
+	// User autopilot manager (per-user autopilot instances)
+	userAutopilotManager *UserAutopilotManager
+
 	// State
 	running    bool
 	dryRun     bool
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
 	mu         sync.RWMutex
+
+	// Multi-user support: Track which user owns the running autopilot
+	ownerUserID string // UserID who started the autopilot (background loops use their API keys)
 
 	// Tracking
 	dailyTrades     int
@@ -780,6 +786,20 @@ func (fc *FuturesController) GetGinieAutopilot() *GinieAutopilot {
 	return fc.ginieAutopilot
 }
 
+// SetUserAutopilotManager sets the user autopilot manager
+func (fc *FuturesController) SetUserAutopilotManager(mgr *UserAutopilotManager) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.userAutopilotManager = mgr
+}
+
+// GetUserAutopilotManager returns the user autopilot manager
+func (fc *FuturesController) GetUserAutopilotManager() *UserAutopilotManager {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.userAutopilotManager
+}
+
 // StartGinieAutopilot starts the Ginie autonomous trading
 func (fc *FuturesController) StartGinieAutopilot() error {
 	if fc.ginieAutopilot == nil {
@@ -808,6 +828,22 @@ func (fc *FuturesController) GetFuturesClient() binance.FuturesClient {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	return fc.futuresClient
+}
+
+// GetOwnerUserID returns the user ID who owns the running autopilot
+func (fc *FuturesController) GetOwnerUserID() string {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.ownerUserID
+}
+
+// SetOwnerUserID sets the user ID who owns the running autopilot
+// This should be called when a user starts the autopilot
+func (fc *FuturesController) SetOwnerUserID(userID string) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.ownerUserID = userID
+	fc.logger.Info("Autopilot owner set", "user_id", userID)
 }
 
 // SetDryRun sets dry run mode and propagates to Ginie

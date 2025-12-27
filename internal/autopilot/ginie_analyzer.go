@@ -662,12 +662,33 @@ func (g *GinieAnalyzer) IsEnabled() bool {
 }
 
 // GetStatus returns current Ginie status
+// NOTE: This function copies data under locks and releases them before returning
+// to avoid deadlock when callers subsequently call ScanCoin() or GenerateDecision()
+// which need write locks on the same mutexes.
 func (g *GinieAnalyzer) GetStatus() *GinieStatus {
+	// Copy scan-related data under scanLock
 	g.scanLock.RLock()
-	g.decisionLock.RLock()
-	defer g.scanLock.RUnlock()
-	defer g.decisionLock.RUnlock()
+	lastScanTime := g.lastScanTime
+	scannedSymbols := len(g.coinScans)
+	// Make a copy of watchSymbols slice to avoid data race
+	watchSymbols := make([]string, len(g.watchSymbols))
+	copy(watchSymbols, g.watchSymbols)
+	g.scanLock.RUnlock()
 
+	// Copy decision-related data under decisionLock
+	g.decisionLock.RLock()
+	// Get recent decisions (last 10) - copy while holding lock
+	recentDecisions := make([]GinieDecisionReport, 0)
+	start := len(g.decisions) - 10
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(g.decisions); i++ {
+		recentDecisions = append(recentDecisions, g.decisions[i])
+	}
+	g.decisionLock.RUnlock()
+
+	// These fields are either atomic or don't require locking
 	winRate := 0.0
 	total := g.wins + g.losses
 	if total > 0 {
@@ -682,30 +703,20 @@ func (g *GinieAnalyzer) GetStatus() *GinieStatus {
 		maxPos = g.config.MaxPositionPositions
 	}
 
-	// Get recent decisions (last 10)
-	recentDecisions := make([]GinieDecisionReport, 0)
-	start := len(g.decisions) - 10
-	if start < 0 {
-		start = 0
-	}
-	for i := start; i < len(g.decisions); i++ {
-		recentDecisions = append(recentDecisions, g.decisions[i])
-	}
-
 	return &GinieStatus{
 		Enabled:          g.enabled,
 		ActiveMode:       g.activeMode,
 		ActivePositions:  0, // Will be updated from controller
 		MaxPositions:     maxPos,
-		LastScanTime:     g.lastScanTime,
+		LastScanTime:     lastScanTime,
 		LastDecisionTime: time.Now(),
 		DailyPnL:         g.dailyPnL,
 		DailyTrades:      g.dailyTrades,
 		WinRate:          winRate,
 		Config:           g.config,
 		RecentDecisions:  recentDecisions,
-		WatchedSymbols:   g.watchSymbols,
-		ScannedSymbols:   len(g.coinScans),
+		WatchedSymbols:   watchSymbols,
+		ScannedSymbols:   scannedSymbols,
 	}
 }
 

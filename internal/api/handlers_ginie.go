@@ -13,15 +13,15 @@ import (
 )
 
 // handleGetGinieStatus returns current Ginie status
+// NOTE: This is a read-only endpoint and should NOT call tryInitializeUserClients()
+// which makes blocking database calls. Client initialization only happens on
+// mutation endpoints (toggle, start, stop) to keep status checks fast.
 func (s *Server) handleGetGinieStatus(c *gin.Context) {
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
 		return
 	}
-
-	// Initialize user-specific clients (LLM + Binance) from database
-	s.tryInitializeUserClients(c, controller)
 
 	ginie := controller.GetGinieAnalyzer()
 	if ginie == nil {

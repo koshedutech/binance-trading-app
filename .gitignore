@@ -58,3 +58,7 @@ D\357\200\272*
 # Build artifacts
 dist/
 build/
+
+# Node modules
+node_modules/
+web/node_modules/

@@ -12,6 +12,7 @@ import (
 
 	"binance-trading-bot/internal/apikeys"
 	"binance-trading-bot/internal/auth"
+	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/billing"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
@@ -79,6 +80,9 @@ type Server struct {
 	licenseInfo    *license.LicenseInfo
 	rateLimiter    *RateLimiter        // API rate limiter to prevent Binance bans
 	apiKeyService  *apikeys.Service    // Service to get user-specific API keys
+
+	// Multi-user autopilot manager (per-user autopilot instances)
+	userAutopilotManager *autopilot.UserAutopilotManager
 }
 
 // ServerConfig holds server configuration
@@ -897,4 +901,14 @@ func (s *Server) isUserAdmin(c *gin.Context) bool {
 		return true // Admin access when auth is disabled
 	}
 	return auth.IsAdmin(c)
+}
+
+// SetUserAutopilotManager sets the multi-user autopilot manager
+func (s *Server) SetUserAutopilotManager(mgr *autopilot.UserAutopilotManager) {
+	s.userAutopilotManager = mgr
+}
+
+// GetUserAutopilotManager returns the multi-user autopilot manager
+func (s *Server) GetUserAutopilotManager() *autopilot.UserAutopilotManager {
+	return s.userAutopilotManager
 }

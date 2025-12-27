@@ -164,7 +164,7 @@ func main() {
 	earlyRepo := database.NewRepository(db)
 
 	// Initialize API Key Service for user-specific keys from database
-	_ = apikeys.NewService(earlyRepo) // Used by api.Server internally, just validate it works
+	apiKeyService := apikeys.NewService(earlyRepo) // Used by UserAutopilotManager for per-user AI keys
 	logger.Info("API Key Service initialized (using user-stored keys from database)")
 
 	// Initialize Futures clients - NO GLOBAL API KEYS
@@ -688,6 +688,52 @@ func main() {
 		}
 	}
 
+	// Initialize Client Factory for per-user Binance clients
+	var clientFactory *binance.ClientFactory
+	if vaultClient != nil {
+		var err error
+		clientFactory, err = binance.NewClientFactory(vaultClient, cfg.BinanceConfig, cfg.FuturesConfig)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize Client Factory: %v", err)
+		} else {
+			logger.Info("Client Factory initialized for per-user Binance clients")
+		}
+	}
+
+	// Initialize UserAutopilotManager for multi-user simultaneous trading
+	// This enables each user to have their own independent autopilot instance
+	// Note: clientFactory is optional - manager can use apiKeyService directly from database
+	var userAutopilotManager *autopilot.UserAutopilotManager
+	if futuresAutopilotController != nil {
+		// Create LLM config for per-user AI analyzers
+		llmConfig := llm.DefaultAnalyzerConfig()
+		llmConfig.Provider = llm.Provider(cfg.AIConfig.LLMProvider)
+		llmConfig.Model = cfg.AIConfig.LLMModel
+
+		// Create the multi-user autopilot manager
+		userAutopilotLogger := logging.New(&logging.Config{
+			Level:       cfg.LoggingConfig.Level,
+			Output:      cfg.LoggingConfig.Output,
+			JSONFormat:  cfg.LoggingConfig.JSONFormat,
+			IncludeFile: cfg.LoggingConfig.IncludeFile,
+			Component:   "user_autopilot",
+		})
+
+		userAutopilotManager = autopilot.NewUserAutopilotManager(
+			repo,
+			futuresAutopilotController.GetGinieAnalyzer(),
+			clientFactory,
+			apiKeyService,
+			llmConfig,
+			userAutopilotLogger,
+		)
+
+		// Set manager on FuturesController for access in handlers
+		futuresAutopilotController.SetUserAutopilotManager(userAutopilotManager)
+
+		logger.Info("UserAutopilotManager initialized for multi-user trading")
+	}
+
 	// Initialize Billing service if enabled
 	var billingService *billing.StripeService
 	if cfg.BillingConfig.Enabled {
@@ -712,6 +758,12 @@ func main() {
 	}
 
 	server := api.NewServer(serverConfig, repo, eventBus, botAPI, authService, vaultClient, billingService, licenseInfo)
+
+	// Set the UserAutopilotManager on the server for per-user autopilot handling
+	if userAutopilotManager != nil {
+		server.SetUserAutopilotManager(userAutopilotManager)
+		logger.Info("UserAutopilotManager set on API server")
+	}
 
 	// Start web server in a goroutine
 	go func() {
@@ -792,6 +844,10 @@ func main() {
 	if futuresAutopilotController != nil {
 		futuresAutopilotController.Stop()
 		logger.Info("Futures autopilot stopped")
+	}
+	if userAutopilotManager != nil {
+		userAutopilotManager.Shutdown()
+		logger.Info("UserAutopilotManager stopped")
 	}
 	if sentimentAnalyzer != nil {
 		sentimentAnalyzer.Stop()

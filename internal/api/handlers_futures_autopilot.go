@@ -19,6 +19,30 @@ import (
 
 // handleGetFuturesAutopilotStatus returns futures autopilot status
 func (s *Server) handleGetFuturesAutopilotStatus(c *gin.Context) {
+	userID := s.getUserID(c)
+
+	// MULTI-USER MODE: Use per-user autopilot if manager is available
+	if s.userAutopilotManager != nil && userID != "" {
+		status := s.userAutopilotManager.GetStatus(userID)
+		c.JSON(http.StatusOK, gin.H{
+			"enabled":          status.Running,
+			"running":          status.Running,
+			"dry_run":          status.DryRun,
+			"active_positions": status.ActivePositions,
+			"total_trades":     status.TotalTrades,
+			"win_rate":         status.WinRate,
+			"total_pnl":        status.TotalPnL,
+			"daily_trades":     status.DailyTrades,
+			"daily_pnl":        status.DailyPnL,
+			"circuit_breaker":  status.CircuitBreaker,
+			"message":          status.Message,
+			"user_id":          status.UserID,
+			"multi_user_mode":  true,
+		})
+		return
+	}
+
+	// LEGACY MODE: Fall back to shared controller
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -31,9 +55,17 @@ func (s *Server) handleGetFuturesAutopilotStatus(c *gin.Context) {
 	}
 
 	// Initialize user-specific clients (LLM + Binance) from database
+	// This only modifies controller if user is owner or no owner set
 	s.tryInitializeUserClients(c, controller)
 
 	status := controller.GetStatus()
+
+	// Add multi-user ownership information
+	ownerUserID := controller.GetOwnerUserID()
+	currentUserID := s.getUserID(c)
+	status["owner_user_id"] = ownerUserID
+	status["is_owner"] = (currentUserID != "" && currentUserID == ownerUserID) || ownerUserID == ""
+
 	c.JSON(http.StatusOK, status)
 }
 
@@ -49,6 +81,86 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 		return
 	}
 
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// MULTI-USER MODE: Use per-user autopilot if manager is available
+	if s.userAutopilotManager != nil && userID != "" {
+		if req.Enabled {
+			// Check if already running for this user
+			if s.userAutopilotManager.IsRunning(userID) {
+				status := s.userAutopilotManager.GetStatus(userID)
+				c.JSON(http.StatusOK, gin.H{
+					"success":         true,
+					"message":         "Your autopilot is already running",
+					"user_id":         userID,
+					"multi_user_mode": true,
+					"status":          status,
+				})
+				return
+			}
+
+			// Update dry run mode if specified
+			if req.DryRun != nil {
+				s.userAutopilotManager.UpdateUserDryRun(userID, *req.DryRun)
+			}
+
+			// Start the user's autopilot
+			if err := s.userAutopilotManager.StartAutopilot(ctx, userID); err != nil {
+				errorResponse(c, http.StatusInternalServerError, "Failed to start autopilot: "+err.Error())
+				return
+			}
+
+			log.Printf("[MULTI-USER] User %s started their personal autopilot", userID)
+
+			status := s.userAutopilotManager.GetStatus(userID)
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"message":         "Your personal autopilot started",
+				"user_id":         userID,
+				"multi_user_mode": true,
+				"status":          status,
+			})
+		} else {
+			// Check if running for this user
+			if !s.userAutopilotManager.IsRunning(userID) {
+				status := s.userAutopilotManager.GetStatus(userID)
+				c.JSON(http.StatusOK, gin.H{
+					"success":         true,
+					"message":         "Your autopilot is already stopped",
+					"user_id":         userID,
+					"multi_user_mode": true,
+					"status":          status,
+				})
+				return
+			}
+
+			// Update dry run mode if specified
+			if req.DryRun != nil {
+				s.userAutopilotManager.UpdateUserDryRun(userID, *req.DryRun)
+			}
+
+			// Stop the user's autopilot
+			if err := s.userAutopilotManager.StopAutopilot(userID); err != nil {
+				errorResponse(c, http.StatusInternalServerError, "Failed to stop autopilot: "+err.Error())
+				return
+			}
+
+			log.Printf("[MULTI-USER] User %s stopped their personal autopilot", userID)
+
+			status := s.userAutopilotManager.GetStatus(userID)
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"message":         "Your personal autopilot stopped",
+				"user_id":         userID,
+				"multi_user_mode": true,
+				"status":          status,
+			})
+		}
+		return
+	}
+
+	// LEGACY MODE: Fall back to shared controller
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures autopilot not configured")
@@ -63,9 +175,17 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{
 				"success": true,
 				"message": "Futures autopilot already running",
+				"owner":   controller.GetOwnerUserID(),
 				"status":  controller.GetStatus(),
 			})
 			return
+		}
+
+		// Set the owner of the autopilot to the user who started it
+		// This enables per-user API key isolation - the autopilot will use this user's keys
+		if userID != "" {
+			controller.SetOwnerUserID(userID)
+			log.Printf("[AUTOPILOT] User %s is starting the autopilot", userID)
 		}
 
 		// Load saved settings before starting (ensures config is up-to-date)
@@ -129,6 +249,11 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 		}
 
 		controller.Stop()
+
+		// Clear owner when autopilot is stopped - allows any user to start it next
+		controller.SetOwnerUserID("")
+		log.Printf("[AUTOPILOT] Autopilot stopped, owner cleared")
+
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "Futures autopilot stopped",
@@ -1046,7 +1171,8 @@ func (s *Server) tryInitializeUserClients(c *gin.Context, controller *autopilot.
 }
 
 // tryInitializeFuturesClient attempts to set the user's Binance Futures client on the controller
-// This allows the background Ginie autopilot to use user-specific API keys
+// MULTI-USER AWARE: Only modifies controller if user is the owner or no owner is set yet
+// This prevents users from hijacking each other's autopilot sessions
 func (s *Server) tryInitializeFuturesClient(c *gin.Context, controller *autopilot.FuturesController) {
 	// Get user ID from context
 	userID := s.getUserID(c)
@@ -1057,6 +1183,17 @@ func (s *Server) tryInitializeFuturesClient(c *gin.Context, controller *autopilo
 	// Check if controller already has a valid client (skip if dry_run mode)
 	if controller.GetDryRun() {
 		return // In paper mode, no need to use real API keys
+	}
+
+	// MULTI-USER CHECK: Only allow client injection if:
+	// 1. No owner is set yet (first user to start autopilot)
+	// 2. The current user IS the owner
+	currentOwner := controller.GetOwnerUserID()
+	if currentOwner != "" && currentOwner != userID {
+		// This user is NOT the owner - don't modify the controller's client
+		// The autopilot will continue using the owner's API keys
+		log.Printf("[FUTURES-CLIENT-INIT] User %s is not the owner (owner=%s), skipping client injection", userID, currentOwner)
+		return
 	}
 
 	ctx := c.Request.Context()
@@ -1086,12 +1223,23 @@ func (s *Server) tryInitializeFuturesClient(c *gin.Context, controller *autopilo
 }
 
 // tryInitializeLLMAnalyzer attempts to initialize LLM analyzer with user's AI key
+// MULTI-USER AWARE: Only modifies controller if user is the owner or no owner is set yet
 // This allows using per-user AI keys stored in the database
 // It will also RE-INITIALIZE if the user changed their provider (e.g., from Claude to DeepSeek)
 func (s *Server) tryInitializeLLMAnalyzer(c *gin.Context, controller *autopilot.FuturesController) {
 	// Get user ID from context
 	userID := s.getUserID(c)
 	if userID == "" {
+		return
+	}
+
+	// MULTI-USER CHECK: Only allow LLM initialization if:
+	// 1. No owner is set yet (first user to start autopilot)
+	// 2. The current user IS the owner
+	currentOwner := controller.GetOwnerUserID()
+	if currentOwner != "" && currentOwner != userID {
+		// This user is NOT the owner - don't modify the controller's LLM analyzer
+		log.Printf("[LLM-INIT] User %s is not the owner (owner=%s), skipping LLM initialization", userID, currentOwner)
 		return
 	}
 
@@ -1164,6 +1312,51 @@ func (s *Server) tryInitializeLLMAnalyzer(c *gin.Context, controller *autopilot.
 			return
 		}
 	}
+}
+
+// getUserFuturesClient returns a per-user Binance Futures client for the requesting user
+// WITHOUT modifying the shared controller state. This allows non-owner users to
+// view their own positions and account data using their own API keys.
+// Returns the user's client if available, otherwise returns the controller's client (for dry run mode)
+func (s *Server) getUserFuturesClient(c *gin.Context) binance.FuturesClient {
+	userID := s.getUserID(c)
+	if userID == "" {
+		// No user context - use controller's client
+		controller := s.getFuturesAutopilot()
+		if controller != nil {
+			return controller.GetFuturesClient()
+		}
+		return nil
+	}
+
+	// Get user's Binance API keys from database
+	if s.apiKeyService == nil {
+		controller := s.getFuturesAutopilot()
+		if controller != nil {
+			return controller.GetFuturesClient()
+		}
+		return nil
+	}
+
+	ctx := c.Request.Context()
+
+	// Try mainnet first, then testnet
+	keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
+	if err != nil {
+		keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
+	}
+
+	if err != nil || keys == nil || keys.APIKey == "" || keys.SecretKey == "" {
+		// No keys for this user - fall back to controller's client
+		controller := s.getFuturesAutopilot()
+		if controller != nil {
+			return controller.GetFuturesClient()
+		}
+		return nil
+	}
+
+	// Create user-specific Futures client (cached by ClientFactory if available)
+	return binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
 }
 
 // handleClearFlipFlopCooldown clears the flip-flop cooldown

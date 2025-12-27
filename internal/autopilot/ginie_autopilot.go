@@ -2320,7 +2320,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	// Ensure we have 4 TP levels
 	if len(takeProfits) < 4 {
 		// Generate default TPs based on mode
-		takeProfits = ga.generateDefaultTPs(price, decision.SelectedMode, decision.TradeExecution.Action == "LONG")
+		takeProfits = ga.generateDefaultTPs(symbol, price, decision.SelectedMode, decision.TradeExecution.Action == "LONG")
 	}
 
 	ga.logger.Info("Ginie executing trade",
@@ -2636,23 +2636,55 @@ func (ga *GinieAutopilot) runPositionMonitor() {
 
 // monitorAllPositions checks all positions for TP/SL/trailing triggers
 func (ga *GinieAutopilot) monitorAllPositions() {
-	ga.mu.Lock()
-	defer ga.mu.Unlock()
-
-	if len(ga.positions) > 0 {
-		log.Printf("[GINIE-MONITOR] Checking %d positions for trailing/TP/SL", len(ga.positions))
-		// DEBUG: Show which positions are being monitored
-		var posSymbols []string
-		for sym := range ga.positions {
-			posSymbols = append(posSymbols, sym)
-		}
-		log.Printf("[GINIE-MONITOR-DEBUG] Positions in monitoring: %v", posSymbols)
+	// PHASE 1: Copy position symbols while holding lock briefly
+	ga.mu.RLock()
+	posCount := len(ga.positions)
+	if posCount == 0 {
+		ga.mu.RUnlock()
+		return
 	}
 
-	for symbol, pos := range ga.positions {
-		// Get current price
-		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+	// Copy symbols and positions for processing outside lock
+	type positionSnapshot struct {
+		symbol string
+		pos    *GiniePosition
+	}
+	snapshots := make([]positionSnapshot, 0, posCount)
+	for sym, pos := range ga.positions {
+		snapshots = append(snapshots, positionSnapshot{symbol: sym, pos: pos})
+	}
+	ga.mu.RUnlock()
+
+	log.Printf("[GINIE-MONITOR] Checking %d positions for trailing/TP/SL", posCount)
+	var posSymbols []string
+	for _, snap := range snapshots {
+		posSymbols = append(posSymbols, snap.symbol)
+	}
+	log.Printf("[GINIE-MONITOR-DEBUG] Positions in monitoring: %v", posSymbols)
+
+	// PHASE 2: Fetch prices OUTSIDE the lock (network calls)
+	prices := make(map[string]float64)
+	for _, snap := range snapshots {
+		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(snap.symbol)
 		if err != nil {
+			continue
+		}
+		prices[snap.symbol] = currentPrice
+	}
+
+	// PHASE 3: Process positions with lock for state updates
+	for _, snap := range snapshots {
+		symbol := snap.symbol
+		currentPrice, ok := prices[symbol]
+		if !ok {
+			continue
+		}
+
+		// Acquire lock for this position's state update
+		ga.mu.Lock()
+		pos, exists := ga.positions[symbol]
+		if !exists {
+			ga.mu.Unlock()
 			continue
 		}
 
@@ -2682,6 +2714,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				"pnl", pos.UnrealizedPnL,
 				"pnl_percent", pnlPercent,
 				"reason", reason)
+			ga.mu.Unlock()
 			ga.closePosition(symbol, pos, currentPrice, "funding_rate_exit", pos.CurrentTPLevel)
 			continue
 		}
@@ -2702,7 +2735,16 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				"pnl_percent", pnlPercent,
 				"threshold", ga.config.ProactiveBreakevenPercent)
 			ga.moveToBreakeven(pos)
+			// FIX: Release lock BEFORE network call to prevent blocking GetStatus API
+			ga.mu.Unlock()
 			ga.updateBinanceSLOrder(pos)
+			// Re-acquire lock and check if position still exists
+			ga.mu.Lock()
+			pos, exists = ga.positions[symbol]
+			if !exists {
+				ga.mu.Unlock()
+				continue
+			}
 		}
 
 		// 2. Trailing SL: Activate ONLY after TP1 hit AND SL moved to breakeven (for swing/position)
@@ -2837,24 +2879,41 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 			// Update Binance order if SL improved significantly
 			if slImproved {
+				// Capture values needed for event logging before releasing lock
+				eventLogger := ga.eventLogger
+				futuresTradeID := pos.FuturesTradeID
+				posSymbol := pos.Symbol
+				posSide := pos.Side
+				posStopLoss := pos.StopLoss
+				highWaterMark := pos.HighestPrice
+				if pos.Side == "SHORT" {
+					highWaterMark = pos.LowestPrice
+				}
+
+				// FIX: Release lock BEFORE network call to prevent blocking GetStatus API
+				ga.mu.Unlock()
 				ga.updateBinanceSLOrder(pos)
 
-				// Log trailing update to trade lifecycle
-				if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
-					highWaterMark := pos.HighestPrice
-					if pos.Side == "SHORT" {
-						highWaterMark = pos.LowestPrice
-					}
-					go ga.eventLogger.LogTrailingUpdated(
+				// Log trailing update to trade lifecycle (uses captured values, no lock needed)
+				if eventLogger != nil && futuresTradeID > 0 {
+					go eventLogger.LogTrailingUpdated(
 						context.Background(),
-						pos.FuturesTradeID,
-						pos.Symbol,
-						pos.Side,
+						futuresTradeID,
+						posSymbol,
+						posSide,
 						trailingOldSL,
-						pos.StopLoss,
+						posStopLoss,
 						highWaterMark,
 						trailingImprovement,
 					)
+				}
+
+				// Re-acquire lock and check if position still exists
+				ga.mu.Lock()
+				pos, exists = ga.positions[symbol]
+				if !exists {
+					ga.mu.Unlock()
+					continue
 				}
 			}
 		}
@@ -2872,6 +2931,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				"threshold", roiPercent,
 				"entry_price", pos.EntryPrice,
 				"current_price", currentPrice)
+			ga.mu.Unlock()
 			ga.closePosition(symbol, pos, currentPrice, "early_profit_booking", pos.CurrentTPLevel)
 			continue
 		}
@@ -2879,14 +2939,26 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 		// Check Stop Loss
 		if ga.checkStopLoss(pos, currentPrice) {
+			ga.mu.Unlock()
 			ga.closePosition(symbol, pos, currentPrice, "stop_loss", 0)
 			continue
 		}
 
 		// Check Take Profit levels (process one at a time)
+		// FIX: Release lock BEFORE checkTakeProfits since it makes network calls
+		// (executePartialClose, updateBinanceSLOrder, placeNextTPOrder)
+		ga.mu.Unlock()
 		tpHit := ga.checkTakeProfits(pos, currentPrice, pnlPercent)
 		if tpHit > 0 && tpHit <= len(pos.TakeProfits) {
 			// Partial close for TP1-3, handled by checkTakeProfits
+			// Lock already released, just continue
+			continue
+		}
+		// Re-acquire lock for remaining checks
+		ga.mu.Lock()
+		pos, exists = ga.positions[symbol]
+		if !exists {
+			ga.mu.Unlock()
 			continue
 		}
 
@@ -2897,9 +2969,14 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				if pos.CurrentTPLevel >= 3 {
 					reason = "trailing_stop_tp4"
 				}
+				ga.mu.Unlock()
 				ga.closePosition(symbol, pos, currentPrice, reason, pos.CurrentTPLevel)
+				continue
 			}
 		}
+
+		// Release lock at end of this position's processing
+		ga.mu.Unlock()
 	}
 }
 
@@ -3025,6 +3102,15 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × leverage=%d = ROI threshold %.2f%%\n",
 				pos.Symbol, source, tpPercent, pos.Leverage, threshold)
 		}
+	}
+
+	// FIX: Enforce minimum threshold to prevent booking at 0% or near-zero ROI
+	// This guards against misconfigured settings where threshold could be 0
+	const minThreshold = 0.1 // Minimum 0.1% ROI required to book profit
+	if threshold < minThreshold {
+		fmt.Printf("[EARLY-PROFIT-DEBUG] %s: ⚠️ Threshold %.4f%% below minimum, using %.4f%%\n",
+			pos.Symbol, threshold, minThreshold)
+		threshold = minThreshold
 	}
 
 	// Check if ROI exceeds threshold
@@ -4336,7 +4422,7 @@ func (ga *GinieAutopilot) isTrailingEnabled(mode GinieTradingMode) bool {
 	}
 }
 
-func (ga *GinieAutopilot) generateDefaultTPs(entryPrice float64, mode GinieTradingMode, isLong bool) []GinieTakeProfitLevel {
+func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, mode GinieTradingMode, isLong bool) []GinieTakeProfitLevel {
 	var gains []float64
 
 	// Try to get TP gain levels from mode config first
@@ -4359,6 +4445,12 @@ func (ga *GinieAutopilot) generateDefaultTPs(entryPrice float64, mode GinieTradi
 		}
 	}
 
+	// Determine side string for proper rounding
+	side := "LONG"
+	if !isLong {
+		side = "SHORT"
+	}
+
 	// Create TP levels based on gains (variable number of levels)
 	tps := make([]GinieTakeProfitLevel, len(gains))
 	for i, gain := range gains {
@@ -4368,9 +4460,11 @@ func (ga *GinieAutopilot) generateDefaultTPs(entryPrice float64, mode GinieTradi
 		} else {
 			price = entryPrice * (1 - gain/100)
 		}
+		// FIX: Use roundPriceForTP with symbol and side for proper tick precision
+		// This prevents TP prices from being rounded to values <= entry price
 		tps[i] = GinieTakeProfitLevel{
 			Level:   i + 1,
-			Price:   roundPrice("", price),
+			Price:   roundPriceForTP(symbol, price, side),
 			Percent: ga.getTPPercent(i + 1),
 			GainPct: gain,
 			Status:  "pending",
@@ -4668,10 +4762,14 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 		}
 
 		// Get current price for TP calculation
+		// FIX: Do NOT use entry price as fallback - this causes 0% ROI issues
+		// If price fetch fails, skip TP generation and use entry price only for tracking
 		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
 		if err != nil {
-			ga.logger.Error("Failed to get price during sync", "symbol", symbol, "error", err)
-			currentPrice = pos.EntryPrice // Use entry as fallback
+			ga.logger.Error("Failed to get price during sync, using entry price for tracking only", "symbol", symbol, "error", err)
+			// Use entry price for HighestPrice/LowestPrice tracking only
+			// TPs will still be generated based on entry price which is correct
+			currentPrice = pos.EntryPrice
 		}
 
 		// Create a GiniePosition from exchange data
@@ -4686,7 +4784,7 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			EntryTime:    time.Now(), // We don't know actual entry time
 
 			// Generate default TPs based on entry price
-			TakeProfits:    ga.generateDefaultTPs(pos.EntryPrice, GinieModeSwing, side == "LONG"),
+			TakeProfits:    ga.generateDefaultTPs(symbol, pos.EntryPrice, GinieModeSwing, side == "LONG"),
 			CurrentTPLevel: 0,
 
 			// Calculate a reasonable stop loss (2% for synced positions)
@@ -4767,30 +4865,34 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 
 // SyncWithExchange syncs Ginie tracked positions with actual exchange positions
 // This is useful when server restarts or positions get lost
+// IMPORTANT: This function minimizes lock holding to avoid blocking API handlers
 func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
-	ga.mu.Lock()
-	defer ga.mu.Unlock()
-
-	// Get all open positions from exchange
+	// ========== PHASE 1: Fetch exchange data OUTSIDE the lock ==========
+	// Network calls can take multiple seconds - don't hold lock during this
 	positions, err := ga.futuresClient.GetPositions()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get exchange positions: %w", err)
 	}
 
-	// Build a set of symbols with open positions on exchange
+	// Build a set of symbols with open positions on exchange (pure computation, no lock needed)
 	exchangePositions := make(map[string]bool)
+	exchangePositionData := make(map[string]binance.FuturesPosition) // Store full data for sync
 	for _, pos := range positions {
 		if pos.PositionAmt != 0 {
 			exchangePositions[pos.Symbol] = true
+			exchangePositionData[pos.Symbol] = pos
 			ga.logger.Debug("Exchange position found", "symbol", pos.Symbol, "amt", pos.PositionAmt)
 		}
 	}
+
+	// ========== PHASE 2: Quick lock to identify stale and new positions ==========
+	ga.mu.RLock()
+	ginieCount := len(ga.positions)
 	ga.logger.Info("Exchange positions check",
 		"exchange_count", len(exchangePositions),
-		"ginie_count", len(ga.positions))
+		"ginie_count", ginieCount)
 
-	// Remove Ginie positions that no longer exist on exchange
-	removed := 0
+	// Find stale positions (tracked by Ginie but not on exchange)
 	toRemove := make([]string, 0)
 	for symbol := range ga.positions {
 		if !exchangePositions[symbol] {
@@ -4798,9 +4900,21 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			toRemove = append(toRemove, symbol)
 		}
 	}
+
+	// Find new positions (on exchange but not tracked by Ginie)
+	toAdd := make([]string, 0)
+	for symbol := range exchangePositions {
+		if _, exists := ga.positions[symbol]; !exists {
+			toAdd = append(toAdd, symbol)
+		}
+	}
+	ga.mu.RUnlock()
+
+	// ========== PHASE 3: Cancel algo orders for stale positions OUTSIDE lock ==========
+	// This involves network calls with retry logic - must not hold lock
+	removed := 0
 	for _, symbol := range toRemove {
-		ga.logger.Info("Removing stale position and cancelling orphan orders", "symbol", symbol)
-		// CRITICAL: Cancel all algo orders for this symbol to prevent orphan orders
+		ga.logger.Info("Cancelling orphan orders for stale position", "symbol", symbol)
 		success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
 		if err != nil || failed > 0 {
 			ga.logger.Warn("Failed to cancel all algo orders on stale position removal",
@@ -4809,26 +4923,59 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 				"failed", failed,
 				"error", err)
 		}
-		delete(ga.positions, symbol)
-		removed++
-	}
-	if removed > 0 {
-		ga.logger.Info("Cleaned up stale positions", "removed_count", removed)
 	}
 
+	// ========== PHASE 4: Remove stale positions with brief lock ==========
+	if len(toRemove) > 0 {
+		ga.mu.Lock()
+		for _, symbol := range toRemove {
+			if _, exists := ga.positions[symbol]; exists {
+				delete(ga.positions, symbol)
+				removed++
+				ga.logger.Info("Removed stale position", "symbol", symbol)
+			}
+		}
+		ga.mu.Unlock()
+		if removed > 0 {
+			ga.logger.Info("Cleaned up stale positions", "removed_count", removed)
+		}
+	}
+
+	// ========== PHASE 5: Fetch prices for new positions OUTSIDE lock ==========
+	// Network calls for prices - can take several seconds
+	type syncData struct {
+		symbol       string
+		pos          binance.FuturesPosition
+		currentPrice float64
+	}
+	toSync := make([]syncData, 0, len(toAdd))
+
+	for _, symbol := range toAdd {
+		pos, exists := exchangePositionData[symbol]
+		if !exists {
+			continue
+		}
+
+		// Fetch current price outside the lock
+		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+		if err != nil {
+			ga.logger.Error("Failed to get price during sync", "symbol", symbol, "error", err)
+			continue
+		}
+
+		toSync = append(toSync, syncData{
+			symbol:       symbol,
+			pos:          pos,
+			currentPrice: currentPrice,
+		})
+	}
+
+	// ========== PHASE 6: Create positions and add to map WITH proper locking ==========
 	synced := 0
-	for _, pos := range positions {
-		// Skip positions with no quantity
-		if pos.PositionAmt == 0 {
-			continue
-		}
-
-		symbol := pos.Symbol
-
-		// Skip if already tracked
-		if _, exists := ga.positions[symbol]; exists {
-			continue
-		}
+	for _, data := range toSync {
+		symbol := data.symbol
+		pos := data.pos
+		currentPrice := data.currentPrice
 
 		// Determine side
 		side := "LONG"
@@ -4839,13 +4986,6 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 		qty := pos.PositionAmt
 		if qty < 0 {
 			qty = -qty
-		}
-
-		// Get current price for TP calculation
-		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
-		if err != nil {
-			ga.logger.Error("Failed to get price during sync", "symbol", symbol, "error", err)
-			continue
 		}
 
 		// Create a basic GiniePosition from exchange data
@@ -4861,7 +5001,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			EntryTime:    time.Now(), // We don't know actual entry time
 
 			// Generate default TPs based on entry price
-			TakeProfits:    ga.generateDefaultTPs(pos.EntryPrice, GinieModeSwing, side == "LONG"),
+			TakeProfits:    ga.generateDefaultTPs(symbol, pos.EntryPrice, GinieModeSwing, side == "LONG"),
 			CurrentTPLevel: 0,
 
 			// Calculate a reasonable stop loss (2% for synced positions)
@@ -4883,7 +5023,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			Protection: NewProtectionStatus(),
 		}
 
-		// Create FuturesTrade record in database for lifecycle tracking
+		// Create FuturesTrade record in database for lifecycle tracking (outside lock)
 		if ga.repo != nil {
 			trade := &database.FuturesTrade{
 				Symbol:       symbol,
@@ -4925,16 +5065,21 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			}
 		}
 
-		ga.positions[symbol] = position
-		synced++
-
-		ga.logger.Info("Synced position from exchange",
-			"symbol", symbol,
-			"side", side,
-			"qty", qty,
-			"entry_price", pos.EntryPrice,
-			"unrealized_pnl", pos.UnrealizedProfit,
-			"trade_id", position.FuturesTradeID)
+		// Add to positions map with brief lock
+		ga.mu.Lock()
+		// Double-check position wasn't added by another goroutine
+		if _, exists := ga.positions[symbol]; !exists {
+			ga.positions[symbol] = position
+			synced++
+			ga.logger.Info("Synced position from exchange",
+				"symbol", symbol,
+				"side", side,
+				"qty", qty,
+				"entry_price", pos.EntryPrice,
+				"unrealized_pnl", pos.UnrealizedProfit,
+				"trade_id", position.FuturesTradeID)
+		}
+		ga.mu.Unlock()
 	}
 
 	if synced > 0 {
@@ -8677,7 +8822,7 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 	}
 
 	// Generate default TPs based on mode (use swing as default for strategies)
-	takeProfits := ga.generateDefaultTPs(actualPrice, GinieModeSwing, isLong)
+	takeProfits := ga.generateDefaultTPs(symbol, actualPrice, GinieModeSwing, isLong)
 
 	// Create strategy ID and name pointers
 	stratID := signal.StrategyID

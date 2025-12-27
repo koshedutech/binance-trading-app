@@ -550,7 +550,21 @@
       "Bash(wmic process where \"ProcessId=14284\" call terminate)",
       "Bash(\"cd /d D:\\\\Apps\\\\binance-trading-bot && start /B binance-trading-bot.exe\")",
       "Bash(wmic process where \"name=''binance-trading-bot.exe''\" list brief)",
-      "Bash(start /B \"\" \"D:\\\\Apps\\\\binance-trading-bot\\\\binance-trading-bot.exe\")"
+      "Bash(start /B \"\" \"D:\\\\Apps\\\\binance-trading-bot\\\\binance-trading-bot.exe\")",
+      "Bash(./scripts/docker-dev.sh:*)",
+      "Bash(docker-compose restart:*)",
+      "Bash(docker compose:*)",
+      "Bash(.claude/hooks/play-tts.sh:*)",
+      "Bash(docker-compose down:*)",
+      "Bash(docker exec:*)",
+      "Bash(AUTH=\"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNTI4NzY4ZDctZTY3ZC00ZjBjLWE5ZjUtNTEyOWM4ZmJlMjViIiwiZW1haWwiOiJqZWplcmFtQGdtYWlsLmNvbSIsInRpZXIiOiJ3aGFsZSIsImFwaV9rZXlfbW9kZSI6InVzZXJfcHJvdmlkZWQiLCJpc19hZG1pbiI6ZmFsc2UsImlzcyI6InRyYWRpbmctYm90Iiwic3ViIjoiNTI4NzY4ZDctZTY3ZC00ZjBjLWE5ZjUtNTEyOWM4ZmJlMjViIiwiYXVkIjpbInRyYWRpbmctYm90LWFwaSJdLCJleHAiOjE3NjY4Mzg1ODcsIm5iZiI6MTc2NjgzNzY4NywiaWF0IjoxNzY2ODM3Njg3fQ.Mw08E_Onl3TFa4NT1-laMtAQmBlfx8PzMPolxgH_L-M\")",
+      "mcp__chrome-devtools__list_pages",
+      "mcp__chrome-devtools__new_page",
+      "Bash(AUTH=\"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNTI4NzY4ZDctZTY3ZC00ZjBjLWE5ZjUtNTEyOWM4ZmJlMjViIiwiZW1haWwiOiJqZWplcmFtQGdtYWlsLmNvbSIsInRpZXIiOiJ3aGFsZSIsImFwaV9rZXlfbW9kZSI6InVzZXJfcHJvdmlkZWQiLCJpc19hZG1pbiI6ZmFsc2UsImlzcyI6InRyYWRpbmctYm90Iiwic3ViIjoiNTI4NzY4ZDctZTY3ZC00ZjBjLWE5ZjUtNTEyOWM4ZmJlMjViIiwiYXVkIjpbInRyYWRpbmctYm90LWFwaSJdLCJleHAiOjE3NjY4NDA2MDIsIm5iZiI6MTc2NjgzOTcwMiwiaWF0IjoxNzY2ODM5NzAyfQ.U1hB0uU_k3ztADWI4YtmtO29zRP79kAoUiVjSoxGGZU\")",
+      "Bash(__NEW_LINE__ echo \"=== GET /api/futures/trade-events/recent?limit=10 ===\")",
+      "Bash(__NEW_LINE__ curl -s \"http://localhost:8094/api/futures/trade-events/recent?limit=10\" -H \"$AUTH\")",
+      "Bash(__NEW_LINE__ echo \"=== GET /api/futures/trades/1/events ===\")",
+      "Bash(awk:*)"
     ]
   }
 }
