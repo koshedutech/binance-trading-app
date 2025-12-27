@@ -2182,26 +2182,36 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	}
 
 	// Create position record with ACTUAL fill price and quantity
+	// Get trailing stop settings from Mode Config
+	trailingEnabled := ga.isTrailingEnabled(decision.SelectedMode)
+	trailingPercent := 0.0
+	trailingActivation := 0.0
+	if trailingEnabled {
+		trailingPercent = ga.getTrailingPercent(decision.SelectedMode)
+		trailingActivation = ga.getTrailingActivation(decision.SelectedMode)
+	}
+
 	position := &GiniePosition{
-		Symbol:          symbol,
-		Side:            decision.TradeExecution.Action,
-		Mode:            decision.SelectedMode,
-		EntryPrice:      actualPrice,
-		OriginalQty:     actualQty,
-		RemainingQty:    actualQty,
-		Leverage:        leverage,
-		EntryTime:       time.Now(),
-		TakeProfits:     takeProfits,
-		CurrentTPLevel:  0,
-		StopLoss:        decision.TradeExecution.StopLoss,
-		OriginalSL:      decision.TradeExecution.StopLoss,
-		MovedToBreakeven: false,
-		TrailingActive:  false,
-		HighestPrice:    actualPrice,
-		LowestPrice:     actualPrice,
-		TrailingPercent: ga.getTrailingPercent(decision.SelectedMode),
-		DecisionReport:  decision,
-		Source:          "ai", // AI-based trade
+		Symbol:               symbol,
+		Side:                 decision.TradeExecution.Action,
+		Mode:                 decision.SelectedMode,
+		EntryPrice:           actualPrice,
+		OriginalQty:          actualQty,
+		RemainingQty:         actualQty,
+		Leverage:             leverage,
+		EntryTime:            time.Now(),
+		TakeProfits:          takeProfits,
+		CurrentTPLevel:       0,
+		StopLoss:             decision.TradeExecution.StopLoss,
+		OriginalSL:           decision.TradeExecution.StopLoss,
+		MovedToBreakeven:     false,
+		TrailingActive:       false,
+		HighestPrice:         actualPrice,
+		LowestPrice:          actualPrice,
+		TrailingPercent:      trailingPercent,
+		TrailingActivationPct: trailingActivation, // Now properly initialized from Mode Config
+		DecisionReport:       decision,
+		Source:               "ai", // AI-based trade
 	}
 
 	ga.positions[symbol] = position
@@ -3681,7 +3691,21 @@ func (ga *GinieAutopilot) getTPPercent(level int) float64 {
 	}
 }
 
+// getTrailingPercent reads trailing stop percent from Mode Config
+// Falls back to defaults if Mode Config is unavailable
 func (ga *GinieAutopilot) getTrailingPercent(mode GinieTradingMode) float64 {
+	// Try to read from Mode Config first
+	sm := GetSettingsManager()
+	if sm != nil {
+		modeStr := string(mode)
+		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+			if modeConfig.SLTP.TrailingStopPercent > 0 {
+				return modeConfig.SLTP.TrailingStopPercent
+			}
+		}
+	}
+
+	// Fallback to defaults if Mode Config not available
 	switch mode {
 	case GinieModeScalp:
 		return 0.3 // 0.3% trailing for scalp
@@ -3691,6 +3715,52 @@ func (ga *GinieAutopilot) getTrailingPercent(mode GinieTradingMode) float64 {
 		return 3.0 // 3% trailing for position
 	default:
 		return 1.0
+	}
+}
+
+// getTrailingActivation reads trailing stop activation threshold from Mode Config
+// Returns the profit % at which trailing stop activates
+func (ga *GinieAutopilot) getTrailingActivation(mode GinieTradingMode) float64 {
+	// Try to read from Mode Config first
+	sm := GetSettingsManager()
+	if sm != nil {
+		modeStr := string(mode)
+		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+			// Return the configured activation (even if 0, that's valid = disabled)
+			return modeConfig.SLTP.TrailingStopActivation
+		}
+	}
+
+	// Fallback to defaults if Mode Config not available
+	switch mode {
+	case GinieModeScalp:
+		return 0.5 // 0.5% profit to activate
+	case GinieModeSwing:
+		return 1.0 // 1.0% profit to activate
+	case GinieModePosition:
+		return 2.0 // 2.0% profit to activate
+	default:
+		return 1.0
+	}
+}
+
+// isTrailingEnabled checks if trailing stop is enabled for the given mode from Mode Config
+func (ga *GinieAutopilot) isTrailingEnabled(mode GinieTradingMode) bool {
+	// Try to read from Mode Config first
+	sm := GetSettingsManager()
+	if sm != nil {
+		modeStr := string(mode)
+		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+			return modeConfig.SLTP.TrailingStopEnabled
+		}
+	}
+
+	// Fallback to defaults if Mode Config not available
+	switch mode {
+	case GinieModeSwing, GinieModePosition:
+		return true // Default enabled for swing/position
+	default:
+		return false // Default disabled for scalp/ultra-fast
 	}
 }
 
@@ -4039,11 +4109,12 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			OriginalSL:       ga.calculateDefaultSL(pos.EntryPrice, side == "LONG", 2.0),
 			MovedToBreakeven: false,
 
-			// Trailing
-			TrailingActive:  false,
-			HighestPrice:    currentPrice,
-			LowestPrice:     currentPrice,
-			TrailingPercent: ga.getTrailingPercent(GinieModeSwing),
+			// Trailing - read from Mode Config
+			TrailingActive:        false,
+			HighestPrice:          currentPrice,
+			LowestPrice:           currentPrice,
+			TrailingPercent:       ga.getTrailingPercent(GinieModeSwing),
+			TrailingActivationPct: ga.getTrailingActivation(GinieModeSwing),
 
 			// PnL from exchange
 			UnrealizedPnL: pos.UnrealizedProfit,
@@ -4167,11 +4238,12 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			OriginalSL:       ga.calculateDefaultSL(pos.EntryPrice, side == "LONG", 2.0),
 			MovedToBreakeven: false,
 
-			// Trailing
-			TrailingActive:  false,
-			HighestPrice:    currentPrice,
-			LowestPrice:     currentPrice,
-			TrailingPercent: ga.getTrailingPercent(GinieModeSwing),
+			// Trailing - read from Mode Config
+			TrailingActive:        false,
+			HighestPrice:          currentPrice,
+			LowestPrice:           currentPrice,
+			TrailingPercent:       ga.getTrailingPercent(GinieModeSwing),
+			TrailingActivationPct: ga.getTrailingActivation(GinieModeSwing),
 
 			// PnL from exchange
 			UnrealizedPnL: pos.UnrealizedProfit,
@@ -7387,27 +7459,28 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 
 	// Create position record
 	position := &GiniePosition{
-		Symbol:           symbol,
-		Side:             signal.Side,
-		Mode:             GinieModeSwing, // Default mode for strategy trades
-		EntryPrice:       actualPrice,
-		OriginalQty:      actualQty,
-		RemainingQty:     actualQty,
-		Leverage:         leverage,
-		EntryTime:        time.Now(),
-		TakeProfits:      takeProfits,
-		CurrentTPLevel:   0,
-		StopLoss:         signal.StopLoss,
-		OriginalSL:       signal.StopLoss,
-		MovedToBreakeven: false,
-		TrailingActive:   false,
-		HighestPrice:     actualPrice,
-		LowestPrice:      actualPrice,
-		TrailingPercent:  ga.getTrailingPercent(GinieModeSwing),
-		DecisionReport:   nil, // No AI decision report for strategy trades
-		Source:           "strategy",
-		StrategyID:       &stratID,
-		StrategyName:     &stratName,
+		Symbol:                symbol,
+		Side:                  signal.Side,
+		Mode:                  GinieModeSwing, // Default mode for strategy trades
+		EntryPrice:            actualPrice,
+		OriginalQty:           actualQty,
+		RemainingQty:          actualQty,
+		Leverage:              leverage,
+		EntryTime:             time.Now(),
+		TakeProfits:           takeProfits,
+		CurrentTPLevel:        0,
+		StopLoss:              signal.StopLoss,
+		OriginalSL:            signal.StopLoss,
+		MovedToBreakeven:      false,
+		TrailingActive:        false,
+		HighestPrice:          actualPrice,
+		LowestPrice:           actualPrice,
+		TrailingPercent:       ga.getTrailingPercent(GinieModeSwing),
+		TrailingActivationPct: ga.getTrailingActivation(GinieModeSwing),
+		DecisionReport:        nil, // No AI decision report for strategy trades
+		Source:                "strategy",
+		StrategyID:            &stratID,
+		StrategyName:          &stratName,
 	}
 
 	ga.positions[symbol] = position
