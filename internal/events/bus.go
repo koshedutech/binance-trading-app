@@ -9,21 +9,23 @@ import (
 type EventType string
 
 const (
-	EventTradeOpened     EventType = "TRADE_OPENED"
-	EventTradeClosed     EventType = "TRADE_CLOSED"
-	EventTradeUpdate     EventType = "TRADE_UPDATE"
-	EventOrderPlaced     EventType = "ORDER_PLACED"
-	EventOrderFilled     EventType = "ORDER_FILLED"
-	EventOrderCancelled  EventType = "ORDER_CANCELLED"
-	EventOrderUpdate     EventType = "ORDER_UPDATE"
-	EventSignalGenerated EventType = "SIGNAL_GENERATED"
-	EventStrategyToggled EventType = "STRATEGY_TOGGLED"
-	EventScreenerUpdate  EventType = "SCREENER_UPDATE"
-	EventPriceUpdate     EventType = "PRICE_UPDATE"
-	EventPositionUpdate  EventType = "POSITION_UPDATE"
-	EventBotStarted      EventType = "BOT_STARTED"
-	EventBotStopped      EventType = "BOT_STOPPED"
-	EventError           EventType = "ERROR"
+	EventTradeOpened       EventType = "TRADE_OPENED"
+	EventTradeClosed       EventType = "TRADE_CLOSED"
+	EventTradeUpdate       EventType = "TRADE_UPDATE"
+	EventOrderPlaced       EventType = "ORDER_PLACED"
+	EventOrderFilled       EventType = "ORDER_FILLED"
+	EventOrderCancelled    EventType = "ORDER_CANCELLED"
+	EventOrderUpdate       EventType = "ORDER_UPDATE"
+	EventSignalGenerated   EventType = "SIGNAL_GENERATED"
+	EventStrategyToggled   EventType = "STRATEGY_TOGGLED"
+	EventScreenerUpdate    EventType = "SCREENER_UPDATE"
+	EventPriceUpdate       EventType = "PRICE_UPDATE"
+	EventPositionUpdate    EventType = "POSITION_UPDATE"
+	EventBotStarted        EventType = "BOT_STARTED"
+	EventBotStopped        EventType = "BOT_STOPPED"
+	EventError             EventType = "ERROR"
+	EventTradingModeChanged EventType = "TRADING_MODE_CHANGED"
+	EventAutopilotToggled   EventType = "AUTOPILOT_TOGGLED"
 )
 
 // Event represents a system event

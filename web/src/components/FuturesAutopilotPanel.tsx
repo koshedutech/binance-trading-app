@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { futuresApi, formatUSD, formatPercent } from '../services/futuresApi';
+import { apiService } from '../services/api';
+import { useFuturesStore } from '../store/futuresStore';
 import { Bot, Power, PowerOff, Settings, AlertTriangle, RefreshCw, TrendingUp, DollarSign, Shield, Percent, Target, Check, RotateCcw, Save, X, Edit2, Zap, Clock, Activity } from 'lucide-react';
 
 interface AutopilotStatus {
@@ -110,6 +112,9 @@ interface AutoModeConfig {
 }
 
 export default function FuturesAutopilotPanel() {
+  // Use global trading mode from futuresStore (synced via WebSocket)
+  const { tradingMode, fetchTradingMode } = useFuturesStore();
+
   const [status, setStatus] = useState<AutopilotStatus | null>(null);
   const [profitStats, setProfitStats] = useState<ProfitStats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -357,10 +362,12 @@ export default function FuturesAutopilotPanel() {
     if (!status) return;
     setLoading(true);
     try {
-      const result = await futuresApi.setAutopilotDryRun(!status.dry_run);
-      if (result.success) {
-        fetchStatus();
-      }
+      // Use global trading mode API - this syncs across all components
+      const newDryRun = !tradingMode.dryRun;
+      await apiService.setTradingMode(newDryRun);
+      // Refresh global trading mode state
+      await fetchTradingMode();
+      fetchStatus();
     } catch (err) {
       setError('Failed to update mode');
     } finally {
@@ -844,8 +851,8 @@ export default function FuturesAutopilotPanel() {
           <span className={`px-1.5 py-0.5 rounded text-[10px] capitalize ${getRiskLevelColor(riskLevel)}`}>
             {riskLevel}
           </span>
-          <span className={`px-1 py-0.5 rounded text-[10px] ${status.dry_run ? 'bg-yellow-500/20 text-yellow-500' : 'bg-red-500/20 text-red-500'}`}>
-            {status.dry_run ? 'PAPER' : 'LIVE'}
+          <span className={`px-1 py-0.5 rounded text-[10px] ${tradingMode.dryRun ? 'bg-yellow-500/20 text-yellow-500' : 'bg-red-500/20 text-red-500'}`}>
+            {tradingMode.dryRun ? 'PAPER' : 'LIVE'}
           </span>
           {status.running && (
             <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px] animate-pulse">ON</span>
@@ -986,16 +993,16 @@ export default function FuturesAutopilotPanel() {
           onClick={handleDryRunToggle}
           disabled={loading || status.running}
           className={`w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg font-medium transition-colors ${
-            status.dry_run
+            tradingMode.dryRun
               ? 'bg-yellow-500/20 text-yellow-500 hover:bg-yellow-500/30'
               : 'bg-red-500/20 text-red-500 hover:bg-red-500/30'
           } ${loading || status.running ? 'opacity-50 cursor-not-allowed' : ''}`}
           title={status.running ? 'Stop autopilot to change mode' : ''}
         >
-          {status.dry_run ? 'Switch to LIVE Mode' : 'Switch to PAPER Mode'}
+          {tradingMode.dryRun ? 'Switch to LIVE Mode' : 'Switch to PAPER Mode'}
         </button>
 
-        {!status.dry_run && (
+        {!tradingMode.dryRun && (
           <div className="flex items-center gap-2 text-xs text-yellow-500 bg-yellow-500/10 p-2 rounded">
             <AlertTriangle className="w-4 h-4" />
             <span>Live mode - Real trades will be executed!</span>

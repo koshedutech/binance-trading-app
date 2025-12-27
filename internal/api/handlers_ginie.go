@@ -3,6 +3,7 @@ package api
 import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/events"
 	"fmt"
 	"log"
 	"net/http"
@@ -30,6 +31,15 @@ func (s *Server) handleGetGinieStatus(c *gin.Context) {
 	}
 
 	status := ginie.GetStatus()
+
+	// CRITICAL FIX: Override enabled status with per-user GinieAutopilot's running state
+	// The toggle operates on GinieAutopilot, so status must reflect that component's state
+	// Otherwise toggle and status read from different sources causing UI mismatch
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		status.Enabled = giniePilot.IsRunning()
+	}
+
 	c.JSON(http.StatusOK, status)
 }
 
@@ -82,18 +92,10 @@ func (s *Server) handleUpdateGinieConfig(c *gin.Context) {
 
 // handleToggleGinie enables or disables Ginie
 func (s *Server) handleToggleGinie(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	// Initialize user-specific clients (LLM + Binance) from database BEFORE operations
-	s.tryInitializeUserClients(c, controller)
-
-	ginie := controller.GetGinieAnalyzer()
-	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
+	// Get the per-user GinieAutopilot instance (multi-user mode)
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -106,27 +108,58 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 	}
 
 	if req.Enabled {
-		// Enable the analyzer
-		ginie.Enable()
-		// CRITICAL: Start the actual autopilot trading loop
-		if err := controller.StartGinieAutopilot(); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to start autopilot: "+err.Error())
-			return
+		// Start the per-user Ginie autopilot
+		if err := giniePilot.Start(); err != nil {
+			// Check if it's already running - that's OK, not an error
+			if giniePilot.IsRunning() {
+				log.Printf("[GINIE-TOGGLE] Ginie already running for user, continuing")
+			} else {
+				errorResponse(c, http.StatusInternalServerError, "Failed to start autopilot: "+err.Error())
+				return
+			}
 		}
 	} else {
-		// CRITICAL: Stop the autopilot trading loop
-		if err := controller.StopGinieAutopilot(); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to stop autopilot: "+err.Error())
-			return
+		// Stop the per-user Ginie autopilot
+		// CRITICAL FIX: Check error from Stop() - log but don't fail if already stopped
+		if err := giniePilot.Stop(); err != nil {
+			// "not running" is OK when disabling, just log it
+			log.Printf("[GINIE-TOGGLE] Stop returned: %v (this is OK if already stopped)", err)
 		}
-		// Disable the analyzer
-		ginie.Disable()
+	}
+
+	enabled := giniePilot.IsRunning()
+
+	// CRITICAL FIX: Persist the auto-start setting so Ginie restarts after server reboot
+	// This was missing before, causing Ginie to not auto-start on server restart
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateGinieAutoStart(req.Enabled); err != nil {
+		log.Printf("[GINIE-TOGGLE] Failed to persist auto-start setting: %v", err)
+	}
+
+	// Get current dry_run mode from the autopilot config
+	dryRun := giniePilot.GetConfig().DryRun
+
+	// Broadcast autopilot status change to the SPECIFIC user via WebSocket (multi-user safe)
+	userID := s.getUserID(c)
+	if userWSHub != nil && userID != "" {
+		userWSHub.BroadcastToUser(userID, events.Event{
+			Type:      events.EventAutopilotToggled,
+			Timestamp: time.Now(),
+			Data: map[string]interface{}{
+				"enabled":  enabled,
+				"dry_run":  dryRun,
+				"source":   "ginie",
+				"user_id":  userID,
+			},
+		})
+		log.Printf("[GINIE-TOGGLE] Broadcasted AUTOPILOT_TOGGLED event to user %s: enabled=%v, dry_run=%v", userID, enabled, dryRun)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Ginie toggled",
-		"enabled": ginie.IsEnabled(),
+		"enabled": enabled,
+		"dry_run": dryRun,
 	})
 }
 
@@ -665,15 +698,10 @@ func (s *Server) handleRefreshGinieSymbols(c *gin.Context) {
 
 // handleGetGinieCircuitBreakerStatus returns Ginie circuit breaker status
 func (s *Server) handleGetGinieCircuitBreakerStatus(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -683,15 +711,10 @@ func (s *Server) handleGetGinieCircuitBreakerStatus(c *gin.Context) {
 
 // handleResetGinieCircuitBreaker resets Ginie circuit breaker
 func (s *Server) handleResetGinieCircuitBreaker(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -710,15 +733,10 @@ func (s *Server) handleResetGinieCircuitBreaker(c *gin.Context) {
 
 // handleToggleGinieCircuitBreaker enables or disables Ginie circuit breaker
 func (s *Server) handleToggleGinieCircuitBreaker(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -742,15 +760,10 @@ func (s *Server) handleToggleGinieCircuitBreaker(c *gin.Context) {
 
 // handleUpdateGinieCircuitBreakerConfig updates Ginie circuit breaker config
 func (s *Server) handleUpdateGinieCircuitBreakerConfig(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -797,15 +810,10 @@ func (s *Server) handleUpdateGinieCircuitBreakerConfig(c *gin.Context) {
 
 // handleSyncGiniePositions syncs Ginie positions with exchange
 func (s *Server) handleSyncGiniePositions(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -824,25 +832,20 @@ func (s *Server) handleSyncGiniePositions(c *gin.Context) {
 	positions := giniePilot.GetPositions()
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":        true,
-		"message":        "Synced positions with exchange",
-		"synced_count":   synced,
+		"success":         true,
+		"message":         "Synced positions with exchange",
+		"synced_count":    synced,
 		"total_positions": len(positions),
-		"positions":      positions,
+		"positions":       positions,
 	})
 }
 
 // handleCloseAllGiniePositions closes all Ginie-managed positions (panic button)
 func (s *Server) handleCloseAllGiniePositions(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -862,15 +865,10 @@ func (s *Server) handleCloseAllGiniePositions(c *gin.Context) {
 
 // handleRecalculateAdaptiveSLTP applies adaptive SL/TP to all naked positions
 func (s *Server) handleRecalculateAdaptiveSLTP(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -886,15 +884,10 @@ func (s *Server) handleRecalculateAdaptiveSLTP(c *gin.Context) {
 
 // handleGetSLTPJobStatus returns the status of a SLTP recalculation job
 func (s *Server) handleGetSLTPJobStatus(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -920,15 +913,10 @@ func (s *Server) handleGetSLTPJobStatus(c *gin.Context) {
 
 // handleListSLTPJobs returns recent SLTP recalculation jobs
 func (s *Server) handleListSLTPJobs(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -954,15 +942,10 @@ func (s *Server) handleListSLTPJobs(c *gin.Context) {
 
 // handleSetPositionROITarget sets custom ROI% target for a specific position
 func (s *Server) handleSetPositionROITarget(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1037,15 +1020,10 @@ func (s *Server) handleSetPositionROITarget(c *gin.Context) {
 
 // handleGetGinieRiskLevel returns the current Ginie risk level
 func (s *Server) handleGetGinieRiskLevel(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1061,15 +1039,10 @@ func (s *Server) handleGetGinieRiskLevel(c *gin.Context) {
 
 // handleSetGinieRiskLevel updates the Ginie risk level
 func (s *Server) handleSetGinieRiskLevel(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot instance (multi-user safe)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1462,6 +1435,21 @@ func (s *Server) handleGetGinieDiagnostics(c *gin.Context) {
 	}
 
 	diagnostics := giniePilot.GetDiagnostics()
+
+	// Override LLM status with user-specific AI key info
+	// The global autopilot has no LLM analyzer (uses per-user keys from database)
+	// So we need to check if the current user has an active AI key configured
+	userID := s.getUserID(c)
+	if userID != "" && s.apiKeyService != nil {
+		ctx := c.Request.Context()
+		aiKey, err := s.apiKeyService.GetActiveAIKey(ctx, userID)
+		if err == nil && aiKey != nil && aiKey.APIKey != "" {
+			// User has an active AI key - update diagnostics to show connected
+			diagnostics.LLMStatus.Connected = true
+			diagnostics.LLMStatus.Provider = string(aiKey.Provider)
+		}
+	}
+
 	c.JSON(http.StatusOK, diagnostics)
 }
 

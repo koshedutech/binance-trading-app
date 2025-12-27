@@ -9,6 +9,7 @@ import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/circuit"
+	"binance-trading-bot/internal/events"
 
 	"github.com/gin-gonic/gin"
 )
@@ -177,6 +178,16 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		// Give system a moment to complete mode switch before restart
 		time.Sleep(500 * time.Millisecond)
 
+		// SAFETY CHECK: Ensure Ginie is fully stopped before restarting
+		// This prevents race conditions if the stop timed out
+		if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
+			if giniePilot.IsRunning() {
+				log.Println("[MODE-SWITCH] Ginie still running after timeout, force-stopping...")
+				giniePilot.Stop()
+				time.Sleep(300 * time.Millisecond) // Brief wait for cleanup
+			}
+		}
+
 		// Re-enable the analyzer first
 		if ginieAnalyzer := futuresController.GetGinieAnalyzer(); ginieAnalyzer != nil {
 			ginieAnalyzer.Enable()
@@ -190,6 +201,21 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 			log.Println("[MODE-SWITCH] Ginie autopilot restarted successfully after mode switch")
 			ginieRestarted = true
 		}
+	}
+
+	// Broadcast trading mode change to all connected clients via WebSocket
+	if userWSHub != nil {
+		userWSHub.BroadcastToAll(events.Event{
+			Type:      events.EventTradingModeChanged,
+			Timestamp: time.Now(),
+			Data: map[string]interface{}{
+				"dry_run":         req.DryRun,
+				"mode":            mode,
+				"mode_label":      modeLabel,
+				"ginie_restarted": ginieRestarted,
+			},
+		})
+		log.Printf("[MODE-SWITCH] Broadcasted TRADING_MODE_CHANGED event to all clients")
 	}
 
 	c.JSON(http.StatusOK, gin.H{

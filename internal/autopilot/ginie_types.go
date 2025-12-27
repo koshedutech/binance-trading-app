@@ -348,6 +348,7 @@ func DefaultGinieConfig() *GinieConfig {
 // GinieStatus represents current Ginie status
 type GinieStatus struct {
 	Enabled           bool              `json:"enabled"`
+	DryRun            bool              `json:"dry_run"`
 	ActiveMode        GinieTradingMode  `json:"active_mode"`
 	ActivePositions   int               `json:"active_positions"`
 	MaxPositions      int               `json:"max_positions"`

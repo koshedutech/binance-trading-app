@@ -557,6 +557,7 @@ type GinieAutopilot struct {
 	logger        *logging.Logger
 	repo          *database.Repository // Database for trade persistence
 	eventLogger   *TradeEventLogger    // Trade lifecycle event logging
+	userID        string               // User ID for multi-tenant PnL isolation
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -663,6 +664,7 @@ func NewGinieAutopilot(
 	futuresClient binance.FuturesClient,
 	logger *logging.Logger,
 	repo *database.Repository,
+	userID string,
 ) *GinieAutopilot {
 	config := DefaultGinieAutopilotConfig()
 
@@ -684,6 +686,7 @@ func NewGinieAutopilot(
 		logger:            logger,
 		repo:              repo,
 		eventLogger:       NewTradeEventLogger(repo.GetDB()),
+		userID:            userID,
 		circuitBreaker:    circuit.NewCircuitBreaker(cbConfig),
 		currentRiskLevel:  config.RiskLevel,
 		stopChan:          make(chan struct{}),
@@ -755,30 +758,80 @@ func NewGinieAutopilot(
 	return ga
 }
 
-// LoadPnLStats loads persisted PnL statistics from settings
+// LoadPnLStats loads PnL statistics from database (per-user isolation)
 func (ga *GinieAutopilot) LoadPnLStats() {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
-	sm := GetSettingsManager()
-	totalPnL, dailyPnL, totalTrades, winningTrades, dailyTrades := sm.GetGiniePnLStats()
+	// If no userID set or no repo, fall back to shared settings (legacy mode)
+	if ga.userID == "" || ga.repo == nil {
+		sm := GetSettingsManager()
+		totalPnL, dailyPnL, totalTrades, winningTrades, dailyTrades := sm.GetGiniePnLStats()
+		ga.totalPnL = totalPnL
+		ga.dailyPnL = dailyPnL
+		ga.totalTrades = totalTrades
+		ga.winningTrades = winningTrades
+		ga.dailyTrades = dailyTrades
+		ga.logger.Info("Loaded Ginie PnL stats from settings (legacy mode)",
+			"total_pnl", totalPnL,
+			"daily_pnl", dailyPnL,
+			"total_trades", totalTrades)
+		return
+	}
 
-	ga.totalPnL = totalPnL
+	// Load from database for multi-user isolation
+	ctx := context.Background()
+	db := ga.repo.GetDB()
+
+	// Get comprehensive trading metrics for this user
+	metrics, err := db.GetFuturesTradingMetricsForUser(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Error("Failed to load PnL metrics from database", "error", err, "user_id", ga.userID)
+		return
+	}
+
+	// Get daily PnL and trade count
+	dailyPnL, err := db.GetDailyFuturesPnLForUser(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to get daily PnL from database", "error", err)
+		dailyPnL = 0
+	}
+
+	dailyTrades, err := db.GetDailyFuturesTradeCountForUser(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to get daily trade count from database", "error", err)
+		dailyTrades = 0
+	}
+
+	// Set the values from database
+	ga.totalPnL = metrics.TotalRealizedPnL
 	ga.dailyPnL = dailyPnL
-	ga.totalTrades = totalTrades
-	ga.winningTrades = winningTrades
+	ga.totalTrades = metrics.TotalTrades
+	ga.winningTrades = metrics.WinningTrades
 	ga.dailyTrades = dailyTrades
 
-	ga.logger.Info("Loaded Ginie PnL stats from settings",
-		"total_pnl", totalPnL,
-		"daily_pnl", dailyPnL,
-		"total_trades", totalTrades,
-		"winning_trades", winningTrades,
-		"daily_trades", dailyTrades)
+	ga.logger.Info("Loaded Ginie PnL stats from database (per-user)",
+		"user_id", ga.userID,
+		"total_pnl", ga.totalPnL,
+		"daily_pnl", ga.dailyPnL,
+		"total_trades", ga.totalTrades,
+		"winning_trades", ga.winningTrades,
+		"daily_trades", ga.dailyTrades,
+		"win_rate", metrics.WinRate)
 }
 
-// SavePnLStats persists current PnL statistics to settings
+// SavePnLStats is deprecated for multi-user mode - PnL is calculated from trades in database
+// For legacy (shared) mode, still persists to settings file
 func (ga *GinieAutopilot) SavePnLStats() {
+	// In multi-user mode, PnL is calculated from futures_trades table automatically
+	// No need to persist separately - the trades themselves are the source of truth
+	if ga.userID != "" {
+		ga.logger.Debug("SavePnLStats skipped - using database for multi-user PnL tracking",
+			"user_id", ga.userID)
+		return
+	}
+
+	// Legacy mode: persist to shared settings file
 	sm := GetSettingsManager()
 	if err := sm.UpdateGiniePnLStats(
 		ga.totalPnL,

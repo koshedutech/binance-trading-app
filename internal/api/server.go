@@ -158,6 +158,9 @@ func NewServer(
 
 	server.setupRoutes()
 
+	// Initialize user-aware WebSocket hub for real-time event broadcasting
+	InitUserWebSocket(eventBus)
+
 	return server
 }
 
