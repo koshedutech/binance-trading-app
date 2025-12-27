@@ -168,6 +168,7 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/ginie/autopilot/config":          true,
 		"/api/futures/ginie/autopilot/positions":       true,
 		"/api/futures/ginie/autopilot/history":         true,
+		"/api/futures/ginie/protection/status":         true,
 		"/api/futures/ginie/trade-history":             true,
 		"/api/futures/ginie/performance-metrics":       true,
 		"/api/futures/ginie/llm-diagnostics":           true,
@@ -546,6 +547,9 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/autopilot/history", s.handleGetGinieAutopilotTradeHistory)
 			futures.POST("/ginie/autopilot/clear", s.handleClearGinieAutopilotPositions)
 			futures.POST("/ginie/refresh-symbols", s.handleRefreshGinieSymbols)
+
+			// Bulletproof Protection Status (SL/TP health monitoring)
+			futures.GET("/ginie/protection/status", s.handleGetProtectionStatus)
 
 			// Per-symbol performance settings endpoints
 			futures.GET("/autopilot/symbols", s.handleGetSymbolSettings)

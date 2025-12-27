@@ -182,7 +182,10 @@ func getPricePrecision(symbol string) int {
 	if prec, ok := pricePrecision[symbol]; ok {
 		return prec
 	}
-	return 2 // Default fallback
+	// CRITICAL FIX: Default to 6 decimals (most common for low-priced coins)
+	// Previous value of 2 was truncating prices like 0.0106 to 0.01 causing order rejections
+	// 6 decimals handles coins down to $0.000001 tick size
+	return 6
 }
 
 // getQuantityPrecision gets quantity precision from cache or falls back to hardcoded map
@@ -2725,19 +2728,23 @@ func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *F
 
 		if tpAlreadyPassed {
 			// Price already passed TP - book profit immediately with market order
+			// CRITICAL: MARKET orders cannot use ClosePosition=true (API error -4136)
+			// Must use Quantity instead
+			roundedQty := roundQuantity(symbol, decision.Quantity)
 			fc.logger.Info("TP already passed (selective) - executing market order immediately",
 				"symbol", symbol,
 				"current_price", currentPrice,
 				"tp_price", roundedTP,
+				"qty", roundedQty,
 				"side", closeSide)
 
-			// Use ClosePosition=true to close entire position
+			// Use Quantity for MARKET orders (not ClosePosition)
 			orderParams := binance.FuturesOrderParams{
-				Symbol:        symbol,
-				Side:          closeSide,
-				PositionSide:  effectivePositionSide,
-				Type:          binance.FuturesOrderTypeMarket,
-				ClosePosition: true,
+				Symbol:       symbol,
+				Side:         closeSide,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeMarket,
+				Quantity:     roundedQty,
 			}
 
 			for attempt := 1; attempt <= maxRetries; attempt++ {
@@ -2746,6 +2753,7 @@ func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *F
 					fc.logger.Info("Immediate TP market order executed (selective)",
 						"symbol", symbol,
 						"order_id", order.OrderId,
+						"qty", roundedQty,
 						"attempt", attempt)
 					break
 				}

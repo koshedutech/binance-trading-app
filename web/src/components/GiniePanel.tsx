@@ -8,6 +8,7 @@ import {
   ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
+import { ProtectionHealthPanel } from './ProtectionHealthPanel';
 
 export default function GiniePanel() {
   const [status, setStatus] = useState<GinieStatus | null>(null);
@@ -27,7 +28,7 @@ export default function GiniePanel() {
   const [expandedPosition, setExpandedPosition] = useState<string | null>(null);
   const [coinScans, setCoinScans] = useState<GinieCoinScan[]>([]);
   const [showScans, setShowScans] = useState(false);
-  const [activeTab, setActiveTab] = useState<'decisions' | 'positions' | 'history' | 'movers' | 'diagnostics' | 'performance'>('decisions');
+  const [activeTab, setActiveTab] = useState<'decisions' | 'positions' | 'history' | 'movers' | 'diagnostics' | 'performance' | 'protection'>('decisions');
   // Diagnostics state
   const [diagnostics, setDiagnostics] = useState<GinieDiagnostics | null>(null);
   const [signalLogs, setSignalLogs] = useState<GinieSignalLog[]>([]);
@@ -583,6 +584,30 @@ export default function GiniePanel() {
       }
     } catch (err) {
       setError('Failed to update trend timeframes');
+    } finally {
+      setSavingTimeframes(false);
+    }
+  };
+
+  // Quick toggle for divergence blocking (without opening timeframes editor)
+  const handleToggleDivergenceBlock = async () => {
+    const newValue = !trendTimeframes.block_on_divergence;
+    setSavingTimeframes(true);
+    try {
+      const result = await futuresApi.updateGinieTrendTimeframes({
+        scalp_timeframe: trendTimeframes.scalp,
+        swing_timeframe: trendTimeframes.swing,
+        position_timeframe: trendTimeframes.position,
+        ultrafast_timeframe: trendTimeframes.ultra_fast,
+        block_on_divergence: newValue,
+      });
+      if (result.success) {
+        setTrendTimeframes({ ...trendTimeframes, block_on_divergence: newValue });
+        setSuccessMsg(`Divergence blocking ${newValue ? 'enabled' : 'disabled'}`);
+        setTimeout(() => setSuccessMsg(null), 3000);
+      }
+    } catch (err) {
+      setError('Failed to update divergence blocking');
     } finally {
       setSavingTimeframes(false);
     }
@@ -1294,6 +1319,38 @@ export default function GiniePanel() {
               {savingRiskLevel && riskLevel === level ? '...' : level.charAt(0).toUpperCase() + level.slice(1)}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Divergence Block Toggle */}
+      <div className="flex items-center gap-2 px-2 py-1.5 mb-3 bg-gray-700/30 rounded border border-gray-600">
+        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+        <span className="text-xs text-gray-300 whitespace-nowrap">Trend Divergence:</span>
+        <div className="flex-1 flex items-center justify-between">
+          <span className="text-[10px] text-gray-400">
+            {trendTimeframes.block_on_divergence
+              ? 'Block trades when timeframes disagree'
+              : 'Allow trades despite timeframe conflicts'}
+          </span>
+          <button
+            onClick={handleToggleDivergenceBlock}
+            disabled={savingTimeframes}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-colors ${
+              trendTimeframes.block_on_divergence
+                ? 'bg-red-900/50 text-red-400 border border-red-700 hover:bg-red-900/70'
+                : 'bg-green-900/50 text-green-400 border border-green-700 hover:bg-green-900/70'
+            } disabled:opacity-50`}
+          >
+            {savingTimeframes ? '...' : (
+              <>
+                {trendTimeframes.block_on_divergence ? (
+                  <><AlertOctagon className="w-3 h-3" /> Blocking</>
+                ) : (
+                  <><Check className="w-3 h-3" /> Allowed</>
+                )}
+              </>
+            )}
+          </button>
         </div>
       </div>
 
@@ -2746,6 +2803,13 @@ export default function GiniePanel() {
           <ListChecks className="w-3 h-3" />
           Perf
         </button>
+        <button
+          onClick={() => setActiveTab('protection')}
+          className={`px-2 py-0.5 rounded text-xs flex items-center gap-0.5 ${activeTab === 'protection' ? 'bg-blue-900/50 text-blue-400' : 'text-gray-400 hover:text-white'}`}
+        >
+          <Shield className="w-3 h-3" />
+          🛡️
+        </button>
       </div>
 
       {/* Positions Tab */}
@@ -3526,6 +3590,13 @@ export default function GiniePanel() {
               Click "Refresh Performance Data" to load metrics
             </div>
           )}
+        </div>
+      )}
+
+      {/* Protection Tab */}
+      {activeTab === 'protection' && (
+        <div className="space-y-2">
+          <ProtectionHealthPanel refreshInterval={5000} compact={false} />
         </div>
       )}
     </div>

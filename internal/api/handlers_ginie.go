@@ -3089,3 +3089,70 @@ func (s *Server) handleGetTradeHistoryWithAI(c *gin.Context) {
 		"has_more":    offset+len(trades) < totalCount,
 	})
 }
+
+// ==================== BULLETPROOF PROTECTION STATUS ====================
+
+// handleGetProtectionStatus returns the protection status of all active positions
+// This endpoint is used by the UI to display real-time SL/TP protection health
+func (s *Server) handleGetProtectionStatus(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	giniePilot := controller.GetGinieAutopilot()
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		return
+	}
+
+	// Get protection status for all positions
+	protectionStatus := giniePilot.GetPositionProtectionStatus()
+
+	// Calculate summary statistics
+	totalPositions := len(protectionStatus)
+	protectedCount := 0
+	unprotectedCount := 0
+	healingCount := 0
+	emergencyCount := 0
+
+	for _, status := range protectionStatus {
+		state, ok := status["protection_state"].(string)
+		if !ok {
+			continue
+		}
+		switch state {
+		case "PROTECTED", "SL_VERIFIED":
+			protectedCount++
+		case "UNPROTECTED":
+			unprotectedCount++
+		case "HEALING":
+			healingCount++
+		case "EMERGENCY":
+			emergencyCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"positions": protectionStatus,
+		"summary": gin.H{
+			"total":       totalPositions,
+			"protected":   protectedCount,
+			"unprotected": unprotectedCount,
+			"healing":     healingCount,
+			"emergency":   emergencyCount,
+			"health_pct":  calculateHealthPercent(protectedCount, totalPositions),
+		},
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+// calculateHealthPercent returns the percentage of protected positions
+func calculateHealthPercent(protected, total int) float64 {
+	if total == 0 {
+		return 100.0 // No positions = 100% healthy
+	}
+	return float64(protected) / float64(total) * 100.0
+}

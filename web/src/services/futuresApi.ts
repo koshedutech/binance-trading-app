@@ -1839,6 +1839,13 @@ class FuturesAPIService {
     const { data } = await this.client.post('/ginie/adaptive/config', config);
     return data;
   }
+
+  // ==================== PROTECTION STATUS ====================
+
+  async getProtectionStatus(): Promise<ProtectionStatusResponse> {
+    const { data } = await this.client.get('/ginie/protection/status');
+    return data;
+  }
 }
 
 // ==================== MARKET MOVERS TYPES ====================
@@ -2953,4 +2960,41 @@ export function getTimeInForceLabel(tif: string): string {
     GTX: 'Post Only',
   };
   return labels[tif] || tif;
+}
+
+// ==================== BULLETPROOF PROTECTION STATUS ====================
+
+export interface ProtectionPositionStatus {
+  symbol: string;
+  side: string;
+  entry_time: string;
+  protection_state: string;
+  sl_verified: boolean;
+  tp_verified: boolean;
+  failure_count: number;
+  heal_attempts: number;
+  last_failure: string;
+  time_in_state: string;
+  is_protected: boolean;
+}
+
+export interface ProtectionSummary {
+  total: number;
+  protected: number;
+  unprotected: number;
+  healing: number;
+  emergency: number;
+  health_pct: number;
+}
+
+export interface ProtectionStatusResponse {
+  success: boolean;
+  positions: ProtectionPositionStatus[];
+  summary: ProtectionSummary;
+  timestamp: string;
+}
+
+// Get protection status for all positions
+export async function getProtectionStatus(): Promise<ProtectionStatusResponse> {
+  return futuresApi.getProtectionStatus();
 }

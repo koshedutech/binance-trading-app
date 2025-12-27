@@ -208,6 +208,76 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 	}
 }
 
+// ==================== POSITION PROTECTION STATE MACHINE ====================
+
+// ProtectionState represents the current SL/TP protection state of a position
+type ProtectionState string
+
+const (
+	// StateOpening - Position just opened, SL/TP not yet placed
+	StateOpening ProtectionState = "OPENING"
+	// StatePlacingSL - Attempting to place Stop Loss order
+	StatePlacingSL ProtectionState = "PLACING_SL"
+	// StateSLVerified - Stop Loss confirmed on Binance
+	StateSLVerified ProtectionState = "SL_VERIFIED"
+	// StatePlacingTP - Attempting to place Take Profit order
+	StatePlacingTP ProtectionState = "PLACING_TP"
+	// StateFullyProtected - Both SL and TP verified on Binance
+	StateFullyProtected ProtectionState = "PROTECTED"
+	// StateHealing - Reconciler is fixing missing orders
+	StateHealing ProtectionState = "HEALING"
+	// StateUnprotected - DANGER: Position lacks SL/TP protection
+	StateUnprotected ProtectionState = "UNPROTECTED"
+	// StateEmergencyClose - Position being closed due to protection failure
+	StateEmergencyClose ProtectionState = "EMERGENCY"
+)
+
+// ProtectionStatus tracks the SL/TP protection state of a position
+type ProtectionStatus struct {
+	State           ProtectionState `json:"state"`
+	SLOrderID       int64           `json:"sl_order_id"`
+	SLVerified      bool            `json:"sl_verified"`
+	SLVerifiedAt    time.Time       `json:"sl_verified_at,omitempty"`
+	TPOrderIDs      []int64         `json:"tp_order_ids,omitempty"`
+	TPVerified      bool            `json:"tp_verified"`
+	TPVerifiedAt    time.Time       `json:"tp_verified_at,omitempty"`
+	FailureCount    int             `json:"failure_count"`
+	LastFailure     string          `json:"last_failure,omitempty"`
+	LastStateChange time.Time       `json:"last_state_change"`
+	HealAttempts    int             `json:"heal_attempts"`
+}
+
+// NewProtectionStatus creates a new protection status in OPENING state
+func NewProtectionStatus() *ProtectionStatus {
+	return &ProtectionStatus{
+		State:           StateOpening,
+		LastStateChange: time.Now(),
+	}
+}
+
+// SetState updates the protection state with timestamp
+func (ps *ProtectionStatus) SetState(state ProtectionState) {
+	ps.State = state
+	ps.LastStateChange = time.Now()
+}
+
+// TimeSinceStateChange returns duration since last state change
+func (ps *ProtectionStatus) TimeSinceStateChange() time.Duration {
+	return time.Since(ps.LastStateChange)
+}
+
+// IsProtected returns true if position has verified SL (minimum protection)
+func (ps *ProtectionStatus) IsProtected() bool {
+	return ps.State == StateFullyProtected || ps.State == StateSLVerified
+}
+
+// NeedsHealing returns true if position needs SL/TP repair
+func (ps *ProtectionStatus) NeedsHealing() bool {
+	return ps.State == StateUnprotected || ps.State == StateHealing
+}
+
+// ==================== END POSITION PROTECTION STATE MACHINE ====================
+
 // GiniePosition represents a Ginie-managed position with multi-level TPs
 type GiniePosition struct {
 	Symbol          string           `json:"symbol"`
@@ -239,6 +309,9 @@ type GiniePosition struct {
 	StopLossAlgoID   int64   `json:"stop_loss_algo_id,omitempty"`   // Binance algo order ID for SL
 	TakeProfitAlgoIDs []int64 `json:"take_profit_algo_ids,omitempty"` // Binance algo order IDs for TPs
 	LastLLMUpdate    time.Time `json:"last_llm_update,omitempty"`   // Last LLM SL/TP update time
+
+	// Protection State Machine (bulletproof SL/TP tracking)
+	Protection *ProtectionStatus `json:"protection,omitempty"` // SL/TP protection state
 
 	// Tracking
 	RealizedPnL      float64 `json:"realized_pnl"`     // From partial closes
@@ -1017,6 +1090,11 @@ func (ga *GinieAutopilot) Start() error {
 	// This prevents order accumulation from position updates and failed cancellations
 	ga.wg.Add(1)
 	go ga.periodicOrphanOrderCleanup()
+
+	// Start protection guardian (bulletproof SL/TP monitoring every 5 seconds)
+	// This is the core of the bulletproof protection system
+	ga.wg.Add(1)
+	go ga.runProtectionGuardian()
 
 	ga.mu.Unlock()
 	// CRITICAL: Release lock BEFORE doing any blocking operations (prevents API handler timeouts)
@@ -2212,6 +2290,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		TrailingActivationPct: trailingActivation, // Now properly initialized from Mode Config
 		DecisionReport:       decision,
 		Source:               "ai", // AI-based trade
+		Protection:           NewProtectionStatus(), // Initialize bulletproof protection tracking
 	}
 
 	ga.positions[symbol] = position
@@ -2220,7 +2299,20 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 
 	// Place SL/TP orders on Binance (if not dry run)
 	if !ga.config.DryRun {
+		position.Protection.SetState(StatePlacingSL)
 		ga.placeSLTPOrders(position)
+
+		// CRITICAL: Verify protection was established
+		// Give orders time to be registered on Binance
+		time.Sleep(500 * time.Millisecond)
+		ga.verifyPositionProtection(position)
+
+		if !position.Protection.SLVerified {
+			log.Printf("[PROTECTION] %s: WARNING - SL not verified after initial placement, will be healed by guardian", symbol)
+		}
+	} else {
+		// In dry run, mark as protected
+		position.Protection.SetState(StateFullyProtected)
 	}
 
 	// Build signal names for summary
@@ -3391,25 +3483,44 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 
 		_, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
 		if err != nil {
-			errMsg := "unknown"
-			if err != nil {
-				errMsg = err.Error()
-			}
-			ga.logger.Error("Ginie full close failed",
+			ga.logger.Warn("LIMIT close order failed, falling back to MARKET order",
 				"symbol", symbol,
-				"error_msg", errMsg,
-				"qty", roundedQty,
-				"price", roundedPrice,
-				"reason", reason)
-			return
-		}
+				"error", err.Error(),
+				"limit_price", roundedPrice,
+				"qty", roundedQty)
 
-		ga.logger.Info("Ginie full close order placed (LIMIT - SL/Trailing)",
-			"symbol", symbol,
-			"reason", reason,
-			"current_price", currentPrice,
-			"limit_price", closePrice,
-			"quantity", pos.RemainingQty)
+			// FALLBACK: Use MARKET order if LIMIT fails (e.g., due to price precision issues)
+			marketParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: positionSide,
+				Type:         binance.FuturesOrderTypeMarket,
+				Quantity:     roundedQty,
+			}
+
+			_, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
+			if marketErr != nil {
+				ga.logger.Error("Both LIMIT and MARKET close orders failed",
+					"symbol", symbol,
+					"limit_error", err.Error(),
+					"market_error", marketErr.Error(),
+					"qty", roundedQty,
+					"reason", reason)
+				return
+			}
+
+			ga.logger.Info("MARKET fallback close order placed successfully",
+				"symbol", symbol,
+				"reason", reason,
+				"qty", roundedQty)
+		} else {
+			ga.logger.Info("Ginie full close order placed (LIMIT - SL/Trailing)",
+				"symbol", symbol,
+				"reason", reason,
+				"current_price", currentPrice,
+				"limit_price", closePrice,
+				"quantity", pos.RemainingQty)
+		}
 	}
 
 	// Update tracking
@@ -3471,21 +3582,132 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	delete(ga.positions, symbol)
 }
 
-// closePositionAtMarket closes a position immediately at market price
-// Used when LLM recommends closing or when SL would immediately trigger
+// closePositionAtMarket closes a position immediately using a TRUE MARKET order
+// Used for emergency close, LLM close signals, or when immediate execution is required
+// CRITICAL: Uses MARKET order type to guarantee execution regardless of price precision issues
 func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 	if pos == nil {
 		return fmt.Errorf("nil position")
 	}
 
-	// Get current price
-	currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(pos.Symbol)
+	symbol := pos.Symbol
+
+	// Cancel all algo orders first to prevent orphan orders
+	log.Printf("[MARKET-CLOSE] %s: Cancelling all algo orders before market close", symbol)
+	success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
+	if err != nil || failed > 0 {
+		ga.logger.Warn("Failed to cancel all algo orders on market close",
+			"symbol", symbol,
+			"success", success,
+			"failed", failed,
+			"error", err)
+	}
+
+	// Get current price for PnL calculation
+	currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
 	if err != nil {
 		return fmt.Errorf("failed to get current price: %w", err)
 	}
 
-	// Use the existing closePosition logic
-	ga.closePosition(pos.Symbol, pos, currentPrice, "LLM_CLOSE_SIGNAL", 0)
+	// Calculate PnL
+	var grossPnl float64
+	var pnlPercent float64
+	if pos.Side == "LONG" {
+		grossPnl = (currentPrice - pos.EntryPrice) * pos.RemainingQty
+		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+	} else {
+		grossPnl = (pos.EntryPrice - currentPrice) * pos.RemainingQty
+		pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+	}
+
+	// Calculate fees
+	exitFee := calculateTradingFee(pos.RemainingQty, currentPrice)
+	pnl := grossPnl - exitFee
+	totalPnL := pos.RealizedPnL + pnl
+
+	ga.logger.Info("Closing position with MARKET order",
+		"symbol", symbol,
+		"remaining_qty", pos.RemainingQty,
+		"current_price", currentPrice,
+		"gross_pnl", grossPnl,
+		"fees", exitFee,
+		"net_pnl", pnl,
+		"total_pnl", totalPnL)
+
+	if !ga.config.DryRun && pos.RemainingQty > 0 {
+		// Determine order side and position side
+		side := "SELL"
+		positionSide := binance.PositionSideLong
+		if pos.Side == "SHORT" {
+			side = "BUY"
+			positionSide = binance.PositionSideShort
+		}
+
+		// Round quantity only (MARKET orders don't need price)
+		roundedQty := roundQuantity(symbol, pos.RemainingQty)
+
+		ga.logger.Info("Placing MARKET close order",
+			"symbol", symbol,
+			"side", side,
+			"qty", roundedQty,
+			"raw_qty", pos.RemainingQty)
+
+		// Use MARKET order - no price needed, guaranteed execution
+		orderParams := binance.FuturesOrderParams{
+			Symbol:       symbol,
+			Side:         side,
+			PositionSide: positionSide,
+			Type:         binance.FuturesOrderTypeMarket,
+			Quantity:     roundedQty,
+		}
+
+		_, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
+		if err != nil {
+			ga.logger.Error("MARKET close order failed",
+				"symbol", symbol,
+				"error", err.Error(),
+				"qty", roundedQty)
+			return fmt.Errorf("market close failed: %w", err)
+		}
+
+		ga.logger.Info("MARKET close order executed successfully",
+			"symbol", symbol,
+			"qty", roundedQty,
+			"estimated_price", currentPrice)
+	}
+
+	// Update tracking
+	ga.dailyPnL += pnl
+	ga.totalPnL += pnl
+
+	if totalPnL > 0 {
+		ga.winningTrades++
+	}
+
+	// Update per-coin loss tracking
+	ga.updateCoinLossTracking(symbol, pnl, pnlPercent)
+
+	// Create trade result
+	tradeResult := GinieTradeResult{
+		Symbol:    symbol,
+		Mode:      pos.Mode,
+		Side:      pos.Side,
+		Action:    "close_market",
+		Price:     currentPrice,
+		Quantity:  pos.OriginalQty,
+		PnL:       totalPnL,
+		PnLPercent: pnlPercent,
+		Reason:    "market_close",
+		Timestamp: time.Now(),
+	}
+	ga.recordTrade(tradeResult)
+
+	// Remove position
+	ga.mu.Lock()
+	delete(ga.positions, symbol)
+	ga.mu.Unlock()
+
+	log.Printf("[MARKET-CLOSE] %s: Position closed successfully via MARKET order", symbol)
 
 	return nil
 }
@@ -4118,6 +4340,9 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 
 			// PnL from exchange
 			UnrealizedPnL: pos.UnrealizedProfit,
+
+			// Initialize protection tracking (will be verified by guardian)
+			Protection: NewProtectionStatus(),
 		}
 
 		ga.positions[symbol] = position
@@ -4247,6 +4472,9 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 
 			// PnL from exchange
 			UnrealizedPnL: pos.UnrealizedProfit,
+
+			// Initialize protection tracking (will be verified by guardian)
+			Protection: NewProtectionStatus(),
 		}
 
 		ga.positions[symbol] = position
@@ -4607,6 +4835,366 @@ func (ga *GinieAutopilot) ensureSLTPOrdersExist(symbol string, pos *GiniePositio
 		ga.placeSLTPOrders(pos)
 	}
 }
+
+// ==================== BULLETPROOF POSITION PROTECTION SYSTEM ====================
+
+// verifySLOrderExists checks if a Stop Loss order exists on Binance for the position
+// Returns true if SL order found and verified, false otherwise
+func (ga *GinieAutopilot) verifySLOrderExists(symbol string, expectedSide string) (bool, int64) {
+	if ga.config.DryRun {
+		return true, 0 // In dry run, assume SL exists
+	}
+
+	algoOrders, err := ga.futuresClient.GetOpenAlgoOrders(symbol)
+	if err != nil {
+		ga.logger.Debug("Failed to get algo orders for SL verification",
+			"symbol", symbol, "error", err)
+		return false, 0
+	}
+
+	for _, order := range algoOrders {
+		if order.PositionSide != expectedSide {
+			continue
+		}
+		if order.OrderType == "STOP_MARKET" || order.OrderType == "STOP" {
+			return true, order.AlgoId
+		}
+	}
+
+	return false, 0
+}
+
+// verifyTPOrderExists checks if a Take Profit order exists on Binance for the position
+// Returns true if TP order found and verified, false otherwise
+func (ga *GinieAutopilot) verifyTPOrderExists(symbol string, expectedSide string) (bool, []int64) {
+	if ga.config.DryRun {
+		return true, nil // In dry run, assume TP exists
+	}
+
+	algoOrders, err := ga.futuresClient.GetOpenAlgoOrders(symbol)
+	if err != nil {
+		ga.logger.Debug("Failed to get algo orders for TP verification",
+			"symbol", symbol, "error", err)
+		return false, nil
+	}
+
+	var tpOrderIDs []int64
+	for _, order := range algoOrders {
+		if order.PositionSide != expectedSide {
+			continue
+		}
+		if order.OrderType == "TAKE_PROFIT_MARKET" || order.OrderType == "TAKE_PROFIT" {
+			tpOrderIDs = append(tpOrderIDs, order.AlgoId)
+		}
+	}
+
+	return len(tpOrderIDs) > 0, tpOrderIDs
+}
+
+// verifyPositionProtection checks if position has valid SL/TP orders on Binance
+// and updates the protection status accordingly
+func (ga *GinieAutopilot) verifyPositionProtection(pos *GiniePosition) {
+	if pos == nil {
+		return
+	}
+
+	// Initialize protection status if nil
+	if pos.Protection == nil {
+		pos.Protection = NewProtectionStatus()
+	}
+
+	// Verify SL exists on Binance
+	slExists, slOrderID := ga.verifySLOrderExists(pos.Symbol, pos.Side)
+	if slExists {
+		pos.Protection.SLOrderID = slOrderID
+		pos.Protection.SLVerified = true
+		pos.Protection.SLVerifiedAt = time.Now()
+	} else {
+		pos.Protection.SLVerified = false
+	}
+
+	// Verify TP exists on Binance
+	tpExists, tpOrderIDs := ga.verifyTPOrderExists(pos.Symbol, pos.Side)
+	if tpExists {
+		pos.Protection.TPOrderIDs = tpOrderIDs
+		pos.Protection.TPVerified = true
+		pos.Protection.TPVerifiedAt = time.Now()
+	} else {
+		pos.Protection.TPVerified = false
+	}
+
+	// Update protection state based on verification
+	if pos.Protection.SLVerified && pos.Protection.TPVerified {
+		if pos.Protection.State != StateFullyProtected {
+			pos.Protection.SetState(StateFullyProtected)
+			log.Printf("[PROTECTION] %s: Position FULLY PROTECTED (SL+TP verified)", pos.Symbol)
+		}
+	} else if pos.Protection.SLVerified {
+		if pos.Protection.State != StateSLVerified && pos.Protection.State != StateFullyProtected {
+			pos.Protection.SetState(StateSLVerified)
+			log.Printf("[PROTECTION] %s: SL VERIFIED (TP missing)", pos.Symbol)
+		}
+	} else {
+		// No SL = UNPROTECTED
+		if pos.Protection.State != StateUnprotected && pos.Protection.State != StateHealing && pos.Protection.State != StateEmergencyClose {
+			pos.Protection.SetState(StateUnprotected)
+			log.Printf("[PROTECTION] %s: UNPROTECTED - SL missing!", pos.Symbol)
+		}
+	}
+}
+
+// healPosition attempts to repair SL/TP orders for an unprotected position
+func (ga *GinieAutopilot) healPosition(pos *GiniePosition) {
+	if pos == nil || pos.Protection == nil {
+		return
+	}
+
+	// Don't heal if already protected or in emergency close
+	if pos.Protection.State == StateFullyProtected || pos.Protection.State == StateEmergencyClose {
+		return
+	}
+
+	pos.Protection.SetState(StateHealing)
+	pos.Protection.HealAttempts++
+
+	log.Printf("[PROTECTION-HEAL] %s: Attempting heal (attempt #%d)", pos.Symbol, pos.Protection.HealAttempts)
+
+	// Cancel any orphan orders and recreate
+	_, _, err := ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
+	if err != nil {
+		log.Printf("[PROTECTION-HEAL] %s: Failed to cancel existing orders: %v", pos.Symbol, err)
+		pos.Protection.LastFailure = fmt.Sprintf("cancel failed: %v", err)
+		pos.Protection.FailureCount++
+		pos.Protection.SetState(StateUnprotected)
+		return
+	}
+
+	// Wait for cancellation to propagate
+	time.Sleep(300 * time.Millisecond)
+
+	// Recreate SL/TP orders
+	ga.placeSLTPOrders(pos)
+
+	// Wait for orders to be placed
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify the orders were created
+	ga.verifyPositionProtection(pos)
+
+	if pos.Protection.SLVerified {
+		log.Printf("[PROTECTION-HEAL] %s: Heal SUCCESSFUL - SL verified", pos.Symbol)
+		pos.Protection.HealAttempts = 0 // Reset on success
+	} else {
+		log.Printf("[PROTECTION-HEAL] %s: Heal FAILED - SL still not verified", pos.Symbol)
+		pos.Protection.FailureCount++
+		pos.Protection.LastFailure = "SL placement failed after heal attempt"
+		pos.Protection.SetState(StateUnprotected)
+	}
+}
+
+// emergencyClosePosition closes a position immediately due to protection failure
+func (ga *GinieAutopilot) emergencyClosePosition(pos *GiniePosition, reason string) error {
+	if pos == nil {
+		return fmt.Errorf("nil position")
+	}
+
+	pos.Protection.SetState(StateEmergencyClose)
+
+	log.Printf("[EMERGENCY-CLOSE] %s: CLOSING POSITION - Reason: %s", pos.Symbol, reason)
+	ga.logger.Error("Emergency position close triggered",
+		"symbol", pos.Symbol,
+		"reason", reason,
+		"protection_failures", pos.Protection.FailureCount,
+		"heal_attempts", pos.Protection.HealAttempts,
+		"unprotected_duration", pos.Protection.TimeSinceStateChange())
+
+	// Close at market
+	return ga.closePositionAtMarket(pos)
+}
+
+// runProtectionGuardian runs a continuous loop that monitors and heals position protection
+// This is the core of the bulletproof SL/TP system
+func (ga *GinieAutopilot) runProtectionGuardian() {
+	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
+	defer ticker.Stop()
+
+	log.Printf("[PROTECTION-GUARDIAN] Starting position protection guardian (5s interval)")
+
+	for {
+		select {
+		case <-ga.stopChan:
+			log.Printf("[PROTECTION-GUARDIAN] Stopping protection guardian")
+			return
+		case <-ticker.C:
+			ga.checkAllPositionsProtection()
+		}
+	}
+}
+
+// checkAllPositionsProtection verifies protection for all active positions
+func (ga *GinieAutopilot) checkAllPositionsProtection() {
+	ga.mu.RLock()
+	positions := make([]*GiniePosition, 0, len(ga.positions))
+	for _, pos := range ga.positions {
+		positions = append(positions, pos)
+	}
+	ga.mu.RUnlock()
+
+	for _, pos := range positions {
+		ga.checkSinglePositionProtection(pos)
+	}
+}
+
+// checkSinglePositionProtection checks and handles protection for a single position
+func (ga *GinieAutopilot) checkSinglePositionProtection(pos *GiniePosition) {
+	if pos == nil {
+		return
+	}
+
+	// Initialize protection if nil
+	if pos.Protection == nil {
+		pos.Protection = NewProtectionStatus()
+		pos.Protection.SetState(StateOpening)
+	}
+
+	// Skip if in emergency close
+	if pos.Protection.State == StateEmergencyClose {
+		return
+	}
+
+	// Verify current protection status
+	ga.verifyPositionProtection(pos)
+
+	// Handle unprotected positions
+	if pos.Protection.State == StateUnprotected {
+		unprotectedDuration := pos.Protection.TimeSinceStateChange()
+
+		// Configuration: Max unprotected time before emergency close
+		const maxUnprotectedTime = 30 * time.Second
+		const maxHealAttempts = 3
+
+		if unprotectedDuration > maxUnprotectedTime || pos.Protection.HealAttempts >= maxHealAttempts {
+			// EMERGENCY: Position has been unprotected too long or too many heal attempts
+			reason := fmt.Sprintf("Unprotected for %v, heal attempts: %d", unprotectedDuration.Round(time.Second), pos.Protection.HealAttempts)
+			ga.emergencyClosePosition(pos, reason)
+			return
+		}
+
+		// Try to heal (only if not already healing)
+		if pos.Protection.State != StateHealing {
+			ga.healPosition(pos)
+		}
+	}
+
+	// Handle partially protected (SL only, no TP)
+	if pos.Protection.State == StateSLVerified && !pos.Protection.TPVerified {
+		// TP missing but SL in place - try to add TP without canceling SL
+		if pos.Protection.TimeSinceStateChange() > 10*time.Second {
+			log.Printf("[PROTECTION] %s: TP missing for %v, attempting to add TP", pos.Symbol, pos.Protection.TimeSinceStateChange().Round(time.Second))
+			// Only place TP, don't cancel SL
+			ga.placeTPOrderOnly(pos)
+		}
+	}
+}
+
+// placeTPOrderOnly places only the TP order without touching SL
+// Used when SL is verified but TP is missing
+func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
+	if pos == nil || len(pos.TakeProfits) == 0 {
+		return
+	}
+
+	// Determine the current TP level to place
+	tpLevel := pos.CurrentTPLevel
+	if tpLevel >= len(pos.TakeProfits) {
+		return // All TPs already hit
+	}
+
+	tp := pos.TakeProfits[tpLevel]
+	if tp.Price <= 0 || tp.Status == "hit" {
+		return
+	}
+
+	closeSide := "SELL"
+	positionSide := binance.PositionSideLong
+	if pos.Side == "SHORT" {
+		closeSide = "BUY"
+		positionSide = binance.PositionSideShort
+	}
+
+	tpQty := roundQuantity(pos.Symbol, pos.RemainingQty*(tp.Percent/100.0))
+	if tpQty <= 0 {
+		return
+	}
+
+	roundedTP := roundPriceForTP(pos.Symbol, tp.Price, pos.Side)
+
+	tpParams := binance.AlgoOrderParams{
+		Symbol:       pos.Symbol,
+		Side:         closeSide,
+		PositionSide: positionSide,
+		Type:         binance.FuturesOrderTypeTakeProfitMarket,
+		Quantity:     tpQty,
+		TriggerPrice: roundedTP,
+		WorkingType:  binance.WorkingTypeMarkPrice,
+	}
+
+	tpOrder, err := ga.futuresClient.PlaceAlgoOrder(tpParams)
+	if err == nil && tpOrder != nil && tpOrder.AlgoId > 0 {
+		pos.TakeProfitAlgoIDs = append(pos.TakeProfitAlgoIDs, tpOrder.AlgoId)
+		pos.Protection.TPOrderIDs = append(pos.Protection.TPOrderIDs, tpOrder.AlgoId)
+		pos.Protection.TPVerified = true
+		pos.Protection.TPVerifiedAt = time.Now()
+		pos.Protection.SetState(StateFullyProtected)
+		log.Printf("[PROTECTION] %s: TP order placed successfully (algoID: %d)", pos.Symbol, tpOrder.AlgoId)
+	} else {
+		log.Printf("[PROTECTION] %s: Failed to place TP order: %v", pos.Symbol, err)
+	}
+}
+
+// initializePositionProtection initializes protection tracking for a new position
+func (ga *GinieAutopilot) initializePositionProtection(pos *GiniePosition) {
+	if pos == nil {
+		return
+	}
+	pos.Protection = NewProtectionStatus()
+	pos.Protection.SetState(StateOpening)
+}
+
+// GetPositionProtectionStatus returns protection status for all positions (for API/UI)
+func (ga *GinieAutopilot) GetPositionProtectionStatus() []map[string]interface{} {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	result := make([]map[string]interface{}, 0, len(ga.positions))
+	for symbol, pos := range ga.positions {
+		status := map[string]interface{}{
+			"symbol":     symbol,
+			"side":       pos.Side,
+			"entry_time": pos.EntryTime,
+		}
+
+		if pos.Protection != nil {
+			status["protection_state"] = string(pos.Protection.State)
+			status["sl_verified"] = pos.Protection.SLVerified
+			status["tp_verified"] = pos.Protection.TPVerified
+			status["failure_count"] = pos.Protection.FailureCount
+			status["heal_attempts"] = pos.Protection.HealAttempts
+			status["last_failure"] = pos.Protection.LastFailure
+			status["time_in_state"] = pos.Protection.TimeSinceStateChange().String()
+			status["is_protected"] = pos.Protection.IsProtected()
+		} else {
+			status["protection_state"] = "UNKNOWN"
+			status["is_protected"] = false
+		}
+
+		result = append(result, status)
+	}
+
+	return result
+}
+
+// ==================== END BULLETPROOF POSITION PROTECTION SYSTEM ====================
 
 // cancelAllAlgoOrdersForSymbol queries Binance for all open algo orders for a symbol and cancels them
 // Returns (successCount, failureCount, error)
