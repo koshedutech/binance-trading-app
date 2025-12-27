@@ -113,6 +113,13 @@ type SetPositionModeRequest struct {
 
 // handleGetFuturesAccountInfo returns futures account information
 func (s *Server) handleGetFuturesAccountInfo(c *gin.Context) {
+	// Check if we're in dry run mode via settings API
+	settingsAPI := s.getSettingsAPI()
+	isSimulated := false // Default to real mode if settings unavailable
+	if settingsAPI != nil {
+		isSimulated = settingsAPI.GetDryRunMode()
+	}
+
 	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
@@ -125,7 +132,25 @@ func (s *Server) handleGetFuturesAccountInfo(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, accountInfo)
+	// Build response with is_simulated field
+	c.JSON(http.StatusOK, gin.H{
+		"total_wallet_balance":      accountInfo.TotalWalletBalance,
+		"total_unrealized_profit":   accountInfo.TotalUnrealizedProfit,
+		"total_margin_balance":      accountInfo.TotalMarginBalance,
+		"total_position_initial_margin": accountInfo.TotalPositionInitialMargin,
+		"total_open_order_initial_margin": accountInfo.TotalOpenOrderInitialMargin,
+		"total_cross_wallet_balance": accountInfo.TotalCrossWalletBalance,
+		"total_cross_unrealized_pnl": accountInfo.TotalCrossUnPnl,
+		"available_balance":         accountInfo.AvailableBalance,
+		"max_withdraw_amount":       accountInfo.MaxWithdrawAmount,
+		"assets":                    accountInfo.Assets,
+		"positions":                 accountInfo.Positions,
+		"can_trade":                 accountInfo.CanTrade,
+		"can_deposit":               accountInfo.CanDeposit,
+		"can_withdraw":              accountInfo.CanWithdraw,
+		"update_time":               accountInfo.UpdateTime,
+		"is_simulated":              isSimulated,
+	})
 }
 
 // handleGetFuturesPositions returns all futures positions
@@ -1454,7 +1479,7 @@ func (s *Server) handleGetFuturesKlines(c *gin.Context) {
 func (s *Server) handleGetFuturesWalletBalance(c *gin.Context) {
 	// Check if we're in dry run mode via settings API
 	settingsAPI := s.getSettingsAPI()
-	isSimulated := true
+	isSimulated := false // Default to real mode if settings unavailable
 	if settingsAPI != nil {
 		isSimulated = settingsAPI.GetDryRunMode()
 	}

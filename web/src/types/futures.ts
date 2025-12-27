@@ -39,21 +39,21 @@ export type FuturesTradeStatus = 'OPEN' | 'CLOSED' | 'LIQUIDATED';
 // ==================== ACCOUNT ====================
 
 export interface FuturesAccountInfo {
-  feeTier: number;
-  canTrade: boolean;
-  canDeposit: boolean;
-  canWithdraw: boolean;
-  totalInitialMargin: number;
-  totalMaintMargin: number;
-  totalWalletBalance: number;
-  totalUnrealizedProfit: number;
-  totalMarginBalance: number;
-  totalPositionInitialMargin: number;
-  totalOpenOrderInitialMargin: number;
-  totalCrossWalletBalance: number;
-  totalCrossUnPnl: number;
-  availableBalance: number;
-  maxWithdrawAmount: number;
+  fee_tier: number;
+  can_trade: boolean;
+  can_deposit: boolean;
+  can_withdraw: boolean;
+  total_initial_margin: number;
+  total_maint_margin: number;
+  total_wallet_balance: number;
+  total_unrealized_profit: number;
+  total_margin_balance: number;
+  total_position_initial_margin: number;
+  total_open_order_initial_margin: number;
+  total_cross_wallet_balance: number;
+  total_cross_un_pnl: number;
+  available_balance: number;
+  max_withdraw_amount: number;
   assets: FuturesAsset[];
   positions: FuturesAccountPosition[];
 }

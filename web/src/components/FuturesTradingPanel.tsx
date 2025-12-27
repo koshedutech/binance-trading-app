@@ -148,7 +148,7 @@ export default function FuturesTradingPanel() {
   };
 
   const currentPrice = markPrice?.markPrice || 0;
-  const availableBalance = accountInfo?.availableBalance || 0;
+  const availableBalance = accountInfo?.available_balance || 0;
 
   // Calculate preview TP/SL prices based on current mode
   const calculateTPSLPreview = () => {
