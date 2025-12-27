@@ -799,9 +799,42 @@ func (ga *GinieAutopilot) SetConfig(config *GinieAutopilotConfig) {
 // SetFuturesClient updates the futures client (used when switching between paper/live modes)
 func (ga *GinieAutopilot) SetFuturesClient(client binance.FuturesClient) {
 	ga.mu.Lock()
-	defer ga.mu.Unlock()
 	ga.futuresClient = client
 	ga.logger.Info("Ginie futures client updated")
+	wasRunning := ga.running
+	ga.mu.Unlock()
+
+	// CRITICAL: Re-sync positions and auto-start when client is updated
+	// This handles the case where container starts with mock client, then real client is injected
+	if client != nil {
+		go func() {
+			// 1. Sync existing positions from exchange
+			synced, err := ga.SyncWithExchange()
+			if err != nil {
+				ga.logger.Error("Failed to sync positions after client update", "error", err)
+			} else if synced > 0 {
+				ga.logger.Info("Synced existing exchange positions after client update", "count", synced)
+			}
+
+			// 2. Auto-start Ginie if enabled in settings and not already running
+			if !wasRunning {
+				settingsManager := GetSettingsManager()
+				settings := settingsManager.GetCurrentSettings()
+				if settings.GinieAutoStart {
+					ga.logger.Info("Auto-starting Ginie autopilot (ginie_auto_start=true)")
+					if err := ga.Start(); err != nil {
+						ga.logger.Warn("Failed to auto-start Ginie", "error", err)
+					} else {
+						ga.logger.Info("Ginie autopilot auto-started successfully")
+						// 3. Place SL/TP orders for synced positions
+						if synced > 0 {
+							ga.placeSLTPOrdersForSyncedPositions()
+						}
+					}
+				}
+			}
+		}()
+	}
 }
 
 func (ga *GinieAutopilot) SetLLMAnalyzer(analyzer *llm.Analyzer) {
@@ -5100,18 +5133,29 @@ func (ga *GinieAutopilot) checkSinglePositionProtection(pos *GiniePosition) {
 // placeTPOrderOnly places only the TP order without touching SL
 // Used when SL is verified but TP is missing
 func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
-	if pos == nil || len(pos.TakeProfits) == 0 {
+	if pos == nil {
+		log.Printf("[PROTECTION-TP] placeTPOrderOnly called with nil position")
+		return
+	}
+	if len(pos.TakeProfits) == 0 {
+		log.Printf("[PROTECTION-TP] %s: No TakeProfits defined (len=0), cannot place TP", pos.Symbol)
 		return
 	}
 
 	// Determine the current TP level to place
 	tpLevel := pos.CurrentTPLevel
 	if tpLevel >= len(pos.TakeProfits) {
+		log.Printf("[PROTECTION-TP] %s: All TPs already hit (level=%d, total=%d)", pos.Symbol, tpLevel, len(pos.TakeProfits))
 		return // All TPs already hit
 	}
 
 	tp := pos.TakeProfits[tpLevel]
-	if tp.Price <= 0 || tp.Status == "hit" {
+	if tp.Price <= 0 {
+		log.Printf("[PROTECTION-TP] %s: TP price is invalid (price=%.8f)", pos.Symbol, tp.Price)
+		return
+	}
+	if tp.Status == "hit" {
+		log.Printf("[PROTECTION-TP] %s: TP level %d already hit", pos.Symbol, tpLevel)
 		return
 	}
 
@@ -5124,8 +5168,19 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 
 	tpQty := roundQuantity(pos.Symbol, pos.RemainingQty*(tp.Percent/100.0))
 	if tpQty <= 0 {
-		return
+		// CRITICAL FIX: For small positions, use full remaining quantity (single TP mode)
+		// This handles cases like VETUSDT where 40% of 1 unit = 0.4 which rounds to 0
+		tpQty = roundQuantity(pos.Symbol, pos.RemainingQty)
+		if tpQty <= 0 {
+			log.Printf("[PROTECTION-TP] %s: Even full quantity rounds to 0 (remainingQty=%.8f)", pos.Symbol, pos.RemainingQty)
+			return
+		}
+		log.Printf("[PROTECTION-TP] %s: Using full remaining qty for TP (small position, %.8f -> %.8f)",
+			pos.Symbol, pos.RemainingQty, tpQty)
 	}
+
+	log.Printf("[PROTECTION-TP] %s: Placing TP order (level=%d, price=%.8f, qty=%.8f, side=%s)",
+		pos.Symbol, tpLevel, tp.Price, tpQty, closeSide)
 
 	roundedTP := roundPriceForTP(pos.Symbol, tp.Price, pos.Side)
 
