@@ -76,11 +76,13 @@ export default function SpotAutopilotPanel() {
     fetchStatus();
     fetchProfitStats();
     fetchCircuitBreakerStatus();
+    // Increased from 15s to 30s to prevent timeout race conditions
+    // (10s timeout + 20s buffer before next poll)
     const interval = setInterval(() => {
       fetchStatus();
       fetchProfitStats();
       fetchCircuitBreakerStatus();
-    }, 15000);
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 

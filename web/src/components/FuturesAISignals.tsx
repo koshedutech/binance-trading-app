@@ -58,8 +58,20 @@ export default function FuturesAISignals() {
 
   const fetchDecisions = async () => {
     try {
+      const token = localStorage.getItem('access_token');
+      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+
       // Fetch from the existing AI decisions endpoint, which includes futures decisions
-      const res = await fetch('/api/ai-decisions?limit=50');
+      const res = await fetch('/api/ai-decisions?limit=50', { headers });
+
+      // Silently handle 401 errors
+      if (res.status === 401) {
+        console.warn('FuturesAISignals: Not authenticated');
+        setDecisions([]);
+        setError(null);
+        return;
+      }
+
       if (!res.ok) throw new Error('Failed to fetch');
       const data = await res.json();
 

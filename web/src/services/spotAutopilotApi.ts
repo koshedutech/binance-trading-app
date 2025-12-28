@@ -99,7 +99,7 @@ class SpotAutopilotAPIService {
   constructor() {
     this.client = axios.create({
       baseURL: '/api/spot',
-      timeout: 15000,
+      timeout: 10000, // Reduced from 15s to 10s to prevent timeout race conditions
       headers: {
         'Content-Type': 'application/json',
       },

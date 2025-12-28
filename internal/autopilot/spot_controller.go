@@ -118,6 +118,9 @@ type SpotController struct {
 	running  bool
 	stopChan chan struct{}
 	wg       sync.WaitGroup
+
+	// Multi-user tracking
+	ownerUserID string // UserID who owns this autopilot instance
 }
 
 // NewSpotController creates a new Spot AI controller
@@ -284,6 +287,20 @@ func (sc *SpotController) IsRunning() bool {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	return sc.running
+}
+
+// GetOwnerUserID returns the user ID who owns this autopilot instance
+func (sc *SpotController) GetOwnerUserID() string {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.ownerUserID
+}
+
+// SetOwnerUserID sets the user ID who owns this autopilot instance
+func (sc *SpotController) SetOwnerUserID(userID string) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.ownerUserID = userID
 }
 
 // Start begins the Spot autopilot trading loop

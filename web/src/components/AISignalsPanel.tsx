@@ -103,12 +103,23 @@ export default function AISignalsPanel() {
   const fetchData = async () => {
     try {
       setLoading(true);
+      const token = localStorage.getItem('access_token');
+      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+
       const [decisionsRes, statsRes] = await Promise.all([
-        fetch('/api/ai-decisions?limit=100'),
-        fetch('/api/ai-decisions/stats?hours=24')
+        fetch('/api/ai-decisions?limit=100', { headers }),
+        fetch('/api/ai-decisions/stats?hours=24', { headers })
       ]);
 
       if (!decisionsRes.ok || !statsRes.ok) {
+        // Silently handle auth errors - user may not be logged in
+        if (decisionsRes.status === 401 || statsRes.status === 401) {
+          console.warn('AI decisions: Not authenticated');
+          setDecisions([]);
+          setStats(null);
+          setError(null);
+          return;
+        }
         throw new Error('Failed to fetch AI decisions');
       }
 
