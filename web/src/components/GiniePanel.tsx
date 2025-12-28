@@ -4069,8 +4069,12 @@ export default function GiniePanel() {
                   {coinScans.map((scan) => {
                     // Find matching decision for this coin
                     const matchingDecision = status?.recent_decisions?.find(d => d.symbol === scan.symbol);
-                    const hasRejection = matchingDecision?.rejection_tracking?.is_blocked;
-                    const rejectionReason = matchingDecision?.rejection_tracking?.block_reason;
+                    // Show rejection for ANY coin where recommendation is not EXECUTE
+                    const hasRejection = matchingDecision && matchingDecision.recommendation !== 'EXECUTE';
+                    // Use block_reason first, then recommendation_note, then scan.reason as fallbacks
+                    const rejectionReason = matchingDecision?.rejection_tracking?.block_reason ||
+                                           matchingDecision?.recommendation_note ||
+                                           (hasRejection ? scan.reason : '');
                     const allReasons = matchingDecision?.rejection_tracking?.all_reasons || [];
 
                     return (
@@ -4109,8 +4113,8 @@ export default function GiniePanel() {
                           </div>
                         </div>
 
-                        {/* Show rejection reason if coin has good score but was skipped */}
-                        {hasRejection && scan.score >= 50 && (
+                        {/* Show rejection reason for ALL coins not being traded */}
+                        {hasRejection && rejectionReason && (
                           <div className="mt-2 pt-2 border-t border-red-800/30">
                             <div className="flex items-start gap-2 text-xs">
                               <AlertTriangle className="w-3 h-3 text-red-400 mt-0.5 flex-shrink-0" />
@@ -4133,8 +4137,8 @@ export default function GiniePanel() {
                           </div>
                         )}
 
-                        {/* Show scan reason if not trade ready */}
-                        {!scan.trade_ready && scan.reason && (
+                        {/* Show scan reason if not trade ready and no rejection reason already shown */}
+                        {!scan.trade_ready && scan.reason && !(hasRejection && rejectionReason) && (
                           <div className="mt-1 text-[10px] text-gray-500 pl-2">
                             Scan: {scan.reason}
                           </div>
