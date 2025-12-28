@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -1320,21 +1321,30 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			// Mode Integration Status (Story 2.5 verification)
 			modesEnabled := 0
+			var enabledModes []string
 			if ga.config.EnableScalpMode {
 				modesEnabled++
+				enabledModes = append(enabledModes, "SCALP")
 			}
 			if ga.config.EnableSwingMode {
 				modesEnabled++
+				enabledModes = append(enabledModes, "SWING")
 			}
 			if ga.config.EnablePositionMode {
 				modesEnabled++
+				enabledModes = append(enabledModes, "POSITION")
 			}
 			currentSettings := GetSettingsManager().GetCurrentSettings()
 			if currentSettings.UltraFastEnabled {
 				modesEnabled++
+				enabledModes = append(enabledModes, "ULTRA-FAST")
 			}
 			if modesEnabled > 1 {
-				log.Printf("[MODE-ORCHESTRATION] Multi-mode trading active: %d modes enabled", modesEnabled)
+				log.Printf("[MODE-ORCHESTRATION] Multi-mode trading active: %d modes enabled [%s]", modesEnabled, strings.Join(enabledModes, ", "))
+			} else if modesEnabled == 1 {
+				log.Printf("[MODE-ORCHESTRATION] Single-mode trading: %s enabled", enabledModes[0])
+			} else {
+				log.Printf("[MODE-ORCHESTRATION] WARNING: No trading modes enabled!")
 			}
 
 			// Track scan cycle timing (Issue 2B)
@@ -1349,18 +1359,21 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			// Scan based on mode intervals
 			if ga.config.EnableScalpMode && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning SCALP mode (interval: %ds)", ga.config.ScalpScanInterval)
 				ga.scanForMode(GinieModeScalp)
 				lastScalpScan = now
 				scansPerformed++
 			}
 
 			if ga.config.EnableSwingMode && now.Sub(lastSwingScan) >= time.Duration(ga.config.SwingScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning SWING mode (interval: %ds)", ga.config.SwingScanInterval)
 				ga.scanForMode(GinieModeSwing)
 				lastSwingScan = now
 				scansPerformed++
 			}
 
 			if ga.config.EnablePositionMode && now.Sub(lastPositionScan) >= time.Duration(ga.config.PositionScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning POSITION mode (interval: %ds)", ga.config.PositionScanInterval)
 				ga.scanForMode(GinieModePosition)
 				lastPositionScan = now
 				scansPerformed++
