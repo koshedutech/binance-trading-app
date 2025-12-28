@@ -479,7 +479,7 @@ func (r *Repository) GetUserTradingConfig(ctx context.Context, userID string) (*
 			futures_margin_type, autopilot_enabled, autopilot_risk_level, autopilot_min_confidence,
 			autopilot_require_multi_signal, allowed_symbols, blocked_symbols,
 			notification_email, notification_push, notification_telegram, telegram_chat_id,
-			created_at, updated_at
+			COALESCE(dry_run_mode, true), created_at, updated_at
 		FROM user_trading_configs
 		WHERE user_id = $1
 	`
@@ -493,7 +493,7 @@ func (r *Repository) GetUserTradingConfig(ctx context.Context, userID string) (*
 		&config.AutopilotMinConfidence, &config.AutopilotRequireMultiSign,
 		&config.AllowedSymbols, &config.BlockedSymbols,
 		&config.NotificationEmail, &config.NotificationPush, &config.NotificationTelegram,
-		&config.TelegramChatID, &config.CreatedAt, &config.UpdatedAt,
+		&config.TelegramChatID, &config.DryRunMode, &config.CreatedAt, &config.UpdatedAt,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -514,8 +514,8 @@ func (r *Repository) UpsertUserTradingConfig(ctx context.Context, config *UserTr
 			default_take_profit_percent, enable_spot, enable_futures, futures_default_leverage,
 			futures_margin_type, autopilot_enabled, autopilot_risk_level, autopilot_min_confidence,
 			autopilot_require_multi_signal, allowed_symbols, blocked_symbols,
-			notification_email, notification_push, notification_telegram, telegram_chat_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			notification_email, notification_push, notification_telegram, telegram_chat_id, dry_run_mode
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		ON CONFLICT (user_id) DO UPDATE SET
 			max_open_positions = EXCLUDED.max_open_positions,
 			max_risk_per_trade = EXCLUDED.max_risk_per_trade,
@@ -535,6 +535,7 @@ func (r *Repository) UpsertUserTradingConfig(ctx context.Context, config *UserTr
 			notification_push = EXCLUDED.notification_push,
 			notification_telegram = EXCLUDED.notification_telegram,
 			telegram_chat_id = EXCLUDED.telegram_chat_id,
+			dry_run_mode = EXCLUDED.dry_run_mode,
 			updated_at = CURRENT_TIMESTAMP
 	`
 
@@ -546,11 +547,48 @@ func (r *Repository) UpsertUserTradingConfig(ctx context.Context, config *UserTr
 		config.AutopilotMinConfidence, config.AutopilotRequireMultiSign,
 		config.AllowedSymbols, config.BlockedSymbols,
 		config.NotificationEmail, config.NotificationPush, config.NotificationTelegram,
-		config.TelegramChatID,
+		config.TelegramChatID, config.DryRunMode,
 	)
 
 	if err != nil {
 		return fmt.Errorf("failed to upsert trading config: %w", err)
+	}
+
+	return nil
+}
+
+// GetUserDryRunMode retrieves just the trading mode for a user (fast lookup)
+func (r *Repository) GetUserDryRunMode(ctx context.Context, userID string) (bool, error) {
+	query := `SELECT COALESCE(dry_run_mode, true) FROM user_trading_configs WHERE user_id = $1`
+
+	var dryRun bool
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&dryRun)
+
+	if err == pgx.ErrNoRows {
+		// No config exists, default to paper trading (safe default)
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("failed to get user dry run mode: %w", err)
+	}
+
+	return dryRun, nil
+}
+
+// SetUserDryRunMode updates just the trading mode for a user
+func (r *Repository) SetUserDryRunMode(ctx context.Context, userID string, dryRun bool) error {
+	// Use upsert to handle case where user has no config yet
+	query := `
+		INSERT INTO user_trading_configs (user_id, dry_run_mode)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET
+			dry_run_mode = EXCLUDED.dry_run_mode,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := r.db.Pool.Exec(ctx, query, userID, dryRun)
+	if err != nil {
+		return fmt.Errorf("failed to set user dry run mode: %w", err)
 	}
 
 	return nil
@@ -1138,4 +1176,190 @@ func (r *Repository) GetUserAIKeyByID(ctx context.Context, keyID, userID string)
 	}
 
 	return key, nil
+}
+
+// =====================================================
+// USER SYMBOL SETTINGS CRUD OPERATIONS
+// =====================================================
+
+// UserSymbolSettings represents per-user symbol-specific trading settings
+type UserSymbolSettings struct {
+	ID               string  `json:"id"`
+	UserID           string  `json:"user_id"`
+	Symbol           string  `json:"symbol"`
+	Category         string  `json:"category"`
+	MinConfidence    float64 `json:"min_confidence"`
+	MaxPositionUSD   float64 `json:"max_position_usd"`
+	SizeMultiplier   float64 `json:"size_multiplier"`
+	LeverageOverride int     `json:"leverage_override"`
+	Enabled          bool    `json:"enabled"`
+	CustomROIPercent float64 `json:"custom_roi_percent"`
+	Notes            string  `json:"notes"`
+	TotalTrades      int     `json:"total_trades"`
+	WinningTrades    int     `json:"winning_trades"`
+	TotalPnL         float64 `json:"total_pnl"`
+	WinRate          float64 `json:"win_rate"`
+	AvgPnL           float64 `json:"avg_pnl"`
+	LastUpdated      string  `json:"last_updated"`
+}
+
+// GetUserSymbolSettings retrieves symbol settings for a specific user and symbol
+func (r *Repository) GetUserSymbolSettings(ctx context.Context, userID, symbol string) (*UserSymbolSettings, error) {
+	query := `
+		SELECT id, user_id, symbol, COALESCE(category, 'neutral'),
+			COALESCE(min_confidence, 0), COALESCE(max_position_usd, 0),
+			COALESCE(size_multiplier, 1.0), COALESCE(leverage_override, 0),
+			COALESCE(enabled, true), COALESCE(custom_roi_percent, 0),
+			COALESCE(notes, ''), COALESCE(total_trades, 0), COALESCE(winning_trades, 0),
+			COALESCE(total_pnl, 0), COALESCE(win_rate, 0), COALESCE(avg_pnl, 0),
+			COALESCE(to_char(last_updated, 'YYYY-MM-DD HH24:MI:SS'), '')
+		FROM user_symbol_settings
+		WHERE user_id = $1 AND symbol = $2
+	`
+
+	settings := &UserSymbolSettings{}
+	err := r.db.Pool.QueryRow(ctx, query, userID, symbol).Scan(
+		&settings.ID, &settings.UserID, &settings.Symbol, &settings.Category,
+		&settings.MinConfidence, &settings.MaxPositionUSD, &settings.SizeMultiplier,
+		&settings.LeverageOverride, &settings.Enabled, &settings.CustomROIPercent,
+		&settings.Notes, &settings.TotalTrades, &settings.WinningTrades,
+		&settings.TotalPnL, &settings.WinRate, &settings.AvgPnL, &settings.LastUpdated,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user symbol settings: %w", err)
+	}
+
+	return settings, nil
+}
+
+// GetAllUserSymbolSettings retrieves all symbol settings for a user
+func (r *Repository) GetAllUserSymbolSettings(ctx context.Context, userID string) (map[string]*UserSymbolSettings, error) {
+	query := `
+		SELECT id, user_id, symbol, COALESCE(category, 'neutral'),
+			COALESCE(min_confidence, 0), COALESCE(max_position_usd, 0),
+			COALESCE(size_multiplier, 1.0), COALESCE(leverage_override, 0),
+			COALESCE(enabled, true), COALESCE(custom_roi_percent, 0),
+			COALESCE(notes, ''), COALESCE(total_trades, 0), COALESCE(winning_trades, 0),
+			COALESCE(total_pnl, 0), COALESCE(win_rate, 0), COALESCE(avg_pnl, 0),
+			COALESCE(to_char(last_updated, 'YYYY-MM-DD HH24:MI:SS'), '')
+		FROM user_symbol_settings
+		WHERE user_id = $1
+		ORDER BY symbol
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user symbol settings: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]*UserSymbolSettings)
+	for rows.Next() {
+		settings := &UserSymbolSettings{}
+		err := rows.Scan(
+			&settings.ID, &settings.UserID, &settings.Symbol, &settings.Category,
+			&settings.MinConfidence, &settings.MaxPositionUSD, &settings.SizeMultiplier,
+			&settings.LeverageOverride, &settings.Enabled, &settings.CustomROIPercent,
+			&settings.Notes, &settings.TotalTrades, &settings.WinningTrades,
+			&settings.TotalPnL, &settings.WinRate, &settings.AvgPnL, &settings.LastUpdated,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan user symbol settings: %w", err)
+		}
+		result[settings.Symbol] = settings
+	}
+
+	return result, nil
+}
+
+// UpsertUserSymbolSettings creates or updates symbol settings for a user
+func (r *Repository) UpsertUserSymbolSettings(ctx context.Context, settings *UserSymbolSettings) error {
+	query := `
+		INSERT INTO user_symbol_settings (
+			user_id, symbol, category, min_confidence, max_position_usd,
+			size_multiplier, leverage_override, enabled, custom_roi_percent, notes,
+			total_trades, winning_trades, total_pnl, win_rate, avg_pnl, last_updated
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP)
+		ON CONFLICT (user_id, symbol) DO UPDATE SET
+			category = EXCLUDED.category,
+			min_confidence = EXCLUDED.min_confidence,
+			max_position_usd = EXCLUDED.max_position_usd,
+			size_multiplier = EXCLUDED.size_multiplier,
+			leverage_override = EXCLUDED.leverage_override,
+			enabled = EXCLUDED.enabled,
+			custom_roi_percent = EXCLUDED.custom_roi_percent,
+			notes = EXCLUDED.notes,
+			total_trades = EXCLUDED.total_trades,
+			winning_trades = EXCLUDED.winning_trades,
+			total_pnl = EXCLUDED.total_pnl,
+			win_rate = EXCLUDED.win_rate,
+			avg_pnl = EXCLUDED.avg_pnl,
+			last_updated = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING id
+	`
+
+	err := r.db.Pool.QueryRow(ctx, query,
+		settings.UserID, settings.Symbol, settings.Category, settings.MinConfidence,
+		settings.MaxPositionUSD, settings.SizeMultiplier, settings.LeverageOverride,
+		settings.Enabled, settings.CustomROIPercent, settings.Notes,
+		settings.TotalTrades, settings.WinningTrades, settings.TotalPnL,
+		settings.WinRate, settings.AvgPnL,
+	).Scan(&settings.ID)
+
+	if err != nil {
+		return fmt.Errorf("failed to upsert user symbol settings: %w", err)
+	}
+
+	return nil
+}
+
+// SetUserSymbolROI sets just the custom ROI percent for a user's symbol
+func (r *Repository) SetUserSymbolROI(ctx context.Context, userID, symbol string, roiPercent float64) error {
+	query := `
+		INSERT INTO user_symbol_settings (user_id, symbol, custom_roi_percent)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, symbol) DO UPDATE SET
+			custom_roi_percent = EXCLUDED.custom_roi_percent,
+			last_updated = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := r.db.Pool.Exec(ctx, query, userID, symbol, roiPercent)
+	if err != nil {
+		return fmt.Errorf("failed to set user symbol ROI: %w", err)
+	}
+
+	return nil
+}
+
+// GetUserSymbolROI gets just the custom ROI percent for a user's symbol
+func (r *Repository) GetUserSymbolROI(ctx context.Context, userID, symbol string) (float64, error) {
+	query := `SELECT COALESCE(custom_roi_percent, 0) FROM user_symbol_settings WHERE user_id = $1 AND symbol = $2`
+
+	var roi float64
+	err := r.db.Pool.QueryRow(ctx, query, userID, symbol).Scan(&roi)
+
+	if err == pgx.ErrNoRows {
+		return 0, nil // No custom ROI set, use defaults
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user symbol ROI: %w", err)
+	}
+
+	return roi, nil
+}
+
+// DeleteUserSymbolSettings removes symbol settings for a user
+func (r *Repository) DeleteUserSymbolSettings(ctx context.Context, userID, symbol string) error {
+	query := `DELETE FROM user_symbol_settings WHERE user_id = $1 AND symbol = $2`
+	_, err := r.db.Pool.Exec(ctx, query, userID, symbol)
+	if err != nil {
+		return fmt.Errorf("failed to delete user symbol settings: %w", err)
+	}
+	return nil
 }

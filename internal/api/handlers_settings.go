@@ -53,21 +53,48 @@ type UpdateCircuitBreakerRequest struct {
 
 // ==================== HANDLERS ====================
 
-// handleGetTradingMode returns current trading mode (paper/live)
+// handleGetTradingMode returns current trading mode (paper/live) for the authenticated user
 func (s *Server) handleGetTradingMode(c *gin.Context) {
-	settingsAPI := s.getSettingsAPI()
-	if settingsAPI == nil {
+	// Get user ID from auth context
+	userID := s.getUserID(c)
+	if userID == "" {
+		// Fallback to global mode for unauthenticated requests
+		settingsAPI := s.getSettingsAPI()
+		if settingsAPI == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"dry_run":      true,
+				"mode":         "paper",
+				"mode_label":   "Paper Trading",
+				"can_switch":   false,
+				"switch_error": "Settings API not available",
+			})
+			return
+		}
+		dryRun := settingsAPI.GetDryRunMode()
+		mode := "live"
+		modeLabel := "Live Trading"
+		if dryRun {
+			mode = "paper"
+			modeLabel = "Paper Trading"
+		}
 		c.JSON(http.StatusOK, gin.H{
-			"dry_run":      true,
-			"mode":         "paper",
-			"mode_label":   "Paper Trading",
-			"can_switch":   false,
-			"switch_error": "Settings API not available",
+			"dry_run":    dryRun,
+			"mode":       mode,
+			"mode_label": modeLabel,
+			"can_switch": true,
 		})
 		return
 	}
 
-	dryRun := settingsAPI.GetDryRunMode()
+	// Get per-user trading mode from database
+	ctx := c.Request.Context()
+	dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
+	if err != nil {
+		log.Printf("[TRADING-MODE] Error getting user dry run mode for %s: %v", userID, err)
+		// Default to paper trading on error (safe default)
+		dryRun = true
+	}
+
 	mode := "live"
 	modeLabel := "Live Trading"
 	if dryRun {
@@ -80,10 +107,11 @@ func (s *Server) handleGetTradingMode(c *gin.Context) {
 		"mode":       mode,
 		"mode_label": modeLabel,
 		"can_switch": true,
+		"user_id":    userID, // Include user ID for debugging
 	})
 }
 
-// handleSetTradingMode toggles between paper and live trading
+// handleSetTradingMode toggles between paper and live trading for the authenticated user
 func (s *Server) handleSetTradingMode(c *gin.Context) {
 	var req SetTradingModeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -91,6 +119,86 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		return
 	}
 
+	// Get user ID from auth context
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// Per-user trading mode: save to database
+	if userID != "" {
+		log.Printf("[MODE-SWITCH] User %s switching to dry_run=%v", userID, req.DryRun)
+
+		// Save per-user trading mode to database
+		if err := s.repo.SetUserDryRunMode(ctx, userID, req.DryRun); err != nil {
+			log.Printf("[MODE-SWITCH] Failed to save user trading mode: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save trading mode: "+err.Error())
+			return
+		}
+
+		log.Printf("[MODE-SWITCH] User %s trading mode saved to database: dry_run=%v", userID, req.DryRun)
+
+		// Handle per-user Ginie autopilot restart if needed
+		ginieRestarted := false
+		if s.userAutopilotManager != nil {
+			// Check if user's autopilot is running
+			if s.userAutopilotManager.IsRunning(userID) {
+				log.Printf("[MODE-SWITCH] User %s Ginie autopilot is running, stopping before mode switch...", userID)
+
+				// Stop the user's autopilot
+				if err := s.userAutopilotManager.StopAutopilot(userID); err != nil {
+					log.Printf("[MODE-SWITCH] Warning: Failed to stop user %s Ginie: %v", userID, err)
+				}
+
+				// Brief wait for cleanup
+				time.Sleep(500 * time.Millisecond)
+
+				// Restart with new mode
+				log.Printf("[MODE-SWITCH] Restarting user %s Ginie autopilot after mode switch...", userID)
+				if err := s.userAutopilotManager.StartAutopilot(ctx, userID); err != nil {
+					log.Printf("[MODE-SWITCH] Warning: Failed to restart user %s Ginie: %v", userID, err)
+				} else {
+					log.Printf("[MODE-SWITCH] User %s Ginie autopilot restarted successfully", userID)
+					ginieRestarted = true
+				}
+			}
+		}
+
+		mode := "live"
+		modeLabel := "Live Trading"
+		if req.DryRun {
+			mode = "paper"
+			modeLabel = "Paper Trading"
+		}
+
+		// Broadcast trading mode change to THIS USER ONLY via WebSocket
+		if userWSHub != nil {
+			userWSHub.BroadcastToUser(userID, events.Event{
+				Type:      events.EventTradingModeChanged,
+				Timestamp: time.Now(),
+				Data: map[string]interface{}{
+					"dry_run":         req.DryRun,
+					"mode":            mode,
+					"mode_label":      modeLabel,
+					"ginie_restarted": ginieRestarted,
+					"user_id":         userID,
+				},
+			})
+			log.Printf("[MODE-SWITCH] Broadcasted TRADING_MODE_CHANGED event to user %s only", userID)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"success":         true,
+			"dry_run":         req.DryRun,
+			"mode":            mode,
+			"mode_label":      modeLabel,
+			"can_switch":      true,
+			"message":         "Trading mode updated successfully",
+			"ginie_restarted": ginieRestarted,
+			"user_id":         userID,
+		})
+		return
+	}
+
+	// Fallback: Global mode for unauthenticated requests (legacy behavior)
 	settingsAPI := s.getSettingsAPI()
 	if settingsAPI == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Settings API not available")
@@ -148,12 +256,12 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		}
 	}
 
-	log.Printf("[MODE-SWITCH] Starting trading mode switch to dry_run=%v\n", req.DryRun)
+	log.Printf("[MODE-SWITCH] Starting GLOBAL trading mode switch to dry_run=%v (no user context)\n", req.DryRun)
 	if err := settingsAPI.SetDryRunMode(req.DryRun); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to update trading mode: "+err.Error())
 		return
 	}
-	log.Println("[MODE-SWITCH] Trading mode switch completed successfully")
+	log.Println("[MODE-SWITCH] Global trading mode switch completed successfully")
 
 	// Verify the change was applied by reading back the current mode
 	currentMode := settingsAPI.GetDryRunMode()
@@ -203,7 +311,7 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		}
 	}
 
-	// Broadcast trading mode change to all connected clients via WebSocket
+	// Broadcast trading mode change to all connected clients via WebSocket (global mode)
 	if userWSHub != nil {
 		userWSHub.BroadcastToAll(events.Event{
 			Type:      events.EventTradingModeChanged,
@@ -213,9 +321,10 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 				"mode":            mode,
 				"mode_label":      modeLabel,
 				"ginie_restarted": ginieRestarted,
+				"global":          true, // Flag indicating this is a global mode change
 			},
 		})
-		log.Printf("[MODE-SWITCH] Broadcasted TRADING_MODE_CHANGED event to all clients")
+		log.Printf("[MODE-SWITCH] Broadcasted TRADING_MODE_CHANGED event to all clients (global mode)")
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -224,7 +333,7 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		"mode":            mode,
 		"mode_label":      modeLabel,
 		"can_switch":      true,
-		"message":         "Trading mode updated successfully",
+		"message":         "Trading mode updated successfully (global)",
 		"ginie_restarted": ginieRestarted,
 	})
 }
@@ -640,44 +749,57 @@ func (s *Server) getBinanceClient() binance.BinanceClient {
 func (s *Server) getBinanceClientForUser(c *gin.Context) binance.BinanceClient {
 	log.Printf("[DEBUG] getBinanceClientForUser: authEnabled=%v, apiKeyService=%v", s.authEnabled, s.apiKeyService != nil)
 
-	// Check if in paper trading mode - use mock client
-	if s.botAPI != nil {
-		if settingsAPI, ok := s.botAPI.(SettingsAPI); ok {
-			if settingsAPI.GetDryRunMode() {
-				log.Printf("[DEBUG] getBinanceClientForUser: Paper trading mode, using mock client")
-				return s.getBinanceClient() // Returns mock client in paper mode
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// Check if in paper trading mode - use per-user mode if authenticated
+	if userID != "" {
+		// Get per-user trading mode from database
+		dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
+		if err != nil {
+			log.Printf("[DEBUG] getBinanceClientForUser: Error getting user dry run mode: %v, defaulting to paper", err)
+			dryRun = true
+		}
+		if dryRun {
+			log.Printf("[DEBUG] getBinanceClientForUser: User %s in paper trading mode, using mock client", userID)
+			return s.getBinanceClient() // Returns mock client in paper mode
+		}
+	} else {
+		// Fallback to global mode for unauthenticated requests
+		if s.botAPI != nil {
+			if settingsAPI, ok := s.botAPI.(SettingsAPI); ok {
+				if settingsAPI.GetDryRunMode() {
+					log.Printf("[DEBUG] getBinanceClientForUser: Global paper trading mode, using mock client")
+					return s.getBinanceClient() // Returns mock client in paper mode
+				}
 			}
 		}
 	}
 
 	// Live mode - must use user-specific keys from database
-	if s.authEnabled && s.apiKeyService != nil {
-		userID := s.getUserID(c)
-		log.Printf("[DEBUG] getBinanceClientForUser: userID=%s", userID)
-		if userID != "" {
-			ctx := c.Request.Context()
-			// Try mainnet first, then testnet
-			keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
-			if err != nil {
-				log.Printf("[DEBUG] getBinanceClientForUser: mainnet key lookup failed: %v", err)
-				// Try testnet
-				keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
+	if s.authEnabled && s.apiKeyService != nil && userID != "" {
+		log.Printf("[DEBUG] getBinanceClientForUser: userID=%s in LIVE mode", userID)
+		// Try mainnet first, then testnet
+		keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
+		if err != nil {
+			log.Printf("[DEBUG] getBinanceClientForUser: mainnet key lookup failed: %v", err)
+			// Try testnet
+			keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
+		}
+		if err == nil && keys != nil && keys.APIKey != "" && keys.SecretKey != "" {
+			log.Printf("[DEBUG] getBinanceClientForUser: Found user keys for %s (testnet=%v, keyLen=%d)", userID, keys.IsTestnet, len(keys.APIKey))
+			// Create user-specific spot client
+			baseURL := "https://api.binance.com"
+			if keys.IsTestnet {
+				baseURL = "https://testnet.binance.vision"
 			}
-			if err == nil && keys != nil && keys.APIKey != "" && keys.SecretKey != "" {
-				log.Printf("[DEBUG] getBinanceClientForUser: Found user keys for %s (testnet=%v, keyLen=%d)", userID, keys.IsTestnet, len(keys.APIKey))
-				// Create user-specific spot client
-				baseURL := "https://api.binance.com"
-				if keys.IsTestnet {
-					baseURL = "https://testnet.binance.vision"
-				}
-				client := binance.NewClient(keys.APIKey, keys.SecretKey, baseURL)
-				if client != nil {
-					log.Printf("[DEBUG] getBinanceClientForUser: Created user-specific client for %s", userID)
-					return client
-				}
-			} else {
-				log.Printf("[DEBUG] getBinanceClientForUser: No keys found for user %s, err=%v", userID, err)
+			client := binance.NewClient(keys.APIKey, keys.SecretKey, baseURL)
+			if client != nil {
+				log.Printf("[DEBUG] getBinanceClientForUser: Created user-specific client for %s", userID)
+				return client
 			}
+		} else {
+			log.Printf("[DEBUG] getBinanceClientForUser: No keys found for user %s, err=%v", userID, err)
 		}
 	}
 

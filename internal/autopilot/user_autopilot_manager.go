@@ -249,6 +249,18 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	}
 
 	m.logger.Info("Created new autopilot instance for user", "user_id", userID)
+
+	// Check per-user auto-start setting from database
+	if m.repo != nil {
+		tradingConfig, err := m.repo.GetUserTradingConfig(ctx, userID)
+		if err == nil && tradingConfig != nil && tradingConfig.AutopilotEnabled {
+			m.logger.Info("Per-user auto-start enabled, starting autopilot",
+				"user_id", userID,
+				"autopilot_enabled", tradingConfig.AutopilotEnabled)
+			autopilot.Start()
+		}
+	}
+
 	return instance, nil
 }
 

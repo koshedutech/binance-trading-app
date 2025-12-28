@@ -103,25 +103,26 @@ type UserAPIKey struct {
 
 // UserTradingConfig represents per-user trading configuration
 type UserTradingConfig struct {
-	UserID                    string   `json:"user_id"`
-	MaxOpenPositions          int      `json:"max_open_positions"`
-	MaxRiskPerTrade           float64  `json:"max_risk_per_trade"`
-	DefaultStopLossPercent    float64  `json:"default_stop_loss_percent"`
-	DefaultTakeProfitPercent  float64  `json:"default_take_profit_percent"`
-	EnableSpot                bool     `json:"enable_spot"`
-	EnableFutures             bool     `json:"enable_futures"`
-	FuturesDefaultLeverage    int      `json:"futures_default_leverage"`
-	FuturesMarginType         string   `json:"futures_margin_type"`
-	AutopilotEnabled          bool     `json:"autopilot_enabled"`
-	AutopilotRiskLevel        string   `json:"autopilot_risk_level"`
-	AutopilotMinConfidence    float64  `json:"autopilot_min_confidence"`
-	AutopilotRequireMultiSign bool     `json:"autopilot_require_multi_signal"`
-	AllowedSymbols            []string `json:"allowed_symbols,omitempty"`
-	BlockedSymbols            []string `json:"blocked_symbols,omitempty"`
-	NotificationEmail         bool     `json:"notification_email"`
-	NotificationPush          bool     `json:"notification_push"`
-	NotificationTelegram      bool     `json:"notification_telegram"`
-	TelegramChatID            string   `json:"telegram_chat_id,omitempty"`
+	UserID                    string    `json:"user_id"`
+	MaxOpenPositions          int       `json:"max_open_positions"`
+	MaxRiskPerTrade           float64   `json:"max_risk_per_trade"`
+	DefaultStopLossPercent    float64   `json:"default_stop_loss_percent"`
+	DefaultTakeProfitPercent  float64   `json:"default_take_profit_percent"`
+	EnableSpot                bool      `json:"enable_spot"`
+	EnableFutures             bool      `json:"enable_futures"`
+	FuturesDefaultLeverage    int       `json:"futures_default_leverage"`
+	FuturesMarginType         string    `json:"futures_margin_type"`
+	AutopilotEnabled          bool      `json:"autopilot_enabled"`
+	AutopilotRiskLevel        string    `json:"autopilot_risk_level"`
+	AutopilotMinConfidence    float64   `json:"autopilot_min_confidence"`
+	AutopilotRequireMultiSign bool      `json:"autopilot_require_multi_signal"`
+	AllowedSymbols            []string  `json:"allowed_symbols,omitempty"`
+	BlockedSymbols            []string  `json:"blocked_symbols,omitempty"`
+	NotificationEmail         bool      `json:"notification_email"`
+	NotificationPush          bool      `json:"notification_push"`
+	NotificationTelegram      bool      `json:"notification_telegram"`
+	TelegramChatID            string    `json:"telegram_chat_id,omitempty"`
+	DryRunMode                bool      `json:"dry_run_mode"`                   // Per-user paper/live trading mode
 	CreatedAt                 time.Time `json:"created_at"`
 	UpdatedAt                 time.Time `json:"updated_at"`
 }
