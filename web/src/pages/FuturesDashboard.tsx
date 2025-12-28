@@ -302,6 +302,26 @@ export default function FuturesDashboard() {
         <GiniePanel />
       </div>
 
+      {/* Trade Source Performance Stats - Below Ginie */}
+      <div className="mb-4">
+        <TradeSourceStatsPanel />
+      </div>
+
+      {/* Positions Table - Below Trade Source */}
+      <div className="mb-4">
+        <FuturesPositionsTable
+          onSymbolClick={(symbol) => {
+            setSelectedSymbol(symbol);
+            setCenterView('chart');
+          }}
+        />
+      </div>
+
+      {/* Open Orders & Trade History - Below Positions */}
+      <div className="mb-4">
+        <FuturesOrdersHistory />
+      </div>
+
       {/* Mode Capital Allocation & Safety Control */}
       <div className="mb-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
         <ModeAllocationPanel />
@@ -416,20 +436,6 @@ export default function FuturesDashboard() {
               valueColor="text-red-500"
             />
           </div>
-
-          {/* Trade Source Performance Stats */}
-          <TradeSourceStatsPanel />
-
-          {/* Positions Table */}
-          <FuturesPositionsTable
-            onSymbolClick={(symbol) => {
-              setSelectedSymbol(symbol);
-              setCenterView('chart');
-            }}
-          />
-
-          {/* Open Orders & Trade History */}
-          <FuturesOrdersHistory />
 
         </div>
       </div>
