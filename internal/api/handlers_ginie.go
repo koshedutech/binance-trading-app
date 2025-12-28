@@ -1489,17 +1489,23 @@ func (s *Server) handleResetGinieLLMSL(c *gin.Context) {
 }
 
 // handleGetGinieDiagnostics returns comprehensive diagnostic info for troubleshooting
+// Multi-user isolation: Uses per-user GinieAutopilot for accurate running state
 func (s *Server) handleGetGinieDiagnostics(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// CRITICAL FIX: Use per-user GinieAutopilot for accurate "autopilot_running" status
+	// The shared system autopilot may not be running even if user's autopilot is running
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
-		return
+		// Fallback to shared controller for unauthenticated or legacy mode
+		controller := s.getFuturesAutopilot()
+		if controller == nil {
+			errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+			return
+		}
+		giniePilot = controller.GetGinieAutopilot()
+		if giniePilot == nil {
+			errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+			return
+		}
 	}
 
 	diagnostics := giniePilot.GetDiagnostics()
