@@ -30,7 +30,7 @@ class APIService {
   constructor() {
     this.client = axios.create({
       baseURL: '/api',
-      timeout: 10000,
+      timeout: 30000, // Increased for slow Binance API calls
       headers: {
         'Content-Type': 'application/json',
       },
