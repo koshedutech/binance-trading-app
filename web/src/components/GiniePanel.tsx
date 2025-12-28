@@ -158,6 +158,9 @@ export default function GiniePanel() {
       setError(null);
     } catch (err) {
       console.error('Failed to fetch Ginie status:', err);
+      // Show error to user instead of silently failing
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch Ginie status';
+      setError(errorMsg);
     }
   };
 
@@ -188,6 +191,9 @@ export default function GiniePanel() {
       }
     } catch (err) {
       console.error('Failed to fetch Ginie autopilot status:', err);
+      // Show error to user for critical autopilot status failures
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch autopilot status';
+      setError(errorMsg);
     }
   };
 
@@ -317,6 +323,7 @@ export default function GiniePanel() {
   };
 
   useEffect(() => {
+    fetchTradingMode(); // Fetch trading mode first - critical for UI state
     fetchStatus();
     fetchAutopilotStatus(true); // Initialize settings on first load
     fetchCircuitBreaker();
@@ -493,11 +500,14 @@ export default function GiniePanel() {
     setPanicking(true);
     try {
       const result = await futuresApi.closeAllGiniePositions();
-      setSuccessMsg(`Ginie panic exit: Closed ${result.positions_closed} positions, PnL: ${formatUSD(result.total_pnl)}`);
+      const closedCount = result?.positions_closed ?? 0;
+      const totalPnl = result?.total_pnl ?? 0;
+      setSuccessMsg(`Ginie panic exit: Closed ${closedCount} positions, PnL: ${formatUSD(totalPnl)}`);
       setTimeout(() => setSuccessMsg(null), 5000);
       await fetchAutopilotStatus();
     } catch (err) {
-      setError('Ginie panic exit failed!');
+      const errorMsg = err instanceof Error ? err.message : 'Ginie panic exit failed!';
+      setError(errorMsg);
     } finally {
       setPanicking(false);
     }
