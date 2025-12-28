@@ -232,6 +232,63 @@ func (db *DB) GetOpenFuturesTradeBySymbolForUser(ctx context.Context, userID, sy
 	return &trade, nil
 }
 
+// SymbolPerformanceStats holds aggregated performance metrics for a single symbol
+type SymbolPerformanceStats struct {
+	Symbol        string
+	TotalTrades   int
+	WinningTrades int
+	LosingTrades  int
+	TotalPnL      float64
+	AvgPnL        float64
+	AvgWin        float64
+	AvgLoss       float64
+}
+
+// GetSymbolPerformanceStatsForUser aggregates performance metrics by symbol from closed trades
+func (db *DB) GetSymbolPerformanceStatsForUser(ctx context.Context, userID string) (map[string]*SymbolPerformanceStats, error) {
+	query := `
+		SELECT
+			symbol,
+			COUNT(*) as total_trades,
+			COUNT(CASE WHEN realized_pnl > 0 THEN 1 END) as winning_trades,
+			COUNT(CASE WHEN realized_pnl <= 0 THEN 1 END) as losing_trades,
+			COALESCE(SUM(realized_pnl), 0) as total_pnl,
+			COALESCE(AVG(realized_pnl), 0) as avg_pnl,
+			COALESCE(AVG(CASE WHEN realized_pnl > 0 THEN realized_pnl END), 0) as avg_win,
+			COALESCE(ABS(AVG(CASE WHEN realized_pnl <= 0 THEN realized_pnl END)), 0) as avg_loss
+		FROM futures_trades
+		WHERE user_id = $1 AND status IN ('CLOSED', 'closed', 'LIQUIDATED', 'liquidated')
+		GROUP BY symbol
+		ORDER BY total_pnl DESC`
+
+	rows, err := db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get symbol performance stats: %w", err)
+	}
+	defer rows.Close()
+
+	stats := make(map[string]*SymbolPerformanceStats)
+	for rows.Next() {
+		s := &SymbolPerformanceStats{}
+		err := rows.Scan(
+			&s.Symbol,
+			&s.TotalTrades,
+			&s.WinningTrades,
+			&s.LosingTrades,
+			&s.TotalPnL,
+			&s.AvgPnL,
+			&s.AvgWin,
+			&s.AvgLoss,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan symbol performance stats: %w", err)
+		}
+		stats[s.Symbol] = s
+	}
+
+	return stats, nil
+}
+
 // ==================== USER-SCOPED FUTURES ORDERS ====================
 
 // CreateFuturesOrderForUser creates a new futures order for a specific user

@@ -187,7 +187,7 @@ export default function GinieDiagnosticsPanel() {
             }`}
           >
             {tab === 'overview' && 'Overview'}
-            {tab === 'signals' && `Signals ${signalStats ? `(${signalStats.total})` : ''}`}
+            {tab === 'signals' && `Signals ${signalStats ? (signalFilter === 'all' ? `(${signalStats.total})` : `(${signals.length}/${signalStats.total})`) : ''}`}
             {tab === 'issues' && `Issues ${diagnostics?.issues?.length ? `(${diagnostics.issues.length})` : ''}`}
           </button>
         ))}

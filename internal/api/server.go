@@ -569,6 +569,7 @@ func (s *Server) setupRoutes() {
 			// Per-symbol performance settings endpoints
 			futures.GET("/autopilot/symbols", s.handleGetSymbolSettings)
 			futures.GET("/autopilot/symbols/report", s.handleGetSymbolPerformanceReport)
+			futures.POST("/autopilot/symbols/refresh-performance", s.handleRefreshSymbolPerformance)
 			futures.GET("/autopilot/symbols/category/:category", s.handleGetSymbolsByCategory)
 			futures.GET("/autopilot/symbols/:symbol", s.handleGetSingleSymbolSettings)
 			futures.PUT("/autopilot/symbols/:symbol", s.handleUpdateSymbolSettings)

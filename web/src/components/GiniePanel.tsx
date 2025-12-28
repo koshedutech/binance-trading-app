@@ -4030,7 +4030,7 @@ export default function GiniePanel() {
             ))}
           </div>
 
-          <div className="space-y-1 max-h-60 overflow-y-auto">
+          <div className="space-y-1 max-h-96 overflow-y-auto">
             {tradeHistory.length === 0 && (!autopilotStatus?.trade_history || autopilotStatus.trade_history.length === 0) ? (
               <div className="text-center text-gray-500 py-4">
                 No {sourceFilter === 'all' ? '' : sourceFilter + ' '}trade history yet

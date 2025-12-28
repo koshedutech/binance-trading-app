@@ -48,6 +48,7 @@ export default function SymbolPerformancePanel() {
   const [data, setData] = useState<SymbolPerformanceData | null>(null);
   const [report, setReport] = useState<SymbolPerformanceReport[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'pnl' | 'winrate' | 'trades'>('pnl');
   const [sortAsc, setSortAsc] = useState(false);
@@ -67,6 +68,21 @@ export default function SymbolPerformancePanel() {
       console.error('Failed to fetch symbol settings:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const refreshFromDatabase = async () => {
+    try {
+      setRefreshing(true);
+      const result = await futuresApi.refreshSymbolPerformance();
+      setReport(result.report || []);
+      // Also refresh settings data
+      const settingsRes = await futuresApi.getSymbolPerformanceSettings();
+      setData(settingsRes);
+    } catch (error) {
+      console.error('Failed to refresh symbol performance:', error);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -161,12 +177,24 @@ export default function SymbolPerformancePanel() {
             <Target className="w-5 h-5 text-indigo-600" />
             <h2 className="text-lg font-semibold text-gray-900">Symbol Performance Settings</h2>
           </div>
-          <button
-            onClick={fetchData}
-            className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={refreshFromDatabase}
+              disabled={refreshing}
+              className="px-3 py-1.5 text-sm bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg flex items-center gap-1"
+              title="Recalculate categories from database trades"
+            >
+              <TrendingUp className={`w-4 h-4 ${refreshing ? 'animate-pulse' : ''}`} />
+              {refreshing ? 'Recalculating...' : 'Recalculate'}
+            </button>
+            <button
+              onClick={fetchData}
+              className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg"
+              title="Refresh view"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
         </div>
         <p className="text-sm text-gray-500 mt-1">
           Adjust confidence thresholds and position sizes based on symbol performance

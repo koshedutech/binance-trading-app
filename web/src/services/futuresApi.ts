@@ -1543,6 +1543,17 @@ class FuturesAPIService {
     return data;
   }
 
+  async refreshSymbolPerformance(): Promise<{
+    success: boolean;
+    symbols_updated: number;
+    report: SymbolPerformanceReport[];
+    by_category: Record<string, SymbolPerformanceReport[]>;
+    total_symbols: number;
+  }> {
+    const { data } = await this.client.post('/autopilot/symbols/refresh-performance');
+    return data;
+  }
+
   async getSymbolsByCategory(category: string): Promise<{
     symbols: SymbolPerformanceReport[];
     category: string;

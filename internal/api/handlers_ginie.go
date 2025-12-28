@@ -1261,15 +1261,9 @@ func (s *Server) handleRefreshDynamicSymbols(c *gin.Context) {
 
 // handleGetGinieBlockedCoins returns list of blocked coins
 func (s *Server) handleGetGinieBlockedCoins(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1283,15 +1277,9 @@ func (s *Server) handleGetGinieBlockedCoins(c *gin.Context) {
 
 // handleUnblockGinieCoin manually unblocks a specific coin
 func (s *Server) handleUnblockGinieCoin(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1315,15 +1303,9 @@ func (s *Server) handleUnblockGinieCoin(c *gin.Context) {
 
 // handleResetGinieCoinBlockHistory resets block history for a coin (allows auto-unblock again)
 func (s *Server) handleResetGinieCoinBlockHistory(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1350,15 +1332,9 @@ func (s *Server) handleResetGinieCoinBlockHistory(c *gin.Context) {
 
 // handleGetGinieSignalLogs returns recent signal logs
 func (s *Server) handleGetGinieSignalLogs(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1414,15 +1390,9 @@ func (s *Server) handleGetGinieSignalLogs(c *gin.Context) {
 
 // handleGetGinieSignalStats returns signal statistics
 func (s *Server) handleGetGinieSignalStats(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1434,15 +1404,9 @@ func (s *Server) handleGetGinieSignalStats(c *gin.Context) {
 
 // handleGetGinieSLHistory returns SL update history for all or specific symbol
 func (s *Server) handleGetGinieSLHistory(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1478,15 +1442,9 @@ func (s *Server) handleGetGinieSLHistory(c *gin.Context) {
 
 // handleGetGinieSLStats returns SL update statistics
 func (s *Server) handleGetGinieSLStats(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1498,15 +1456,9 @@ func (s *Server) handleGetGinieSLStats(c *gin.Context) {
 
 // handleGetGinieLLMSLStatus returns LLM SL kill switch status
 func (s *Server) handleGetGinieLLMSLStatus(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1516,15 +1468,9 @@ func (s *Server) handleGetGinieLLMSLStatus(c *gin.Context) {
 
 // handleResetGinieLLMSL resets the LLM SL kill switch for a specific symbol
 func (s *Server) handleResetGinieLLMSL(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1553,21 +1499,11 @@ func (s *Server) handleResetGinieLLMSL(c *gin.Context) {
 // handleGetGinieDiagnostics returns comprehensive diagnostic info for troubleshooting
 // Multi-user isolation: Uses per-user GinieAutopilot for accurate running state
 func (s *Server) handleGetGinieDiagnostics(c *gin.Context) {
-	// CRITICAL FIX: Use per-user GinieAutopilot for accurate "autopilot_running" status
-	// The shared system autopilot may not be running even if user's autopilot is running
+	// Use per-user GinieAutopilot for accurate "autopilot_running" status
 	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		// Fallback to shared controller for unauthenticated or legacy mode
-		controller := s.getFuturesAutopilot()
-		if controller == nil {
-			errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-			return
-		}
-		giniePilot = controller.GetGinieAutopilot()
-		if giniePilot == nil {
-			errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
-			return
-		}
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
 	}
 
 	diagnostics := giniePilot.GetDiagnostics()
@@ -1620,22 +1556,16 @@ func (s *Server) handleGetSourcePerformance(c *gin.Context) {
 
 // handleGetPositionsBySource returns Ginie positions filtered by source (ai, strategy, or all)
 func (s *Server) handleGetPositionsBySource(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilotInst := controller.GetGinieAutopilot()
-	if autopilotInst == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
 	// Get filter from query param
 	source := c.DefaultQuery("source", "all")
 
-	positions := autopilotInst.GetPositions()
+	positions := giniePilot.GetPositions()
 
 	// Filter by source if specified
 	if source != "all" && source != "" {
@@ -1657,15 +1587,9 @@ func (s *Server) handleGetPositionsBySource(c *gin.Context) {
 
 // handleGetTradeHistoryBySource returns Ginie trade history filtered by source
 func (s *Server) handleGetTradeHistoryBySource(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilotInst := controller.GetGinieAutopilot()
-	if autopilotInst == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -1677,7 +1601,7 @@ func (s *Server) handleGetTradeHistoryBySource(c *gin.Context) {
 		limit = 100
 	}
 
-	history := autopilotInst.GetTradeHistory(limit * 2) // Get more to filter
+	history := giniePilot.GetTradeHistory(limit * 2) // Get more to filter
 
 	// Filter by source if specified
 	if source != "all" && source != "" {
@@ -2147,17 +2071,14 @@ func (s *Server) handleGetModeCircuitBreakerStatus(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
 	cbConfigs := sm.GetModeCircuitBreakerConfigs()
 
-	// Get runtime state from Ginie autopilot if available
-	controller := s.getFuturesAutopilot()
+	// Get runtime state from Ginie autopilot if available (per-user)
+	giniePilot := s.getGinieAutopilotForUser(c)
 	var runtimeStatus map[string]interface{}
 
-	if controller != nil {
-		giniePilot := controller.GetGinieAutopilot()
-		if giniePilot != nil {
-			// Get runtime circuit breaker status if method exists
-			runtimeStatus = map[string]interface{}{
-				"ginie_cb_status": giniePilot.GetCircuitBreakerStatus(),
-			}
+	if giniePilot != nil {
+		// Get runtime circuit breaker status if method exists
+		runtimeStatus = map[string]interface{}{
+			"ginie_cb_status": giniePilot.GetCircuitBreakerStatus(),
 		}
 	}
 
@@ -2363,15 +2284,9 @@ func (s *Server) handleResetUltraFastStats(c *gin.Context) {
 
 // handleGetGinieTradeHistoryWithDateRange returns trade history filtered by date range
 func (s *Server) handleGetGinieTradeHistoryWithDateRange(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
-	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -2406,12 +2321,12 @@ func (s *Server) handleGetGinieTradeHistoryWithDateRange(c *gin.Context) {
 	var trades []interface{}
 	if startTime.IsZero() && endTime.IsZero() {
 		// No date filter, return recent trades
-		historyTrades := autopilot.GetTradeHistory(50)
+		historyTrades := giniePilot.GetTradeHistory(50)
 		for _, trade := range historyTrades {
 			trades = append(trades, trade)
 		}
 	} else {
-		historyTrades := autopilot.GetTradeHistoryInDateRange(startTime, endTime)
+		historyTrades := giniePilot.GetTradeHistoryInDateRange(startTime, endTime)
 		for _, trade := range historyTrades {
 			trades = append(trades, trade)
 		}
@@ -2430,15 +2345,9 @@ func (s *Server) handleGetGinieTradeHistoryWithDateRange(c *gin.Context) {
 
 // handleGetGiniePerformanceMetrics returns performance metrics with optional date filtering
 func (s *Server) handleGetGiniePerformanceMetrics(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
-	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -2469,9 +2378,9 @@ func (s *Server) handleGetGiniePerformanceMetrics(c *gin.Context) {
 	// Get trades in date range
 	var trades interface{}
 	if startTime.IsZero() && endTime.IsZero() {
-		trades = autopilot.GetTradeHistory(1000)
+		trades = giniePilot.GetTradeHistory(1000)
 	} else {
-		trades = autopilot.GetTradeHistoryInDateRange(startTime, endTime)
+		trades = giniePilot.GetTradeHistoryInDateRange(startTime, endTime)
 	}
 
 	// Return basic performance data
@@ -2487,20 +2396,14 @@ func (s *Server) handleGetGiniePerformanceMetrics(c *gin.Context) {
 
 // handleGetGinieLLMDiagnostics returns LLM switch history
 func (s *Server) handleGetGinieLLMDiagnostics(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
-	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
 	// Get all LLM switches
-	switches := autopilot.GetLLMSwitches(500)
+	switches := giniePilot.GetLLMSwitches(500)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -2511,20 +2414,14 @@ func (s *Server) handleGetGinieLLMDiagnostics(c *gin.Context) {
 
 // handleResetGinieLLMDiagnostics clears LLM diagnostic data
 func (s *Server) handleResetGinieLLMDiagnostics(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	autopilot := controller.GetGinieAutopilot()
-	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
 	// Clear LLM switch history
-	autopilot.ClearLLMSwitches()
+	giniePilot.ClearLLMSwitches()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -2886,15 +2783,9 @@ func (s *Server) handleUpdateModeLLMSettings(c *gin.Context) {
 func (s *Server) handleGetAdaptiveRecommendations(c *gin.Context) {
 	log.Println("[ADAPTIVE-AI] Getting adaptive recommendations")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -2962,15 +2853,9 @@ func (s *Server) handleApplyRecommendation(c *gin.Context) {
 		return
 	}
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -3001,15 +2886,9 @@ func (s *Server) handleDismissRecommendation(c *gin.Context) {
 		return
 	}
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -3033,15 +2912,9 @@ func (s *Server) handleDismissRecommendation(c *gin.Context) {
 func (s *Server) handleApplyAllRecommendations(c *gin.Context) {
 	log.Println("[ADAPTIVE-AI] Applying all pending recommendations")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -3066,15 +2939,9 @@ func (s *Server) handleApplyAllRecommendations(c *gin.Context) {
 func (s *Server) handleGetLLMDiagnosticsV2(c *gin.Context) {
 	log.Println("[LLM-DIAG] Getting LLM diagnostics")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -3126,15 +2993,9 @@ func (s *Server) handleGetLLMDiagnosticsV2(c *gin.Context) {
 func (s *Server) handleResetLLMDiagnosticsV2(c *gin.Context) {
 	log.Println("[LLM-DIAG] Resetting LLM diagnostics")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -3155,15 +3016,9 @@ func (s *Server) handleResetLLMDiagnosticsV2(c *gin.Context) {
 func (s *Server) handleGetTradeHistoryWithAI(c *gin.Context) {
 	log.Println("[TRADE-HISTORY] Getting trade history with AI context")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
@@ -3229,15 +3084,9 @@ func (s *Server) handleGetTradeHistoryWithAI(c *gin.Context) {
 // handleGetProtectionStatus returns the protection status of all active positions
 // This endpoint is used by the UI to display real-time SL/TP protection health
 func (s *Server) handleGetProtectionStatus(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 

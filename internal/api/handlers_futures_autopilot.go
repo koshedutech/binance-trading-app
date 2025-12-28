@@ -1649,6 +1649,62 @@ func (s *Server) handleGetSymbolPerformanceReport(c *gin.Context) {
 	})
 }
 
+// handleRefreshSymbolPerformance recalculates symbol performance from database trades
+func (s *Server) handleRefreshSymbolPerformance(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	// Get performance stats from database
+	ctx := c.Request.Context()
+	dbStats, err := s.repo.GetDB().GetSymbolPerformanceStatsForUser(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to get performance stats: "+err.Error())
+		return
+	}
+
+	// Convert to map[string]interface{} for RecalculateSymbolPerformance
+	statsMap := make(map[string]interface{})
+	for symbol, stats := range dbStats {
+		statsMap[symbol] = map[string]interface{}{
+			"total_trades":   stats.TotalTrades,
+			"winning_trades": stats.WinningTrades,
+			"losing_trades":  stats.LosingTrades,
+			"total_pnl":      stats.TotalPnL,
+			"avg_pnl":        stats.AvgPnL,
+			"avg_win":        stats.AvgWin,
+			"avg_loss":       stats.AvgLoss,
+		}
+	}
+
+	// Update symbol settings with new performance data
+	sm := autopilot.GetSettingsManager()
+	updated, err := sm.RecalculateSymbolPerformance(statsMap)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update symbol settings: "+err.Error())
+		return
+	}
+
+	// Get updated report
+	report := sm.GetSymbolPerformanceReport()
+
+	// Group by category
+	byCategory := make(map[string][]autopilot.SymbolPerformanceReport)
+	for _, r := range report {
+		byCategory[r.Category] = append(byCategory[r.Category], r)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"symbols_updated": updated,
+		"report":         report,
+		"by_category":    byCategory,
+		"total_symbols":  len(report),
+	})
+}
+
 // handleGetSingleSymbolSettings returns settings for a specific symbol
 func (s *Server) handleGetSingleSymbolSettings(c *gin.Context) {
 	symbol := c.Param("symbol")

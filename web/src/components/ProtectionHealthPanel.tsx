@@ -88,6 +88,37 @@ export const ProtectionHealthPanel: React.FC<ProtectionHealthPanelProps> = ({
   if (!status) return null;
 
   const { summary, positions } = status;
+
+  // Handle empty/nil positions - show success state
+  if (!positions || positions.length === 0) {
+    if (compact) {
+      return (
+        <div className="rounded-lg p-3 bg-gray-800">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">✅</span>
+              <span className="font-medium text-green-400">Protection</span>
+            </div>
+            <div className="text-sm text-gray-400">No positions</div>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="flex items-center gap-2 mb-4">
+          <span className="text-2xl">✅</span>
+          <h3 className="text-lg font-medium text-white">Position Protection</h3>
+        </div>
+        <div className="text-center py-6">
+          <span className="text-4xl mb-2 block">🛡️</span>
+          <p className="text-gray-400">No active positions to protect</p>
+          <p className="text-xs text-gray-500 mt-1">Protection will activate when positions are opened</p>
+        </div>
+      </div>
+    );
+  }
+
   const hasUnprotected = summary.unprotected > 0 || summary.healing > 0 || summary.emergency > 0;
 
   // Compact mode for sidebar

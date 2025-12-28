@@ -7030,6 +7030,7 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				Mode:         externalMode, // Use user's enabled mode preference
 				HighestPrice: exchangePos.MarkPrice,
 				LowestPrice:  exchangePos.MarkPrice,
+				Protection:   NewProtectionStatus(), // Initialize protection tracking
 			}
 
 			ga.positions[exchangePos.Symbol] = newPos
@@ -9767,6 +9768,7 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		Source:                "strategy",
 		StrategyID:            &stratID,
 		StrategyName:          &stratName,
+		Protection:            NewProtectionStatus(), // Initialize protection tracking
 	}
 
 	ga.positions[symbol] = position
@@ -10730,6 +10732,7 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 		UltraFastSignal:        signal,
 		UltraFastTargetPercent: signal.MinProfitTarget,
 		MaxHoldTime:            3 * time.Second,
+		Protection:             NewProtectionStatus(), // Initialize protection tracking
 	}
 
 	ga.positions[symbol] = position

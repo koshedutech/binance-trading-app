@@ -14,20 +14,16 @@ import (
 // handleGetModeAllocations returns current capital allocation for all modes
 func (s *Server) handleGetModeAllocations(c *gin.Context) {
 	userID := s.getUserID(c)
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+
+	// Use per-user Ginie autopilot for multi-user isolation
+	ginie := s.getGinieAutopilotForUser(c)
+	if ginie == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
 	// Log user access for read operation
 	log.Printf("User %s accessing mode allocations", userID)
-
-	ginie := controller.GetGinieAutopilot()
-	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
-		return
-	}
 
 	// Get user's real futures client to fetch actual balance
 	// This ensures allocations are calculated based on real Binance balance, not mock
@@ -280,20 +276,15 @@ func (s *Server) handleGetModeAllocationStatus(c *gin.Context) {
 	userID := s.getUserID(c)
 	mode := c.Param("mode")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+	// Use per-user Ginie autopilot for multi-user isolation
+	ginie := s.getGinieAutopilotForUser(c)
+	if ginie == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
 	// Log user access for read operation
 	log.Printf("User %s accessing mode allocation status for %s", userID, mode)
-
-	ginie := controller.GetGinieAutopilot()
-	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
-		return
-	}
 
 	allocations := ginie.GetModeAllocationStatus()
 	if len(allocations) == 0 {
@@ -320,20 +311,16 @@ func (s *Server) handleGetModeAllocationStatus(c *gin.Context) {
 // handleGetModeSafetyStatus returns current safety status for all modes
 func (s *Server) handleGetModeSafetyStatus(c *gin.Context) {
 	userID := s.getUserID(c)
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+
+	// Use per-user Ginie autopilot for multi-user isolation
+	ginie := s.getGinieAutopilotForUser(c)
+	if ginie == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
 
 	// Log user access for read operation
 	log.Printf("User %s accessing mode safety status", userID)
-
-	ginie := controller.GetGinieAutopilot()
-	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
-		return
-	}
 
 	// Return comprehensive safety status including rate limits, win rates, profit thresholds
 	safetyStatus := gin.H{
@@ -387,24 +374,14 @@ func (s *Server) handleResumeMode(c *gin.Context) {
 	userID := s.getUserID(c)
 	mode := c.Param("mode")
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	// Add ownership check for write operations
-	ownerID := controller.GetOwnerUserID()
-	if ownerID != "" && ownerID != userID {
-		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
-		return
-	}
-
-	ginie := controller.GetGinieAutopilot()
+	// Use per-user Ginie autopilot for multi-user isolation (includes ownership check)
+	ginie := s.getGinieAutopilotForUser(c)
 	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
 		return
 	}
+
+	log.Printf("User %s resuming mode %s", userID, mode)
 
 	// Resume mode would clear the pause flags in the safety state
 	c.JSON(http.StatusOK, gin.H{

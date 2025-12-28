@@ -2618,6 +2618,124 @@ func (sm *SettingsManager) GetSymbolPerformanceReport() []SymbolPerformanceRepor
 	return reports
 }
 
+// RecalculateSymbolPerformance refreshes all symbol performance metrics from database
+// and updates the categories based on performance thresholds
+func (sm *SettingsManager) RecalculateSymbolPerformance(dbStats map[string]interface{}) (int, error) {
+	settings := sm.GetCurrentSettings()
+
+	if settings.SymbolSettings == nil {
+		settings.SymbolSettings = make(map[string]*SymbolSettings)
+	}
+
+	updated := 0
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	// Iterate over database stats and update symbol settings
+	for symbol, statsRaw := range dbStats {
+		stats, ok := statsRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Get or create symbol settings
+		ss, exists := settings.SymbolSettings[symbol]
+		if !exists {
+			ss = &SymbolSettings{
+				Symbol:         symbol,
+				SizeMultiplier: 1.0,
+				Enabled:        true,
+			}
+			settings.SymbolSettings[symbol] = ss
+		}
+
+		// Update performance metrics
+		if v, ok := stats["total_trades"].(int); ok {
+			ss.TotalTrades = v
+		}
+		if v, ok := stats["winning_trades"].(int); ok {
+			ss.WinningTrades = v
+		}
+		if v, ok := stats["total_pnl"].(float64); ok {
+			ss.TotalPnL = v
+		}
+		if v, ok := stats["avg_pnl"].(float64); ok {
+			ss.AvgPnL = v
+		}
+
+		// Calculate win rate
+		if ss.TotalTrades > 0 {
+			ss.WinRate = float64(ss.WinningTrades) / float64(ss.TotalTrades) * 100
+		}
+
+		// Update category based on performance thresholds
+		// Only recategorize if not manually blacklisted
+		if ss.Category != PerformanceBlacklist {
+			ss.Category = sm.calculatePerformanceCategory(ss.TotalPnL, ss.WinRate, ss.TotalTrades)
+		}
+
+		ss.LastUpdated = now
+		updated++
+	}
+
+	// Save updated settings
+	if err := sm.SaveSettings(settings); err != nil {
+		return updated, err
+	}
+
+	return updated, nil
+}
+
+// calculatePerformanceCategory determines the performance category based on metrics
+func (sm *SettingsManager) calculatePerformanceCategory(totalPnL, winRate float64, totalTrades int) SymbolPerformanceCategory {
+	// Need minimum trades for categorization
+	if totalTrades < 3 {
+		return PerformanceNeutral
+	}
+
+	// Score-based categorization
+	score := 0.0
+
+	// PnL contribution (weighted heavily)
+	if totalPnL > 100 {
+		score += 3
+	} else if totalPnL > 50 {
+		score += 2
+	} else if totalPnL > 0 {
+		score += 1
+	} else if totalPnL > -50 {
+		score -= 1
+	} else if totalPnL > -100 {
+		score -= 2
+	} else {
+		score -= 3
+	}
+
+	// Win rate contribution
+	if winRate > 70 {
+		score += 2
+	} else if winRate > 55 {
+		score += 1
+	} else if winRate < 40 {
+		score -= 1
+	} else if winRate < 30 {
+		score -= 2
+	}
+
+	// Map score to category
+	switch {
+	case score >= 4:
+		return PerformanceBest
+	case score >= 2:
+		return PerformanceGood
+	case score >= -1:
+		return PerformanceNeutral
+	case score >= -3:
+		return PerformancePoor
+	default:
+		return PerformanceWorst
+	}
+}
+
 // BlacklistSymbol adds a symbol to the blacklist
 func (sm *SettingsManager) BlacklistSymbol(symbol string, reason string) error {
 	settings := sm.GetCurrentSettings()
