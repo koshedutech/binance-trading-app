@@ -694,6 +694,13 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/llm-diagnostics-v2", s.handleGetLLMDiagnosticsV2)
 			futures.POST("/ginie/llm-diagnostics-v2/reset", s.handleResetLLMDiagnosticsV2)
 			futures.GET("/ginie/trade-history-ai", s.handleGetTradeHistoryWithAI)
+
+			// Scan Source Configuration (per-user coin source settings)
+			futures.GET("/ginie/scan-config", s.handleGetScanSourceConfig)
+			futures.POST("/ginie/scan-config", s.handleUpdateScanSourceConfig)
+			futures.GET("/ginie/saved-coins", s.handleGetSavedCoins)
+			futures.POST("/ginie/saved-coins", s.handleUpdateSavedCoins)
+			futures.GET("/ginie/scan-preview", s.handleGetScanPreview)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

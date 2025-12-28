@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import { useFuturesStore } from '../store/futuresStore';
 import {
@@ -7,7 +7,7 @@ import {
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
-  ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge
+  ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge, Coins, Star
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
@@ -134,6 +134,15 @@ export default function GiniePanel() {
   const [applyingRecommendation, setApplyingRecommendation] = useState<string | null>(null);
   const [selectedLLMMode, setSelectedLLMMode] = useState<'ultra_fast' | 'scalp' | 'swing' | 'position'>('swing');
 
+  // Scan Source Configuration state
+  const [scanSourceConfig, setScanSourceConfig] = useState<ScanSourceConfig | null>(null);
+  const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null);
+  const [showCoinSources, setShowCoinSources] = useState(false);
+  const [showCoinManager, setShowCoinManager] = useState(false);
+  const [savingScanConfig, setSavingScanConfig] = useState(false);
+  const [loadingScanPreview, setLoadingScanPreview] = useState(false);
+  const [savedCoinsInput, setSavedCoinsInput] = useState('');
+
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
 
@@ -240,6 +249,73 @@ export default function GiniePanel() {
     }
   };
 
+  // Fetch scan source configuration
+  const fetchScanSourceConfig = async () => {
+    try {
+      const config = await futuresApi.getScanSourceConfig();
+      setScanSourceConfig(config);
+      if (config?.saved_coins) {
+        setSavedCoinsInput(config.saved_coins.join(', '));
+      }
+    } catch (err) {
+      console.error('Failed to fetch scan source config:', err);
+    }
+  };
+
+  // Save scan source configuration
+  const handleSaveScanConfig = async () => {
+    if (!scanSourceConfig) return;
+    setSavingScanConfig(true);
+    try {
+      await futuresApi.updateScanSourceConfig(scanSourceConfig);
+      setSuccessMsg('Scan source configuration saved');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to save scan source config');
+      setTimeout(() => setError(null), 3000);
+    } finally {
+      setSavingScanConfig(false);
+    }
+  };
+
+  // Get scan preview
+  const handleScanPreview = async () => {
+    setLoadingScanPreview(true);
+    try {
+      const preview = await futuresApi.getScanPreview();
+      setScanPreview(preview);
+    } catch (err) {
+      console.error('Failed to get scan preview:', err);
+    } finally {
+      setLoadingScanPreview(false);
+    }
+  };
+
+  // Save saved coins
+  const handleSaveSavedCoins = async () => {
+    const coins = savedCoinsInput
+      .split(',')
+      .map(c => c.trim().toUpperCase())
+      .filter(c => c.length > 0)
+      .map(c => c.endsWith('USDT') ? c : c + 'USDT');
+
+    try {
+      await futuresApi.updateSavedCoins(coins);
+      setScanSourceConfig(prev => prev ? { ...prev, saved_coins: coins } : null);
+      setShowCoinManager(false);
+      setSuccessMsg(`Saved ${coins.length} coins`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err) {
+      setError('Failed to save coins');
+      setTimeout(() => setError(null), 3000);
+    }
+  };
+
+  // Update scan config helper
+  const updateScanConfig = (updates: Partial<ScanSourceConfig>) => {
+    setScanSourceConfig(prev => prev ? { ...prev, ...updates } : null);
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchAutopilotStatus(true); // Initialize settings on first load
@@ -253,6 +329,7 @@ export default function GiniePanel() {
     fetchPerformanceMetrics(); // Fetch performance metrics
     fetchLLMSwitches(); // Fetch LLM diagnostics
     fetchModeConfigs(); // Fetch mode configurations (Story 2.7)
+    fetchScanSourceConfig(); // Fetch scan source configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
     const interval = setInterval(() => {
       fetchStatus();
@@ -3518,6 +3595,280 @@ export default function GiniePanel() {
           </div>
         </div>
       </div>
+
+      {/* Coin Sources Configuration */}
+      <div className="bg-gray-800/50 rounded-lg border border-gray-700 mb-3">
+        <button
+          onClick={() => setShowCoinSources(!showCoinSources)}
+          className="w-full flex items-center justify-between p-2 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <Coins className="w-4 h-4 text-yellow-400" />
+            <span className="text-sm font-medium text-gray-200">Coin Sources</span>
+            <span className="text-xs text-gray-500">
+              ({scanSourceConfig?.max_coins ?? 50} max)
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {scanSourceConfig?.use_saved_coins && <span title="Saved Coins"><Star className="w-3 h-3 text-yellow-400" /></span>}
+            {scanSourceConfig?.use_llm_list && <span title="AI/LLM"><Brain className="w-3 h-3 text-purple-400" /></span>}
+            {scanSourceConfig?.use_market_movers && <span title="Market Movers"><TrendingUp className="w-3 h-3 text-green-400" /></span>}
+            {showCoinSources ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+          </div>
+        </button>
+
+        {showCoinSources && scanSourceConfig && (
+          <div className="p-3 pt-0 space-y-3 border-t border-gray-700">
+            {/* Max Coins Slider */}
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-gray-400 w-20">Max Coins:</label>
+              <input
+                type="range"
+                min="5"
+                max="100"
+                value={scanSourceConfig.max_coins}
+                onChange={(e) => updateScanConfig({ max_coins: parseInt(e.target.value) })}
+                className="flex-1 h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+              />
+              <span className="text-sm text-white w-8 text-right">{scanSourceConfig.max_coins}</span>
+            </div>
+
+            {/* Source Toggles */}
+            <div className="space-y-2">
+              {/* Saved Coins */}
+              <div className="flex items-center justify-between">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={scanSourceConfig.use_saved_coins}
+                    onChange={(e) => updateScanConfig({ use_saved_coins: e.target.checked })}
+                    className="rounded bg-gray-700 border-gray-600"
+                  />
+                  <Star className="w-3 h-3 text-yellow-400" />
+                  <span className="text-gray-300">My Saved Coins</span>
+                  <span className="text-xs text-gray-500">({scanSourceConfig.saved_coins?.length ?? 0})</span>
+                </label>
+                <button
+                  onClick={() => setShowCoinManager(true)}
+                  className="text-xs text-blue-400 hover:text-blue-300"
+                >
+                  Manage...
+                </button>
+              </div>
+
+              {/* LLM Selection */}
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={scanSourceConfig.use_llm_list}
+                  onChange={(e) => updateScanConfig({ use_llm_list: e.target.checked })}
+                  className="rounded bg-gray-700 border-gray-600"
+                />
+                <Brain className="w-3 h-3 text-purple-400" />
+                <span className="text-gray-300">AI/LLM Selection</span>
+              </label>
+
+              {/* Market Movers */}
+              <div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={scanSourceConfig.use_market_movers}
+                    onChange={(e) => updateScanConfig({ use_market_movers: e.target.checked })}
+                    className="rounded bg-gray-700 border-gray-600"
+                  />
+                  <TrendingUp className="w-3 h-3 text-green-400" />
+                  <span className="text-gray-300">Market Movers</span>
+                </label>
+
+                {/* Market Mover Filters */}
+                {scanSourceConfig.use_market_movers && (
+                  <div className="ml-6 mt-2 grid grid-cols-2 gap-2">
+                    <label className="flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={scanSourceConfig.mover_gainers}
+                        onChange={(e) => updateScanConfig({ mover_gainers: e.target.checked })}
+                        className="rounded bg-gray-700 border-gray-600 w-3 h-3"
+                      />
+                      <span className="text-green-400">Gainers</span>
+                      <select
+                        value={scanSourceConfig.gainers_limit}
+                        onChange={(e) => updateScanConfig({ gainers_limit: parseInt(e.target.value) })}
+                        className="ml-1 bg-gray-700 text-xs rounded px-1 py-0.5"
+                      >
+                        {[5, 10, 15, 20, 25].map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={scanSourceConfig.mover_losers}
+                        onChange={(e) => updateScanConfig({ mover_losers: e.target.checked })}
+                        className="rounded bg-gray-700 border-gray-600 w-3 h-3"
+                      />
+                      <span className="text-red-400">Losers</span>
+                      <select
+                        value={scanSourceConfig.losers_limit}
+                        onChange={(e) => updateScanConfig({ losers_limit: parseInt(e.target.value) })}
+                        className="ml-1 bg-gray-700 text-xs rounded px-1 py-0.5"
+                      >
+                        {[5, 10, 15, 20, 25].map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={scanSourceConfig.mover_volume}
+                        onChange={(e) => updateScanConfig({ mover_volume: e.target.checked })}
+                        className="rounded bg-gray-700 border-gray-600 w-3 h-3"
+                      />
+                      <span className="text-blue-400">Volume</span>
+                      <select
+                        value={scanSourceConfig.volume_limit}
+                        onChange={(e) => updateScanConfig({ volume_limit: parseInt(e.target.value) })}
+                        className="ml-1 bg-gray-700 text-xs rounded px-1 py-0.5"
+                      >
+                        {[5, 10, 15, 20, 25].map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={scanSourceConfig.mover_volatility}
+                        onChange={(e) => updateScanConfig({ mover_volatility: e.target.checked })}
+                        className="rounded bg-gray-700 border-gray-600 w-3 h-3"
+                      />
+                      <span className="text-orange-400">Volatility</span>
+                      <select
+                        value={scanSourceConfig.volatility_limit}
+                        onChange={(e) => updateScanConfig({ volatility_limit: parseInt(e.target.value) })}
+                        className="ml-1 bg-gray-700 text-xs rounded px-1 py-0.5"
+                      >
+                        {[5, 10, 15, 20, 25].map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 text-xs col-span-2">
+                      <input
+                        type="checkbox"
+                        checked={scanSourceConfig.mover_new_listings}
+                        onChange={(e) => updateScanConfig({ mover_new_listings: e.target.checked })}
+                        className="rounded bg-gray-700 border-gray-600 w-3 h-3"
+                      />
+                      <span className="text-pink-400">New Listings</span>
+                      <select
+                        value={scanSourceConfig.new_listings_limit}
+                        onChange={(e) => updateScanConfig({ new_listings_limit: parseInt(e.target.value) })}
+                        className="ml-1 bg-gray-700 text-xs rounded px-1 py-0.5"
+                      >
+                        {[3, 5, 10].map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </label>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Preview */}
+            {scanPreview && (
+              <div className="bg-gray-900/50 rounded p-2">
+                <div className="text-xs text-gray-400 mb-1">
+                  Preview: {scanPreview.total_count} coins (max {scanPreview.max_coins})
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {scanPreview.coins.slice(0, 20).map((coin) => (
+                    <span
+                      key={coin.symbol}
+                      className="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-300"
+                      title={coin.sources.join(', ')}
+                    >
+                      {coin.symbol.replace('USDT', '')}
+                    </span>
+                  ))}
+                  {scanPreview.coins.length > 20 && (
+                    <span className="text-xs text-gray-500">+{scanPreview.coins.length - 20} more</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="flex gap-2">
+              <button
+                onClick={handleScanPreview}
+                disabled={loadingScanPreview}
+                className="flex-1 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 rounded text-gray-300 flex items-center justify-center gap-1"
+              >
+                {loadingScanPreview ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
+                Preview
+              </button>
+              <button
+                onClick={handleSaveScanConfig}
+                disabled={savingScanConfig}
+                className="flex-1 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 rounded text-white flex items-center justify-center gap-1"
+              >
+                {savingScanConfig ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                Save
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Saved Coins Manager Modal */}
+      {showCoinManager && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-gray-800 rounded-lg p-4 w-96 max-w-[90vw]">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-lg font-medium text-white">Manage Saved Coins</h3>
+              <button onClick={() => setShowCoinManager(false)} className="text-gray-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="space-y-3">
+              <textarea
+                value={savedCoinsInput}
+                onChange={(e) => setSavedCoinsInput(e.target.value)}
+                placeholder="Enter coins separated by commas (e.g., BTC, ETH, SOL)"
+                className="w-full h-32 bg-gray-700 border border-gray-600 rounded p-2 text-sm text-white placeholder-gray-500"
+              />
+              <div className="text-xs text-gray-400">
+                USDT suffix will be added automatically. Quick add:
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX'].map(coin => (
+                  <button
+                    key={coin}
+                    onClick={() => {
+                      const current = savedCoinsInput.split(',').map(c => c.trim()).filter(c => c);
+                      if (!current.includes(coin) && !current.includes(coin + 'USDT')) {
+                        setSavedCoinsInput([...current, coin].join(', '));
+                      }
+                    }}
+                    className="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                  >
+                    + {coin}
+                  </button>
+                ))}
+              </div>
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={() => setShowCoinManager(false)}
+                  className="flex-1 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveSavedCoins}
+                  className="flex-1 py-2 text-sm bg-purple-600 hover:bg-purple-500 rounded text-white"
+                >
+                  Save Coins
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 mb-2 border-b border-gray-700 pb-1">

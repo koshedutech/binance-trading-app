@@ -12,16 +12,22 @@ import (
 func (db *DB) CreateFuturesTrade(ctx context.Context, trade *FuturesTrade) error {
 	query := `
 		INSERT INTO futures_trades (
-			symbol, position_side, side, entry_price, quantity, leverage,
+			user_id, symbol, position_side, side, entry_price, quantity, leverage,
 			margin_type, isolated_margin, liquidation_price, stop_loss, take_profit,
 			status, entry_time, trade_source, notes, ai_decision_id,
 			strategy_id, strategy_name, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
 		) RETURNING id`
 
 	now := time.Now()
+	// Handle empty UserID - pass nil for NULL in database
+	var userID interface{} = trade.UserID
+	if trade.UserID == "" {
+		userID = nil
+	}
 	err := db.Pool.QueryRow(ctx, query,
+		userID,
 		trade.Symbol,
 		trade.PositionSide,
 		trade.Side,

@@ -4794,23 +4794,86 @@ func (ga *GinieAutopilot) isTrailingEnabled(mode GinieTradingMode) bool {
 func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, mode GinieTradingMode, isLong bool) []GinieTakeProfitLevel {
 	var gains []float64
 
-	// Try to get TP gain levels from mode config first
+	// Check if single TP mode is enabled for this mode
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	useSingleTP := false
+
+	// Also check mode config for use_single_tp
 	modeConfig := ga.getModeConfig(mode)
-	if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) > 0 {
-		gains = modeConfig.SLTP.TPGainLevels
+	if modeConfig != nil && modeConfig.SLTP != nil {
+		useSingleTP = modeConfig.SLTP.UseSingleTP
+	}
+
+	// Override with global settings if set
+	switch mode {
+	case GinieModeUltraFast:
+		useSingleTP = useSingleTP || settings.GinieUseSingleTPUltrafast
+	case GinieModeScalp:
+		useSingleTP = useSingleTP || settings.GinieUseSingleTPScalp
+	}
+
+	// For single TP modes, only use TP1 gain (first valid gain)
+	if useSingleTP {
+		var singleGain float64
+		// Try to get from mode config
+		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) > 0 {
+			// Find first non-zero gain
+			for _, g := range modeConfig.SLTP.TPGainLevels {
+				if g > 0.01 { // Skip near-zero values
+					singleGain = g
+					break
+				}
+			}
+		}
+		// Fallback to mode-specific defaults if no valid gain found
+		if singleGain < 0.01 {
+			switch mode {
+			case GinieModeUltraFast:
+				singleGain = settings.GinieTPPercentUltrafast
+				if singleGain < 0.01 {
+					singleGain = 0.5 // Fallback
+				}
+			case GinieModeScalp:
+				singleGain = settings.GinieTPPercentScalp
+				if singleGain < 0.01 {
+					singleGain = 1.0 // Fallback
+				}
+			default:
+				singleGain = 1.0 // Safe default
+			}
+		}
+		gains = []float64{singleGain}
 	} else {
-		// Fallback to hardcoded defaults if config not available
-		switch mode {
-		case GinieModeUltraFast:
-			gains = []float64{0.15, 0.3, 0.5, 0.8}
-		case GinieModeScalp:
-			gains = []float64{0.3, 0.6, 1.0, 1.5}
-		case GinieModeSwing:
-			gains = []float64{3.0, 6.0, 10.0, 15.0}
-		case GinieModePosition:
-			gains = []float64{10.0, 20.0, 35.0, 50.0}
-		default:
-			gains = []float64{3.0, 6.0, 10.0, 15.0} // Default to swing
+		// Multi-TP mode: Try to get TP gain levels from mode config first
+		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) > 0 {
+			gains = modeConfig.SLTP.TPGainLevels
+		}
+
+		// Validate gains - filter out 0% or near-zero values
+		validGains := make([]float64, 0, len(gains))
+		for _, g := range gains {
+			if g >= 0.05 { // Minimum 0.05% gain to be meaningful
+				validGains = append(validGains, g)
+			}
+		}
+
+		// If no valid gains after filtering, use hardcoded defaults
+		if len(validGains) == 0 {
+			switch mode {
+			case GinieModeUltraFast:
+				gains = []float64{0.15, 0.3, 0.5, 0.8}
+			case GinieModeScalp:
+				gains = []float64{0.3, 0.6, 1.0, 1.5}
+			case GinieModeSwing:
+				gains = []float64{1.0, 2.0, 3.0, 4.0}
+			case GinieModePosition:
+				gains = []float64{2.0, 4.0, 6.0, 8.0}
+			default:
+				gains = []float64{1.0, 2.0, 3.0, 4.0} // Default to swing-like
+			}
+		} else {
+			gains = validGains
 		}
 	}
 
@@ -5217,34 +5280,61 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 		}
 
 		// Create FuturesTrade record in database for lifecycle tracking
+		// IMPORTANT: Check for existing open trade first to prevent duplicates
 		if ga.repo != nil {
-			trade := &database.FuturesTrade{
-				Symbol:       symbol,
-				PositionSide: side,
-				Side:         side,
-				EntryPrice:   pos.EntryPrice,
-				Quantity:     qty,
-				Leverage:     pos.Leverage,
-				MarginType:   "CROSSED",
-				Status:       "OPEN",
-				EntryTime:    time.Now(),
-				TradeSource:  "force_sync", // Mark as force synced from exchange
-			}
-			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
-				ga.logger.Warn("Failed to create futures trade record for force-synced position", "error", err, "symbol", symbol)
-			} else {
-				position.FuturesTradeID = trade.ID
-				ga.logger.Debug("Created futures trade record for force-synced position", "symbol", symbol, "trade_id", trade.ID)
+			var tradeID int64
+			var isNewTrade bool
 
-				// Log position synced event to lifecycle
-				if ga.eventLogger != nil {
+			// Check if an open trade already exists for this symbol/user
+			if ga.userID != "" {
+				existingTrade, err := ga.repo.GetDB().GetOpenFuturesTradeBySymbolForUser(context.Background(), ga.userID, symbol)
+				if err != nil {
+					ga.logger.Warn("Failed to check for existing trade in force sync", "error", err, "symbol", symbol)
+				} else if existingTrade != nil {
+					// Use existing trade ID instead of creating a duplicate
+					tradeID = existingTrade.ID
+					isNewTrade = false
+					ga.logger.Debug("Using existing open trade record for force-synced position", "symbol", symbol, "trade_id", tradeID)
+				}
+			}
+
+			// Only create new trade if no existing one found
+			if tradeID == 0 {
+				trade := &database.FuturesTrade{
+					UserID:       ga.userID, // CRITICAL: Set user ID for duplicate detection
+					Symbol:       symbol,
+					PositionSide: side,
+					Side:         side,
+					EntryPrice:   pos.EntryPrice,
+					Quantity:     qty,
+					Leverage:     pos.Leverage,
+					MarginType:   "CROSSED",
+					Status:       "OPEN",
+					EntryTime:    time.Now(),
+					TradeSource:  "force_sync", // Mark as force synced from exchange
+				}
+				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+					ga.logger.Warn("Failed to create futures trade record for force-synced position", "error", err, "symbol", symbol)
+				} else {
+					tradeID = trade.ID
+					isNewTrade = true
+					ga.logger.Debug("Created futures trade record for force-synced position", "symbol", symbol, "trade_id", tradeID)
+				}
+			}
+
+			// Set trade ID on position
+			if tradeID > 0 {
+				position.FuturesTradeID = tradeID
+
+				// Log position synced event to lifecycle (only for new trades)
+				if isNewTrade && ga.eventLogger != nil {
 					conditionsMet := map[string]interface{}{
 						"source":      "force_sync",
 						"sync_reason": "manual_force_sync",
 					}
 					go ga.eventLogger.LogPositionOpened(
 						context.Background(),
-						trade.ID,
+						tradeID,
 						symbol,
 						side,
 						string(syncedMode), // Use user's enabled mode preference
@@ -5437,34 +5527,61 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 		}
 
 		// Create FuturesTrade record in database for lifecycle tracking (outside lock)
+		// IMPORTANT: Check for existing open trade first to prevent duplicates
 		if ga.repo != nil {
-			trade := &database.FuturesTrade{
-				Symbol:       symbol,
-				PositionSide: side,
-				Side:         side,
-				EntryPrice:   pos.EntryPrice,
-				Quantity:     qty,
-				Leverage:     pos.Leverage,
-				MarginType:   "CROSSED",
-				Status:       "OPEN",
-				EntryTime:    time.Now(),
-				TradeSource:  "sync", // Mark as synced from exchange
-			}
-			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
-				ga.logger.Warn("Failed to create futures trade record for synced position", "error", err, "symbol", symbol)
-			} else {
-				position.FuturesTradeID = trade.ID
-				ga.logger.Debug("Created futures trade record for synced position", "symbol", symbol, "trade_id", trade.ID)
+			var tradeID int64
+			var isNewTrade bool
 
-				// Log position synced event to lifecycle
-				if ga.eventLogger != nil {
+			// Check if an open trade already exists for this symbol/user
+			if ga.userID != "" {
+				existingTrade, err := ga.repo.GetDB().GetOpenFuturesTradeBySymbolForUser(context.Background(), ga.userID, symbol)
+				if err != nil {
+					ga.logger.Warn("Failed to check for existing trade", "error", err, "symbol", symbol)
+				} else if existingTrade != nil {
+					// Use existing trade ID instead of creating a duplicate
+					tradeID = existingTrade.ID
+					isNewTrade = false
+					ga.logger.Debug("Using existing open trade record for synced position", "symbol", symbol, "trade_id", tradeID)
+				}
+			}
+
+			// Only create new trade if no existing one found
+			if tradeID == 0 {
+				trade := &database.FuturesTrade{
+					UserID:       ga.userID, // CRITICAL: Set user ID for duplicate detection
+					Symbol:       symbol,
+					PositionSide: side,
+					Side:         side,
+					EntryPrice:   pos.EntryPrice,
+					Quantity:     qty,
+					Leverage:     pos.Leverage,
+					MarginType:   "CROSSED",
+					Status:       "OPEN",
+					EntryTime:    time.Now(),
+					TradeSource:  "sync", // Mark as synced from exchange
+				}
+				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+					ga.logger.Warn("Failed to create futures trade record for synced position", "error", err, "symbol", symbol)
+				} else {
+					tradeID = trade.ID
+					isNewTrade = true
+					ga.logger.Debug("Created futures trade record for synced position", "symbol", symbol, "trade_id", tradeID)
+				}
+			}
+
+			// Set trade ID on position
+			if tradeID > 0 {
+				position.FuturesTradeID = tradeID
+
+				// Log position synced event to lifecycle (only for new trades)
+				if isNewTrade && ga.eventLogger != nil {
 					conditionsMet := map[string]interface{}{
 						"source":      "exchange_sync",
 						"sync_reason": "app_restart_or_manual_position",
 					}
 					go ga.eventLogger.LogPositionOpened(
 						context.Background(),
-						trade.ID,
+						tradeID,
 						symbol,
 						side,
 						string(GinieModeSwing), // Synced positions default to swing mode

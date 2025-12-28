@@ -201,6 +201,37 @@ func (db *DB) CountOpenFuturesTradesForUser(ctx context.Context, userID string) 
 	return count, err
 }
 
+// GetOpenFuturesTradeBySymbolForUser retrieves an open futures trade for a specific symbol and user
+// Returns nil, nil if no open trade exists for this symbol/user combination
+func (db *DB) GetOpenFuturesTradeBySymbolForUser(ctx context.Context, userID, symbol string) (*FuturesTrade, error) {
+	query := `
+		SELECT id, symbol, position_side, side, entry_price, exit_price, mark_price,
+			quantity, leverage, margin_type, isolated_margin, realized_pnl, unrealized_pnl,
+			realized_pnl_percent, liquidation_price, stop_loss, take_profit, trailing_stop,
+			status, entry_time, exit_time, trade_source, notes, created_at, updated_at
+		FROM futures_trades
+		WHERE status = 'OPEN' AND user_id = $1 AND symbol = $2
+		ORDER BY entry_time DESC
+		LIMIT 1`
+
+	var trade FuturesTrade
+	err := db.Pool.QueryRow(ctx, query, userID, symbol).Scan(
+		&trade.ID, &trade.Symbol, &trade.PositionSide, &trade.Side, &trade.EntryPrice,
+		&trade.ExitPrice, &trade.MarkPrice, &trade.Quantity, &trade.Leverage,
+		&trade.MarginType, &trade.IsolatedMargin, &trade.RealizedPnL, &trade.UnrealizedPnL,
+		&trade.RealizedPnLPercent, &trade.LiquidationPrice, &trade.StopLoss, &trade.TakeProfit,
+		&trade.TrailingStop, &trade.Status, &trade.EntryTime, &trade.ExitTime,
+		&trade.TradeSource, &trade.Notes, &trade.CreatedAt, &trade.UpdatedAt,
+	)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil // No open trade exists - this is not an error
+		}
+		return nil, fmt.Errorf("failed to get open futures trade by symbol: %w", err)
+	}
+	return &trade, nil
+}
+
 // ==================== USER-SCOPED FUTURES ORDERS ====================
 
 // CreateFuturesOrderForUser creates a new futures order for a specific user

@@ -1363,3 +1363,117 @@ func (r *Repository) DeleteUserSymbolSettings(ctx context.Context, userID, symbo
 	}
 	return nil
 }
+
+// ========================================
+// Scan Source Settings Repository Methods
+// ========================================
+
+// GetUserScanSourceSettings retrieves scan source settings for a user
+func (r *Repository) GetUserScanSourceSettings(ctx context.Context, userID string) (*UserScanSourceSettings, error) {
+	query := `
+		SELECT id, user_id, max_coins, use_saved_coins, saved_coins, use_llm_list,
+		       use_market_movers, mover_gainers, mover_losers, mover_volume,
+		       mover_volatility, mover_new_listings, gainers_limit, losers_limit,
+		       volume_limit, volatility_limit, new_listings_limit, created_at, updated_at
+		FROM user_scan_source_settings
+		WHERE user_id = $1
+	`
+
+	var settings UserScanSourceSettings
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(
+		&settings.ID, &settings.UserID, &settings.MaxCoins, &settings.UseSavedCoins,
+		&settings.SavedCoins, &settings.UseLLMList, &settings.UseMarketMovers,
+		&settings.MoverGainers, &settings.MoverLosers, &settings.MoverVolume,
+		&settings.MoverVolatility, &settings.MoverNewListings, &settings.GainersLimit,
+		&settings.LosersLimit, &settings.VolumeLimit, &settings.VolatilityLimit,
+		&settings.NewListingsLimit, &settings.CreatedAt, &settings.UpdatedAt,
+	)
+
+	if err == pgx.ErrNoRows {
+		// Return default settings if not found
+		defaults := GetDefaultScanSourceSettings()
+		defaults.UserID = userID
+		return defaults, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get scan source settings: %w", err)
+	}
+
+	return &settings, nil
+}
+
+// UpsertUserScanSourceSettings creates or updates scan source settings for a user
+func (r *Repository) UpsertUserScanSourceSettings(ctx context.Context, settings *UserScanSourceSettings) error {
+	query := `
+		INSERT INTO user_scan_source_settings (
+			user_id, max_coins, use_saved_coins, saved_coins, use_llm_list,
+			use_market_movers, mover_gainers, mover_losers, mover_volume,
+			mover_volatility, mover_new_listings, gainers_limit, losers_limit,
+			volume_limit, volatility_limit, new_listings_limit
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		ON CONFLICT (user_id) DO UPDATE SET
+			max_coins = EXCLUDED.max_coins,
+			use_saved_coins = EXCLUDED.use_saved_coins,
+			saved_coins = EXCLUDED.saved_coins,
+			use_llm_list = EXCLUDED.use_llm_list,
+			use_market_movers = EXCLUDED.use_market_movers,
+			mover_gainers = EXCLUDED.mover_gainers,
+			mover_losers = EXCLUDED.mover_losers,
+			mover_volume = EXCLUDED.mover_volume,
+			mover_volatility = EXCLUDED.mover_volatility,
+			mover_new_listings = EXCLUDED.mover_new_listings,
+			gainers_limit = EXCLUDED.gainers_limit,
+			losers_limit = EXCLUDED.losers_limit,
+			volume_limit = EXCLUDED.volume_limit,
+			volatility_limit = EXCLUDED.volatility_limit,
+			new_listings_limit = EXCLUDED.new_listings_limit,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := r.db.Pool.Exec(ctx, query,
+		settings.UserID, settings.MaxCoins, settings.UseSavedCoins, settings.SavedCoins,
+		settings.UseLLMList, settings.UseMarketMovers, settings.MoverGainers,
+		settings.MoverLosers, settings.MoverVolume, settings.MoverVolatility,
+		settings.MoverNewListings, settings.GainersLimit, settings.LosersLimit,
+		settings.VolumeLimit, settings.VolatilityLimit, settings.NewListingsLimit,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to upsert scan source settings: %w", err)
+	}
+
+	return nil
+}
+
+// GetUserSavedCoins retrieves just the saved coins for a user
+func (r *Repository) GetUserSavedCoins(ctx context.Context, userID string) ([]string, error) {
+	query := `SELECT COALESCE(saved_coins, '{}') FROM user_scan_source_settings WHERE user_id = $1`
+
+	var coins []string
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&coins)
+	if err == pgx.ErrNoRows {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get saved coins: %w", err)
+	}
+
+	return coins, nil
+}
+
+// UpdateUserSavedCoins updates just the saved coins for a user
+func (r *Repository) UpdateUserSavedCoins(ctx context.Context, userID string, coins []string) error {
+	query := `
+		INSERT INTO user_scan_source_settings (user_id, saved_coins)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET
+			saved_coins = EXCLUDED.saved_coins,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := r.db.Pool.Exec(ctx, query, userID, coins)
+	if err != nil {
+		return fmt.Errorf("failed to update saved coins: %w", err)
+	}
+
+	return nil
+}

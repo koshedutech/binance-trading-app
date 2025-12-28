@@ -7,6 +7,7 @@ import (
 // FuturesTrade represents a futures trading position in the database
 type FuturesTrade struct {
 	ID                  int64      `json:"id"`
+	UserID              string     `json:"user_id,omitempty"` // Multi-tenant user ID
 	Symbol              string     `json:"symbol"`
 	PositionSide        string     `json:"position_side"` // LONG, SHORT, BOTH
 	Side                string     `json:"side"`          // BUY, SELL (entry side)

@@ -1,14 +1,17 @@
 package api
 
 import (
+	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -3264,4 +3267,235 @@ func calculateHealthPercent(protected, total int) float64 {
 func (s *Server) handleGetRateLimiterStatus(c *gin.Context) {
 	status := binance.GetRateLimiter().GetStatus()
 	c.JSON(http.StatusOK, status)
+}
+
+// ========================================
+// Scan Source Configuration Handlers
+// ========================================
+
+// handleGetScanSourceConfig returns the user's scan source configuration
+// GET /api/futures/ginie/scan-config
+func (s *Server) handleGetScanSourceConfig(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	settings, err := s.repo.GetUserScanSourceSettings(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[handleGetScanSourceConfig] Error getting scan source settings for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get scan source settings")
+		return
+	}
+
+	c.JSON(http.StatusOK, settings)
+}
+
+// handleUpdateScanSourceConfig updates the user's scan source configuration
+// POST /api/futures/ginie/scan-config
+func (s *Server) handleUpdateScanSourceConfig(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	var req database.UserScanSourceSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Set user ID from auth context
+	req.UserID = userID
+
+	// Validate settings
+	if req.MaxCoins < 5 {
+		req.MaxCoins = 5
+	}
+	if req.MaxCoins > 100 {
+		req.MaxCoins = 100
+	}
+
+	if err := s.repo.UpsertUserScanSourceSettings(c.Request.Context(), &req); err != nil {
+		log.Printf("[handleUpdateScanSourceConfig] Error saving scan source settings for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save scan source settings")
+		return
+	}
+
+	log.Printf("[handleUpdateScanSourceConfig] User %s updated scan source config: max_coins=%d, saved=%v, llm=%v, movers=%v",
+		userID, req.MaxCoins, req.UseSavedCoins, req.UseLLMList, req.UseMarketMovers)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Scan source configuration saved",
+	})
+}
+
+// handleGetSavedCoins returns the user's saved coins list
+// GET /api/futures/ginie/saved-coins
+func (s *Server) handleGetSavedCoins(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	coins, err := s.repo.GetUserSavedCoins(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[handleGetSavedCoins] Error getting saved coins for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get saved coins")
+		return
+	}
+
+	// Get the full settings to check if saved coins is enabled
+	settings, _ := s.repo.GetUserScanSourceSettings(c.Request.Context(), userID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"coins":   coins,
+		"count":   len(coins),
+		"enabled": settings != nil && settings.UseSavedCoins,
+	})
+}
+
+// handleUpdateSavedCoins updates the user's saved coins list
+// POST /api/futures/ginie/saved-coins
+func (s *Server) handleUpdateSavedCoins(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	var req struct {
+		Coins []string `json:"coins"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Normalize coin symbols (uppercase, add USDT if missing)
+	normalizedCoins := make([]string, 0, len(req.Coins))
+	seen := make(map[string]bool)
+	for _, coin := range req.Coins {
+		coin = strings.TrimSpace(strings.ToUpper(coin))
+		if coin == "" {
+			continue
+		}
+		if !strings.HasSuffix(coin, "USDT") {
+			coin = coin + "USDT"
+		}
+		if !seen[coin] {
+			normalizedCoins = append(normalizedCoins, coin)
+			seen[coin] = true
+		}
+	}
+
+	if err := s.repo.UpdateUserSavedCoins(c.Request.Context(), userID, normalizedCoins); err != nil {
+		log.Printf("[handleUpdateSavedCoins] Error saving coins for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save coins")
+		return
+	}
+
+	log.Printf("[handleUpdateSavedCoins] User %s saved %d coins: %v", userID, len(normalizedCoins), normalizedCoins)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"coins":   normalizedCoins,
+		"count":   len(normalizedCoins),
+	})
+}
+
+// handleGetScanPreview returns a preview of coins that would be scanned based on current config
+// GET /api/futures/ginie/scan-preview
+func (s *Server) handleGetScanPreview(c *gin.Context) {
+	userID := auth.GetUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	// Get user's scan source settings
+	settings, err := s.repo.GetUserScanSourceSettings(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[handleGetScanPreview] Error getting settings for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get scan source settings")
+		return
+	}
+
+	preview := make(map[string][]string)
+	totalCoins := make(map[string]bool)
+
+	// 1. Saved Coins (if enabled)
+	if settings.UseSavedCoins && len(settings.SavedCoins) > 0 {
+		preview["saved"] = settings.SavedCoins
+		for _, coin := range settings.SavedCoins {
+			totalCoins[coin] = true
+		}
+	}
+
+	// 2. LLM Selection (placeholder - actual selection happens during scan)
+	if settings.UseLLMList {
+		preview["llm"] = []string{"(AI will select during scan)"}
+	}
+
+	// 3. Market Movers (if enabled)
+	if settings.UseMarketMovers {
+		movers := s.getMarketMoversPreview(settings)
+		for category, coins := range movers {
+			preview["movers_"+category] = coins
+			for _, coin := range coins {
+				totalCoins[coin] = true
+			}
+		}
+	}
+
+	// Compile unique coins
+	uniqueCoins := make([]string, 0, len(totalCoins))
+	for coin := range totalCoins {
+		uniqueCoins = append(uniqueCoins, coin)
+	}
+
+	// Calculate will_scan count
+	willScan := len(uniqueCoins)
+	if willScan > settings.MaxCoins {
+		willScan = settings.MaxCoins
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"sources":       preview,
+		"unique_coins":  uniqueCoins,
+		"total_unique":  len(uniqueCoins),
+		"max_coins":     settings.MaxCoins,
+		"will_scan":     willScan,
+		"config_active": settings.UseSavedCoins || settings.UseLLMList || settings.UseMarketMovers,
+	})
+}
+
+// getMarketMoversPreview gets a preview of market mover coins based on user settings
+func (s *Server) getMarketMoversPreview(settings *database.UserScanSourceSettings) map[string][]string {
+	result := make(map[string][]string)
+
+	// Get cached market movers from existing system
+	// For now, return placeholders - the actual data comes from the existing market movers endpoint
+	if settings.MoverGainers {
+		result["gainers"] = []string{fmt.Sprintf("(Top %d gainers)", settings.GainersLimit)}
+	}
+	if settings.MoverLosers {
+		result["losers"] = []string{fmt.Sprintf("(Top %d losers)", settings.LosersLimit)}
+	}
+	if settings.MoverVolume {
+		result["volume"] = []string{fmt.Sprintf("(Top %d by volume)", settings.VolumeLimit)}
+	}
+	if settings.MoverVolatility {
+		result["volatility"] = []string{fmt.Sprintf("(Top %d by volatility)", settings.VolatilityLimit)}
+	}
+	if settings.MoverNewListings {
+		result["new"] = []string{fmt.Sprintf("(Last %d new listings)", settings.NewListingsLimit)}
+	}
+
+	return result
 }

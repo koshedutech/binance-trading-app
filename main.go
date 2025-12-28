@@ -158,6 +158,12 @@ func main() {
 		} else {
 			logger.Info("Admin user seeded successfully")
 		}
+
+		// Run Scan Source migrations for per-user coin source configuration
+		if err := db.RunScanSourceMigrations(ctx); err != nil {
+			log.Printf("Warning: Scan source migrations failed: %v", err)
+		}
+		logger.Info("Scan source migrations completed")
 	}
 
 	// Create repository early for API key service

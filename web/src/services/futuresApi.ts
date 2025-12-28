@@ -38,6 +38,7 @@ class FuturesAPIService {
       (config) => {
         const token = localStorage.getItem('access_token');
         if (token) {
+          config.headers = config.headers || {};
           config.headers.Authorization = `Bearer ${token}`;
         }
         return config;
@@ -1888,6 +1889,81 @@ class FuturesAPIService {
     const { data } = await this.client.get(`/trades/${tradeId}/sl-revisions`);
     return data;
   }
+
+  // ==================== SCAN SOURCE CONFIG ====================
+
+  /**
+   * Get scan source configuration for current user
+   */
+  async getScanSourceConfig(): Promise<ScanSourceConfig> {
+    const { data } = await this.client.get('/ginie/scan-config');
+    return data.config;
+  }
+
+  /**
+   * Update scan source configuration
+   */
+  async updateScanSourceConfig(config: Partial<ScanSourceConfig>): Promise<{ success: boolean }> {
+    const { data } = await this.client.post('/ginie/scan-config', config);
+    return data;
+  }
+
+  /**
+   * Get saved coins list
+   */
+  async getSavedCoins(): Promise<{ coins: string[]; count: number; enabled: boolean }> {
+    const { data } = await this.client.get('/ginie/saved-coins');
+    return { coins: data.saved_coins || [], count: data.count || 0, enabled: data.enabled || false };
+  }
+
+  /**
+   * Update saved coins list
+   */
+  async updateSavedCoins(coins: string[]): Promise<{ success: boolean }> {
+    const { data } = await this.client.post('/ginie/saved-coins', { coins });
+    return data;
+  }
+
+  /**
+   * Get scan preview - shows which coins will be scanned with current config
+   */
+  async getScanPreview(): Promise<ScanPreview> {
+    const { data } = await this.client.get('/ginie/scan-preview');
+    return data;
+  }
+}
+
+// ==================== SCAN SOURCE CONFIG TYPES ====================
+
+export interface ScanSourceConfig {
+  id?: string;
+  user_id?: string;
+  max_coins: number;
+  use_saved_coins: boolean;
+  saved_coins: string[];
+  use_llm_list: boolean;
+  use_market_movers: boolean;
+  mover_gainers: boolean;
+  mover_losers: boolean;
+  mover_volume: boolean;
+  mover_volatility: boolean;
+  mover_new_listings: boolean;
+  gainers_limit: number;
+  losers_limit: number;
+  volume_limit: number;
+  volatility_limit: number;
+  new_listings_limit: number;
+}
+
+export interface ScanPreviewCoin {
+  symbol: string;
+  sources: string[];
+}
+
+export interface ScanPreview {
+  coins: ScanPreviewCoin[];
+  total_count: number;
+  max_coins: number;
 }
 
 // ==================== MARKET MOVERS TYPES ====================

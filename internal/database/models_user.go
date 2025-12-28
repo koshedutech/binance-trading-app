@@ -377,3 +377,47 @@ type UserAIKey struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
+
+// UserScanSourceSettings represents per-user coin scan source configuration
+type UserScanSourceSettings struct {
+	ID               string    `json:"id"`
+	UserID           string    `json:"user_id"`
+	MaxCoins         int       `json:"max_coins"`
+	UseSavedCoins    bool      `json:"use_saved_coins"`
+	SavedCoins       []string  `json:"saved_coins"`
+	UseLLMList       bool      `json:"use_llm_list"`
+	UseMarketMovers  bool      `json:"use_market_movers"`
+	MoverGainers     bool      `json:"mover_gainers"`
+	MoverLosers      bool      `json:"mover_losers"`
+	MoverVolume      bool      `json:"mover_volume"`
+	MoverVolatility  bool      `json:"mover_volatility"`
+	MoverNewListings bool      `json:"mover_new_listings"`
+	GainersLimit     int       `json:"gainers_limit"`
+	LosersLimit      int       `json:"losers_limit"`
+	VolumeLimit      int       `json:"volume_limit"`
+	VolatilityLimit  int       `json:"volatility_limit"`
+	NewListingsLimit int       `json:"new_listings_limit"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// GetDefaultScanSourceSettings returns default scan source settings
+func GetDefaultScanSourceSettings() *UserScanSourceSettings {
+	return &UserScanSourceSettings{
+		MaxCoins:         50,
+		UseSavedCoins:    false,
+		SavedCoins:       []string{},
+		UseLLMList:       true,
+		UseMarketMovers:  true,
+		MoverGainers:     true,
+		MoverLosers:      true,
+		MoverVolume:      true,
+		MoverVolatility:  true,
+		MoverNewListings: false,
+		GainersLimit:     10,
+		LosersLimit:      10,
+		VolumeLimit:      15,
+		VolatilityLimit:  10,
+		NewListingsLimit: 5,
+	}
+}
