@@ -1785,7 +1785,14 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	if req.BlockOnDivergence != nil {
 		blockOnDiv = *req.BlockOnDivergence
 	} else {
-		blockOnDiv = sm.GetCurrentSettings().GinieBlockOnDivergence
+		// Get from ModeConfigs (check any mode for divergence setting)
+		currentSettings := sm.GetCurrentSettings()
+		for _, mc := range currentSettings.ModeConfigs {
+			if mc != nil && mc.TrendDivergence != nil && mc.TrendDivergence.BlockOnDivergence {
+				blockOnDiv = true
+				break
+			}
+		}
 	}
 
 	if err := sm.UpdateGinieTrendTimeframes(

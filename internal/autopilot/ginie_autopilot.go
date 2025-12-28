@@ -8001,11 +8001,8 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 					"mode", pos.Mode,
 					"allocation", modeConfig.SLTP.TPAllocation)
 			} else {
-				// Fallback to global settings
-				tp1Pct = settings.GinieTP1Percent
-				tp2Pct = settings.GinieTP2Percent
-				tp3Pct = settings.GinieTP3Percent
-				tp4Pct = settings.GinieTP4Percent
+				// Fallback to defaults (legacy fields removed)
+				tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
 			}
 
 			// Ensure allocation sums to 100%
@@ -8398,11 +8395,8 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 				"mode", pos.Mode,
 				"allocation", modeConfig.SLTP.TPAllocation)
 		} else {
-			// Fallback to global settings
-			tp1Pct = settings.GinieTP1Percent
-			tp2Pct = settings.GinieTP2Percent
-			tp3Pct = settings.GinieTP3Percent
-			tp4Pct = settings.GinieTP4Percent
+			// Fallback to defaults (legacy fields removed)
+			tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
 		}
 
 		// Ensure allocation sums to 100%

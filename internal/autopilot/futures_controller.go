@@ -641,19 +641,28 @@ func (fc *FuturesController) LoadSavedSettings() {
 			ginieConfig.CBCooldownMinutes = settings.CooldownMinutes
 		}
 
-		// Apply Ginie TP percentages (multi-level take profit allocation)
-		if settings.GinieUseSingleTP {
-			// Single TP mode: book entire position at single TP
+		// Apply Ginie TP percentages from ModeConfigs (use swing as reference)
+		useSingleTP := false
+		tp1, tp2, tp3, tp4 := 25.0, 25.0, 25.0, 25.0
+		if mc := settings.ModeConfigs["swing"]; mc != nil && mc.SLTP != nil {
+			useSingleTP = mc.SLTP.UseSingleTP
+			if len(mc.SLTP.TPAllocation) >= 4 {
+				tp1 = mc.SLTP.TPAllocation[0]
+				tp2 = mc.SLTP.TPAllocation[1]
+				tp3 = mc.SLTP.TPAllocation[2]
+				tp4 = mc.SLTP.TPAllocation[3]
+			}
+		}
+		if useSingleTP {
 			ginieConfig.TP1Percent = 100.0
 			ginieConfig.TP2Percent = 0
 			ginieConfig.TP3Percent = 0
 			ginieConfig.TP4Percent = 0
 		} else {
-			// Multi-TP mode: allocate across 4 levels
-			ginieConfig.TP1Percent = settings.GinieTP1Percent
-			ginieConfig.TP2Percent = settings.GinieTP2Percent
-			ginieConfig.TP3Percent = settings.GinieTP3Percent
-			ginieConfig.TP4Percent = settings.GinieTP4Percent
+			ginieConfig.TP1Percent = tp1
+			ginieConfig.TP2Percent = tp2
+			ginieConfig.TP3Percent = tp3
+			ginieConfig.TP4Percent = tp4
 		}
 
 		fc.ginieAutopilot.SetConfig(ginieConfig)
@@ -682,7 +691,7 @@ func (fc *FuturesController) LoadSavedSettings() {
 			"cb_max_daily_loss", ginieConfig.CBMaxDailyLoss,
 			"cb_max_consecutive_losses", ginieConfig.CBMaxConsecutiveLosses,
 			"cb_cooldown_minutes", ginieConfig.CBCooldownMinutes,
-			"tp_mode", map[bool]string{true: "SINGLE", false: "MULTI"}[settings.GinieUseSingleTP],
+			"tp_mode", map[bool]string{true: "SINGLE", false: "MULTI"}[useSingleTP],
 			"tp1_percent", ginieConfig.TP1Percent,
 			"trend_timeframes", trendTimeframes,
 			"block_on_divergence", blockOnDivergence,
