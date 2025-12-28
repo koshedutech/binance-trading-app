@@ -1976,26 +1976,76 @@ func (sm *SettingsManager) UpdateProfitReinvest(percent float64, riskLevel strin
 	return sm.SaveSettings(settings)
 }
 
-// UpdateGinieRiskLevel updates Ginie risk level and related settings
-// Deprecated: This function updates deprecated legacy fields. Use UpdateGinieModeConfig to update
-// ModeConfigs[mode].Risk.RiskLevel instead. Legacy fields are kept for backwards compatibility
-// and will be migrated to ModeConfigs automatically.
+// UpdateGinieRiskLevel updates the risk level across all mode configs
+// This function updates ModeConfigs (primary) and legacy fields (backwards compat).
 func (sm *SettingsManager) UpdateGinieRiskLevel(riskLevel string) error {
 	settings := sm.GetCurrentSettings()
-	settings.GinieRiskLevel = riskLevel
 
-	// Adjust related settings based on risk level
+	// Update risk level in all ModeConfigs
+	for _, modeKey := range []string{"ultra_fast", "scalp", "swing", "position"} {
+		if mc := settings.ModeConfigs[modeKey]; mc != nil {
+			if mc.Risk == nil {
+				mc.Risk = &ModeRiskConfig{}
+			}
+			mc.Risk.RiskLevel = riskLevel
+
+			// Adjust risk multipliers based on level
+			switch riskLevel {
+			case "conservative":
+				mc.Risk.RiskMultiplierConservative = 0.7
+				mc.Risk.RiskMultiplierModerate = 1.0
+				mc.Risk.RiskMultiplierAggressive = 1.3
+			case "moderate":
+				mc.Risk.RiskMultiplierConservative = 0.7
+				mc.Risk.RiskMultiplierModerate = 1.0
+				mc.Risk.RiskMultiplierAggressive = 1.3
+			case "aggressive":
+				mc.Risk.RiskMultiplierConservative = 0.7
+				mc.Risk.RiskMultiplierModerate = 1.0
+				mc.Risk.RiskMultiplierAggressive = 1.3
+			}
+
+			// Adjust confidence based on risk level
+			if mc.Confidence == nil {
+				mc.Confidence = &ModeConfidenceConfig{}
+			}
+			switch riskLevel {
+			case "conservative":
+				mc.Confidence.MinConfidence = 60.0
+			case "moderate":
+				mc.Confidence.MinConfidence = 50.0
+			case "aggressive":
+				mc.Confidence.MinConfidence = 45.0
+			}
+
+			// Adjust size based on risk level
+			if mc.Size == nil {
+				mc.Size = &ModeSizeConfig{}
+			}
+			switch riskLevel {
+			case "conservative":
+				mc.Size.MaxSizeUSD = 300
+			case "moderate":
+				mc.Size.MaxSizeUSD = 500
+			case "aggressive":
+				mc.Size.MaxSizeUSD = 800
+			}
+		}
+	}
+
+	// Also update global settings for backwards compatibility during transition
+	settings.GinieRiskLevel = riskLevel
 	switch riskLevel {
 	case "conservative":
-		settings.GinieMinConfidence = 60.0 // FIXED: Lowered from 75% to allow more trades
+		settings.GinieMinConfidence = 60.0
 		settings.GinieMaxUSD = 300
 		settings.GinieLeverage = 3
 	case "moderate":
-		settings.GinieMinConfidence = 50.0 // FIXED: Lowered from 65% to match user expectations
+		settings.GinieMinConfidence = 50.0
 		settings.GinieMaxUSD = 500
 		settings.GinieLeverage = 5
 	case "aggressive":
-		settings.GinieMinConfidence = 45.0 // FIXED: Lowered from 55% to be truly aggressive
+		settings.GinieMinConfidence = 45.0
 		settings.GinieMaxUSD = 800
 		settings.GinieLeverage = 10
 	}
@@ -2063,9 +2113,7 @@ func ValidateTimeframe(tf string) error {
 }
 
 // UpdateGinieTrendTimeframes updates the trend timeframe settings for each mode
-// Deprecated: This function updates deprecated legacy fields. Use UpdateGinieModeConfig to update
-// ModeConfigs[mode].Timeframe.TrendTimeframe and ModeConfigs[mode].TrendDivergence.BlockOnDivergence
-// instead. Legacy fields are kept for backwards compatibility and will be migrated automatically.
+// This function updates ModeConfigs (primary) and legacy fields (backwards compat).
 func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 	ultrafastTF string,
 	scalpTF string,
@@ -2095,10 +2143,35 @@ func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 		}
 	}
 
-	// Get current settings BEFORE acquiring the lock to avoid deadlock
-	// (GetCurrentSettings acquires RLock internally)
 	settings := sm.GetCurrentSettings()
 
+	// Build map of mode -> timeframe
+	modeTimeframes := map[string]string{
+		"ultra_fast": ultrafastTF,
+		"scalp":      scalpTF,
+		"swing":      swingTF,
+		"position":   positionTF,
+	}
+
+	// Update ModeConfigs (primary)
+	for modeKey, tf := range modeTimeframes {
+		if tf == "" {
+			continue
+		}
+		if mc := settings.ModeConfigs[modeKey]; mc != nil {
+			if mc.Timeframe == nil {
+				mc.Timeframe = &ModeTimeframeConfig{}
+			}
+			mc.Timeframe.TrendTimeframe = tf
+
+			if mc.TrendDivergence == nil {
+				mc.TrendDivergence = &ModeTrendDivergenceConfig{}
+			}
+			mc.TrendDivergence.BlockOnDivergence = blockOnDivergence
+		}
+	}
+
+	// Also update legacy fields for backwards compatibility
 	if ultrafastTF != "" {
 		settings.GinieTrendTimeframeUltrafast = ultrafastTF
 	}
@@ -2143,9 +2216,7 @@ func ValidateTPAllocation(tp1, tp2, tp3, tp4 float64) error {
 }
 
 // UpdateGinieSLTPSettings updates SL/TP configuration for a specific mode
-// Deprecated: This function updates deprecated legacy fields. Use UpdateGinieModeConfig to update
-// ModeConfigs[mode].SLTP settings instead. Legacy fields are kept for backwards compatibility
-// and will be migrated to ModeConfigs automatically.
+// This function updates ModeConfigs (primary) and legacy fields (backwards compat).
 func (sm *SettingsManager) UpdateGinieSLTPSettings(
 	mode string, // "scalp", "swing", "position"
 	slPercent, tpPercent float64,
@@ -2165,10 +2236,27 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		return fmt.Errorf("trailing activation must be 0-20%%, got: %.2f", trailingActivation)
 	}
 
-	// Get current settings BEFORE acquiring the lock to avoid deadlock
-	// (GetCurrentSettings acquires RLock internally)
+	// Validate mode
+	validModes := map[string]bool{"scalp": true, "swing": true, "position": true}
+	if !validModes[mode] {
+		return fmt.Errorf("invalid mode: %s (must be scalp, swing, or position)", mode)
+	}
+
 	settings := sm.GetCurrentSettings()
 
+	// Update ModeConfigs (primary)
+	if mc := settings.ModeConfigs[mode]; mc != nil {
+		if mc.SLTP == nil {
+			mc.SLTP = &ModeSLTPConfig{}
+		}
+		mc.SLTP.StopLossPercent = slPercent
+		mc.SLTP.TakeProfitPercent = tpPercent
+		mc.SLTP.TrailingStopEnabled = trailingEnabled
+		mc.SLTP.TrailingStopPercent = trailingPercent
+		mc.SLTP.TrailingStopActivation = trailingActivation
+	}
+
+	// Also update legacy fields for backwards compatibility
 	switch mode {
 	case "scalp":
 		settings.GinieSLPercentScalp = slPercent
@@ -2188,14 +2276,13 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		settings.GinieTrailingStopEnabledPosition = trailingEnabled
 		settings.GinieTrailingStopPercentPosition = trailingPercent
 		settings.GinieTrailingStopActivationPosition = trailingActivation
-	default:
-		return fmt.Errorf("invalid mode: %s (must be scalp, swing, or position)", mode)
 	}
 
 	return sm.SaveSettings(settings)
 }
 
 // UpdateGinieTPMode updates the TP mode (single vs multi) and allocation
+// This function updates ModeConfigs (primary) and legacy fields (backwards compat).
 func (sm *SettingsManager) UpdateGinieTPMode(
 	useSingleTP bool,
 	singleTPPercent float64,
@@ -2211,9 +2298,21 @@ func (sm *SettingsManager) UpdateGinieTPMode(
 		}
 	}
 
-	// Get current settings BEFORE acquiring the lock to avoid deadlock
-	// (GetCurrentSettings acquires RLock internally)
 	settings := sm.GetCurrentSettings()
+
+	// Update ModeConfigs (primary) - TP mode is global, applies to all modes
+	for _, modeKey := range []string{"ultra_fast", "scalp", "swing", "position"} {
+		if mc := settings.ModeConfigs[modeKey]; mc != nil {
+			if mc.SLTP == nil {
+				mc.SLTP = &ModeSLTPConfig{}
+			}
+			mc.SLTP.UseSingleTP = useSingleTP
+			mc.SLTP.SingleTPPercent = singleTPPercent
+			mc.SLTP.TPAllocation = []float64{tp1, tp2, tp3, tp4}
+		}
+	}
+
+	// Also update legacy fields for backwards compatibility
 	settings.GinieUseSingleTP = useSingleTP
 	settings.GinieSingleTPPercent = singleTPPercent
 	settings.GinieTP1Percent = tp1
