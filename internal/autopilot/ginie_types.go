@@ -233,6 +233,9 @@ type GinieDecisionReport struct {
 	// LLM Decision Context (for analysis tracking)
 	DecisionContext *DecisionContext `json:"decision_context,omitempty"`
 
+	// Rejection Tracking (helps users understand WHY a coin isn't being traded)
+	RejectionTracking *RejectionTracker `json:"rejection_tracking,omitempty"`
+
 	// Final Scores
 	ConfidenceScore    float64             `json:"confidence_score"`
 	Recommendation     GenieRecommendation `json:"recommendation"`
@@ -509,4 +512,154 @@ type DecisionContext struct {
 	UsedCache           bool     `json:"used_cache"`
 	SkippedLLM          bool     `json:"skipped_llm"`
 	SkipReason          string   `json:"skip_reason,omitempty"`
+}
+
+// RejectionTracker tracks all rejection reasons for a trade decision
+// This helps users understand WHY a coin with a good score isn't being traded
+type RejectionTracker struct {
+	// Overall rejection status
+	IsBlocked      bool     `json:"is_blocked"`       // True if trade is blocked
+	BlockReason    string   `json:"block_reason"`     // Primary reason for blocking
+	AllReasons     []string `json:"all_reasons"`      // All rejection reasons accumulated
+
+	// Trend divergence rejection
+	TrendDivergence *TrendDivergenceRejection `json:"trend_divergence,omitempty"`
+
+	// Signal strength rejection
+	SignalStrength *SignalStrengthRejection `json:"signal_strength,omitempty"`
+
+	// Liquidity rejection
+	Liquidity *LiquidityRejection `json:"liquidity,omitempty"`
+
+	// ADX/Trend strength rejection
+	ADXStrength *ADXStrengthRejection `json:"adx_strength,omitempty"`
+
+	// Counter-trend rejection
+	CounterTrend *CounterTrendRejection `json:"counter_trend,omitempty"`
+
+	// Confidence rejection
+	Confidence *ConfidenceRejection `json:"confidence,omitempty"`
+
+	// Position limit rejection
+	PositionLimit *PositionLimitRejection `json:"position_limit,omitempty"`
+
+	// Fund/Balance rejection
+	InsufficientFunds *InsufficientFundsRejection `json:"insufficient_funds,omitempty"`
+
+	// Circuit breaker rejection
+	CircuitBreaker *CircuitBreakerRejection `json:"circuit_breaker,omitempty"`
+
+	// Scan quality rejection
+	ScanQuality *ScanQualityRejection `json:"scan_quality,omitempty"`
+}
+
+// TrendDivergenceRejection tracks trend divergence blocking
+type TrendDivergenceRejection struct {
+	Blocked          bool   `json:"blocked"`
+	ScanTimeframe    string `json:"scan_timeframe"`
+	ScanTrend        string `json:"scan_trend"`
+	DecisionTimeframe string `json:"decision_timeframe"`
+	DecisionTrend    string `json:"decision_trend"`
+	Severity         string `json:"severity"`
+	Reason           string `json:"reason"`
+}
+
+// SignalStrengthRejection tracks insufficient signals
+type SignalStrengthRejection struct {
+	Blocked        bool     `json:"blocked"`
+	SignalsMet     int      `json:"signals_met"`
+	SignalsRequired int     `json:"signals_required"`
+	FailedSignals  []string `json:"failed_signals"`
+	Reason         string   `json:"reason"`
+}
+
+// LiquidityRejection tracks liquidity failures
+type LiquidityRejection struct {
+	Blocked        bool    `json:"blocked"`
+	Volume24h      float64 `json:"volume_24h"`
+	RequiredVolume float64 `json:"required_volume"`
+	BidAskSpread   float64 `json:"bid_ask_spread"`
+	MaxSpread      float64 `json:"max_spread"`
+	Reason         string  `json:"reason"`
+}
+
+// ADXStrengthRejection tracks weak trend blocking
+type ADXStrengthRejection struct {
+	Blocked   bool    `json:"blocked"`
+	ADXValue  float64 `json:"adx_value"`
+	Threshold float64 `json:"threshold"`
+	Penalty   float64 `json:"penalty"`      // Penalty applied (0.0-1.0)
+	Reason    string  `json:"reason"`
+}
+
+// CounterTrendRejection tracks counter-trend trade blocking
+type CounterTrendRejection struct {
+	Blocked            bool   `json:"blocked"`
+	SignalDirection    string `json:"signal_direction"`
+	TrendDirection     string `json:"trend_direction"`
+	MissingRequirements []string `json:"missing_requirements"`
+	Reason             string `json:"reason"`
+}
+
+// ConfidenceRejection tracks low confidence blocking
+type ConfidenceRejection struct {
+	Blocked           bool    `json:"blocked"`
+	ConfidenceScore   float64 `json:"confidence_score"`
+	ExecuteThreshold  float64 `json:"execute_threshold"`
+	WaitThreshold     float64 `json:"wait_threshold"`
+	Reason            string  `json:"reason"`
+}
+
+// PositionLimitRejection tracks position limit blocking
+type PositionLimitRejection struct {
+	Blocked          bool   `json:"blocked"`
+	CurrentPositions int    `json:"current_positions"`
+	MaxPositions     int    `json:"max_positions"`
+	Mode             string `json:"mode"`
+	Reason           string `json:"reason"`
+}
+
+// InsufficientFundsRejection tracks fund/balance blocking
+type InsufficientFundsRejection struct {
+	Blocked         bool    `json:"blocked"`
+	RequiredUSD     float64 `json:"required_usd"`
+	AvailableUSD    float64 `json:"available_usd"`
+	PositionSizeUSD float64 `json:"position_size_usd"`
+	Reason          string  `json:"reason"`
+}
+
+// CircuitBreakerRejection tracks circuit breaker blocking
+type CircuitBreakerRejection struct {
+	Blocked      bool   `json:"blocked"`
+	TripReason   string `json:"trip_reason"`
+	CooldownMins int    `json:"cooldown_mins"`
+	ResumeAt     string `json:"resume_at"`
+	Reason       string `json:"reason"`
+}
+
+// ScanQualityRejection tracks poor scan quality blocking
+type ScanQualityRejection struct {
+	Blocked       bool    `json:"blocked"`
+	ScanScore     float64 `json:"scan_score"`
+	MinScore      float64 `json:"min_score"`
+	TradeReady    bool    `json:"trade_ready"`
+	ScanStatus    string  `json:"scan_status"`
+	Reason        string  `json:"reason"`
+}
+
+// NewRejectionTracker creates a new rejection tracker
+func NewRejectionTracker() *RejectionTracker {
+	return &RejectionTracker{
+		IsBlocked:  false,
+		AllReasons: []string{},
+	}
+}
+
+// AddRejection adds a rejection reason to the tracker
+func (rt *RejectionTracker) AddRejection(reason string) {
+	rt.AllReasons = append(rt.AllReasons, reason)
+	if !rt.IsBlocked {
+		rt.IsBlocked = true
+		rt.BlockReason = reason // First rejection becomes primary reason
+	}
 }

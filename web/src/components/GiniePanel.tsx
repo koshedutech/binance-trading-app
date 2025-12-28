@@ -339,6 +339,13 @@ export default function GiniePanel() {
         fetchDiagnostics();
         fetchSignalLogs();
       }
+      if (activeTab === 'performance' || activeTab === 'history') {
+        fetchPerformanceMetrics();
+        fetchTradeHistory();
+      }
+      if (activeTab === 'movers') {
+        fetchMarketMovers();
+      }
     }, 10000);
     return () => clearInterval(interval);
   }, [activeTab]);
@@ -3776,17 +3783,17 @@ export default function GiniePanel() {
                   Preview: {scanPreview.total_count} coins (max {scanPreview.max_coins})
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {scanPreview.coins.slice(0, 20).map((coin) => (
+                  {(scanPreview.coins || []).slice(0, 20).map((coin) => (
                     <span
                       key={coin.symbol}
                       className="text-xs px-1.5 py-0.5 rounded bg-gray-700 text-gray-300"
-                      title={coin.sources.join(', ')}
+                      title={(coin.sources || []).join(', ')}
                     >
                       {coin.symbol.replace('USDT', '')}
                     </span>
                   ))}
-                  {scanPreview.coins.length > 20 && (
-                    <span className="text-xs text-gray-500">+{scanPreview.coins.length - 20} more</span>
+                  {(scanPreview.coins || []).length > 20 && (
+                    <span className="text-xs text-gray-500">+{(scanPreview.coins || []).length - 20} more</span>
                   )}
                 </div>
               </div>
@@ -4047,7 +4054,7 @@ export default function GiniePanel() {
       {/* Decisions Tab */}
       {activeTab === 'decisions' && (
         <>
-          {/* Coin Scans (collapsible) */}
+          {/* Coin Scans (collapsible) - Enhanced with decision status */}
           {coinScans.length > 0 && (
             <div className="mb-4">
               <button
@@ -4058,26 +4065,83 @@ export default function GiniePanel() {
                 {showScans ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
               </button>
               {showScans && (
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {coinScans.map((scan) => (
-                    <div
-                      key={scan.symbol}
-                      className="flex items-center justify-between p-2 bg-gray-700/30 rounded text-sm"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-white font-medium">{scan.symbol.replace('USDT', '')}</span>
-                        {getStatusBadge(scan.status)}
+                <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                  {coinScans.map((scan) => {
+                    // Find matching decision for this coin
+                    const matchingDecision = status?.recent_decisions?.find(d => d.symbol === scan.symbol);
+                    const hasRejection = matchingDecision?.rejection_tracking?.is_blocked;
+                    const rejectionReason = matchingDecision?.rejection_tracking?.block_reason;
+                    const allReasons = matchingDecision?.rejection_tracking?.all_reasons || [];
+
+                    return (
+                      <div
+                        key={scan.symbol}
+                        className={`p-2 rounded text-sm ${
+                          hasRejection ? 'bg-red-900/20 border border-red-800/30' :
+                          matchingDecision?.recommendation === 'EXECUTE' ? 'bg-green-900/20 border border-green-800/30' :
+                          'bg-gray-700/30'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-white font-medium">{scan.symbol.replace('USDT', '')}</span>
+                            {getStatusBadge(scan.status)}
+                            {/* Decision indicator */}
+                            {matchingDecision && (
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                                matchingDecision.recommendation === 'EXECUTE' ? 'bg-green-900/50 text-green-400' :
+                                matchingDecision.recommendation === 'WAIT' ? 'bg-yellow-900/50 text-yellow-400' :
+                                'bg-red-900/50 text-red-400'
+                              }`}>
+                                {matchingDecision.recommendation}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3 text-xs">
+                            <span className="text-gray-400">
+                              Score: <span className={`font-medium ${scan.score >= 70 ? 'text-green-400' : scan.score >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                {Number(scan.score || 0).toFixed(0)}
+                              </span>
+                            </span>
+                            <span className={scan.trade_ready ? 'text-green-400' : 'text-red-400'}>
+                              {scan.trade_ready ? '✓ Ready' : '✗ Not Ready'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Show rejection reason if coin has good score but was skipped */}
+                        {hasRejection && scan.score >= 50 && (
+                          <div className="mt-2 pt-2 border-t border-red-800/30">
+                            <div className="flex items-start gap-2 text-xs">
+                              <AlertTriangle className="w-3 h-3 text-red-400 mt-0.5 flex-shrink-0" />
+                              <div className="text-red-300">
+                                <span className="font-medium">Why not trading: </span>
+                                {rejectionReason}
+                              </div>
+                            </div>
+                            {/* Show additional reasons if more than one */}
+                            {allReasons.length > 1 && (
+                              <div className="mt-1 pl-5 space-y-0.5">
+                                {allReasons.slice(1, 3).map((reason, idx) => (
+                                  <div key={idx} className="text-[10px] text-red-400/70">• {reason}</div>
+                                ))}
+                                {allReasons.length > 3 && (
+                                  <div className="text-[10px] text-gray-500">+{allReasons.length - 3} more issues</div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Show scan reason if not trade ready */}
+                        {!scan.trade_ready && scan.reason && (
+                          <div className="mt-1 text-[10px] text-gray-500 pl-2">
+                            Scan: {scan.reason}
+                          </div>
+                        )}
                       </div>
-                      <div className="flex items-center gap-3 text-xs">
-                        <span className="text-gray-400">
-                          Score: <span className="text-white">{Number(scan.score || 0).toFixed(0)}</span>
-                        </span>
-                        <span className={scan.trade_ready ? 'text-green-400' : 'text-red-400'}>
-                          {scan.trade_ready ? 'Ready' : 'Not Ready'}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -4103,6 +4167,13 @@ export default function GiniePanel() {
                         <span className="text-white font-medium">{decision.symbol.replace('USDT', '')}</span>
                         {getStatusBadge(decision.scan_status)}
                         {getRecommendationBadge(decision.recommendation)}
+                        {/* Quick rejection indicator */}
+                        {decision.rejection_tracking?.is_blocked && (
+                          <span className="px-1.5 py-0.5 bg-red-900/40 text-red-400 text-[10px] rounded flex items-center gap-1" title={decision.rejection_tracking.block_reason}>
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            {decision.rejection_tracking.all_reasons?.length || 0} issues
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
                         <span className={`text-sm font-bold ${
@@ -4237,6 +4308,82 @@ export default function GiniePanel() {
                           "{decision.recommendation_note}"
                         </div>
 
+                        {/* Rejection Reasons - Shows WHY a coin isn't being traded */}
+                        {decision.rejection_tracking && decision.rejection_tracking.all_reasons && decision.rejection_tracking.all_reasons.length > 0 && (
+                          <div className="p-2 bg-red-900/20 border border-red-800/50 rounded">
+                            <div className="flex items-center gap-2 mb-2">
+                              <AlertTriangle className="w-4 h-4 text-red-400" />
+                              <span className="text-red-400 font-medium text-xs">Why Not Trading</span>
+                            </div>
+                            <div className="space-y-1.5">
+                              {decision.rejection_tracking.all_reasons.map((reason, rIdx) => (
+                                <div key={rIdx} className="flex items-start gap-2 text-xs">
+                                  <XCircle className="w-3 h-3 text-red-400 mt-0.5 flex-shrink-0" />
+                                  <span className="text-red-300">{reason}</span>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Detailed rejection breakdown */}
+                            <div className="mt-2 pt-2 border-t border-red-800/30 space-y-1">
+                              {decision.rejection_tracking.trend_divergence?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-orange-400">
+                                  <AlertOctagon className="w-3 h-3" />
+                                  <span>Trend Divergence: {decision.rejection_tracking.trend_divergence.scan_trend} ({decision.rejection_tracking.trend_divergence.scan_timeframe}) vs {decision.rejection_tracking.trend_divergence.decision_trend} ({decision.rejection_tracking.trend_divergence.decision_timeframe})</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.signal_strength?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-yellow-400">
+                                  <BarChart3 className="w-3 h-3" />
+                                  <span>Signals: {decision.rejection_tracking.signal_strength.signals_met}/{decision.rejection_tracking.signal_strength.signals_required} met</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.confidence?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-yellow-400">
+                                  <Gauge className="w-3 h-3" />
+                                  <span>Confidence: {decision.rejection_tracking.confidence.confidence_score.toFixed(1)}% (need {decision.rejection_tracking.confidence.execute_threshold}%)</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.counter_trend?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-orange-400">
+                                  <TrendingDown className="w-3 h-3" />
+                                  <span>Counter-trend: {decision.rejection_tracking.counter_trend.signal_direction} signal vs {decision.rejection_tracking.counter_trend.trend_direction} trend</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.liquidity?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-blue-400">
+                                  <Coins className="w-3 h-3" />
+                                  <span>Liquidity: ${(decision.rejection_tracking.liquidity.volume_24h / 1000000).toFixed(1)}M (need ${(decision.rejection_tracking.liquidity.required_volume / 1000000).toFixed(0)}M)</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.adx_strength && !decision.rejection_tracking.adx_strength.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-gray-400">
+                                  <Activity className="w-3 h-3" />
+                                  <span>ADX: {decision.rejection_tracking.adx_strength.adx_value.toFixed(1)} (threshold {decision.rejection_tracking.adx_strength.threshold}) - {((1 - decision.rejection_tracking.adx_strength.penalty) * 100).toFixed(0)}% penalty</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.position_limit?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-purple-400">
+                                  <Target className="w-3 h-3" />
+                                  <span>Position Limit: {decision.rejection_tracking.position_limit.current_positions}/{decision.rejection_tracking.position_limit.max_positions}</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.insufficient_funds?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-red-400">
+                                  <AlertCircle className="w-3 h-3" />
+                                  <span>Funds: ${decision.rejection_tracking.insufficient_funds.available_usd.toFixed(0)} available (need ${decision.rejection_tracking.insufficient_funds.required_usd.toFixed(0)})</span>
+                                </div>
+                              )}
+                              {decision.rejection_tracking.circuit_breaker?.blocked && (
+                                <div className="flex items-center gap-2 text-xs text-red-400">
+                                  <AlertOctagon className="w-3 h-3" />
+                                  <span>Circuit Breaker: {decision.rejection_tracking.circuit_breaker.trip_reason}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
                         {/* Next Review */}
                         <div className="flex items-center gap-2 text-gray-500">
                           <Clock className="w-3 h-3" />
@@ -4289,7 +4436,7 @@ export default function GiniePanel() {
                   <span className="text-xs font-medium">Top Gainers</span>
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {marketMovers.top_gainers.slice(0, 8).map((symbol) => (
+                  {(marketMovers.top_gainers || []).slice(0, 8).map((symbol) => (
                     <span key={symbol} className="px-1.5 py-0.5 bg-green-900/30 text-green-400 rounded text-[10px]">
                       {symbol.replace('USDT', '')}
                     </span>
@@ -4304,7 +4451,7 @@ export default function GiniePanel() {
                   <span className="text-xs font-medium">Top Losers</span>
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {marketMovers.top_losers.slice(0, 8).map((symbol) => (
+                  {(marketMovers.top_losers || []).slice(0, 8).map((symbol) => (
                     <span key={symbol} className="px-1.5 py-0.5 bg-red-900/30 text-red-400 rounded text-[10px]">
                       {symbol.replace('USDT', '')}
                     </span>
@@ -4319,7 +4466,7 @@ export default function GiniePanel() {
                   <span className="text-xs font-medium">Top Volume</span>
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {marketMovers.top_volume.slice(0, 8).map((symbol) => (
+                  {(marketMovers.top_volume || []).slice(0, 8).map((symbol) => (
                     <span key={symbol} className="px-1.5 py-0.5 bg-blue-900/30 text-blue-400 rounded text-[10px]">
                       {symbol.replace('USDT', '')}
                     </span>
@@ -4334,7 +4481,7 @@ export default function GiniePanel() {
                   <span className="text-xs font-medium">High Volatility</span>
                 </div>
                 <div className="flex flex-wrap gap-1">
-                  {marketMovers.high_volatility.slice(0, 8).map((symbol) => (
+                  {(marketMovers.high_volatility || []).slice(0, 8).map((symbol) => (
                     <span key={symbol} className="px-1.5 py-0.5 bg-orange-900/30 text-orange-400 rounded text-[10px]">
                       {symbol.replace('USDT', '')}
                     </span>
@@ -4758,7 +4905,7 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
             position.mode === 'scalp' ? 'text-yellow-400' :
             position.mode === 'swing' ? 'text-blue-400' :
             'text-purple-400'
-          }`}>{position.mode.slice(0, 3).toUpperCase()}</span>
+          }`}>{(position.mode || 'UNK').slice(0, 3).toUpperCase()}</span>
           {/* Source Badge */}
           <span className={`px-1 py-0.5 rounded text-xs ${
             position.source === 'strategy' ? 'bg-purple-900/50 text-purple-400' : 'bg-blue-900/50 text-blue-400'

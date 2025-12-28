@@ -2259,6 +2259,107 @@ export interface GinieHedgeRecommendation {
   reason: string;
 }
 
+// Rejection tracking types - shows WHY a coin with good score isn't being traded
+export interface RejectionTracker {
+  is_blocked: boolean;
+  block_reason: string;
+  all_reasons: string[];
+  trend_divergence?: TrendDivergenceRejection;
+  signal_strength?: SignalStrengthRejection;
+  liquidity?: LiquidityRejection;
+  adx_strength?: ADXStrengthRejection;
+  counter_trend?: CounterTrendRejection;
+  confidence?: ConfidenceRejection;
+  position_limit?: PositionLimitRejection;
+  insufficient_funds?: InsufficientFundsRejection;
+  circuit_breaker?: CircuitBreakerRejection;
+  scan_quality?: ScanQualityRejection;
+}
+
+export interface TrendDivergenceRejection {
+  blocked: boolean;
+  scan_timeframe: string;
+  scan_trend: string;
+  decision_timeframe: string;
+  decision_trend: string;
+  severity: string;
+  reason: string;
+}
+
+export interface SignalStrengthRejection {
+  blocked: boolean;
+  signals_met: number;
+  signals_required: number;
+  failed_signals: string[];
+  reason: string;
+}
+
+export interface LiquidityRejection {
+  blocked: boolean;
+  volume_24h: number;
+  required_volume: number;
+  bid_ask_spread: number;
+  max_spread: number;
+  reason: string;
+}
+
+export interface ADXStrengthRejection {
+  blocked: boolean;
+  adx_value: number;
+  threshold: number;
+  penalty: number;
+  reason: string;
+}
+
+export interface CounterTrendRejection {
+  blocked: boolean;
+  signal_direction: string;
+  trend_direction: string;
+  missing_requirements: string[];
+  reason: string;
+}
+
+export interface ConfidenceRejection {
+  blocked: boolean;
+  confidence_score: number;
+  execute_threshold: number;
+  wait_threshold: number;
+  reason: string;
+}
+
+export interface PositionLimitRejection {
+  blocked: boolean;
+  current_positions: number;
+  max_positions: number;
+  mode: string;
+  reason: string;
+}
+
+export interface InsufficientFundsRejection {
+  blocked: boolean;
+  required_usd: number;
+  available_usd: number;
+  position_size_usd: number;
+  reason: string;
+}
+
+export interface CircuitBreakerRejection {
+  blocked: boolean;
+  trip_reason: string;
+  cooldown_mins: number;
+  resume_at: string;
+  reason: string;
+}
+
+export interface ScanQualityRejection {
+  blocked: boolean;
+  scan_score: number;
+  min_score: number;
+  trade_ready: boolean;
+  scan_status: string;
+  reason: string;
+}
+
 export interface GinieDecisionReport {
   symbol: string;
   timestamp: string;
@@ -2280,6 +2381,7 @@ export interface GinieDecisionReport {
   invalidation_conditions: string[];
   re_evaluate_conditions: string[];
   next_review: string;
+  rejection_tracking?: RejectionTracker;  // Shows WHY a coin isn't being traded
   confidence_score: number;
   recommendation: GinieRecommendation;
   recommendation_note: string;
