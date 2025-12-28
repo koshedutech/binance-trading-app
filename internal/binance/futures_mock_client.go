@@ -567,9 +567,22 @@ func (c *FuturesMockClient) Get24hrTicker(symbol string) (*Futures24hrTicker, er
 }
 
 func (c *FuturesMockClient) GetAll24hrTickers() ([]Futures24hrTicker, error) {
+	// All 30 symbols that match GetFuturesExchangeInfo()
 	symbols := []string{
+		// Major cryptocurrencies
 		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-		"DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+		// Popular altcoins
+		"DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "MATICUSDT",
+		// Additional popular pairs
+		"DOTUSDT", "LTCUSDT", "ATOMUSDT", "UNIUSDT", "NEARUSDT",
+		// High volume memecoins and trending
+		"SHIBUSDT", "PEPEUSDT", "WIFUSDT",
+		// Layer 2 and DeFi
+		"ARBUSDT", "OPUSDT", "AAVEUSDT", "MKRUSDT",
+		// Gaming and metaverse
+		"SANDUSDT", "MANAUSDT", "AXSUSDT",
+		// Infrastructure
+		"FILUSDT", "ICPUSDT", "APTUSDT", "SUIUSDT", "SEIUSDT",
 	}
 
 	tickers := make([]Futures24hrTicker, len(symbols))

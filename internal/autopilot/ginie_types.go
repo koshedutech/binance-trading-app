@@ -295,6 +295,13 @@ type GinieConfig struct {
 	// Auto Mode Override
 	AutoOverrideEnabled bool `json:"auto_override_enabled"`
 
+	// Counter-Trend Trading Configuration
+	AllowCounterTrend              bool    `json:"allow_counter_trend"`                // Enable counter-trend trading
+	CounterTrendMinConfidence      float64 `json:"counter_trend_min_confidence"`       // Min confidence for counter-trend trades (0-100)
+	CounterTrendRequireReversal    bool    `json:"counter_trend_require_reversal"`     // Require reversal pattern confirmation
+	CounterTrendRequireRSIExtreme  bool    `json:"counter_trend_require_rsi_extreme"`  // Require RSI in extreme zone
+	CounterTrendRequireADXWeakening bool   `json:"counter_trend_require_adx_weakening"` // Require ADX weakening
+
 	// Monitoring Intervals (seconds)
 	ScalpMonitorInterval    int `json:"scalp_monitor_interval"`    // 900 (15 min)
 	SwingMonitorInterval    int `json:"swing_monitor_interval"`    // 14400 (4 hours)
@@ -337,6 +344,13 @@ func DefaultGinieConfig() *GinieConfig {
 
 		// Override
 		AutoOverrideEnabled: true,
+
+		// Counter-Trend Trading (more permissive defaults)
+		AllowCounterTrend:              true,
+		CounterTrendMinConfidence:      50.0, // 50% instead of 80% - allow contrarian trades with decent signals
+		CounterTrendRequireReversal:    true,  // Still require reversal pattern for safety
+		CounterTrendRequireRSIExtreme:  false, // Don't require extreme RSI (too restrictive)
+		CounterTrendRequireADXWeakening: false, // Don't require ADX weakening (too restrictive)
 
 		// Monitoring
 		ScalpMonitorInterval:    900,

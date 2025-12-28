@@ -186,7 +186,7 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		SwingSLTPUpdateInterval:    300,  // 5 minutes for swing
 		PositionSLTPUpdateInterval: 900,  // 15 minutes for position
 
-		MinConfidenceToTrade: 65.0,
+		MinConfidenceToTrade: 50.0, // FIXED: Lowered from 65% to match user expectations
 		MaxDailyTrades:       1000,
 		MaxDailyLoss:         500,
 
@@ -510,14 +510,30 @@ type ScanDiagnostics struct {
 	ScalpEnabled         bool      `json:"scalp_enabled"`
 	SwingEnabled         bool      `json:"swing_enabled"`
 	PositionEnabled      bool      `json:"position_enabled"`
+	// New fields for scan status tracking (Issue 2B)
+	ScanningActive       bool      `json:"scanning_active"`
+	CurrentPhase         string    `json:"current_phase"`
+	TimeUntilNextScan    int64     `json:"time_until_next_scan"`
+	ScannedThisCycle     int       `json:"scanned_this_cycle"`
+	TotalSymbols         int       `json:"total_symbols"`
+	LastScanDuration     int64     `json:"last_scan_duration_ms"`
+	NextScanTime         time.Time `json:"next_scan_time"`
 }
 
 // SignalDiagnostics shows signal generation stats
 type SignalDiagnostics struct {
-	TotalGenerated      int            `json:"total_generated"`
-	Executed            int            `json:"executed"`
-	Rejected            int            `json:"rejected"`
-	ExecutionRate       float64        `json:"execution_rate_pct"`
+	// Last 1 hour window (existing behavior)
+	TotalGenerated      int            `json:"total_generated_1h"`
+	Executed            int            `json:"executed_1h"`
+	Rejected            int            `json:"rejected_1h"`
+	ExecutionRate       float64        `json:"execution_rate_pct_1h"`
+
+	// All-time/session counters (NEW)
+	TotalGeneratedAllTime int     `json:"total_generated"`
+	ExecutedAllTime       int     `json:"executed"`
+	RejectedAllTime       int     `json:"rejected"`
+	ExecutionRateAllTime  float64 `json:"execution_rate_pct"`
+
 	TopRejectionReasons map[string]int `json:"top_rejection_reasons"`
 }
 
@@ -640,6 +656,15 @@ type GinieAutopilot struct {
 	tpHitsLastHour         int
 	partialClosesLastHour  int
 	lastLLMCallTime        time.Time
+
+	// Scan status tracking (Issue 2B)
+	lastScanTime     time.Time     // When last scan completed
+	nextScanTime     time.Time     // When next scan will start
+	scanningActive   bool          // Currently scanning
+	currentPhase     string        // "initializing", "loading_symbols", "scanning", "idle"
+	scannedThisCycle int           // Coins scanned in current cycle
+	totalSymbols     int           // Total symbols to scan
+	scanDuration     time.Duration // How long last scan took
 
 	// Balance caching (to avoid blocking API calls)
 	cachedAvailableBalance float64
@@ -849,6 +874,33 @@ func (ga *GinieAutopilot) SetLLMAnalyzer(analyzer *llm.Analyzer) {
 	}
 }
 
+// HasLLMAnalyzer returns true if an LLM analyzer is configured and enabled
+func (ga *GinieAutopilot) HasLLMAnalyzer() bool {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return ga.llmAnalyzer != nil && ga.llmAnalyzer.IsEnabled()
+}
+
+// getEffectivePositionSide determines the correct position side based on Binance account's position mode
+// Returns PositionSideBoth for ONE_WAY mode, or the provided positionSide for HEDGE mode
+func (ga *GinieAutopilot) getEffectivePositionSide(positionSide binance.PositionSide) binance.PositionSide {
+	posMode, err := ga.futuresClient.GetPositionMode()
+	if err != nil {
+		log.Printf("[GINIE] Warning: Failed to get position mode, assuming ONE_WAY: %v", err)
+		return binance.PositionSideBoth
+	}
+
+	if !posMode.DualSidePosition {
+		// ONE_WAY mode - must use BOTH
+		log.Printf("[GINIE] One-Way mode detected, using PositionSideBoth")
+		return binance.PositionSideBoth
+	}
+
+	// HEDGE mode - use the provided position side
+	log.Printf("[GINIE] Hedge mode detected, using %s", positionSide)
+	return positionSide
+}
+
 // GetConfig returns current configuration
 func (ga *GinieAutopilot) GetConfig() *GinieAutopilotConfig {
 	ga.mu.RLock()
@@ -874,15 +926,15 @@ func (ga *GinieAutopilot) SetRiskLevel(level string) error {
 	// Adjust parameters based on risk level
 	switch level {
 	case "conservative":
-		ga.config.MinConfidenceToTrade = 75.0
+		ga.config.MinConfidenceToTrade = 60.0 // FIXED: Lowered from 75% to allow more trades
 		ga.config.MaxUSDPerPosition = 300
 		ga.config.DefaultLeverage = 3
 	case "moderate":
-		ga.config.MinConfidenceToTrade = 65.0
+		ga.config.MinConfidenceToTrade = 50.0 // FIXED: Lowered from 65% to match user expectations
 		ga.config.MaxUSDPerPosition = 500
 		ga.config.DefaultLeverage = 5
 	case "aggressive":
-		ga.config.MinConfidenceToTrade = 55.0
+		ga.config.MinConfidenceToTrade = 45.0 // FIXED: Lowered from 55% to be truly aggressive
 		ga.config.MaxUSDPerPosition = 800
 		ga.config.DefaultLeverage = 10
 	}
@@ -1139,6 +1191,27 @@ func (ga *GinieAutopilot) Start() error {
 	// This prevents the API endpoint from timing out due to Binance API calls
 	if !ga.config.DryRun {
 		go func() {
+			// Ensure watchlist is populated with market movers
+			// This is critical for ultra-fast scan and all trading modes
+			currentWatchlist := ga.analyzer.GetWatchSymbols()
+			ga.logger.Info("Current watchlist size on start", "count", len(currentWatchlist))
+
+			// If watchlist is too small (< 20 symbols), force load market movers
+			if len(currentWatchlist) < 20 {
+				ga.logger.Warn("Watchlist too small, loading market movers", "current_count", len(currentWatchlist))
+				err := ga.analyzer.LoadDynamicSymbols(50) // Load top 50 market movers
+				if err != nil {
+					ga.logger.Error("Failed to load market movers, trying smaller batch", "error", err)
+					// Try with smaller batch as fallback
+					err = ga.analyzer.LoadDynamicSymbols(25)
+					if err != nil {
+						ga.logger.Error("Failed to load market movers fallback", "error", err)
+					}
+				}
+				updatedWatchlist := ga.analyzer.GetWatchSymbols()
+				ga.logger.Info("Watchlist updated with market movers", "new_count", len(updatedWatchlist))
+			}
+
 			// Sync positions with exchange (this can be slow)
 			synced, err := ga.SyncWithExchange()
 			if err != nil {
@@ -1199,6 +1272,11 @@ func (ga *GinieAutopilot) runMainLoop() {
 		}
 	}()
 
+	// Set initial phase (Issue 2B)
+	ga.mu.Lock()
+	ga.currentPhase = "initializing"
+	ga.mu.Unlock()
+
 	ga.logger.Info("Ginie main loop started")
 
 	// Use the shortest enabled interval as base, then check mode-specific timing
@@ -1211,6 +1289,12 @@ func (ga *GinieAutopilot) runMainLoop() {
 	lastPositionScan := time.Now()
 	lastStrategyScan := time.Now()
 	lastUltraFastScan := time.Now() // Ultra-fast mode: 5-second scan interval
+	lastWatchlistRefresh := time.Now() // Periodic watchlist refresh
+
+	// Set phase to idle after initialization (Issue 2B)
+	ga.mu.Lock()
+	ga.currentPhase = "idle"
+	ga.mu.Unlock()
 
 	for {
 		select {
@@ -1224,6 +1308,11 @@ func (ga *GinieAutopilot) runMainLoop() {
 			canTrade := ga.canTrade()
 			log.Printf("[GINIE-SCAN] canTrade=%v, positions=%d/%d", canTrade, len(ga.positions), ga.config.MaxPositions)
 			if !canTrade {
+				// Set phase to idle when not trading (Issue 2B)
+				ga.mu.Lock()
+				ga.currentPhase = "idle"
+				ga.scanningActive = false
+				ga.mu.Unlock()
 				continue
 			}
 
@@ -1248,20 +1337,33 @@ func (ga *GinieAutopilot) runMainLoop() {
 				log.Printf("[MODE-ORCHESTRATION] Multi-mode trading active: %d modes enabled", modesEnabled)
 			}
 
+			// Track scan cycle timing (Issue 2B)
+			scanCycleStart := time.Now()
+			scansPerformed := 0
+
+			// Set scanning phase (Issue 2B)
+			ga.mu.Lock()
+			ga.currentPhase = "scanning"
+			ga.scanningActive = true
+			ga.mu.Unlock()
+
 			// Scan based on mode intervals
 			if ga.config.EnableScalpMode && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
 				ga.scanForMode(GinieModeScalp)
 				lastScalpScan = now
+				scansPerformed++
 			}
 
 			if ga.config.EnableSwingMode && now.Sub(lastSwingScan) >= time.Duration(ga.config.SwingScanInterval)*time.Second {
 				ga.scanForMode(GinieModeSwing)
 				lastSwingScan = now
+				scansPerformed++
 			}
 
 			if ga.config.EnablePositionMode && now.Sub(lastPositionScan) >= time.Duration(ga.config.PositionScanInterval)*time.Second {
 				ga.scanForMode(GinieModePosition)
 				lastPositionScan = now
+				scansPerformed++
 			}
 
 			// Ultra-fast mode: 5-second scan for rapid scalping opportunities
@@ -1273,6 +1375,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 					log.Printf("[ULTRA-FAST-SCAN] Starting ultra-fast scan cycle at %s", now.Format("15:04:05.000"))
 					ga.scanForUltraFast()
 					lastUltraFastScan = now
+					scansPerformed++
 				}
 			}
 
@@ -1280,6 +1383,42 @@ func (ga *GinieAutopilot) runMainLoop() {
 			if ga.strategyEvaluator != nil && now.Sub(lastStrategyScan) >= 60*time.Second {
 				ga.scanStrategies()
 				lastStrategyScan = now
+			}
+
+			// Refresh watchlist with market movers (every 30 minutes)
+			// This ensures ultra-fast scan and all modes have access to current market leaders
+			if now.Sub(lastWatchlistRefresh) >= 30*time.Minute {
+				go func() {
+					currentCount := len(ga.analyzer.GetWatchSymbols())
+					ga.logger.Info("Refreshing watchlist with market movers", "current_count", currentCount)
+					err := ga.analyzer.LoadDynamicSymbols(50)
+					if err != nil {
+						ga.logger.Warn("Failed to refresh watchlist with market movers", "error", err)
+					} else {
+						newCount := len(ga.analyzer.GetWatchSymbols())
+						ga.logger.Info("Watchlist refreshed successfully", "new_count", newCount)
+					}
+				}()
+				lastWatchlistRefresh = now
+			}
+
+			// Update scan status after scan cycle (Issue 2B)
+			if scansPerformed > 0 {
+				ga.mu.Lock()
+				ga.lastScanTime = time.Now()
+				ga.scanDuration = time.Since(scanCycleStart)
+				// Calculate next scan time based on shortest enabled interval
+				shortestInterval := time.Duration(ga.config.ScalpScanInterval) * time.Second
+				if currentSettings.UltraFastEnabled {
+					ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
+					if ultraFastInterval < shortestInterval {
+						shortestInterval = ultraFastInterval
+					}
+				}
+				ga.nextScanTime = time.Now().Add(shortestInterval)
+				ga.currentPhase = "idle"
+				ga.scanningActive = false
+				ga.mu.Unlock()
 			}
 		}
 	}
@@ -1331,6 +1470,9 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 	ga.mu.Lock()
 	ga.lastUltraFastScan = time.Now()
 	ga.symbolsScannedLastCycle = len(symbols)
+	// Initialize progress tracking (Issue 2B)
+	ga.scannedThisCycle = 0
+	ga.totalSymbols = len(symbols)
 	ga.mu.Unlock()
 
 	log.Printf("[ULTRA-FAST-SCAN] Scanning %d symbols, min_confidence=%d%%", len(symbols), currentSettings.UltraFastMinConfidence)
@@ -1393,17 +1535,39 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 				signal.VolatilityRegime.Level,
 				signal.MinProfitTarget)
 
+			// Get current price for signal log
+			currentPrice, _ := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+
+			// Build signal log entry for ultra-fast signal
+			signalLog := &GinieSignalLog{
+				Symbol:       symbol,
+				Direction:    signal.TrendBias, // LONG or SHORT
+				Mode:         "ultra_fast",
+				Confidence:   signal.EntryConfidence,
+				CurrentPrice: currentPrice,
+				Trend:        signal.TrendBias,
+				Volatility:   signal.VolatilityRegime.Level,
+				ATRPercent:   signal.VolatilityRegime.ATRRatio * 100, // Convert ratio to percentage estimate
+				SignalNames:  []string{"TrendBias", "EntryConfidence", "VolatilityRegime", "MinProfitTarget"},
+			}
+
 			// Check confidence threshold
 			minConfidence := float64(currentSettings.UltraFastMinConfidence)
 			if signal.EntryConfidence < minConfidence {
 				log.Printf("[ULTRA-FAST-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
 					symbol, signal.EntryConfidence, minConfidence)
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = fmt.Sprintf("low_confidence (%.1f < %.1f)", signal.EntryConfidence, minConfidence)
+				ga.LogSignal(signalLog)
 				continue
 			}
 
 			// Check trend bias (skip NEUTRAL for entries)
 			if signal.TrendBias == "NEUTRAL" {
 				log.Printf("[ULTRA-FAST-SCAN] %s: Neutral trend, SKIP", symbol)
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = "neutral_trend"
+				ga.LogSignal(signalLog)
 				continue
 			}
 
@@ -1417,8 +1581,13 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 			err = ga.executeUltraFastEntry(symbol, signal)
 			if err != nil {
 				log.Printf("[ULTRA-FAST-SCAN] %s: Entry execution failed: %v", symbol, err)
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = fmt.Sprintf("execution_failed: %v", err)
+				ga.LogSignal(signalLog)
 			} else {
 				log.Printf("[ULTRA-FAST-SCAN] %s: ✓ ENTRY EXECUTED - Now monitoring for exit", symbol)
+				signalLog.Status = "executed"
+				ga.LogSignal(signalLog)
 
 				// Check if we've hit position limit after this entry
 				ga.mu.RLock()
@@ -1439,6 +1608,11 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 	}
 
 	log.Printf("[ULTRA-FAST-SCAN] Scan complete: %d signals generated, %d trade attempts", signalsGenerated, tradesAttempted)
+
+	// Update progress to show scan completed (Issue 2B)
+	ga.mu.Lock()
+	ga.scannedThisCycle = len(symbols)
+	ga.mu.Unlock()
 }
 
 // scanForMode scans all watched symbols for a specific trading mode
@@ -1457,6 +1631,9 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 		ga.lastPositionScan = now
 	}
 	ga.symbolsScannedLastCycle = len(symbols)
+	// Initialize progress tracking (Issue 2B)
+	ga.scannedThisCycle = 0
+	ga.totalSymbols = len(symbols)
 	ga.mu.Unlock()
 
 	ga.logger.Info("Ginie scanning for mode", "mode", mode, "symbols", len(symbols))
@@ -1645,30 +1822,47 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			// Get effective confidence threshold for this symbol (considers performance category)
 			effectiveMinConfidence := settingsManager.GetEffectiveConfidence(symbol, ga.config.MinConfidenceToTrade)
 
+			// Get symbol category for logging
+			symbolSettings := settingsManager.GetSymbolSettings(symbol)
+			categoryBoost := effectiveMinConfidence - ga.config.MinConfidenceToTrade
+
 			// Check confidence threshold (both are 0-100 format)
 			if decision.ConfidenceScore < effectiveMinConfidence {
+				// Enhanced logging with category boost information
+				boostInfo := ""
+				if categoryBoost > 0 {
+					boostInfo = fmt.Sprintf(" (base %.1f%% + %.1f%% boost for '%s' category)",
+						ga.config.MinConfidenceToTrade, categoryBoost, symbolSettings.Category)
+				} else if categoryBoost < 0 {
+					boostInfo = fmt.Sprintf(" (base %.1f%% - %.1f%% bonus for '%s' category)",
+						ga.config.MinConfidenceToTrade, -categoryBoost, symbolSettings.Category)
+				}
+
 				// Scalp mode: Log confidence rejection (AC-2.2.2)
 				if isScalpMode {
-					log.Printf("[SCALP-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
-						symbol, decision.ConfidenceScore, effectiveMinConfidence)
+					log.Printf("[SCALP-SCAN] %s: Confidence %.1f%% < threshold %.1f%%%s, SKIP",
+						symbol, decision.ConfidenceScore, effectiveMinConfidence, boostInfo)
 				}
 				// Swing mode: Log confidence rejection (AC-2.3.2)
 				if mode == GinieModeSwing {
-					log.Printf("[SWING-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
-						symbol, decision.ConfidenceScore, effectiveMinConfidence)
+					log.Printf("[SWING-SCAN] %s: Confidence %.1f%% < threshold %.1f%%%s, SKIP",
+						symbol, decision.ConfidenceScore, effectiveMinConfidence, boostInfo)
 				}
 				// Position mode: Log confidence rejection (AC-2.4.1)
 				if mode == GinieModePosition {
-					log.Printf("[POSITION-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
-						symbol, decision.ConfidenceScore, effectiveMinConfidence)
+					log.Printf("[POSITION-SCAN] %s: Confidence %.1f%% < threshold %.1f%%%s, SKIP",
+						symbol, decision.ConfidenceScore, effectiveMinConfidence, boostInfo)
 				}
 				ga.logger.Debug("Ginie skipping low confidence signal",
 					"symbol", symbol,
 					"confidence", decision.ConfidenceScore,
 					"min_required", effectiveMinConfidence,
-					"global_min", ga.config.MinConfidenceToTrade)
+					"global_min", ga.config.MinConfidenceToTrade,
+					"category", symbolSettings.Category,
+					"category_boost", categoryBoost)
 				signalLog.Status = "rejected"
-				signalLog.RejectionReason = fmt.Sprintf("low_confidence (%.1f < %.1f)", decision.ConfidenceScore, effectiveMinConfidence)
+				signalLog.RejectionReason = fmt.Sprintf("low_confidence (%.1f < %.1f)%s",
+					decision.ConfidenceScore, effectiveMinConfidence, boostInfo)
 				ga.LogSignal(signalLog)
 				continue
 			}
@@ -1781,6 +1975,11 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 	case GinieModePosition:
 		log.Printf("[POSITION-SCAN] Scan cycle complete: %d symbols scanned, %d signals generated", len(symbols), positionSignals)
 	}
+
+	// Update progress to show scan completed (Issue 2B)
+	ga.mu.Lock()
+	ga.scannedThisCycle = len(symbols)
+	ga.mu.Unlock()
 }
 
 // getAvailableBalance fetches the actual available balance from Binance
@@ -2305,6 +2504,9 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		positionSide = binance.PositionSideShort
 	}
 
+	// Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	// Build TP levels with prices
 	takeProfits := make([]GinieTakeProfitLevel, len(decision.TradeExecution.TakeProfits))
 	for i, tp := range decision.TradeExecution.TakeProfits {
@@ -2348,7 +2550,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeMarket,
 			Quantity:     quantity,
 		}
@@ -3315,6 +3517,9 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 			positionSide = binance.PositionSideShort
 		}
 
+		// Check actual Binance position mode to avoid API error -4061
+		effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 		// Use LIMIT order at slightly worse price (0.1% buffer) to ensure execution
 		// This avoids slippage on volatile movements during order execution
 		// For LONG: sell at 0.1% below current price
@@ -3329,7 +3534,7 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       pos.Symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeLimit,
 			Quantity:     closeQty,
 			Price:        closePrice, // LIMIT order with 0.1% buffer
@@ -3516,6 +3721,9 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		positionSide = binance.PositionSideShort
 	}
 
+	// Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	// Round TP price with directional rounding to ensure trigger fires
 	roundedTPPrice := roundPriceForTP(pos.Symbol, nextTP.Price, pos.Side)
 
@@ -3544,7 +3752,7 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       pos.Symbol,
 			Side:         closeSide,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeMarket,
 			Quantity:     tpQty,
 		}
@@ -3610,7 +3818,7 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		tpParams = binance.AlgoOrderParams{
 			Symbol:        pos.Symbol,
 			Side:          closeSide,
-			PositionSide:  positionSide,
+			PositionSide:  effectivePositionSide,
 			Type:          binance.FuturesOrderTypeTakeProfitMarket,
 			ClosePosition: true, // Close entire remaining position
 			TriggerPrice:  roundedTPPrice,
@@ -3621,7 +3829,7 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 		tpParams = binance.AlgoOrderParams{
 			Symbol:       pos.Symbol,
 			Side:         closeSide,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeTakeProfitMarket,
 			Quantity:     tpQty,
 			TriggerPrice: roundedTPPrice,
@@ -3729,6 +3937,9 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 		positionSide = binance.PositionSideShort
 	}
 
+	// CRITICAL FIX: Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	// Round SL price with directional rounding to ensure trigger protects capital
 	roundedSL := roundPriceForSL(pos.Symbol, pos.StopLoss, pos.Side)
 
@@ -3738,7 +3949,7 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 	slParams := binance.AlgoOrderParams{
 		Symbol:        pos.Symbol,
 		Side:          closeSide,
-		PositionSide:  positionSide,
+		PositionSide:  effectivePositionSide,
 		Type:          binance.FuturesOrderTypeStopMarket,
 		ClosePosition: true, // Close entire position - no quantity needed
 		TriggerPrice:  roundedSL,
@@ -3870,6 +4081,9 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 			positionSide = binance.PositionSideShort
 		}
 
+		// Check actual Binance position mode to avoid API error -4061
+		effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 		// Use LIMIT order at slightly worse price (0.1% buffer) to ensure execution
 		// Avoids slippage especially on volatile coins where price moves between detection and execution
 		// For LONG: sell at 0.1% below current price to ensure fill
@@ -3898,7 +4112,7 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeLimit,
 			Quantity:     roundedQty,
 			Price:        roundedPrice, // LIMIT order with 0.1% buffer
@@ -3916,7 +4130,7 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 			marketParams := binance.FuturesOrderParams{
 				Symbol:       symbol,
 				Side:         side,
-				PositionSide: positionSide,
+				PositionSide: effectivePositionSide,
 				Type:         binance.FuturesOrderTypeMarket,
 				Quantity:     roundedQty,
 			}
@@ -4066,6 +4280,9 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 			positionSide = binance.PositionSideShort
 		}
 
+		// Check actual Binance position mode to avoid API error -4061
+		effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 		// Round quantity only (MARKET orders don't need price)
 		roundedQty := roundQuantity(symbol, pos.RemainingQty)
 
@@ -4079,7 +4296,7 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeMarket,
 			Quantity:     roundedQty,
 		}
@@ -5122,6 +5339,9 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 		positionSide = binance.PositionSideShort
 	}
 
+	// Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	// Round SL price with directional rounding to ensure trigger protects capital
 	roundedSL := roundPriceForSL(pos.Symbol, pos.StopLoss, pos.Side)
 	roundedQty := roundQuantity(pos.Symbol, pos.RemainingQty)
@@ -5131,7 +5351,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 	slParams := binance.AlgoOrderParams{
 		Symbol:       pos.Symbol,
 		Side:         closeSide,
-		PositionSide: positionSide,
+		PositionSide: effectivePositionSide,
 		Type:         binance.FuturesOrderTypeStopMarket,
 		Quantity:     roundedQty,
 		TriggerPrice: roundedSL,
@@ -5211,7 +5431,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 				orderParams := binance.FuturesOrderParams{
 					Symbol:       pos.Symbol,
 					Side:         closeSide,
-					PositionSide: positionSide,
+					PositionSide: effectivePositionSide,
 					Type:         binance.FuturesOrderTypeMarket,
 					Quantity:     tp1Qty,
 				}
@@ -5259,7 +5479,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 				tpParams := binance.AlgoOrderParams{
 					Symbol:       pos.Symbol,
 					Side:         closeSide,
-					PositionSide: positionSide,
+					PositionSide: effectivePositionSide,
 					Type:         binance.FuturesOrderTypeTakeProfitMarket,
 					Quantity:     tp1Qty,
 					TriggerPrice: roundedTP1,
@@ -5743,6 +5963,9 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 		positionSide = binance.PositionSideShort
 	}
 
+	// CRITICAL FIX: Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	// Determine if this is the final TP level - use ClosePosition=true to avoid residual
 	isFinalTPLevel := tpLevel >= len(pos.TakeProfits)-1
 
@@ -5758,7 +5981,7 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 		tpParams = binance.AlgoOrderParams{
 			Symbol:        pos.Symbol,
 			Side:          closeSide,
-			PositionSide:  positionSide,
+			PositionSide:  effectivePositionSide,
 			Type:          binance.FuturesOrderTypeTakeProfitMarket,
 			ClosePosition: true, // Close entire remaining position
 			TriggerPrice:  roundedTP,
@@ -5784,7 +6007,7 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 		tpParams = binance.AlgoOrderParams{
 			Symbol:       pos.Symbol,
 			Side:         closeSide,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeTakeProfitMarket,
 			Quantity:     tpQty,
 			TriggerPrice: roundedTP,
@@ -8152,10 +8375,13 @@ func (ga *GinieAutopilot) CloseAllPositions() (int, float64, error) {
 				positionSide = binance.PositionSideShort
 			}
 
+			// Check actual Binance position mode to avoid API error -4061
+			effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 			orderParams := binance.FuturesOrderParams{
 				Symbol:       symbol,
 				Side:         side,
-				PositionSide: positionSide,
+				PositionSide: effectivePositionSide,
 				Type:         binance.FuturesOrderTypeMarket,
 				Quantity:     pos.RemainingQty,
 			}
@@ -8363,6 +8589,12 @@ func (ga *GinieAutopilot) getScanDiagnosticsLocked() ScanDiagnostics {
 		symbolsCount = len(ga.analyzer.watchSymbols)
 	}
 
+	// Calculate time until next scan
+	var timeUntilNext int64
+	if !ga.nextScanTime.IsZero() && ga.nextScanTime.After(time.Now()) {
+		timeUntilNext = int64(time.Until(ga.nextScanTime).Seconds())
+	}
+
 	return ScanDiagnostics{
 		LastScanTime:         lastScan,
 		SecondsSinceLastScan: int64(time.Since(lastScan).Seconds()),
@@ -8371,6 +8603,36 @@ func (ga *GinieAutopilot) getScanDiagnosticsLocked() ScanDiagnostics {
 		ScalpEnabled:         ga.config.EnableScalpMode,
 		SwingEnabled:         ga.config.EnableSwingMode,
 		PositionEnabled:      ga.config.EnablePositionMode,
+		// New scan status fields (Issue 2B)
+		ScanningActive:    ga.scanningActive,
+		CurrentPhase:      ga.currentPhase,
+		TimeUntilNextScan: timeUntilNext,
+		ScannedThisCycle:  ga.scannedThisCycle,
+		TotalSymbols:      ga.totalSymbols,
+		LastScanDuration:  ga.scanDuration.Milliseconds(),
+		NextScanTime:      ga.nextScanTime,
+	}
+}
+
+// GetScanStatus returns current scan status information (Issue 2B)
+// This method is thread-safe and can be called from API handlers
+func (ga *GinieAutopilot) GetScanStatus() map[string]interface{} {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	var timeUntilNext int64
+	if !ga.nextScanTime.IsZero() && ga.nextScanTime.After(time.Now()) {
+		timeUntilNext = int64(time.Until(ga.nextScanTime).Seconds())
+	}
+
+	return map[string]interface{}{
+		"scanning_active":             ga.scanningActive,
+		"current_phase":               ga.currentPhase,
+		"time_until_next_scan_seconds": timeUntilNext,
+		"progress":                    fmt.Sprintf("%d/%d", ga.scannedThisCycle, ga.totalSymbols),
+		"last_scan_duration_ms":       ga.scanDuration.Milliseconds(),
+		"last_scan_time":              ga.lastScanTime,
+		"next_scan_time":              ga.nextScanTime,
 	}
 }
 
@@ -8380,10 +8642,20 @@ func (ga *GinieAutopilot) getSignalDiagnosticsLocked() SignalDiagnostics {
 		TopRejectionReasons: make(map[string]int),
 	}
 
-	// Only look at signals from the last hour
+	// Time filter for 1-hour window
 	oneHourAgo := time.Now().Add(-1 * time.Hour)
 
 	for _, sig := range ga.signalLogs {
+		// Count for all-time/session (no time filter)
+		diag.TotalGeneratedAllTime++
+		switch sig.Status {
+		case "executed":
+			diag.ExecutedAllTime++
+		case "rejected":
+			diag.RejectedAllTime++
+		}
+
+		// Count for last 1 hour only
 		if sig.Timestamp.Before(oneHourAgo) {
 			continue
 		}
@@ -8399,8 +8671,12 @@ func (ga *GinieAutopilot) getSignalDiagnosticsLocked() SignalDiagnostics {
 		}
 	}
 
+	// Calculate execution rates for both windows
 	if diag.TotalGenerated > 0 {
 		diag.ExecutionRate = float64(diag.Executed) / float64(diag.TotalGenerated) * 100
+	}
+	if diag.TotalGeneratedAllTime > 0 {
+		diag.ExecutionRateAllTime = float64(diag.ExecutedAllTime) / float64(diag.TotalGeneratedAllTime) * 100
 	}
 
 	return diag
@@ -8795,6 +9071,9 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		positionSide = binance.PositionSideShort
 	}
 
+	// Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	ga.logger.Info("Executing strategy trade",
 		"symbol", symbol,
 		"strategy", signal.StrategyName,
@@ -8825,7 +9104,7 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeMarket,
 			Quantity:     quantity,
 		}
@@ -9624,6 +9903,9 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 			positionSide = binance.PositionSideShort
 		}
 
+		// Check actual Binance position mode to avoid API error -4061
+		effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 		// Use LIMIT order at slightly worse price (0.1% buffer) to ensure execution
 		// For LONG: sell at 0.1% below current price (ensures fill on pullback)
 		// For SHORT: buy at 0.1% above current price (ensures fill on pullback)
@@ -9637,7 +9919,7 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeLimit,
 			Quantity:     closeQty,
 			Price:        limitPrice,
@@ -9755,6 +10037,9 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 		positionSide = binance.PositionSideShort
 	}
 
+	// Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
 	ga.logger.Info("Ultra-fast entry executing",
 		"symbol", symbol,
 		"trend_bias", signal.TrendBias,
@@ -9781,7 +10066,7 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
-			PositionSide: positionSide,
+			PositionSide: effectivePositionSide,
 			Type:         binance.FuturesOrderTypeMarket,
 			Quantity:     quantity,
 		}

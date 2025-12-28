@@ -853,14 +853,16 @@ func (s *Server) handleGetAPIHealthStatus(c *gin.Context) {
 		status["binance_futures"] = map[string]interface{}{"status": "disabled", "message": "Not configured"}
 	}
 
-	// Check AI service (via autopilot)
-	controller := s.getFuturesAutopilot()
-	if controller != nil && controller.IsRunning() {
-		status["ai_service"] = map[string]interface{}{"status": "ok", "message": "Running"}
-	} else if controller != nil {
-		status["ai_service"] = map[string]interface{}{"status": "stopped", "message": "Autopilot stopped"}
+	// Check AI service (user-specific LLM status)
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		if giniePilot.HasLLMAnalyzer() {
+			status["ai_service"] = map[string]interface{}{"status": "ok", "message": "LLM configured and enabled"}
+		} else {
+			status["ai_service"] = map[string]interface{}{"status": "disabled", "message": "LLM not configured"}
+		}
 	} else {
-		status["ai_service"] = map[string]interface{}{"status": "disabled", "message": "Not configured"}
+		status["ai_service"] = map[string]interface{}{"status": "disabled", "message": "Autopilot not initialized"}
 	}
 
 	// Check database
@@ -908,30 +910,30 @@ func (s *Server) getFuturesAutopilot() *autopilot.FuturesController {
 }
 
 // getGinieAutopilotForUser returns the GinieAutopilot for the current user.
-// In multi-user mode, it returns a per-user instance.
-// In legacy mode, it falls back to the shared controller's GinieAutopilot.
+// Returns a per-user autopilot instance only. Does NOT fallback to shared controller.
 // This is the PREFERRED method for handlers that need GinieAutopilot.
 func (s *Server) getGinieAutopilotForUser(c *gin.Context) *autopilot.GinieAutopilot {
 	userID := s.getUserID(c)
 	ctx := c.Request.Context()
 
-	// MULTI-USER MODE: Use per-user autopilot if manager is available
-	if s.userAutopilotManager != nil && userID != "" {
-		instance, err := s.userAutopilotManager.GetOrCreateInstance(ctx, userID)
-		if err == nil && instance != nil && instance.Autopilot != nil {
-			instance.TouchLastActive()
-			return instance.Autopilot
-		}
-		// Log error but continue to fallback
-		log.Printf("[MULTI-USER] Failed to get autopilot for user %s: %v, falling back to shared", userID, err)
-	}
-
-	// LEGACY MODE: Fall back to shared controller's GinieAutopilot
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
+	if s.userAutopilotManager == nil || userID == "" {
+		log.Printf("[USER-AUTOPILOT] No user session or manager not available")
 		return nil
 	}
-	return controller.GetGinieAutopilot()
+
+	instance, err := s.userAutopilotManager.GetOrCreateInstance(ctx, userID)
+	if err != nil {
+		log.Printf("[USER-AUTOPILOT] Failed to get autopilot for user %s: %v", userID, err)
+		return nil
+	}
+
+	if instance == nil || instance.Autopilot == nil {
+		log.Printf("[USER-AUTOPILOT] No autopilot instance for user %s", userID)
+		return nil
+	}
+
+	instance.TouchLastActive()
+	return instance.Autopilot
 }
 
 // getFuturesControllerForUser returns the FuturesController for the current user.

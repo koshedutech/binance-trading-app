@@ -1286,6 +1286,24 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 	c.JSON(http.StatusOK, metrics)
 }
 
+// GetCachedDailyPnL returns cached daily and total P/L from the metrics cache
+// If cache is invalid or empty, it returns zeros
+// This is used by Ginie autopilot to avoid duplicate Binance API calls
+func (s *Server) GetCachedDailyPnL() (dailyPnL float64, totalPnL float64) {
+	// Check if metrics cache is valid
+	if metricsCache != nil && time.Since(metricsCacheTime) < metricsCacheTTL {
+		if daily, ok := metricsCache["dailyRealizedPnl"].(float64); ok {
+			dailyPnL = daily
+		}
+		if total, ok := metricsCache["totalRealizedPnl"].(float64); ok {
+			totalPnL = total
+		}
+		return dailyPnL, totalPnL
+	}
+	// Return zeros if cache is invalid/empty
+	return 0.0, 0.0
+}
+
 // handleGetTradeSourceStats returns trading stats grouped by trade source (AI, Strategy, Manual)
 func (s *Server) handleGetTradeSourceStats(c *gin.Context) {
 	// Initialize stats for each source

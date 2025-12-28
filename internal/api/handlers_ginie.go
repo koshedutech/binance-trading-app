@@ -13,9 +13,8 @@ import (
 )
 
 // handleGetGinieStatus returns current Ginie status
-// NOTE: This is a read-only endpoint and should NOT call tryInitializeUserClients()
-// which makes blocking database calls. Client initialization only happens on
-// mutation endpoints (toggle, start, stop) to keep status checks fast.
+// NOTE: This returns status from the user-specific GinieAutopilot via the shared GinieAnalyzer.
+// The diagnostics endpoint should be used for user-specific LLM status.
 func (s *Server) handleGetGinieStatus(c *gin.Context) {
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
@@ -82,20 +81,8 @@ func (s *Server) handleUpdateGinieConfig(c *gin.Context) {
 
 // handleToggleGinie enables or disables Ginie
 func (s *Server) handleToggleGinie(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	// Initialize user-specific clients (LLM + Binance) from database BEFORE operations
-	s.tryInitializeUserClients(c, controller)
-
-	ginie := controller.GetGinieAnalyzer()
-	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
-		return
-	}
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
 
 	var req struct {
 		Enabled bool `json:"enabled"`
@@ -105,29 +92,78 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 		return
 	}
 
-	if req.Enabled {
-		// Enable the analyzer
-		ginie.Enable()
-		// CRITICAL: Start the actual autopilot trading loop
-		if err := controller.StartGinieAutopilot(); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to start autopilot: "+err.Error())
-			return
+	// MULTI-USER MODE: Use per-user autopilot if manager is available
+	if s.userAutopilotManager != nil && userID != "" {
+		if req.Enabled {
+			// Check if already running for this user
+			if s.userAutopilotManager.IsRunning(userID) {
+				status := s.userAutopilotManager.GetStatus(userID)
+				c.JSON(http.StatusOK, gin.H{
+					"success":         true,
+					"message":         "Your Ginie is already running",
+					"enabled":         true,
+					"user_id":         userID,
+					"multi_user_mode": true,
+					"status":          status,
+				})
+				return
+			}
+
+			// Start the user's autopilot
+			if err := s.userAutopilotManager.StartAutopilot(ctx, userID); err != nil {
+				errorResponse(c, http.StatusInternalServerError, "Failed to start Ginie: "+err.Error())
+				return
+			}
+
+			log.Printf("[MULTI-USER] User %s enabled Ginie", userID)
+
+			status := s.userAutopilotManager.GetStatus(userID)
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"message":         "Your personal Ginie enabled",
+				"enabled":         true,
+				"user_id":         userID,
+				"multi_user_mode": true,
+				"status":          status,
+			})
+		} else {
+			// Check if running for this user
+			if !s.userAutopilotManager.IsRunning(userID) {
+				status := s.userAutopilotManager.GetStatus(userID)
+				c.JSON(http.StatusOK, gin.H{
+					"success":         true,
+					"message":         "Your Ginie is already stopped",
+					"enabled":         false,
+					"user_id":         userID,
+					"multi_user_mode": true,
+					"status":          status,
+				})
+				return
+			}
+
+			// Stop the user's autopilot
+			if err := s.userAutopilotManager.StopAutopilot(userID); err != nil {
+				errorResponse(c, http.StatusInternalServerError, "Failed to stop Ginie: "+err.Error())
+				return
+			}
+
+			log.Printf("[MULTI-USER] User %s disabled Ginie", userID)
+
+			status := s.userAutopilotManager.GetStatus(userID)
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"message":         "Your personal Ginie disabled",
+				"enabled":         false,
+				"user_id":         userID,
+				"multi_user_mode": true,
+				"status":          status,
+			})
 		}
-	} else {
-		// CRITICAL: Stop the autopilot trading loop
-		if err := controller.StopGinieAutopilot(); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to stop autopilot: "+err.Error())
-			return
-		}
-		// Disable the analyzer
-		ginie.Disable()
+		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Ginie toggled",
-		"enabled": ginie.IsEnabled(),
-	})
+	// NO fallback - user authentication required
+	errorResponse(c, http.StatusUnauthorized, "User authentication required")
 }
 
 // handleGinieScanCoin scans a specific coin
@@ -316,6 +352,18 @@ func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
 	// Get available balance for adaptive sizing info
 	availableBalance, walletBalance := autopilot.GetBalanceInfo()
 
+	// Reuse cached P/L from Futures Dashboard metrics (no duplicate API calls)
+	// The Futures Dashboard already fetches and caches this data with 5-minute TTL
+	dailyPnL, totalPnL := s.GetCachedDailyPnL()
+
+	// Override internal counter values with cached Binance API values
+	stats["daily_pnl"] = dailyPnL
+	stats["total_pnl"] = totalPnL
+	// Recalculate combined_pnl with actual daily P/L
+	if unrealizedPnL, ok := stats["unrealized_pnl"].(float64); ok {
+		stats["combined_pnl"] = dailyPnL + unrealizedPnL
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"stats":             stats,
 		"config":            config,
@@ -503,79 +551,111 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 
 // handleStartGinieAutopilot starts the Ginie autonomous trading
 func (s *Server) handleStartGinieAutopilot(c *gin.Context) {
-	giniePilot := s.getGinieAutopilotForUser(c)
-	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// MULTI-USER MODE: Use per-user autopilot if manager is available
+	if s.userAutopilotManager != nil && userID != "" {
+		// Check if already running for this user
+		if s.userAutopilotManager.IsRunning(userID) {
+			status := s.userAutopilotManager.GetStatus(userID)
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"message":         "Your Ginie autopilot is already running",
+				"running":         true,
+				"user_id":         userID,
+				"multi_user_mode": true,
+				"status":          status,
+			})
+			return
+		}
+
+		// Start the user's autopilot
+		if err := s.userAutopilotManager.StartAutopilot(ctx, userID); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to start Ginie autopilot: "+err.Error())
+			return
+		}
+
+		log.Printf("[MULTI-USER] User %s started their personal Ginie autopilot", userID)
+
+		// Persist auto-start setting so Ginie restarts automatically after server restart
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateGinieAutoStart(true); err != nil {
+			// Log but don't fail - the start was successful
+			log.Printf("Failed to persist Ginie auto-start setting: %v", err)
+		}
+
+		status := s.userAutopilotManager.GetStatus(userID)
+		modeStr := "PAPER"
+		if !status.DryRun {
+			modeStr = "LIVE"
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"success":         true,
+			"message":         "Your personal Ginie autopilot started in " + modeStr + " mode",
+			"running":         true,
+			"mode":            modeStr,
+			"user_id":         userID,
+			"multi_user_mode": true,
+			"status":          status,
+		})
 		return
 	}
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	// Check mode for response message
-	isLiveMode := !giniePilot.GetConfig().DryRun
-
-	err := controller.StartGinieAutopilot()
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to start Ginie autopilot: "+err.Error())
-		return
-	}
-
-	// Persist auto-start setting so Ginie restarts automatically after server restart
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateGinieAutoStart(true); err != nil {
-		// Log but don't fail - the start was successful
-		log.Printf("Failed to persist Ginie auto-start setting: %v", err)
-	}
-
-	modeStr := "PAPER"
-	if isLiveMode {
-		modeStr = "LIVE"
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Ginie autopilot started in " + modeStr + " mode (will auto-start on server restart)",
-		"running": true,
-		"mode":    modeStr,
-	})
+	// NO fallback - user authentication required
+	errorResponse(c, http.StatusUnauthorized, "User authentication required")
 }
 
 // handleStopGinieAutopilot stops the Ginie autonomous trading
 func (s *Server) handleStopGinieAutopilot(c *gin.Context) {
-	giniePilot := s.getGinieAutopilotForUser(c)
-	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+	userID := s.getUserID(c)
+
+	// MULTI-USER MODE: Use per-user autopilot if manager is available
+	if s.userAutopilotManager != nil && userID != "" {
+		// Check if running for this user
+		if !s.userAutopilotManager.IsRunning(userID) {
+			status := s.userAutopilotManager.GetStatus(userID)
+			c.JSON(http.StatusOK, gin.H{
+				"success":         true,
+				"message":         "Your Ginie autopilot is already stopped",
+				"running":         false,
+				"user_id":         userID,
+				"multi_user_mode": true,
+				"status":          status,
+			})
+			return
+		}
+
+		// Stop the user's autopilot
+		if err := s.userAutopilotManager.StopAutopilot(userID); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to stop Ginie autopilot: "+err.Error())
+			return
+		}
+
+		log.Printf("[MULTI-USER] User %s stopped their personal Ginie autopilot", userID)
+
+		// Clear auto-start setting so Ginie doesn't restart after server restart
+		sm := autopilot.GetSettingsManager()
+		if err := sm.UpdateGinieAutoStart(false); err != nil {
+			// Log but don't fail - the stop was successful
+			log.Printf("Failed to clear Ginie auto-start setting: %v", err)
+		}
+
+		status := s.userAutopilotManager.GetStatus(userID)
+		c.JSON(http.StatusOK, gin.H{
+			"success":         true,
+			"message":         "Your personal Ginie autopilot stopped (will NOT auto-start on server restart)",
+			"running":         false,
+			"user_id":         userID,
+			"multi_user_mode": true,
+			"status":          status,
+		})
 		return
 	}
 
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	err := controller.StopGinieAutopilot()
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to stop Ginie autopilot: "+err.Error())
-		return
-	}
-
-	// Clear auto-start setting so Ginie doesn't restart after server restart
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateGinieAutoStart(false); err != nil {
-		// Log but don't fail - the stop was successful
-		log.Printf("Failed to clear Ginie auto-start setting: %v", err)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Ginie autopilot stopped (will NOT auto-start on server restart)",
-		"running": false,
-	})
+	// NO fallback - user authentication required
+	errorResponse(c, http.StatusUnauthorized, "User authentication required")
 }
 
 // handleGetGinieAutopilotPositions returns active Ginie positions
@@ -1449,13 +1529,8 @@ func (s *Server) handleResetGinieLLMSL(c *gin.Context) {
 
 // handleGetGinieDiagnostics returns comprehensive diagnostic info for troubleshooting
 func (s *Server) handleGetGinieDiagnostics(c *gin.Context) {
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	giniePilot := controller.GetGinieAutopilot()
+	// Use user-specific autopilot instance to get accurate LLM status
+	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not initialized")
 		return

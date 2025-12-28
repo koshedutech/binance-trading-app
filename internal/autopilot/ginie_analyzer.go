@@ -2394,9 +2394,21 @@ func (g *GinieAnalyzer) FuseConfidence(technicalConfidence int, technicalDirecti
 		techDir = "neutral"
 	}
 
-	// Calculate base fusion
-	// Formula: base_fusion = (technical × (1 - llm_weight)) + (llm × llm_weight)
-	baseFusion := float64(technicalConfidence)*(1-llmWeight) + float64(llmConfidence)*llmWeight
+	// === WEIGHTED CONFIDENCE BLEND ===
+	// When LLM says HOLD/neutral, it contributes 0 directional confidence instead of vetoing
+	llmDirectionalConfidence := float64(llmConfidence)
+	if llmDirection == "neutral" {
+		llmDirectionalConfidence = 0 // HOLD = no directional conviction
+		if g.logger != nil {
+			g.logger.Debug("[LLM] LLM recommends HOLD - contributing 0 directional confidence",
+				"llm_recommendation", llmResponse.Recommendation,
+				"llm_confidence", llmConfidence)
+		}
+	}
+
+	// Pure weighted blend: finalConfidence = (techConfidence × techWeight) + (llmDirectionalConfidence × llmWeight)
+	techWeight := 1.0 - llmWeight
+	baseFusion := (float64(technicalConfidence) * techWeight) + (llmDirectionalConfidence * llmWeight)
 
 	// Check for agreement/disagreement
 	agreement := false
@@ -2411,6 +2423,15 @@ func (g *GinieAnalyzer) FuseConfidence(technicalConfidence int, technicalDirecti
 				"tech_direction", techDir,
 				"llm_direction", llmDirection,
 				"bonus", "+10")
+		}
+	} else if llmDirection == "neutral" {
+		// LLM is neutral (HOLD) - no penalty, no bonus
+		agreement = false
+		adjustment = 0.0
+		if g.logger != nil {
+			g.logger.Debug("[LLM] LLM is neutral - no adjustment applied",
+				"tech_direction", techDir,
+				"llm_direction", llmDirection)
 		}
 	} else if (techDir == "long" && llmDirection == "short") || (techDir == "short" && llmDirection == "long") {
 		// Directions conflict - apply penalty
@@ -2456,8 +2477,12 @@ func (g *GinieAnalyzer) FuseConfidence(technicalConfidence int, technicalDirecti
 	if g.logger != nil {
 		g.logger.Info("[LLM] Confidence fusion complete",
 			"tech_confidence", technicalConfidence,
+			"tech_direction", techDir,
 			"llm_confidence", llmConfidence,
+			"llm_direction", llmDirection,
+			"llm_directional_confidence", llmDirectionalConfidence,
 			"llm_weight", llmWeight,
+			"tech_weight", techWeight,
 			"base_fusion", baseFusion,
 			"adjustment", adjustment,
 			"final_confidence", int(finalConfidence),
@@ -2634,14 +2659,19 @@ func (g *GinieAnalyzer) checkADXStrengthRequirement(adx float64, mode GinieTradi
 
 // ===== COUNTER-TREND TRADE VALIDATION =====
 // isValidReversalTrade validates if a counter-trend trade has sufficient reversal signals
-// Returns true only if the trade passes all strict requirements
+// Returns true only if the trade passes configured requirements (controlled by GinieConfig)
 func (g *GinieAnalyzer) isValidReversalTrade(
 	direction string,
 	confidence float64,
 	klines []binance.Kline,
 ) bool {
-	// Require very high confidence for counter-trend trades
-	if confidence < 80.0 {
+	// Check if counter-trend trading is disabled
+	if !g.config.AllowCounterTrend {
+		return false
+	}
+
+	// Check confidence threshold (configurable, default 50%)
+	if confidence < g.config.CounterTrendMinConfidence {
 		return false
 	}
 
@@ -2649,31 +2679,37 @@ func (g *GinieAnalyzer) isValidReversalTrade(
 		return false
 	}
 
-	// Check for reversal pattern confirmation (market structure)
-	if !g.hasReversalPattern(klines, direction) {
-		return false
+	// Check for reversal pattern confirmation (market structure) - if required
+	if g.config.CounterTrendRequireReversal {
+		if !g.hasReversalPattern(klines, direction) {
+			return false
+		}
 	}
 
-	// ADX must be weakening (trend losing strength)
-	if len(klines) < 35 {
-		return false
-	}
-	currentADX, _, _ := g.calculateADX(klines, 14)
-	previousADX, _, _ := g.calculateADX(klines[:len(klines)-5], 14)
-	if currentADX >= previousADX {
-		return false // Trend still strengthening, not weakening
-	}
-
-	// RSI must be in extreme zone
-	rsi := g.calculateRSI(klines, 14)
-	if direction == "long" && rsi > 30 {
-		return false // Not oversold enough for long bounce
-	}
-	if direction == "short" && rsi < 70 {
-		return false // Not overbought enough for short bounce
+	// ADX must be weakening (trend losing strength) - if required
+	if g.config.CounterTrendRequireADXWeakening {
+		if len(klines) < 35 {
+			return false
+		}
+		currentADX, _, _ := g.calculateADX(klines, 14)
+		previousADX, _, _ := g.calculateADX(klines[:len(klines)-5], 14)
+		if currentADX >= previousADX {
+			return false // Trend still strengthening, not weakening
+		}
 	}
 
-	// Block reversals in extreme volatility
+	// RSI must be in extreme zone - if required
+	if g.config.CounterTrendRequireRSIExtreme {
+		rsi := g.calculateRSI(klines, 14)
+		if direction == "long" && rsi > 30 {
+			return false // Not oversold enough for long bounce
+		}
+		if direction == "short" && rsi < 70 {
+			return false // Not overbought enough for short bounce
+		}
+	}
+
+	// Always block reversals in extreme volatility (safety measure)
 	atr := g.calculateATR(klines, 14)
 	avgATR := g.calculateAverageATR(klines, 50)
 	if atr > avgATR*2.0 {
@@ -3139,13 +3175,24 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 		ema20Idx = 20
 	}
 
-	// Simple trend check: price above/below previous candle
-	if close1h > close1hPrev*1.005 { // 0.5% above
+	// Multi-tiered trend check: more sensitive to catch more opportunities
+	// Strong trend: ±0.3% or more
+	// Weak trend: ±0.1% to ±0.3%
+	// Neutral: less than ±0.1%
+	priceDiffPct := ((close1h - close1hPrev) / close1hPrev) * 100.0
+
+	if priceDiffPct >= 0.3 { // Strong uptrend
 		signal.TrendBias = "LONG"
-		signal.TrendStrength = 70
-	} else if close1h < close1hPrev*0.995 { // 0.5% below
+		signal.TrendStrength = 80
+	} else if priceDiffPct >= 0.1 { // Weak uptrend
+		signal.TrendBias = "LONG"
+		signal.TrendStrength = 55
+	} else if priceDiffPct <= -0.3 { // Strong downtrend
 		signal.TrendBias = "SHORT"
-		signal.TrendStrength = 70
+		signal.TrendStrength = 80
+	} else if priceDiffPct <= -0.1 { // Weak downtrend
+		signal.TrendBias = "SHORT"
+		signal.TrendStrength = 55
 	} else {
 		signal.TrendBias = "NEUTRAL"
 		signal.TrendStrength = 40
@@ -3180,15 +3227,35 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 			}
 		}
 
-		// Entry confidence based on candle alignment
-		if signal.TrendBias == "LONG" && bullishCount >= 3 {
-			signal.EntryConfidence = 75
-		} else if signal.TrendBias == "SHORT" && bullishCount <= 2 {
-			signal.EntryConfidence = 75
+		// Entry confidence based on candle alignment and trend strength
+		// Strong trends get boosted confidence when 1m confirms
+		// Weak trends can still enter if 1m candles strongly confirm
+		if signal.TrendBias == "LONG" {
+			if bullishCount >= 4 { // 4-5 bullish candles = very strong
+				signal.EntryConfidence = 85
+			} else if bullishCount >= 3 { // 3 bullish = strong
+				if signal.TrendStrength >= 70 {
+					signal.EntryConfidence = 80
+				} else {
+					signal.EntryConfidence = 70 // Weak trend but good 1m confirmation
+				}
+			} else {
+				signal.EntryConfidence = 40 // Trend not confirmed by 1m
+			}
+		} else if signal.TrendBias == "SHORT" {
+			if bullishCount <= 1 { // 0-1 bullish = very bearish
+				signal.EntryConfidence = 85
+			} else if bullishCount <= 2 { // 2 bullish = bearish
+				if signal.TrendStrength >= 70 {
+					signal.EntryConfidence = 80
+				} else {
+					signal.EntryConfidence = 70 // Weak trend but good 1m confirmation
+				}
+			} else {
+				signal.EntryConfidence = 40 // Trend not confirmed by 1m
+			}
 		} else if signal.TrendBias == "NEUTRAL" {
 			signal.EntryConfidence = 50
-		} else {
-			signal.EntryConfidence = 40
 		}
 	}
 

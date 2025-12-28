@@ -370,10 +370,10 @@ func DefaultModeLLMSettings() map[GinieTradingMode]ModeLLMSettings {
 		},
 		GinieModeSwing: {
 			LLMEnabled:          true,
-			LLMWeight:           0.40,
+			LLMWeight:           0.25,
 			SkipOnTimeout:       false,
 			MinLLMConfidence:    60,
-			BlockOnDisagreement: true,
+			BlockOnDisagreement: false,
 			CacheEnabled:        false,
 		},
 		GinieModePosition: {
@@ -1137,7 +1137,7 @@ func DefaultSettings() *AutopilotSettings {
 		GinieAutoStart:     false, // Don't auto-start by default
 		GinieMaxUSD:        500,
 		GinieLeverage:      10,
-		GinieMinConfidence: 65.0,
+		GinieMinConfidence: 50.0, // FIXED: Lowered from 65% to match user expectations
 		GinieMaxPositions:  10,
 
 		// Ginie trend timeframe defaults (per mode)
@@ -1351,8 +1351,8 @@ func DefaultSettings() *AutopilotSettings {
 			"best":      -5.0,  // Can use 5% lower confidence for best performers
 			"good":      0.0,   // Normal confidence
 			"neutral":   0.0,   // Normal confidence
-			"poor":      10.0,  // Require 10% higher confidence for poor performers
-			"worst":     20.0,  // Require 20% higher confidence for worst performers
+			"poor":      0.0,   // FIXED: No penalty - user sets min confidence globally
+			"worst":     0.0,   // FIXED: No penalty - user sets min confidence globally
 			"blacklist": 100.0, // Effectively disable (impossible confidence)
 		},
 		CategorySizeMultiplier: map[string]float64{
@@ -1987,15 +1987,15 @@ func (sm *SettingsManager) UpdateGinieRiskLevel(riskLevel string) error {
 	// Adjust related settings based on risk level
 	switch riskLevel {
 	case "conservative":
-		settings.GinieMinConfidence = 75.0
+		settings.GinieMinConfidence = 60.0 // FIXED: Lowered from 75% to allow more trades
 		settings.GinieMaxUSD = 300
 		settings.GinieLeverage = 3
 	case "moderate":
-		settings.GinieMinConfidence = 65.0
+		settings.GinieMinConfidence = 50.0 // FIXED: Lowered from 65% to match user expectations
 		settings.GinieMaxUSD = 500
 		settings.GinieLeverage = 5
 	case "aggressive":
-		settings.GinieMinConfidence = 55.0
+		settings.GinieMinConfidence = 45.0 // FIXED: Lowered from 55% to be truly aggressive
 		settings.GinieMaxUSD = 800
 		settings.GinieLeverage = 10
 	}
