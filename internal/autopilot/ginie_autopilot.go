@@ -3671,11 +3671,27 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 				}
 			}
 
-			// Convert TP% to ROI threshold: ROI = TP% × leverage
-			// This ensures we book profit when price move reaches the mode's TP target
-			threshold = tpPercent * float64(pos.Leverage)
-			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × leverage=%d = ROI threshold %.2f%%\n",
-				pos.Symbol, source, tpPercent, pos.Leverage, threshold)
+			// Convert TP% to ROI threshold, but use a FRACTION for early booking
+			// Early profit should trigger BEFORE reaching full TP (e.g., at 50% of target)
+			// Also cap maximum threshold to prevent unreasonably high values
+			fullTPROI := tpPercent * float64(pos.Leverage)
+
+			// Use 40% of full TP ROI for early booking, with min 3% and max 15% cap
+			earlyBookingFraction := 0.4
+			threshold = fullTPROI * earlyBookingFraction
+
+			// Enforce reasonable bounds
+			const minEarlyThreshold = 3.0  // At least 3% ROI to book
+			const maxEarlyThreshold = 15.0 // Cap at 15% ROI max
+
+			if threshold < minEarlyThreshold {
+				threshold = minEarlyThreshold
+			} else if threshold > maxEarlyThreshold {
+				threshold = maxEarlyThreshold
+			}
+
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × lev=%d = fullROI=%.2f%%, early threshold=%.2f%% (40%% of full, capped 3-15%%)\n",
+				pos.Symbol, source, tpPercent, pos.Leverage, fullTPROI, threshold)
 			}
 		}
 	}
@@ -5847,12 +5863,160 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 
 // ==================== ADAPTIVE SL/TP WITH LLM ====================
 
+// validateAndFixSLTPPrices validates SL/TP prices are reasonable relative to entry price
+// This guards against calculation bugs where prices end up wildly wrong (e.g., 97.xx instead of 12.xx)
+// If prices are unreasonable (> 50% deviation for SL, > 100% for TP), recalculate using safe mode defaults
+func (ga *GinieAutopilot) validateAndFixSLTPPrices(pos *GiniePosition) *GiniePosition {
+	if pos == nil || pos.EntryPrice <= 0 {
+		return pos
+	}
+
+	entry := pos.EntryPrice
+	isLong := pos.Side == "LONG"
+
+	// Calculate deviation percentages
+	slDeviation := 0.0
+	if pos.StopLoss > 0 {
+		if isLong {
+			slDeviation = ((entry - pos.StopLoss) / entry) * 100 // Should be positive for LONG
+		} else {
+			slDeviation = ((pos.StopLoss - entry) / entry) * 100 // Should be positive for SHORT
+		}
+	}
+
+	// Check if SL is reasonable (within 50% of entry price)
+	// For LONG: SL should be below entry (positive deviation)
+	// For SHORT: SL should be above entry (positive deviation)
+	slNeedsRecalc := false
+	if slDeviation < -5 || slDeviation > 50 {
+		// SL is on wrong side or too far
+		slNeedsRecalc = true
+		log.Printf("[GINIE-SLTP-FIX] %s: SL deviation %.2f%% is unreasonable (entry=%.4f, sl=%.4f), will recalculate",
+			pos.Symbol, slDeviation, entry, pos.StopLoss)
+	}
+
+	// Validate TP prices
+	tpNeedsRecalc := false
+	for i, tp := range pos.TakeProfits {
+		if tp.Price <= 0 {
+			continue
+		}
+		tpDeviation := 0.0
+		if isLong {
+			tpDeviation = ((tp.Price - entry) / entry) * 100 // Should be positive for LONG
+		} else {
+			tpDeviation = ((entry - tp.Price) / entry) * 100 // Should be positive for SHORT
+		}
+
+		// TP should be within reasonable range (0.1% to 100% gain)
+		// Also check if TP is on wrong side of entry
+		if tpDeviation < 0.05 || tpDeviation > 100 {
+			tpNeedsRecalc = true
+			log.Printf("[GINIE-SLTP-FIX] %s: TP%d deviation %.2f%% is unreasonable (entry=%.4f, tp=%.4f), will recalculate",
+				pos.Symbol, i+1, tpDeviation, entry, tp.Price)
+			break
+		}
+	}
+
+	// If either SL or TP needs recalculation, use safe mode-based defaults
+	if slNeedsRecalc || tpNeedsRecalc {
+		log.Printf("[GINIE-SLTP-FIX] %s: Recalculating SL/TP with safe defaults (mode=%s)", pos.Symbol, pos.Mode)
+
+		// Get safe default SL percentage based on mode
+		var safeSLPct float64
+		switch pos.Mode {
+		case GinieModeUltraFast:
+			safeSLPct = 0.5
+		case GinieModeScalp:
+			safeSLPct = 0.8
+		case GinieModeSwing:
+			safeSLPct = 2.0
+		case GinieModePosition:
+			safeSLPct = 3.0
+		default:
+			safeSLPct = 2.0
+		}
+
+		// Recalculate SL if needed
+		if slNeedsRecalc {
+			oldSL := pos.StopLoss
+			if isLong {
+				pos.StopLoss = entry * (1 - safeSLPct/100)
+			} else {
+				pos.StopLoss = entry * (1 + safeSLPct/100)
+			}
+			pos.StopLoss = roundPriceForSL(pos.Symbol, pos.StopLoss, pos.Side)
+			pos.OriginalSL = pos.StopLoss
+			log.Printf("[GINIE-SLTP-FIX] %s: Fixed SL from %.4f to %.4f (%.2f%% from entry)",
+				pos.Symbol, oldSL, pos.StopLoss, safeSLPct)
+		}
+
+		// Recalculate TPs if needed
+		if tpNeedsRecalc {
+			// Generate new TPs using safe gains
+			var gains []float64
+			switch pos.Mode {
+			case GinieModeUltraFast:
+				gains = []float64{0.15, 0.3, 0.5, 0.8}
+			case GinieModeScalp:
+				gains = []float64{0.3, 0.6, 1.0, 1.5}
+			case GinieModeSwing:
+				gains = []float64{1.0, 2.0, 3.0, 4.0}
+			case GinieModePosition:
+				gains = []float64{2.0, 4.0, 6.0, 8.0}
+			default:
+				gains = []float64{1.0, 2.0, 3.0, 4.0}
+			}
+
+			// Ensure we have same number of TPs
+			if len(gains) < len(pos.TakeProfits) {
+				gains = append(gains, gains[len(gains)-1]*1.5) // Extend if needed
+			}
+
+			for i := range pos.TakeProfits {
+				if i >= len(gains) {
+					break
+				}
+				oldPrice := pos.TakeProfits[i].Price
+				gainPct := gains[i]
+				if isLong {
+					pos.TakeProfits[i].Price = entry * (1 + gainPct/100)
+				} else {
+					pos.TakeProfits[i].Price = entry * (1 - gainPct/100)
+				}
+				pos.TakeProfits[i].Price = roundPriceForTP(pos.Symbol, pos.TakeProfits[i].Price, pos.Side)
+				pos.TakeProfits[i].GainPct = gainPct
+				log.Printf("[GINIE-SLTP-FIX] %s: Fixed TP%d from %.4f to %.4f (%.2f%% gain)",
+					pos.Symbol, i+1, oldPrice, pos.TakeProfits[i].Price, gainPct)
+			}
+		}
+
+		ga.logger.Info("SL/TP prices validated and fixed",
+			"symbol", pos.Symbol,
+			"mode", pos.Mode,
+			"entry", entry,
+			"new_sl", pos.StopLoss,
+			"new_tp1", func() float64 {
+				if len(pos.TakeProfits) > 0 {
+					return pos.TakeProfits[0].Price
+				}
+				return 0
+			}())
+	}
+
+	return pos
+}
+
 // placeSLTPOrders places stop loss and take profit orders on Binance
 func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 	if pos == nil || pos.StopLoss <= 0 {
 		ga.logger.Warn("Cannot place SL/TP orders - invalid position or SL", "symbol", pos.Symbol)
 		return
 	}
+
+	// CRITICAL FIX: Validate SL/TP prices are reasonable before placing orders
+	// This guards against bugs where prices are calculated incorrectly (e.g., 97.xx instead of 12.xx)
+	pos = ga.validateAndFixSLTPPrices(pos)
 
 	// CRITICAL: Cancel ALL existing algo orders for this symbol FIRST
 	// This prevents accumulation of orphan orders when updating SL/TP
