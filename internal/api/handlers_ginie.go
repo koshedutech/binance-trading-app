@@ -1447,6 +1447,16 @@ func (s *Server) handleGetGinieDiagnostics(c *gin.Context) {
 			// User has an active AI key - update diagnostics to show connected
 			diagnostics.LLMStatus.Connected = true
 			diagnostics.LLMStatus.Provider = string(aiKey.Provider)
+
+			// CRITICAL FIX: Remove "LLM analyzer not connected" issue since user has API key
+			// The issues array was generated before the LLM status override, so we need to filter it
+			filteredIssues := make([]autopilot.DiagnosticIssue, 0, len(diagnostics.Issues))
+			for _, issue := range diagnostics.Issues {
+				if issue.Message != "LLM analyzer not connected" {
+					filteredIssues = append(filteredIssues, issue)
+				}
+			}
+			diagnostics.Issues = filteredIssues
 		}
 	}
 
