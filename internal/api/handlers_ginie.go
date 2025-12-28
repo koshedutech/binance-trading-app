@@ -4,6 +4,7 @@ import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/events"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -32,12 +33,26 @@ func (s *Server) handleGetGinieStatus(c *gin.Context) {
 
 	status := ginie.GetStatus()
 
-	// CRITICAL FIX: Override enabled status with per-user GinieAutopilot's running state
-	// The toggle operates on GinieAutopilot, so status must reflect that component's state
-	// Otherwise toggle and status read from different sources causing UI mismatch
+	// CRITICAL FIX: Override with per-user GinieAutopilot's state and stats
+	// Multi-user isolation: status must show user-specific data, not shared analyzer data
 	giniePilot := s.getGinieAutopilotForUser(c)
 	if giniePilot != nil {
 		status.Enabled = giniePilot.IsRunning()
+
+		// Override stats with per-user data from GinieAutopilot
+		userStats := giniePilot.GetStats()
+		if winRate, ok := userStats["win_rate"].(float64); ok {
+			status.WinRate = winRate
+		}
+		if dailyPnL, ok := userStats["daily_pnl"].(float64); ok {
+			status.DailyPnL = dailyPnL
+		}
+		if dailyTrades, ok := userStats["daily_trades"].(int); ok {
+			status.DailyTrades = dailyTrades
+		}
+		if activePos, ok := userStats["active_positions"].(int); ok {
+			status.ActivePositions = activePos
+		}
 	}
 
 	c.JSON(http.StatusOK, status)
@@ -227,8 +242,22 @@ func (s *Server) handleGinieGenerateDecision(c *gin.Context) {
 	c.JSON(http.StatusOK, decision)
 }
 
-// handleGinieGetDecisions returns recent decisions
+// handleGinieGetDecisions returns recent decisions/signals for the current user
+// Multi-user isolation: Uses per-user GinieAutopilot signal logs instead of shared analyzer
 func (s *Server) handleGinieGetDecisions(c *gin.Context) {
+	// First try per-user GinieAutopilot for user-specific signal logs
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		signals := giniePilot.GetSignalLogs(20)
+		c.JSON(http.StatusOK, gin.H{
+			"signals": signals,
+			"count":   len(signals),
+			"source":  "user_autopilot",
+		})
+		return
+	}
+
+	// Fallback to shared analyzer (for unauthenticated or legacy mode)
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
@@ -246,6 +275,7 @@ func (s *Server) handleGinieGetDecisions(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"decisions": decisions,
 		"count":     len(decisions),
+		"source":    "shared_analyzer",
 	})
 }
 
@@ -993,15 +1023,21 @@ func (s *Server) handleSetPositionROITarget(c *gin.Context) {
 		targetPos.CustomROIPercent = nil // Clear custom ROI
 	}
 
-	// Optionally save to SymbolSettings for future positions
+	// Optionally save to per-user SymbolSettings for future positions
 	if req.SaveForFuture {
-		settingsManager := autopilot.GetSettingsManager()
-		if err := settingsManager.UpdateSymbolROITarget(symbol, req.ROIPercent); err != nil {
-			fmt.Printf("[API] Failed to save symbol ROI target: %v\n", err)
+		userID := s.getUserID(c)
+		if userID == "" {
+			errorResponse(c, http.StatusUnauthorized, "User authentication required to save symbol settings")
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.repo.SetUserSymbolROI(ctx, userID, symbol, req.ROIPercent); err != nil {
+			fmt.Printf("[API] Failed to save symbol ROI target for user %s: %v\n", userID, err)
 			errorResponse(c, http.StatusInternalServerError, "Failed to save symbol ROI target")
 			return
 		}
-		fmt.Printf("[API] Saved custom ROI %.2f%% for symbol %s to settings\n", req.ROIPercent, symbol)
+		fmt.Printf("[API] Saved custom ROI %.2f%% for symbol %s to user %s database\n", req.ROIPercent, symbol, userID)
 	}
 
 	fmt.Printf("[API] Set custom ROI %.2f%% for position %s (save_for_future=%v)\n",
@@ -1272,7 +1308,39 @@ func (s *Server) handleGetGinieSignalLogs(c *gin.Context) {
 		}
 	}
 
-	signals := giniePilot.GetSignalLogs(limit)
+	// Get status filter from query param (optional)
+	statusFilter := c.Query("status")
+
+	// Get more signals than limit if filtering, to ensure we have enough results
+	fetchLimit := limit
+	if statusFilter != "" {
+		fetchLimit = limit * 5 // Fetch 5x to account for filtering
+		if fetchLimit > 1000 {
+			fetchLimit = 1000
+		}
+	}
+
+	allSignals := giniePilot.GetSignalLogs(fetchLimit)
+
+	// Apply status filter if provided
+	var signals []autopilot.GinieSignalLog
+	if statusFilter != "" {
+		signals = make([]autopilot.GinieSignalLog, 0, limit)
+		for _, sig := range allSignals {
+			if sig.Status == statusFilter {
+				signals = append(signals, sig)
+				if len(signals) >= limit {
+					break
+				}
+			}
+		}
+	} else {
+		signals = allSignals
+		if len(signals) > limit {
+			signals = signals[:limit]
+		}
+	}
+
 	stats := giniePilot.GetSignalStats()
 
 	c.JSON(http.StatusOK, gin.H{

@@ -1175,6 +1175,10 @@ func (ga *GinieAutopilot) Start() error {
 	ga.wg.Add(1)
 	go ga.resetDailyCounters()
 
+	// Start hourly reset goroutine for profit booking metrics
+	ga.wg.Add(1)
+	go ga.resetHourlyCounters()
+
 	// Start periodic orphan order cleanup (every 5 minutes)
 	// This prevents order accumulation from position updates and failed cancellations
 	ga.wg.Add(1)
@@ -3098,21 +3102,40 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 				pos.Symbol, *pos.CustomROIPercent)
 		}
 
-		// 2. Check symbol-level custom ROI (second priority)
-		settingsManager := GetSettingsManager()
-		symbolSettings := settingsManager.GetSymbolSettings(pos.Symbol)
-		if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
-			threshold = symbolSettings.CustomROIPercent
-			source = "symbol_custom"
-			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SYMBOL-LEVEL custom ROI = %.4f%% from settings\n",
+		// 2. Check symbol-level custom ROI from PER-USER database (second priority)
+		var userSymbolROI float64
+		if ga.userID != "" && ga.repo != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			roi, err := ga.repo.GetUserSymbolROI(ctx, ga.userID, pos.Symbol)
+			cancel()
+			if err == nil && roi > 0 {
+				userSymbolROI = roi
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Found PER-USER custom ROI = %.4f%% from database\n",
+					pos.Symbol, userSymbolROI)
+			}
+		}
+
+		if userSymbolROI > 0 {
+			threshold = userSymbolROI
+			source = "user_symbol_custom"
+			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using USER-SPECIFIC custom ROI = %.4f%% from database\n",
 				pos.Symbol, threshold)
 		} else {
-			if symbolSettings == nil {
-				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: No symbol settings found\n", pos.Symbol)
+			// Fallback: Check shared symbol settings (legacy mode)
+			settingsManager := GetSettingsManager()
+			symbolSettings := settingsManager.GetSymbolSettings(pos.Symbol)
+			if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
+				threshold = symbolSettings.CustomROIPercent
+				source = "symbol_custom"
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using SHARED symbol custom ROI = %.4f%% from settings\n",
+					pos.Symbol, threshold)
 			} else {
-				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Symbol settings found but CustomROIPercent = %.4f (not set)\n",
-					pos.Symbol, symbolSettings.CustomROIPercent)
-			}
+				if symbolSettings == nil {
+					fmt.Printf("[EARLY-PROFIT-DEBUG] %s: No symbol settings found (shared or user)\n", pos.Symbol)
+				} else {
+					fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Symbol settings found but CustomROIPercent = %.4f (not set)\n",
+						pos.Symbol, symbolSettings.CustomROIPercent)
+				}
 
 			// 3. Fallback to mode-based threshold from SETTINGS (not hardcoded)
 			// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
@@ -3154,6 +3177,7 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 			threshold = tpPercent * float64(pos.Leverage)
 			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × leverage=%d = ROI threshold %.2f%%\n",
 				pos.Symbol, source, tpPercent, pos.Leverage, threshold)
+			}
 		}
 	}
 
@@ -4645,6 +4669,44 @@ func (ga *GinieAutopilot) resetDailyCounters() {
 		ga.mu.Unlock()
 
 		ga.logger.Info("Ginie autopilot daily counters reset")
+	}
+}
+
+// resetHourlyCounters resets profit booking metrics every hour
+// These are "LastHour" metrics so they need to reset hourly for accuracy
+func (ga *GinieAutopilot) resetHourlyCounters() {
+	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in hourly reset goroutine - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Hourly reset panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.resetHourlyCounters()
+		}
+	}()
+
+	for {
+		// Reset at the top of every hour
+		now := time.Now()
+		next := now.Truncate(time.Hour).Add(time.Hour)
+		sleepDuration := time.Until(next)
+
+		select {
+		case <-ga.stopChan:
+			ga.logger.Info("Ginie hourly reset goroutine stopping")
+			return
+		case <-time.After(sleepDuration):
+			// Time to reset hourly counters
+		}
+
+		ga.mu.Lock()
+		ga.tpHitsLastHour = 0
+		ga.partialClosesLastHour = 0
+		ga.failedOrdersLastHour = 0
+		ga.mu.Unlock()
+
+		ga.logger.Info("Ginie autopilot hourly profit booking metrics reset")
 	}
 }
 
@@ -7997,19 +8059,26 @@ func (ga *GinieAutopilot) GetSignalLogs(limit int) []GinieSignalLog {
 	return result
 }
 
-// GetSignalStats returns signal statistics
+// GetSignalStats returns signal statistics for the last hour (consistent with diagnostics)
 func (ga *GinieAutopilot) GetSignalStats() map[string]interface{} {
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
 
 	stats := make(map[string]interface{})
-	total := len(ga.signalLogs)
+	total := 0
 	executed := 0
 	rejected := 0
-	pending := 0
 	rejectionReasons := make(map[string]int)
 
+	// Only count signals from the last hour to be consistent with diagnostics
+	oneHourAgo := time.Now().Add(-1 * time.Hour)
+
 	for _, sig := range ga.signalLogs {
+		// Skip signals older than 1 hour
+		if sig.Timestamp.Before(oneHourAgo) {
+			continue
+		}
+		total++
 		switch sig.Status {
 		case "executed":
 			executed++
@@ -8018,15 +8087,12 @@ func (ga *GinieAutopilot) GetSignalStats() map[string]interface{} {
 			if sig.RejectionReason != "" {
 				rejectionReasons[sig.RejectionReason]++
 			}
-		case "pending":
-			pending++
 		}
 	}
 
 	stats["total"] = total
 	stats["executed"] = executed
 	stats["rejected"] = rejected
-	stats["pending"] = pending
 	stats["execution_rate"] = 0.0
 	if total > 0 {
 		stats["execution_rate"] = float64(executed) / float64(total) * 100
@@ -8416,9 +8482,16 @@ func (ga *GinieAutopilot) getScanDiagnosticsLocked() ScanDiagnostics {
 		symbolsCount = len(ga.analyzer.watchSymbols)
 	}
 
+	// Handle uninitialized timestamps (zero time) - show 0 seconds since last scan
+	// instead of garbage values (billions of seconds since epoch)
+	var secondsSinceLastScan int64 = 0
+	if !lastScan.IsZero() {
+		secondsSinceLastScan = int64(time.Since(lastScan).Seconds())
+	}
+
 	return ScanDiagnostics{
 		LastScanTime:         lastScan,
-		SecondsSinceLastScan: int64(time.Since(lastScan).Seconds()),
+		SecondsSinceLastScan: secondsSinceLastScan,
 		SymbolsInWatchlist:   symbolsCount,
 		SymbolsScannedLast:   ga.symbolsScannedLastCycle,
 		ScalpEnabled:         ga.config.EnableScalpMode,
@@ -8620,12 +8693,23 @@ func (ga *GinieAutopilot) generateIssueRecommendationsLocked(diag *GinieDiagnost
 	}
 
 	// Warning: No scanning for > 5 minutes when running
-	if diag.AutopilotRunning && diag.Scanning.SecondsSinceLastScan > 300 {
+	// Note: SecondsSinceLastScan is 0 when no scans have happened yet (just started)
+	if diag.AutopilotRunning && diag.Scanning.SecondsSinceLastScan > 300 && !diag.Scanning.LastScanTime.IsZero() {
 		issues = append(issues, DiagnosticIssue{
 			Severity:   "warning",
 			Category:   "scanning",
 			Message:    fmt.Sprintf("No scan activity for %s", formatDurationHMS(diag.Scanning.SecondsSinceLastScan)),
 			Suggestion: "Check if autopilot loop is running correctly",
+		})
+	}
+
+	// Info: Autopilot just started, waiting for first scan
+	if diag.AutopilotRunning && diag.Scanning.LastScanTime.IsZero() {
+		issues = append(issues, DiagnosticIssue{
+			Severity:   "info",
+			Category:   "scanning",
+			Message:    "Waiting for first scan cycle",
+			Suggestion: "First scan should complete within 30-60 seconds",
 		})
 	}
 
