@@ -41,6 +41,7 @@ class APIService {
       (config) => {
         const token = localStorage.getItem(ACCESS_TOKEN_KEY);
         if (token) {
+          config.headers = config.headers || {};
           config.headers.Authorization = `Bearer ${token}`;
         }
         return config;

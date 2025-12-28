@@ -25,8 +25,8 @@ export default function PanicButton({ type, onComplete, className = '' }: PanicB
     setResult(null);
 
     try {
-      let futuresResult = null;
-      let spotResult = null;
+      let futuresResult: { closed: number; total: number; errors?: string[]; closed_positions?: any[] } | null = null;
+      let spotResult: { closed: number; total: number; errors?: string[] } | null = null;
 
       if (type === 'futures' || type === 'all') {
         futuresResult = await futuresApi.closeAllPositions();
