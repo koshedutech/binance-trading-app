@@ -2122,7 +2122,36 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 					log.Printf("[POSITION-SCAN] %s: Not recommended (recommendation=%s), SKIP", symbol, decision.Recommendation)
 				}
 				signalLog.Status = "rejected"
-				signalLog.RejectionReason = "not_recommended"
+				// Include actual rejection reason from decision
+				if decision.RecommendationNote != "" {
+					signalLog.RejectionReason = decision.RecommendationNote
+				} else {
+					signalLog.RejectionReason = string(decision.Recommendation)
+				}
+				// Copy rejection tracking details to signal log
+				if decision.RejectionTracking != nil && len(decision.RejectionTracking.AllReasons) > 0 {
+					signalLog.RejectionDetails = &SignalRejectionDetails{
+						AllReasons: decision.RejectionTracking.AllReasons,
+					}
+					// Map trend divergence if present
+					if decision.RejectionTracking.TrendDivergence != nil {
+						signalLog.RejectionDetails.TrendDivergence = &TrendDivergenceInfo{
+							ScanTimeframe:     decision.RejectionTracking.TrendDivergence.ScanTimeframe,
+							ScanTrend:         decision.RejectionTracking.TrendDivergence.ScanTrend,
+							DecisionTimeframe: decision.RejectionTracking.TrendDivergence.DecisionTimeframe,
+							DecisionTrend:     decision.RejectionTracking.TrendDivergence.DecisionTrend,
+							Severity:          decision.RejectionTracking.TrendDivergence.Severity,
+						}
+					}
+					// Map counter-trend rejection if present
+					if decision.RejectionTracking.CounterTrend != nil {
+						signalLog.RejectionDetails.CounterTrend = &CounterTrendInfo{
+							SignalDirection: decision.RejectionTracking.CounterTrend.SignalDirection,
+							TrendDirection:  decision.RejectionTracking.CounterTrend.TrendDirection,
+							MissingSignals:  decision.RejectionTracking.CounterTrend.MissingRequirements,
+						}
+					}
+				}
 				ga.LogSignal(signalLog)
 				continue
 			}
