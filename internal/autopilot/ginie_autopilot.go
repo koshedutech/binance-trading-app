@@ -92,9 +92,10 @@ type GinieAutopilotConfig struct {
 	RiskLevel          string  `json:"risk_level"`           // conservative, moderate, aggressive
 
 	// Mode-specific settings
-	EnableScalpMode    bool `json:"enable_scalp_mode"`
-	EnableSwingMode    bool `json:"enable_swing_mode"`
-	EnablePositionMode bool `json:"enable_position_mode"`
+	EnableScalpMode     bool `json:"enable_scalp_mode"`
+	EnableSwingMode     bool `json:"enable_swing_mode"`
+	EnablePositionMode  bool `json:"enable_position_mode"`
+	EnableUltraFastMode bool `json:"enable_ultra_fast_mode"`
 
 	// Take Profit Distribution (must total 100%)
 	TP1Percent float64 `json:"tp1_percent"` // % of position to close at TP1
@@ -754,6 +755,21 @@ func NewGinieAutopilot(
 	ga.modeSafetyConfigs["swing"] = settings.SafetySwing
 	ga.modeSafetyConfigs["position"] = settings.SafetyPosition
 
+	// CRITICAL FIX: Load user mode enable/disable settings from ModeConfigs
+	// This ensures user's mode preferences are respected (fixes swing bypass bug)
+	if scalpConfig, err := settingsManager.GetModeConfig("scalp"); err == nil && scalpConfig != nil {
+		ga.config.EnableScalpMode = scalpConfig.Enabled
+		log.Printf("[GINIE-INIT] Scalp mode enabled from user settings: %v", scalpConfig.Enabled)
+	}
+	if swingConfig, err := settingsManager.GetModeConfig("swing"); err == nil && swingConfig != nil {
+		ga.config.EnableSwingMode = swingConfig.Enabled
+		log.Printf("[GINIE-INIT] Swing mode enabled from user settings: %v", swingConfig.Enabled)
+	}
+	if positionConfig, err := settingsManager.GetModeConfig("position"); err == nil && positionConfig != nil {
+		ga.config.EnablePositionMode = positionConfig.Enabled
+		log.Printf("[GINIE-INIT] Position mode enabled from user settings: %v", positionConfig.Enabled)
+	}
+
 	// Initialize safety states
 	for _, mode := range []string{"ultra_fast", "scalp", "swing", "position"} {
 		ga.modeSafetyStates[mode] = &ModeSafetyState{
@@ -782,6 +798,45 @@ func NewGinieAutopilot(
 	ga.initModeCircuitBreakers()
 
 	return ga
+}
+
+// selectEnabledModeForPosition returns the first enabled trading mode for synced/external positions.
+// This replaces hardcoded GinieModeSwing defaults to respect user mode preferences.
+// Priority: swing > scalp > position (swing is most common default)
+func (ga *GinieAutopilot) selectEnabledModeForPosition() GinieTradingMode {
+	// Check modes in order of preference for position management
+	if ga.config.EnableSwingMode {
+		return GinieModeSwing
+	}
+	if ga.config.EnableScalpMode {
+		return GinieModeScalp
+	}
+	if ga.config.EnablePositionMode {
+		return GinieModePosition
+	}
+	// Fallback: if no modes enabled, default to swing (should not happen normally)
+	log.Printf("[GINIE-WARNING] No modes enabled, defaulting to swing for position management")
+	return GinieModeSwing
+}
+
+// isModeEnabled checks if a specific trading mode is enabled in user settings.
+// Used for defense-in-depth validation before executing mode-specific operations.
+func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
+	switch mode {
+	case GinieModeScalp:
+		return ga.config.EnableScalpMode
+	case GinieModeSwing:
+		return ga.config.EnableSwingMode
+	case GinieModePosition:
+		return ga.config.EnablePositionMode
+	case GinieModeUltraFast:
+		// UltraFast has its own config in settings, check there
+		sm := GetSettingsManager()
+		settings := sm.GetCurrentSettings()
+		return settings.UltraFastEnabled
+	default:
+		return false
+	}
 }
 
 // LoadPnLStats loads PnL statistics from database (per-user isolation)
@@ -1687,6 +1742,13 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 
 // scanForMode scans all watched symbols for a specific trading mode
 func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
+	// DEFENSE-IN-DEPTH: Verify mode is actually enabled before scanning
+	// This catches any edge cases where the main loop check was bypassed
+	if !ga.isModeEnabled(mode) {
+		log.Printf("[%s-SCAN] Mode disabled in user settings, skipping scan", mode)
+		return
+	}
+
 	symbols := ga.analyzer.watchSymbols
 
 	// Track scan time for diagnostics
@@ -5117,11 +5179,14 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			currentPrice = pos.EntryPrice
 		}
 
+		// Select mode based on user's enabled modes (fixes hardcoded swing bypass)
+		syncedMode := ga.selectEnabledModeForPosition()
+
 		// Create a GiniePosition from exchange data
 		position := &GiniePosition{
 			Symbol:       symbol,
 			Side:         side,
-			Mode:         GinieModeSwing, // Default to swing mode for synced positions
+			Mode:         syncedMode, // Use user's enabled mode preference
 			EntryPrice:   pos.EntryPrice,
 			OriginalQty:  qty,
 			RemainingQty: qty,
@@ -5129,7 +5194,7 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			EntryTime:    time.Now(), // We don't know actual entry time
 
 			// Generate default TPs based on entry price
-			TakeProfits:    ga.generateDefaultTPs(symbol, pos.EntryPrice, GinieModeSwing, side == "LONG"),
+			TakeProfits:    ga.generateDefaultTPs(symbol, pos.EntryPrice, syncedMode, side == "LONG"),
 			CurrentTPLevel: 0,
 
 			// Calculate a reasonable stop loss (2% for synced positions)
@@ -5141,8 +5206,8 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 			TrailingActive:        false,
 			HighestPrice:          currentPrice,
 			LowestPrice:           currentPrice,
-			TrailingPercent:       ga.getTrailingPercent(GinieModeSwing),
-			TrailingActivationPct: ga.getTrailingActivation(GinieModeSwing),
+			TrailingPercent:       ga.getTrailingPercent(syncedMode),
+			TrailingActivationPct: ga.getTrailingActivation(syncedMode),
 
 			// PnL from exchange
 			UnrealizedPnL: pos.UnrealizedProfit,
@@ -5182,7 +5247,7 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 						trade.ID,
 						symbol,
 						side,
-						string(GinieModeSwing), // Force-synced positions default to swing mode
+						string(syncedMode), // Use user's enabled mode preference
 						pos.EntryPrice,
 						qty,
 						pos.Leverage,
@@ -5333,12 +5398,15 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			qty = -qty
 		}
 
+		// Select mode based on user's enabled modes (fixes hardcoded swing bypass)
+		syncMode := ga.selectEnabledModeForPosition()
+
 		// Create a basic GiniePosition from exchange data
 		// Note: This won't have the original decision info, but allows position monitoring
 		position := &GiniePosition{
 			Symbol:       symbol,
 			Side:         side,
-			Mode:         GinieModeSwing, // Default to swing mode for synced positions
+			Mode:         syncMode, // Use user's enabled mode preference
 			EntryPrice:   pos.EntryPrice,
 			OriginalQty:  qty,
 			RemainingQty: qty,
@@ -5346,7 +5414,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			EntryTime:    time.Now(), // We don't know actual entry time
 
 			// Generate default TPs based on entry price
-			TakeProfits:    ga.generateDefaultTPs(symbol, pos.EntryPrice, GinieModeSwing, side == "LONG"),
+			TakeProfits:    ga.generateDefaultTPs(symbol, pos.EntryPrice, syncMode, side == "LONG"),
 			CurrentTPLevel: 0,
 
 			// Calculate a reasonable stop loss (2% for synced positions)
@@ -5358,8 +5426,8 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			TrailingActive:        false,
 			HighestPrice:          currentPrice,
 			LowestPrice:           currentPrice,
-			TrailingPercent:       ga.getTrailingPercent(GinieModeSwing),
-			TrailingActivationPct: ga.getTrailingActivation(GinieModeSwing),
+			TrailingPercent:       ga.getTrailingPercent(syncMode),
+			TrailingActivationPct: ga.getTrailingActivation(syncMode),
 
 			// PnL from exchange
 			UnrealizedPnL: pos.UnrealizedProfit,
@@ -6605,6 +6673,9 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			}
 			qty := math.Abs(exchangePos.PositionAmt)
 
+			// Select mode based on user's enabled modes (fixes hardcoded swing bypass)
+			externalMode := ga.selectEnabledModeForPosition()
+
 			// Create internal position entry
 			newPos := &GiniePosition{
 				Symbol:       exchangePos.Symbol,
@@ -6613,7 +6684,7 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				OriginalQty:  qty,
 				RemainingQty: qty,
 				EntryTime:    time.Now(), // Approximate
-				Mode:         GinieModeSwing, // Default to swing for external positions
+				Mode:         externalMode, // Use user's enabled mode preference
 				HighestPrice: exchangePos.MarkPrice,
 				LowestPrice:  exchangePos.MarkPrice,
 			}
@@ -9155,9 +9226,9 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		return
 	}
 
-	// Check funding rate before entry (strategy trades default to swing mode)
+	// Check funding rate before entry (use user's enabled mode preference)
 	isLong := signal.Side == "LONG"
-	strategyMode := GinieModeSwing // Strategy trades use swing mode for funding checks
+	strategyMode := ga.selectEnabledModeForPosition() // Use user's enabled mode instead of hardcoded swing
 	if blocked, reason := ga.checkFundingRate(symbol, isLong, strategyMode); blocked {
 		ga.logger.Warn("Strategy trade skipped - funding rate concern",
 			"symbol", symbol,
@@ -9332,11 +9403,11 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 	stratID := signal.StrategyID
 	stratName := signal.StrategyName
 
-	// Create position record
+	// Create position record using user's enabled mode preference
 	position := &GiniePosition{
 		Symbol:                symbol,
 		Side:                  signal.Side,
-		Mode:                  GinieModeSwing, // Default mode for strategy trades
+		Mode:                  strategyMode, // Use user's enabled mode preference
 		EntryPrice:            actualPrice,
 		OriginalQty:           actualQty,
 		RemainingQty:          actualQty,
@@ -9350,8 +9421,8 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		TrailingActive:        false,
 		HighestPrice:          actualPrice,
 		LowestPrice:           actualPrice,
-		TrailingPercent:       ga.getTrailingPercent(GinieModeSwing),
-		TrailingActivationPct: ga.getTrailingActivation(GinieModeSwing),
+		TrailingPercent:       ga.getTrailingPercent(strategyMode),
+		TrailingActivationPct: ga.getTrailingActivation(strategyMode),
 		DecisionReport:        nil, // No AI decision report for strategy trades
 		Source:                "strategy",
 		StrategyID:            &stratID,
@@ -9383,7 +9454,7 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		slPercent = ((signal.StopLoss - actualPrice) / actualPrice) * 100
 	}
 
-	// Record trade with strategy info
+	// Record trade with strategy info using user's enabled mode
 	ga.recordTrade(GinieTradeResult{
 		Symbol:    symbol,
 		Action:    "open",
@@ -9392,7 +9463,7 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 		Price:     actualPrice,
 		Reason:    fmt.Sprintf("Strategy: %s - %s", signal.StrategyName, signal.Reason),
 		Timestamp: time.Now(),
-		Mode:      GinieModeSwing,
+		Mode:      strategyMode, // Use user's enabled mode preference
 		EntryParams: &GinieEntryParams{
 			EntryPrice:  actualPrice,
 			StopLoss:    signal.StopLoss,
