@@ -1,9 +1,10 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store';
 import { useFuturesStore } from './store/futuresStore';
 import { apiService } from './services/api';
 import { wsService } from './services/websocket';
+import { futuresApi } from './services/futuresApi';
 import { AuthProvider, useAuth, ProtectedRoute } from './contexts/AuthContext';
 import Dashboard from './pages/Dashboard';
 // Temporarily disabled due to @xyflow/react type export issues
@@ -41,11 +42,41 @@ function AppContent() {
     resetState,
   } = useStore();
 
+  // Track if we've already auto-started Ginie for this session
+  const ginieAutoStarted = useRef(false);
+
   useEffect(() => {
     // Only initialize data and websocket when authenticated
     if (!isAuthenticated || isLoading) {
       return;
     }
+
+    // Auto-start Ginie autopilot on login (runs once per session)
+    const autoStartGinie = async () => {
+      if (ginieAutoStarted.current) {
+        return; // Already started this session
+      }
+
+      try {
+        // Check current Ginie status
+        const status = await futuresApi.getGinieAutopilotStatus();
+
+        if (!status.stats?.running) {
+          // Ginie not running - auto-start it
+          console.log('[AUTO-START] Starting Ginie autopilot...');
+          await futuresApi.toggleGinie(true);
+          console.log('[AUTO-START] Ginie autopilot started successfully');
+        } else {
+          console.log('[AUTO-START] Ginie already running, skipping auto-start');
+        }
+
+        ginieAutoStarted.current = true;
+      } catch (error) {
+        console.error('[AUTO-START] Failed to auto-start Ginie:', error);
+        // Don't retry - let user manually start if needed
+        ginieAutoStarted.current = true;
+      }
+    };
 
     // Initialize data fetching
     const initializeData = async () => {
@@ -69,6 +100,9 @@ function AppContent() {
         setScreenerResults(screener);
         setMetrics(metrics);
         setConnected(true);
+
+        // Auto-start Ginie after successful data initialization
+        autoStartGinie();
       } catch (error) {
         console.error('Failed to initialize data:', error);
         setConnected(false);
@@ -129,6 +163,36 @@ function AppContent() {
       setScreenerResults(results);
     });
 
+    // Subscribe to trading mode changes - keeps UI in sync across tabs/users
+    wsService.subscribe('TRADING_MODE_CHANGED', (event) => {
+      console.log('WebSocket: TRADING_MODE_CHANGED event received', event.data);
+      const { dry_run, mode, mode_label } = event.data;
+      useFuturesStore.getState().setTradingMode({
+        dryRun: dry_run,
+        mode: mode,
+        modeLabel: mode_label,
+        canSwitch: true,
+      });
+    });
+
+    // Subscribe to autopilot toggle events - keeps UI in sync
+    wsService.subscribe('AUTOPILOT_TOGGLED', (event) => {
+      console.log('WebSocket: AUTOPILOT_TOGGLED event received', event.data);
+      // Update trading mode if dry_run changed
+      const { dry_run } = event.data;
+      const currentMode = useFuturesStore.getState().tradingMode;
+      if (currentMode.dryRun !== dry_run) {
+        useFuturesStore.getState().setTradingMode({
+          ...currentMode,
+          dryRun: dry_run,
+          mode: dry_run ? 'paper' : 'live',
+          modeLabel: dry_run ? 'Paper Trading' : 'Live Trading',
+        });
+      }
+      // Note: Autopilot status is handled by GiniePanel/FuturesAutopilotPanel polling
+      // This event is mainly for mode sync
+    });
+
     // Initialize
     initializeData();
 
@@ -160,6 +224,7 @@ function AppContent() {
       wsService.disconnect();
       resetState();  // Reset main store
       useFuturesStore.getState().resetState();  // Reset futures store - CRITICAL for multi-user isolation
+      ginieAutoStarted.current = false;  // Reset auto-start flag for next login
     };
   }, [isAuthenticated, isLoading]);
 

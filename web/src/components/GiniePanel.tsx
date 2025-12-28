@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics } from '../services/futuresApi';
+import { apiService } from '../services/api';
+import { useFuturesStore } from '../store/futuresStore';
 import {
   Sparkles, Power, PowerOff, RefreshCw, Shield, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
@@ -135,8 +137,10 @@ export default function GiniePanel() {
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
 
+  // Use global trading mode from futuresStore (synced via WebSocket)
+  const { tradingMode, fetchTradingMode } = useFuturesStore();
   const isRunning = autopilotStatus?.stats?.running ?? false;
-  const isDryRun = autopilotStatus?.config?.dry_run ?? true;
+  const isDryRun = tradingMode.dryRun;
 
   const fetchStatus = async () => {
     try {
@@ -275,8 +279,13 @@ export default function GiniePanel() {
       setSuccessMsg(result.message);
       setTimeout(() => setSuccessMsg(null), 3000);
       await fetchStatus();
-    } catch (err) {
-      setError('Failed to toggle Ginie');
+    } catch (err: unknown) {
+      // CRITICAL FIX: Log the actual error for debugging
+      console.error('[GINIE-TOGGLE] Toggle failed:', err);
+      const errorMsg = err instanceof Error ? err.message :
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ((err as any)?.response?.data?.error) || 'Failed to toggle Ginie';
+      setError(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -366,7 +375,10 @@ export default function GiniePanel() {
     setTogglingMode(true);
     try {
       const newDryRun = !isDryRun;
-      await futuresApi.setGinieDryRun(newDryRun);
+      // Use global trading mode API - this syncs across all components
+      await apiService.setTradingMode(newDryRun);
+      // Refresh global trading mode state
+      await fetchTradingMode();
       setSuccessMsg(newDryRun ? 'Switched to PAPER mode' : 'Switched to LIVE mode');
       setTimeout(() => setSuccessMsg(null), 3000);
       await fetchAutopilotStatus();

@@ -215,13 +215,13 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		}
 	}
 
-	// Create per-user GinieAutopilot instance
-	// Note: NewGinieAutopilot uses the settings singleton internally
+	// Create per-user GinieAutopilot instance with userID for multi-tenant PnL isolation
 	autopilot := NewGinieAutopilot(
 		m.ginieAnalyzer,
 		futuresClient,
 		m.logger,
 		m.repo,
+		userID,
 	)
 
 	// Set the LLM analyzer if we have one

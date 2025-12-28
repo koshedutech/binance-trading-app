@@ -6,6 +6,7 @@ import (
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/events"
 	"fmt"
 	"log"
 	"net/http"
@@ -215,6 +216,20 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 			return
 		}
 
+		// Broadcast autopilot status change to all connected clients via WebSocket
+		if userWSHub != nil {
+			userWSHub.BroadcastToAll(events.Event{
+				Type:      events.EventAutopilotToggled,
+				Timestamp: time.Now(),
+				Data: map[string]interface{}{
+					"enabled":  true,
+					"dry_run":  controller.GetDryRun(),
+					"source":   "futures",
+				},
+			})
+			log.Printf("[FUTURES-AUTOPILOT] Broadcasted AUTOPILOT_TOGGLED event: enabled=true")
+		}
+
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "Futures autopilot started",
@@ -253,6 +268,20 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 		// Clear owner when autopilot is stopped - allows any user to start it next
 		controller.SetOwnerUserID("")
 		log.Printf("[AUTOPILOT] Autopilot stopped, owner cleared")
+
+		// Broadcast autopilot status change to all connected clients via WebSocket
+		if userWSHub != nil {
+			userWSHub.BroadcastToAll(events.Event{
+				Type:      events.EventAutopilotToggled,
+				Timestamp: time.Now(),
+				Data: map[string]interface{}{
+					"enabled":  false,
+					"dry_run":  controller.GetDryRun(),
+					"source":   "futures",
+				},
+			})
+			log.Printf("[FUTURES-AUTOPILOT] Broadcasted AUTOPILOT_TOGGLED event: enabled=false")
+		}
 
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,

@@ -574,6 +574,7 @@ type GinieAutopilot struct {
 	logger        *logging.Logger
 	repo          *database.Repository // Database for trade persistence
 	eventLogger   *TradeEventLogger    // Trade lifecycle event logging
+	userID        string               // User ID for multi-tenant PnL isolation
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -689,6 +690,7 @@ func NewGinieAutopilot(
 	futuresClient binance.FuturesClient,
 	logger *logging.Logger,
 	repo *database.Repository,
+	userID string,
 ) *GinieAutopilot {
 	config := DefaultGinieAutopilotConfig()
 
@@ -710,6 +712,7 @@ func NewGinieAutopilot(
 		logger:            logger,
 		repo:              repo,
 		eventLogger:       NewTradeEventLogger(repo.GetDB()),
+		userID:            userID,
 		circuitBreaker:    circuit.NewCircuitBreaker(cbConfig),
 		currentRiskLevel:  config.RiskLevel,
 		stopChan:          make(chan struct{}),
@@ -781,30 +784,80 @@ func NewGinieAutopilot(
 	return ga
 }
 
-// LoadPnLStats loads persisted PnL statistics from settings
+// LoadPnLStats loads PnL statistics from database (per-user isolation)
 func (ga *GinieAutopilot) LoadPnLStats() {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
-	sm := GetSettingsManager()
-	totalPnL, dailyPnL, totalTrades, winningTrades, dailyTrades := sm.GetGiniePnLStats()
+	// If no userID set or no repo, fall back to shared settings (legacy mode)
+	if ga.userID == "" || ga.repo == nil {
+		sm := GetSettingsManager()
+		totalPnL, dailyPnL, totalTrades, winningTrades, dailyTrades := sm.GetGiniePnLStats()
+		ga.totalPnL = totalPnL
+		ga.dailyPnL = dailyPnL
+		ga.totalTrades = totalTrades
+		ga.winningTrades = winningTrades
+		ga.dailyTrades = dailyTrades
+		ga.logger.Info("Loaded Ginie PnL stats from settings (legacy mode)",
+			"total_pnl", totalPnL,
+			"daily_pnl", dailyPnL,
+			"total_trades", totalTrades)
+		return
+	}
 
-	ga.totalPnL = totalPnL
+	// Load from database for multi-user isolation
+	ctx := context.Background()
+	db := ga.repo.GetDB()
+
+	// Get comprehensive trading metrics for this user
+	metrics, err := db.GetFuturesTradingMetricsForUser(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Error("Failed to load PnL metrics from database", "error", err, "user_id", ga.userID)
+		return
+	}
+
+	// Get daily PnL and trade count
+	dailyPnL, err := db.GetDailyFuturesPnLForUser(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to get daily PnL from database", "error", err)
+		dailyPnL = 0
+	}
+
+	dailyTrades, err := db.GetDailyFuturesTradeCountForUser(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to get daily trade count from database", "error", err)
+		dailyTrades = 0
+	}
+
+	// Set the values from database
+	ga.totalPnL = metrics.TotalRealizedPnL
 	ga.dailyPnL = dailyPnL
-	ga.totalTrades = totalTrades
-	ga.winningTrades = winningTrades
+	ga.totalTrades = metrics.TotalTrades
+	ga.winningTrades = metrics.WinningTrades
 	ga.dailyTrades = dailyTrades
 
-	ga.logger.Info("Loaded Ginie PnL stats from settings",
-		"total_pnl", totalPnL,
-		"daily_pnl", dailyPnL,
-		"total_trades", totalTrades,
-		"winning_trades", winningTrades,
-		"daily_trades", dailyTrades)
+	ga.logger.Info("Loaded Ginie PnL stats from database (per-user)",
+		"user_id", ga.userID,
+		"total_pnl", ga.totalPnL,
+		"daily_pnl", ga.dailyPnL,
+		"total_trades", ga.totalTrades,
+		"winning_trades", ga.winningTrades,
+		"daily_trades", ga.dailyTrades,
+		"win_rate", metrics.WinRate)
 }
 
-// SavePnLStats persists current PnL statistics to settings
+// SavePnLStats is deprecated for multi-user mode - PnL is calculated from trades in database
+// For legacy (shared) mode, still persists to settings file
 func (ga *GinieAutopilot) SavePnLStats() {
+	// In multi-user mode, PnL is calculated from futures_trades table automatically
+	// No need to persist separately - the trades themselves are the source of truth
+	if ga.userID != "" {
+		ga.logger.Debug("SavePnLStats skipped - using database for multi-user PnL tracking",
+			"user_id", ga.userID)
+		return
+	}
+
+	// Legacy mode: persist to shared settings file
 	sm := GetSettingsManager()
 	if err := sm.UpdateGiniePnLStats(
 		ga.totalPnL,
@@ -8756,6 +8809,31 @@ func (ga *GinieAutopilot) getLLMDiagnosticsLocked() LLMDiagnostics {
 	return diag
 }
 
+// formatDurationHMS formats seconds into a human-readable duration string (e.g., "1h 30m 45s")
+func formatDurationHMS(seconds int64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if seconds < 3600 {
+		mins := seconds / 60
+		secs := seconds % 60
+		if secs == 0 {
+			return fmt.Sprintf("%dm", mins)
+		}
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	}
+	hours := seconds / 3600
+	mins := (seconds % 3600) / 60
+	secs := seconds % 60
+	if secs == 0 {
+		if mins == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dh %dm %ds", hours, mins, secs)
+}
+
 // generateIssueRecommendationsLocked identifies problems and suggests fixes (must hold lock)
 func (ga *GinieAutopilot) generateIssueRecommendationsLocked(diag *GinieDiagnostics) []DiagnosticIssue {
 	var issues []DiagnosticIssue
@@ -8835,7 +8913,7 @@ func (ga *GinieAutopilot) generateIssueRecommendationsLocked(diag *GinieDiagnost
 		issues = append(issues, DiagnosticIssue{
 			Severity:   "warning",
 			Category:   "scanning",
-			Message:    fmt.Sprintf("No scan activity for %d seconds", diag.Scanning.SecondsSinceLastScan),
+			Message:    fmt.Sprintf("No scan activity for %s", formatDurationHMS(diag.Scanning.SecondsSinceLastScan)),
 			Suggestion: "Check if autopilot loop is running correctly",
 		})
 	}
@@ -9352,6 +9430,35 @@ func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD floa
 func (ga *GinieAutopilot) GetModeAllocationStatus() map[string]interface{} {
 	settings := GetSettingsManager()
 	balance, _ := ga.getAvailableBalance()
+
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	allocations := make(map[string]interface{})
+
+	for _, mode := range []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition} {
+		state := settings.GetModeAllocationState(string(mode), balance, ga.modePositionCounts, ga.modeUsedUSD)
+
+		allocations[string(mode)] = map[string]interface{}{
+			"allocated_percent":    state.AllocatedPercent,
+			"allocated_usd":        state.AllocatedUSD,
+			"used_usd":             state.UsedUSD,
+			"available_usd":        state.AvailableUSD,
+			"current_positions":    state.CurrentPositions,
+			"max_positions":        state.MaxPositions,
+			"capital_utilization":  state.CapitalUtilization,
+			"position_utilization": state.PositionUtilization,
+		}
+	}
+
+	return allocations
+}
+
+// GetModeAllocationStatusWithBalance returns the current allocation status for all modes
+// using an externally provided balance instead of the internal client's balance.
+// This is used when the API needs to show allocations based on a user's real Binance balance.
+func (ga *GinieAutopilot) GetModeAllocationStatusWithBalance(balance float64) map[string]interface{} {
+	settings := GetSettingsManager()
 
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()

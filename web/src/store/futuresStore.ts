@@ -144,6 +144,7 @@ interface FuturesState {
   fetchMetrics: () => Promise<void>;
   fetchPositionMode: () => Promise<void>;
   fetchTradingMode: () => Promise<void>;
+  setTradingMode: (mode: TradingModeState) => void;
 
   // Actions - Trading
   placeOrder: () => Promise<boolean>;
@@ -353,6 +354,12 @@ export const useFuturesStore = create<FuturesState>((set, get) => ({
       // Default to paper trading on error
       console.error('Failed to fetch trading mode:', error);
     }
+  },
+
+  // Set trading mode directly (called from WebSocket events)
+  setTradingMode: (mode: TradingModeState) => {
+    set({ tradingMode: mode });
+    console.log('FuturesStore: Trading mode updated via WebSocket:', mode);
   },
 
   // ==================== TRADING ====================

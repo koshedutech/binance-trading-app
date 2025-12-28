@@ -464,7 +464,8 @@ func NewFuturesController(
 	ginieAn := NewGinieAnalyzer(futuresClient, signalAgg, logger)
 
 	// Initialize Ginie autopilot (autonomous multi-mode trading)
-	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo)
+	// Empty userID = legacy shared mode (uses settings file for PnL)
+	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "")
 
 	// Load persisted PnL stats
 	ginieAuto.LoadPnLStats()
