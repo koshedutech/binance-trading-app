@@ -29,8 +29,29 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 		return
 	}
 
-	// Get total capital from controller balance
-	allocationsMap := ginie.GetModeAllocationStatus()
+	// Get user's real futures client to fetch actual balance
+	// This ensures allocations are calculated based on real Binance balance, not mock
+	futuresClient := s.getFuturesClientForUser(c)
+	var allocationsMap map[string]interface{}
+
+	if futuresClient != nil {
+		// Try to get real balance from user's Binance account
+		accountInfo, err := futuresClient.GetFuturesAccountInfo()
+		if err == nil && accountInfo != nil {
+			// Use real balance for allocation calculation
+			realBalance := accountInfo.AvailableBalance
+			log.Printf("User %s: Using real balance $%.2f for mode allocations", userID, realBalance)
+			allocationsMap = ginie.GetModeAllocationStatusWithBalance(realBalance)
+		} else {
+			// Fallback to internal client balance if account fetch fails
+			log.Printf("User %s: Failed to get real balance (%v), using internal client", userID, err)
+			allocationsMap = ginie.GetModeAllocationStatus()
+		}
+	} else {
+		// No user client available, use internal client (mock in paper mode)
+		log.Printf("User %s: No user client available, using internal client for allocations", userID)
+		allocationsMap = ginie.GetModeAllocationStatus()
+	}
 
 	// Fee constants for Binance Futures
 	const (

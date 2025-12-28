@@ -8520,6 +8520,31 @@ func (ga *GinieAutopilot) getLLMDiagnosticsLocked() LLMDiagnostics {
 	return diag
 }
 
+// formatDurationHMS formats seconds into a human-readable duration string (e.g., "1h 30m 45s")
+func formatDurationHMS(seconds int64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if seconds < 3600 {
+		mins := seconds / 60
+		secs := seconds % 60
+		if secs == 0 {
+			return fmt.Sprintf("%dm", mins)
+		}
+		return fmt.Sprintf("%dm %ds", mins, secs)
+	}
+	hours := seconds / 3600
+	mins := (seconds % 3600) / 60
+	secs := seconds % 60
+	if secs == 0 {
+		if mins == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, mins)
+	}
+	return fmt.Sprintf("%dh %dm %ds", hours, mins, secs)
+}
+
 // generateIssueRecommendationsLocked identifies problems and suggests fixes (must hold lock)
 func (ga *GinieAutopilot) generateIssueRecommendationsLocked(diag *GinieDiagnostics) []DiagnosticIssue {
 	var issues []DiagnosticIssue
@@ -8599,7 +8624,7 @@ func (ga *GinieAutopilot) generateIssueRecommendationsLocked(diag *GinieDiagnost
 		issues = append(issues, DiagnosticIssue{
 			Severity:   "warning",
 			Category:   "scanning",
-			Message:    fmt.Sprintf("No scan activity for %d seconds", diag.Scanning.SecondsSinceLastScan),
+			Message:    fmt.Sprintf("No scan activity for %s", formatDurationHMS(diag.Scanning.SecondsSinceLastScan)),
 			Suggestion: "Check if autopilot loop is running correctly",
 		})
 	}
@@ -9113,6 +9138,35 @@ func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD floa
 func (ga *GinieAutopilot) GetModeAllocationStatus() map[string]interface{} {
 	settings := GetSettingsManager()
 	balance, _ := ga.getAvailableBalance()
+
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	allocations := make(map[string]interface{})
+
+	for _, mode := range []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition} {
+		state := settings.GetModeAllocationState(string(mode), balance, ga.modePositionCounts, ga.modeUsedUSD)
+
+		allocations[string(mode)] = map[string]interface{}{
+			"allocated_percent":    state.AllocatedPercent,
+			"allocated_usd":        state.AllocatedUSD,
+			"used_usd":             state.UsedUSD,
+			"available_usd":        state.AvailableUSD,
+			"current_positions":    state.CurrentPositions,
+			"max_positions":        state.MaxPositions,
+			"capital_utilization":  state.CapitalUtilization,
+			"position_utilization": state.PositionUtilization,
+		}
+	}
+
+	return allocations
+}
+
+// GetModeAllocationStatusWithBalance returns the current allocation status for all modes
+// using an externally provided balance instead of the internal client's balance.
+// This is used when the API needs to show allocations based on a user's real Binance balance.
+func (ga *GinieAutopilot) GetModeAllocationStatusWithBalance(balance float64) map[string]interface{} {
+	settings := GetSettingsManager()
 
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
