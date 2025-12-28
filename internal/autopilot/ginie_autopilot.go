@@ -410,6 +410,9 @@ type GinieSignalLog struct {
 	Status        string    `json:"status"`         // "executed", "rejected", "pending"
 	RejectionReason string  `json:"rejection_reason,omitempty"`
 
+	// Detailed rejection tracking (shows WHY a good signal wasn't traded)
+	RejectionDetails *SignalRejectionDetails `json:"rejection_details,omitempty"`
+
 	// Signal details
 	EntryPrice    float64   `json:"entry_price"`
 	StopLoss      float64   `json:"stop_loss"`
@@ -427,6 +430,71 @@ type GinieSignalLog struct {
 	SignalNames   []string  `json:"signal_names"`
 	PrimaryMet    int       `json:"primary_met"`
 	PrimaryRequired int     `json:"primary_required"`
+}
+
+// SignalRejectionDetails provides detailed rejection breakdown for signals
+// This helps users understand exactly WHY a coin with a good score isn't being traded
+type SignalRejectionDetails struct {
+	// All rejection reasons (ordered by severity)
+	AllReasons []string `json:"all_reasons"`
+
+	// Category-specific rejection details
+	PositionLimit    *PositionLimitInfo    `json:"position_limit,omitempty"`
+	InsufficientFunds *InsufficientFundsInfo `json:"insufficient_funds,omitempty"`
+	CircuitBreaker   *CircuitBreakerInfo   `json:"circuit_breaker,omitempty"`
+	TrendDivergence  *TrendDivergenceInfo  `json:"trend_divergence,omitempty"`
+	SignalQuality    *SignalQualityInfo    `json:"signal_quality,omitempty"`
+	CounterTrend     *CounterTrendInfo     `json:"counter_trend,omitempty"`
+}
+
+// PositionLimitInfo shows position limit blocking details
+type PositionLimitInfo struct {
+	CurrentPositions int    `json:"current_positions"`
+	MaxPositions     int    `json:"max_positions"`
+	ModePositions    int    `json:"mode_positions"`
+	ModeName         string `json:"mode_name"`
+}
+
+// InsufficientFundsInfo shows funding blocking details
+type InsufficientFundsInfo struct {
+	RequiredUSD   float64 `json:"required_usd"`
+	AvailableUSD  float64 `json:"available_usd"`
+	PositionSize  float64 `json:"position_size"`
+	Leverage      int     `json:"leverage"`
+}
+
+// CircuitBreakerInfo shows circuit breaker blocking details
+type CircuitBreakerInfo struct {
+	IsTripped    bool    `json:"is_tripped"`
+	Reason       string  `json:"reason"`
+	DailyLoss    float64 `json:"daily_loss"`
+	MaxDailyLoss float64 `json:"max_daily_loss"`
+	CooldownMins int     `json:"cooldown_mins"`
+}
+
+// TrendDivergenceInfo shows trend divergence blocking details
+type TrendDivergenceInfo struct {
+	ScanTimeframe     string `json:"scan_timeframe"`
+	ScanTrend         string `json:"scan_trend"`
+	DecisionTimeframe string `json:"decision_timeframe"`
+	DecisionTrend     string `json:"decision_trend"`
+	Severity          string `json:"severity"`
+}
+
+// SignalQualityInfo shows signal quality blocking details
+type SignalQualityInfo struct {
+	SignalsMet      int      `json:"signals_met"`
+	SignalsRequired int      `json:"signals_required"`
+	FailedSignals   []string `json:"failed_signals"`
+	ConfidenceScore float64  `json:"confidence_score"`
+	MinConfidence   float64  `json:"min_confidence"`
+}
+
+// CounterTrendInfo shows counter-trend blocking details
+type CounterTrendInfo struct {
+	SignalDirection string   `json:"signal_direction"`
+	TrendDirection  string   `json:"trend_direction"`
+	MissingSignals  []string `json:"missing_signals"`
 }
 
 // SLUpdateRecord tracks individual SL update attempts
@@ -1304,26 +1372,26 @@ func (ga *GinieAutopilot) Start() error {
 	// This prevents the API endpoint from timing out due to Binance API calls
 	if !ga.config.DryRun {
 		go func() {
-			// Ensure watchlist is populated with market movers
-			// This is critical for ultra-fast scan and all trading modes
+			// Load watchlist from user's coin source settings
+			// This uses configured sources: saved coins, LLM selection, market movers
 			currentWatchlist := ga.analyzer.GetWatchSymbols()
 			ga.logger.Info("Current watchlist size on start", "count", len(currentWatchlist))
 
-			// If watchlist is too small (< 20 symbols), force load market movers
-			if len(currentWatchlist) < 20 {
-				ga.logger.Warn("Watchlist too small, loading market movers", "current_count", len(currentWatchlist))
-				err := ga.analyzer.LoadDynamicSymbols(50) // Load top 50 market movers
+			// Always load from user coin sources on startup
+			ga.logger.Info("Loading watchlist from user coin source settings")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			err := ga.LoadUserCoinSources(ctx)
+			cancel()
+			if err != nil {
+				ga.logger.Error("Failed to load user coin sources, trying fallback", "error", err)
+				// Fallback to market movers if user settings fail
+				err = ga.analyzer.LoadDynamicSymbols(50)
 				if err != nil {
-					ga.logger.Error("Failed to load market movers, trying smaller batch", "error", err)
-					// Try with smaller batch as fallback
-					err = ga.analyzer.LoadDynamicSymbols(25)
-					if err != nil {
-						ga.logger.Error("Failed to load market movers fallback", "error", err)
-					}
+					ga.logger.Error("Failed to load market movers fallback", "error", err)
 				}
-				updatedWatchlist := ga.analyzer.GetWatchSymbols()
-				ga.logger.Info("Watchlist updated with market movers", "new_count", len(updatedWatchlist))
 			}
+			updatedWatchlist := ga.analyzer.GetWatchSymbols()
+			ga.logger.Info("Watchlist loaded from user config", "new_count", len(updatedWatchlist))
 
 			// Sync positions with exchange (this can be slow)
 			synced, err := ga.SyncWithExchange()
@@ -1510,18 +1578,20 @@ func (ga *GinieAutopilot) runMainLoop() {
 				lastStrategyScan = now
 			}
 
-			// Refresh watchlist with market movers (every 30 minutes)
-			// This ensures ultra-fast scan and all modes have access to current market leaders
+			// Refresh watchlist based on user's coin source settings (every 30 minutes)
+			// This uses user-configured sources: saved coins, LLM selection, market movers
 			if now.Sub(lastWatchlistRefresh) >= 30*time.Minute {
 				go func() {
 					currentCount := len(ga.analyzer.GetWatchSymbols())
-					ga.logger.Info("Refreshing watchlist with market movers", "current_count", currentCount)
-					err := ga.analyzer.LoadDynamicSymbols(50)
+					ga.logger.Info("Refreshing watchlist from user coin sources", "current_count", currentCount)
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					err := ga.LoadUserCoinSources(ctx)
 					if err != nil {
-						ga.logger.Warn("Failed to refresh watchlist with market movers", "error", err)
+						ga.logger.Warn("Failed to refresh watchlist from user sources", "error", err)
 					} else {
 						newCount := len(ga.analyzer.GetWatchSymbols())
-						ga.logger.Info("Watchlist refreshed successfully", "new_count", newCount)
+						ga.logger.Info("Watchlist refreshed from user config successfully", "new_count", newCount)
 					}
 				}()
 				lastWatchlistRefresh = now
@@ -1547,6 +1617,132 @@ func (ga *GinieAutopilot) runMainLoop() {
 			}
 		}
 	}
+}
+
+// LoadUserCoinSources loads coins based on user's scan source settings
+// This replaces the hardcoded coin selection with user-configurable sources
+func (ga *GinieAutopilot) LoadUserCoinSources(ctx context.Context) error {
+	if ga.userID == "" || ga.repo == nil {
+		ga.logger.Warn("No user ID or repo, falling back to market movers")
+		return ga.analyzer.LoadDynamicSymbols(50)
+	}
+
+	// Get user's scan source settings
+	settings, err := ga.repo.GetUserScanSourceSettings(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to get user scan source settings, falling back to market movers", "error", err)
+		return ga.analyzer.LoadDynamicSymbols(50)
+	}
+
+	// Build coin list from enabled sources
+	coinSet := make(map[string]bool)
+
+	// 1. Saved Coins (highest priority - user's explicit selections)
+	if settings.UseSavedCoins && len(settings.SavedCoins) > 0 {
+		for _, coin := range settings.SavedCoins {
+			coinSet[coin] = true
+		}
+		ga.logger.Info("Loaded saved coins from user config", "count", len(settings.SavedCoins))
+	}
+
+	// 2. LLM Selection (if enabled)
+	if settings.UseLLMList {
+		// Try to load LLM coins (uses cache if valid)
+		if err := ga.analyzer.LoadLLMSelectedCoins(); err != nil {
+			ga.logger.Warn("Failed to load LLM coins", "error", err)
+		} else {
+			llmCoins := ga.analyzer.GetLLMSelectedCoins()
+			for _, coin := range llmCoins {
+				coinSet[coin] = true
+			}
+			ga.logger.Info("Added LLM-selected coins", "count", len(llmCoins))
+		}
+	}
+
+	// 3. Market Movers (if enabled)
+	if settings.UseMarketMovers {
+		// Determine max limit needed
+		maxLimit := settings.GainersLimit
+		if settings.LosersLimit > maxLimit {
+			maxLimit = settings.LosersLimit
+		}
+		if settings.VolumeLimit > maxLimit {
+			maxLimit = settings.VolumeLimit
+		}
+		if settings.VolatilityLimit > maxLimit {
+			maxLimit = settings.VolatilityLimit
+		}
+		if maxLimit < 10 {
+			maxLimit = 10
+		}
+
+		movers, err := ga.analyzer.GetMarketMovers(maxLimit)
+		if err == nil {
+			if settings.MoverGainers {
+				for i, coin := range movers.TopGainers {
+					if i >= settings.GainersLimit {
+						break
+					}
+					coinSet[coin] = true
+				}
+			}
+			if settings.MoverLosers {
+				for i, coin := range movers.TopLosers {
+					if i >= settings.LosersLimit {
+						break
+					}
+					coinSet[coin] = true
+				}
+			}
+			if settings.MoverVolume {
+				for i, coin := range movers.TopVolume {
+					if i >= settings.VolumeLimit {
+						break
+					}
+					coinSet[coin] = true
+				}
+			}
+			if settings.MoverVolatility {
+				for i, coin := range movers.HighVolatility {
+					if i >= settings.VolatilityLimit {
+						break
+					}
+					coinSet[coin] = true
+				}
+			}
+			ga.logger.Info("Added market mover coins from user config")
+		} else {
+			ga.logger.Warn("Failed to get market movers", "error", err)
+		}
+	}
+
+	// Convert to slice and apply max_coins limit
+	coins := make([]string, 0, len(coinSet))
+	for coin := range coinSet {
+		coins = append(coins, coin)
+	}
+
+	// Limit to max_coins
+	if len(coins) > settings.MaxCoins && settings.MaxCoins > 0 {
+		coins = coins[:settings.MaxCoins]
+	}
+
+	// If no coins found from user settings, fall back to core coins
+	if len(coins) == 0 {
+		ga.logger.Warn("No coins from user config, using default market movers")
+		return ga.analyzer.LoadDynamicSymbols(50)
+	}
+
+	// Update the analyzer's watch list
+	ga.analyzer.SetWatchSymbols(coins)
+	ga.logger.Info("Loaded coins from user scan source config",
+		"total", len(coins),
+		"saved_enabled", settings.UseSavedCoins,
+		"llm_enabled", settings.UseLLMList,
+		"movers_enabled", settings.UseMarketMovers,
+		"max_coins", settings.MaxCoins)
+
+	return nil
 }
 
 // canTrade checks if trading is allowed
@@ -3087,19 +3283,20 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			settingsManager := GetSettingsManager()
 			settings := settingsManager.GetCurrentSettings()
 
-			// Check if trailing is enabled for this mode
-			var trailingEnabled bool
-			switch pos.Mode {
-			case GinieModeUltraFast:
-				trailingEnabled = settings.GinieTrailingStopEnabledUltrafast
-			case GinieModeScalp:
-				trailingEnabled = settings.GinieTrailingStopEnabledScalp
-			case GinieModeSwing:
-				trailingEnabled = settings.GinieTrailingStopEnabledSwing
-			case GinieModePosition:
-				trailingEnabled = settings.GinieTrailingStopEnabledPosition
-			default:
-				trailingEnabled = false
+			// Check if trailing is enabled for this mode (read from ModeConfigs)
+			modeToConfigKey := map[string]string{
+				string(GinieModeUltraFast): "ultra_fast",
+				string(GinieModeScalp):     "scalp",
+				string(GinieModeSwing):     "swing",
+				string(GinieModePosition):  "position",
+			}
+			trailingEnabled := false
+			if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
+				if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+					if modeConfig.SLTP != nil {
+						trailingEnabled = modeConfig.SLTP.TrailingStopEnabled
+					}
+				}
 			}
 
 			if trailingEnabled {
@@ -3414,39 +3611,35 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 						pos.Symbol, symbolSettings.CustomROIPercent)
 				}
 
-			// 3. Fallback to mode-based threshold from SETTINGS (not hardcoded)
+			// 3. Fallback to mode-based threshold from ModeConfigs (not hardcoded)
 			// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
 			settings := settingsManager.GetCurrentSettings()
-			var tpPercent float64
+			modeToConfigKey := map[string]string{
+				string(GinieModeUltraFast): "ultra_fast",
+				string(GinieModeScalp):     "scalp",
+				string(GinieModeSwing):     "swing",
+				string(GinieModePosition):  "position",
+			}
+			modeDefaults := map[string]float64{
+				"ultra_fast": 2.0,
+				"scalp":      3.0,
+				"swing":      5.0,
+				"position":   8.0,
+			}
 
-			switch pos.Mode {
-			case GinieModeUltraFast:
-				tpPercent = settings.GinieTPPercentUltrafast
-				if tpPercent <= 0 {
-					tpPercent = 2.0 // Default 2% if not set
-				}
-				source = "ultra_fast_settings"
-			case GinieModeScalp:
-				tpPercent = settings.GinieTPPercentScalp
-				if tpPercent <= 0 {
-					tpPercent = 3.0 // Default 3% if not set
-				}
-				source = "scalp_settings"
-			case GinieModeSwing:
-				tpPercent = settings.GinieTPPercentSwing
-				if tpPercent <= 0 {
-					tpPercent = 5.0 // Default 5% if not set
-				}
-				source = "swing_settings"
-			case GinieModePosition:
-				tpPercent = settings.GinieTPPercentPosition
-				if tpPercent <= 0 {
-					tpPercent = 8.0 // Default 8% if not set
-				}
-				source = "position_settings"
-			default:
-				tpPercent = 5.0 // Fallback
+			var tpPercent float64
+			modeKey, ok := modeToConfigKey[string(pos.Mode)]
+			if !ok {
+				tpPercent = 5.0
 				source = "default"
+			} else {
+				tpPercent = modeDefaults[modeKey]
+				source = modeKey + "_settings"
+				if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+					if modeConfig.SLTP != nil && modeConfig.SLTP.TakeProfitPercent > 0 {
+						tpPercent = modeConfig.SLTP.TakeProfitPercent
+					}
+				}
 			}
 
 			// Convert TP% to ROI threshold: ROI = TP% × leverage
@@ -4805,14 +4998,6 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 		useSingleTP = modeConfig.SLTP.UseSingleTP
 	}
 
-	// Override with global settings if set
-	switch mode {
-	case GinieModeUltraFast:
-		useSingleTP = useSingleTP || settings.GinieUseSingleTPUltrafast
-	case GinieModeScalp:
-		useSingleTP = useSingleTP || settings.GinieUseSingleTPScalp
-	}
-
 	// For single TP modes, only use TP1 gain (first valid gain)
 	if useSingleTP {
 		var singleGain float64
@@ -4826,21 +5011,33 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 				}
 			}
 		}
-		// Fallback to mode-specific defaults if no valid gain found
+		// Fallback to mode-specific defaults from ModeConfigs if no valid gain found
 		if singleGain < 0.01 {
-			switch mode {
-			case GinieModeUltraFast:
-				singleGain = settings.GinieTPPercentUltrafast
-				if singleGain < 0.01 {
-					singleGain = 0.5 // Fallback
+			modeToConfigKey := map[string]string{
+				string(GinieModeUltraFast): "ultra_fast",
+				string(GinieModeScalp):     "scalp",
+				string(GinieModeSwing):     "swing",
+				string(GinieModePosition):  "position",
+			}
+			modeDefaults := map[string]float64{
+				"ultra_fast": 0.5,
+				"scalp":      1.0,
+				"swing":      2.0,
+				"position":   3.0,
+			}
+
+			modeKey, ok := modeToConfigKey[string(mode)]
+			if !ok {
+				singleGain = 1.0
+			} else {
+				singleGain = modeDefaults[modeKey]
+				if mc := settings.ModeConfigs[modeKey]; mc != nil && mc.SLTP != nil {
+					if mc.SLTP.SingleTPPercent > 0 {
+						singleGain = mc.SLTP.SingleTPPercent
+					} else if mc.SLTP.TakeProfitPercent > 0 {
+						singleGain = mc.SLTP.TakeProfitPercent
+					}
 				}
-			case GinieModeScalp:
-				singleGain = settings.GinieTPPercentScalp
-				if singleGain < 0.01 {
-					singleGain = 1.0 // Fallback
-				}
-			default:
-				singleGain = 1.0 // Safe default
 			}
 		}
 		gains = []float64{singleGain}
@@ -7559,24 +7756,24 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			}
 		}
 
-		// Check for manual SL/TP override from settings
+		// Check for manual SL/TP override from ModeConfigs
 		sm := GetSettingsManager()
 		settings := sm.GetCurrentSettings()
 		var manualSLPct, manualTPPct float64
 
-		switch pos.Mode {
-		case GinieModeUltraFast:
-			manualSLPct = settings.GinieSLPercentUltrafast
-			manualTPPct = settings.GinieTPPercentUltrafast
-		case GinieModeScalp:
-			manualSLPct = settings.GinieSLPercentScalp
-			manualTPPct = settings.GinieTPPercentScalp
-		case GinieModeSwing:
-			manualSLPct = settings.GinieSLPercentSwing
-			manualTPPct = settings.GinieTPPercentSwing
-		case GinieModePosition:
-			manualSLPct = settings.GinieSLPercentPosition
-			manualTPPct = settings.GinieTPPercentPosition
+		modeToConfigKey := map[string]string{
+			string(GinieModeUltraFast): "ultra_fast",
+			string(GinieModeScalp):     "scalp",
+			string(GinieModeSwing):     "swing",
+			string(GinieModePosition):  "position",
+		}
+		if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
+			if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+				if modeConfig.SLTP != nil {
+					manualSLPct = modeConfig.SLTP.StopLossPercent
+					manualTPPct = modeConfig.SLTP.TakeProfitPercent
+				}
+			}
 		}
 
 		// Manual override takes precedence if set (> 0)
@@ -7764,13 +7961,14 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		pos.OriginalSL = pos.StopLoss
 
 		// Generate TP levels based on TP mode (single vs multi)
-		// CRITICAL: Check MODE-SPECIFIC single TP settings first, then fall back to global
-		useSingleTP := settings.GinieUseSingleTP
-		switch pos.Mode {
-		case GinieModeUltraFast:
-			useSingleTP = settings.GinieUseSingleTPUltrafast
-		case GinieModeScalp:
-			useSingleTP = settings.GinieUseSingleTPScalp
+		// Use modeToConfigKey already declared above
+		useSingleTP := false
+		if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
+			if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+				if modeConfig.SLTP != nil {
+					useSingleTP = modeConfig.SLTP.UseSingleTP
+				}
+			}
 		}
 
 		if useSingleTP {
@@ -7841,23 +8039,24 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		var trailingEnabled bool
 		var trailingPercent, trailingActivation float64
 
-		switch pos.Mode {
-		case GinieModeScalp:
-			trailingEnabled = settings.GinieTrailingStopEnabledScalp
-			trailingPercent = settings.GinieTrailingStopPercentScalp
-			trailingActivation = settings.GinieTrailingStopActivationScalp
-		case GinieModeSwing:
-			trailingEnabled = settings.GinieTrailingStopEnabledSwing
-			trailingPercent = settings.GinieTrailingStopPercentSwing
-			trailingActivation = settings.GinieTrailingStopActivationSwing
-		case GinieModePosition:
-			trailingEnabled = settings.GinieTrailingStopEnabledPosition
-			trailingPercent = settings.GinieTrailingStopPercentPosition
-			trailingActivation = settings.GinieTrailingStopActivationPosition
-		default:
-			trailingEnabled = true
-			trailingPercent = 1.5  // Default swing mode
-			trailingActivation = 1.0
+		// Read trailing stop config from ModeConfigs (use modeToConfigKey already declared)
+		// Defaults
+		trailingEnabled = true
+		trailingPercent = 1.5
+		trailingActivation = 1.0
+
+		if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
+			if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+				if modeConfig.SLTP != nil {
+					trailingEnabled = modeConfig.SLTP.TrailingStopEnabled
+					if modeConfig.SLTP.TrailingStopPercent > 0 {
+						trailingPercent = modeConfig.SLTP.TrailingStopPercent
+					}
+					if modeConfig.SLTP.TrailingStopActivation > 0 {
+						trailingActivation = modeConfig.SLTP.TrailingStopActivation
+					}
+				}
+			}
 		}
 
 		if trailingEnabled {
@@ -8121,21 +8320,21 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 		mode = "swing" // Default
 	}
 
-	// Get manual SL/TP override if set
+	// Get manual SL/TP override if set from ModeConfigs
 	var manualSL, manualTP float64
-	switch mode {
-	case "scalp":
-		manualSL = settings.GinieSLPercentScalp
-		manualTP = settings.GinieTPPercentScalp
-	case "swing":
-		manualSL = settings.GinieSLPercentSwing
-		manualTP = settings.GinieTPPercentSwing
-	case "position":
-		manualSL = settings.GinieSLPercentPosition
-		manualTP = settings.GinieTPPercentPosition
-	default:
-		manualSL = settings.GinieSLPercentSwing
-		manualTP = settings.GinieTPPercentSwing
+	modeToConfigKey := map[string]string{
+		"ultra_fast": "ultra_fast",
+		"scalp":      "scalp",
+		"swing":      "swing",
+		"position":   "position",
+	}
+	if modeKey, ok := modeToConfigKey[string(mode)]; ok {
+		if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+			if modeConfig.SLTP != nil {
+				manualSL = modeConfig.SLTP.StopLossPercent
+				manualTP = modeConfig.SLTP.TakeProfitPercent
+			}
+		}
 	}
 
 	var finalSLPct, finalTPPct float64
@@ -8165,13 +8364,14 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 		direction = -1.0
 	}
 
-	// Check single vs multi TP mode based on position mode
-	useSingleTP := settings.GinieUseSingleTP
-	switch mode {
-	case "ultrafast":
-		useSingleTP = settings.GinieUseSingleTPUltrafast
-	case "scalp":
-		useSingleTP = settings.GinieUseSingleTPScalp
+	// Check single vs multi TP mode from ModeConfigs
+	useSingleTP := false
+	if modeKey, ok := modeToConfigKey[string(mode)]; ok {
+		if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+			if modeConfig.SLTP != nil {
+				useSingleTP = modeConfig.SLTP.UseSingleTP
+			}
+		}
 	}
 
 	if useSingleTP {

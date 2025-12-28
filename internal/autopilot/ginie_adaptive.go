@@ -629,10 +629,15 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	var err error
 	switch rec.Type {
 	case "block_disagreement":
-		// Update block_on_disagreement setting
+		// Update block_on_divergence in all ModeConfigs
 		if ai.settingsManager != nil {
 			settings := ai.settingsManager.GetCurrentSettings()
-			settings.GinieBlockOnDivergence = true
+			// Update all mode configurations with block_on_divergence
+			for _, mc := range settings.ModeConfigs {
+				if mc != nil && mc.TrendDivergence != nil {
+					mc.TrendDivergence.BlockOnDivergence = true
+				}
+			}
 			err = ai.settingsManager.SaveSettings(settings)
 		}
 

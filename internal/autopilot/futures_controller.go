@@ -586,19 +586,43 @@ func (fc *FuturesController) LoadSavedSettings() {
 	if fc.ginieAutopilot != nil {
 		ginieConfig := fc.ginieAutopilot.GetConfig()
 		ginieConfig.DryRun = settings.GinieDryRunMode
-		if settings.GinieRiskLevel != "" {
+
+		// Read configuration from ModeConfigs (use swing as default reference mode)
+		// Individual mode-specific settings are read by GinieAutopilot at runtime
+		refMode := "swing" // Reference mode for global config values
+		if modeConfig := settings.ModeConfigs[refMode]; modeConfig != nil {
+			if modeConfig.Risk != nil && modeConfig.Risk.RiskLevel != "" {
+				ginieConfig.RiskLevel = modeConfig.Risk.RiskLevel
+			}
+			if modeConfig.Size != nil {
+				if modeConfig.Size.MaxSizeUSD > 0 {
+					ginieConfig.MaxUSDPerPosition = modeConfig.Size.MaxSizeUSD
+				}
+				if modeConfig.Size.Leverage > 0 {
+					ginieConfig.DefaultLeverage = modeConfig.Size.Leverage
+				}
+				if modeConfig.Size.MaxPositions > 0 {
+					ginieConfig.MaxPositions = modeConfig.Size.MaxPositions
+				}
+			}
+			if modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+				ginieConfig.MinConfidenceToTrade = modeConfig.Confidence.MinConfidence
+			}
+		}
+		// Fallback to legacy fields if ModeConfigs not populated (backwards compatibility)
+		if ginieConfig.RiskLevel == "" && settings.GinieRiskLevel != "" {
 			ginieConfig.RiskLevel = settings.GinieRiskLevel
 		}
-		if settings.GinieMaxUSD > 0 {
+		if ginieConfig.MaxUSDPerPosition == 0 && settings.GinieMaxUSD > 0 {
 			ginieConfig.MaxUSDPerPosition = settings.GinieMaxUSD
 		}
-		if settings.GinieLeverage > 0 {
+		if ginieConfig.DefaultLeverage == 0 && settings.GinieLeverage > 0 {
 			ginieConfig.DefaultLeverage = settings.GinieLeverage
 		}
-		if settings.GinieMinConfidence > 0 {
+		if ginieConfig.MinConfidenceToTrade == 0 && settings.GinieMinConfidence > 0 {
 			ginieConfig.MinConfidenceToTrade = settings.GinieMinConfidence
 		}
-		if settings.GinieMaxPositions > 0 {
+		if ginieConfig.MaxPositions == 0 && settings.GinieMaxPositions > 0 {
 			ginieConfig.MaxPositions = settings.GinieMaxPositions
 		}
 
@@ -633,6 +657,19 @@ func (fc *FuturesController) LoadSavedSettings() {
 		}
 
 		fc.ginieAutopilot.SetConfig(ginieConfig)
+
+		// Build trend timeframes map from ModeConfigs for logging
+		trendTimeframes := make(map[string]string)
+		blockOnDivergence := false
+		for modeName, mc := range settings.ModeConfigs {
+			if mc != nil && mc.Timeframe != nil {
+				trendTimeframes[modeName] = mc.Timeframe.TrendTimeframe
+			}
+			if mc != nil && mc.TrendDivergence != nil && mc.TrendDivergence.BlockOnDivergence {
+				blockOnDivergence = true
+			}
+		}
+
 		fc.logger.Info("Applied Ginie autopilot settings",
 			"dry_run", ginieConfig.DryRun,
 			"risk_level", ginieConfig.RiskLevel,
@@ -647,13 +684,8 @@ func (fc *FuturesController) LoadSavedSettings() {
 			"cb_cooldown_minutes", ginieConfig.CBCooldownMinutes,
 			"tp_mode", map[bool]string{true: "SINGLE", false: "MULTI"}[settings.GinieUseSingleTP],
 			"tp1_percent", ginieConfig.TP1Percent,
-			"trend_timeframes", map[string]string{
-				"ultrafast": settings.GinieTrendTimeframeUltrafast,
-				"scalp":     settings.GinieTrendTimeframeScalp,
-				"swing":     settings.GinieTrendTimeframeSwing,
-				"position":  settings.GinieTrendTimeframePosition,
-			},
-			"block_on_divergence", settings.GinieBlockOnDivergence,
+			"trend_timeframes", trendTimeframes,
+			"block_on_divergence", blockOnDivergence,
 			"auto_start", settings.GinieAutoStart)
 
 		// NOTE: Ginie analyzer automatically reads trend timeframes and divergence settings

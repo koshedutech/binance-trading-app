@@ -1709,13 +1709,23 @@ func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"timeframes": gin.H{
-			"ultrafast":          settings.GinieTrendTimeframeUltrafast,
-			"scalp":              settings.GinieTrendTimeframeScalp,
-			"swing":              settings.GinieTrendTimeframeSwing,
-			"position":           settings.GinieTrendTimeframePosition,
-			"block_on_divergence": settings.GinieBlockOnDivergence,
-		},
+		"timeframes": func() gin.H {
+			timeframes := gin.H{}
+			modes := []string{"ultra_fast", "scalp", "swing", "position"}
+			blockOnDivergence := false
+			for _, mode := range modes {
+				if modeConfig := settings.ModeConfigs[mode]; modeConfig != nil {
+					if modeConfig.Timeframe != nil {
+						timeframes[mode] = modeConfig.Timeframe.TrendTimeframe
+					}
+					if modeConfig.TrendDivergence != nil && modeConfig.TrendDivergence.BlockOnDivergence {
+						blockOnDivergence = true
+					}
+				}
+			}
+			timeframes["block_on_divergence"] = blockOnDivergence
+			return timeframes
+		}(),
 		"valid_timeframes": []string{
 			"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M",
 		},
@@ -1798,12 +1808,23 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Trend timeframes updated successfully",
-		"timeframes": gin.H{
-			"scalp":              sm.GetCurrentSettings().GinieTrendTimeframeScalp,
-			"swing":              sm.GetCurrentSettings().GinieTrendTimeframeSwing,
-			"position":           sm.GetCurrentSettings().GinieTrendTimeframePosition,
-			"block_on_divergence": sm.GetCurrentSettings().GinieBlockOnDivergence,
-		},
+		"timeframes": func() gin.H {
+			currentSettings := sm.GetCurrentSettings()
+			tf := gin.H{}
+			for _, mode := range []string{"ultra_fast", "scalp", "swing", "position"} {
+				if mc := currentSettings.ModeConfigs[mode]; mc != nil && mc.Timeframe != nil {
+					tf[mode] = mc.Timeframe.TrendTimeframe
+				}
+			}
+			// Check if any mode has block_on_divergence enabled
+			for _, mc := range currentSettings.ModeConfigs {
+				if mc != nil && mc.TrendDivergence != nil && mc.TrendDivergence.BlockOnDivergence {
+					tf["block_on_divergence"] = true
+					break
+				}
+			}
+			return tf
+		}(),
 	})
 }
 
@@ -1814,44 +1835,50 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"sltp_config": gin.H{
-			"ultrafast": gin.H{
-				"sl_percent":             settings.GinieSLPercentUltrafast,
-				"tp_percent":             settings.GinieTPPercentUltrafast,
-				"trailing_enabled":       settings.GinieTrailingStopEnabledUltrafast,
-				"trailing_percent":       settings.GinieTrailingStopPercentUltrafast,
-				"trailing_activation":    settings.GinieTrailingStopActivationUltrafast,
-			},
-			"scalp": gin.H{
-				"sl_percent":             settings.GinieSLPercentScalp,
-				"tp_percent":             settings.GinieTPPercentScalp,
-				"trailing_enabled":       settings.GinieTrailingStopEnabledScalp,
-				"trailing_percent":       settings.GinieTrailingStopPercentScalp,
-				"trailing_activation":    settings.GinieTrailingStopActivationScalp,
-			},
-			"swing": gin.H{
-				"sl_percent":             settings.GinieSLPercentSwing,
-				"tp_percent":             settings.GinieTPPercentSwing,
-				"trailing_enabled":       settings.GinieTrailingStopEnabledSwing,
-				"trailing_percent":       settings.GinieTrailingStopPercentSwing,
-				"trailing_activation":    settings.GinieTrailingStopActivationSwing,
-			},
-			"position": gin.H{
-				"sl_percent":             settings.GinieSLPercentPosition,
-				"tp_percent":             settings.GinieTPPercentPosition,
-				"trailing_enabled":       settings.GinieTrailingStopEnabledPosition,
-				"trailing_percent":       settings.GinieTrailingStopPercentPosition,
-				"trailing_activation":    settings.GinieTrailingStopActivationPosition,
-			},
-		},
-		"tp_mode": gin.H{
-			"use_single_tp":     settings.GinieUseSingleTP,
-			"single_tp_percent": settings.GinieSingleTPPercent,
-			"tp1_percent":       settings.GinieTP1Percent,
-			"tp2_percent":       settings.GinieTP2Percent,
-			"tp3_percent":       settings.GinieTP3Percent,
-			"tp4_percent":       settings.GinieTP4Percent,
-		},
+		"sltp_config": func() gin.H {
+			modes := []string{"ultra_fast", "scalp", "swing", "position"}
+			config := gin.H{}
+			for _, mode := range modes {
+				modeConfig := gin.H{
+					"sl_percent":           0.0,
+					"tp_percent":           0.0,
+					"trailing_enabled":     false,
+					"trailing_percent":     0.0,
+					"trailing_activation":  0.0,
+				}
+				if mc := settings.ModeConfigs[mode]; mc != nil && mc.SLTP != nil {
+					modeConfig["sl_percent"] = mc.SLTP.StopLossPercent
+					modeConfig["tp_percent"] = mc.SLTP.TakeProfitPercent
+					modeConfig["trailing_enabled"] = mc.SLTP.TrailingStopEnabled
+					modeConfig["trailing_percent"] = mc.SLTP.TrailingStopPercent
+					modeConfig["trailing_activation"] = mc.SLTP.TrailingStopActivation
+				}
+				config[mode] = modeConfig
+			}
+			return config
+		}(),
+		"tp_mode": func() gin.H {
+			tpMode := gin.H{
+				"use_single_tp":     false,
+				"single_tp_percent": 0.0,
+				"tp1_percent":       25.0,
+				"tp2_percent":       25.0,
+				"tp3_percent":       25.0,
+				"tp4_percent":       25.0,
+			}
+			// Use swing mode as reference for global TP settings
+			if mc := settings.ModeConfigs["swing"]; mc != nil && mc.SLTP != nil {
+				tpMode["use_single_tp"] = mc.SLTP.UseSingleTP
+				tpMode["single_tp_percent"] = mc.SLTP.SingleTPPercent
+				if len(mc.SLTP.TPAllocation) >= 4 {
+					tpMode["tp1_percent"] = mc.SLTP.TPAllocation[0]
+					tpMode["tp2_percent"] = mc.SLTP.TPAllocation[1]
+					tpMode["tp3_percent"] = mc.SLTP.TPAllocation[2]
+					tpMode["tp4_percent"] = mc.SLTP.TPAllocation[3]
+				}
+			}
+			return tpMode
+		}(),
 	})
 }
 
@@ -1875,36 +1902,24 @@ func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
 	settings := sm.GetCurrentSettings()
 
-	// Get current values as defaults
+	// Get current values from ModeConfigs as defaults
 	var slPct, tpPct, trailPct, trailAct float64
 	var trailEnabled bool
 
-	switch mode {
-	case "ultrafast":
-		slPct = settings.GinieSLPercentUltrafast
-		tpPct = settings.GinieTPPercentUltrafast
-		trailEnabled = settings.GinieTrailingStopEnabledUltrafast
-		trailPct = settings.GinieTrailingStopPercentUltrafast
-		trailAct = settings.GinieTrailingStopActivationUltrafast
-	case "scalp":
-		slPct = settings.GinieSLPercentScalp
-		tpPct = settings.GinieTPPercentScalp
-		trailEnabled = settings.GinieTrailingStopEnabledScalp
-		trailPct = settings.GinieTrailingStopPercentScalp
-		trailAct = settings.GinieTrailingStopActivationScalp
-	case "swing":
-		slPct = settings.GinieSLPercentSwing
-		tpPct = settings.GinieTPPercentSwing
-		trailEnabled = settings.GinieTrailingStopEnabledSwing
-		trailPct = settings.GinieTrailingStopPercentSwing
-		trailAct = settings.GinieTrailingStopActivationSwing
-	case "position":
-		slPct = settings.GinieSLPercentPosition
-		tpPct = settings.GinieTPPercentPosition
-		trailEnabled = settings.GinieTrailingStopEnabledPosition
-		trailPct = settings.GinieTrailingStopPercentPosition
-		trailAct = settings.GinieTrailingStopActivationPosition
-	default:
+	modeKey := mode
+	if mode == "ultrafast" {
+		modeKey = "ultra_fast"
+	}
+
+	if mc := settings.ModeConfigs[modeKey]; mc != nil && mc.SLTP != nil {
+		slPct = mc.SLTP.StopLossPercent
+		tpPct = mc.SLTP.TakeProfitPercent
+		trailEnabled = mc.SLTP.TrailingStopEnabled
+		trailPct = mc.SLTP.TrailingStopPercent
+		trailAct = mc.SLTP.TrailingStopActivation
+	}
+
+	if modeKey != "ultra_fast" && modeKey != "scalp" && modeKey != "swing" && modeKey != "position" {
 		errorResponse(c, http.StatusBadRequest, "Invalid mode: must be ultrafast, scalp, swing, or position")
 		return
 	}
@@ -1964,13 +1979,19 @@ func (s *Server) handleUpdateGinieTPMode(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
 	settings := sm.GetCurrentSettings()
 
-	useSingle := settings.GinieUseSingleTP
-	singlePct := settings.GinieSingleTPPercent
-	tp1 := settings.GinieTP1Percent
-	tp2 := settings.GinieTP2Percent
-	tp3 := settings.GinieTP3Percent
-	tp4 := settings.GinieTP4Percent
-
+	// Get current values from ModeConfigs (use swing as reference for global TP settings)
+	var useSingle bool
+	var singlePct, tp1, tp2, tp3, tp4 float64 = 0.0, 25.0, 25.0, 25.0, 25.0
+	if mc := settings.ModeConfigs["swing"]; mc != nil && mc.SLTP != nil {
+		useSingle = mc.SLTP.UseSingleTP
+		singlePct = mc.SLTP.SingleTPPercent
+		if len(mc.SLTP.TPAllocation) >= 4 {
+			tp1 = mc.SLTP.TPAllocation[0]
+			tp2 = mc.SLTP.TPAllocation[1]
+			tp3 = mc.SLTP.TPAllocation[2]
+			tp4 = mc.SLTP.TPAllocation[3]
+		}
+	}
 	if req.UseSingleTP != nil {
 		useSingle = *req.UseSingleTP
 	}
@@ -3289,7 +3310,9 @@ func (s *Server) handleGetScanSourceConfig(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, settings)
+	c.JSON(http.StatusOK, gin.H{
+		"config": settings,
+	})
 }
 
 // handleUpdateScanSourceConfig updates the user's scan source configuration
@@ -3350,12 +3373,15 @@ func (s *Server) handleGetSavedCoins(c *gin.Context) {
 	}
 
 	// Get the full settings to check if saved coins is enabled
-	settings, _ := s.repo.GetUserScanSourceSettings(c.Request.Context(), userID)
+	settings, err := s.repo.GetUserScanSourceSettings(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[handleGetSavedCoins] Warning: failed to get scan source settings for user %s: %v", userID, err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"coins":   coins,
-		"count":   len(coins),
-		"enabled": settings != nil && settings.UseSavedCoins,
+		"saved_coins": coins,
+		"count":       len(coins),
+		"enabled":     settings != nil && settings.UseSavedCoins,
 	})
 }
 
@@ -3425,77 +3451,111 @@ func (s *Server) handleGetScanPreview(c *gin.Context) {
 		return
 	}
 
-	preview := make(map[string][]string)
-	totalCoins := make(map[string]bool)
+	// Track coins with their sources: map[symbol][]sources
+	coinSources := make(map[string][]string)
 
 	// 1. Saved Coins (if enabled)
 	if settings.UseSavedCoins && len(settings.SavedCoins) > 0 {
-		preview["saved"] = settings.SavedCoins
 		for _, coin := range settings.SavedCoins {
-			totalCoins[coin] = true
+			coinSources[coin] = append(coinSources[coin], "saved")
 		}
 	}
 
-	// 2. LLM Selection (placeholder - actual selection happens during scan)
+	// 2. LLM Selection - get actual LLM coins if available
 	if settings.UseLLMList {
-		preview["llm"] = []string{"(AI will select during scan)"}
-	}
-
-	// 3. Market Movers (if enabled)
-	if settings.UseMarketMovers {
-		movers := s.getMarketMoversPreview(settings)
-		for category, coins := range movers {
-			preview["movers_"+category] = coins
-			for _, coin := range coins {
-				totalCoins[coin] = true
+		controller := s.getFuturesAutopilot()
+		if controller != nil {
+			if ginie := controller.GetGinieAnalyzer(); ginie != nil {
+				llmCoins := ginie.GetLLMSelectedCoins()
+				for _, coin := range llmCoins {
+					coinSources[coin] = append(coinSources[coin], "llm")
+				}
 			}
 		}
 	}
 
-	// Compile unique coins
-	uniqueCoins := make([]string, 0, len(totalCoins))
-	for coin := range totalCoins {
-		uniqueCoins = append(uniqueCoins, coin)
+	// 3. Market Movers (if enabled) - get actual market movers
+	if settings.UseMarketMovers {
+		controller := s.getFuturesAutopilot()
+		if controller != nil {
+			if ginie := controller.GetGinieAnalyzer(); ginie != nil {
+				// Get max limit from settings
+				maxLimit := settings.GainersLimit
+				if settings.LosersLimit > maxLimit {
+					maxLimit = settings.LosersLimit
+				}
+				if settings.VolumeLimit > maxLimit {
+					maxLimit = settings.VolumeLimit
+				}
+				if settings.VolatilityLimit > maxLimit {
+					maxLimit = settings.VolatilityLimit
+				}
+				if maxLimit < 10 {
+					maxLimit = 10
+				}
+
+				movers, err := ginie.GetMarketMovers(maxLimit)
+				if err == nil {
+					if settings.MoverGainers && len(movers.TopGainers) > 0 {
+						for i, coin := range movers.TopGainers {
+							if i >= settings.GainersLimit {
+								break
+							}
+							coinSources[coin] = append(coinSources[coin], "gainers")
+						}
+					}
+					if settings.MoverLosers && len(movers.TopLosers) > 0 {
+						for i, coin := range movers.TopLosers {
+							if i >= settings.LosersLimit {
+								break
+							}
+							coinSources[coin] = append(coinSources[coin], "losers")
+						}
+					}
+					if settings.MoverVolume && len(movers.TopVolume) > 0 {
+						for i, coin := range movers.TopVolume {
+							if i >= settings.VolumeLimit {
+								break
+							}
+							coinSources[coin] = append(coinSources[coin], "volume")
+						}
+					}
+					if settings.MoverVolatility && len(movers.HighVolatility) > 0 {
+						for i, coin := range movers.HighVolatility {
+							if i >= settings.VolatilityLimit {
+								break
+							}
+							coinSources[coin] = append(coinSources[coin], "volatility")
+						}
+					}
+				}
+			}
+		}
 	}
 
-	// Calculate will_scan count
-	willScan := len(uniqueCoins)
-	if willScan > settings.MaxCoins {
-		willScan = settings.MaxCoins
+	// Build coins array with sources for frontend
+	type coinPreview struct {
+		Symbol  string   `json:"symbol"`
+		Sources []string `json:"sources"`
+	}
+
+	coins := make([]coinPreview, 0, len(coinSources))
+	for symbol, sources := range coinSources {
+		coins = append(coins, coinPreview{
+			Symbol:  symbol,
+			Sources: sources,
+		})
+	}
+
+	// Limit to max_coins
+	totalCount := len(coins)
+	if len(coins) > settings.MaxCoins {
+		coins = coins[:settings.MaxCoins]
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":       true,
-		"sources":       preview,
-		"unique_coins":  uniqueCoins,
-		"total_unique":  len(uniqueCoins),
-		"max_coins":     settings.MaxCoins,
-		"will_scan":     willScan,
-		"config_active": settings.UseSavedCoins || settings.UseLLMList || settings.UseMarketMovers,
+		"coins":       coins,
+		"total_count": totalCount,
+		"max_coins":   settings.MaxCoins,
 	})
-}
-
-// getMarketMoversPreview gets a preview of market mover coins based on user settings
-func (s *Server) getMarketMoversPreview(settings *database.UserScanSourceSettings) map[string][]string {
-	result := make(map[string][]string)
-
-	// Get cached market movers from existing system
-	// For now, return placeholders - the actual data comes from the existing market movers endpoint
-	if settings.MoverGainers {
-		result["gainers"] = []string{fmt.Sprintf("(Top %d gainers)", settings.GainersLimit)}
-	}
-	if settings.MoverLosers {
-		result["losers"] = []string{fmt.Sprintf("(Top %d losers)", settings.LosersLimit)}
-	}
-	if settings.MoverVolume {
-		result["volume"] = []string{fmt.Sprintf("(Top %d by volume)", settings.VolumeLimit)}
-	}
-	if settings.MoverVolatility {
-		result["volatility"] = []string{fmt.Sprintf("(Top %d by volatility)", settings.VolatilityLimit)}
-	}
-	if settings.MoverNewListings {
-		result["new"] = []string{fmt.Sprintf("(Last %d new listings)", settings.NewListingsLimit)}
-	}
-
-	return result
 }

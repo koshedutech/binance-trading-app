@@ -494,6 +494,14 @@ func (g *GinieAnalyzer) GetWatchSymbols() []string {
 	return g.watchSymbols
 }
 
+// GetLLMSelectedCoins returns the cached LLM-selected coins
+func (g *GinieAnalyzer) GetLLMSelectedCoins() []string {
+	if len(g.llmCoinsCache) > 0 {
+		return g.llmCoinsCache
+	}
+	return g.watchSymbols // Fallback to watch symbols if no LLM cache
+}
+
 // MarketMoverCategory represents different types of market movers
 type MarketMoverCategory struct {
 	TopGainers    []string // Highest 24h % gain
@@ -1527,32 +1535,40 @@ func (g *GinieAnalyzer) GenerateDecisionForMode(symbol string, mode GinieTrading
 
 // generateDecisionInternal is the core decision generation logic used by both GenerateDecision and GenerateDecisionForMode
 func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradingMode, scan *GinieCoinScan) (*GinieDecisionReport, error) {
+	// Initialize rejection tracker to capture all rejection reasons
+	rejectionTracker := NewRejectionTracker()
+
 	// Get klines for signal generation (always 1h)
 	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
 	if err != nil {
 		return nil, err
 	}
 
-	// Determine target trend timeframe based on mode
+	// Determine target trend timeframe based on mode using ModeConfigs
+	modeToConfigKey := map[string]string{
+		string(GinieModeScalp):    "scalp",
+		string(GinieModeSwing):    "swing",
+		string(GinieModePosition): "position",
+	}
+	modeDefaults := map[string]string{
+		"scalp":    "15m",
+		"swing":    "1h",
+		"position": "4h",
+	}
+
 	var targetTimeframe string
-	switch mode {
-	case GinieModeScalp:
-		targetTimeframe = "15m" // default
-		if g.settings != nil && g.settings.GinieTrendTimeframeScalp != "" {
-			targetTimeframe = g.settings.GinieTrendTimeframeScalp
+	modeKey, ok := modeToConfigKey[string(mode)]
+	if !ok {
+		targetTimeframe = "1h" // Default fallback
+	} else {
+		targetTimeframe = modeDefaults[modeKey] // Mode-specific default
+		if g.settings != nil {
+			if modeConfig := g.settings.ModeConfigs[modeKey]; modeConfig != nil {
+				if modeConfig.Timeframe != nil && modeConfig.Timeframe.TrendTimeframe != "" {
+					targetTimeframe = modeConfig.Timeframe.TrendTimeframe
+				}
+			}
 		}
-	case GinieModeSwing:
-		targetTimeframe = "1h" // default
-		if g.settings != nil && g.settings.GinieTrendTimeframeSwing != "" {
-			targetTimeframe = g.settings.GinieTrendTimeframeSwing
-		}
-	case GinieModePosition:
-		targetTimeframe = "4h" // default
-		if g.settings != nil && g.settings.GinieTrendTimeframePosition != "" {
-			targetTimeframe = g.settings.GinieTrendTimeframePosition
-		}
-	default:
-		targetTimeframe = "1h"
 	}
 
 	// Fetch klines for target timeframe if different from scan
@@ -1582,10 +1598,14 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 					"adx", trendAnalysis.ADXValue)
 			}
 
-			// Detect divergence
+			// Detect divergence - read from ModeConfigs
 			blockOnDivergence := false
-			if g.settings != nil {
-				blockOnDivergence = g.settings.GinieBlockOnDivergence
+			if g.settings != nil && modeKey != "" {
+				if modeConfig := g.settings.ModeConfigs[modeKey]; modeConfig != nil {
+					if modeConfig.TrendDivergence != nil {
+						blockOnDivergence = modeConfig.TrendDivergence.BlockOnDivergence
+					}
+				}
 			}
 			divergence = g.DetectTrendDivergence(scan.Trend, trendAnalysis, blockOnDivergence)
 
@@ -1606,11 +1626,12 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 	// Build decision report
 	report := &GinieDecisionReport{
-		Symbol:          symbol,
-		Timestamp:       time.Now(),
-		ScanStatus:      scan.Status,
-		SelectedMode:    mode,
-		TrendDivergence: divergence,
+		Symbol:            symbol,
+		Timestamp:         time.Now(),
+		ScanStatus:        scan.Status,
+		SelectedMode:      mode,
+		TrendDivergence:   divergence,
+		RejectionTracking: rejectionTracker,
 	}
 
 	// Market conditions
@@ -1634,6 +1655,20 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 	// CRITICAL: Block trade if divergence detected and blocking enabled
 	if divergence != nil && divergence.ShouldBlock {
+		// Track trend divergence rejection
+		rejectionTracker.TrendDivergence = &TrendDivergenceRejection{
+			Blocked:           true,
+			ScanTimeframe:     divergence.ScanTimeframe,
+			ScanTrend:         divergence.ScanTrend,
+			DecisionTimeframe: divergence.DecisionTimeframe,
+			DecisionTrend:     divergence.DecisionTrend,
+			Severity:          divergence.Severity,
+			Reason:            divergence.Reason,
+		}
+		rejectionTracker.AddRejection(fmt.Sprintf("Trend Divergence (%s): %s trend on %s vs %s trend on %s",
+			divergence.Severity, divergence.ScanTrend, divergence.ScanTimeframe,
+			divergence.DecisionTrend, divergence.DecisionTimeframe))
+
 		report.Recommendation = RecommendationSkip
 		report.RecommendationNote = fmt.Sprintf("BLOCKED: %s", divergence.Reason)
 		report.ConfidenceScore = 0
@@ -1646,6 +1681,50 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		}
 
 		return report, nil
+	}
+
+	// Track signal and scan quality issues (even if not blocking yet)
+	if !signals.PrimaryPassed {
+		// Collect failed signals
+		failedSignals := []string{}
+		for _, sig := range signals.PrimarySignals {
+			if !sig.Met {
+				failedSignals = append(failedSignals, sig.Name)
+			}
+		}
+		rejectionTracker.SignalStrength = &SignalStrengthRejection{
+			Blocked:         true,
+			SignalsMet:      signals.PrimaryMet,
+			SignalsRequired: signals.PrimaryRequired,
+			FailedSignals:   failedSignals,
+			Reason:          fmt.Sprintf("Insufficient signals: %d/%d met (need %d)", signals.PrimaryMet, len(signals.PrimarySignals), signals.PrimaryRequired),
+		}
+		rejectionTracker.AddRejection(fmt.Sprintf("Signals: %d/%d required (missing: %v)", signals.PrimaryMet, signals.PrimaryRequired, failedSignals))
+	}
+
+	if !scan.TradeReady {
+		rejectionTracker.ScanQuality = &ScanQualityRejection{
+			Blocked:    true,
+			ScanScore:  scan.Score,
+			MinScore:   30.0, // Minimum score threshold
+			TradeReady: scan.TradeReady,
+			ScanStatus: string(scan.Status),
+			Reason:     fmt.Sprintf("Scan not ready: %s (score: %.1f)", scan.Reason, scan.Score),
+		}
+		rejectionTracker.AddRejection(fmt.Sprintf("Scan Quality: %s (score: %.1f)", scan.Reason, scan.Score))
+	}
+
+	// Track liquidity issues
+	if !scan.Liquidity.PassedSwing {
+		rejectionTracker.Liquidity = &LiquidityRejection{
+			Blocked:        true,
+			Volume24h:      scan.Liquidity.VolumeUSD,
+			RequiredVolume: 1000000, // $1M for swing
+			BidAskSpread:   scan.Liquidity.SpreadPercent,
+			MaxSpread:      0.1,
+			Reason:         fmt.Sprintf("Low liquidity: $%.0f volume (need $1M+)", scan.Liquidity.VolumeUSD),
+		}
+		rejectionTracker.AddRejection(fmt.Sprintf("Liquidity: $%.0f volume (need $1M+)", scan.Liquidity.VolumeUSD))
 	}
 
 	// Trade execution
@@ -1834,6 +1913,28 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	// Check if trend is strong enough for the selected mode
 	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, mode)
 	if !adxPassed {
+		// Determine threshold based on mode
+		var adxThreshold float64
+		switch mode {
+		case GinieModeScalp:
+			adxThreshold = 30
+		case GinieModeSwing:
+			adxThreshold = 20
+		case GinieModePosition:
+			adxThreshold = 25
+		default:
+			adxThreshold = 20
+		}
+
+		rejectionTracker.ADXStrength = &ADXStrengthRejection{
+			Blocked:   false, // Not a hard block, just penalty
+			ADXValue:  trendAnalysis.ADXValue,
+			Threshold: adxThreshold,
+			Penalty:   adxPenalty,
+			Reason:    fmt.Sprintf("Weak trend: ADX %.1f (threshold %.0f for %s mode) - 10%% confidence penalty applied", trendAnalysis.ADXValue, adxThreshold, mode),
+		}
+		// Don't add to rejection list since it's soft (penalty, not block)
+
 		if g.logger != nil {
 			g.logger.Warn("Weak trend detected - applying ADX strength penalty",
 				"symbol", symbol,
@@ -1941,6 +2042,16 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			// Signal contradicts trend - this is a counter-trend trade (bounce trade)
 			// Validate with strict reversal signal requirements
 			if !g.isValidReversalTrade(signals.Direction, report.ConfidenceScore, klines) {
+				// Track counter-trend rejection
+				rejectionTracker.CounterTrend = &CounterTrendRejection{
+					Blocked:         true,
+					SignalDirection: signals.Direction,
+					TrendDirection:  trendAnalysis.TrendDirection,
+					MissingRequirements: []string{"RSI extreme zone", "ADX weakening", "Reversal pattern"},
+					Reason:          fmt.Sprintf("Counter-trend blocked: %s signal vs %s trend", signals.Direction, trendAnalysis.TrendDirection),
+				}
+				rejectionTracker.AddRejection(fmt.Sprintf("Counter-trend: %s signal vs %s trend (missing reversal signals)", signals.Direction, trendAnalysis.TrendDirection))
+
 				if g.logger != nil {
 					g.logger.Info("Blocking counter-trend trade - insufficient reversal signals",
 						"symbol", symbol,
@@ -1948,15 +2059,19 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 						"trend", trendAnalysis.TrendDirection,
 						"confidence", report.ConfidenceScore)
 				}
-				return &GinieDecisionReport{
-					Symbol:           symbol,
-					Timestamp:        time.Now(),
-					ScanStatus:       scan.Status,
-					SelectedMode:     mode,
-					Recommendation:   RecommendationSkip,
+
+				// Return report with rejection tracking attached
+				counterTrendReport := &GinieDecisionReport{
+					Symbol:             symbol,
+					Timestamp:          time.Now(),
+					ScanStatus:         scan.Status,
+					SelectedMode:       mode,
+					Recommendation:     RecommendationSkip,
 					RecommendationNote: "Counter-trend trade rejected - missing required reversal signals (RSI extreme zone, ADX weakening, reversal pattern)",
-					ConfidenceScore:  0.0,
-				}, nil
+					ConfidenceScore:    0.0,
+					RejectionTracking:  rejectionTracker,
+				}
+				return counterTrendReport, nil
 			}
 
 			if g.logger != nil {
@@ -1977,9 +2092,28 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	} else if report.ConfidenceScore >= 20.0 {
 		report.Recommendation = RecommendationWait
 		report.RecommendationNote = "Signals present but consider waiting for better entry"
+
+		// Track confidence issue (not a hard block, but worth noting)
+		rejectionTracker.Confidence = &ConfidenceRejection{
+			Blocked:          false,
+			ConfidenceScore:  report.ConfidenceScore,
+			ExecuteThreshold: 30.0,
+			WaitThreshold:    20.0,
+			Reason:           fmt.Sprintf("Confidence %.1f%% below execute threshold (30%%)", report.ConfidenceScore),
+		}
 	} else {
 		report.Recommendation = RecommendationSkip
 		report.RecommendationNote = "Insufficient confluence or poor conditions"
+
+		// Track low confidence rejection
+		rejectionTracker.Confidence = &ConfidenceRejection{
+			Blocked:          true,
+			ConfidenceScore:  report.ConfidenceScore,
+			ExecuteThreshold: 30.0,
+			WaitThreshold:    20.0,
+			Reason:           fmt.Sprintf("Low confidence: %.1f%% (need 20%% for WAIT, 30%% for EXECUTE)", report.ConfidenceScore),
+		}
+		rejectionTracker.AddRejection(fmt.Sprintf("Confidence: %.1f%% (need 30%% to execute)", report.ConfidenceScore))
 	}
 
 	// Store decision
