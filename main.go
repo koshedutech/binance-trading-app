@@ -655,6 +655,9 @@ func main() {
 		spotRealClient: nil, // No global real client - created per-request from user API keys
 		// Market data cache
 		marketDataCache: marketDataCache,
+		// API key service for per-user client creation during mode switch
+		apiKeyService: apiKeyService,
+		repo:          earlyRepo,
 	}
 
 	// Initialize email service
@@ -1108,6 +1111,9 @@ type BotAPIWrapper struct {
 	spotRealClient binance.BinanceClient
 	// Market data cache for WebSocket data
 	marketDataCache *binance.MarketDataCache
+	// API key service for creating per-user clients during mode switch
+	apiKeyService *apikeys.Service
+	repo          *database.Repository
 }
 
 func (w *BotAPIWrapper) GetStatus() map[string]interface{} {
@@ -1488,10 +1494,35 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 					w.logger.Info("Selecting mock client for PAPER mode")
 				}
 			} else {
-				// Switching to LIVE mode - real client comes from user API keys per-request
-				// Do not set a global client here - handlers will create user-specific client
-				w.logger.Info("LIVE mode enabled - real client will be created per-request from user API keys")
-				newClient = nil // No global client for live mode
+				// Switching to LIVE mode - create real client from owner's API keys
+				ownerUserID := w.futuresAutopilotController.GetOwnerUserID()
+				if ownerUserID == "" {
+					w.logger.Warn("LIVE mode enabled but no autopilot owner set - trades will fail until user starts autopilot")
+					newClient = nil
+				} else if w.apiKeyService == nil {
+					w.logger.Warn("LIVE mode enabled but no API key service available - using mock client")
+					newClient = w.futuresMockClient
+				} else {
+					// Get owner's Binance API keys from database
+					ctx := context.Background()
+					keys, err := w.apiKeyService.GetActiveBinanceKey(ctx, ownerUserID, false)
+					if err != nil {
+						// Try testnet
+						keys, err = w.apiKeyService.GetActiveBinanceKey(ctx, ownerUserID, true)
+					}
+					if err != nil || keys == nil || keys.APIKey == "" {
+						w.logger.Error("LIVE mode enabled but failed to get owner's API keys",
+							"owner_user_id", ownerUserID,
+							"error", err)
+						newClient = nil
+					} else {
+						// Create real client from owner's API keys
+						newClient = binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
+						w.logger.Info("LIVE mode - created real client from owner's API keys",
+							"owner_user_id", ownerUserID,
+							"testnet", keys.IsTestnet)
+					}
+				}
 			}
 
 			// Wrap with cache if available
