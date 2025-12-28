@@ -3,7 +3,7 @@ import type { WSEvent } from '../types';
 type EventCallback = (event: WSEvent) => void;
 type ConnectionCallback = () => void;
 
-const ACCESS_TOKEN_KEY = 'trading_bot_access_token';
+const ACCESS_TOKEN_KEY = 'access_token';
 
 class WebSocketService {
   private ws: WebSocket | null = null;

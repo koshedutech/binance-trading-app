@@ -1092,7 +1092,7 @@ func (s *Server) handleSetPositionROITarget(c *gin.Context) {
 			errorResponse(c, http.StatusUnauthorized, "User authentication required to save symbol settings")
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 		defer cancel()
 		if err := s.repo.SetUserSymbolROI(ctx, userID, symbol, req.ROIPercent); err != nil {
 			fmt.Printf("[API] Failed to save symbol ROI target for user %s: %v\n", userID, err)

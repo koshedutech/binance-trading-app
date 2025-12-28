@@ -93,8 +93,17 @@ export interface SpotDecisionStats {
   message?: string;
 }
 
+// Token storage keys
+const ACCESS_TOKEN_KEY = 'access_token';
+const REFRESH_TOKEN_KEY = 'refresh_token';
+
 class SpotAutopilotAPIService {
   private client: AxiosInstance;
+  private isRefreshing = false;
+  private failedQueue: Array<{
+    resolve: (token: string) => void;
+    reject: (error: unknown) => void;
+  }> = [];
 
   constructor() {
     this.client = axios.create({
@@ -108,7 +117,7 @@ class SpotAutopilotAPIService {
     // Request interceptor to add auth token
     this.client.interceptors.request.use(
       (config) => {
-        const token = localStorage.getItem('access_token');
+        const token = localStorage.getItem(ACCESS_TOKEN_KEY);
         if (token) {
           config.headers = config.headers || {};
           config.headers.Authorization = `Bearer ${token}`;
@@ -120,9 +129,67 @@ class SpotAutopilotAPIService {
       }
     );
 
+    // Response interceptor for error handling and token refresh
     this.client.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
+        const originalRequest = error.config;
+
+        // Handle 401 Unauthorized - attempt token refresh
+        if (error.response?.status === 401 && !originalRequest._retry) {
+          if (this.isRefreshing) {
+            // Queue the request while refreshing
+            return new Promise((resolve, reject) => {
+              this.failedQueue.push({ resolve, reject });
+            }).then((token) => {
+              originalRequest.headers.Authorization = `Bearer ${token}`;
+              return this.client(originalRequest);
+            });
+          }
+
+          originalRequest._retry = true;
+          this.isRefreshing = true;
+
+          try {
+            const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+            if (!refreshToken) {
+              throw new Error('No refresh token');
+            }
+
+            const response = await axios.post('/api/auth/refresh', {
+              refresh_token: refreshToken,
+            });
+
+            const { access_token, refresh_token: newRefreshToken } = response.data;
+            localStorage.setItem(ACCESS_TOKEN_KEY, access_token);
+            localStorage.setItem(REFRESH_TOKEN_KEY, newRefreshToken);
+
+            // Process queued requests
+            this.failedQueue.forEach((request) => request.resolve(access_token));
+            this.failedQueue = [];
+
+            originalRequest.headers.Authorization = `Bearer ${access_token}`;
+            return this.client(originalRequest);
+          } catch (refreshError) {
+            // Refresh failed, clear tokens and redirect to login
+            localStorage.removeItem(ACCESS_TOKEN_KEY);
+            localStorage.removeItem(REFRESH_TOKEN_KEY);
+            localStorage.removeItem('user');
+
+            // Process queued requests with error
+            this.failedQueue.forEach((request) => request.reject(refreshError));
+            this.failedQueue = [];
+
+            // Redirect to login if not already there
+            if (window.location.pathname !== '/login') {
+              window.location.href = '/login';
+            }
+            return Promise.reject(refreshError);
+          } finally {
+            this.isRefreshing = false;
+          }
+        }
+
         console.error('Spot Autopilot API Error:', error);
         return Promise.reject(error);
       }

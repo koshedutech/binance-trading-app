@@ -810,9 +810,9 @@ func (s *Server) Start() error {
 	s.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second, // Increased for LLM calls and slow operations
+		IdleTimeout:  120 * time.Second,
 	}
 
 	log.Printf("Starting HTTP server on %s", addr)
