@@ -131,6 +131,11 @@ func main() {
 		log.Printf("Warning: AI migrations failed (table may already exist): %v", err)
 	}
 
+	// Run Trade-AI link migrations (adds ai_decision_id to trades table)
+	if err := db.RunTradeAILinkMigration(ctx); err != nil {
+		log.Printf("Warning: Trade-AI link migrations failed: %v", err)
+	}
+
 	// Run Futures migrations if enabled
 	if cfg.FuturesConfig.Enabled {
 		if err := db.RunFuturesMigrations(ctx); err != nil {
