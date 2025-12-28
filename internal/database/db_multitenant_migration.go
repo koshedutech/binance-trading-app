@@ -392,6 +392,9 @@ func (db *DB) RunMultiTenantMigrations(ctx context.Context) error {
 		// AI API KEYS TABLE
 		// =====================================================
 
+		// Add dry_run_mode column to user_trading_configs (per-user paper/live mode)
+		`ALTER TABLE user_trading_configs ADD COLUMN IF NOT EXISTS dry_run_mode BOOLEAN DEFAULT TRUE`,
+
 		// Create user AI keys table for per-user AI provider API keys
 		`CREATE TABLE IF NOT EXISTS user_ai_keys (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
