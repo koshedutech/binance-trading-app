@@ -847,91 +847,10 @@ type AutopilotSettings struct {
 	ProfitReinvestPercent   float64 `json:"profit_reinvest_percent"`   // % of profit to reinvest
 	ProfitReinvestRiskLevel string  `json:"profit_reinvest_risk_level"` // Risk level for reinvested profits
 
-	// Ginie-specific settings
-	// Deprecated: Use ModeConfigs[mode].Risk.RiskLevel instead. Will be migrated automatically.
-	GinieRiskLevel     string  `json:"ginie_risk_level"`      // conservative/moderate/aggressive
-	GinieDryRunMode    bool    `json:"ginie_dry_run_mode"`    // Paper trading mode for Ginie
-	GinieAutoStart     bool    `json:"ginie_auto_start"`      // Auto-start Ginie on server restart
-	GinieMaxUSD        float64 `json:"ginie_max_usd"`         // Max USD per position for Ginie
-	GinieLeverage      int     `json:"ginie_leverage"`        // Default leverage for Ginie
-	GinieMinConfidence float64 `json:"ginie_min_confidence"`  // Min confidence to trade
-	GinieMaxPositions  int     `json:"ginie_max_positions"`   // Max concurrent positions for Ginie
-
-	// Ginie trend detection timeframes (per mode)
-	// Deprecated: Use ModeConfigs["ultrafast"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
-	GinieTrendTimeframeUltrafast string `json:"ginie_trend_timeframe_ultrafast"` // e.g., "5m"
-	// Deprecated: Use ModeConfigs["scalp"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
-	GinieTrendTimeframeScalp    string `json:"ginie_trend_timeframe_scalp"`    // e.g., "15m"
-	// Deprecated: Use ModeConfigs["swing"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
-	GinieTrendTimeframeSwing    string `json:"ginie_trend_timeframe_swing"`    // e.g., "1h"
-	// Deprecated: Use ModeConfigs["position"].Timeframe.TrendTimeframe instead. Will be migrated automatically.
-	GinieTrendTimeframePosition string `json:"ginie_trend_timeframe_position"` // e.g., "4h"
-
-	// Ginie divergence detection
-	// Deprecated: Use ModeConfigs[mode].TrendDivergence.BlockOnDivergence instead. Will be migrated automatically.
-	GinieBlockOnDivergence bool `json:"ginie_block_on_divergence"` // Block trades when timeframe divergence detected
-
-	// Ginie SL/TP manual overrides (per mode) - if set (> 0), override ATR/LLM calculations
-	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.StopLossPercent instead. Will be migrated automatically.
-	GinieSLPercentUltrafast    float64 `json:"ginie_sl_percent_ultrafast"`    // e.g., 0.5 (0.5%)
-	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
-	GinieTPPercentUltrafast    float64 `json:"ginie_tp_percent_ultrafast"`    // e.g., 1.0 (1%)
-	// Deprecated: Use ModeConfigs["scalp"].SLTP.StopLossPercent instead. Will be migrated automatically.
-	GinieSLPercentScalp        float64 `json:"ginie_sl_percent_scalp"`        // e.g., 1.0 (1%)
-	// Deprecated: Use ModeConfigs["scalp"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
-	GinieTPPercentScalp        float64 `json:"ginie_tp_percent_scalp"`        // e.g., 2.0 (2%)
-	// Deprecated: Use ModeConfigs["swing"].SLTP.StopLossPercent instead. Will be migrated automatically.
-	GinieSLPercentSwing        float64 `json:"ginie_sl_percent_swing"`        // e.g., 2.0 (2%)
-	// Deprecated: Use ModeConfigs["swing"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
-	GinieTPPercentSwing        float64 `json:"ginie_tp_percent_swing"`        // e.g., 6.0 (6%)
-	// Deprecated: Use ModeConfigs["position"].SLTP.StopLossPercent instead. Will be migrated automatically.
-	GinieSLPercentPosition     float64 `json:"ginie_sl_percent_position"`     // e.g., 3.0 (3%)
-	// Deprecated: Use ModeConfigs["position"].SLTP.TakeProfitPercent instead. Will be migrated automatically.
-	GinieTPPercentPosition     float64 `json:"ginie_tp_percent_position"`     // e.g., 10.0 (10%)
-
-	// Trailing stop configuration (per mode)
-	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
-	GinieTrailingStopEnabledUltrafast       bool    `json:"ginie_trailing_stop_enabled_ultrafast"`
-	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
-	GinieTrailingStopPercentUltrafast       float64 `json:"ginie_trailing_stop_percent_ultrafast"`       // e.g., 0.1%
-	// Deprecated: Use ModeConfigs["ultrafast"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
-	GinieTrailingStopActivationUltrafast    float64 `json:"ginie_trailing_stop_activation_ultrafast"`    // e.g., 0.2% profit
-
-	// Deprecated: Use ModeConfigs["scalp"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
-	GinieTrailingStopEnabledScalp           bool    `json:"ginie_trailing_stop_enabled_scalp"`
-	// Deprecated: Use ModeConfigs["scalp"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
-	GinieTrailingStopPercentScalp           float64 `json:"ginie_trailing_stop_percent_scalp"`       // e.g., 0.3%
-	// Deprecated: Use ModeConfigs["scalp"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
-	GinieTrailingStopActivationScalp        float64 `json:"ginie_trailing_stop_activation_scalp"`    // e.g., 0.5% profit
-
-	// Deprecated: Use ModeConfigs["swing"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
-	GinieTrailingStopEnabledSwing           bool    `json:"ginie_trailing_stop_enabled_swing"`
-	// Deprecated: Use ModeConfigs["swing"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
-	GinieTrailingStopPercentSwing           float64 `json:"ginie_trailing_stop_percent_swing"`       // e.g., 1.5%
-	// Deprecated: Use ModeConfigs["swing"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
-	GinieTrailingStopActivationSwing        float64 `json:"ginie_trailing_stop_activation_swing"`    // e.g., 1.0% profit
-
-	// Deprecated: Use ModeConfigs["position"].SLTP.TrailingStopEnabled instead. Will be migrated automatically.
-	GinieTrailingStopEnabledPosition        bool    `json:"ginie_trailing_stop_enabled_position"`
-	// Deprecated: Use ModeConfigs["position"].SLTP.TrailingStopPercent instead. Will be migrated automatically.
-	GinieTrailingStopPercentPosition        float64 `json:"ginie_trailing_stop_percent_position"`    // e.g., 3.0%
-	// Deprecated: Use ModeConfigs["position"].SLTP.TrailingStopActivation instead. Will be migrated automatically.
-	GinieTrailingStopActivationPosition     float64 `json:"ginie_trailing_stop_activation_position"` // e.g., 2.0% profit
-
-	// TP mode configuration (global and per-mode)
-	GinieUseSingleTP          bool    `json:"ginie_use_single_tp"`           // true = 100% at TP1, false = 4-level (global fallback)
-	GinieUseSingleTPUltrafast bool    `json:"ginie_use_single_tp_ultrafast"` // Ultra-fast: always single TP
-	GinieUseSingleTPScalp     bool    `json:"ginie_use_single_tp_scalp"`     // Scalp: single TP mode
-	GinieSingleTPPercent      float64 `json:"ginie_single_tp_percent"`       // If single TP, this is the gain %
-
-	// Trailing stop activation mode: "immediate" (default), "after_tp1", "after_breakeven", "after_tp1_and_breakeven"
-	GinieTrailingActivationMode string `json:"ginie_trailing_activation_mode"` // When to activate trailing
-
-	// TP allocation for multi-TP mode (if not using single TP)
-	GinieTP1Percent float64 `json:"ginie_tp1_percent"` // e.g., 25.0 (25%)
-	GinieTP2Percent float64 `json:"ginie_tp2_percent"` // e.g., 25.0 (25%)
-	GinieTP3Percent float64 `json:"ginie_tp3_percent"` // e.g., 25.0 (25%)
-	GinieTP4Percent float64 `json:"ginie_tp4_percent"` // e.g., 25.0 (25%)
+	// Ginie global settings (not per-mode)
+	GinieDryRunMode   bool `json:"ginie_dry_run_mode"`   // Paper trading mode for Ginie
+	GinieAutoStart    bool `json:"ginie_auto_start"`     // Auto-start Ginie on server restart
+	GinieMaxPositions int  `json:"ginie_max_positions"`  // Max concurrent positions for Ginie
 
 	// Ginie PnL statistics (persisted)
 	GinieTotalPnL      float64 `json:"ginie_total_pnl"`       // Lifetime realized PnL
@@ -1131,65 +1050,10 @@ func DefaultSettings() *AutopilotSettings {
 		ProfitReinvestPercent:   50,
 		ProfitReinvestRiskLevel: "aggressive",
 
-		// Ginie defaults
-		GinieRiskLevel:     "moderate",
-		GinieDryRunMode:    false, // Default to LIVE mode, not PAPER mode
-		GinieAutoStart:     false, // Don't auto-start by default
-		GinieMaxUSD:        500,
-		GinieLeverage:      10,
-		GinieMinConfidence: 50.0, // FIXED: Lowered from 65% to match user expectations
-		GinieMaxPositions:  10,
-
-		// Ginie trend timeframe defaults (per mode)
-		GinieTrendTimeframeUltrafast: "5m",
-		GinieTrendTimeframeScalp:    "15m",
-		GinieTrendTimeframeSwing:    "1h",
-		GinieTrendTimeframePosition: "4h",
-
-		// Ginie divergence detection
-		GinieBlockOnDivergence: true, // Default to safest mode (block on severe divergence)
-
-		// Ginie SL/TP manual overrides (0 = use ATR/LLM blend)
-		GinieSLPercentUltrafast:    0,   // Disabled, use ATR/LLM
-		GinieTPPercentUltrafast:    0,   // Disabled, use ATR/LLM
-		GinieSLPercentScalp:        0,   // Disabled, use ATR/LLM
-		GinieTPPercentScalp:        0,   // Disabled, use ATR/LLM
-		GinieSLPercentSwing:        0,   // Disabled, use ATR/LLM
-		GinieTPPercentSwing:        0,   // Disabled, use ATR/LLM
-		GinieSLPercentPosition:     0,   // Disabled, use ATR/LLM
-		GinieTPPercentPosition:     0,   // Disabled, use ATR/LLM
-
-		// Ginie trailing stop defaults (match current hardcoded values)
-		GinieTrailingStopEnabledUltrafast:       false, // Ultra-fast: NO trailing, only SL/TP
-		GinieTrailingStopPercentUltrafast:       0,    // Disabled
-		GinieTrailingStopActivationUltrafast:    0,    // Disabled
-
-		GinieTrailingStopEnabledScalp:           false, // Scalp: NO trailing, only SL/TP
-		GinieTrailingStopPercentScalp:           0,     // Disabled
-		GinieTrailingStopActivationScalp:        0,     // Disabled
-
-		GinieTrailingStopEnabledSwing:           true,
-		GinieTrailingStopPercentSwing:           1.5,  // 1.5%
-		GinieTrailingStopActivationSwing:        1.0,  // After 1% profit
-
-		GinieTrailingStopEnabledPosition:        true,
-		GinieTrailingStopPercentPosition:        3.0,  // 3.0%
-		GinieTrailingStopActivationPosition:     2.0,  // After 2% profit
-
-		// Ginie TP mode (per-mode single TP settings)
-		GinieUseSingleTP:          false, // Global fallback: Use multi-TP
-		GinieUseSingleTPUltrafast: true,  // Ultra-fast: ALWAYS single TP (100% at TP)
-		GinieUseSingleTPScalp:     true,  // Scalp: Single TP for quick exits
-		GinieSingleTPPercent:      5.0,   // If single TP enabled, 5% gain
-
-		// Trailing activation mode: trailing only activates after TP1 AND breakeven
-		GinieTrailingActivationMode: "after_tp1_and_breakeven",
-
-		// Ginie TP allocation (current default: 25% each)
-		GinieTP1Percent: 25.0,
-		GinieTP2Percent: 25.0,
-		GinieTP3Percent: 25.0,
-		GinieTP4Percent: 25.0,
+		// Ginie global defaults (per-mode settings are in ModeConfigs)
+		GinieDryRunMode:   false, // Default to LIVE mode, not PAPER mode
+		GinieAutoStart:    false, // Don't auto-start by default
+		GinieMaxPositions: 10,
 
 		// Auto Mode defaults (LLM-driven trading)
 		AutoModeEnabled:          false, // Disabled by default - user must opt in
@@ -1392,24 +1256,13 @@ func patchMigrateTPAllocation(settings *AutopilotSettings) bool {
 	modes := []string{"ultra_fast", "scalp", "swing", "position"}
 	migrated := false
 
-	// Build global TP allocation from global settings
-	globalTPAllocation := []float64{
-		settings.GinieTP1Percent,
-		settings.GinieTP2Percent,
-		settings.GinieTP3Percent,
-		settings.GinieTP4Percent,
-	}
-
-	// Default allocations per mode (if global is all zeros)
+	// Default allocations per mode
 	defaultAllocations := map[string][]float64{
-		"ultra_fast": {100, 0, 0, 0},  // 100% at TP1
-		"scalp":      {100, 0, 0, 0},  // 100% at TP1
-		"swing":      {50, 50, 0, 0},  // 50% at TP1, 50% at TP2
+		"ultra_fast": {100, 0, 0, 0},   // 100% at TP1
+		"scalp":      {100, 0, 0, 0},   // 100% at TP1
+		"swing":      {50, 50, 0, 0},   // 50% at TP1, 50% at TP2
 		"position":   {40, 30, 20, 10}, // Multi-level
 	}
-
-	hasGlobalAllocation := settings.GinieTP1Percent > 0 || settings.GinieTP2Percent > 0 ||
-		settings.GinieTP3Percent > 0 || settings.GinieTP4Percent > 0
 
 	for _, mode := range modes {
 		cfg := settings.ModeConfigs[mode]
@@ -1419,36 +1272,27 @@ func patchMigrateTPAllocation(settings *AutopilotSettings) bool {
 
 		// Check if TPAllocation is missing or empty
 		if cfg.SLTP.TPAllocation == nil || len(cfg.SLTP.TPAllocation) == 0 {
-			if hasGlobalAllocation {
-				// Use global allocation for multi-TP modes
-				if !cfg.SLTP.UseSingleTP {
-					cfg.SLTP.TPAllocation = globalTPAllocation
-					log.Printf("[PATCH-MIGRATION] Applied global TPAllocation to %s: %v", mode, globalTPAllocation)
-					migrated = true
-				} else {
-					// For single-TP modes, set 100% at TP1
-					cfg.SLTP.TPAllocation = []float64{100, 0, 0, 0}
-					log.Printf("[PATCH-MIGRATION] Applied single-TP allocation to %s: [100, 0, 0, 0]", mode)
-					migrated = true
-				}
+			if cfg.SLTP.UseSingleTP {
+				// For single-TP modes, set 100% at TP1
+				cfg.SLTP.TPAllocation = []float64{100, 0, 0, 0}
+				log.Printf("[PATCH-MIGRATION] Applied single-TP allocation to %s: [100, 0, 0, 0]", mode)
 			} else {
 				// Use defaults for each mode
 				cfg.SLTP.TPAllocation = defaultAllocations[mode]
 				log.Printf("[PATCH-MIGRATION] Applied default TPAllocation to %s: %v", mode, defaultAllocations[mode])
-				migrated = true
 			}
+			migrated = true
 		}
 	}
 
 	return migrated
 }
 
-// migrateSettings migrates legacy autopilot_settings.json to the consolidated ModeConfigs structure.
+// migrateSettings ensures ModeConfigs are properly initialized for new or legacy settings.
 // This function is idempotent - safe to run multiple times.
-// Legacy fields remain populated for rollback safety.
-// Returns true if migration was performed, false if already migrated or no migration needed.
+// Returns true if migration was performed, false if already migrated.
 func migrateSettings(settings *AutopilotSettings) bool {
-	// Always run patch migrations to fix missing fields in v2
+	// Always run patch migrations to fix missing fields
 	patchMigrated := patchMigrateTPAllocation(settings)
 
 	// Already migrated to v2 or higher - no full migration needed
@@ -1461,7 +1305,7 @@ func migrateSettings(settings *AutopilotSettings) bool {
 		settings.ModeConfigs = make(map[string]*ModeFullConfig)
 	}
 
-	// Initialize mode configs if they don't exist
+	// Initialize mode configs with defaults if they don't exist
 	modes := []string{"ultra_fast", "scalp", "swing", "position"}
 	for _, mode := range modes {
 		if settings.ModeConfigs[mode] == nil {
@@ -1474,153 +1318,74 @@ func migrateSettings(settings *AutopilotSettings) bool {
 		ensureModeSubConfigs(settings.ModeConfigs[mode])
 	}
 
-	// ====== MIGRATE TRAILING STOP SETTINGS ======
-	// Scalp trailing stop
-	if settings.GinieTrailingStopPercentScalp > 0 {
-		settings.ModeConfigs["scalp"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentScalp
-	}
-	if settings.GinieTrailingStopActivationScalp > 0 {
-		settings.ModeConfigs["scalp"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationScalp
-	}
-	settings.ModeConfigs["scalp"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledScalp
-
-	// Swing trailing stop
-	if settings.GinieTrailingStopPercentSwing > 0 {
-		settings.ModeConfigs["swing"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentSwing
-	}
-	if settings.GinieTrailingStopActivationSwing > 0 {
-		settings.ModeConfigs["swing"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationSwing
-	}
-	settings.ModeConfigs["swing"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledSwing
-
-	// Position trailing stop
-	if settings.GinieTrailingStopPercentPosition > 0 {
-		settings.ModeConfigs["position"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentPosition
-	}
-	if settings.GinieTrailingStopActivationPosition > 0 {
-		settings.ModeConfigs["position"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationPosition
-	}
-	settings.ModeConfigs["position"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledPosition
-
-	// Ultra-fast trailing stop
-	if settings.GinieTrailingStopPercentUltrafast > 0 {
-		settings.ModeConfigs["ultra_fast"].SLTP.TrailingStopPercent = settings.GinieTrailingStopPercentUltrafast
-	}
-	if settings.GinieTrailingStopActivationUltrafast > 0 {
-		settings.ModeConfigs["ultra_fast"].SLTP.TrailingStopActivation = settings.GinieTrailingStopActivationUltrafast
-	}
-	settings.ModeConfigs["ultra_fast"].SLTP.TrailingStopEnabled = settings.GinieTrailingStopEnabledUltrafast
-
-	// ====== MIGRATE TIMEFRAME SETTINGS ======
-	// Scalp timeframe -> TrendTimeframe
-	if settings.GinieTrendTimeframeScalp != "" {
-		settings.ModeConfigs["scalp"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframeScalp
-	}
-	// Swing timeframe -> TrendTimeframe
-	if settings.GinieTrendTimeframeSwing != "" {
-		settings.ModeConfigs["swing"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframeSwing
-	}
-	// Position timeframe -> TrendTimeframe
-	if settings.GinieTrendTimeframePosition != "" {
-		settings.ModeConfigs["position"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframePosition
-	}
-	// Ultra-fast timeframe -> TrendTimeframe
-	if settings.GinieTrendTimeframeUltrafast != "" {
-		settings.ModeConfigs["ultra_fast"].Timeframe.TrendTimeframe = settings.GinieTrendTimeframeUltrafast
-	}
-
-	// ====== MIGRATE SL/TP PERCENT SETTINGS ======
-	// These override ATR/LLM calculations if set (> 0)
-	if settings.GinieSLPercentScalp > 0 {
-		settings.ModeConfigs["scalp"].SLTP.StopLossPercent = settings.GinieSLPercentScalp
-	}
-	if settings.GinieTPPercentScalp > 0 {
-		settings.ModeConfigs["scalp"].SLTP.TakeProfitPercent = settings.GinieTPPercentScalp
-	}
-	if settings.GinieSLPercentSwing > 0 {
-		settings.ModeConfigs["swing"].SLTP.StopLossPercent = settings.GinieSLPercentSwing
-	}
-	if settings.GinieTPPercentSwing > 0 {
-		settings.ModeConfigs["swing"].SLTP.TakeProfitPercent = settings.GinieTPPercentSwing
-	}
-	if settings.GinieSLPercentPosition > 0 {
-		settings.ModeConfigs["position"].SLTP.StopLossPercent = settings.GinieSLPercentPosition
-	}
-	if settings.GinieTPPercentPosition > 0 {
-		settings.ModeConfigs["position"].SLTP.TakeProfitPercent = settings.GinieTPPercentPosition
-	}
-	if settings.GinieSLPercentUltrafast > 0 {
-		settings.ModeConfigs["ultra_fast"].SLTP.StopLossPercent = settings.GinieSLPercentUltrafast
-	}
-	if settings.GinieTPPercentUltrafast > 0 {
-		settings.ModeConfigs["ultra_fast"].SLTP.TakeProfitPercent = settings.GinieTPPercentUltrafast
-	}
-
-	// ====== MIGRATE SINGLE TP MODE SETTINGS ======
-	settings.ModeConfigs["ultra_fast"].SLTP.UseSingleTP = settings.GinieUseSingleTPUltrafast
-	settings.ModeConfigs["scalp"].SLTP.UseSingleTP = settings.GinieUseSingleTPScalp
-	// Swing and position default to multi-TP, but can be overridden by global setting
-	if settings.GinieUseSingleTP {
-		settings.ModeConfigs["swing"].SLTP.UseSingleTP = settings.GinieUseSingleTP
-		settings.ModeConfigs["position"].SLTP.UseSingleTP = settings.GinieUseSingleTP
-	}
-
-	// ====== MIGRATE SINGLE TP PERCENT (new field) ======
-	if settings.GinieSingleTPPercent > 0 {
-		// Apply to all modes as fallback (will be overwritten by mode-specific TP% below)
-		for _, mode := range modes {
-			if settings.ModeConfigs[mode].SLTP.SingleTPPercent == 0 {
-				settings.ModeConfigs[mode].SLTP.SingleTPPercent = settings.GinieSingleTPPercent
-			}
-		}
-	}
-	// Override with mode-specific TP percentages
-	if settings.GinieTPPercentUltrafast > 0 {
-		settings.ModeConfigs["ultra_fast"].SLTP.SingleTPPercent = settings.GinieTPPercentUltrafast
-	}
-	if settings.GinieTPPercentScalp > 0 {
-		settings.ModeConfigs["scalp"].SLTP.SingleTPPercent = settings.GinieTPPercentScalp
-	}
-	if settings.GinieTPPercentSwing > 0 {
-		settings.ModeConfigs["swing"].SLTP.SingleTPPercent = settings.GinieTPPercentSwing
-	}
-	if settings.GinieTPPercentPosition > 0 {
-		settings.ModeConfigs["position"].SLTP.SingleTPPercent = settings.GinieTPPercentPosition
-	}
-
-	// ====== MIGRATE TRAILING ACTIVATION MODE (new field) ======
-	if settings.GinieTrailingActivationMode != "" {
-		for _, mode := range modes {
-			if settings.ModeConfigs[mode].SLTP.TrailingActivationMode == "" {
-				settings.ModeConfigs[mode].SLTP.TrailingActivationMode = settings.GinieTrailingActivationMode
-			}
-		}
-	}
-
-	// ====== MIGRATE TP ALLOCATION (new field) ======
-	// Convert global TP1/TP2/TP3/TP4 percent to per-mode TPAllocation array
-	if settings.GinieTP1Percent > 0 || settings.GinieTP2Percent > 0 ||
-		settings.GinieTP3Percent > 0 || settings.GinieTP4Percent > 0 {
-		globalTPAllocation := []float64{
-			settings.GinieTP1Percent,
-			settings.GinieTP2Percent,
-			settings.GinieTP3Percent,
-			settings.GinieTP4Percent,
-		}
-		// Apply to modes that use multi-TP and don't have allocation set
-		for _, mode := range modes {
-			if !settings.ModeConfigs[mode].SLTP.UseSingleTP &&
-				(settings.ModeConfigs[mode].SLTP.TPAllocation == nil ||
-					len(settings.ModeConfigs[mode].SLTP.TPAllocation) == 0) {
-				settings.ModeConfigs[mode].SLTP.TPAllocation = globalTPAllocation
-			}
-		}
-	}
+	// Apply sensible defaults for each mode
+	applyModeDefaults(settings)
 
 	// Bump version to v2 after successful migration
 	settings.SettingsVersion = SettingsVersionConsolidated
 
 	return true
+}
+
+// applyModeDefaults sets sensible defaults for each trading mode
+func applyModeDefaults(settings *AutopilotSettings) {
+	// Ultra-fast defaults
+	if cfg := settings.ModeConfigs["ultra_fast"]; cfg != nil && cfg.SLTP != nil {
+		if cfg.SLTP.TrailingActivationMode == "" {
+			cfg.SLTP.TrailingActivationMode = "immediate"
+		}
+		cfg.SLTP.UseSingleTP = true
+		if cfg.SLTP.SingleTPPercent == 0 {
+			cfg.SLTP.SingleTPPercent = 1.0
+		}
+		if cfg.Timeframe != nil && cfg.Timeframe.TrendTimeframe == "" {
+			cfg.Timeframe.TrendTimeframe = "5m"
+		}
+	}
+
+	// Scalp defaults
+	if cfg := settings.ModeConfigs["scalp"]; cfg != nil && cfg.SLTP != nil {
+		if cfg.SLTP.TrailingActivationMode == "" {
+			cfg.SLTP.TrailingActivationMode = "after_breakeven"
+		}
+		cfg.SLTP.UseSingleTP = true
+		if cfg.SLTP.SingleTPPercent == 0 {
+			cfg.SLTP.SingleTPPercent = 2.0
+		}
+		if cfg.Timeframe != nil && cfg.Timeframe.TrendTimeframe == "" {
+			cfg.Timeframe.TrendTimeframe = "15m"
+		}
+	}
+
+	// Swing defaults
+	if cfg := settings.ModeConfigs["swing"]; cfg != nil && cfg.SLTP != nil {
+		if cfg.SLTP.TrailingActivationMode == "" {
+			cfg.SLTP.TrailingActivationMode = "after_tp1_and_breakeven"
+		}
+		if !cfg.SLTP.TrailingStopEnabled {
+			cfg.SLTP.TrailingStopEnabled = true
+			cfg.SLTP.TrailingStopPercent = 1.5
+			cfg.SLTP.TrailingStopActivation = 1.0
+		}
+		if cfg.Timeframe != nil && cfg.Timeframe.TrendTimeframe == "" {
+			cfg.Timeframe.TrendTimeframe = "1h"
+		}
+	}
+
+	// Position defaults
+	if cfg := settings.ModeConfigs["position"]; cfg != nil && cfg.SLTP != nil {
+		if cfg.SLTP.TrailingActivationMode == "" {
+			cfg.SLTP.TrailingActivationMode = "after_tp1_and_breakeven"
+		}
+		if !cfg.SLTP.TrailingStopEnabled {
+			cfg.SLTP.TrailingStopEnabled = true
+			cfg.SLTP.TrailingStopPercent = 3.0
+			cfg.SLTP.TrailingStopActivation = 2.0
+		}
+		if cfg.Timeframe != nil && cfg.Timeframe.TrendTimeframe == "" {
+			cfg.Timeframe.TrendTimeframe = "4h"
+		}
+	}
 }
 
 // ensureModeSubConfigs ensures all sub-configurations exist for a mode
@@ -2033,27 +1798,11 @@ func (sm *SettingsManager) UpdateGinieRiskLevel(riskLevel string) error {
 		}
 	}
 
-	// Also update global settings for backwards compatibility during transition
-	settings.GinieRiskLevel = riskLevel
-	switch riskLevel {
-	case "conservative":
-		settings.GinieMinConfidence = 60.0
-		settings.GinieMaxUSD = 300
-		settings.GinieLeverage = 3
-	case "moderate":
-		settings.GinieMinConfidence = 50.0
-		settings.GinieMaxUSD = 500
-		settings.GinieLeverage = 5
-	case "aggressive":
-		settings.GinieMinConfidence = 45.0
-		settings.GinieMaxUSD = 800
-		settings.GinieLeverage = 10
-	}
-
 	return sm.SaveSettings(settings)
 }
 
-// UpdateGinieSettings updates all Ginie-specific settings
+// UpdateGinieSettings updates Ginie settings via ModeConfigs.
+// Only dryRun and maxPositions are still global settings.
 func (sm *SettingsManager) UpdateGinieSettings(
 	riskLevel string,
 	dryRun bool,
@@ -2064,21 +1813,36 @@ func (sm *SettingsManager) UpdateGinieSettings(
 ) error {
 	settings := sm.GetCurrentSettings()
 
+	// Update risk level via ModeConfigs
 	if riskLevel != "" {
-		settings.GinieRiskLevel = riskLevel
+		if err := sm.UpdateGinieRiskLevel(riskLevel); err != nil {
+			return err
+		}
+		settings = sm.GetCurrentSettings() // Refresh after update
 	}
+
+	// Global settings that don't belong to ModeConfigs
 	settings.GinieDryRunMode = dryRun
-	if maxUSD > 0 {
-		settings.GinieMaxUSD = maxUSD
-	}
-	if leverage > 0 {
-		settings.GinieLeverage = leverage
-	}
-	if minConfidence > 0 {
-		settings.GinieMinConfidence = minConfidence
-	}
 	if maxPositions > 0 {
 		settings.GinieMaxPositions = maxPositions
+	}
+
+	// Update size/confidence in ModeConfigs for all modes
+	for _, modeKey := range []string{"ultra_fast", "scalp", "swing", "position"} {
+		if mc := settings.ModeConfigs[modeKey]; mc != nil {
+			if maxUSD > 0 {
+				if mc.Size == nil {
+					mc.Size = &ModeSizeConfig{}
+				}
+				mc.Size.MaxSizeUSD = maxUSD
+			}
+			if minConfidence > 0 {
+				if mc.Confidence == nil {
+					mc.Confidence = &ModeConfidenceConfig{}
+				}
+				mc.Confidence.MinConfidence = minConfidence
+			}
+		}
 	}
 
 	return sm.SaveSettings(settings)
@@ -2171,21 +1935,6 @@ func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 		}
 	}
 
-	// Also update legacy fields for backwards compatibility
-	if ultrafastTF != "" {
-		settings.GinieTrendTimeframeUltrafast = ultrafastTF
-	}
-	if scalpTF != "" {
-		settings.GinieTrendTimeframeScalp = scalpTF
-	}
-	if swingTF != "" {
-		settings.GinieTrendTimeframeSwing = swingTF
-	}
-	if positionTF != "" {
-		settings.GinieTrendTimeframePosition = positionTF
-	}
-	settings.GinieBlockOnDivergence = blockOnDivergence
-
 	return sm.SaveSettings(settings)
 }
 
@@ -2244,7 +1993,7 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 
 	settings := sm.GetCurrentSettings()
 
-	// Update ModeConfigs (primary)
+	// Update ModeConfigs
 	if mc := settings.ModeConfigs[mode]; mc != nil {
 		if mc.SLTP == nil {
 			mc.SLTP = &ModeSLTPConfig{}
@@ -2256,33 +2005,10 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		mc.SLTP.TrailingStopActivation = trailingActivation
 	}
 
-	// Also update legacy fields for backwards compatibility
-	switch mode {
-	case "scalp":
-		settings.GinieSLPercentScalp = slPercent
-		settings.GinieTPPercentScalp = tpPercent
-		settings.GinieTrailingStopEnabledScalp = trailingEnabled
-		settings.GinieTrailingStopPercentScalp = trailingPercent
-		settings.GinieTrailingStopActivationScalp = trailingActivation
-	case "swing":
-		settings.GinieSLPercentSwing = slPercent
-		settings.GinieTPPercentSwing = tpPercent
-		settings.GinieTrailingStopEnabledSwing = trailingEnabled
-		settings.GinieTrailingStopPercentSwing = trailingPercent
-		settings.GinieTrailingStopActivationSwing = trailingActivation
-	case "position":
-		settings.GinieSLPercentPosition = slPercent
-		settings.GinieTPPercentPosition = tpPercent
-		settings.GinieTrailingStopEnabledPosition = trailingEnabled
-		settings.GinieTrailingStopPercentPosition = trailingPercent
-		settings.GinieTrailingStopActivationPosition = trailingActivation
-	}
-
 	return sm.SaveSettings(settings)
 }
 
-// UpdateGinieTPMode updates the TP mode (single vs multi) and allocation
-// This function updates ModeConfigs (primary) and legacy fields (backwards compat).
+// UpdateGinieTPMode updates the TP mode (single vs multi) and allocation via ModeConfigs.
 func (sm *SettingsManager) UpdateGinieTPMode(
 	useSingleTP bool,
 	singleTPPercent float64,
@@ -2300,7 +2026,7 @@ func (sm *SettingsManager) UpdateGinieTPMode(
 
 	settings := sm.GetCurrentSettings()
 
-	// Update ModeConfigs (primary) - TP mode is global, applies to all modes
+	// Update ModeConfigs - TP mode applies to all modes
 	for _, modeKey := range []string{"ultra_fast", "scalp", "swing", "position"} {
 		if mc := settings.ModeConfigs[modeKey]; mc != nil {
 			if mc.SLTP == nil {
@@ -2311,14 +2037,6 @@ func (sm *SettingsManager) UpdateGinieTPMode(
 			mc.SLTP.TPAllocation = []float64{tp1, tp2, tp3, tp4}
 		}
 	}
-
-	// Also update legacy fields for backwards compatibility
-	settings.GinieUseSingleTP = useSingleTP
-	settings.GinieSingleTPPercent = singleTPPercent
-	settings.GinieTP1Percent = tp1
-	settings.GinieTP2Percent = tp2
-	settings.GinieTP3Percent = tp3
-	settings.GinieTP4Percent = tp4
 
 	return sm.SaveSettings(settings)
 }
@@ -2889,8 +2607,8 @@ func (sm *SettingsManager) GetSymbolPerformanceReport() []SymbolPerformanceRepor
 			TotalPnL:       s.TotalPnL,
 			WinRate:        s.WinRate,
 			AvgPnL:         s.AvgPnL,
-			MinConfidence:  sm.GetEffectiveConfidence(s.Symbol, settings.GinieMinConfidence),
-			MaxPositionUSD: sm.GetEffectivePositionSize(s.Symbol, settings.GinieMaxUSD),
+			MinConfidence:  sm.GetEffectiveConfidence(s.Symbol, 50.0),  // Default confidence
+			MaxPositionUSD: sm.GetEffectivePositionSize(s.Symbol, 500), // Default max USD
 			SizeMultiplier: s.SizeMultiplier,
 			Enabled:        s.Enabled,
 		}

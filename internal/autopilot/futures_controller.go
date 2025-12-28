@@ -609,18 +609,18 @@ func (fc *FuturesController) LoadSavedSettings() {
 				ginieConfig.MinConfidenceToTrade = modeConfig.Confidence.MinConfidence
 			}
 		}
-		// Fallback to legacy fields if ModeConfigs not populated (backwards compatibility)
-		if ginieConfig.RiskLevel == "" && settings.GinieRiskLevel != "" {
-			ginieConfig.RiskLevel = settings.GinieRiskLevel
+		// Apply defaults if not set from ModeConfigs
+		if ginieConfig.RiskLevel == "" {
+			ginieConfig.RiskLevel = "moderate"
 		}
-		if ginieConfig.MaxUSDPerPosition == 0 && settings.GinieMaxUSD > 0 {
-			ginieConfig.MaxUSDPerPosition = settings.GinieMaxUSD
+		if ginieConfig.MaxUSDPerPosition == 0 {
+			ginieConfig.MaxUSDPerPosition = 500
 		}
-		if ginieConfig.DefaultLeverage == 0 && settings.GinieLeverage > 0 {
-			ginieConfig.DefaultLeverage = settings.GinieLeverage
+		if ginieConfig.DefaultLeverage == 0 {
+			ginieConfig.DefaultLeverage = 10
 		}
-		if ginieConfig.MinConfidenceToTrade == 0 && settings.GinieMinConfidence > 0 {
-			ginieConfig.MinConfidenceToTrade = settings.GinieMinConfidence
+		if ginieConfig.MinConfidenceToTrade == 0 {
+			ginieConfig.MinConfidenceToTrade = 50.0
 		}
 		if ginieConfig.MaxPositions == 0 && settings.GinieMaxPositions > 0 {
 			ginieConfig.MaxPositions = settings.GinieMaxPositions

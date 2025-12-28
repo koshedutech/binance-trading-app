@@ -1606,7 +1606,6 @@ func (s *Server) handleGetSymbolSettings(c *gin.Context) {
 
 	// Also get category defaults
 	categorySettings := sm.GetCategorySettings()
-	globalSettings := sm.GetCurrentSettings()
 
 	// Apply category adjustments to each symbol's effective values
 	type EnrichedSymbolSettings struct {
@@ -1619,16 +1618,16 @@ func (s *Server) handleGetSymbolSettings(c *gin.Context) {
 	for symbol, settings := range allSettings {
 		enrichedSymbols[symbol] = &EnrichedSymbolSettings{
 			SymbolSettings:      settings,
-			EffectiveConfidence: sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
-			EffectiveMaxUSD:     sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+			EffectiveConfidence: sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
+			EffectiveMaxUSD:     sm.GetEffectivePositionSize(symbol, 500), // Default max USD
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"symbols":          enrichedSymbols,
 		"category_config":  categorySettings,
-		"global_min_confidence": globalSettings.GinieMinConfidence,
-		"global_max_usd":   globalSettings.GinieMaxUSD,
+		"global_min_confidence": 50.0, // Default confidence
+		"global_max_usd":   500.0,     // Default max USD
 	})
 }
 
@@ -1660,13 +1659,12 @@ func (s *Server) handleGetSingleSymbolSettings(c *gin.Context) {
 
 	sm := autopilot.GetSettingsManager()
 	settings := sm.GetSymbolSettings(symbol)
-	globalSettings := sm.GetCurrentSettings()
 
 	c.JSON(http.StatusOK, gin.H{
 		"symbol":              symbol,
 		"settings":            settings,
-		"effective_confidence": sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
-		"effective_max_usd":   sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+		"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
+		"effective_max_usd":   sm.GetEffectivePositionSize(symbol, 500), // Default max USD
 		"enabled":             sm.IsSymbolEnabled(symbol),
 	})
 }
@@ -1729,14 +1727,13 @@ func (s *Server) handleUpdateSymbolSettings(c *gin.Context) {
 		return
 	}
 
-	globalSettings := sm.GetCurrentSettings()
 	c.JSON(http.StatusOK, gin.H{
 		"success":              true,
 		"message":              "Symbol settings updated",
 		"symbol":               symbol,
 		"settings":             sm.GetSymbolSettings(symbol),
-		"effective_confidence": sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
-		"effective_max_usd":    sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+		"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
+		"effective_max_usd":    sm.GetEffectivePositionSize(symbol, 500), // Default max USD
 	})
 }
 
@@ -1844,7 +1841,6 @@ func (s *Server) handleGetSymbolsByCategory(c *gin.Context) {
 	}
 
 	symbols := sm.GetSymbolsByCategory(perfCategory)
-	globalSettings := sm.GetCurrentSettings()
 
 	// Get effective settings for each symbol
 	symbolDetails := make([]map[string]interface{}, 0, len(symbols))
@@ -1855,8 +1851,8 @@ func (s *Server) handleGetSymbolsByCategory(c *gin.Context) {
 			"win_rate":            settings.WinRate,
 			"total_pnl":           settings.TotalPnL,
 			"total_trades":        settings.TotalTrades,
-			"effective_confidence": sm.GetEffectiveConfidence(symbol, globalSettings.GinieMinConfidence),
-			"effective_max_usd":   sm.GetEffectivePositionSize(symbol, globalSettings.GinieMaxUSD),
+			"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
+			"effective_max_usd":   sm.GetEffectivePositionSize(symbol, 500), // Default max USD
 			"enabled":             settings.Enabled,
 		})
 	}
