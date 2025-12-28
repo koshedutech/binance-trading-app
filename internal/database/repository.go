@@ -29,6 +29,22 @@ func (r *Repository) GetDB() *DB {
 	return r.db
 }
 
+// GetUserSymbolROI retrieves per-user custom ROI setting for a specific symbol
+// Returns 0 and error if not found or not implemented
+func (r *Repository) GetUserSymbolROI(ctx context.Context, userID string, symbol string) (float64, error) {
+	// TODO: Implement user-specific symbol ROI settings table
+	// For now, return not found to fall back to shared settings
+	return 0, fmt.Errorf("user symbol ROI not implemented")
+}
+
+// SetUserSymbolROI saves per-user custom ROI setting for a specific symbol
+// Returns error if not implemented
+func (r *Repository) SetUserSymbolROI(ctx context.Context, userID string, symbol string, roiPercent float64) error {
+	// TODO: Implement user-specific symbol ROI settings table
+	// For now, return not implemented error
+	return fmt.Errorf("user symbol ROI not implemented")
+}
+
 // ============================================================================
 // TRADES
 // ============================================================================
