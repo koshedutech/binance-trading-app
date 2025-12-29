@@ -1356,6 +1356,10 @@ func (ga *GinieAutopilot) Start() error {
 	ga.wg.Add(1)
 	go ga.resetHourlyCounters()
 
+	// Start morning auto-block goroutine (blocks worst performers at configured UTC time)
+	ga.wg.Add(1)
+	go ga.morningAutoBlockWorstPerformers()
+
 	// Start periodic orphan order cleanup (every 5 minutes)
 	// This prevents order accumulation from position updates and failed cancellations
 	ga.wg.Add(1)
@@ -1897,6 +1901,23 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 				rank+1, symbol, signal.TrendBias, signal.TrendStrength, signal.EntryConfidence,
 				ranked.EfficiencyScore, ranked.PositionSizeUSD)
 
+			// CRITICAL FIX: Re-check ultra-fast position limit BEFORE executing each trade
+			// This prevents race conditions where multiple signals queue up
+			ga.mu.RLock()
+			currentUFCountNow := 0
+			for _, pos := range ga.positions {
+				if pos.Mode == GinieModeUltraFast {
+					currentUFCountNow++
+				}
+			}
+			ga.mu.RUnlock()
+
+			if currentUFCountNow >= maxUFPositions {
+				log.Printf("[ULTRA-FAST-SCAN] %s: POSITION LIMIT REACHED during scan: %d/%d, SKIP",
+					symbol, currentUFCountNow, maxUFPositions)
+				break // Stop scan since limit is reached
+			}
+
 			// Build signal log entry
 			signalLog := &GinieSignalLog{
 				Symbol:       symbol,
@@ -2111,6 +2132,34 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 		log.Printf("[%s-SCAN] Mode disabled in user settings, skipping scan", mode)
 		return
 	}
+
+	// CRITICAL FIX: Check mode-specific position limit BEFORE scanning any symbols
+	// This prevents the scan from wasting resources when the limit is already reached
+	modeConfig := ga.getModeConfig(mode)
+	maxPositions := ga.config.MaxPositions // Default to global config
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
+		maxPositions = modeConfig.Size.MaxPositions
+	}
+
+	// Count current positions for THIS mode specifically
+	ga.mu.RLock()
+	currentModePositions := 0
+	for _, pos := range ga.positions {
+		if pos.Mode == mode {
+			currentModePositions++
+		}
+	}
+	ga.mu.RUnlock()
+
+	// Early exit if position limit already reached for this mode
+	if currentModePositions >= maxPositions {
+		log.Printf("[%s-SCAN] POSITION LIMIT REACHED: %d/%d positions for this mode, skipping entire scan",
+			mode, currentModePositions, maxPositions)
+		return
+	}
+
+	log.Printf("[%s-SCAN] Position check passed: %d/%d slots used, %d available",
+		mode, currentModePositions, maxPositions, maxPositions-currentModePositions)
 
 	symbols := ga.analyzer.watchSymbols
 
@@ -2454,6 +2503,26 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				"min_required", effectiveMinConfidence,
 				"action", decision.TradeExecution.Action,
 				"mode", decision.SelectedMode)
+
+			// CRITICAL FIX: Re-check mode-specific position limit before EACH trade execution
+			// This prevents race conditions where multiple signals pass initial checks
+			ga.mu.RLock()
+			currentModePositionsNow := 0
+			for _, pos := range ga.positions {
+				if pos.Mode == mode {
+					currentModePositionsNow++
+				}
+			}
+			ga.mu.RUnlock()
+
+			if currentModePositionsNow >= maxPositions {
+				log.Printf("[%s-SCAN] %s: POSITION LIMIT REACHED during scan: %d/%d, SKIP trade",
+					mode, symbol, currentModePositionsNow, maxPositions)
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = fmt.Sprintf("position_limit_reached: %d/%d", currentModePositionsNow, maxPositions)
+				ga.LogSignal(signalLog)
+				continue
+			}
 
 			// Check mode-specific circuit breaker before executing (Story 2.7 Task 2.7.4)
 			canTrade, cbReason := ga.CheckModeCircuitBreaker(mode)
@@ -5528,6 +5597,97 @@ func (ga *GinieAutopilot) resetHourlyCounters() {
 		ga.mu.Unlock()
 
 		ga.logger.Info("Ginie autopilot hourly profit booking metrics reset")
+	}
+}
+
+// morningAutoBlockWorstPerformers runs at a configurable time each morning (UTC)
+// to automatically block worst performing symbols for the entire day
+func (ga *GinieAutopilot) morningAutoBlockWorstPerformers() {
+	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in morning auto-block goroutine - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Morning auto-block panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.morningAutoBlockWorstPerformers()
+		}
+	}()
+
+	sm := GetSettingsManager()
+
+	for {
+		// Get current settings to check if enabled and get scheduled time
+		settings := sm.GetCurrentSettings()
+		if !settings.MorningAutoBlockEnabled {
+			ga.logger.Info("Morning auto-block is disabled, checking again in 1 hour")
+			select {
+			case <-ga.stopChan:
+				ga.logger.Info("Morning auto-block goroutine stopping (disabled)")
+				return
+			case <-time.After(1 * time.Hour):
+				continue
+			}
+		}
+
+		// Calculate next scheduled time (default: 00:05 UTC)
+		hour := settings.MorningAutoBlockHourUTC
+		minute := settings.MorningAutoBlockMinUTC
+		if hour < 0 || hour > 23 {
+			hour = 0
+		}
+		if minute < 0 || minute > 59 {
+			minute = 5
+		}
+
+		now := time.Now().UTC()
+		next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
+
+		// If the scheduled time has already passed today, schedule for tomorrow
+		if now.After(next) {
+			next = next.Add(24 * time.Hour)
+		}
+
+		sleepDuration := time.Until(next)
+		ga.logger.Info("Morning auto-block scheduled",
+			"next_run", next.Format(time.RFC3339),
+			"sleep_duration", sleepDuration.String())
+
+		// Wait until scheduled time or stop signal
+		select {
+		case <-ga.stopChan:
+			ga.logger.Info("Morning auto-block goroutine stopping")
+			return
+		case <-time.After(sleepDuration):
+			// Time to run auto-block
+		}
+
+		// Re-check if still enabled (settings might have changed)
+		settings = sm.GetCurrentSettings()
+		if !settings.MorningAutoBlockEnabled {
+			ga.logger.Info("Morning auto-block was disabled before execution, skipping")
+			continue
+		}
+
+		ga.logger.Info("Running morning auto-block for worst performers")
+
+		// First, clear any expired blocks from yesterday
+		clearedCount := sm.ClearExpiredBlocks()
+		if clearedCount > 0 {
+			ga.logger.Info("Cleared expired symbol blocks", "count", clearedCount)
+		}
+
+		// Then, auto-block worst performers for today
+		blockedSymbols, err := sm.AutoBlockWorstPerformers()
+		if err != nil {
+			ga.logger.Error("Failed to auto-block worst performers", "error", err)
+		} else if len(blockedSymbols) > 0 {
+			ga.logger.Info("Morning auto-block completed",
+				"blocked_count", len(blockedSymbols),
+				"symbols", blockedSymbols)
+		} else {
+			ga.logger.Info("Morning auto-block: no worst performers to block")
+		}
 	}
 }
 

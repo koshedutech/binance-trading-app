@@ -3653,3 +3653,97 @@ func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, response)
 }
+
+// handleGetMorningAutoBlockConfig returns morning auto-block configuration
+// GET /api/futures/autopilot/morning-auto-block/config
+func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Calculate next scheduled time
+	hour := settings.MorningAutoBlockHourUTC
+	minute := settings.MorningAutoBlockMinUTC
+	if hour < 0 || hour > 23 {
+		hour = 0
+	}
+	if minute < 0 || minute > 59 {
+		minute = 5
+	}
+
+	now := time.Now().UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
+	if now.After(next) {
+		next = next.Add(24 * time.Hour)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"enabled":        settings.MorningAutoBlockEnabled,
+		"hour_utc":       hour,
+		"minute_utc":     minute,
+		"next_run":       next.Format(time.RFC3339),
+		"time_until":     time.Until(next).String(),
+	})
+}
+
+// handleUpdateMorningAutoBlockConfig updates morning auto-block configuration
+// POST /api/futures/autopilot/morning-auto-block/config
+func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
+	var req struct {
+		Enabled   *bool `json:"enabled"`
+		HourUTC   *int  `json:"hour_utc"`
+		MinuteUTC *int  `json:"minute_utc"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Update only provided fields
+	if req.Enabled != nil {
+		settings.MorningAutoBlockEnabled = *req.Enabled
+	}
+	if req.HourUTC != nil {
+		if *req.HourUTC < 0 || *req.HourUTC > 23 {
+			errorResponse(c, http.StatusBadRequest, "hour_utc must be 0-23")
+			return
+		}
+		settings.MorningAutoBlockHourUTC = *req.HourUTC
+	}
+	if req.MinuteUTC != nil {
+		if *req.MinuteUTC < 0 || *req.MinuteUTC > 59 {
+			errorResponse(c, http.StatusBadRequest, "minute_utc must be 0-59")
+			return
+		}
+		settings.MorningAutoBlockMinUTC = *req.MinuteUTC
+	}
+
+	// Save settings
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+		return
+	}
+
+	// Calculate next scheduled time with new settings
+	hour := settings.MorningAutoBlockHourUTC
+	minute := settings.MorningAutoBlockMinUTC
+	now := time.Now().UTC()
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
+	if now.After(next) {
+		next = next.Add(24 * time.Hour)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"enabled":        settings.MorningAutoBlockEnabled,
+		"hour_utc":       hour,
+		"minute_utc":     minute,
+		"next_run":       next.Format(time.RFC3339),
+		"time_until":     time.Until(next).String(),
+		"message":        "Morning auto-block configuration updated",
+	})
+}

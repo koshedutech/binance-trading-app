@@ -585,6 +585,10 @@ func (s *Server) setupRoutes() {
 			futures.POST("/autopilot/symbols/:symbol/unblock", s.handleUnblockSymbol)
 			futures.GET("/autopilot/symbols/:symbol/block-status", s.handleGetSymbolBlockStatus)
 
+			// Morning auto-block configuration (scheduled daily worst performer blocking)
+			futures.GET("/autopilot/morning-auto-block/config", s.handleGetMorningAutoBlockConfig)
+			futures.POST("/autopilot/morning-auto-block/config", s.handleUpdateMorningAutoBlockConfig)
+
 			// Ginie Circuit Breaker endpoints (separate from FuturesController)
 			futures.GET("/ginie/circuit-breaker/status", s.handleGetGinieCircuitBreakerStatus)
 			futures.POST("/ginie/circuit-breaker/reset", s.handleResetGinieCircuitBreaker)

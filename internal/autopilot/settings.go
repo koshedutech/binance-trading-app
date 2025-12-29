@@ -993,6 +993,12 @@ type AutopilotSettings struct {
 	CategoryConfidenceBoost  map[string]float64 `json:"category_confidence_boost"`  // Extra confidence required by category
 	CategorySizeMultiplier   map[string]float64 `json:"category_size_multiplier"`   // Size multiplier by category
 
+	// ====== MORNING AUTO-BLOCK SETTINGS ======
+	// Automatically block worst performers at the start of each day
+	MorningAutoBlockEnabled  bool `json:"morning_auto_block_enabled"`   // Enable automatic morning blocking
+	MorningAutoBlockHourUTC  int  `json:"morning_auto_block_hour_utc"`  // Hour in UTC to run auto-block (0-23, default 0)
+	MorningAutoBlockMinUTC   int  `json:"morning_auto_block_min_utc"`   // Minute in UTC to run auto-block (0-59, default 5)
+
 	// ====== COMPREHENSIVE MODE CONFIGURATIONS (Story 2.7) ======
 	// Full configuration for each trading mode with all settings
 	// User can customize any setting - defaults provided from Story 2.7
