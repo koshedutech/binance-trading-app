@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1820,97 +1821,113 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 		return
 	}
 
-	signalsGenerated := 0
-	tradesAttempted := 0
+	// === SMART MARGIN ALLOCATION ===
+	// Get available balance for margin-aware prioritization
+	availableBalance := 0.0
+	accountInfo, err := ga.futuresClient.GetFuturesAccountInfo()
+	if err != nil {
+		log.Printf("[ULTRA-FAST-SCAN] Failed to get account balance: %v, using fallback", err)
+		availableBalance = 100 // Fallback
+	} else {
+		availableBalance = accountInfo.AvailableBalance
+	}
 
-	for _, symbol := range symbols {
+	leverage := ga.config.DefaultLeverage
+	if leverage <= 0 {
+		leverage = 10
+	}
+
+	maxPositionUSD := float64(currentSettings.UltraFastMaxUSDPerPos)
+	if maxPositionUSD <= 0 {
+		maxPositionUSD = 50
+	}
+
+	log.Printf("[ULTRA-FAST-SCAN] Available balance: $%.2f, max per position: $%.2f, leverage: %dx",
+		availableBalance, maxPositionUSD, leverage)
+
+	// Rank symbols by margin efficiency (high confidence + low margin = priority)
+	rankedSymbols := ga.rankSymbolsByMarginEfficiency(symbols, availableBalance, maxPositionUSD, leverage)
+
+	if len(rankedSymbols) == 0 {
+		log.Printf("[ULTRA-FAST-SCAN] No symbols qualified after margin filtering")
+		return
+	}
+
+	signalsGenerated := len(rankedSymbols)
+	tradesAttempted := 0
+	tradesExecuted := 0
+	remainingMargin := availableBalance * 0.9 // 90% safety buffer
+
+	// Process symbols in ranked order (best efficiency first)
+	for rank, ranked := range rankedSymbols {
 		select {
 		case <-ga.stopChan:
 			log.Printf("[ULTRA-FAST-SCAN] Scan interrupted by stop signal")
 			return
 		default:
-			// Skip if we already have a position for this symbol (any mode)
-			ga.mu.RLock()
-			_, hasPosition := ga.positions[symbol]
-			ga.mu.RUnlock()
+			symbol := ranked.Symbol
+			signal := ranked.Signal
 
-			if hasPosition {
-				continue
+			// Check if we can afford this trade
+			marginNeeded := ranked.PositionSizeUSD / float64(leverage)
+			if marginNeeded > remainingMargin {
+				log.Printf("[ULTRA-FAST-SCAN] %s: SKIP - margin needed $%.2f > remaining $%.2f",
+					symbol, marginNeeded, remainingMargin)
+				// Try smaller position if possible
+				if ranked.MinMarginUSD <= remainingMargin {
+					// Use minimum margin position
+					marginNeeded = ranked.MinMarginUSD
+					ranked.PositionSizeUSD = marginNeeded * float64(leverage)
+					log.Printf("[ULTRA-FAST-SCAN] %s: Using minimum position $%.2f instead", symbol, ranked.PositionSizeUSD)
+				} else {
+					continue // Can't afford even minimum
+				}
 			}
-
-			// Generate ultra-fast signal using 4-layer analysis
-			signal, err := ga.analyzer.GenerateUltraFastSignal(symbol)
-			if err != nil {
-				log.Printf("[ULTRA-FAST-SCAN] %s: Signal generation failed: %v", symbol, err)
-				continue
-			}
-
-			signalsGenerated++
 
 			// Log signal details
-			log.Printf("[ULTRA-FAST-SCAN] %s: TrendBias=%s (%.1f%%), EntryConfidence=%.1f%%, VolatilityRegime=%s, MinTP=%.2f%%",
-				symbol,
-				signal.TrendBias,
-				signal.TrendStrength,
-				signal.EntryConfidence,
-				signal.VolatilityRegime.Level,
-				signal.MinProfitTarget)
+			log.Printf("[ULTRA-FAST-SCAN] Rank #%d %s: TrendBias=%s (%.1f%%), Confidence=%.1f%%, Efficiency=%.2f, PositionUSD=$%.2f",
+				rank+1, symbol, signal.TrendBias, signal.TrendStrength, signal.EntryConfidence,
+				ranked.EfficiencyScore, ranked.PositionSizeUSD)
 
-			// Get current price for signal log
-			currentPrice, _ := ga.futuresClient.GetFuturesCurrentPrice(symbol)
-
-			// Build signal log entry for ultra-fast signal
+			// Build signal log entry
 			signalLog := &GinieSignalLog{
 				Symbol:       symbol,
-				Direction:    signal.TrendBias, // LONG or SHORT
+				Direction:    signal.TrendBias,
 				Mode:         "ultra_fast",
 				Confidence:   signal.EntryConfidence,
-				CurrentPrice: currentPrice,
+				CurrentPrice: ranked.Price,
 				Trend:        signal.TrendBias,
 				Volatility:   signal.VolatilityRegime.Level,
-				ATRPercent:   signal.VolatilityRegime.ATRRatio * 100, // Convert ratio to percentage estimate
-				SignalNames:  []string{"TrendBias", "EntryConfidence", "VolatilityRegime", "MinProfitTarget"},
+				ATRPercent:   signal.VolatilityRegime.ATRRatio * 100,
+				SignalNames:  []string{"TrendBias", "EntryConfidence", "VolatilityRegime", "MinProfitTarget", "MarginEfficiency"},
 			}
-
-			// Check confidence threshold
-			minConfidence := float64(currentSettings.UltraFastMinConfidence)
-			if signal.EntryConfidence < minConfidence {
-				log.Printf("[ULTRA-FAST-SCAN] %s: Confidence %.1f%% < threshold %.1f%%, SKIP",
-					symbol, signal.EntryConfidence, minConfidence)
-				signalLog.Status = "rejected"
-				signalLog.RejectionReason = fmt.Sprintf("low_confidence (%.1f < %.1f)", signal.EntryConfidence, minConfidence)
-				ga.LogSignal(signalLog)
-				continue
-			}
-
-			// Check trend bias (skip NEUTRAL for entries)
-			if signal.TrendBias == "NEUTRAL" {
-				log.Printf("[ULTRA-FAST-SCAN] %s: Neutral trend, SKIP", symbol)
-				signalLog.Status = "rejected"
-				signalLog.RejectionReason = "neutral_trend"
-				ga.LogSignal(signalLog)
-				continue
-			}
-
-			// Confidence met - attempt entry
-			log.Printf("[ULTRA-FAST-SCAN] %s: ✓ ENTRY SIGNAL - Confidence %.1f%% >= %.1f%%, Direction=%s",
-				symbol, signal.EntryConfidence, minConfidence, signal.TrendBias)
 
 			tradesAttempted++
 
-			// Execute the ultra-fast entry
-			err = ga.executeUltraFastEntry(symbol, signal)
+			// Execute the ultra-fast entry with dynamic position size
+			err = ga.executeUltraFastEntryWithSize(symbol, signal, ranked.PositionSizeUSD)
 			if err != nil {
 				log.Printf("[ULTRA-FAST-SCAN] %s: Entry execution failed: %v", symbol, err)
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = fmt.Sprintf("execution_failed: %v", err)
 				ga.LogSignal(signalLog)
+
+				// If margin error, don't try more expensive coins
+				if strings.Contains(err.Error(), "insufficient") || strings.Contains(err.Error(), "-2019") {
+					log.Printf("[ULTRA-FAST-SCAN] Margin exhausted, stopping scan early")
+					break
+				}
 			} else {
-				log.Printf("[ULTRA-FAST-SCAN] %s: ✓ ENTRY EXECUTED - Now monitoring for exit", symbol)
+				log.Printf("[ULTRA-FAST-SCAN] %s: ✓ ENTRY EXECUTED (Rank #%d, Efficiency=%.2f)", symbol, rank+1, ranked.EfficiencyScore)
 				signalLog.Status = "executed"
 				ga.LogSignal(signalLog)
+				tradesExecuted++
 
-				// Check if we've hit position limit after this entry
+				// Deduct used margin from remaining
+				remainingMargin -= marginNeeded
+				log.Printf("[ULTRA-FAST-SCAN] Remaining margin: $%.2f", remainingMargin)
+
+				// Check position limit
 				ga.mu.RLock()
 				newUFCount := 0
 				for _, pos := range ga.positions {
@@ -1921,19 +1938,161 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 				ga.mu.RUnlock()
 
 				if newUFCount >= maxUFPositions {
-					log.Printf("[ULTRA-FAST-SCAN] Position limit reached after entry: %d/%d, stopping scan", newUFCount, maxUFPositions)
+					log.Printf("[ULTRA-FAST-SCAN] Position limit reached: %d/%d, stopping scan", newUFCount, maxUFPositions)
+					break
+				}
+
+				// Stop if margin is too low for any more trades
+				if remainingMargin < 5 { // $5 minimum threshold
+					log.Printf("[ULTRA-FAST-SCAN] Margin nearly exhausted ($%.2f), stopping scan", remainingMargin)
 					break
 				}
 			}
 		}
 	}
 
-	log.Printf("[ULTRA-FAST-SCAN] Scan complete: %d signals generated, %d trade attempts", signalsGenerated, tradesAttempted)
+	log.Printf("[ULTRA-FAST-SCAN] Scan complete: %d signals, %d attempts, %d executed, $%.2f margin remaining",
+		signalsGenerated, tradesAttempted, tradesExecuted, remainingMargin)
 
 	// Update progress to show scan completed (Issue 2B)
 	ga.mu.Lock()
 	ga.scannedThisCycle = len(symbols)
 	ga.mu.Unlock()
+}
+
+// MarginRankedSymbol holds a symbol with its margin requirements and signal strength
+type MarginRankedSymbol struct {
+	Symbol           string
+	Price            float64
+	MinQty           float64
+	MinMarginUSD     float64  // Minimum margin needed for 1 position (price * minQty / leverage)
+	Signal           *UltraFastSignal
+	EfficiencyScore  float64  // Higher = better (confidence * volatility / margin)
+	PositionSizeUSD  float64  // Actual position size we'll use
+}
+
+// rankSymbolsByMarginEfficiency ranks symbols by their profit potential per unit margin
+// Prioritizes: high confidence + high volatility + low margin requirement
+func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availableBalance float64, maxPositionUSD float64, leverage int) []MarginRankedSymbol {
+	var ranked []MarginRankedSymbol
+
+	log.Printf("[SMART-MARGIN] Ranking %d symbols, available=$%.2f, max_per_pos=$%.2f, leverage=%dx",
+		len(symbols), availableBalance, maxPositionUSD, leverage)
+
+	for _, symbol := range symbols {
+		// Skip if we already have a position
+		ga.mu.RLock()
+		_, hasPosition := ga.positions[symbol]
+		ga.mu.RUnlock()
+		if hasPosition {
+			continue
+		}
+
+		// Get current price
+		price, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+		if err != nil || price <= 0 {
+			continue
+		}
+
+		// Get symbol info for min quantity
+		minQty := ga.getMinQuantity(symbol)
+		if minQty <= 0 {
+			minQty = 1 // Default
+		}
+
+		// Calculate minimum margin required for this symbol
+		// minMargin = (price * minQty) / leverage
+		minMarginUSD := (price * minQty) / float64(leverage)
+
+		// Skip if we can't even afford minimum
+		if minMarginUSD > availableBalance {
+			log.Printf("[SMART-MARGIN] %s: SKIP - min margin $%.2f > available $%.2f",
+				symbol, minMarginUSD, availableBalance)
+			continue
+		}
+
+		// Generate signal to get confidence and volatility
+		signal, err := ga.analyzer.GenerateUltraFastSignal(symbol)
+		if err != nil || signal == nil {
+			continue
+		}
+
+		// Skip neutral or low confidence
+		if signal.TrendBias == "NEUTRAL" || signal.EntryConfidence < 50 {
+			continue
+		}
+
+		// Calculate efficiency score:
+		// Higher confidence + higher volatility + lower margin = higher score
+		// Formula: (confidence * volatility_atr * 100) / minMargin
+		volatilityMultiplier := signal.VolatilityRegime.ATRRatio
+		if volatilityMultiplier < 0.5 {
+			volatilityMultiplier = 0.5 // Floor
+		}
+
+		efficiencyScore := (signal.EntryConfidence * volatilityMultiplier * 100) / minMarginUSD
+
+		// Determine actual position size: min(maxPositionUSD, availableBalance, what we can afford)
+		positionSizeUSD := maxPositionUSD
+		if positionSizeUSD > availableBalance * 0.9 { // 90% safety margin
+			positionSizeUSD = availableBalance * 0.9
+		}
+
+		ranked = append(ranked, MarginRankedSymbol{
+			Symbol:          symbol,
+			Price:           price,
+			MinQty:          minQty,
+			MinMarginUSD:    minMarginUSD,
+			Signal:          signal,
+			EfficiencyScore: efficiencyScore,
+			PositionSizeUSD: positionSizeUSD,
+		})
+	}
+
+	// Sort by efficiency score (highest first)
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].EfficiencyScore > ranked[j].EfficiencyScore
+	})
+
+	// Log top 5
+	logCount := 5
+	if len(ranked) < logCount {
+		logCount = len(ranked)
+	}
+	for i := 0; i < logCount; i++ {
+		r := ranked[i]
+		log.Printf("[SMART-MARGIN] Rank %d: %s - Confidence=%.0f%%, MinMargin=$%.2f, Efficiency=%.2f, Direction=%s",
+			i+1, r.Symbol, r.Signal.EntryConfidence, r.MinMarginUSD, r.EfficiencyScore, r.Signal.TrendBias)
+	}
+
+	log.Printf("[SMART-MARGIN] Ranked %d symbols by margin efficiency (filtered %d)", len(ranked), len(symbols)-len(ranked))
+
+	return ranked
+}
+
+// getMinQuantity gets the minimum order quantity for a symbol based on price tier
+// This is a conservative estimate to ensure orders meet Binance minimum notional requirements
+func (ga *GinieAutopilot) getMinQuantity(symbol string) float64 {
+	price, _ := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+
+	// Estimate based on price tier (conservative minimums)
+	// Goal: ensure minimum position value of ~$5-10 at 10x leverage
+	if price > 50000 { // BTC tier ($50k+)
+		return 0.001
+	} else if price > 1000 { // ETH tier ($1k-50k)
+		return 0.01
+	} else if price > 100 { // Mid tier ($100-1k: SOL, BNB, AVAX)
+		return 0.1
+	} else if price > 10 { // Low tier ($10-100)
+		return 1
+	} else if price > 1 { // Very low tier ($1-10)
+		return 10
+	} else if price > 0.1 { // Micro tier ($0.1-1)
+		return 100
+	} else if price > 0.01 { // Ultra-micro tier ($0.01-0.1: DOGE, SHIB)
+		return 1000
+	}
+	return 10000 // Dust coins
 }
 
 // scanForMode scans all watched symbols for a specific trading mode
@@ -2357,7 +2516,8 @@ func (ga *GinieAutopilot) getAvailableBalance() (float64, error) {
 // 5. Safety margin to avoid over-allocation
 // 6. Per-symbol performance category (size multiplier)
 // 7. Mode-specific configuration overrides
-func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidence float64, currentPositionCount int, mode GinieTradingMode) (positionUSD float64, canTrade bool, reason string) {
+// 8. AI/LLM suggested size when auto_size_enabled is true
+func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidence float64, currentPositionCount int, mode GinieTradingMode, llmSuggestedSize float64) (positionUSD float64, canTrade bool, reason string) {
 	// Get mode configuration for mode-specific sizing parameters
 	modeConfig := ga.getModeConfig(mode)
 
@@ -2448,8 +2608,26 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 	effectiveMaxUSD := settingsManager.GetEffectivePositionSize(symbol, ga.config.MaxUSDPerPosition)
 	symbolSettings := settingsManager.GetSymbolSettings(symbol)
 
-	// Calculate final position size
-	positionUSD = baseAllocationPerPosition * riskMultiplier * confidenceMultiplier
+	// Check if AI/LLM sizing is enabled for this mode
+	autoSizeEnabled := false
+	if modeConfig != nil && modeConfig.Size != nil {
+		autoSizeEnabled = modeConfig.Size.AutoSizeEnabled
+	}
+
+	// Calculate position size - use LLM suggestion if auto_size_enabled and valid LLM size provided
+	useLLMSize := autoSizeEnabled && llmSuggestedSize > 0
+	if useLLMSize {
+		// Use LLM suggested size as base, but still apply safety limits
+		positionUSD = llmSuggestedSize
+		ga.logger.Info("Using AI/LLM suggested position size",
+			"symbol", symbol,
+			"mode", mode,
+			"llm_suggested_usd", fmt.Sprintf("$%.2f", llmSuggestedSize),
+			"auto_size_enabled", autoSizeEnabled)
+	} else {
+		// Calculate using formula-based approach
+		positionUSD = baseAllocationPerPosition * riskMultiplier * confidenceMultiplier
+	}
 
 	// Cap at mode-specific MaxSizeUSD if configured, otherwise use effective max USD
 	maxSizeUSD := effectiveMaxUSD
@@ -2482,8 +2660,15 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		return 0, false, fmt.Sprintf("calculated position too small: $%.2f (min $%.2f)", positionUSD, minPositionSize)
 	}
 
+	// Determine sizing method for logging
+	sizingMethod := "formula"
+	if useLLMSize {
+		sizingMethod = "ai_llm"
+	}
+
 	ga.logger.Info("Adaptive position sizing",
 		"mode", mode,
+		"sizing_method", sizingMethod,
 		"available_balance", fmt.Sprintf("$%.2f", availableBalance),
 		"usable_balance", fmt.Sprintf("$%.2f", usableBalance),
 		"safety_margin", fmt.Sprintf("%.0f%%", safetyMargin*100),
@@ -2494,6 +2679,8 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		"risk_multiplier", fmt.Sprintf("%.2f", riskMultiplier),
 		"confidence", fmt.Sprintf("%.1f%%", confidence),
 		"confidence_multiplier", fmt.Sprintf("%.2f", confidenceMultiplier),
+		"llm_suggested_size", fmt.Sprintf("$%.2f", llmSuggestedSize),
+		"auto_size_enabled", autoSizeEnabled,
 		"max_size_usd", fmt.Sprintf("$%.2f", maxSizeUSD),
 		"final_position_usd", fmt.Sprintf("$%.2f", positionUSD))
 
@@ -2807,9 +2994,12 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	currentPositionCount := len(ga.positions)
 
 	// Use adaptive position sizing based on available balance (human-like approach)
+	// Get LLM suggested size from decision (if available)
+	llmSuggestedSize := decision.TradeExecution.LLMSuggestedSizeUSD
+
 	// Need to unlock temporarily for API call to get balance
 	ga.mu.Unlock()
-	positionUSD, canTrade, reason := ga.calculateAdaptivePositionSize(symbol, decision.ConfidenceScore, currentPositionCount, selectedMode)
+	positionUSD, canTrade, reason := ga.calculateAdaptivePositionSize(symbol, decision.ConfidenceScore, currentPositionCount, selectedMode, llmSuggestedSize)
 	ga.mu.Lock()
 
 	// CRITICAL: Re-check position doesn't exist after re-acquiring lock
@@ -10696,6 +10886,8 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 		} else {
 			limitPrice = currentPrice * 1.001 // 0.1% buffer above
 		}
+		// Round to symbol's tick size to avoid precision errors
+		limitPrice = roundPrice(symbol, limitPrice)
 
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
@@ -10708,20 +10900,50 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 
 		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
 		if err != nil {
-			ga.logger.Error("Ultra-fast exit LIMIT order failed",
+			// Check if error is due to price precision (-1111, -4014)
+			errStr := err.Error()
+			if strings.Contains(errStr, "-1111") || strings.Contains(errStr, "-4014") ||
+				strings.Contains(errStr, "Precision") || strings.Contains(errStr, "tick size") {
+				// Fallback to MARKET order for precision errors
+				ga.logger.Warn("Ultra-fast LIMIT failed on precision, falling back to MARKET",
+					"symbol", symbol,
+					"limit_price", limitPrice,
+					"error", errStr)
+
+				marketParams := binance.FuturesOrderParams{
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: effectivePositionSide,
+					Type:         binance.FuturesOrderTypeMarket,
+					Quantity:     closeQty,
+				}
+				marketOrder, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
+				if marketErr != nil {
+					ga.logger.Error("Ultra-fast exit MARKET order also failed",
+						"symbol", symbol,
+						"error", marketErr.Error())
+					return
+				}
+				ga.logger.Info("Ultra-fast exit MARKET order placed (fallback)",
+					"symbol", symbol,
+					"order_id", marketOrder.OrderId,
+					"reason", reason)
+			} else {
+				ga.logger.Error("Ultra-fast exit LIMIT order failed",
+					"symbol", symbol,
+					"current_price", currentPrice,
+					"limit_price", limitPrice,
+					"error", err.Error())
+				return
+			}
+		} else {
+			ga.logger.Info("Ultra-fast exit LIMIT order placed",
 				"symbol", symbol,
+				"order_id", order.OrderId,
 				"current_price", currentPrice,
 				"limit_price", limitPrice,
-				"error", err.Error())
-			return
+				"reason", reason)
 		}
-
-		ga.logger.Info("Ultra-fast exit LIMIT order placed",
-			"symbol", symbol,
-			"order_id", order.OrderId,
-			"current_price", currentPrice,
-			"limit_price", limitPrice,
-			"reason", reason)
 	}
 
 	// Remove position from tracking
@@ -10922,6 +11144,179 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 
 	ga.logger.Info("Ultra-fast position opened successfully",
 		"symbol", symbol,
+		"position_id", fmt.Sprintf("%s_%d", symbol, time.Now().UnixNano()))
+
+	return nil
+}
+
+// executeUltraFastEntryWithSize executes an ultra-fast entry with dynamic position sizing
+// This is used by the smart margin allocation system to optimize capital usage
+func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *UltraFastSignal, positionUSD float64) error {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	// Safety checks
+	if _, exists := ga.positions[symbol]; exists {
+		return fmt.Errorf("position already exists for %s", symbol)
+	}
+
+	// Check position limits
+	currentUltraFastCount := 0
+	for _, pos := range ga.positions {
+		if pos.Mode == GinieModeUltraFast {
+			currentUltraFastCount++
+		}
+	}
+
+	settingsManager := GetSettingsManager()
+	currentSettings := settingsManager.GetCurrentSettings()
+	maxUltraFastPositions := currentSettings.UltraFastMaxPositions
+	if currentUltraFastCount >= maxUltraFastPositions {
+		return fmt.Errorf("ultra-fast position limit reached: %d/%d", currentUltraFastCount, maxUltraFastPositions)
+	}
+
+	// Get current price
+	price, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+	if err != nil {
+		return fmt.Errorf("failed to get price for %s: %w", symbol, err)
+	}
+
+	// Validate position size (dynamic from smart margin allocation)
+	if positionUSD < 5 {
+		positionUSD = 5 // Minimum $5
+	}
+	maxUSD := float64(currentSettings.UltraFastMaxUSDPerPos)
+	if positionUSD > maxUSD {
+		positionUSD = maxUSD // Cap at max
+	}
+
+	// Get leverage from style config
+	styleConfig := GetDefaultStyleConfig(StyleUltraFast)
+	leverage := styleConfig.DefaultLeverage
+
+	// Calculate quantity using dynamic position size
+	quantity := (positionUSD * float64(leverage)) / price
+	quantity = roundQuantity(symbol, quantity)
+
+	if quantity <= 0 {
+		return fmt.Errorf("calculated zero quantity for %s (positionUSD=$%.2f, price=$%.4f)", symbol, positionUSD, price)
+	}
+
+	// Determine side
+	side := "BUY"
+	positionSide := binance.PositionSideLong
+	isLong := signal.TrendBias == "LONG"
+	if !isLong {
+		side = "SELL"
+		positionSide = binance.PositionSideShort
+	}
+
+	// Check actual Binance position mode to avoid API error -4061
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
+	ga.logger.Info("Ultra-fast entry executing (smart margin)",
+		"symbol", symbol,
+		"trend_bias", signal.TrendBias,
+		"trend_strength", signal.TrendStrength,
+		"entry_confidence", signal.EntryConfidence,
+		"volatility_regime", signal.VolatilityRegime.Level,
+		"quantity", quantity,
+		"leverage", leverage,
+		"position_usd", positionUSD,
+		"target_percent", signal.MinProfitTarget)
+
+	// Variables for actual fill details
+	actualPrice := price
+	actualQty := quantity
+
+	if !ga.config.DryRun {
+		// Set leverage
+		_, err = ga.futuresClient.SetLeverage(symbol, leverage)
+		if err != nil {
+			return fmt.Errorf("failed to set leverage: %w", err)
+		}
+
+		// Place market order
+		orderParams := binance.FuturesOrderParams{
+			Symbol:       symbol,
+			Side:         side,
+			PositionSide: effectivePositionSide,
+			Type:         binance.FuturesOrderTypeMarket,
+			Quantity:     quantity,
+		}
+
+		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
+		if err != nil {
+			return fmt.Errorf("failed to place order: %w", err)
+		}
+
+		// Verify fill
+		fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+		if fillErr != nil {
+			return fmt.Errorf("order fill verification failed: %w", fillErr)
+		}
+
+		actualPrice = fillPrice
+		actualQty = fillQty
+
+		ga.logger.Info("Ultra-fast order filled (smart margin)",
+			"symbol", symbol,
+			"order_id", order.OrderId,
+			"fill_price", actualPrice,
+			"fill_qty", actualQty,
+			"position_usd", positionUSD)
+	}
+
+	// Create ultra-fast position
+	position := &GiniePosition{
+		Symbol:                 symbol,
+		Side:                   signal.TrendBias,
+		Mode:                   GinieModeUltraFast,
+		EntryPrice:             actualPrice,
+		OriginalQty:            actualQty,
+		RemainingQty:           actualQty,
+		Leverage:               leverage,
+		EntryTime:              time.Now(),
+		TakeProfits:            []GinieTakeProfitLevel{},
+		CurrentTPLevel:         0,
+		StopLoss:               0,
+		OriginalSL:             0,
+		MovedToBreakeven:       false,
+		TrailingActive:         false,
+		HighestPrice:           actualPrice,
+		LowestPrice:            actualPrice,
+		TrailingPercent:        0,
+		Source:                 "ai",
+		UltraFastSignal:        signal,
+		UltraFastTargetPercent: signal.MinProfitTarget,
+		MaxHoldTime:            3 * time.Second,
+		Protection:             NewProtectionStatus(),
+	}
+
+	ga.positions[symbol] = position
+	ga.dailyTrades++
+	ga.totalTrades++
+
+	// Update ultra-fast stats
+	sm := GetSettingsManager()
+	sm.IncrementUltraFastTrade()
+
+	// Record trade opening
+	ga.recordTrade(GinieTradeResult{
+		Symbol:     symbol,
+		Action:     "open",
+		Side:       signal.TrendBias,
+		Quantity:   actualQty,
+		Price:      actualPrice,
+		Reason:     fmt.Sprintf("ultra_fast_entry (smart_margin): %s, confidence=%.1f%%, posUSD=$%.2f", signal.TrendBias, signal.EntryConfidence*100, positionUSD),
+		Timestamp:  time.Now(),
+		Mode:       GinieModeUltraFast,
+		Confidence: signal.EntryConfidence,
+	})
+
+	ga.logger.Info("Ultra-fast position opened successfully (smart margin)",
+		"symbol", symbol,
+		"position_usd", positionUSD,
 		"position_id", fmt.Sprintf("%s_%d", symbol, time.Now().UnixNano()))
 
 	return nil
