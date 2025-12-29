@@ -1648,173 +1648,94 @@ export default function GiniePanel() {
 
         {editingSLTP && (
           <div className="space-y-3 px-3 py-2 bg-gray-800/50 border border-gray-600 rounded">
-            {/* Auto AI/LLM SL/TP Toggle */}
-            <div className="flex items-center justify-between pb-2 border-b border-gray-600">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] font-semibold text-purple-400" title="Enable AI/LLM to automatically determine optimal SL/TP levels based on market conditions, volatility, and trade context.">Auto AI/LLM SL/TP</span>
-              </div>
-              <button
-                onClick={() => setSltpConfig({
-                  ...sltpConfig,
-                  [selectedMode]: {...(sltpConfig[selectedMode] || {}), auto_sltp_enabled: !sltpConfig[selectedMode]?.auto_sltp_enabled}
-                })}
-                className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
-                  sltpConfig[selectedMode]?.auto_sltp_enabled
-                    ? 'bg-purple-900/50 text-purple-400 border border-purple-500/30'
-                    : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                }`}
-                title={sltpConfig[selectedMode]?.auto_sltp_enabled ? 'Disable AI SL/TP' : 'Enable AI SL/TP'}
-              >
-                {sltpConfig[selectedMode]?.auto_sltp_enabled ? 'ON' : 'OFF'}
-              </button>
-            </div>
-
-            {/* Auto AI/LLM Configuration (when enabled) */}
-            {sltpConfig[selectedMode]?.auto_sltp_enabled && (
-              <div className="px-2 py-2 bg-purple-900/20 border border-purple-700/30 rounded space-y-3">
-                <div className="text-[10px] text-purple-400 mb-2">AI/LLM will determine SL/TP based on market conditions. Configure minimum safety thresholds:</div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Minimum profit percentage before AI can activate trailing stop. Ensures fees are covered before trailing begins.">Min Profit to Trail %</label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="10"
-                      value={sltpConfig[selectedMode]?.min_profit_to_trail_pct || 0}
-                      onChange={(e) => setSltpConfig({
-                        ...sltpConfig,
-                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), min_profit_to_trail_pct: parseFloat(e.target.value) || 0}
-                      })}
-                      className="w-full px-2 py-1 bg-gray-700 border border-purple-600/50 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Minimum distance the SL must be from entry price. Prevents AI from setting SL too close to entry (avoids near-zero closes).">Min SL Distance %</label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="10"
-                      value={sltpConfig[selectedMode]?.min_sl_distance_from_zero || 0}
-                      onChange={(e) => setSltpConfig({
-                        ...sltpConfig,
-                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), min_sl_distance_from_zero: parseFloat(e.target.value) || 0}
-                      })}
-                      className="w-full px-2 py-1 bg-gray-700 border border-purple-600/50 rounded text-white text-xs"
-                    />
-                  </div>
-                </div>
-
-                {/* Auto Trailing Toggle */}
-                <label className="flex items-center gap-2 text-[10px] text-gray-400" title="Allow AI/LLM to manage trailing stop dynamically based on market conditions.">
+            {/* Manual SL/TP Percentages */}
+            <div>
+              <h4 className="text-[11px] font-semibold text-gray-400 mb-2 flex items-center gap-1">
+                <span>SL/TP % Override (0 = use Mode Config)</span>
+              </h4>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss percentage from entry price. Position closes if price moves against you by this amount.">Stop Loss %</label>
                   <input
-                    type="checkbox"
-                    checked={sltpConfig[selectedMode]?.auto_trailing_enabled || false}
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="20"
+                    value={sltpConfig[selectedMode]?.sl_percent || 0}
                     onChange={(e) => setSltpConfig({
                       ...sltpConfig,
-                      [selectedMode]: {...(sltpConfig[selectedMode] || {}), auto_trailing_enabled: e.target.checked}
+                      [selectedMode]: {...(sltpConfig[selectedMode] || {}), sl_percent: parseFloat(e.target.value) || 0}
                     })}
-                    className="w-3 h-3 accent-purple-500"
+                    className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
-                  <span className="text-purple-300">AI-Managed Trailing Stop</span>
-                </label>
-              </div>
-            )}
-
-            {/* Manual SL/TP Percentages (when auto is disabled) */}
-            {!sltpConfig[selectedMode]?.auto_sltp_enabled && (
-              <>
-                <div>
-                  <h4 className="text-[11px] font-semibold text-gray-400 mb-2 flex items-center gap-1">
-                    <span>Manual SL/TP % (0 = use ATR/LLM)</span>
-                  </h4>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss percentage from entry price. Position closes if price moves against you by this amount.">Stop Loss %</label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        max="20"
-                        value={sltpConfig[selectedMode]?.sl_percent || 0}
-                        onChange={(e) => setSltpConfig({
-                          ...sltpConfig,
-                          [selectedMode]: {...(sltpConfig[selectedMode] || {}), sl_percent: parseFloat(e.target.value) || 0}
-                        })}
-                        className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1" title="Take profit percentage from entry price. Position closes when price moves in your favor by this amount.">Take Profit %</label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        max="50"
-                        value={sltpConfig[selectedMode]?.tp_percent || 0}
-                        onChange={(e) => setSltpConfig({
-                          ...sltpConfig,
-                          [selectedMode]: {...(sltpConfig[selectedMode] || {}), tp_percent: parseFloat(e.target.value) || 0}
-                        })}
-                        className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                  </div>
                 </div>
-
-                {/* Trailing Stop (manual mode) */}
                 <div>
-                  <label className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 mb-2" title="Enable trailing stop that follows price movement. Locks in profits as price moves favorably instead of fixed TP.">
+                  <label className="block text-[10px] text-gray-400 mb-1" title="Take profit percentage from entry price. Position closes when price moves in your favor by this amount.">Take Profit %</label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="50"
+                    value={sltpConfig[selectedMode]?.tp_percent || 0}
+                    onChange={(e) => setSltpConfig({
+                      ...sltpConfig,
+                      [selectedMode]: {...(sltpConfig[selectedMode] || {}), tp_percent: parseFloat(e.target.value) || 0}
+                    })}
+                    className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Trailing Stop */}
+            <div>
+              <label className="flex items-center gap-2 text-[11px] font-semibold text-gray-400 mb-2" title="Enable trailing stop that follows price movement. Locks in profits as price moves favorably instead of fixed TP.">
+                <input
+                  type="checkbox"
+                  checked={sltpConfig[selectedMode]?.trailing_enabled || false}
+                  onChange={(e) => setSltpConfig({
+                    ...sltpConfig,
+                    [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_enabled: e.target.checked}
+                  })}
+                  className="w-3 h-3"
+                />
+                Trailing Stop
+              </label>
+              {sltpConfig[selectedMode]?.trailing_enabled && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Trailing stop distance as percentage. Stop follows peak price by this amount (e.g., 1% = stop trails 1% below highest price reached).">Trailing %</label>
                     <input
-                      type="checkbox"
-                      checked={sltpConfig[selectedMode]?.trailing_enabled || false}
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="10"
+                      value={sltpConfig[selectedMode]?.trailing_percent || 0}
                       onChange={(e) => setSltpConfig({
                         ...sltpConfig,
-                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_enabled: e.target.checked}
+                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_percent: parseFloat(e.target.value) || 0}
                       })}
-                      className="w-3 h-3"
+                      className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
-                    Trailing Stop
-                  </label>
-                  {sltpConfig[selectedMode]?.trailing_enabled && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[10px] text-gray-400 mb-1" title="Trailing stop distance as percentage. Stop follows peak price by this amount (e.g., 1% = stop trails 1% below highest price reached).">Trailing %</label>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          max="10"
-                          value={sltpConfig[selectedMode]?.trailing_percent || 0}
-                          onChange={(e) => setSltpConfig({
-                            ...sltpConfig,
-                            [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_percent: parseFloat(e.target.value) || 0}
-                          })}
-                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] text-gray-400 mb-1" title="Profit level required before trailing stop activates. E.g., 0.5% = trailing starts after 0.5% profit is reached.">Activation %</label>
-                        <input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          max="20"
-                          value={sltpConfig[selectedMode]?.trailing_activation || 0}
-                          onChange={(e) => setSltpConfig({
-                            ...sltpConfig,
-                            [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_activation: parseFloat(e.target.value) || 0}
-                          })}
-                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                        />
-                      </div>
-                    </div>
-                  )}
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Profit level required before trailing stop activates. E.g., 0.5% = trailing starts after 0.5% profit is reached.">Activation %</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="20"
+                      value={sltpConfig[selectedMode]?.trailing_activation || 0}
+                      onChange={(e) => setSltpConfig({
+                        ...sltpConfig,
+                        [selectedMode]: {...(sltpConfig[selectedMode] || {}), trailing_activation: parseFloat(e.target.value) || 0}
+                      })}
+                      className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
                 </div>
-              </>
-            )}
+              )}
+            </div>
 
             {/* TP Mode Selection */}
             <div>
@@ -2433,83 +2354,170 @@ export default function GiniePanel() {
                         )}
                       </div>
 
-                      {/* ROI-based SL/TP Toggle */}
+                      {/* SL/TP Method Selector */}
                       <div className="pb-2 border-b border-gray-700">
-                        <label className="flex items-center gap-2 text-[10px] text-gray-400 mb-2" title="Use Return on Investment (ROI) percentage instead of price percentage. ROI accounts for leverage. E.g., 10x leverage with 1% price move = 10% ROI.">
-                          <input
-                            type="checkbox"
-                            checked={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp || false}
-                            onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.use_roi_based_sltp', e.target.checked)}
-                            className="w-3 h-3"
-                          />
-                          <span className="text-purple-400 font-medium">Use ROI-Based SL/TP</span>
-                          <span className="text-gray-500">(instead of price %)</span>
-                        </label>
-                        {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp && (
-                          <div className="grid grid-cols-2 gap-2 mt-2">
-                            <div>
-                              <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss based on ROI (Return on Investment). Negative value. E.g., -10% = close if ROI drops to -10%. Accounts for leverage.">ROI Stop Loss %</label>
-                              <div className="flex items-center gap-1">
-                                <input
-                                  type="number"
-                                  min="-100"
-                                  max="0"
-                                  step="1"
-                                  value={modeConfigs[selectedModeConfig]?.sltp?.roi_stop_loss_percent || -10}
-                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.roi_stop_loss_percent', Number(e.target.value))}
-                                  className="w-full px-1 py-1 bg-gray-700 border border-red-600/50 rounded text-red-400 text-xs"
-                                />
-                                <span className="text-[10px] text-gray-500">%</span>
-                              </div>
-                            </div>
-                            <div>
-                              <label className="block text-[10px] text-gray-400 mb-1" title="Take profit based on ROI (Return on Investment). E.g., 25% = close when ROI reaches 25%. With 10x leverage, 2.5% price move = 25% ROI.">ROI Take Profit %</label>
-                              <div className="flex items-center gap-1">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  max="500"
-                                  step="5"
-                                  value={modeConfigs[selectedModeConfig]?.sltp?.roi_take_profit_percent || 25}
-                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.roi_take_profit_percent', Number(e.target.value))}
-                                  className="w-full px-1 py-1 bg-gray-700 border border-green-600/50 rounded text-green-400 text-xs"
-                                />
-                                <span className="text-[10px] text-gray-500">%</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
+                        <label className="block text-[10px] text-gray-400 mb-2">SL/TP Method</label>
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => updateModeConfig(selectedModeConfig, 'sltp.auto_sltp_enabled', false)}
+                            className={`flex-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                              !modeConfigs[selectedModeConfig]?.sltp?.auto_sltp_enabled
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                            }`}
+                            title="Manual SL/TP percentages"
+                          >
+                            Manual
+                          </button>
+                          <button
+                            onClick={() => updateModeConfig(selectedModeConfig, 'sltp.auto_sltp_enabled', true)}
+                            className={`flex-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                              modeConfigs[selectedModeConfig]?.sltp?.auto_sltp_enabled
+                                ? 'bg-purple-600 text-white'
+                                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                            }`}
+                            title="AI/LLM automatically determines optimal SL/TP"
+                          >
+                            Auto AI/LLM
+                          </button>
+                        </div>
                       </div>
 
-                      {/* Price-based SL/TP */}
-                      {!modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp && (
+                      {/* Calculation Type Selector (for both Manual and Auto AI/LLM) */}
+                      <div className="pb-2 border-b border-gray-700">
+                        <label className="block text-[10px] text-gray-400 mb-2">Calculation Type</label>
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => updateModeConfig(selectedModeConfig, 'sltp.use_roi_based_sltp', false)}
+                            className={`flex-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                              !modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                ? 'bg-cyan-600 text-white'
+                                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                            }`}
+                            title="Calculate SL/TP based on price movement percentage"
+                          >
+                            Price %
+                          </button>
+                          <button
+                            onClick={() => updateModeConfig(selectedModeConfig, 'sltp.use_roi_based_sltp', true)}
+                            className={`flex-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                              modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                ? 'bg-green-600 text-white'
+                                : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                            }`}
+                            title="Calculate SL/TP based on ROI (accounts for leverage)"
+                          >
+                            ROI %
+                          </button>
+                        </div>
+                        <p className="text-[9px] text-gray-500 mt-1">
+                          {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                            ? 'ROI accounts for leverage. With 10x, 1% price = 10% ROI.'
+                            : 'Price % is direct price movement from entry.'}
+                        </p>
+                      </div>
+
+                      {/* Auto AI/LLM Configuration */}
+                      {modeConfigs[selectedModeConfig]?.sltp?.auto_sltp_enabled && (
+                        <div className="px-2 py-2 bg-purple-900/20 border border-purple-700/30 rounded space-y-3">
+                          <div className="text-[10px] text-purple-400 mb-2">
+                            AI/LLM determines SL/TP using {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI %' : 'Price %'} calculation. Configure safety thresholds:
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] text-gray-400 mb-1" title="Minimum profit before AI can activate trailing stop. Ensures fees are covered.">
+                                Min Profit to Trail {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI' : ''} %
+                              </label>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0"
+                                max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 100 : 10}
+                                value={modeConfigs[selectedModeConfig]?.sltp?.min_profit_to_trail_pct || 0.5}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.min_profit_to_trail_pct', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-purple-600/50 rounded text-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] text-gray-400 mb-1" title="Minimum distance SL must be from entry. Prevents near-zero closes.">
+                                Min SL Distance {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI' : ''} %
+                              </label>
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0"
+                                max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 100 : 10}
+                                value={modeConfigs[selectedModeConfig]?.sltp?.min_sl_distance_from_zero || 0.5}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.min_sl_distance_from_zero', Number(e.target.value))}
+                                className="w-full px-1 py-1 bg-gray-700 border border-purple-600/50 rounded text-white text-xs"
+                              />
+                            </div>
+                          </div>
+                          <label className="flex items-center gap-2 text-[10px] text-gray-400" title="Allow AI/LLM to manage trailing stop dynamically.">
+                            <input
+                              type="checkbox"
+                              checked={modeConfigs[selectedModeConfig]?.sltp?.auto_trailing_enabled || false}
+                              onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.auto_trailing_enabled', e.target.checked)}
+                              className="w-3 h-3 accent-purple-500"
+                            />
+                            <span className="text-purple-300">AI-Managed Trailing Stop</span>
+                          </label>
+                        </div>
+                      )}
+
+                      {/* Manual SL/TP Configuration */}
+                      {!modeConfigs[selectedModeConfig]?.sltp?.auto_sltp_enabled && (
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="block text-[10px] text-gray-400 mb-1" title="Stop loss percentage from entry price. Position closes if price moves against you by this amount.">Stop Loss %</label>
+                            <label className="block text-[10px] text-gray-400 mb-1" title={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                              ? "Stop loss based on ROI. Negative value. E.g., -10% = close at -10% ROI."
+                              : "Stop loss % from entry price. Position closes if price moves against you."}>
+                              Stop Loss {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI' : ''} %
+                            </label>
                             <div className="flex items-center gap-1">
                               <input
                                 type="number"
-                                min="0"
-                                max="50"
-                                step="0.1"
-                                value={modeConfigs[selectedModeConfig]?.sltp?.stop_loss_percent || 1.5}
-                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.stop_loss_percent', Number(e.target.value))}
-                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                min={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? -100 : 0}
+                                max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 0 : 50}
+                                step={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 1 : 0.1}
+                                value={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                  ? (modeConfigs[selectedModeConfig]?.sltp?.roi_stop_loss_percent || -10)
+                                  : (modeConfigs[selectedModeConfig]?.sltp?.stop_loss_percent || 1.5)}
+                                onChange={(e) => updateModeConfig(selectedModeConfig,
+                                  modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'sltp.roi_stop_loss_percent' : 'sltp.stop_loss_percent',
+                                  Number(e.target.value))}
+                                className={`w-full px-1 py-1 bg-gray-700 border rounded text-xs ${
+                                  modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                    ? 'border-red-600/50 text-red-400'
+                                    : 'border-gray-600 text-white'
+                                }`}
                               />
                               <span className="text-[10px] text-gray-500">%</span>
                             </div>
                           </div>
                           <div>
-                            <label className="block text-[10px] text-gray-400 mb-1" title="Take profit percentage from entry price. Position closes when price moves in your favor by this amount.">Take Profit %</label>
+                            <label className="block text-[10px] text-gray-400 mb-1" title={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                              ? "Take profit based on ROI. E.g., 25% = close at +25% ROI."
+                              : "Take profit % from entry. Position closes when price moves in your favor."}>
+                              Take Profit {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI' : ''} %
+                            </label>
                             <div className="flex items-center gap-1">
                               <input
                                 type="number"
                                 min="0"
-                                max="100"
-                                step="0.1"
-                                value={modeConfigs[selectedModeConfig]?.sltp?.take_profit_percent || 3.0}
-                                onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.take_profit_percent', Number(e.target.value))}
-                                className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 500 : 100}
+                                step={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 5 : 0.1}
+                                value={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                  ? (modeConfigs[selectedModeConfig]?.sltp?.roi_take_profit_percent || 25)
+                                  : (modeConfigs[selectedModeConfig]?.sltp?.take_profit_percent || 3.0)}
+                                onChange={(e) => updateModeConfig(selectedModeConfig,
+                                  modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'sltp.roi_take_profit_percent' : 'sltp.take_profit_percent',
+                                  Number(e.target.value))}
+                                className={`w-full px-1 py-1 bg-gray-700 border rounded text-xs ${
+                                  modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                    ? 'border-green-600/50 text-green-400'
+                                    : 'border-gray-600 text-white'
+                                }`}
                               />
                               <span className="text-[10px] text-gray-500">%</span>
                             </div>
@@ -2527,28 +2535,39 @@ export default function GiniePanel() {
                             className="w-3 h-3"
                           />
                           <span className="text-cyan-400 font-medium">Trailing Stop</span>
+                          <span className="text-[9px] text-gray-500">
+                            (using {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI %' : 'Price %'})
+                          </span>
                         </label>
                         {modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_enabled && (
                           <div className="grid grid-cols-3 gap-2 ml-4">
                             <div>
-                              <label className="block text-[10px] text-gray-500 mb-1" title="Trailing stop distance as percentage. Stop follows price by this amount (e.g., 1% = stop trails 1% below peak).">Trail %</label>
+                              <label className="block text-[10px] text-gray-500 mb-1" title={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                ? "Trailing stop distance as ROI %. Stop follows peak ROI by this amount."
+                                : "Trailing stop distance as price %. Stop follows peak price by this amount."}>
+                                Trail {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI' : ''} %
+                              </label>
                               <input
                                 type="number"
                                 min="0"
-                                max="20"
-                                step="0.1"
+                                max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 100 : 20}
+                                step={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 1 : 0.1}
                                 value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_percent || 1.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_percent', Number(e.target.value))}
                                 className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                             </div>
                             <div>
-                              <label className="block text-[10px] text-gray-500 mb-1" title="Profit level required before trailing stop activates. E.g., 0.5% = trailing starts after 0.5% profit.">Activate @ %</label>
+                              <label className="block text-[10px] text-gray-500 mb-1" title={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
+                                ? "ROI % required before trailing activates. E.g., 5% = trailing starts after 5% ROI."
+                                : "Profit % required before trailing activates. E.g., 0.5% = trailing starts after 0.5% profit."}>
+                                Activate @ {modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'ROI' : ''} %
+                              </label>
                               <input
                                 type="number"
                                 min="0"
-                                max="50"
-                                step="0.5"
+                                max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 200 : 50}
+                                step={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 1 : 0.5}
                                 value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_activation || 1.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_activation', Number(e.target.value))}
                                 className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
