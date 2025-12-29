@@ -1788,6 +1788,13 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 	settingsManager := GetSettingsManager()
 	currentSettings := settingsManager.GetCurrentSettings()
 
+	// Check if circuit breaker is tripped - skip entire scan
+	if currentSettings.UltraFastCircuitBreakerTripped {
+		log.Printf("[ULTRA-FAST-SCAN] Circuit breaker TRIPPED - skipping scan (consecutive_losses=%d, daily_pnl=$%.2f)",
+			currentSettings.UltraFastConsecutiveLosses, currentSettings.UltraFastDailyPnL)
+		return
+	}
+
 	// Track scan time for diagnostics
 	ga.mu.Lock()
 	ga.lastUltraFastScan = time.Now()
@@ -1797,7 +1804,8 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 	ga.totalSymbols = len(symbols)
 	ga.mu.Unlock()
 
-	log.Printf("[ULTRA-FAST-SCAN] Scanning %d symbols, min_confidence=%d%%", len(symbols), currentSettings.UltraFastMinConfidence)
+	log.Printf("[ULTRA-FAST-SCAN] Scanning %d symbols, min_confidence=%d%%, min_profit=$%.2f",
+		len(symbols), int(currentSettings.UltraFastMinConfidence), currentSettings.UltraFastMinProfitUSD)
 
 	// Count current ultra-fast positions
 	ga.mu.RLock()
@@ -1815,8 +1823,8 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 		return
 	}
 
-	// Check daily trade limit
-	if ga.dailyTrades >= currentSettings.UltraFastMaxDailyTrades {
+	// Check daily trade limit (0 = unlimited)
+	if currentSettings.UltraFastMaxDailyTrades > 0 && ga.dailyTrades >= currentSettings.UltraFastMaxDailyTrades {
 		log.Printf("[ULTRA-FAST-SCAN] Daily trade limit reached: %d/%d, skipping scan", ga.dailyTrades, currentSettings.UltraFastMaxDailyTrades)
 		return
 	}
@@ -2990,8 +2998,15 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		return
 	}
 
-	// Capture position count while holding lock for adaptive sizing
-	currentPositionCount := len(ga.positions)
+	// Capture MODE-SPECIFIC position count while holding lock for adaptive sizing
+	// BUG FIX: Previously used total position count, but mode-specific max requires mode-specific count
+	modePositionCount := 0
+	for _, pos := range ga.positions {
+		if pos.Mode == selectedMode {
+			modePositionCount++
+		}
+	}
+	currentPositionCount := modePositionCount
 
 	// Use adaptive position sizing based on available balance (human-like approach)
 	// Get LLM suggested size from decision (if available)
@@ -7363,6 +7378,10 @@ func (ga *GinieAutopilot) reconcilePositions() {
 
 	// Add discovered positions to tracking (release lock briefly for placeSLTPOrders)
 	if len(positionsToAdd) > 0 {
+		// BUG FIX: Track positions added per mode to enforce limits
+		addedPerMode := make(map[GinieTradingMode]int)
+		skippedDueToLimit := 0
+
 		for _, exchangePos := range positionsToAdd {
 			side := "LONG"
 			if exchangePos.PositionAmt < 0 {
@@ -7372,6 +7391,32 @@ func (ga *GinieAutopilot) reconcilePositions() {
 
 			// Select mode based on user's enabled modes (fixes hardcoded swing bypass)
 			externalMode := ga.selectEnabledModeForPosition()
+
+			// BUG FIX: Check mode-specific position limit before adding
+			modeConfig := ga.getModeConfig(externalMode)
+			maxPositions := ga.config.MaxPositions
+			if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
+				maxPositions = modeConfig.Size.MaxPositions
+			}
+
+			// Count current positions for this mode (including ones we just added in this loop)
+			currentModePositions := addedPerMode[externalMode]
+			for _, pos := range ga.positions {
+				if pos.Mode == externalMode {
+					currentModePositions++
+				}
+			}
+
+			// Skip if adding this position would exceed the mode's limit
+			if currentModePositions >= maxPositions {
+				ga.logger.Warn("Position reconciliation: skipping position - mode limit reached",
+					"symbol", exchangePos.Symbol,
+					"mode", externalMode,
+					"current_positions", currentModePositions,
+					"max_positions", maxPositions)
+				skippedDueToLimit++
+				continue
+			}
 
 			// Create internal position entry
 			newPos := &GiniePosition{
@@ -7388,12 +7433,22 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			}
 
 			ga.positions[exchangePos.Symbol] = newPos
+			addedPerMode[externalMode]++
 
 			ga.logger.Info("Position reconciliation: added untracked position to Ginie",
 				"symbol", exchangePos.Symbol,
 				"side", side,
 				"quantity", qty,
-				"entry_price", exchangePos.EntryPrice)
+				"entry_price", exchangePos.EntryPrice,
+				"mode", externalMode,
+				"mode_position_count", currentModePositions+1,
+				"max_positions", maxPositions)
+		}
+
+		if skippedDueToLimit > 0 {
+			ga.logger.Warn("Position reconciliation: some positions not added due to mode limits",
+				"skipped_count", skippedDueToLimit,
+				"added_count", len(positionsToAdd)-skippedDueToLimit)
 		}
 
 		// Place SL/TP orders for newly added positions (in background to avoid lock issues)
@@ -10658,16 +10713,28 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 
 // checkUltraFastExits checks all ultra-fast positions for exit conditions
 // Exit priority:
-// 1. STOP LOSS hit → EXIT immediately (100% loss booking)
-// 2. Profit target hit → EXIT immediately (100% profit booking)
-// 3. Trailing stop triggered → EXIT (capture max profit with pullback protection)
-// 4. Time > 1s AND profitable → EXIT to secure profit
-// 5. Time > 3s → FORCE EXIT (emergency timeout)
+// 1. Circuit breaker check - if tripped, close all positions
+// 2. STOP LOSS hit → EXIT immediately (100% loss booking)
+// 3. Profit >= $0.50 after fees → EXIT immediately (small profit collection)
+// 4. Profit target % hit → EXIT immediately (100% profit booking)
+// 5. Trailing stop triggered → EXIT (capture max profit with pullback protection)
+// 6. In loss → Call AI/LLM for decision (average down or book loss)
+// 7. Time > max_hold_ms → FORCE EXIT (emergency timeout)
 func (ga *GinieAutopilot) checkUltraFastExits() {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
 	now := time.Now()
+	settingsManager := GetSettingsManager()
+	currentSettings := settingsManager.GetCurrentSettings()
+
+	// Check if circuit breaker is tripped
+	if currentSettings.UltraFastCircuitBreakerTripped {
+		ga.logger.Warn("Ultra-fast: Circuit breaker is TRIPPED - ultra-fast trading paused",
+			"consecutive_losses", currentSettings.UltraFastConsecutiveLosses,
+			"daily_pnl", currentSettings.UltraFastDailyPnL)
+		return
+	}
 
 	// Find all ultra-fast positions
 	ultraFastPositions := make([]*GiniePosition, 0)
@@ -10681,6 +10748,19 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 		return
 	}
 
+	// Get min profit USD threshold from settings (default $0.50)
+	minProfitUSD := currentSettings.UltraFastMinProfitUSD
+	if minProfitUSD <= 0 {
+		minProfitUSD = 0.50 // Fallback default
+	}
+
+	// Get max hold time from settings
+	maxHoldMS := currentSettings.UltraFastMaxHoldMS
+	if maxHoldMS <= 0 {
+		maxHoldMS = 15000 // Default 15 seconds
+	}
+	maxHoldDuration := time.Duration(maxHoldMS) * time.Millisecond
+
 	for _, pos := range ultraFastPositions {
 		// Get current price
 		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(pos.Symbol)
@@ -10691,11 +10771,19 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			continue
 		}
 
-		// Calculate PnL %
-		var pnlPercent float64
+		// Calculate PnL in both % and USD
+		var pnlPercent, pnlUSD, exitFeeUSD float64
+		closeQty := pos.RemainingQty
+
 		if pos.Side == "LONG" {
+			pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
+			exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
 		} else {
+			pnlBeforeFees := (pos.EntryPrice - currentPrice) * closeQty
+			exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
 		}
 
@@ -10707,31 +10795,46 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 				"symbol", pos.Symbol,
 				"stop_loss", pos.StopLoss,
 				"current_price", currentPrice,
+				"pnl_usd", pnlUSD,
 				"pnl_pct", pnlPercent)
-			ga.executeUltraFastExit(pos, currentPrice, "stop_loss_hit")
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "stop_loss_hit", pnlUSD)
 			continue
 		}
 
-		// Exit Condition 2: Profit target hit → 100% PROFIT BOOKING (priority 2)
+		// Exit Condition 2: Profit >= $0.50 after fees → COLLECT SMALL PROFIT (priority 2)
+		if pnlUSD >= minProfitUSD {
+			ga.logger.Info("Ultra-fast: MIN PROFIT HIT - collecting small profit",
+				"symbol", pos.Symbol,
+				"pnl_usd", pnlUSD,
+				"min_profit_usd", minProfitUSD,
+				"pnl_pct", pnlPercent,
+				"hold_time_ms", holdTime.Milliseconds())
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "min_profit_hit", pnlUSD)
+			continue
+		}
+
+		// Exit Condition 3: Profit target % hit → 100% PROFIT BOOKING (priority 3)
 		if pos.UltraFastTargetPercent > 0 && pnlPercent >= pos.UltraFastTargetPercent {
 			ga.logger.Info("Ultra-fast: Profit target hit - 100% profit booking - exiting",
 				"symbol", pos.Symbol,
 				"target_pct", pos.UltraFastTargetPercent,
 				"current_pnl_pct", pnlPercent,
+				"pnl_usd", pnlUSD,
 				"hold_time_ms", holdTime.Milliseconds())
-			ga.executeUltraFastExit(pos, currentPrice, "target_hit")
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "target_hit", pnlUSD)
 			continue
 		}
 
-		// Exit Condition 3: Trailing stop triggered (priority 3)
+		// Exit Condition 4: Trailing stop triggered (priority 4)
 		if pos.TrailingActive && ga.checkTrailingStop(pos, currentPrice) {
 			ga.logger.Info("Ultra-fast: Trailing stop hit - exiting with profit protection",
 				"symbol", pos.Symbol,
 				"highest_price", pos.HighestPrice,
 				"current_price", currentPrice,
 				"trailing_pct", pos.TrailingPercent,
+				"pnl_usd", pnlUSD,
 				"pnl_pct", pnlPercent)
-			ga.executeUltraFastExit(pos, currentPrice, "trailing_stop_hit")
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "trailing_stop_hit", pnlUSD)
 			continue
 		}
 
@@ -10740,23 +10843,39 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			ga.updateUltraFastTrailingStop(pos, currentPrice)
 		}
 
-		// Exit Condition 4: Time > 1s AND profitable → EXIT to secure profit
-		if holdTime >= 1*time.Second && pnlPercent > 0 {
-			ga.logger.Info("Ultra-fast: Time limit with profit - exiting",
-				"symbol", pos.Symbol,
-				"hold_time_ms", holdTime.Milliseconds(),
-				"pnl_pct", pnlPercent)
-			ga.executeUltraFastExit(pos, currentPrice, "time_limit_profit")
-			continue
-		}
-
-		// Exit Condition 5: Time > 3s → FORCE EXIT (emergency)
-		if holdTime >= 3*time.Second {
-			ga.logger.Warn("Ultra-fast: Force exit after 3s timeout",
-				"symbol", pos.Symbol,
-				"hold_time_ms", holdTime.Milliseconds(),
-				"pnl_pct", pnlPercent)
-			ga.executeUltraFastExit(pos, currentPrice, "force_exit_timeout")
+		// Exit Condition 5: In loss AND past hold time → Ask AI/LLM for decision
+		if pnlUSD < 0 && holdTime >= maxHoldDuration {
+			// Check if we should use LLM for loss decisions
+			if currentSettings.UltraFastUseLLMForLoss {
+				decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
+				if decision == "average" {
+					// AI suggests averaging down - skip exit, will re-enter on next scan
+					ga.logger.Info("Ultra-fast: AI suggests AVERAGE DOWN - holding position",
+						"symbol", pos.Symbol,
+						"pnl_usd", pnlUSD,
+						"pnl_pct", pnlPercent,
+						"hold_time_ms", holdTime.Milliseconds())
+					continue
+				} else {
+					// AI suggests booking loss
+					ga.logger.Warn("Ultra-fast: AI suggests BOOK LOSS - closing position",
+						"symbol", pos.Symbol,
+						"pnl_usd", pnlUSD,
+						"pnl_pct", pnlPercent,
+						"hold_time_ms", holdTime.Milliseconds())
+					ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_book_loss", pnlUSD)
+					continue
+				}
+			} else {
+				// No LLM - just force exit on timeout
+				ga.logger.Warn("Ultra-fast: Force exit after timeout",
+					"symbol", pos.Symbol,
+					"hold_time_ms", holdTime.Milliseconds(),
+					"max_hold_ms", maxHoldMS,
+					"pnl_usd", pnlUSD,
+					"pnl_pct", pnlPercent)
+				ga.executeUltraFastExitWithTracking(pos, currentPrice, "force_exit_timeout", pnlUSD)
+			}
 		}
 	}
 }
@@ -10823,6 +10942,169 @@ func (ga *GinieAutopilot) updateUltraFastTrailingStop(pos *GiniePosition, curren
 			pos.StopLoss = pos.LowestPrice * (1 + pos.TrailingPercent/100)
 		}
 	}
+}
+
+// executeUltraFastExitWithTracking wraps executeUltraFastExit with win/loss tracking and circuit breaker checks
+// This is the primary exit method for ultra-fast positions that updates statistics
+func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, currentPrice float64, reason string, pnlUSD float64) {
+	// Execute the actual exit
+	ga.executeUltraFastExit(pos, currentPrice, reason)
+
+	// Update ultra-fast specific statistics
+	settingsManager := GetSettingsManager()
+	settings := settingsManager.GetCurrentSettings()
+
+	// Check if we need to reset daily stats (new day)
+	today := time.Now().Format("2006-01-02")
+	if settings.UltraFastLastUpdate != today {
+		settings.UltraFastDailyPnL = 0
+		settings.UltraFastTodayTrades = 0
+		settings.UltraFastConsecutiveLosses = 0
+		settings.UltraFastTotalLosses = 0
+		settings.UltraFastTotalWins = 0
+		settings.UltraFastCircuitBreakerTripped = false // Reset circuit breaker on new day
+		settings.UltraFastLastUpdate = today
+	}
+
+	// Update PnL
+	settings.UltraFastDailyPnL += pnlUSD
+	settings.UltraFastTotalPnL += pnlUSD
+
+	// Update win/loss tracking
+	if pnlUSD >= 0 {
+		// WIN - reset consecutive losses
+		settings.UltraFastConsecutiveLosses = 0
+		settings.UltraFastTotalWins++
+		ga.logger.Info("Ultra-fast: WIN recorded - consecutive losses reset",
+			"symbol", pos.Symbol,
+			"pnl_usd", pnlUSD,
+			"total_wins", settings.UltraFastTotalWins,
+			"daily_pnl", settings.UltraFastDailyPnL)
+	} else {
+		// LOSS - increment consecutive losses
+		settings.UltraFastConsecutiveLosses++
+		settings.UltraFastTotalLosses++
+		ga.logger.Warn("Ultra-fast: LOSS recorded - checking circuit breaker",
+			"symbol", pos.Symbol,
+			"pnl_usd", pnlUSD,
+			"consecutive_losses", settings.UltraFastConsecutiveLosses,
+			"total_losses", settings.UltraFastTotalLosses,
+			"daily_pnl", settings.UltraFastDailyPnL)
+	}
+
+	// Calculate win rate
+	totalTrades := settings.UltraFastTotalWins + settings.UltraFastTotalLosses
+	if totalTrades > 0 {
+		settings.UltraFastWinRate = float64(settings.UltraFastTotalWins) / float64(totalTrades) * 100
+	}
+
+	// Check circuit breaker conditions
+	if settings.UltraFastCircuitBreakerEnabled {
+		shouldTrip := false
+		tripReason := ""
+
+		// Condition 1: Consecutive losses >= threshold (default 10)
+		if settings.UltraFastConsecutiveLosses >= settings.UltraFastMaxConsecutiveLosses {
+			shouldTrip = true
+			tripReason = fmt.Sprintf("consecutive_losses=%d >= max=%d",
+				settings.UltraFastConsecutiveLosses, settings.UltraFastMaxConsecutiveLosses)
+		}
+
+		// Condition 2: Daily loss exceeds threshold (default $10)
+		if settings.UltraFastDailyPnL <= -settings.UltraFastMaxDailyLossUSD {
+			shouldTrip = true
+			tripReason = fmt.Sprintf("daily_loss=$%.2f >= max=$%.2f",
+				-settings.UltraFastDailyPnL, settings.UltraFastMaxDailyLossUSD)
+		}
+
+		if shouldTrip && !settings.UltraFastCircuitBreakerTripped {
+			settings.UltraFastCircuitBreakerTripped = true
+			ga.logger.Error("Ultra-fast: CIRCUIT BREAKER TRIPPED - ultra-fast trading PAUSED",
+				"reason", tripReason,
+				"consecutive_losses", settings.UltraFastConsecutiveLosses,
+				"daily_pnl", settings.UltraFastDailyPnL,
+				"total_losses", settings.UltraFastTotalLosses,
+				"total_wins", settings.UltraFastTotalWins,
+				"win_rate", settings.UltraFastWinRate)
+		}
+	}
+
+	// Save updated settings
+	if err := settingsManager.SaveSettings(settings); err != nil {
+		ga.logger.Error("Failed to save ultra-fast settings after exit",
+			"error", err)
+	}
+}
+
+// getUltraFastLossDecision calls AI/LLM to decide whether to average down or book loss
+// Returns "average" to hold and average down, or "book_loss" to close the position
+func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPrice float64, pnlUSD float64, pnlPercent float64) string {
+	// Get current market conditions via ScanCoin
+	scan, err := ga.analyzer.ScanCoin(pos.Symbol)
+	if err != nil {
+		ga.logger.Warn("Ultra-fast AI: Failed to analyze market, defaulting to book_loss",
+			"symbol", pos.Symbol,
+			"error", err)
+		return "book_loss"
+	}
+
+	// Check if trend is still favorable for the position direction
+	trendFavorable := false
+	if pos.Side == "LONG" && scan.Trend.TrendDirection == "bullish" {
+		trendFavorable = true
+	} else if pos.Side == "SHORT" && scan.Trend.TrendDirection == "bearish" {
+		trendFavorable = true
+	}
+
+	// Check if volatility is reasonable for recovery (Low or Medium is OK)
+	volatilityOK := scan.Volatility.Regime != "High" && scan.Volatility.Regime != "Extreme"
+
+	// Check ADX - weak trend means less likely to recover
+	adxFavorable := scan.Trend.ADXValue > 15 // Minimum trend strength
+
+	// Get settings for circuit breaker thresholds
+	settingsManager := GetSettingsManager()
+	settings := settingsManager.GetCurrentSettings()
+
+	// Calculate how much more we can lose before circuit breaker
+	remainingLossBuffer := settings.UltraFastMaxDailyLossUSD + settings.UltraFastDailyPnL
+
+	// Decision logic - prefer averaging if conditions are favorable
+	shouldAverage := false
+	reason := ""
+
+	// Only consider averaging if:
+	// 1. Loss is small (< $2)
+	// 2. Trend is still favorable
+	// 3. We have loss buffer remaining
+	// 4. Not too many consecutive losses already
+	if pnlUSD > -2.0 && // Small loss only
+		trendFavorable &&
+		volatilityOK &&
+		adxFavorable &&
+		remainingLossBuffer > 5.0 && // At least $5 buffer
+		settings.UltraFastConsecutiveLosses < 5 { // Not too many losses in a row
+		shouldAverage = true
+		reason = fmt.Sprintf("trend=%s ADX=%.1f volatility=%s loss_buffer=$%.2f",
+			scan.Trend.TrendDirection, scan.Trend.ADXValue, scan.Volatility.Regime, remainingLossBuffer)
+	} else {
+		reason = fmt.Sprintf("conditions unfavorable: trend_ok=%v vol_ok=%v adx_ok=%v buffer=$%.2f consec_losses=%d",
+			trendFavorable, volatilityOK, adxFavorable, remainingLossBuffer, settings.UltraFastConsecutiveLosses)
+	}
+
+	ga.logger.Info("Ultra-fast AI decision",
+		"symbol", pos.Symbol,
+		"side", pos.Side,
+		"pnl_usd", pnlUSD,
+		"decision", map[bool]string{true: "AVERAGE", false: "BOOK_LOSS"}[shouldAverage],
+		"reason", reason,
+		"trend", scan.Trend.TrendDirection,
+		"adx", scan.Trend.ADXValue)
+
+	if shouldAverage {
+		return "average"
+	}
+	return "book_loss"
 }
 
 // executeUltraFastExit closes an ultra-fast position with fee-aware PnL calculation
