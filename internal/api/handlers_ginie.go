@@ -1771,11 +1771,15 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 			config := gin.H{}
 			for _, mode := range modes {
 				modeConfig := gin.H{
-					"sl_percent":           0.0,
-					"tp_percent":           0.0,
-					"trailing_enabled":     false,
-					"trailing_percent":     0.0,
-					"trailing_activation":  0.0,
+					"sl_percent":                0.0,
+					"tp_percent":                0.0,
+					"trailing_enabled":          false,
+					"trailing_percent":          0.0,
+					"trailing_activation":       0.0,
+					"auto_sltp_enabled":         false,
+					"auto_trailing_enabled":     false,
+					"min_profit_to_trail_pct":   0.5,
+					"min_sl_distance_from_zero": 0.1,
 				}
 				if mc := settings.ModeConfigs[mode]; mc != nil && mc.SLTP != nil {
 					modeConfig["sl_percent"] = mc.SLTP.StopLossPercent
@@ -1783,6 +1787,10 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 					modeConfig["trailing_enabled"] = mc.SLTP.TrailingStopEnabled
 					modeConfig["trailing_percent"] = mc.SLTP.TrailingStopPercent
 					modeConfig["trailing_activation"] = mc.SLTP.TrailingStopActivation
+					modeConfig["auto_sltp_enabled"] = mc.SLTP.AutoSLTPEnabled
+					modeConfig["auto_trailing_enabled"] = mc.SLTP.AutoTrailingEnabled
+					modeConfig["min_profit_to_trail_pct"] = mc.SLTP.MinProfitToTrailPct
+					modeConfig["min_sl_distance_from_zero"] = mc.SLTP.MinSLDistanceFromZero
 				}
 				config[mode] = modeConfig
 			}
@@ -1815,14 +1823,18 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 
 // handleUpdateGinieSLTP updates SL/TP configuration for a mode
 func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
-	mode := c.Param("mode") // scalp, swing, or position
+	mode := c.Param("mode") // ultra_fast, scalp, swing, or position
 
 	var req struct {
-		SLPercent           *float64 `json:"sl_percent"`
-		TPPercent           *float64 `json:"tp_percent"`
-		TrailingEnabled     *bool    `json:"trailing_enabled"`
-		TrailingPercent     *float64 `json:"trailing_percent"`
-		TrailingActivation  *float64 `json:"trailing_activation"`
+		SLPercent             *float64 `json:"sl_percent"`
+		TPPercent             *float64 `json:"tp_percent"`
+		TrailingEnabled       *bool    `json:"trailing_enabled"`
+		TrailingPercent       *float64 `json:"trailing_percent"`
+		TrailingActivation    *float64 `json:"trailing_activation"`
+		AutoSLTPEnabled       *bool    `json:"auto_sltp_enabled"`
+		AutoTrailingEnabled   *bool    `json:"auto_trailing_enabled"`
+		MinProfitToTrailPct   *float64 `json:"min_profit_to_trail_pct"`
+		MinSLDistanceFromZero *float64 `json:"min_sl_distance_from_zero"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1836,6 +1848,8 @@ func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
 	// Get current values from ModeConfigs as defaults
 	var slPct, tpPct, trailPct, trailAct float64
 	var trailEnabled bool
+	var autoSLTP, autoTrailing bool
+	var minProfitToTrail, minSLDistanceFromZero float64
 
 	modeKey := mode
 	if mode == "ultrafast" {
@@ -1848,6 +1862,10 @@ func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
 		trailEnabled = mc.SLTP.TrailingStopEnabled
 		trailPct = mc.SLTP.TrailingStopPercent
 		trailAct = mc.SLTP.TrailingStopActivation
+		autoSLTP = mc.SLTP.AutoSLTPEnabled
+		autoTrailing = mc.SLTP.AutoTrailingEnabled
+		minProfitToTrail = mc.SLTP.MinProfitToTrailPct
+		minSLDistanceFromZero = mc.SLTP.MinSLDistanceFromZero
 	}
 
 	if modeKey != "ultra_fast" && modeKey != "scalp" && modeKey != "swing" && modeKey != "position" {
@@ -1871,22 +1889,39 @@ func (s *Server) handleUpdateGinieSLTP(c *gin.Context) {
 	if req.TrailingActivation != nil {
 		trailAct = *req.TrailingActivation
 	}
+	if req.AutoSLTPEnabled != nil {
+		autoSLTP = *req.AutoSLTPEnabled
+	}
+	if req.AutoTrailingEnabled != nil {
+		autoTrailing = *req.AutoTrailingEnabled
+	}
+	if req.MinProfitToTrailPct != nil {
+		minProfitToTrail = *req.MinProfitToTrailPct
+	}
+	if req.MinSLDistanceFromZero != nil {
+		minSLDistanceFromZero = *req.MinSLDistanceFromZero
+	}
 
-	// Update settings
-	if err := sm.UpdateGinieSLTPSettings(mode, slPct, tpPct, trailEnabled, trailPct, trailAct); err != nil {
+	// Update settings (use modeKey for consistency)
+	if err := sm.UpdateGinieSLTPSettings(modeKey, slPct, tpPct, trailEnabled, trailPct, trailAct,
+		autoSLTP, autoTrailing, minProfitToTrail, minSLDistanceFromZero); err != nil {
 		errorResponse(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": fmt.Sprintf("SL/TP config updated for %s mode", mode),
+		"message": fmt.Sprintf("SL/TP config updated for %s mode", modeKey),
 		"config": gin.H{
-			"sl_percent":          slPct,
-			"tp_percent":          tpPct,
-			"trailing_enabled":    trailEnabled,
-			"trailing_percent":    trailPct,
-			"trailing_activation": trailAct,
+			"sl_percent":                slPct,
+			"tp_percent":                tpPct,
+			"trailing_enabled":          trailEnabled,
+			"trailing_percent":          trailPct,
+			"trailing_activation":       trailAct,
+			"auto_sltp_enabled":         autoSLTP,
+			"auto_trailing_enabled":     autoTrailing,
+			"min_profit_to_trail_pct":   minProfitToTrail,
+			"min_sl_distance_from_zero": minSLDistanceFromZero,
 		},
 	})
 }

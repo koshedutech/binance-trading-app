@@ -2196,6 +2196,43 @@ export default function GiniePanel() {
                   </button>
                   {expandedModeSection === 'size' && modeConfigs[selectedModeConfig]?.size && (
                     <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                      {/* Auto AI Size Toggle */}
+                      <div className="flex items-center justify-between p-2 bg-purple-900/20 border border-purple-700/30 rounded">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-purple-400 font-medium">🤖 Auto AI Size</span>
+                          <span className="text-[10px] text-gray-400" title="Let AI/LLM determine optimal position size based on market conditions, volatility, and confidence">
+                            (AI manages sizing)
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => updateModeConfig(selectedModeConfig, 'size.auto_size_enabled', !modeConfigs[selectedModeConfig]?.size?.auto_size_enabled)}
+                          className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                            modeConfigs[selectedModeConfig]?.size?.auto_size_enabled
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
+                          }`}
+                        >
+                          {modeConfigs[selectedModeConfig]?.size?.auto_size_enabled ? 'ON' : 'OFF'}
+                        </button>
+                      </div>
+                      {modeConfigs[selectedModeConfig]?.size?.auto_size_enabled && (
+                        <div className="flex items-center gap-2 px-2 py-1.5 bg-purple-900/10 rounded">
+                          <label className="text-[10px] text-purple-400" title="Minimum position size to ensure Binance fees are covered (0.08% round-trip). Smaller positions may result in losses from fees alone.">
+                            Min Fee Coverage:
+                          </label>
+                          <span className="text-[10px] text-gray-500">$</span>
+                          <input
+                            type="number"
+                            min="5"
+                            max="100"
+                            step="5"
+                            value={modeConfigs[selectedModeConfig]?.size?.auto_size_min_cover_fee ?? 15}
+                            onChange={(e) => updateModeConfig(selectedModeConfig, 'size.auto_size_min_cover_fee', Number(e.target.value))}
+                            className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
+                          />
+                          <span className="text-[10px] text-gray-500">min size</span>
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-2">
                         <div>
                           <label className="block text-[10px] text-gray-400 mb-1" title="Starting position size in USD before adjustments. The actual size may be larger based on confidence and risk settings.">Base Size</label>

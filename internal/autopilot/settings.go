@@ -155,6 +155,10 @@ type ModeSizeConfig struct {
 	RiskMultiplierAggressive   float64 `json:"risk_multiplier_aggressive"`     // Default: 1.0 - Aggressive risk scaling
 	ConfidenceMultiplierBase   float64 `json:"confidence_multiplier_base"`     // Default: 0.5 - Base multiplier for confidence scaling
 	ConfidenceMultiplierScale  float64 `json:"confidence_multiplier_scale"`    // Default: 0.7 - Additional multiplier per confidence level
+
+	// Auto AI/LLM sizing - let AI determine optimal position size
+	AutoSizeEnabled     bool    `json:"auto_size_enabled"`      // Use AI/LLM to determine position size based on volatility, confidence, market conditions
+	AutoSizeMinCoverFee float64 `json:"auto_size_min_cover_fee"` // Minimum size to ensure fees are covered (default: $15 to cover 0.08% round-trip fees)
 }
 
 // ModeCircuitBreakerConfig holds circuit breaker settings for a mode
@@ -200,6 +204,12 @@ type ModeSLTPConfig struct {
 	ATRTPMax        float64 `json:"atr_tp_max"`        // Max TP distance (ATR-based)
 	LLMWeight       float64 `json:"llm_weight"`        // Weight for LLM-suggested SL/TP
 	ATRWeight       float64 `json:"atr_weight"`        // Weight for ATR-calculated SL/TP
+
+	// Auto AI/LLM SL/TP - let AI dynamically manage SL/TP
+	AutoSLTPEnabled       bool    `json:"auto_sltp_enabled"`        // Use AI/LLM to determine SL/TP levels (ignores manual SL/TP %)
+	AutoTrailingEnabled   bool    `json:"auto_trailing_enabled"`    // Use AI/LLM to manage trailing stop activation and distance
+	MinProfitToTrailPct   float64 `json:"min_profit_to_trail_pct"`  // Minimum profit % before trailing activates (covers fees, default: 0.5%)
+	MinSLDistanceFromZero float64 `json:"min_sl_distance_from_zero"` // Minimum SL distance from entry to avoid near-zero closes (default: 0.1%)
 }
 
 // HedgeModeConfig holds hedge mode settings for a mode (LONG + SHORT simultaneously)
@@ -418,12 +428,14 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 85.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:      100.0,
-				MaxSizeUSD:       200.0,
-				MaxPositions:     5,
-				Leverage:         10,
-				SizeMultiplierLo: 1.0,
-				SizeMultiplierHi: 1.5,
+				BaseSizeUSD:         100.0,
+				MaxSizeUSD:          200.0,
+				MaxPositions:        5,
+				Leverage:            10,
+				SizeMultiplierLo:    1.0,
+				SizeMultiplierHi:    1.5,
+				AutoSizeEnabled:     false, // Manual sizing by default
+				AutoSizeMinCoverFee: 15.0,  // Min $15 to cover 0.08% round-trip fees
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       20.0,
@@ -453,6 +465,10 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ROITakeProfitPercent:    10,
 				MarginType:              "CROSS",
 				IsolatedMarginPercent:   25,
+				AutoSLTPEnabled:         false, // Manual SL/TP by default
+				AutoTrailingEnabled:     false, // Manual trailing by default
+				MinProfitToTrailPct:     0.3,   // 0.3% profit before trailing (ultra-fast needs lower)
+				MinSLDistanceFromZero:   0.1,   // 0.1% min SL distance from entry
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true,
@@ -508,12 +524,14 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 88.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:      200.0,
-				MaxSizeUSD:       400.0,
-				MaxPositions:     4,
-				Leverage:         8,
-				SizeMultiplierLo: 1.0,
-				SizeMultiplierHi: 1.8,
+				BaseSizeUSD:         200.0,
+				MaxSizeUSD:          400.0,
+				MaxPositions:        4,
+				Leverage:            8,
+				SizeMultiplierLo:    1.0,
+				SizeMultiplierHi:    1.8,
+				AutoSizeEnabled:     false,
+				AutoSizeMinCoverFee: 15.0,
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       40.0,
@@ -543,6 +561,10 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ROITakeProfitPercent:    15,
 				MarginType:              "CROSS",
 				IsolatedMarginPercent:   30,
+				AutoSLTPEnabled:         false,
+				AutoTrailingEnabled:     false,
+				MinProfitToTrailPct:     0.5,   // 0.5% profit before trailing
+				MinSLDistanceFromZero:   0.1,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true,
@@ -598,12 +620,14 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 90.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:      400.0,
-				MaxSizeUSD:       750.0,
-				MaxPositions:     3,
-				Leverage:         5,
-				SizeMultiplierLo: 1.0,
-				SizeMultiplierHi: 2.0,
+				BaseSizeUSD:         400.0,
+				MaxSizeUSD:          750.0,
+				MaxPositions:        3,
+				Leverage:            5,
+				SizeMultiplierLo:    1.0,
+				SizeMultiplierHi:    2.0,
+				AutoSizeEnabled:     false,
+				AutoSizeMinCoverFee: 20.0, // Higher min for swing trades
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       80.0,
@@ -633,6 +657,10 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ROITakeProfitPercent:    20,
 				MarginType:              "CROSS",
 				IsolatedMarginPercent:   40,
+				AutoSLTPEnabled:         false,
+				AutoTrailingEnabled:     false,
+				MinProfitToTrailPct:     1.0,   // 1% profit before trailing for swing
+				MinSLDistanceFromZero:   0.15,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true,
@@ -688,12 +716,14 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 92.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:      600.0,
-				MaxSizeUSD:       1000.0,
-				MaxPositions:     2,
-				Leverage:         3,
-				SizeMultiplierLo: 1.0,
-				SizeMultiplierHi: 2.5,
+				BaseSizeUSD:         600.0,
+				MaxSizeUSD:          1000.0,
+				MaxPositions:        2,
+				Leverage:            3,
+				SizeMultiplierLo:    1.0,
+				SizeMultiplierHi:    2.5,
+				AutoSizeEnabled:     false,
+				AutoSizeMinCoverFee: 25.0, // Higher min for position trades
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       150.0,
@@ -723,6 +753,10 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ROITakeProfitPercent:    30,
 				MarginType:              "ISOLATED", // Position mode uses isolated for safety
 				IsolatedMarginPercent:   50,
+				AutoSLTPEnabled:         false,
+				AutoTrailingEnabled:     false,
+				MinProfitToTrailPct:     2.0,   // 2% profit before trailing for position trades
+				MinSLDistanceFromZero:   0.2,
 			},
 			Hedge: &HedgeModeConfig{
 				AllowHedge:                true, // Cautious
@@ -1967,10 +2001,12 @@ func ValidateTPAllocation(tp1, tp2, tp3, tp4 float64) error {
 // UpdateGinieSLTPSettings updates SL/TP configuration for a specific mode
 // This function updates ModeConfigs (primary) and legacy fields (backwards compat).
 func (sm *SettingsManager) UpdateGinieSLTPSettings(
-	mode string, // "scalp", "swing", "position"
+	mode string, // "ultra_fast", "scalp", "swing", "position"
 	slPercent, tpPercent float64,
 	trailingEnabled bool,
 	trailingPercent, trailingActivation float64,
+	autoSLTPEnabled, autoTrailingEnabled bool,
+	minProfitToTrail, minSLDistanceFromZero float64,
 ) error {
 	// Validate inputs
 	if err := ValidateSLTPPercents(slPercent, tpPercent); err != nil {
@@ -1985,10 +2021,19 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		return fmt.Errorf("trailing activation must be 0-20%%, got: %.2f", trailingActivation)
 	}
 
+	// Validate auto trailing parameters
+	if minProfitToTrail < 0 || minProfitToTrail > 10 {
+		return fmt.Errorf("min profit to trail must be 0-10%%, got: %.2f", minProfitToTrail)
+	}
+
+	if minSLDistanceFromZero < 0 || minSLDistanceFromZero > 5 {
+		return fmt.Errorf("min SL distance from zero must be 0-5%%, got: %.2f", minSLDistanceFromZero)
+	}
+
 	// Validate mode
-	validModes := map[string]bool{"scalp": true, "swing": true, "position": true}
+	validModes := map[string]bool{"ultra_fast": true, "scalp": true, "swing": true, "position": true}
 	if !validModes[mode] {
-		return fmt.Errorf("invalid mode: %s (must be scalp, swing, or position)", mode)
+		return fmt.Errorf("invalid mode: %s (must be ultra_fast, scalp, swing, or position)", mode)
 	}
 
 	settings := sm.GetCurrentSettings()
@@ -2003,6 +2048,11 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		mc.SLTP.TrailingStopEnabled = trailingEnabled
 		mc.SLTP.TrailingStopPercent = trailingPercent
 		mc.SLTP.TrailingStopActivation = trailingActivation
+		// New auto AI/LLM fields
+		mc.SLTP.AutoSLTPEnabled = autoSLTPEnabled
+		mc.SLTP.AutoTrailingEnabled = autoTrailingEnabled
+		mc.SLTP.MinProfitToTrailPct = minProfitToTrail
+		mc.SLTP.MinSLDistanceFromZero = minSLDistanceFromZero
 	}
 
 	return sm.SaveSettings(settings)

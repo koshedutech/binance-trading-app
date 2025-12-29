@@ -1392,6 +1392,10 @@ class FuturesAPIService {
     trailing_enabled?: boolean;
     trailing_percent?: number;
     trailing_activation?: number;
+    auto_sltp_enabled?: boolean;
+    auto_trailing_enabled?: boolean;
+    min_profit_to_trail_pct?: number;
+    min_sl_distance_from_zero?: number;
   }): Promise<{
     success: boolean;
     message: string;
@@ -1401,6 +1405,10 @@ class FuturesAPIService {
       trailing_enabled: boolean;
       trailing_percent: number;
       trailing_activation: number;
+      auto_sltp_enabled?: boolean;
+      auto_trailing_enabled?: boolean;
+      min_profit_to_trail_pct?: number;
+      min_sl_distance_from_zero?: number;
     };
   }> {
     // API expects 'ultrafast' without underscore
@@ -2967,6 +2975,9 @@ export interface ModeSizeConfig {
   risk_multiplier_aggressive?: number;    // 1.0
   confidence_multiplier_base?: number;    // 0.5
   confidence_multiplier_scale?: number;   // 0.7
+  // Auto AI/LLM sizing
+  auto_size_enabled?: boolean;            // Use AI/LLM to determine position size
+  auto_size_min_cover_fee?: number;       // Minimum size to cover fees (default: $15)
 }
 
 export interface ModeCircuitBreakerConfig {
@@ -3007,6 +3018,11 @@ export interface ModeSLTPConfig {
   llm_weight?: number;                // LLM blend weight (0.7)
   atr_weight?: number;                // ATR blend weight (0.3)
   tp_gain_levels?: number[];          // Multi-TP levels per mode
+  // Auto AI/LLM SL/TP management
+  auto_sltp_enabled?: boolean;        // Use AI/LLM to determine SL/TP levels
+  auto_trailing_enabled?: boolean;    // Use AI/LLM for trailing stop management
+  min_profit_to_trail_pct?: number;   // Min profit % before trailing (covers fees)
+  min_sl_distance_from_zero?: number; // Min SL distance from entry (avoid near-zero closes)
 }
 
 export interface ModeRiskConfig {
