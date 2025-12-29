@@ -9936,17 +9936,31 @@ func (ga *GinieAutopilot) scanStrategies() {
 			}
 		}
 
-		// Check if we have room for more positions
+		// Check if we have room for more positions (MODE-SPECIFIC count)
+		// BUG FIX: Previously used total position count, but strategies use mode-specific limits
+		strategyMode := ga.selectEnabledModeForPosition()
+		modeConfig := ga.getModeConfig(strategyMode)
+		maxPositions := ga.config.MaxPositions
+		if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
+			maxPositions = modeConfig.Size.MaxPositions
+		}
+
 		ga.mu.RLock()
-		posCount := len(ga.positions)
+		modePositionCount := 0
+		for _, pos := range ga.positions {
+			if pos.Mode == strategyMode {
+				modePositionCount++
+			}
+		}
 		ga.mu.RUnlock()
 
-		if posCount >= ga.config.MaxPositions {
-			ga.logger.Warn("Strategy signal blocked - max positions reached",
+		if modePositionCount >= maxPositions {
+			ga.logger.Warn("Strategy signal blocked - mode max positions reached",
 				"symbol", signal.Symbol,
 				"strategy", signal.StrategyName,
-				"current", posCount,
-				"max", ga.config.MaxPositions)
+				"mode", strategyMode,
+				"current_mode_positions", modePositionCount,
+				"max_mode_positions", maxPositions)
 			break
 		}
 
