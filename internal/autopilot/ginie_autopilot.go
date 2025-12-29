@@ -12530,6 +12530,51 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	ga.dailyTrades++
 	ga.totalTrades++
 
+	// Create initial futures trade record in database for lifecycle tracking
+	if ga.repo != nil {
+		tradingMode := string(GinieModeUltraFast)
+		trade := &database.FuturesTrade{
+			Symbol:       symbol,
+			PositionSide: signal.TrendBias,
+			Side:         signal.TrendBias,
+			EntryPrice:   actualPrice,
+			Quantity:     actualQty,
+			Leverage:     leverage,
+			MarginType:   "CROSSED",
+			Status:       "OPEN",
+			EntryTime:    time.Now(),
+			TradeSource:  "ginie",
+			TradingMode:  &tradingMode,
+		}
+		if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+			ga.logger.Warn("Failed to create futures trade record for ultra-fast", "error", err, "symbol", symbol)
+		} else {
+			position.FuturesTradeID = trade.ID
+			ga.logger.Debug("Futures trade record created for ultra-fast", "symbol", symbol, "trade_id", trade.ID)
+
+			// Log position opened event to lifecycle
+			if ga.eventLogger != nil {
+				conditionsMet := make(map[string]interface{})
+				conditionsMet["trend_bias"] = signal.TrendBias
+				conditionsMet["trend_strength"] = signal.TrendStrength
+				conditionsMet["entry_confidence"] = signal.EntryConfidence
+				conditionsMet["volatility_regime"] = signal.VolatilityRegime.Level
+				go ga.eventLogger.LogPositionOpened(
+					context.Background(),
+					trade.ID,
+					symbol,
+					signal.TrendBias,
+					string(GinieModeUltraFast),
+					actualPrice,
+					actualQty,
+					leverage,
+					signal.EntryConfidence,
+					conditionsMet,
+				)
+			}
+		}
+	}
+
 	// Update ultra-fast stats
 	sm := GetSettingsManager()
 	sm.IncrementUltraFastTrade()
