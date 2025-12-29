@@ -11171,7 +11171,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 	if minHoldBeforeAIMS <= 0 {
 		minHoldBeforeAIMS = 3000 // Default: wait 3 seconds before first AI check
 	}
-	minHoldBeforeAI := time.Duration(minHoldBeforeAIMS) * time.Millisecond
+	_ = time.Duration(minHoldBeforeAIMS) * time.Millisecond // minHoldBeforeAI removed - no time restriction
 
 	aiCheckIntervalMS := settings.UltraFastAICheckIntervalMS
 	if aiCheckIntervalMS <= 0 {
@@ -11184,7 +11184,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 	if maxHoldMS <= 0 {
 		maxHoldMS = 15000 // Default 15 seconds
 	}
-	maxHoldDuration := time.Duration(maxHoldMS) * time.Millisecond
+	_ = time.Duration(maxHoldMS) * time.Millisecond // maxHoldDuration removed - no forced exit timeout
 
 	for _, pos := range ultraFastPositions {
 		// Get current price
@@ -11337,7 +11337,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 		if dynamicAIExit && settings.UltraFastUseLLMForLoss {
 			// Dynamic AI Exit: Check continuously after minimum hold time
 			// Only applies to positions in loss (profit positions are handled by TP levels)
-			if pnlUSD < 0 && holdTime >= minHoldBeforeAI {
+			if pnlUSD < 0 { // Removed 3 sec minimum hold time
 				// Rate limiting: Only call AI every aiCheckInterval to avoid excessive API calls
 				timeSinceLastAICheck := now.Sub(pos.UltraFastLastAICheck)
 				shouldCheckAI := pos.UltraFastLastAICheck.IsZero() || timeSinceLastAICheck >= aiCheckInterval
@@ -11369,7 +11369,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			}
 		} else {
 			// Legacy behavior: Fixed timeout exit (only if dynamic AI exit is disabled)
-			if pnlUSD < 0 && holdTime >= maxHoldDuration {
+			if pnlUSD < 0 { // Removed 15 sec max hold time
 				if settings.UltraFastUseLLMForLoss {
 					decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
 					if decision == "average" {
