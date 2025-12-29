@@ -6664,6 +6664,17 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 	}
 
 	// Place Take Profit orders for each level (only TP1 initially, others placed as we hit levels)
+	// SAFETY NET: If TakeProfits is empty, regenerate them now
+	if len(pos.TakeProfits) == 0 {
+		log.Printf("[GINIE] %s: TakeProfits empty in placeSLTPOrders - regenerating", pos.Symbol)
+		isLong := pos.Side == "LONG"
+		pos.TakeProfits = ga.generateDefaultTPs(pos.Symbol, pos.EntryPrice, pos.Mode, isLong)
+		ga.logger.Info("Regenerated empty TakeProfits array",
+			"symbol", pos.Symbol,
+			"mode", pos.Mode,
+			"tp_count", len(pos.TakeProfits))
+	}
+
 	// For now, place TP1 as the first target
 	if len(pos.TakeProfits) > 0 && pos.TakeProfits[0].Price > 0 {
 		tp1 := pos.TakeProfits[0]
@@ -7781,7 +7792,9 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				continue
 			}
 
-			// Create internal position entry
+			// Create internal position entry with full SL/TP initialization (matching SyncWithExchange)
+			isLong := side == "LONG"
+			defaultSL := ga.calculateDefaultSL(exchangePos.EntryPrice, isLong, 2.0)
 			newPos := &GiniePosition{
 				Symbol:       exchangePos.Symbol,
 				Side:         side,
@@ -7793,6 +7806,23 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				HighestPrice: exchangePos.MarkPrice,
 				LowestPrice:  exchangePos.MarkPrice,
 				Protection:   NewProtectionStatus(), // Initialize protection tracking
+
+				// Generate default TPs based on entry price and mode
+				TakeProfits:    ga.generateDefaultTPs(exchangePos.Symbol, exchangePos.EntryPrice, externalMode, isLong),
+				CurrentTPLevel: 0,
+
+				// Calculate a reasonable stop loss (2% for reconciled positions)
+				StopLoss:         defaultSL,
+				OriginalSL:       defaultSL,
+				MovedToBreakeven: false,
+
+				// Trailing - read from Mode Config
+				TrailingActive:        false,
+				TrailingPercent:       ga.getTrailingPercent(externalMode),
+				TrailingActivationPct: ga.getTrailingActivation(externalMode),
+
+				// PnL from exchange
+				UnrealizedPnL: exchangePos.UnrealizedProfit,
 			}
 
 			ga.positions[exchangePos.Symbol] = newPos
@@ -8107,6 +8137,17 @@ func (ga *GinieAutopilot) modifySLTPOrders(pos *GiniePosition, newSL float64, ne
 	// Update position with new SL/TP values
 	if newSL > 0 {
 		pos.StopLoss = newSL
+	}
+
+	// SAFETY NET: If TakeProfits is empty, regenerate them before trying to update
+	if len(pos.TakeProfits) == 0 && len(newTPs) > 0 {
+		log.Printf("[GINIE] %s: TakeProfits empty in modifySLTPOrders - regenerating before update", pos.Symbol)
+		isLong := pos.Side == "LONG"
+		pos.TakeProfits = ga.generateDefaultTPs(pos.Symbol, pos.EntryPrice, pos.Mode, isLong)
+		ga.logger.Info("Regenerated empty TakeProfits array in modifySLTPOrders",
+			"symbol", pos.Symbol,
+			"mode", pos.Mode,
+			"tp_count", len(pos.TakeProfits))
 	}
 
 	// Update TP prices if provided
