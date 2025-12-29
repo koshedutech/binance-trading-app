@@ -332,6 +332,12 @@ type GiniePosition struct {
 	UltraFastTargetPercent float64         `json:"ultra_fast_target_percent,omitempty"` // Fee-aware profit target %
 	MaxHoldTime           time.Duration    `json:"max_hold_time,omitempty"`            // 3s for ultra-fast
 
+	// Adaptive Learning Fields (for tracking and learning)
+	Confidence    float64   `json:"confidence,omitempty"`     // Entry confidence score
+	TrendStrength float64   `json:"trend_strength,omitempty"` // Trend strength at entry
+	TrendAligned  bool      `json:"trend_aligned,omitempty"`  // Was 5m/1h trend aligned?
+	OpenedAt      time.Time `json:"opened_at,omitempty"`      // Position open time for hold tracking
+
 	// Ultra-Fast Tiered Take Profit Tracking
 	UltraFastTP1Hit       bool    `json:"ultra_fast_tp1_hit"`        // TP1 (0.5%) hit - closed 40%
 	UltraFastTP2Hit       bool    `json:"ultra_fast_tp2_hit"`        // TP2 (1.0%) hit - closed 30%
@@ -339,6 +345,10 @@ type GiniePosition struct {
 	UltraFastTotalClosed  float64 `json:"ultra_fast_total_closed"`   // Total % of position closed
 	UltraFastHighestPnL   float64 `json:"ultra_fast_highest_pnl"`    // Highest PnL % reached (for trailing)
 	UltraFastTrailingActive bool  `json:"ultra_fast_trailing_active"` // Trailing stop activated
+	UltraFastLastAICheck    time.Time `json:"ultra_fast_last_ai_check"` // Last AI exit decision check
+
+	// Dynamic AI Exit (for scalp/swing/position modes)
+	LastAICheck    time.Time `json:"last_ai_check,omitempty"` // Last AI exit decision check for non-ultrafast modes
 
 	// Early Profit Booking (per-position custom ROI target)
 	CustomROIPercent *float64 `json:"custom_roi_percent,omitempty"` // Custom ROI% for this position (nil = use mode defaults)
@@ -2081,6 +2091,20 @@ func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availa
 			continue
 		}
 
+		// Skip if trend alignment failed (when enabled)
+		if currentSettings.UltraFastTrendAlignmentEnabled && !signal.TrendAligned {
+			log.Printf("[SMART-MARGIN] %s: SKIP - trend alignment failed (%s)", symbol, signal.AlignmentReason)
+			continue
+		}
+
+		// Use raw confidence for now (AdaptiveAI provides recommendations, not real-time adjustments)
+		effectiveConfidence := signal.EntryConfidence
+		if effectiveConfidence < minConfidence {
+			log.Printf("[SMART-MARGIN] %s: SKIP - confidence %.1f%% < min %.1f%%",
+				symbol, effectiveConfidence, minConfidence)
+			continue
+		}
+
 		// Calculate efficiency score:
 		// Higher confidence + higher volatility + lower margin = higher score
 		// Formula: (confidence * volatility_atr * 100) / minMargin
@@ -2563,6 +2587,53 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				signalLog.RejectionReason = fmt.Sprintf("mode_circuit_breaker: %s", cbReason)
 				ga.LogSignal(signalLog)
 				continue
+			}
+
+			// ====== MTF ANALYSIS CHECK ======
+			// Apply Multi-Timeframe trend analysis for scalp/swing/position modes
+			// This ensures the trade aligns with higher timeframe trends
+			if mode != GinieModeUltraFast { // Ultra-fast has its own specialized MTF logic
+				mtfResult := ga.analyzer.AnalyzeMTF(symbol, mode)
+				if mtfResult.Enabled && !mtfResult.TrendAligned {
+					// MTF analysis blocked this trade
+					modePrefix := ""
+					switch mode {
+					case GinieModeScalp:
+						modePrefix = "[SCALP-SCAN]"
+					case GinieModeSwing:
+						modePrefix = "[SWING-SCAN]"
+					case GinieModePosition:
+						modePrefix = "[POSITION-SCAN]"
+					}
+					log.Printf("%s %s: MTF MISALIGNED - Bias=%s Strength=%.0f Consensus=%d/3 Stable=%v, SKIP",
+						modePrefix, symbol, mtfResult.TrendBias, mtfResult.WeightedStrength,
+						mtfResult.Consensus, mtfResult.TrendStable)
+					log.Printf("%s %s: MTF Details - Primary=%s(%.0f) Secondary=%s(%.0f) Tertiary=%s(%.0f)",
+						modePrefix, symbol,
+						mtfResult.PrimaryTrend, mtfResult.PrimaryStrength,
+						mtfResult.SecondaryTrend, mtfResult.SecondaryStrength,
+						mtfResult.TertiaryTrend, mtfResult.TertiaryStrength)
+
+					signalLog.Status = "rejected"
+					signalLog.RejectionReason = fmt.Sprintf("mtf_misaligned: %s", mtfResult.AlignmentReason)
+					ga.LogSignal(signalLog)
+					continue
+				}
+
+				// Log successful MTF alignment
+				if mtfResult.Enabled {
+					switch mode {
+					case GinieModeScalp:
+						log.Printf("[SCALP-SCAN] %s: MTF ALIGNED - %s Strength=%.0f Consensus=%d/3",
+							symbol, mtfResult.TrendBias, mtfResult.WeightedStrength, mtfResult.Consensus)
+					case GinieModeSwing:
+						log.Printf("[SWING-SCAN] %s: MTF ALIGNED - %s Strength=%.0f Consensus=%d/3",
+							symbol, mtfResult.TrendBias, mtfResult.WeightedStrength, mtfResult.Consensus)
+					case GinieModePosition:
+						log.Printf("[POSITION-SCAN] %s: MTF ALIGNED - %s Strength=%.0f Consensus=%d/3",
+							symbol, mtfResult.TrendBias, mtfResult.WeightedStrength, mtfResult.Consensus)
+					}
+				}
 			}
 
 			// Log as executed (will be attempted)
@@ -3857,6 +3928,60 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				continue
 			}
 		}
+
+		// ====== DYNAMIC AI EXIT (for scalp/swing/position modes) ======
+		// AI continuously evaluates whether to hold or exit based on market conditions
+		// Only applies to non-ultra-fast modes (ultra-fast has its own monitor)
+		mode := pos.Mode
+		if mode != GinieModeUltraFast {
+			// Get dynamic AI exit config for this mode
+			aiExitConfig := GetDynamicAIExitConfigForMode(mode)
+
+			if aiExitConfig.Enabled {
+				holdTime := time.Since(pos.EntryTime)
+				minHoldBeforeAI := time.Duration(aiExitConfig.MinHoldBeforeAIMS) * time.Millisecond
+				aiCheckInterval := time.Duration(aiExitConfig.AICheckIntervalMS) * time.Millisecond
+
+				// Only check after minimum hold time
+				if holdTime >= minHoldBeforeAI {
+					// Rate limiting: Only call AI every aiCheckInterval to avoid excessive API calls
+					now := time.Now()
+					timeSinceLastAICheck := now.Sub(pos.LastAICheck)
+					shouldCheckAI := pos.LastAICheck.IsZero() || timeSinceLastAICheck >= aiCheckInterval
+
+					// Calculate PnL for decision
+					var aiPnlPercent float64
+					if pos.Side == "LONG" {
+						aiPnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
+					} else {
+						aiPnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
+					}
+
+					// Determine if we should check AI based on config
+					shouldCheckLoss := aiExitConfig.UseLLMForLoss && aiPnlPercent < 0
+					shouldCheckProfit := aiExitConfig.UseLLMForProfit && aiPnlPercent > 0 && pos.CurrentTPLevel == 0
+
+					if shouldCheckAI && (shouldCheckLoss || shouldCheckProfit) {
+						pos.LastAICheck = now // Update last check time
+
+						decision, reason := ga.getDynamicAIExitDecision(pos, currentPrice, aiPnlPercent)
+
+						modeStr := string(mode)
+						if decision == "exit" {
+							log.Printf("[%s-AI-EXIT] %s: AI recommends EXIT | PnL=%.2f%% | Reason=%s",
+								strings.ToUpper(modeStr), symbol, aiPnlPercent, reason)
+							ga.mu.Unlock()
+							ga.closePosition(symbol, pos, currentPrice, fmt.Sprintf("ai_dynamic_exit:%s", reason), pos.CurrentTPLevel)
+							continue
+						} else {
+							log.Printf("[%s-AI-EXIT] %s: AI recommends HOLD | PnL=%.2f%% | Reason=%s | Next check in %v",
+								strings.ToUpper(modeStr), symbol, aiPnlPercent, reason, aiCheckInterval)
+						}
+					}
+				}
+			}
+		}
+		// ====== END DYNAMIC AI EXIT ======
 
 		// Release lock at end of this position's processing
 		ga.mu.Unlock()
@@ -11040,7 +11165,21 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 		minProfitUSD = 1.00 // Default $1.00 (raised from $0.50)
 	}
 
-	// Max hold time
+	// Dynamic AI Exit Settings (replaces fixed timeout)
+	dynamicAIExit := settings.UltraFastDynamicAIExit
+	minHoldBeforeAIMS := settings.UltraFastMinHoldBeforeAIMS
+	if minHoldBeforeAIMS <= 0 {
+		minHoldBeforeAIMS = 3000 // Default: wait 3 seconds before first AI check
+	}
+	minHoldBeforeAI := time.Duration(minHoldBeforeAIMS) * time.Millisecond
+
+	aiCheckIntervalMS := settings.UltraFastAICheckIntervalMS
+	if aiCheckIntervalMS <= 0 {
+		aiCheckIntervalMS = 5000 // Default: check AI every 5 seconds
+	}
+	aiCheckInterval := time.Duration(aiCheckIntervalMS) * time.Millisecond
+
+	// Legacy max hold time (only used if dynamic AI exit is disabled)
 	maxHoldMS := settings.UltraFastMaxHoldMS
 	if maxHoldMS <= 0 {
 		maxHoldMS = 15000 // Default 15 seconds
@@ -11191,35 +11330,73 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			continue
 		}
 
-		// ============ EXIT PRIORITY 7: TIMEOUT (only if in loss) ============
-		if pnlUSD < 0 && holdTime >= maxHoldDuration {
-			totalPnL := pnlUSD + pos.RealizedPnL
-			if settings.UltraFastUseLLMForLoss {
-				decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
-				if decision == "average" {
-					ga.logger.Info("Ultra-fast: AI suggests AVERAGE DOWN - holding",
-						"symbol", pos.Symbol,
-						"pnl_usd", totalPnL,
-						"pnl_pct", pnlPercent,
-						"hold_time_ms", holdTime.Milliseconds())
-					continue
-				} else {
-					ga.logger.Warn("Ultra-fast: AI suggests BOOK LOSS - closing",
-						"symbol", pos.Symbol,
-						"pnl_usd", totalPnL,
-						"pnl_pct", pnlPercent,
-						"hold_time_ms", holdTime.Milliseconds())
-					ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_book_loss", totalPnL)
-					continue
+		// ============ EXIT PRIORITY 7: DYNAMIC AI EXIT (replaces fixed timeout) ============
+		// AI continuously evaluates whether to hold or exit based on market conditions
+		totalPnL := pnlUSD + pos.RealizedPnL
+
+		if dynamicAIExit && settings.UltraFastUseLLMForLoss {
+			// Dynamic AI Exit: Check continuously after minimum hold time
+			// Only applies to positions in loss (profit positions are handled by TP levels)
+			if pnlUSD < 0 && holdTime >= minHoldBeforeAI {
+				// Rate limiting: Only call AI every aiCheckInterval to avoid excessive API calls
+				timeSinceLastAICheck := now.Sub(pos.UltraFastLastAICheck)
+				shouldCheckAI := pos.UltraFastLastAICheck.IsZero() || timeSinceLastAICheck >= aiCheckInterval
+
+				if shouldCheckAI {
+					decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
+					pos.UltraFastLastAICheck = now // Update last check time
+
+					if decision == "average" {
+						ga.logger.Info("Ultra-fast: AI DYNAMIC - HOLD (market favorable)",
+							"symbol", pos.Symbol,
+							"pnl_usd", totalPnL,
+							"pnl_pct", pnlPercent,
+							"hold_time_sec", holdTime.Seconds(),
+							"next_check_in_sec", aiCheckInterval.Seconds())
+						// Continue holding, will re-check after aiCheckInterval
+						continue
+					} else {
+						ga.logger.Warn("Ultra-fast: AI DYNAMIC - EXIT (market unfavorable)",
+							"symbol", pos.Symbol,
+							"pnl_usd", totalPnL,
+							"pnl_pct", pnlPercent,
+							"hold_time_sec", holdTime.Seconds())
+						ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_dynamic_exit", totalPnL)
+						continue
+					}
 				}
-			} else {
-				ga.logger.Warn("Ultra-fast: Force exit after timeout",
-					"symbol", pos.Symbol,
-					"hold_time_ms", holdTime.Milliseconds(),
-					"max_hold_ms", maxHoldMS,
-					"pnl_usd", totalPnL,
-					"pnl_pct", pnlPercent)
-				ga.executeUltraFastExitWithTracking(pos, currentPrice, "force_exit_timeout", totalPnL)
+				// Not time for AI check yet, continue monitoring
+			}
+		} else {
+			// Legacy behavior: Fixed timeout exit (only if dynamic AI exit is disabled)
+			if pnlUSD < 0 && holdTime >= maxHoldDuration {
+				if settings.UltraFastUseLLMForLoss {
+					decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
+					if decision == "average" {
+						ga.logger.Info("Ultra-fast: AI suggests AVERAGE DOWN - holding",
+							"symbol", pos.Symbol,
+							"pnl_usd", totalPnL,
+							"pnl_pct", pnlPercent,
+							"hold_time_ms", holdTime.Milliseconds())
+						continue
+					} else {
+						ga.logger.Warn("Ultra-fast: AI suggests BOOK LOSS - closing",
+							"symbol", pos.Symbol,
+							"pnl_usd", totalPnL,
+							"pnl_pct", pnlPercent,
+							"hold_time_ms", holdTime.Milliseconds())
+						ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_book_loss", totalPnL)
+						continue
+					}
+				} else {
+					ga.logger.Warn("Ultra-fast: Force exit after timeout",
+						"symbol", pos.Symbol,
+						"hold_time_ms", holdTime.Milliseconds(),
+						"max_hold_ms", maxHoldMS,
+						"pnl_usd", totalPnL,
+						"pnl_pct", pnlPercent)
+					ga.executeUltraFastExitWithTracking(pos, currentPrice, "force_exit_timeout", totalPnL)
+				}
 			}
 		}
 	}
@@ -11343,6 +11520,49 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 		settings.UltraFastWinRate = float64(settings.UltraFastTotalWins) / float64(totalTrades) * 100
 	}
 
+	// Record trade outcome for adaptive AI learning
+	if ga.adaptiveAI != nil {
+		// Determine outcome (WIN, LOSS, BREAKEVEN)
+		var outcomeStr string
+		if pnlUSD > 0.01 {
+			outcomeStr = "WIN"
+		} else if pnlUSD < -0.01 {
+			outcomeStr = "LOSS"
+		} else {
+			outcomeStr = "BREAKEVEN"
+		}
+
+		// Build market snapshot with ultra-fast specific data
+		marketSnapshot := make(map[string]interface{})
+		if pos.UltraFastSignal != nil {
+			marketSnapshot["adx"] = pos.UltraFastSignal.ADXValue
+			marketSnapshot["volume_multiplier"] = pos.UltraFastSignal.VolumeMultiplier
+			marketSnapshot["trend_aligned"] = pos.UltraFastSignal.TrendAligned
+			marketSnapshot["trend_strength"] = pos.UltraFastSignal.TrendStrength
+			if pos.UltraFastSignal.VolatilityRegime != nil {
+				marketSnapshot["volatility"] = pos.UltraFastSignal.VolatilityRegime.Level
+			}
+		}
+		marketSnapshot["exit_reason"] = reason
+		marketSnapshot["hold_time_ms"] = time.Since(pos.EntryTime).Milliseconds()
+
+		outcome := TradeOutcome{
+			TradeID:    fmt.Sprintf("%s_%d", pos.Symbol, pos.EntryTime.UnixNano()),
+			Symbol:     pos.Symbol,
+			Mode:       GinieModeUltraFast,
+			EntryTime:  pos.EntryTime,
+			ExitTime:   time.Now(),
+			Direction:  pos.Side,
+			EntryPrice: pos.EntryPrice,
+			ExitPrice:  currentPrice,
+			PnLPercent: ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100,
+			PnLUSD:     pnlUSD,
+			Outcome:    outcomeStr,
+			MarketSnapshot: marketSnapshot,
+		}
+		ga.adaptiveAI.RecordTradeOutcome(outcome)
+	}
+
 	// Check circuit breaker conditions
 	if settings.UltraFastCircuitBreakerEnabled {
 		shouldTrip := false
@@ -11404,19 +11624,28 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 	// Check if volatility is reasonable for recovery (Low or Medium is OK)
 	volatilityOK := scan.Volatility.Regime != "High" && scan.Volatility.Regime != "Extreme"
 
-	// Check ADX - weak trend means less likely to recover
-	adxFavorable := scan.Trend.ADXValue > 15 // Minimum trend strength
-
 	// Get settings for circuit breaker thresholds
 	settingsManager := GetSettingsManager()
 	settings := settingsManager.GetCurrentSettings()
 
+	// Check ADX - for ultra-fast, lower threshold since we're catching momentum not trends
+	minADX := settings.UltraFastMinADX
+	if minADX <= 0 {
+		minADX = 5.0 // Lower default for ultra-fast (was 15, then 8, now 5)
+	}
+	adxFavorable := scan.Trend.ADXValue > minADX
+
 	// Calculate how much more we can lose before circuit breaker
 	remainingLossBuffer := settings.UltraFastMaxDailyLossUSD + settings.UltraFastDailyPnL
 
-	// Decision logic - prefer averaging if conditions are favorable
+	// Decision logic - for ultra-fast, be more patient before booking losses
 	shouldAverage := false
 	reason := ""
+
+	// Ultra-fast patience: Give position more time if trend is favorable
+	// Key insight: ultra-fast targets quick momentum, not strong trends
+	// If trend is favorable and loss is small, hold longer
+	maxConsecLosses := 10 // Higher tolerance for ultra-fast (was 5)
 
 	// Only consider averaging if:
 	// 1. Loss is small (< $2)
@@ -11426,9 +11655,9 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 	if pnlUSD > -2.0 && // Small loss only
 		trendFavorable &&
 		volatilityOK &&
-		adxFavorable &&
 		remainingLossBuffer > 5.0 && // At least $5 buffer
-		settings.UltraFastConsecutiveLosses < 5 { // Not too many losses in a row
+		settings.UltraFastConsecutiveLosses < maxConsecLosses { // Higher tolerance
+		// ADX check is relaxed for ultra-fast - we care more about trend direction
 		shouldAverage = true
 		reason = fmt.Sprintf("trend=%s ADX=%.1f volatility=%s loss_buffer=$%.2f",
 			scan.Trend.TrendDirection, scan.Trend.ADXValue, scan.Volatility.Regime, remainingLossBuffer)
@@ -11450,6 +11679,138 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 		return "average"
 	}
 	return "book_loss"
+}
+
+// getDynamicAIExitDecision evaluates whether to hold or exit a position based on market conditions
+// Works for scalp, swing, and position modes using mode-specific thresholds
+// Returns: "hold" = continue holding, "exit" = close position now
+func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPrice float64, pnlPercent float64) (string, string) {
+	mode := pos.Mode
+	modeStr := string(mode)
+
+	// Get current market conditions via ScanCoin
+	scan, err := ga.analyzer.ScanCoin(pos.Symbol)
+	if err != nil {
+		ga.logger.Warn("AI Exit: Failed to analyze market, defaulting to hold",
+			"symbol", pos.Symbol,
+			"mode", modeStr,
+			"error", err)
+		return "hold", "scan_failed"
+	}
+
+	// Check if trend is still favorable for the position direction
+	trendFavorable := false
+	if pos.Side == "LONG" && scan.Trend.TrendDirection == "bullish" {
+		trendFavorable = true
+	} else if pos.Side == "SHORT" && scan.Trend.TrendDirection == "bearish" {
+		trendFavorable = true
+	}
+
+	// Get MTF analysis for the mode to check trend alignment across timeframes
+	mtfResult := ga.analyzer.AnalyzeMTF(pos.Symbol, mode)
+	mtfAligned := mtfResult.TrendAligned && mtfResult.TrendStable
+
+	// Check volatility based on mode
+	// Scalp: More tolerant of high volatility (quick in/out)
+	// Swing: Moderate tolerance
+	// Position: Less tolerant (holding longer)
+	volatilityOK := true
+	switch mode {
+	case GinieModeScalp:
+		volatilityOK = scan.Volatility.Regime != "Extreme"
+	case GinieModeSwing:
+		volatilityOK = scan.Volatility.Regime != "High" && scan.Volatility.Regime != "Extreme"
+	case GinieModePosition:
+		volatilityOK = scan.Volatility.Regime == "Low" || scan.Volatility.Regime == "Medium"
+	}
+
+	// Get mode-specific ADX threshold
+	minADX := 15.0 // Default
+	switch mode {
+	case GinieModeScalp:
+		minADX = 10.0 // Lower threshold for quick scalps
+	case GinieModeSwing:
+		minADX = 15.0 // Medium threshold for swing trades
+	case GinieModePosition:
+		minADX = 20.0 // Higher threshold for position trades (need strong trends)
+	}
+	adxFavorable := scan.Trend.ADXValue > minADX
+
+	// Mode-specific max loss tolerance before exit
+	maxLossPct := 5.0 // Default
+	switch mode {
+	case GinieModeScalp:
+		maxLossPct = 2.0 // Exit scalp quickly if losing 2%+
+	case GinieModeSwing:
+		maxLossPct = 5.0 // More patience for swing
+	case GinieModePosition:
+		maxLossPct = 8.0 // Most patience for position trades
+	}
+
+	// Decision logic
+	shouldExit := false
+	reason := ""
+
+	holdTime := time.Since(pos.EntryTime)
+
+	// Exit conditions (checked in priority order):
+	// 1. Trend completely reversed AND we're in loss
+	if !trendFavorable && pnlPercent < 0 {
+		shouldExit = true
+		reason = fmt.Sprintf("trend_reversed: trend=%s position=%s pnl=%.2f%%",
+			scan.Trend.TrendDirection, pos.Side, pnlPercent)
+	}
+
+	// 2. MTF misaligned AND significant loss
+	if !shouldExit && !mtfAligned && pnlPercent < -1.0 {
+		shouldExit = true
+		reason = fmt.Sprintf("mtf_misaligned: aligned=%v stable=%v pnl=%.2f%%",
+			mtfResult.TrendAligned, mtfResult.TrendStable, pnlPercent)
+	}
+
+	// 3. Excessive loss beyond mode threshold
+	if !shouldExit && pnlPercent <= -maxLossPct {
+		shouldExit = true
+		reason = fmt.Sprintf("max_loss_exceeded: pnl=%.2f%% threshold=-%.2f%%",
+			pnlPercent, maxLossPct)
+	}
+
+	// 4. High volatility in unfavorable direction with loss
+	if !shouldExit && !volatilityOK && pnlPercent < -0.5 {
+		shouldExit = true
+		reason = fmt.Sprintf("high_volatility: regime=%s pnl=%.2f%%",
+			scan.Volatility.Regime, pnlPercent)
+	}
+
+	// 5. Very weak trend strength (ADX) with loss
+	if !shouldExit && !adxFavorable && pnlPercent < -1.0 {
+		shouldExit = true
+		reason = fmt.Sprintf("weak_trend: adx=%.1f threshold=%.1f pnl=%.2f%%",
+			scan.Trend.ADXValue, minADX, pnlPercent)
+	}
+
+	// If all conditions are favorable, hold
+	if !shouldExit {
+		reason = fmt.Sprintf("conditions_ok: trend=%s adx=%.1f vol=%s mtf=%v pnl=%.2f%%",
+			scan.Trend.TrendDirection, scan.Trend.ADXValue, scan.Volatility.Regime, mtfAligned, pnlPercent)
+	}
+
+	ga.logger.Info("Dynamic AI Exit decision",
+		"symbol", pos.Symbol,
+		"mode", modeStr,
+		"side", pos.Side,
+		"pnl_pct", pnlPercent,
+		"hold_time", holdTime.String(),
+		"decision", map[bool]string{true: "EXIT", false: "HOLD"}[shouldExit],
+		"reason", reason,
+		"trend", scan.Trend.TrendDirection,
+		"adx", scan.Trend.ADXValue,
+		"mtf_aligned", mtfAligned)
+
+	if shouldExit {
+		return "exit", reason
+	}
+	return "hold", reason
 }
 
 // executeUltraFastExit closes an ultra-fast position with fee-aware PnL calculation
@@ -11944,6 +12305,12 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 		UltraFastTotalClosed:    0,
 		UltraFastHighestPnL:     0,
 		UltraFastTrailingActive: false,
+
+		// Adaptive Learning fields (for tracking and learning from outcomes)
+		Confidence:    signal.EntryConfidence,
+		TrendStrength: signal.TrendStrength,
+		TrendAligned:  signal.TrendAligned,
+		OpenedAt:      time.Now(),
 	}
 
 	ga.positions[symbol] = position
@@ -12151,6 +12518,12 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 		UltraFastTotalClosed:    0,
 		UltraFastHighestPnL:     0,
 		UltraFastTrailingActive: false,
+
+		// Adaptive Learning fields (for tracking and learning from outcomes)
+		Confidence:    signal.EntryConfidence,
+		TrendStrength: signal.TrendStrength,
+		TrendAligned:  signal.TrendAligned,
+		OpenedAt:      time.Now(),
 	}
 
 	ga.positions[symbol] = position

@@ -289,6 +289,34 @@ type ModeTrendDivergenceConfig struct {
 	DivergenceWeight     float64 `json:"divergence_weight"`      // Weight in signal scoring
 }
 
+// ====== MULTI-TIMEFRAME (MTF) CONFIGURATION ======
+// ModeMTFConfig holds multi-timeframe weighted consensus settings for trend analysis
+// Each mode uses 3 timeframes with configurable weights for better trend detection
+type ModeMTFConfig struct {
+	Enabled             bool    `json:"mtf_enabled"`             // Enable multi-timeframe weighted analysis
+	PrimaryTimeframe    string  `json:"primary_timeframe"`       // Longest TF for trend direction (scalp: 15m, swing: 4h, position: 1d)
+	PrimaryWeight       float64 `json:"primary_weight"`          // Weight 0.0-1.0 for primary TF (default: 0.40)
+	SecondaryTimeframe  string  `json:"secondary_timeframe"`     // Medium TF for confirmation (scalp: 5m, swing: 1h, position: 4h)
+	SecondaryWeight     float64 `json:"secondary_weight"`        // Weight 0.0-1.0 for secondary TF (default: 0.35)
+	TertiaryTimeframe   string  `json:"tertiary_timeframe"`      // Shortest TF for entry timing (scalp: 1m, swing: 15m, position: 1h)
+	TertiaryWeight      float64 `json:"tertiary_weight"`         // Weight 0.0-1.0 for tertiary TF (default: 0.25)
+	MinConsensus        int     `json:"min_consensus"`           // Minimum TFs that must agree on direction (1-3, default: 2)
+	MinWeightedStrength float64 `json:"min_weighted_strength"`   // Min combined weighted strength to enter (0-100, default: 60)
+	TrendStabilityCheck bool    `json:"trend_stability_check"`   // Check if trend flipped in last 3 candles
+}
+
+// ====== DYNAMIC AI EXIT CONFIGURATION ======
+// ModeDynamicAIExitConfig holds dynamic AI-driven exit settings
+// AI continuously evaluates market conditions to decide hold/exit instead of fixed timeouts
+type ModeDynamicAIExitConfig struct {
+	Enabled           bool `json:"dynamic_ai_exit_enabled"` // Enable dynamic AI exit (no fixed timeout)
+	MinHoldBeforeAIMS int  `json:"min_hold_before_ai_ms"`   // Min hold time before first AI check (scalp: 10s, swing: 60s, position: 300s)
+	AICheckIntervalMS int  `json:"ai_check_interval_ms"`    // Interval between AI checks (scalp: 30s, swing: 300s, position: 1800s)
+	UseLLMForLoss     bool `json:"use_llm_for_loss"`        // Use LLM to decide hold/exit when position is in loss
+	UseLLMForProfit   bool `json:"use_llm_for_profit"`      // Use LLM to optimize profit-taking timing
+	MaxHoldTimeMS     int  `json:"max_hold_time_ms"`        // Maximum hold time before forced exit (0 = no limit)
+}
+
 // ModeFullConfig holds ALL settings for a single trading mode
 type ModeFullConfig struct {
 	ModeName       string `json:"mode_name"` // "ultra_fast", "scalp", "swing", "position"
@@ -307,6 +335,10 @@ type ModeFullConfig struct {
 	FundingRate     *ModeFundingRateConfig      `json:"funding_rate"`
 	Risk            *ModeRiskConfig             `json:"risk"`
 	TrendDivergence *ModeTrendDivergenceConfig  `json:"trend_divergence"`
+
+	// ====== NEW: Multi-Timeframe and Dynamic AI Exit ======
+	MTF           *ModeMTFConfig           `json:"mtf"`             // Multi-timeframe weighted consensus
+	DynamicAIExit *ModeDynamicAIExitConfig `json:"dynamic_ai_exit"` // AI-driven adaptive exit logic
 }
 
 // ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
@@ -509,6 +541,28 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				RequiresTrendAlign:  false,
 				PriorityWeight:      0.8,
 			},
+			// ====== Ultra-Fast MTF: 5m/3m/1m weighted consensus ======
+			MTF: &ModeMTFConfig{
+				Enabled:             true,
+				PrimaryTimeframe:    "5m",  // Trend direction
+				PrimaryWeight:       0.40,
+				SecondaryTimeframe:  "3m",  // Confirmation
+				SecondaryWeight:     0.35,
+				TertiaryTimeframe:   "1m",  // Entry timing
+				TertiaryWeight:      0.25,
+				MinConsensus:        2,     // At least 2 TFs must agree
+				MinWeightedStrength: 65.0,  // Min combined weighted strength
+				TrendStabilityCheck: true,  // Check for trend flips
+			},
+			// ====== Ultra-Fast Dynamic AI Exit ======
+			DynamicAIExit: &ModeDynamicAIExitConfig{
+				Enabled:           true,
+				MinHoldBeforeAIMS: 3000,   // 3 seconds settle time
+				AICheckIntervalMS: 5000,   // Check every 5 seconds
+				UseLLMForLoss:     true,   // AI decides hold/exit on loss
+				UseLLMForProfit:   false,  // TP levels handle profit
+				MaxHoldTimeMS:     0,      // No max (AI decides)
+			},
 		},
 		"scalp": {
 			ModeName: "scalp",
@@ -604,6 +658,28 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ProfitPotentialMax:  3.0,
 				RequiresTrendAlign:  false,
 				PriorityWeight:      1.0,
+			},
+			// ====== Scalp MTF: 15m/5m/1m weighted consensus ======
+			MTF: &ModeMTFConfig{
+				Enabled:             true,
+				PrimaryTimeframe:    "15m", // Trend direction
+				PrimaryWeight:       0.40,
+				SecondaryTimeframe:  "5m",  // Confirmation
+				SecondaryWeight:     0.35,
+				TertiaryTimeframe:   "1m",  // Entry timing
+				TertiaryWeight:      0.25,
+				MinConsensus:        2,     // At least 2 TFs must agree
+				MinWeightedStrength: 60.0,  // Min combined weighted strength
+				TrendStabilityCheck: true,  // Check for trend flips
+			},
+			// ====== Scalp Dynamic AI Exit ======
+			DynamicAIExit: &ModeDynamicAIExitConfig{
+				Enabled:           true,
+				MinHoldBeforeAIMS: 10000,  // 10 seconds settle time
+				AICheckIntervalMS: 30000,  // Check every 30 seconds
+				UseLLMForLoss:     true,   // AI decides hold/exit on loss
+				UseLLMForProfit:   true,   // AI optimizes profit timing
+				MaxHoldTimeMS:     14400000, // 4 hours max hold
 			},
 		},
 		"swing": {
@@ -701,6 +777,28 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				RequiresTrendAlign:  true,
 				PriorityWeight:      1.2,
 			},
+			// ====== Swing MTF: 4h/1h/15m weighted consensus ======
+			MTF: &ModeMTFConfig{
+				Enabled:             true,
+				PrimaryTimeframe:    "4h",  // Trend direction
+				PrimaryWeight:       0.45,
+				SecondaryTimeframe:  "1h",  // Confirmation
+				SecondaryWeight:     0.35,
+				TertiaryTimeframe:   "15m", // Entry timing
+				TertiaryWeight:      0.20,
+				MinConsensus:        2,     // At least 2 TFs must agree
+				MinWeightedStrength: 55.0,  // Min combined weighted strength
+				TrendStabilityCheck: true,  // Check for trend flips
+			},
+			// ====== Swing Dynamic AI Exit ======
+			DynamicAIExit: &ModeDynamicAIExitConfig{
+				Enabled:           true,
+				MinHoldBeforeAIMS: 60000,   // 1 minute settle time
+				AICheckIntervalMS: 300000,  // Check every 5 minutes
+				UseLLMForLoss:     true,    // AI decides hold/exit on loss
+				UseLLMForProfit:   true,    // AI optimizes profit timing
+				MaxHoldTimeMS:     259200000, // 3 days max hold
+			},
 		},
 		"position": {
 			ModeName: "position",
@@ -796,6 +894,28 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ProfitPotentialMax:  15.0,
 				RequiresTrendAlign:  true,
 				PriorityWeight:      1.5,
+			},
+			// ====== Position MTF: 1d/4h/1h weighted consensus ======
+			MTF: &ModeMTFConfig{
+				Enabled:             true,
+				PrimaryTimeframe:    "1d",  // Trend direction
+				PrimaryWeight:       0.50,
+				SecondaryTimeframe:  "4h",  // Confirmation
+				SecondaryWeight:     0.30,
+				TertiaryTimeframe:   "1h",  // Entry timing
+				TertiaryWeight:      0.20,
+				MinConsensus:        2,     // At least 2 TFs must agree
+				MinWeightedStrength: 50.0,  // Min combined weighted strength
+				TrendStabilityCheck: true,  // Check for trend flips
+			},
+			// ====== Position Dynamic AI Exit ======
+			DynamicAIExit: &ModeDynamicAIExitConfig{
+				Enabled:           true,
+				MinHoldBeforeAIMS: 300000,  // 5 minutes settle time
+				AICheckIntervalMS: 1800000, // Check every 30 minutes
+				UseLLMForLoss:     true,    // AI decides hold/exit on loss
+				UseLLMForProfit:   true,    // AI optimizes profit timing
+				MaxHoldTimeMS:     1209600000, // 14 days max hold
 			},
 		},
 	}
@@ -983,6 +1103,7 @@ type AutopilotSettings struct {
 	UltraFastMinTrendStrength        float64 `json:"ultra_fast_min_trend_strength"`         // Min trend strength (default 60)
 	UltraFastCandleBodyFilterEnabled bool    `json:"ultra_fast_candle_body_filter_enabled"` // Filter out doji/small body candles
 	UltraFastMinCandleBodyPct        float64 `json:"ultra_fast_min_candle_body_pct"`        // Min candle body % (default 0.1)
+	UltraFastMinADX                  float64 `json:"ultra_fast_min_adx"`                    // Min ADX for AI exit decision (default 8)
 
 	// ====== ULTRA-FAST TIERED TAKE PROFIT ======
 	// Multi-level profit taking for improved win rate
@@ -1001,6 +1122,29 @@ type AutopilotSettings struct {
 
 	// ====== ULTRA-FAST STOP LOSS ======
 	UltraFastStopLossPercent float64 `json:"ultra_fast_stop_loss_percent"` // Stop loss % from entry (default 1%)
+
+	// ====== ULTRA-FAST TREND ALIGNMENT ======
+	// Multi-timeframe trend alignment to filter counter-trend trades
+	UltraFastTrendAlignmentEnabled bool    `json:"ultra_fast_trend_alignment_enabled"` // Enable 5m/1h trend alignment check
+	UltraFastTrendAlignmentStrict  bool    `json:"ultra_fast_trend_alignment_strict"`  // Require STRONG alignment (both 80%+ strength)
+	UltraFastMinAlignedStrength    float64 `json:"ultra_fast_min_aligned_strength"`    // Min combined trend strength (default 120 = both 60%)
+
+	// ====== ULTRA-FAST MULTI-TIMEFRAME (MTF) CONFIGURATION ======
+	// Weighted consensus across 5m/3m/1m timeframes for better trend detection
+	UltraFastMTFEnabled          bool    `json:"ultra_fast_mtf_enabled"`            // Enable 5m/3m/1m weighted consensus (default: true)
+	UltraFast5mWeight            float64 `json:"ultra_fast_5m_weight"`              // Weight for 5m timeframe (default: 0.40)
+	UltraFast3mWeight            float64 `json:"ultra_fast_3m_weight"`              // Weight for 3m timeframe (default: 0.35)
+	UltraFast1mWeight            float64 `json:"ultra_fast_1m_weight"`              // Weight for 1m timeframe (default: 0.25)
+	UltraFastMinConsensus        int     `json:"ultra_fast_min_consensus"`          // Min timeframes that must agree (default: 2)
+	UltraFastMinWeightedStrength float64 `json:"ultra_fast_min_weighted_strength"`  // Min weighted strength to enter (default: 65)
+	UltraFastTrendStabilityCheck bool    `json:"ultra_fast_trend_stability_check"` // Check if trend flipped in last 3 candles (default: true)
+
+	// ====== ULTRA-FAST DYNAMIC AI EXIT (No Fixed Timeout) ======
+	// AI continuously evaluates whether to hold or exit based on market conditions
+	// Replaces the fixed 15-second timeout with intelligent market-based decisions
+	UltraFastDynamicAIExit     bool `json:"ultra_fast_dynamic_ai_exit"`       // Enable dynamic AI exit (no fixed timeout)
+	UltraFastMinHoldBeforeAIMS int  `json:"ultra_fast_min_hold_before_ai_ms"` // Min hold time before first AI check (default: 3000ms = 3 seconds)
+	UltraFastAICheckIntervalMS int  `json:"ultra_fast_ai_check_interval_ms"`  // Interval between AI checks (default: 5000ms = 5 seconds)
 
 	// ====== PER-MODE SAFETY CONTROLS ======
 	// Independent safety settings per trading mode (rate limiting, profit monitoring, win-rate)
@@ -1187,6 +1331,7 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastMinTrendStrength:        60.0,  // Raised from 40 to 60
 		UltraFastCandleBodyFilterEnabled: true,
 		UltraFastMinCandleBodyPct:        0.1,   // 0.1% min candle body (reject doji)
+		UltraFastMinADX:                  8.0,   // Min ADX for AI exit (lower = more patient exits)
 
 		// Tiered take profit (TP1/TP2/TP3)
 		UltraFastTP1Percent:      0.5,  // TP1 at 0.5%
@@ -1203,6 +1348,25 @@ func DefaultSettings() *AutopilotSettings {
 
 		// Stop loss
 		UltraFastStopLossPercent: 1.0, // 1% stop loss from entry
+
+		// Trend alignment (multi-timeframe confirmation)
+		UltraFastTrendAlignmentEnabled: true,  // Enable 5m/1h alignment check
+		UltraFastTrendAlignmentStrict:  false, // Don't require STRONG alignment
+		UltraFastMinAlignedStrength:    120.0, // Min combined strength (60 + 60)
+
+		// Multi-timeframe (MTF) weighted consensus (5m/3m/1m)
+		UltraFastMTFEnabled:          true, // Enable 5m/3m/1m weighted consensus
+		UltraFast5mWeight:            0.40, // 5m has highest weight (40%)
+		UltraFast3mWeight:            0.35, // 3m medium weight (35%)
+		UltraFast1mWeight:            0.25, // 1m lowest weight (25%)
+		UltraFastMinConsensus:        2,    // At least 2 timeframes must agree
+		UltraFastMinWeightedStrength: 65.0, // Min weighted strength to enter (stricter)
+		UltraFastTrendStabilityCheck: true, // Check if trend flipped in last 3 candles
+
+		// Dynamic AI exit settings (replaces fixed 15-second timeout)
+		UltraFastDynamicAIExit:     true,  // Enable dynamic AI exit by default
+		UltraFastMinHoldBeforeAIMS: 3000,  // Wait 3 seconds before first AI check
+		UltraFastAICheckIntervalMS: 5000,  // Check AI every 5 seconds after that
 
 		// Spot autopilot defaults
 		SpotAutopilotEnabled:  false,
