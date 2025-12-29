@@ -85,4 +85,20 @@ type TradeLifecycleEventSummary struct {
 	StartTime         time.Time `json:"start_time"`
 	EndTime           *time.Time `json:"end_time,omitempty"`
 	Duration          *int64    `json:"duration_seconds,omitempty"`
+
+	// Trade details (fetched from futures_trades table)
+	Symbol            string    `json:"symbol,omitempty"`
+	Mode              string    `json:"mode,omitempty"`
+	PositionSide      string    `json:"position_side,omitempty"`
+	EntryPrice        float64   `json:"entry_price,omitempty"`
+	ExitPrice         *float64  `json:"exit_price,omitempty"`
+	Quantity          float64   `json:"quantity,omitempty"`
+	Leverage          int       `json:"leverage,omitempty"`
+	FinalPnL          *float64  `json:"final_pnl,omitempty"`
+	FinalPnLPercent   *float64  `json:"final_pnl_percent,omitempty"`
+	TradeStatus       string    `json:"trade_status,omitempty"`
+
+	// Event type breakdown
+	EventsByType      map[string]int `json:"events_by_type,omitempty"`
+	TrailingUpdates   int       `json:"trailing_updates"`
 }

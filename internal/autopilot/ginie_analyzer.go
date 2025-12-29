@@ -194,6 +194,7 @@ type UltraFastSignal struct {
 	Symbol           string            `json:"symbol"`
 	TrendBias        string            `json:"trend_bias"`        // LONG, SHORT, NEUTRAL
 	TrendStrength    float64           `json:"trend_strength"`    // 0-100
+	ADXValue         float64           `json:"adx_value"`         // Raw ADX value for tracking
 	VolatilityRegime *VolatilityRegime `json:"volatility_regime"`
 	EntryConfidence  float64           `json:"entry_confidence"`  // 0-100
 	MinProfitTarget  float64           `json:"min_profit_target"` // % (fee + ATR buffer)
@@ -210,6 +211,23 @@ type UltraFastSignal struct {
 	CandleBodyConfirmed bool     `json:"candle_body_confirmed"` // Meets body size threshold
 	FiltersApplied      []string `json:"filters_applied"`       // List of filters that passed
 	FiltersFailed       []string `json:"filters_failed"`        // List of filters that failed
+
+	// Multi-timeframe trend alignment (5m/3m/1m weighted consensus)
+	TrendAligned          bool    `json:"trend_aligned"`            // Weighted consensus agrees
+	Trend5mBias           string  `json:"trend_5m_bias"`            // 5m trend direction
+	Trend5mStrength       float64 `json:"trend_5m_strength"`        // 5m trend strength 0-100
+	Trend3mBias           string  `json:"trend_3m_bias"`            // 3m trend direction
+	Trend3mStrength       float64 `json:"trend_3m_strength"`        // 3m trend strength 0-100
+	Trend1mBias           string  `json:"trend_1m_bias"`            // 1m trend direction
+	Trend1mStrength       float64 `json:"trend_1m_strength"`        // 1m trend strength 0-100
+	CombinedTrendStrength float64 `json:"combined_trend_strength"`  // Weighted sum of all timeframes
+	TimeframeConsensus    int     `json:"timeframe_consensus"`      // Count of aligned timeframes (0-3)
+	AlignmentReason       string  `json:"alignment_reason"`         // Why aligned or not
+
+	// Trend stability check (last 3 candles)
+	TrendStable       bool   `json:"trend_stable"`        // True if trend hasn't flipped in last 3 candles
+	TrendFlipCount    int    `json:"trend_flip_count"`    // Number of direction changes in last 3 candles
+	StabilityReason   string `json:"stability_reason"`    // Why stable or unstable
 }
 
 // LoadLLMSelectedCoins asks DeepSeek to provide 100 coins based on market criteria
@@ -3453,6 +3471,257 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 	} else {
 		signal.TrendBias = "NEUTRAL"
 		signal.TrendStrength = 40
+	}
+
+	// Calculate ADX for trend strength tracking (used by adaptive learning)
+	adx, _, _ := g.calculateADX(klines1h, 14)
+	signal.ADXValue = adx
+
+	// Layer 1.5: Multi-timeframe Trend Alignment (5m/3m/1m weighted consensus)
+	settings := GetSettingsManager().GetCurrentSettings()
+
+	// Use new MTF weighted consensus if enabled, otherwise fall back to legacy 5m alignment
+	if settings.UltraFastMTFEnabled {
+		// Fetch 5m, 3m, 1m klines in parallel for faster signal generation
+		type tfResult struct {
+			tf       string
+			bias     string
+			strength float64
+			klines   []binance.Kline
+			err      error
+		}
+
+		results := make(chan tfResult, 3)
+		timeframes := []string{"5m", "3m", "1m"}
+
+		for _, tf := range timeframes {
+			go func(timeframe string) {
+				klines, err := g.futuresClient.GetFuturesKlines(symbol, timeframe, 10)
+				if err != nil || len(klines) < 3 {
+					results <- tfResult{tf: timeframe, err: fmt.Errorf("failed to get %s klines", timeframe)}
+					return
+				}
+
+				// Calculate trend bias and strength from price movement
+				closeNow := klines[len(klines)-1].Close
+				closePrev := klines[len(klines)-2].Close
+				priceDiffPct := ((closeNow - closePrev) / closePrev) * 100.0
+
+				var bias string
+				var strength float64
+
+				// Thresholds adjusted per timeframe (shorter = more sensitive)
+				var strongThreshold, weakThreshold float64
+				switch timeframe {
+				case "5m":
+					strongThreshold, weakThreshold = 0.20, 0.05
+				case "3m":
+					strongThreshold, weakThreshold = 0.15, 0.04
+				case "1m":
+					strongThreshold, weakThreshold = 0.10, 0.03
+				}
+
+				if priceDiffPct >= strongThreshold {
+					bias, strength = "LONG", 80
+				} else if priceDiffPct >= weakThreshold {
+					bias, strength = "LONG", 55
+				} else if priceDiffPct <= -strongThreshold {
+					bias, strength = "SHORT", 80
+				} else if priceDiffPct <= -weakThreshold {
+					bias, strength = "SHORT", 55
+				} else {
+					bias, strength = "NEUTRAL", 40
+				}
+
+				results <- tfResult{tf: timeframe, bias: bias, strength: strength, klines: klines}
+			}(tf)
+		}
+
+		// Collect results
+		tfData := make(map[string]tfResult)
+		for i := 0; i < 3; i++ {
+			r := <-results
+			if r.err == nil {
+				tfData[r.tf] = r
+			}
+		}
+
+		// Get weights from settings
+		weights := map[string]float64{
+			"5m": settings.UltraFast5mWeight,
+			"3m": settings.UltraFast3mWeight,
+			"1m": settings.UltraFast1mWeight,
+		}
+
+		// Normalize weights if they don't sum to 1
+		totalWeight := weights["5m"] + weights["3m"] + weights["1m"]
+		if totalWeight > 0 && totalWeight != 1.0 {
+			for k := range weights {
+				weights[k] /= totalWeight
+			}
+		}
+
+		// Calculate weighted scores and consensus
+		var longScore, shortScore float64
+		var longConsensus, shortConsensus int
+		var alignmentDetails []string
+
+		for tf, data := range tfData {
+			weight := weights[tf]
+			switch tf {
+			case "5m":
+				signal.Trend5mBias = data.bias
+				signal.Trend5mStrength = data.strength
+			case "3m":
+				signal.Trend3mBias = data.bias
+				signal.Trend3mStrength = data.strength
+			case "1m":
+				signal.Trend1mBias = data.bias
+				signal.Trend1mStrength = data.strength
+			}
+
+			if data.bias == "LONG" {
+				longScore += weight * data.strength
+				if data.strength >= 50 {
+					longConsensus++
+				}
+				alignmentDetails = append(alignmentDetails, fmt.Sprintf("%s:LONG(%.0f)", tf, data.strength))
+			} else if data.bias == "SHORT" {
+				shortScore += weight * data.strength
+				if data.strength >= 50 {
+					shortConsensus++
+				}
+				alignmentDetails = append(alignmentDetails, fmt.Sprintf("%s:SHORT(%.0f)", tf, data.strength))
+			} else {
+				alignmentDetails = append(alignmentDetails, fmt.Sprintf("%s:NEUTRAL", tf))
+			}
+		}
+
+		// Determine final bias based on weighted scores and consensus
+		minConsensus := settings.UltraFastMinConsensus
+		minStrength := settings.UltraFastMinWeightedStrength
+
+		if longScore > shortScore && longConsensus >= minConsensus && longScore >= minStrength {
+			signal.TrendBias = "LONG"
+			signal.CombinedTrendStrength = longScore
+			signal.TimeframeConsensus = longConsensus
+			signal.TrendAligned = true
+			signal.AlignmentReason = fmt.Sprintf("MTF LONG consensus=%d/3 strength=%.0f [%s]",
+				longConsensus, longScore, strings.Join(alignmentDetails, ", "))
+		} else if shortScore > longScore && shortConsensus >= minConsensus && shortScore >= minStrength {
+			signal.TrendBias = "SHORT"
+			signal.CombinedTrendStrength = shortScore
+			signal.TimeframeConsensus = shortConsensus
+			signal.TrendAligned = true
+			signal.AlignmentReason = fmt.Sprintf("MTF SHORT consensus=%d/3 strength=%.0f [%s]",
+				shortConsensus, shortScore, strings.Join(alignmentDetails, ", "))
+		} else {
+			// No clear consensus - use strongest signal but mark as not aligned
+			if longScore > shortScore {
+				signal.TrendBias = "LONG"
+				signal.CombinedTrendStrength = longScore
+				signal.TimeframeConsensus = longConsensus
+			} else if shortScore > longScore {
+				signal.TrendBias = "SHORT"
+				signal.CombinedTrendStrength = shortScore
+				signal.TimeframeConsensus = shortConsensus
+			} else {
+				signal.TrendBias = "NEUTRAL"
+				signal.CombinedTrendStrength = 40
+				signal.TimeframeConsensus = 0
+			}
+			signal.TrendAligned = false
+			signal.AlignmentReason = fmt.Sprintf("MTF weak consensus=%d<%d or strength=%.0f<%.0f [%s]",
+				max(longConsensus, shortConsensus), minConsensus,
+				max(longScore, shortScore), minStrength,
+				strings.Join(alignmentDetails, ", "))
+		}
+
+		// Trend stability check: ensure trend hasn't flipped in last 3 candles
+		if settings.UltraFastTrendStabilityCheck && signal.TrendAligned {
+			// Use 1m klines for stability check (most sensitive to recent changes)
+			if data1m, ok := tfData["1m"]; ok && len(data1m.klines) >= 4 {
+				klines := data1m.klines
+				flipCount := 0
+				var directions []string
+
+				// Check last 3 candle directions (compare close vs open for each)
+				for i := len(klines) - 3; i < len(klines); i++ {
+					k := klines[i]
+					if k.Close > k.Open {
+						directions = append(directions, "↑")
+					} else if k.Close < k.Open {
+						directions = append(directions, "↓")
+					} else {
+						directions = append(directions, "→")
+					}
+				}
+
+				// Count direction changes (flips)
+				for i := 1; i < len(directions); i++ {
+					if directions[i] != directions[i-1] && directions[i] != "→" && directions[i-1] != "→" {
+						flipCount++
+					}
+				}
+
+				signal.TrendFlipCount = flipCount
+				signal.TrendStable = flipCount == 0
+
+				if !signal.TrendStable {
+					signal.TrendAligned = false
+					signal.StabilityReason = fmt.Sprintf("trend flipped %d times in last 3 candles [%s]",
+						flipCount, strings.Join(directions, ""))
+					signal.AlignmentReason = fmt.Sprintf("%s - UNSTABLE: %s", signal.AlignmentReason, signal.StabilityReason)
+				} else {
+					signal.StabilityReason = fmt.Sprintf("stable trend [%s]", strings.Join(directions, ""))
+				}
+			} else {
+				// Default to stable if we can't check
+				signal.TrendStable = true
+				signal.StabilityReason = "insufficient data for stability check"
+			}
+		} else if !settings.UltraFastTrendStabilityCheck {
+			signal.TrendStable = true
+			signal.StabilityReason = "stability check disabled"
+		}
+	} else if settings.UltraFastTrendAlignmentEnabled {
+		// Legacy: Simple 5m vs 1h alignment check
+		klines5m, err := g.futuresClient.GetFuturesKlines(symbol, "5m", 10)
+		if err == nil && len(klines5m) >= 3 {
+			close5m := klines5m[len(klines5m)-1].Close
+			close5mPrev := klines5m[len(klines5m)-2].Close
+			priceDiff5mPct := ((close5m - close5mPrev) / close5mPrev) * 100.0
+
+			if priceDiff5mPct >= 0.2 {
+				signal.Trend5mBias, signal.Trend5mStrength = "LONG", 80
+			} else if priceDiff5mPct >= 0.05 {
+				signal.Trend5mBias, signal.Trend5mStrength = "LONG", 55
+			} else if priceDiff5mPct <= -0.2 {
+				signal.Trend5mBias, signal.Trend5mStrength = "SHORT", 80
+			} else if priceDiff5mPct <= -0.05 {
+				signal.Trend5mBias, signal.Trend5mStrength = "SHORT", 55
+			} else {
+				signal.Trend5mBias, signal.Trend5mStrength = "NEUTRAL", 40
+			}
+
+			signal.CombinedTrendStrength = signal.TrendStrength + signal.Trend5mStrength
+
+			if signal.TrendBias == signal.Trend5mBias && signal.TrendBias != "NEUTRAL" {
+				signal.TrendAligned = true
+				signal.AlignmentReason = fmt.Sprintf("5m(%s) confirms 1h(%s)", signal.Trend5mBias, signal.TrendBias)
+			} else {
+				signal.TrendAligned = false
+				signal.AlignmentReason = fmt.Sprintf("5m(%s) vs 1h(%s)", signal.Trend5mBias, signal.TrendBias)
+			}
+		} else {
+			signal.TrendAligned = signal.TrendStrength >= 70
+			signal.Trend5mBias = "UNKNOWN"
+			signal.AlignmentReason = "5m data unavailable"
+		}
+	} else {
+		// All alignment checks disabled
+		signal.TrendAligned = true
+		signal.AlignmentReason = "alignment check disabled"
 	}
 
 	// Layer 2: Volatility Regime classification

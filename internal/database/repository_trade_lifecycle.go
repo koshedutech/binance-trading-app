@@ -218,9 +218,13 @@ func (db *DB) GetTradeLifecycleSummary(ctx context.Context, futuresTradeID int64
 	summary := &TradeLifecycleEventSummary{
 		FuturesTradeID: futuresTradeID,
 		TotalEvents:    len(events),
+		EventsByType:   make(map[string]int),
 	}
 
 	for _, event := range events {
+		// Count events by type
+		summary.EventsByType[event.EventType]++
+
 		switch event.EventType {
 		case EventTypePositionOpened:
 			summary.StartTime = event.Timestamp
@@ -232,6 +236,8 @@ func (db *DB) GetTradeLifecycleSummary(ctx context.Context, futuresTradeID int64
 			summary.MovedToBreakeven = true
 		case EventTypeTrailingActivated:
 			summary.TrailingActivated = true
+		case EventTypeTrailingUpdated:
+			summary.TrailingUpdates++
 		case EventTypePositionClosed, EventTypeExternalClose:
 			summary.EndTime = &event.Timestamp
 			if event.Reason != nil {
@@ -246,6 +252,39 @@ func (db *DB) GetTradeLifecycleSummary(ctx context.Context, futuresTradeID int64
 		duration := int64(summary.EndTime.Sub(summary.StartTime).Seconds())
 		summary.Duration = &duration
 	}
+
+	// Fetch trade details from futures_trades table
+	tradeQuery := `
+		SELECT symbol, position_side, entry_price, exit_price, quantity, leverage,
+			   realized_pnl, realized_pnl_percent, status, trading_mode
+		FROM futures_trades
+		WHERE id = $1`
+
+	var symbol, positionSide, status string
+	var entryPrice, quantity float64
+	var leverage int
+	var exitPrice, realizedPnL, realizedPnLPercent *float64
+	var tradingMode *string
+
+	err = db.Pool.QueryRow(ctx, tradeQuery, futuresTradeID).Scan(
+		&symbol, &positionSide, &entryPrice, &exitPrice, &quantity, &leverage,
+		&realizedPnL, &realizedPnLPercent, &status, &tradingMode,
+	)
+	if err == nil {
+		summary.Symbol = symbol
+		summary.PositionSide = positionSide
+		summary.EntryPrice = entryPrice
+		summary.ExitPrice = exitPrice
+		summary.Quantity = quantity
+		summary.Leverage = leverage
+		summary.FinalPnL = realizedPnL
+		summary.FinalPnLPercent = realizedPnLPercent
+		summary.TradeStatus = status
+		if tradingMode != nil {
+			summary.Mode = *tradingMode
+		}
+	}
+	// Note: If trade not found, we still return the event summary (just without trade details)
 
 	return summary, nil
 }
