@@ -397,11 +397,11 @@ func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
 	// Get available balance for adaptive sizing info
 	availableBalance, walletBalance := autopilot.GetBalanceInfo()
 
-	// Reuse cached P/L from Futures Dashboard metrics (no duplicate API calls)
-	// The Futures Dashboard already fetches and caches this data with 5-minute TTL
-	dailyPnL, totalPnL := s.GetCachedDailyPnL()
+	// Fetch P/L directly from Binance Income History for accuracy
+	// Uses the autopilot's futures client which is already authenticated
+	dailyPnL, totalPnL := s.GetBinancePnLForAutopilot(autopilot)
 
-	// Override internal counter values with cached Binance API values
+	// Override internal counter values with actual Binance values
 	stats["daily_pnl"] = dailyPnL
 	stats["total_pnl"] = totalPnL
 	// Recalculate combined_pnl with actual daily P/L

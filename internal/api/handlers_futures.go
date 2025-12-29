@@ -1102,6 +1102,14 @@ var (
 	metricsCache     map[string]interface{}
 	metricsCacheTime time.Time
 	metricsCacheTTL  = 5 * time.Minute
+
+	// Binance Income PnL cache (separate from metrics cache for accuracy)
+	binancePnLCache struct {
+		DailyPnL  float64
+		TotalPnL  float64
+		CacheTime time.Time
+	}
+	binancePnLCacheTTL = 2 * time.Minute // More frequent updates for PnL
 )
 
 // handleGetFuturesMetrics returns futures trading metrics calculated from Binance API
@@ -1286,11 +1294,15 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 	c.JSON(http.StatusOK, metrics)
 }
 
-// GetCachedDailyPnL returns cached daily and total P/L from the metrics cache
-// If cache is invalid or empty, it returns zeros
-// This is used by Ginie autopilot to avoid duplicate Binance API calls
+// GetCachedDailyPnL returns cached daily and total P/L from metrics cache
+// DEPRECATED: Use GetBinancePnLForAutopilot for accurate Binance Income History data
 func (s *Server) GetCachedDailyPnL() (dailyPnL float64, totalPnL float64) {
-	// Check if metrics cache is valid
+	// Check if Binance PnL cache is still valid
+	if time.Since(binancePnLCache.CacheTime) < binancePnLCacheTTL {
+		return binancePnLCache.DailyPnL, binancePnLCache.TotalPnL
+	}
+
+	// Fallback to metrics cache
 	if metricsCache != nil && time.Since(metricsCacheTime) < metricsCacheTTL {
 		if daily, ok := metricsCache["dailyRealizedPnl"].(float64); ok {
 			dailyPnL = daily
@@ -1300,8 +1312,63 @@ func (s *Server) GetCachedDailyPnL() (dailyPnL float64, totalPnL float64) {
 		}
 		return dailyPnL, totalPnL
 	}
-	// Return zeros if cache is invalid/empty
+
+	// Return cached Binance values even if stale (better than zeros)
+	if !binancePnLCache.CacheTime.IsZero() {
+		return binancePnLCache.DailyPnL, binancePnLCache.TotalPnL
+	}
+
 	return 0.0, 0.0
+}
+
+// GetBinancePnLForAutopilot fetches PnL directly from Binance Income History API
+// Uses a per-user cache with 2-minute TTL for accuracy
+// This is the preferred method for getting accurate PnL data
+func (s *Server) GetBinancePnLForAutopilot(ga *autopilot.GinieAutopilot) (dailyPnL float64, totalPnL float64) {
+	if ga == nil {
+		log.Printf("[PNL-SYNC] No autopilot provided, returning cached values")
+		return s.GetCachedDailyPnL()
+	}
+
+	// Check if Binance PnL cache is still valid
+	if time.Since(binancePnLCache.CacheTime) < binancePnLCacheTTL {
+		return binancePnLCache.DailyPnL, binancePnLCache.TotalPnL
+	}
+
+	// Get the autopilot's futures client
+	futuresClient := ga.GetFuturesClient()
+	if futuresClient == nil {
+		log.Printf("[PNL-SYNC] No futures client available, returning cached values")
+		return s.GetCachedDailyPnL()
+	}
+
+	// Calculate start of today UTC
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	startOfDayMs := startOfDay.UnixMilli()
+
+	// Fetch realized PnL from Binance (last 1000 records for total, filtered for daily)
+	records, err := futuresClient.GetIncomeHistory("REALIZED_PNL", 0, 0, 1000)
+	if err != nil {
+		log.Printf("[PNL-SYNC] Failed to fetch Binance income PnL: %v", err)
+		return s.GetCachedDailyPnL()
+	}
+
+	// Sum up PnL
+	for _, record := range records {
+		totalPnL += record.Income
+		if record.Time >= startOfDayMs {
+			dailyPnL += record.Income
+		}
+	}
+
+	// Update cache
+	binancePnLCache.DailyPnL = dailyPnL
+	binancePnLCache.TotalPnL = totalPnL
+	binancePnLCache.CacheTime = time.Now()
+
+	log.Printf("[PNL-SYNC] Fetched from Binance: daily=$%.2f, total=$%.2f (%d records)", dailyPnL, totalPnL, len(records))
+	return dailyPnL, totalPnL
 }
 
 // handleGetTradeSourceStats returns trading stats grouped by trade source (AI, Strategy, Manual)

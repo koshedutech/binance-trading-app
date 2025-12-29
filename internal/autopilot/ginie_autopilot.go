@@ -1169,6 +1169,12 @@ func (ga *GinieAutopilot) GetPositions() []*GiniePosition {
 	return positions
 }
 
+// GetFuturesClient returns the futures client used by this autopilot
+// This is used by the API layer to fetch PnL directly from Binance
+func (ga *GinieAutopilot) GetFuturesClient() binance.FuturesClient {
+	return ga.futuresClient
+}
+
 // GetBalanceInfo returns available and wallet balance from Binance (uses cache to avoid blocking API calls)
 func (ga *GinieAutopilot) GetBalanceInfo() (availableBalance float64, walletBalance float64) {
 	ga.mu.RLock()
