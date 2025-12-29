@@ -3873,22 +3873,8 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		}
 		// === END PROACTIVE PROFIT PROTECTION ===
 
-		// === EARLY PROFIT BOOKING (ROI-BASED) ===
-		// Close position if ROI after fees exceeds mode-specific threshold
-		log.Printf("[MONITOR-EARLY-PROFIT] %s: About to check early profit booking\n", symbol)
-		shouldBook, roiPercent, modeStr := ga.shouldBookEarlyProfit(pos, currentPrice)
-		if shouldBook {
-			ga.logger.Info("Booking profit early based on ROI threshold",
-				"symbol", symbol,
-				"roi_percent", roiPercent,
-				"mode", modeStr,
-				"threshold", roiPercent,
-				"entry_price", pos.EntryPrice,
-				"current_price", currentPrice)
-			ga.mu.Unlock()
-			ga.closePosition(symbol, pos, currentPrice, "early_profit_booking", pos.CurrentTPLevel)
-			continue
-		}
+		// === EARLY PROFIT BOOKING (ROI-BASED) - DISABLED ===
+		// AI auto exit removed - now only using SL/TP and trailing stop from mode config
 		// === END EARLY PROFIT BOOKING ===
 
 		// Check Stop Loss
@@ -3929,58 +3915,8 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			}
 		}
 
-		// ====== DYNAMIC AI EXIT (for scalp/swing/position modes) ======
-		// AI continuously evaluates whether to hold or exit based on market conditions
-		// Only applies to non-ultra-fast modes (ultra-fast has its own monitor)
-		mode := pos.Mode
-		if mode != GinieModeUltraFast {
-			// Get dynamic AI exit config for this mode
-			aiExitConfig := GetDynamicAIExitConfigForMode(mode)
-
-			if aiExitConfig.Enabled {
-				holdTime := time.Since(pos.EntryTime)
-				minHoldBeforeAI := time.Duration(aiExitConfig.MinHoldBeforeAIMS) * time.Millisecond
-				aiCheckInterval := time.Duration(aiExitConfig.AICheckIntervalMS) * time.Millisecond
-
-				// Only check after minimum hold time
-				if holdTime >= minHoldBeforeAI {
-					// Rate limiting: Only call AI every aiCheckInterval to avoid excessive API calls
-					now := time.Now()
-					timeSinceLastAICheck := now.Sub(pos.LastAICheck)
-					shouldCheckAI := pos.LastAICheck.IsZero() || timeSinceLastAICheck >= aiCheckInterval
-
-					// Calculate PnL for decision
-					var aiPnlPercent float64
-					if pos.Side == "LONG" {
-						aiPnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
-					} else {
-						aiPnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
-					}
-
-					// Determine if we should check AI based on config
-					shouldCheckLoss := aiExitConfig.UseLLMForLoss && aiPnlPercent < 0
-					shouldCheckProfit := aiExitConfig.UseLLMForProfit && aiPnlPercent > 0 && pos.CurrentTPLevel == 0
-
-					if shouldCheckAI && (shouldCheckLoss || shouldCheckProfit) {
-						pos.LastAICheck = now // Update last check time
-
-						decision, reason := ga.getDynamicAIExitDecision(pos, currentPrice, aiPnlPercent)
-
-						modeStr := string(mode)
-						if decision == "exit" {
-							log.Printf("[%s-AI-EXIT] %s: AI recommends EXIT | PnL=%.2f%% | Reason=%s",
-								strings.ToUpper(modeStr), symbol, aiPnlPercent, reason)
-							ga.mu.Unlock()
-							ga.closePosition(symbol, pos, currentPrice, fmt.Sprintf("ai_dynamic_exit:%s", reason), pos.CurrentTPLevel)
-							continue
-						} else {
-							log.Printf("[%s-AI-EXIT] %s: AI recommends HOLD | PnL=%.2f%% | Reason=%s | Next check in %v",
-								strings.ToUpper(modeStr), symbol, aiPnlPercent, reason, aiCheckInterval)
-						}
-					}
-				}
-			}
-		}
+		// ====== DYNAMIC AI EXIT (DISABLED) ======
+		// AI auto exit removed - now only using SL/TP and trailing stop from mode config
 		// ====== END DYNAMIC AI EXIT ======
 
 		// Release lock at end of this position's processing
@@ -11096,7 +11032,6 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
-	now := time.Now()
 	settingsManager := GetSettingsManager()
 	settings := settingsManager.GetCurrentSettings()
 
@@ -11165,26 +11100,8 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 		minProfitUSD = 1.00 // Default $1.00 (raised from $0.50)
 	}
 
-	// Dynamic AI Exit Settings (replaces fixed timeout)
-	dynamicAIExit := settings.UltraFastDynamicAIExit
-	minHoldBeforeAIMS := settings.UltraFastMinHoldBeforeAIMS
-	if minHoldBeforeAIMS <= 0 {
-		minHoldBeforeAIMS = 3000 // Default: wait 3 seconds before first AI check
-	}
-	_ = time.Duration(minHoldBeforeAIMS) * time.Millisecond // minHoldBeforeAI removed - no time restriction
-
-	aiCheckIntervalMS := settings.UltraFastAICheckIntervalMS
-	if aiCheckIntervalMS <= 0 {
-		aiCheckIntervalMS = 5000 // Default: check AI every 5 seconds
-	}
-	aiCheckInterval := time.Duration(aiCheckIntervalMS) * time.Millisecond
-
-	// Legacy max hold time (only used if dynamic AI exit is disabled)
-	maxHoldMS := settings.UltraFastMaxHoldMS
-	if maxHoldMS <= 0 {
-		maxHoldMS = 15000 // Default 15 seconds
-	}
-	_ = time.Duration(maxHoldMS) * time.Millisecond // maxHoldDuration removed - no forced exit timeout
+	// Dynamic AI Exit Settings - DISABLED (now using only SL/TP and trailing stop from mode config)
+	// Variables removed to avoid compilation errors
 
 	for _, pos := range ultraFastPositions {
 		// Get current price
@@ -11211,8 +11128,6 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
 		}
-
-		holdTime := now.Sub(pos.EntryTime)
 
 		// Track highest PnL for trailing stop
 		if pnlPercent > pos.UltraFastHighestPnL {
@@ -11324,81 +11239,15 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 				"symbol", pos.Symbol,
 				"total_pnl_usd", totalUnrealizedPnL,
 				"min_profit_usd", minProfitUSD,
-				"pnl_pct", pnlPercent,
-				"hold_time_ms", holdTime.Milliseconds())
+				"pnl_pct", pnlPercent)
 			ga.executeUltraFastExitWithTracking(pos, currentPrice, "min_profit_hit", totalUnrealizedPnL)
 			continue
 		}
 
-		// ============ EXIT PRIORITY 7: DYNAMIC AI EXIT (replaces fixed timeout) ============
-		// AI continuously evaluates whether to hold or exit based on market conditions
-		totalPnL := pnlUSD + pos.RealizedPnL
-
-		if dynamicAIExit && settings.UltraFastUseLLMForLoss {
-			// Dynamic AI Exit: Check continuously after minimum hold time
-			// Only applies to positions in loss (profit positions are handled by TP levels)
-			if pnlUSD < 0 { // Removed 3 sec minimum hold time
-				// Rate limiting: Only call AI every aiCheckInterval to avoid excessive API calls
-				timeSinceLastAICheck := now.Sub(pos.UltraFastLastAICheck)
-				shouldCheckAI := pos.UltraFastLastAICheck.IsZero() || timeSinceLastAICheck >= aiCheckInterval
-
-				if shouldCheckAI {
-					decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
-					pos.UltraFastLastAICheck = now // Update last check time
-
-					if decision == "average" {
-						ga.logger.Info("Ultra-fast: AI DYNAMIC - HOLD (market favorable)",
-							"symbol", pos.Symbol,
-							"pnl_usd", totalPnL,
-							"pnl_pct", pnlPercent,
-							"hold_time_sec", holdTime.Seconds(),
-							"next_check_in_sec", aiCheckInterval.Seconds())
-						// Continue holding, will re-check after aiCheckInterval
-						continue
-					} else {
-						ga.logger.Warn("Ultra-fast: AI DYNAMIC - EXIT (market unfavorable)",
-							"symbol", pos.Symbol,
-							"pnl_usd", totalPnL,
-							"pnl_pct", pnlPercent,
-							"hold_time_sec", holdTime.Seconds())
-						ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_dynamic_exit", totalPnL)
-						continue
-					}
-				}
-				// Not time for AI check yet, continue monitoring
-			}
-		} else {
-			// Legacy behavior: Fixed timeout exit (only if dynamic AI exit is disabled)
-			if pnlUSD < 0 { // Removed 15 sec max hold time
-				if settings.UltraFastUseLLMForLoss {
-					decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
-					if decision == "average" {
-						ga.logger.Info("Ultra-fast: AI suggests AVERAGE DOWN - holding",
-							"symbol", pos.Symbol,
-							"pnl_usd", totalPnL,
-							"pnl_pct", pnlPercent,
-							"hold_time_ms", holdTime.Milliseconds())
-						continue
-					} else {
-						ga.logger.Warn("Ultra-fast: AI suggests BOOK LOSS - closing",
-							"symbol", pos.Symbol,
-							"pnl_usd", totalPnL,
-							"pnl_pct", pnlPercent,
-							"hold_time_ms", holdTime.Milliseconds())
-						ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_book_loss", totalPnL)
-						continue
-					}
-				} else {
-					ga.logger.Warn("Ultra-fast: Force exit after timeout",
-						"symbol", pos.Symbol,
-						"hold_time_ms", holdTime.Milliseconds(),
-						"max_hold_ms", maxHoldMS,
-						"pnl_usd", totalPnL,
-						"pnl_pct", pnlPercent)
-					ga.executeUltraFastExitWithTracking(pos, currentPrice, "force_exit_timeout", totalPnL)
-				}
-			}
-		}
+		// ============ EXIT PRIORITY 7: DYNAMIC AI EXIT (DISABLED) ============
+		// AI auto exit removed - now only using SL/TP and trailing stop from mode config
+		// Positions in loss will rely on SL orders placed on Binance
+		// ============ END DYNAMIC AI EXIT ============
 	}
 }
 
@@ -11751,8 +11600,6 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 	shouldExit := false
 	reason := ""
 
-	holdTime := time.Since(pos.EntryTime)
-
 	// Exit conditions (checked in priority order):
 	// 1. Trend completely reversed AND we're in loss
 	if !trendFavorable && pnlPercent < 0 {
@@ -11800,7 +11647,6 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 		"mode", modeStr,
 		"side", pos.Side,
 		"pnl_pct", pnlPercent,
-		"hold_time", holdTime.String(),
 		"decision", map[bool]string{true: "EXIT", false: "HOLD"}[shouldExit],
 		"reason", reason,
 		"trend", scan.Trend.TrendDirection,
