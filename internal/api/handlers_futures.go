@@ -1324,6 +1324,7 @@ func (s *Server) GetCachedDailyPnL() (dailyPnL float64, totalPnL float64) {
 // GetBinancePnLForAutopilot fetches PnL directly from Binance Income History API
 // Uses a per-user cache with 2-minute TTL for accuracy
 // This is the preferred method for getting accurate PnL data
+// Paginates through ALL income records to get accurate total PnL
 func (s *Server) GetBinancePnLForAutopilot(ga *autopilot.GinieAutopilot) (dailyPnL float64, totalPnL float64) {
 	if ga == nil {
 		log.Printf("[PNL-SYNC] No autopilot provided, returning cached values")
@@ -1342,20 +1343,55 @@ func (s *Server) GetBinancePnLForAutopilot(ga *autopilot.GinieAutopilot) (dailyP
 		return s.GetCachedDailyPnL()
 	}
 
-	// Calculate start of today UTC
+	// Calculate time boundaries
 	now := time.Now().UTC()
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	startOfDayMs := startOfDay.UnixMilli()
 
-	// Fetch realized PnL from Binance (last 1000 records for total, filtered for daily)
-	records, err := futuresClient.GetIncomeHistory("REALIZED_PNL", 0, 0, 1000)
-	if err != nil {
-		log.Printf("[PNL-SYNC] Failed to fetch Binance income PnL: %v", err)
-		return s.GetCachedDailyPnL()
+	// For "total" PnL, fetch last 7 days (matches Binance UI default view)
+	// Binance Futures PnL widget defaults to 7-day view
+	sevenDaysAgo := now.AddDate(0, 0, -7)
+	startTimeMs := sevenDaysAgo.UnixMilli()
+
+	// Paginate through income records for the last 7 days
+	// Binance API returns records in descending order (newest first)
+	var allRecords []binance.IncomeRecord
+	var endTime int64 = 0 // 0 means no limit (get latest records first)
+	maxPages := 5         // Safety limit: 5 pages * 1000 = 5,000 records max for 7 days
+
+	for page := 0; page < maxPages; page++ {
+		records, err := futuresClient.GetIncomeHistory("REALIZED_PNL", startTimeMs, endTime, 1000)
+		if err != nil {
+			log.Printf("[PNL-SYNC] Failed to fetch page %d: %v", page, err)
+			break
+		}
+
+		if len(records) == 0 {
+			break // No more records
+		}
+
+		allRecords = append(allRecords, records...)
+
+		// If we got less than 1000, we've reached the end
+		if len(records) < 1000 {
+			break
+		}
+
+		// Set endTime to oldest record's time - 1ms for next page
+		oldestTime := records[len(records)-1].Time
+		endTime = oldestTime - 1
+
+		// Stop if we've gone past our start time
+		if endTime < startTimeMs {
+			break
+		}
+
+		// Small delay to avoid rate limits
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Sum up PnL
-	for _, record := range records {
+	// Sum up PnL from all records
+	for _, record := range allRecords {
 		totalPnL += record.Income
 		if record.Time >= startOfDayMs {
 			dailyPnL += record.Income
@@ -1367,7 +1403,7 @@ func (s *Server) GetBinancePnLForAutopilot(ga *autopilot.GinieAutopilot) (dailyP
 	binancePnLCache.TotalPnL = totalPnL
 	binancePnLCache.CacheTime = time.Now()
 
-	log.Printf("[PNL-SYNC] Fetched from Binance: daily=$%.2f, total=$%.2f (%d records)", dailyPnL, totalPnL, len(records))
+	log.Printf("[PNL-SYNC] Fetched from Binance: daily=$%.2f, 7d_total=$%.2f (%d records)", dailyPnL, totalPnL, len(allRecords))
 	return dailyPnL, totalPnL
 }
 

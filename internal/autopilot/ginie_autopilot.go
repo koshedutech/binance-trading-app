@@ -6384,26 +6384,62 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 
 // SyncPnLFromBinance syncs daily and total PnL from Binance income history
 // This ensures local tracking matches actual exchange values
+// Uses 7-day window with pagination to match Binance UI default view
 func (ga *GinieAutopilot) SyncPnLFromBinance() error {
 	if ga.config.DryRun {
 		ga.logger.Debug("Skipping PnL sync in paper trading mode")
 		return nil
 	}
 
-	// Get start of today (UTC)
+	// Calculate time boundaries
 	now := time.Now().UTC()
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	startOfDayMs := startOfDay.UnixMilli()
 
-	// Fetch realized PnL from Binance income history (last 1000 records)
-	records, err := ga.futuresClient.GetIncomeHistory("REALIZED_PNL", 0, 0, 1000)
-	if err != nil {
-		ga.logger.Warn("Failed to fetch income history for PnL sync", "error", err)
-		return err
+	// For "total" PnL, fetch last 7 days (matches Binance UI default view)
+	sevenDaysAgo := now.AddDate(0, 0, -7)
+	startTimeMs := sevenDaysAgo.UnixMilli()
+
+	// Paginate through income records for the last 7 days
+	// Binance API returns records in descending order (newest first)
+	var allRecords []binance.IncomeRecord
+	var endTime int64 = 0 // 0 means no limit (get latest records first)
+	maxPages := 5         // Safety limit: 5 pages * 1000 = 5,000 records max for 7 days
+
+	for page := 0; page < maxPages; page++ {
+		records, err := ga.futuresClient.GetIncomeHistory("REALIZED_PNL", startTimeMs, endTime, 1000)
+		if err != nil {
+			ga.logger.Warn("Failed to fetch income history page", "page", page, "error", err)
+			break
+		}
+
+		if len(records) == 0 {
+			break // No more records
+		}
+
+		allRecords = append(allRecords, records...)
+
+		// If we got less than 1000, we've reached the end
+		if len(records) < 1000 {
+			break
+		}
+
+		// Set endTime to oldest record's time - 1ms for next page
+		oldestTime := records[len(records)-1].Time
+		endTime = oldestTime - 1
+
+		// Stop if we've gone past our start time
+		if endTime < startTimeMs {
+			break
+		}
+
+		// Small delay to avoid rate limits
+		time.Sleep(50 * time.Millisecond)
 	}
 
+	// Sum up PnL from all records
 	var dailyPnL, totalPnL float64
-	for _, record := range records {
+	for _, record := range allRecords {
 		totalPnL += record.Income
 		if record.Time >= startOfDayMs {
 			dailyPnL += record.Income
@@ -6425,12 +6461,12 @@ func (ga *GinieAutopilot) SyncPnLFromBinance() error {
 		return err
 	}
 
-	ga.logger.Info("PnL synced from Binance",
+	ga.logger.Info("PnL synced from Binance (7-day window)",
 		"daily_pnl", dailyPnL,
-		"total_pnl", totalPnL,
+		"7d_total_pnl", totalPnL,
 		"old_daily", oldDaily,
 		"old_total", oldTotal,
-		"records_count", len(records))
+		"records_count", len(allRecords))
 
 	return nil
 }
