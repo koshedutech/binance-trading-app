@@ -3015,6 +3015,15 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	// Need to unlock temporarily for API call to get balance
 	ga.mu.Unlock()
 	positionUSD, canTrade, reason := ga.calculateAdaptivePositionSize(symbol, decision.ConfidenceScore, currentPositionCount, selectedMode, llmSuggestedSize)
+
+	// CAPITAL ALLOCATION CHECK: Ensure mode has capital available (Epic 2 Story 2.1 AC-2.1.3)
+	// This check prevents any mode from using more than its allocated capital percentage
+	var canAllocate bool
+	var allocReason string
+	if canTrade {
+		canAllocate, allocReason = ga.canAllocateForMode(selectedMode, positionUSD)
+	}
+
 	ga.mu.Lock()
 
 	// CRITICAL: Re-check position doesn't exist after re-acquiring lock
@@ -3030,6 +3039,16 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			"symbol", symbol,
 			"reason", reason,
 			"confidence_score", decision.ConfidenceScore)
+		return
+	}
+
+	// Check mode-specific capital allocation limit
+	if !canAllocate {
+		ga.logger.Warn("Ginie cannot trade - capital allocation limit reached",
+			"symbol", symbol,
+			"mode", selectedMode,
+			"reason", allocReason,
+			"requested_usd", positionUSD)
 		return
 	}
 
@@ -10032,6 +10051,29 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 	// Apply max USD per position limit from Ginie config
 	if ga.config.MaxUSDPerPosition > 0 && positionUSD > ga.config.MaxUSDPerPosition {
 		positionUSD = ga.config.MaxUSDPerPosition
+	}
+
+	// CAPITAL ALLOCATION CHECK: Ensure mode has capital available (Epic 2 Story 2.1 AC-2.1.3)
+	// This check prevents any mode from using more than its allocated capital percentage
+	ga.mu.Unlock()
+	canAllocate, allocReason := ga.canAllocateForMode(strategyMode, positionUSD)
+	ga.mu.Lock()
+
+	// Re-check position after unlock
+	if _, exists := ga.positions[symbol]; exists {
+		ga.logger.Warn("Strategy race condition avoided - position created while allocation check",
+			"symbol", symbol)
+		return
+	}
+
+	if !canAllocate {
+		ga.logger.Warn("Strategy trade skipped - capital allocation limit reached",
+			"symbol", symbol,
+			"strategy", signal.StrategyName,
+			"mode", strategyMode,
+			"reason", allocReason,
+			"requested_usd", positionUSD)
+		return
 	}
 
 	// Get current price
