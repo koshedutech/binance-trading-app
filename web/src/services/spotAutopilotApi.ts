@@ -190,7 +190,10 @@ class SpotAutopilotAPIService {
           }
         }
 
-        console.error('Spot Autopilot API Error:', error);
+        // Don't log auth errors (401/403) - they're expected when not logged in
+        if (error.response?.status !== 401 && error.response?.status !== 403) {
+          console.error('Spot Autopilot API Error:', error);
+        }
         return Promise.reject(error);
       }
     );

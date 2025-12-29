@@ -118,7 +118,10 @@ class FuturesAPIService {
           }
         }
 
-        console.error('Futures API Error:', error);
+        // Don't log auth errors (401/403) - they're expected when not logged in
+        if (error.response?.status !== 401 && error.response?.status !== 403) {
+          console.error('Futures API Error:', error);
+        }
         return Promise.reject(error);
       }
     );
@@ -2274,6 +2277,229 @@ export interface CorrelationCheck {
   correlation_score: number;
 }
 
+// FVG (Fair Value Gap) types
+export interface FairValueGap {
+  type: 'bullish' | 'bearish';
+  top_price: number;
+  bottom_price: number;
+  mid_price: number;
+  gap_size: number;
+  gap_percent: number;
+  candle_index: number;
+  timestamp: string;
+  filled: boolean;
+  tested: boolean;
+  strength: 'weak' | 'medium' | 'strong';
+}
+
+export interface FVGAnalysis {
+  bullish_fvgs: FairValueGap[];
+  bearish_fvgs: FairValueGap[];
+  nearest_bullish: FairValueGap | null;
+  nearest_bearish: FairValueGap | null;
+  total_unfilled: number;
+  in_fvg_zone: boolean;
+  fvg_zone_type: string;
+  fvg_confluence: boolean;
+}
+
+// Order Block types
+export interface OrderBlock {
+  type: 'bullish' | 'bearish';
+  high_price: number;
+  low_price: number;
+  mid_price: number;
+  open_price: number;
+  close_price: number;
+  volume: number;
+  candle_index: number;
+  timestamp: string;
+  mitigated: boolean;
+  tested: boolean;
+  test_count: number;
+  strength: 'weak' | 'medium' | 'strong';
+  move_percent: number;
+}
+
+export interface OrderBlockAnalysis {
+  bullish_obs: OrderBlock[];
+  bearish_obs: OrderBlock[];
+  nearest_bullish: OrderBlock | null;
+  nearest_bearish: OrderBlock | null;
+  total_unmitigated: number;
+  in_ob_zone: boolean;
+  ob_zone_type: string;
+  ob_confluence: boolean;
+}
+
+// Chart Pattern Types
+export interface SwingPoint {
+  price: number;
+  index: number;
+  timestamp: string;
+  volume?: number;
+}
+
+export interface Trendline {
+  start_price: number;
+  end_price: number;
+  start_index: number;
+  end_index: number;
+  slope: number;
+  touch_points: number[];
+}
+
+export interface HeadAndShouldersPattern {
+  type: 'head_and_shoulders' | 'inverse_head_and_shoulders';
+  left_shoulder: SwingPoint;
+  head: SwingPoint;
+  right_shoulder: SwingPoint;
+  neckline_left: SwingPoint;
+  neckline_right: SwingPoint;
+  neckline_slope: number;
+  neckline_price: number;
+  target_price: number;
+  pattern_height: number;
+  pattern_percent: number;
+  symmetry_score: number;
+  volume_confirmed: boolean;
+  completed: boolean;
+  candle_index: number;
+  timestamp: string;
+  strength: 'weak' | 'moderate' | 'strong';
+}
+
+export interface DoubleTopBottomPattern {
+  type: 'double_top' | 'double_bottom';
+  first_peak: SwingPoint;
+  second_peak: SwingPoint;
+  neckline: SwingPoint;
+  neckline_price: number;
+  target_price: number;
+  pattern_height: number;
+  pattern_percent: number;
+  peak_difference: number;
+  bars_between: number;
+  volume_confirmed: boolean;
+  status: 'forming' | 'confirmed' | 'invalid';
+  completed: boolean;
+  candle_index: number;
+  timestamp: string;
+  strength: 'weak' | 'moderate' | 'strong';
+}
+
+export interface TrianglePattern {
+  type: 'ascending' | 'descending' | 'symmetrical';
+  upper_trendline: Trendline;
+  lower_trendline: Trendline;
+  apex_price: number;
+  apex_index: number;
+  pattern_start: number;
+  pattern_width: number;
+  base_height: number;
+  base_percent: number;
+  current_height: number;
+  contraction_pct: number;
+  volume_decline: boolean;
+  breakout_bias: 'up' | 'down' | 'neutral';
+  breakout_target: number;
+  touches_upper: number;
+  touches_lower: number;
+  completed: boolean;
+  breakout_dir: string;
+  candle_index: number;
+  timestamp: string;
+  strength: 'weak' | 'moderate' | 'strong';
+}
+
+export interface WedgePattern {
+  type: 'rising_wedge' | 'falling_wedge';
+  upper_trendline: Trendline;
+  lower_trendline: Trendline;
+  apex_price: number;
+  apex_index: number;
+  pattern_start: number;
+  pattern_width: number;
+  slope_ratio: number;
+  base_height: number;
+  base_percent: number;
+  breakout_bias: 'up' | 'down';
+  breakout_target: number;
+  touches_upper: number;
+  touches_lower: number;
+  volume_decline: boolean;
+  completed: boolean;
+  breakout_dir: string;
+  candle_index: number;
+  timestamp: string;
+  strength: 'weak' | 'moderate' | 'strong';
+}
+
+export interface FlagPennantPattern {
+  type: 'bull_flag' | 'bear_flag' | 'bull_pennant' | 'bear_pennant';
+  direction: 'bullish' | 'bearish';
+  flagpole_start: SwingPoint;
+  flagpole_end: SwingPoint;
+  flagpole_height: number;
+  flagpole_percent: number;
+  flagpole_bars: number;
+  flagpole_volume: number;
+  consolidation_type: 'channel' | 'triangle';
+  consolidation_high: number;
+  consolidation_low: number;
+  consolidation_bars: number;
+  retracement_pct: number;
+  consolidation_vol: number;
+  breakout_level: number;
+  target_price: number;
+  stop_loss: number;
+  completed: boolean;
+  volume_confirmed: boolean;
+  candle_index: number;
+  timestamp: string;
+  strength: 'weak' | 'moderate' | 'strong';
+}
+
+export interface PatternSummary {
+  type: string;
+  direction: 'bullish' | 'bearish';
+  strength: 'weak' | 'moderate' | 'strong';
+  target_price: number;
+  breakout_level: number;
+  completion_pct: number;
+}
+
+export interface ChartPatternAnalysis {
+  head_and_shoulders: HeadAndShouldersPattern[];
+  double_tops_bottoms: DoubleTopBottomPattern[];
+  triangles: TrianglePattern[];
+  wedges: WedgePattern[];
+  flags_pennants: FlagPennantPattern[];
+  active_pattern: PatternSummary | null;
+  pattern_score: number;
+  pattern_bias: 'bullish' | 'bearish' | 'neutral';
+  pattern_confluence: boolean;
+  has_bullish_pattern: boolean;
+  has_bearish_pattern: boolean;
+  near_breakout: boolean;
+  estimated_target: number;
+  total_patterns: number;
+  reversal_patterns: number;
+  continuation_patterns: number;
+  consolidation_patterns: number;
+}
+
+// Combined Price Action Analysis
+export interface PriceActionAnalysis {
+  fvg: FVGAnalysis;
+  order_blocks: OrderBlockAnalysis;
+  chart_patterns?: ChartPatternAnalysis;
+  has_bullish_setup: boolean;
+  has_bearish_setup: boolean;
+  setup_quality: 'weak' | 'moderate' | 'good' | 'excellent';
+  confluence_score: number;
+}
+
 export interface GinieCoinScan {
   symbol: string;
   timestamp: string;
@@ -2283,6 +2509,7 @@ export interface GinieCoinScan {
   trend: TrendHealth;
   structure: MarketStructure;
   correlation: CorrelationCheck;
+  price_action?: PriceActionAnalysis;
   score: number;
   trade_ready: boolean;
   reason: string;

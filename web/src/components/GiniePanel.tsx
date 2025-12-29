@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import { useFuturesStore } from '../store/futuresStore';
 import {
@@ -7,7 +7,8 @@ import {
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
-  ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge, Coins, Star
+  ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge, Coins, Star, Layers, Box,
+  Triangle, Flag, Repeat
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
@@ -30,6 +31,8 @@ export default function GiniePanel() {
   const [expandedPosition, setExpandedPosition] = useState<string | null>(null);
   const [coinScans, setCoinScans] = useState<GinieCoinScan[]>([]);
   const [showScans, setShowScans] = useState(false);
+  const [expandedPriceAction, setExpandedPriceAction] = useState<string | null>(null);
+  const [expandedChartPatterns, setExpandedChartPatterns] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'decisions' | 'positions' | 'history' | 'movers' | 'diagnostics' | 'performance' | 'protection'>('decisions');
   // Diagnostics state
   const [diagnostics, setDiagnostics] = useState<GinieDiagnostics | null>(null);
@@ -156,9 +159,10 @@ export default function GiniePanel() {
       const data = await futuresApi.getGinieStatus();
       setStatus(data);
       setError(null);
-    } catch (err) {
+    } catch (err: any) {
+      // Don't log or show error for auth errors (expected when not logged in)
+      if (err?.response?.status === 401 || err?.response?.status === 403) return;
       console.error('Failed to fetch Ginie status:', err);
-      // Show error to user instead of silently failing
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch Ginie status';
       setError(errorMsg);
     }
@@ -189,9 +193,10 @@ export default function GiniePanel() {
         }
         setSettingsInitialized(true);
       }
-    } catch (err) {
+    } catch (err: any) {
+      // Don't log or show error for auth errors (expected when not logged in)
+      if (err?.response?.status === 401 || err?.response?.status === 403) return;
       console.error('Failed to fetch Ginie autopilot status:', err);
-      // Show error to user for critical autopilot status failures
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch autopilot status';
       setError(errorMsg);
     }
@@ -210,7 +215,9 @@ export default function GiniePanel() {
           cooldown_minutes: data.cooldown_minutes,
         });
       }
-    } catch (err) {
+    } catch (err: any) {
+      // Don't log auth errors (expected when not logged in)
+      if (err?.response?.status === 401 || err?.response?.status === 403) return;
       console.error('Failed to fetch Ginie circuit breaker status:', err);
     }
   };
@@ -219,7 +226,9 @@ export default function GiniePanel() {
     try {
       const data = await futuresApi.getMarketMovers(15);
       setMarketMovers(data);
-    } catch (err) {
+    } catch (err: any) {
+      // Don't log auth errors (expected when not logged in)
+      if (err?.response?.status === 401 || err?.response?.status === 403) return;
       console.error('Failed to fetch market movers:', err);
     }
   };
@@ -4307,6 +4316,400 @@ export default function GiniePanel() {
                             Scan: {scan.reason}
                           </div>
                         )}
+
+                        {/* FVG/OB Price Action Display */}
+                        {scan.price_action && (
+                          <div className="mt-2 pt-2 border-t border-gray-600/50">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedPriceAction(expandedPriceAction === scan.symbol ? null : scan.symbol);
+                              }}
+                              className="flex items-center justify-between w-full text-left"
+                            >
+                              <div className="flex items-center gap-2">
+                                <Layers className="w-3 h-3 text-purple-400" />
+                                <span className="text-[10px] text-gray-400">Price Action</span>
+                                {/* Quick indicators */}
+                                <div className="flex items-center gap-1">
+                                  {scan.price_action.has_bullish_setup && (
+                                    <span className="px-1 py-0.5 bg-green-900/40 text-green-400 text-[8px] rounded">BULLISH</span>
+                                  )}
+                                  {scan.price_action.has_bearish_setup && (
+                                    <span className="px-1 py-0.5 bg-red-900/40 text-red-400 text-[8px] rounded">BEARISH</span>
+                                  )}
+                                  <span className={`px-1 py-0.5 text-[8px] rounded ${
+                                    scan.price_action.setup_quality === 'excellent' ? 'bg-purple-900/40 text-purple-400' :
+                                    scan.price_action.setup_quality === 'good' ? 'bg-blue-900/40 text-blue-400' :
+                                    scan.price_action.setup_quality === 'moderate' ? 'bg-yellow-900/40 text-yellow-400' :
+                                    'bg-gray-700/40 text-gray-400'
+                                  }`}>
+                                    {scan.price_action.setup_quality?.toUpperCase()}
+                                  </span>
+                                  <span className="text-[10px] text-gray-500">
+                                    ({scan.price_action.confluence_score?.toFixed(0) || 0}/100)
+                                  </span>
+                                </div>
+                              </div>
+                              {expandedPriceAction === scan.symbol ?
+                                <ChevronUp className="w-3 h-3 text-gray-500" /> :
+                                <ChevronDown className="w-3 h-3 text-gray-500" />
+                              }
+                            </button>
+
+                            {/* Expanded Price Action Details */}
+                            {expandedPriceAction === scan.symbol && (
+                              <div className="mt-2 space-y-2">
+                                {/* FVG Section */}
+                                <div className="bg-gray-800/50 rounded p-2">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <Box className="w-3 h-3 text-cyan-400" />
+                                    <span className="text-[10px] font-medium text-cyan-400">Fair Value Gaps</span>
+                                    <span className="text-[9px] text-gray-500">
+                                      ({scan.price_action.fvg?.total_unfilled || 0} unfilled)
+                                    </span>
+                                  </div>
+
+                                  <div className="grid grid-cols-2 gap-2 text-[9px]">
+                                    {/* Bullish FVGs */}
+                                    <div>
+                                      <div className="text-green-400 mb-1">▲ Bullish ({scan.price_action.fvg?.bullish_fvgs?.filter(f => !f.filled).length || 0})</div>
+                                      {scan.price_action.fvg?.nearest_bullish && (
+                                        <div className="bg-green-900/20 rounded p-1">
+                                          <div className="text-gray-300">
+                                            ${scan.price_action.fvg.nearest_bullish.bottom_price?.toFixed(2)} - ${scan.price_action.fvg.nearest_bullish.top_price?.toFixed(2)}
+                                          </div>
+                                          <div className="text-gray-500">
+                                            Gap: {scan.price_action.fvg.nearest_bullish.gap_percent?.toFixed(2)}%
+                                            <span className={`ml-1 ${
+                                              scan.price_action.fvg.nearest_bullish.strength === 'strong' ? 'text-green-400' :
+                                              scan.price_action.fvg.nearest_bullish.strength === 'medium' ? 'text-yellow-400' :
+                                              'text-gray-500'
+                                            }`}>
+                                              [{scan.price_action.fvg.nearest_bullish.strength}]
+                                            </span>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {!scan.price_action.fvg?.nearest_bullish && (
+                                        <div className="text-gray-600 italic">None nearby</div>
+                                      )}
+                                    </div>
+
+                                    {/* Bearish FVGs */}
+                                    <div>
+                                      <div className="text-red-400 mb-1">▼ Bearish ({scan.price_action.fvg?.bearish_fvgs?.filter(f => !f.filled).length || 0})</div>
+                                      {scan.price_action.fvg?.nearest_bearish && (
+                                        <div className="bg-red-900/20 rounded p-1">
+                                          <div className="text-gray-300">
+                                            ${scan.price_action.fvg.nearest_bearish.bottom_price?.toFixed(2)} - ${scan.price_action.fvg.nearest_bearish.top_price?.toFixed(2)}
+                                          </div>
+                                          <div className="text-gray-500">
+                                            Gap: {scan.price_action.fvg.nearest_bearish.gap_percent?.toFixed(2)}%
+                                            <span className={`ml-1 ${
+                                              scan.price_action.fvg.nearest_bearish.strength === 'strong' ? 'text-red-400' :
+                                              scan.price_action.fvg.nearest_bearish.strength === 'medium' ? 'text-yellow-400' :
+                                              'text-gray-500'
+                                            }`}>
+                                              [{scan.price_action.fvg.nearest_bearish.strength}]
+                                            </span>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {!scan.price_action.fvg?.nearest_bearish && (
+                                        <div className="text-gray-600 italic">None nearby</div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Zone indicators */}
+                                  {scan.price_action.fvg?.in_fvg_zone && (
+                                    <div className={`mt-1 px-1 py-0.5 rounded text-[9px] ${
+                                      scan.price_action.fvg.fvg_zone_type === 'bullish' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
+                                    }`}>
+                                      ⚡ Currently IN {scan.price_action.fvg.fvg_zone_type} FVG zone
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Order Blocks Section */}
+                                <div className="bg-gray-800/50 rounded p-2">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <Target className="w-3 h-3 text-orange-400" />
+                                    <span className="text-[10px] font-medium text-orange-400">Order Blocks</span>
+                                    <span className="text-[9px] text-gray-500">
+                                      ({scan.price_action.order_blocks?.total_unmitigated || 0} active)
+                                    </span>
+                                  </div>
+
+                                  <div className="grid grid-cols-2 gap-2 text-[9px]">
+                                    {/* Bullish OBs */}
+                                    <div>
+                                      <div className="text-green-400 mb-1">▲ Demand ({scan.price_action.order_blocks?.bullish_obs?.filter(o => !o.mitigated).length || 0})</div>
+                                      {scan.price_action.order_blocks?.nearest_bullish && (
+                                        <div className="bg-green-900/20 rounded p-1">
+                                          <div className="text-gray-300">
+                                            ${scan.price_action.order_blocks.nearest_bullish.low_price?.toFixed(2)} - ${scan.price_action.order_blocks.nearest_bullish.high_price?.toFixed(2)}
+                                          </div>
+                                          <div className="text-gray-500">
+                                            Move: {scan.price_action.order_blocks.nearest_bullish.move_percent?.toFixed(1)}%
+                                            <span className={`ml-1 ${
+                                              scan.price_action.order_blocks.nearest_bullish.strength === 'strong' ? 'text-green-400' :
+                                              scan.price_action.order_blocks.nearest_bullish.strength === 'medium' ? 'text-yellow-400' :
+                                              'text-gray-500'
+                                            }`}>
+                                              [{scan.price_action.order_blocks.nearest_bullish.strength}]
+                                            </span>
+                                          </div>
+                                          <div className="text-gray-600">
+                                            Tests: {scan.price_action.order_blocks.nearest_bullish.test_count}
+                                          </div>
+                                        </div>
+                                      )}
+                                      {!scan.price_action.order_blocks?.nearest_bullish && (
+                                        <div className="text-gray-600 italic">None nearby</div>
+                                      )}
+                                    </div>
+
+                                    {/* Bearish OBs */}
+                                    <div>
+                                      <div className="text-red-400 mb-1">▼ Supply ({scan.price_action.order_blocks?.bearish_obs?.filter(o => !o.mitigated).length || 0})</div>
+                                      {scan.price_action.order_blocks?.nearest_bearish && (
+                                        <div className="bg-red-900/20 rounded p-1">
+                                          <div className="text-gray-300">
+                                            ${scan.price_action.order_blocks.nearest_bearish.low_price?.toFixed(2)} - ${scan.price_action.order_blocks.nearest_bearish.high_price?.toFixed(2)}
+                                          </div>
+                                          <div className="text-gray-500">
+                                            Move: {scan.price_action.order_blocks.nearest_bearish.move_percent?.toFixed(1)}%
+                                            <span className={`ml-1 ${
+                                              scan.price_action.order_blocks.nearest_bearish.strength === 'strong' ? 'text-red-400' :
+                                              scan.price_action.order_blocks.nearest_bearish.strength === 'medium' ? 'text-yellow-400' :
+                                              'text-gray-500'
+                                            }`}>
+                                              [{scan.price_action.order_blocks.nearest_bearish.strength}]
+                                            </span>
+                                          </div>
+                                          <div className="text-gray-600">
+                                            Tests: {scan.price_action.order_blocks.nearest_bearish.test_count}
+                                          </div>
+                                        </div>
+                                      )}
+                                      {!scan.price_action.order_blocks?.nearest_bearish && (
+                                        <div className="text-gray-600 italic">None nearby</div>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Zone indicators */}
+                                  {scan.price_action.order_blocks?.in_ob_zone && (
+                                    <div className={`mt-1 px-1 py-0.5 rounded text-[9px] ${
+                                      scan.price_action.order_blocks.ob_zone_type === 'bullish' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
+                                    }`}>
+                                      ⚡ Currently IN {scan.price_action.order_blocks.ob_zone_type} Order Block
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Confluence Summary */}
+                                {(scan.price_action.fvg?.fvg_confluence || scan.price_action.order_blocks?.ob_confluence) && (
+                                  <div className="bg-purple-900/20 rounded p-1 text-[9px] text-purple-300 flex items-center gap-1">
+                                    <Star className="w-3 h-3" />
+                                    FVG & Order Block zones overlap - HIGH CONFLUENCE
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Chart Patterns Section */}
+                            {scan.price_action?.chart_patterns && scan.price_action.chart_patterns.total_patterns > 0 && (
+                              <div className="mt-2">
+                                {/* Chart Patterns Header - Clickable */}
+                                <div
+                                  className="flex items-center justify-between bg-gray-700/30 rounded p-1 cursor-pointer hover:bg-gray-700/50"
+                                  onClick={() => setExpandedChartPatterns(expandedChartPatterns === scan.symbol ? null : scan.symbol)}
+                                >
+                                  <div className="flex items-center gap-1">
+                                    <BarChart2 className="w-3 h-3 text-cyan-400" />
+                                    <span className="text-[10px] text-gray-300">Chart Patterns</span>
+                                    <span className="text-[9px] text-gray-500">({scan.price_action.chart_patterns.total_patterns})</span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    {/* Quick pattern indicators */}
+                                    {scan.price_action.chart_patterns.has_bullish_pattern && (
+                                      <span className="px-1 bg-green-900/40 text-green-400 text-[8px] rounded">BULLISH</span>
+                                    )}
+                                    {scan.price_action.chart_patterns.has_bearish_pattern && (
+                                      <span className="px-1 bg-red-900/40 text-red-400 text-[8px] rounded">BEARISH</span>
+                                    )}
+                                    {scan.price_action.chart_patterns.near_breakout && (
+                                      <span className="px-1 bg-yellow-900/40 text-yellow-400 text-[8px] rounded flex items-center gap-0.5">
+                                        <Zap className="w-2 h-2" />BREAKOUT
+                                      </span>
+                                    )}
+                                    <span className="text-[9px] text-cyan-400">Score: {scan.price_action.chart_patterns.pattern_score.toFixed(0)}</span>
+                                    {expandedChartPatterns === scan.symbol ?
+                                      <ChevronUp className="w-3 h-3 text-gray-400" /> :
+                                      <ChevronDown className="w-3 h-3 text-gray-400" />
+                                    }
+                                  </div>
+                                </div>
+
+                                {/* Expanded Chart Patterns Details */}
+                                {expandedChartPatterns === scan.symbol && (
+                                  <div className="mt-1 space-y-1 bg-gray-800/30 rounded p-1">
+                                    {/* Active Pattern Summary */}
+                                    {scan.price_action.chart_patterns.active_pattern && (
+                                      <div className="bg-cyan-900/20 rounded p-1">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[9px] text-cyan-400 flex items-center gap-1">
+                                            <Target className="w-3 h-3" />
+                                            Active: {scan.price_action.chart_patterns.active_pattern.type.replace(/_/g, ' ').toUpperCase()}
+                                          </span>
+                                          <span className={`text-[8px] px-1 rounded ${
+                                            scan.price_action.chart_patterns.active_pattern.direction === 'bullish'
+                                              ? 'bg-green-900/40 text-green-400'
+                                              : 'bg-red-900/40 text-red-400'
+                                          }`}>
+                                            {scan.price_action.chart_patterns.active_pattern.strength}
+                                          </span>
+                                        </div>
+                                        <div className="text-[8px] text-gray-400 mt-0.5">
+                                          Target: ${scan.price_action.chart_patterns.active_pattern.target_price.toFixed(2)}
+                                          {scan.price_action.chart_patterns.active_pattern.breakout_level > 0 && (
+                                            <span className="ml-2">Breakout: ${scan.price_action.chart_patterns.active_pattern.breakout_level.toFixed(2)}</span>
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Pattern Counts */}
+                                    <div className="grid grid-cols-3 gap-1 text-[8px]">
+                                      {scan.price_action.chart_patterns.reversal_patterns > 0 && (
+                                        <div className="bg-purple-900/20 rounded p-1 text-center">
+                                          <div className="text-purple-400">{scan.price_action.chart_patterns.reversal_patterns}</div>
+                                          <div className="text-purple-300/70">Reversal</div>
+                                        </div>
+                                      )}
+                                      {scan.price_action.chart_patterns.continuation_patterns > 0 && (
+                                        <div className="bg-blue-900/20 rounded p-1 text-center">
+                                          <div className="text-blue-400">{scan.price_action.chart_patterns.continuation_patterns}</div>
+                                          <div className="text-blue-300/70">Continuation</div>
+                                        </div>
+                                      )}
+                                      {scan.price_action.chart_patterns.consolidation_patterns > 0 && (
+                                        <div className="bg-orange-900/20 rounded p-1 text-center">
+                                          <div className="text-orange-400">{scan.price_action.chart_patterns.consolidation_patterns}</div>
+                                          <div className="text-orange-300/70">Consolidation</div>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Head and Shoulders */}
+                                    {(scan.price_action.chart_patterns?.head_and_shoulders || []).length > 0 && (
+                                      <div className="bg-gray-700/30 rounded p-1">
+                                        <div className="text-[9px] text-gray-300 flex items-center gap-1 mb-0.5">
+                                          <Repeat className="w-2.5 h-2.5" />
+                                          Head & Shoulders ({(scan.price_action.chart_patterns?.head_and_shoulders || []).length})
+                                        </div>
+                                        {(scan.price_action.chart_patterns?.head_and_shoulders || []).slice(0, 2).map((p, i) => (
+                                          <div key={i} className="text-[8px] text-gray-400 flex justify-between">
+                                            <span className={p.type === 'inverse_head_and_shoulders' ? 'text-green-400' : 'text-red-400'}>
+                                              {p.type === 'inverse_head_and_shoulders' ? '↑ Inverse' : '↓ Regular'}
+                                            </span>
+                                            <span>Target: ${p.target_price.toFixed(2)} ({p.strength})</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Double Tops/Bottoms */}
+                                    {(scan.price_action.chart_patterns?.double_tops_bottoms || []).length > 0 && (
+                                      <div className="bg-gray-700/30 rounded p-1">
+                                        <div className="text-[9px] text-gray-300 flex items-center gap-1 mb-0.5">
+                                          <BarChart2 className="w-2.5 h-2.5" />
+                                          Double Tops/Bottoms ({(scan.price_action.chart_patterns?.double_tops_bottoms || []).length})
+                                        </div>
+                                        {(scan.price_action.chart_patterns?.double_tops_bottoms || []).slice(0, 2).map((p, i) => (
+                                          <div key={i} className="text-[8px] text-gray-400 flex justify-between">
+                                            <span className={p.type === 'double_bottom' ? 'text-green-400' : 'text-red-400'}>
+                                              {p.type === 'double_bottom' ? '↑ Double Bottom' : '↓ Double Top'}
+                                            </span>
+                                            <span>Target: ${p.target_price.toFixed(2)} ({p.strength})</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Triangles */}
+                                    {(scan.price_action.chart_patterns?.triangles || []).length > 0 && (
+                                      <div className="bg-gray-700/30 rounded p-1">
+                                        <div className="text-[9px] text-gray-300 flex items-center gap-1 mb-0.5">
+                                          <Triangle className="w-2.5 h-2.5" />
+                                          Triangles ({(scan.price_action.chart_patterns?.triangles || []).length})
+                                        </div>
+                                        {(scan.price_action.chart_patterns?.triangles || []).slice(0, 2).map((p, i) => (
+                                          <div key={i} className="text-[8px] text-gray-400 flex justify-between">
+                                            <span className={
+                                              p.breakout_bias === 'up' ? 'text-green-400' :
+                                              p.breakout_bias === 'down' ? 'text-red-400' : 'text-yellow-400'
+                                            }>
+                                              {p.type.charAt(0).toUpperCase() + p.type.slice(1)} ({p.breakout_bias})
+                                            </span>
+                                            <span>Contraction: {p.contraction_pct.toFixed(0)}%</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Wedges */}
+                                    {(scan.price_action.chart_patterns?.wedges || []).length > 0 && (
+                                      <div className="bg-gray-700/30 rounded p-1">
+                                        <div className="text-[9px] text-gray-300 flex items-center gap-1 mb-0.5">
+                                          <TrendingUp className="w-2.5 h-2.5" />
+                                          Wedges ({(scan.price_action.chart_patterns?.wedges || []).length})
+                                        </div>
+                                        {(scan.price_action.chart_patterns?.wedges || []).slice(0, 2).map((p, i) => (
+                                          <div key={i} className="text-[8px] text-gray-400 flex justify-between">
+                                            <span className={p.type === 'falling_wedge' ? 'text-green-400' : 'text-red-400'}>
+                                              {p.type === 'falling_wedge' ? '↑ Falling' : '↓ Rising'} Wedge
+                                            </span>
+                                            <span>Target: ${p.breakout_target.toFixed(2)}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Flags & Pennants */}
+                                    {(scan.price_action.chart_patterns?.flags_pennants || []).length > 0 && (
+                                      <div className="bg-gray-700/30 rounded p-1">
+                                        <div className="text-[9px] text-gray-300 flex items-center gap-1 mb-0.5">
+                                          <Flag className="w-2.5 h-2.5" />
+                                          Flags & Pennants ({(scan.price_action.chart_patterns?.flags_pennants || []).length})
+                                        </div>
+                                        {(scan.price_action.chart_patterns?.flags_pennants || []).slice(0, 2).map((p, i) => (
+                                          <div key={i} className="text-[8px] text-gray-400 flex justify-between">
+                                            <span className={p.direction === 'bullish' ? 'text-green-400' : 'text-red-400'}>
+                                              {p.type.replace(/_/g, ' ')}
+                                            </span>
+                                            <span>Target: ${p.target_price.toFixed(2)} ({p.retracement_pct.toFixed(0)}% retr)</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+
+                                    {/* Pattern Confluence */}
+                                    {scan.price_action.chart_patterns.pattern_confluence && (
+                                      <div className="bg-cyan-900/20 rounded p-1 text-[9px] text-cyan-300 flex items-center gap-1">
+                                        <Star className="w-3 h-3" />
+                                        Pattern aligns with trend - PATTERN CONFLUENCE
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -4446,9 +4849,9 @@ export default function GiniePanel() {
                               </div>
                             </div>
                             {/* Take Profit Levels */}
-                            {decision.trade_execution.take_profits.length > 0 && (
+                            {(decision.trade_execution.take_profits || []).length > 0 && (
                               <div className="mt-2 flex gap-2 flex-wrap">
-                                {decision.trade_execution.take_profits.map((tp) => (
+                                {(decision.trade_execution.take_profits || []).map((tp) => (
                                   <span
                                     key={tp.level}
                                     className="px-2 py-0.5 bg-green-900/30 text-green-400 rounded"
@@ -5241,7 +5644,7 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
           <div className="space-y-2">
             <div className="text-gray-500 text-xs font-medium">Take Profit Progression</div>
             <div className="flex items-center gap-1 flex-wrap">
-              {position.take_profits.map((tp, idx) => {
+              {(position.take_profits || []).map((tp, idx) => {
                 const isHit = tp.status === 'hit';
                 const isActive = position.current_tp_level === tp.level;
                 const isNext = position.current_tp_level + 1 === tp.level;
@@ -5264,7 +5667,7 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
                     </div>
 
                     {/* Arrow between TPs */}
-                    {idx < position.take_profits.length - 1 && (
+                    {idx < (position.take_profits || []).length - 1 && (
                       <div
                         className={`text-xs font-bold ${
                           isHit ? 'text-green-400' : isActive || isNext ? 'text-yellow-400' : 'text-gray-600'
@@ -5280,7 +5683,7 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
 
             {/* TP Details Row */}
             <div className="grid grid-cols-4 gap-2 mt-2">
-              {position.take_profits.map((tp) => (
+              {(position.take_profits || []).map((tp) => (
                 <div
                   key={tp.level}
                   className={`text-xs p-1.5 rounded text-center ${

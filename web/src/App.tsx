@@ -211,8 +211,11 @@ function AppContent() {
         setRecentSignals(signals);
         setScreenerResults(screener);
         setMetrics(metrics);
-      } catch (error) {
-        console.error('Polling error:', error);
+      } catch (error: any) {
+        // Don't log auth errors (expected when not logged in)
+        if (error?.response?.status !== 401 && error?.response?.status !== 403) {
+          console.error('Polling error:', error);
+        }
       }
     }, 15000); // Poll every 15 seconds (reduced from 1s to avoid rate limits)
 
