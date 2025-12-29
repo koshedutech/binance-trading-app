@@ -11357,6 +11357,21 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 	maxUSDPerPos := currentSettings.UltraFastMaxUSDPerPos
 	positionUSD := maxUSDPerPos // Fixed for ultra-fast (not adaptive like scalp)
 
+	// CAPITAL ALLOCATION CHECK: Ensure ultra-fast mode has capital available
+	// This check prevents ultra-fast from using more than its allocated capital percentage
+	ga.mu.Unlock()
+	canAllocate, allocReason := ga.canAllocateForMode(GinieModeUltraFast, positionUSD)
+	ga.mu.Lock()
+
+	// Re-check position after unlock
+	if _, exists := ga.positions[symbol]; exists {
+		return fmt.Errorf("race condition: position created for %s while checking allocation", symbol)
+	}
+
+	if !canAllocate {
+		return fmt.Errorf("capital allocation limit reached for ultra-fast: %s", allocReason)
+	}
+
 	// Get leverage from style config
 	styleConfig := GetDefaultStyleConfig(StyleUltraFast)
 	leverage := styleConfig.DefaultLeverage
@@ -11526,6 +11541,21 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	maxUSD := float64(currentSettings.UltraFastMaxUSDPerPos)
 	if positionUSD > maxUSD {
 		positionUSD = maxUSD // Cap at max
+	}
+
+	// CAPITAL ALLOCATION CHECK: Ensure ultra-fast mode has capital available
+	// This check prevents ultra-fast from using more than its allocated capital percentage
+	ga.mu.Unlock()
+	canAllocate, allocReason := ga.canAllocateForMode(GinieModeUltraFast, positionUSD)
+	ga.mu.Lock()
+
+	// Re-check position after unlock
+	if _, exists := ga.positions[symbol]; exists {
+		return fmt.Errorf("race condition: position created for %s while checking allocation", symbol)
+	}
+
+	if !canAllocate {
+		return fmt.Errorf("capital allocation limit reached for ultra-fast: %s", allocReason)
 	}
 
 	// Get leverage from style config
