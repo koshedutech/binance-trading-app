@@ -489,6 +489,9 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 	if v, ok := updates["enable_position_mode"].(bool); ok {
 		currentConfig.EnablePositionMode = v
 	}
+	if v, ok := updates["enable_ultra_fast_mode"].(bool); ok {
+		currentConfig.EnableUltraFastMode = v
+	}
 	if v, ok := updates["tp1_percent"].(float64); ok {
 		currentConfig.TP1Percent = v
 	}
