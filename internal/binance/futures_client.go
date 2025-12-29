@@ -818,6 +818,46 @@ func (c *FuturesClientImpl) GetAllOrders(symbol string, limit int) ([]FuturesOrd
 	return orders, nil
 }
 
+// GetIncomeHistory retrieves income history (realized PnL, funding fees, commissions, etc.)
+// incomeType: REALIZED_PNL, FUNDING_FEE, COMMISSION, TRANSFER, etc. Empty string for all types.
+// startTime/endTime: Unix milliseconds. Pass 0 to ignore.
+// limit: Max 1000 records
+func (c *FuturesClientImpl) GetIncomeHistory(incomeType string, startTime, endTime int64, limit int) ([]IncomeRecord, error) {
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+
+	if incomeType != "" {
+		params["incomeType"] = incomeType
+	}
+	if startTime > 0 {
+		params["startTime"] = strconv.FormatInt(startTime, 10)
+	}
+	if endTime > 0 {
+		params["endTime"] = strconv.FormatInt(endTime, 10)
+	}
+	if limit > 0 {
+		params["limit"] = strconv.Itoa(limit)
+	}
+
+	resp, err := c.signedGet("/fapi/v1/income", params)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching income history: %w", err)
+	}
+
+	var records []IncomeRecord
+	if err := json.Unmarshal(resp, &records); err != nil {
+		return nil, fmt.Errorf("error parsing income history: %w", err)
+	}
+
+	// Convert timestamps to time.Time
+	for i := range records {
+		records[i].Timestamp = time.UnixMilli(records[i].Time)
+	}
+
+	return records, nil
+}
+
 // ==================== WEBSOCKET ====================
 
 // GetListenKey creates a new user data stream listen key

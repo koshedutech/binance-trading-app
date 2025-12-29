@@ -307,6 +307,21 @@ type FundingFeeRecord struct {
 	Timestamp   time.Time `json:"-"`
 }
 
+// IncomeRecord represents an income entry from the /fapi/v1/income endpoint
+// Used for fetching realized PnL, funding fees, commissions, etc.
+type IncomeRecord struct {
+	Symbol     string    `json:"symbol"`
+	IncomeType string    `json:"incomeType"` // REALIZED_PNL, FUNDING_FEE, COMMISSION, etc.
+	Income     float64   `json:"income,string"`
+	Asset      string    `json:"asset"`
+	Info       string    `json:"info"`
+	Time       int64     `json:"time"`
+	TranId     int64     `json:"tranId"`
+	TradeId    string    `json:"tradeId"`
+	// Derived fields
+	Timestamp  time.Time `json:"-"`
+}
+
 // ==================== LEVERAGE & SETTINGS TYPES ====================
 
 // LeverageResponse represents response from setting leverage

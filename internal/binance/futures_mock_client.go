@@ -719,6 +719,12 @@ func (c *FuturesMockClient) GetAllOrders(symbol string, limit int) ([]FuturesOrd
 	return orders, nil
 }
 
+// GetIncomeHistory returns empty records for mock client (paper trading has no realized PnL from Binance)
+func (c *FuturesMockClient) GetIncomeHistory(incomeType string, startTime, endTime int64, limit int) ([]IncomeRecord, error) {
+	// Paper trading doesn't have real income records from Binance
+	return []IncomeRecord{}, nil
+}
+
 // ==================== WEBSOCKET ====================
 
 func (c *FuturesMockClient) GetListenKey() (string, error) {

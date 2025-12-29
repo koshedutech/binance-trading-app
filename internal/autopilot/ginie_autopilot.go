@@ -1374,6 +1374,10 @@ func (ga *GinieAutopilot) Start() error {
 	ga.wg.Add(1)
 	go ga.resetHourlyCounters()
 
+	// Start periodic PnL sync (syncs with Binance every 5 minutes)
+	ga.wg.Add(1)
+	go ga.periodicPnLSync()
+
 	// Start morning auto-block goroutine (blocks worst performers at configured UTC time)
 	ga.wg.Add(1)
 	go ga.morningAutoBlockWorstPerformers()
@@ -1422,6 +1426,11 @@ func (ga *GinieAutopilot) Start() error {
 				ga.logger.Warn("Failed to sync positions on start", "error", err)
 			} else if synced > 0 {
 				ga.logger.Info("Synced positions from exchange on start", "count", synced)
+			}
+
+			// Sync PnL from Binance income history
+			if err := ga.SyncPnLFromBinance(); err != nil {
+				ga.logger.Warn("Failed to sync PnL from Binance on start", "error", err)
 			}
 
 			// Place SL/TP orders for all existing positions (including those synced during initialization)
@@ -5691,6 +5700,37 @@ func (ga *GinieAutopilot) resetHourlyCounters() {
 	}
 }
 
+// periodicPnLSync syncs PnL with Binance every 5 minutes
+// This ensures local tracking stays in sync with actual exchange values
+func (ga *GinieAutopilot) periodicPnLSync() {
+	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in PnL sync goroutine - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] PnL sync panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.periodicPnLSync()
+		}
+	}()
+
+	// Sync every 5 minutes
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ga.stopChan:
+			ga.logger.Info("Ginie PnL sync goroutine stopping")
+			return
+		case <-ticker.C:
+			if err := ga.SyncPnLFromBinance(); err != nil {
+				ga.logger.Warn("Periodic PnL sync failed", "error", err)
+			}
+		}
+	}
+}
+
 // morningAutoBlockWorstPerformers runs at a configurable time each morning (UTC)
 // to automatically block worst performing symbols for the entire day
 func (ga *GinieAutopilot) morningAutoBlockWorstPerformers() {
@@ -6334,6 +6374,59 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 	}
 
 	return synced, nil
+}
+
+// SyncPnLFromBinance syncs daily and total PnL from Binance income history
+// This ensures local tracking matches actual exchange values
+func (ga *GinieAutopilot) SyncPnLFromBinance() error {
+	if ga.config.DryRun {
+		ga.logger.Debug("Skipping PnL sync in paper trading mode")
+		return nil
+	}
+
+	// Get start of today (UTC)
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	startOfDayMs := startOfDay.UnixMilli()
+
+	// Fetch realized PnL from Binance income history (last 1000 records)
+	records, err := ga.futuresClient.GetIncomeHistory("REALIZED_PNL", 0, 0, 1000)
+	if err != nil {
+		ga.logger.Warn("Failed to fetch income history for PnL sync", "error", err)
+		return err
+	}
+
+	var dailyPnL, totalPnL float64
+	for _, record := range records {
+		totalPnL += record.Income
+		if record.Time >= startOfDayMs {
+			dailyPnL += record.Income
+		}
+	}
+
+	// Update settings with synced values
+	settingsManager := GetSettingsManager()
+	settings := settingsManager.GetCurrentSettings()
+
+	oldDaily := settings.UltraFastDailyPnL
+	oldTotal := settings.UltraFastTotalPnL
+
+	settings.UltraFastDailyPnL = dailyPnL
+	settings.UltraFastTotalPnL = totalPnL
+
+	if err := settingsManager.SaveSettings(settings); err != nil {
+		ga.logger.Error("Failed to save synced PnL", "error", err)
+		return err
+	}
+
+	ga.logger.Info("PnL synced from Binance",
+		"daily_pnl", dailyPnL,
+		"total_pnl", totalPnL,
+		"old_daily", oldDaily,
+		"old_total", oldTotal,
+		"records_count", len(records))
+
+	return nil
 }
 
 // ==================== ADAPTIVE SL/TP WITH LLM ====================

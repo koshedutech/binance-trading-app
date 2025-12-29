@@ -110,6 +110,11 @@ type FuturesClient interface {
 	// GetAllOrders retrieves all orders (filled, canceled, etc.) for a symbol
 	GetAllOrders(symbol string, limit int) ([]FuturesOrder, error)
 
+	// GetIncomeHistory retrieves income history (realized PnL, funding fees, commissions, etc.)
+	// incomeType can be: REALIZED_PNL, FUNDING_FEE, COMMISSION, etc. Empty string for all types.
+	// startTime/endTime in milliseconds, 0 to ignore
+	GetIncomeHistory(incomeType string, startTime, endTime int64, limit int) ([]IncomeRecord, error)
+
 	// ==================== WEBSOCKET ====================
 
 	// GetListenKey creates a new user data stream listen key

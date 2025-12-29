@@ -567,6 +567,10 @@ func (c *CachedFuturesClient) GetAllOrders(symbol string, limit int) ([]FuturesO
 	return c.client.GetAllOrders(symbol, limit)
 }
 
+func (c *CachedFuturesClient) GetIncomeHistory(incomeType string, startTime, endTime int64, limit int) ([]IncomeRecord, error) {
+	return c.client.GetIncomeHistory(incomeType, startTime, endTime, limit)
+}
+
 // ==================== WEBSOCKET (no caching) ====================
 
 func (c *CachedFuturesClient) GetListenKey() (string, error) {
