@@ -577,6 +577,14 @@ func (s *Server) setupRoutes() {
 			futures.DELETE("/autopilot/symbols/:symbol/blacklist", s.handleUnblacklistSymbol)
 			futures.POST("/autopilot/category-config", s.handleUpdateCategorySettings)
 
+			// Symbol Blocking endpoints (daily worst performer blocking)
+			futures.GET("/autopilot/symbols/blocked", s.handleGetBlockedSymbols)
+			futures.POST("/autopilot/symbols/auto-block-worst", s.handleAutoBlockWorstPerformers)
+			futures.POST("/autopilot/symbols/clear-expired-blocks", s.handleClearExpiredBlocks)
+			futures.POST("/autopilot/symbols/:symbol/block-day", s.handleBlockSymbolForDay)
+			futures.POST("/autopilot/symbols/:symbol/unblock", s.handleUnblockSymbol)
+			futures.GET("/autopilot/symbols/:symbol/block-status", s.handleGetSymbolBlockStatus)
+
 			// Ginie Circuit Breaker endpoints (separate from FuturesController)
 			futures.GET("/ginie/circuit-breaker/status", s.handleGetGinieCircuitBreakerStatus)
 			futures.POST("/ginie/circuit-breaker/reset", s.handleResetGinieCircuitBreaker)

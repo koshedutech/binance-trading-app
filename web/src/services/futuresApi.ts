@@ -1667,6 +1667,63 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== SYMBOL BLOCKING (Daily Worst Performer Blocking) ====================
+
+  async getBlockedSymbols(): Promise<{
+    success: boolean;
+    blocked_symbols: Array<{
+      symbol: string;
+      blocked_until: string;
+      reason: string;
+      remaining: string;
+    }>;
+    total: number;
+  }> {
+    const { data } = await this.client.get('/autopilot/symbols/blocked');
+    return data;
+  }
+
+  async blockSymbolForDay(symbol: string, reason?: string): Promise<{
+    success: boolean;
+    symbol: string;
+    blocked_until: string;
+    reason: string;
+  }> {
+    const { data } = await this.client.post(`/autopilot/symbols/${symbol}/block-day`, { reason });
+    return data;
+  }
+
+  async unblockSymbol(symbol: string): Promise<{ success: boolean; symbol: string; message: string }> {
+    const { data } = await this.client.post(`/autopilot/symbols/${symbol}/unblock`);
+    return data;
+  }
+
+  async getSymbolBlockStatus(symbol: string): Promise<{
+    symbol: string;
+    is_blocked: boolean;
+    blocked_until?: string;
+    reason?: string;
+    remaining?: string;
+  }> {
+    const { data } = await this.client.get(`/autopilot/symbols/${symbol}/block-status`);
+    return data;
+  }
+
+  async autoBlockWorstPerformers(): Promise<{
+    success: boolean;
+    blocked_symbols: string[];
+    count: number;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/autopilot/symbols/auto-block-worst');
+    return data;
+  }
+
+  async clearExpiredBlocks(): Promise<{ success: boolean; cleared: number; message: string }> {
+    const { data } = await this.client.post('/autopilot/symbols/clear-expired-blocks');
+    return data;
+  }
+
   async updateCategoryConfig(config: {
     confidence_boost: Record<string, number>;
     size_multiplier: Record<string, number>;

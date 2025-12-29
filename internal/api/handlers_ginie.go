@@ -2135,22 +2135,33 @@ func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"ultrafast_config": gin.H{
-			"enabled":           settings.UltraFastEnabled,
-			"scan_interval_ms":  settings.UltraFastScanInterval,
+			"enabled":             settings.UltraFastEnabled,
+			"scan_interval_ms":    settings.UltraFastScanInterval,
 			"monitor_interval_ms": settings.UltraFastMonitorInterval,
-			"max_positions":     settings.UltraFastMaxPositions,
-			"max_usd_per_pos":   settings.UltraFastMaxUSDPerPos,
-			"min_confidence":    settings.UltraFastMinConfidence,
-			"min_profit_pct":    settings.UltraFastMinProfitPct,
-			"max_hold_ms":       settings.UltraFastMaxHoldMS,
-			"max_daily_trades":  settings.UltraFastMaxDailyTrades,
+			"max_positions":       settings.UltraFastMaxPositions,
+			"max_usd_per_pos":     settings.UltraFastMaxUSDPerPos,
+			"min_confidence":      settings.UltraFastMinConfidence,
+			"min_profit_pct":      settings.UltraFastMinProfitPct,
+			"max_hold_ms":         settings.UltraFastMaxHoldMS,
+			"max_daily_trades":    settings.UltraFastMaxDailyTrades,
+			// New profit/loss management settings
+			"min_profit_usd":     settings.UltraFastMinProfitUSD,
+			"use_llm_for_loss":   settings.UltraFastUseLLMForLoss,
+			// Circuit breaker settings
+			"circuit_breaker_enabled":   settings.UltraFastCircuitBreakerEnabled,
+			"circuit_breaker_tripped":   settings.UltraFastCircuitBreakerTripped,
+			"max_consecutive_losses":    settings.UltraFastMaxConsecutiveLosses,
+			"max_daily_loss_usd":        settings.UltraFastMaxDailyLossUSD,
 		},
 		"ultrafast_stats": gin.H{
-			"today_trades":  settings.UltraFastTodayTrades,
-			"daily_pnl":     settings.UltraFastDailyPnL,
-			"total_pnl":     settings.UltraFastTotalPnL,
-			"win_rate":      settings.UltraFastWinRate,
-			"last_update":   settings.UltraFastLastUpdate,
+			"today_trades":       settings.UltraFastTodayTrades,
+			"daily_pnl":          settings.UltraFastDailyPnL,
+			"total_pnl":          settings.UltraFastTotalPnL,
+			"win_rate":           settings.UltraFastWinRate,
+			"last_update":        settings.UltraFastLastUpdate,
+			"consecutive_losses": settings.UltraFastConsecutiveLosses,
+			"total_losses":       settings.UltraFastTotalLosses,
+			"total_wins":         settings.UltraFastTotalWins,
 		},
 	})
 }
@@ -2158,15 +2169,21 @@ func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
 // handleUpdateUltraFastConfig updates ultrafast scalping configuration
 func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 	var req struct {
-		Enabled          *bool    `json:"enabled"`
-		ScanIntervalMs   *int     `json:"scan_interval_ms"`
-		MonitorIntervalMs *int    `json:"monitor_interval_ms"`
-		MaxPositions     *int     `json:"max_positions"`
-		MaxUSDPerPos     *float64 `json:"max_usd_per_pos"`
-		MinConfidence    *float64 `json:"min_confidence"`
-		MinProfitPct     *float64 `json:"min_profit_pct"`
-		MaxHoldMs        *int     `json:"max_hold_ms"`
-		MaxDailyTrades   *int     `json:"max_daily_trades"`
+		Enabled           *bool    `json:"enabled"`
+		ScanIntervalMs    *int     `json:"scan_interval_ms"`
+		MonitorIntervalMs *int     `json:"monitor_interval_ms"`
+		MaxPositions      *int     `json:"max_positions"`
+		MaxUSDPerPos      *float64 `json:"max_usd_per_pos"`
+		MinConfidence     *float64 `json:"min_confidence"`
+		MinProfitPct      *float64 `json:"min_profit_pct"`
+		MaxHoldMs         *int     `json:"max_hold_ms"`
+		MaxDailyTrades    *int     `json:"max_daily_trades"`
+		// New settings
+		MinProfitUSD           *float64 `json:"min_profit_usd"`
+		UseLLMForLoss          *bool    `json:"use_llm_for_loss"`
+		CircuitBreakerEnabled  *bool    `json:"circuit_breaker_enabled"`
+		MaxConsecutiveLosses   *int     `json:"max_consecutive_losses"`
+		MaxDailyLossUSD        *float64 `json:"max_daily_loss_usd"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2231,11 +2248,41 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 		settings.UltraFastMaxHoldMS = *req.MaxHoldMs
 	}
 	if req.MaxDailyTrades != nil {
-		if *req.MaxDailyTrades < 10 || *req.MaxDailyTrades > 500 {
-			errorResponse(c, http.StatusBadRequest, "Max daily trades must be between 10-500")
+		// 0 = unlimited, otherwise 10-500
+		if *req.MaxDailyTrades < 0 || (*req.MaxDailyTrades > 0 && *req.MaxDailyTrades < 10) || *req.MaxDailyTrades > 500 {
+			errorResponse(c, http.StatusBadRequest, "Max daily trades must be 0 (unlimited) or between 10-500")
 			return
 		}
 		settings.UltraFastMaxDailyTrades = *req.MaxDailyTrades
+	}
+
+	// New settings
+	if req.MinProfitUSD != nil {
+		if *req.MinProfitUSD < 0.1 || *req.MinProfitUSD > 10 {
+			errorResponse(c, http.StatusBadRequest, "Min profit USD must be between $0.10-$10.00")
+			return
+		}
+		settings.UltraFastMinProfitUSD = *req.MinProfitUSD
+	}
+	if req.UseLLMForLoss != nil {
+		settings.UltraFastUseLLMForLoss = *req.UseLLMForLoss
+	}
+	if req.CircuitBreakerEnabled != nil {
+		settings.UltraFastCircuitBreakerEnabled = *req.CircuitBreakerEnabled
+	}
+	if req.MaxConsecutiveLosses != nil {
+		if *req.MaxConsecutiveLosses < 3 || *req.MaxConsecutiveLosses > 50 {
+			errorResponse(c, http.StatusBadRequest, "Max consecutive losses must be between 3-50")
+			return
+		}
+		settings.UltraFastMaxConsecutiveLosses = *req.MaxConsecutiveLosses
+	}
+	if req.MaxDailyLossUSD != nil {
+		if *req.MaxDailyLossUSD < 1 || *req.MaxDailyLossUSD > 100 {
+			errorResponse(c, http.StatusBadRequest, "Max daily loss USD must be between $1-$100")
+			return
+		}
+		settings.UltraFastMaxDailyLossUSD = *req.MaxDailyLossUSD
 	}
 
 	if err := sm.SaveSettings(settings); err != nil {
@@ -2247,15 +2294,20 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 		"success": true,
 		"message": "Ultrafast scalping configuration updated",
 		"config": gin.H{
-			"enabled":           settings.UltraFastEnabled,
-			"scan_interval_ms":  settings.UltraFastScanInterval,
-			"monitor_interval_ms": settings.UltraFastMonitorInterval,
-			"max_positions":     settings.UltraFastMaxPositions,
-			"max_usd_per_pos":   settings.UltraFastMaxUSDPerPos,
-			"min_confidence":    settings.UltraFastMinConfidence,
-			"min_profit_pct":    settings.UltraFastMinProfitPct,
-			"max_hold_ms":       settings.UltraFastMaxHoldMS,
-			"max_daily_trades":  settings.UltraFastMaxDailyTrades,
+			"enabled":                  settings.UltraFastEnabled,
+			"scan_interval_ms":         settings.UltraFastScanInterval,
+			"monitor_interval_ms":      settings.UltraFastMonitorInterval,
+			"max_positions":            settings.UltraFastMaxPositions,
+			"max_usd_per_pos":          settings.UltraFastMaxUSDPerPos,
+			"min_confidence":           settings.UltraFastMinConfidence,
+			"min_profit_pct":           settings.UltraFastMinProfitPct,
+			"max_hold_ms":              settings.UltraFastMaxHoldMS,
+			"max_daily_trades":         settings.UltraFastMaxDailyTrades,
+			"min_profit_usd":           settings.UltraFastMinProfitUSD,
+			"use_llm_for_loss":         settings.UltraFastUseLLMForLoss,
+			"circuit_breaker_enabled":  settings.UltraFastCircuitBreakerEnabled,
+			"max_consecutive_losses":   settings.UltraFastMaxConsecutiveLosses,
+			"max_daily_loss_usd":       settings.UltraFastMaxDailyLossUSD,
 		},
 	})
 }
@@ -2292,7 +2344,7 @@ func (s *Server) handleToggleUltraFast(c *gin.Context) {
 	})
 }
 
-// handleResetUltraFastStats resets daily ultrafast statistics
+// handleResetUltraFastStats resets daily ultrafast statistics and circuit breaker
 func (s *Server) handleResetUltraFastStats(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
 	settings := sm.GetCurrentSettings()
@@ -2301,6 +2353,11 @@ func (s *Server) handleResetUltraFastStats(c *gin.Context) {
 	settings.UltraFastTodayTrades = 0
 	settings.UltraFastDailyPnL = 0
 	settings.UltraFastLastUpdate = time.Now().Format("2006-01-02")
+	// Reset circuit breaker and loss counters
+	settings.UltraFastConsecutiveLosses = 0
+	settings.UltraFastTotalLosses = 0
+	settings.UltraFastTotalWins = 0
+	settings.UltraFastCircuitBreakerTripped = false
 
 	if err := sm.SaveSettings(settings); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to reset stats: "+err.Error())
@@ -2309,10 +2366,14 @@ func (s *Server) handleResetUltraFastStats(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "Ultrafast daily statistics reset",
+		"message": "Ultrafast daily statistics and circuit breaker reset",
 		"stats": gin.H{
-			"today_trades": 0,
-			"daily_pnl":    0,
+			"today_trades":        0,
+			"daily_pnl":           0,
+			"consecutive_losses":  0,
+			"total_losses":        0,
+			"total_wins":          0,
+			"circuit_breaker_tripped": false,
 		},
 	})
 }
@@ -3449,4 +3510,146 @@ func (s *Server) handleGetScanPreview(c *gin.Context) {
 		"total_count": totalCount,
 		"max_coins":   settings.MaxCoins,
 	})
+}
+
+// ============================================================================
+// SYMBOL BLOCKING HANDLERS (Worst Performer Daily Blocking)
+// ============================================================================
+
+// handleBlockSymbolForDay blocks a symbol for the rest of the day
+// POST /api/futures/autopilot/symbols/:symbol/block-day
+func (s *Server) handleBlockSymbolForDay(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"` // Optional custom reason
+	}
+	c.ShouldBindJSON(&req)
+
+	reason := req.Reason
+	if reason == "" {
+		reason = "manual_block"
+	}
+
+	sm := autopilot.GetSettingsManager()
+	err := sm.BlockSymbolForDay(symbol, reason)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to block symbol: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"symbol":        symbol,
+		"blocked_until": time.Now().UTC().Add(24 * time.Hour).Format("2006-01-02 23:59:59 UTC"),
+		"reason":        reason,
+	})
+}
+
+// handleUnblockSymbol removes the block from a symbol
+// POST /api/futures/autopilot/symbols/:symbol/unblock
+func (s *Server) handleUnblockSymbol(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	err := sm.UnblockSymbol(symbol)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to unblock symbol: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"symbol":  symbol,
+		"message": "Symbol unblocked successfully",
+	})
+}
+
+// handleGetBlockedSymbols returns all currently blocked symbols
+// GET /api/futures/autopilot/symbols/blocked
+func (s *Server) handleGetBlockedSymbols(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	blocked := sm.GetAllBlockedSymbols()
+
+	// Convert to JSON-friendly format
+	result := make([]map[string]interface{}, 0)
+	for symbol, info := range blocked {
+		result = append(result, map[string]interface{}{
+			"symbol":        symbol,
+			"blocked_until": info.Until.Format(time.RFC3339),
+			"reason":        info.Reason,
+			"remaining":     time.Until(info.Until).String(),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"blocked_symbols": result,
+		"total":           len(result),
+	})
+}
+
+// handleAutoBlockWorstPerformers blocks all "worst" category symbols for the day
+// POST /api/futures/autopilot/symbols/auto-block-worst
+func (s *Server) handleAutoBlockWorstPerformers(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	blockedSymbols, err := sm.AutoBlockWorstPerformers()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to auto-block worst performers: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"blocked_symbols": blockedSymbols,
+		"count":           len(blockedSymbols),
+		"message":         fmt.Sprintf("Blocked %d worst performing symbols for the day", len(blockedSymbols)),
+	})
+}
+
+// handleClearExpiredBlocks removes expired blocks from all symbols
+// POST /api/futures/autopilot/symbols/clear-expired-blocks
+func (s *Server) handleClearExpiredBlocks(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+	cleared := sm.ClearExpiredBlocks()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"cleared": cleared,
+		"message": fmt.Sprintf("Cleared %d expired blocks", cleared),
+	})
+}
+
+// handleGetSymbolBlockStatus checks if a specific symbol is blocked
+// GET /api/futures/autopilot/symbols/:symbol/block-status
+func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
+	symbol := c.Param("symbol")
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	reason, until, isBlocked := sm.GetBlockedReason(symbol)
+
+	response := gin.H{
+		"symbol":     symbol,
+		"is_blocked": isBlocked,
+	}
+
+	if isBlocked {
+		response["blocked_until"] = until.Format(time.RFC3339)
+		response["reason"] = reason
+		response["remaining"] = time.Until(until).String()
+	}
+
+	c.JSON(http.StatusOK, response)
 }

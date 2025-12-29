@@ -5,7 +5,7 @@ import {
   SymbolPerformanceSettings,
   SymbolPerformanceReport
 } from '../services/futuresApi';
-import { TrendingUp, TrendingDown, AlertTriangle, Ban, Check, RefreshCw, ChevronDown, ChevronUp, Settings, Filter, Shield, Target } from 'lucide-react';
+import { TrendingUp, TrendingDown, AlertTriangle, Ban, Check, RefreshCw, ChevronDown, ChevronUp, Settings, Filter, Shield, Target, Clock, Lock, Unlock } from 'lucide-react';
 
 interface SymbolPerformanceData {
   symbols: Record<string, SymbolPerformanceSettings>;
@@ -44,11 +44,21 @@ const categoryDescriptions: Record<string, string> = {
   blacklist: 'Trading disabled',
 };
 
+interface BlockedSymbol {
+  symbol: string;
+  blocked_until: string;
+  reason: string;
+  remaining: string;
+}
+
 export default function SymbolPerformancePanel() {
   const [data, setData] = useState<SymbolPerformanceData | null>(null);
   const [report, setReport] = useState<SymbolPerformanceReport[]>([]);
+  const [blockedSymbols, setBlockedSymbols] = useState<BlockedSymbol[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [autoBlocking, setAutoBlocking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'pnl' | 'winrate' | 'trades'>('pnl');
   const [sortAsc, setSortAsc] = useState(false);
@@ -58,29 +68,82 @@ export default function SymbolPerformancePanel() {
   const fetchData = async () => {
     try {
       setLoading(true);
-      const [settingsRes, reportRes] = await Promise.all([
+      setError(null);
+      const [settingsRes, reportRes, blockedRes] = await Promise.all([
         futuresApi.getSymbolPerformanceSettings(),
         futuresApi.getSymbolPerformanceReport(),
+        futuresApi.getBlockedSymbols(),
       ]);
       setData(settingsRes);
       setReport(reportRes.report || []);
-    } catch (error) {
-      console.error('Failed to fetch symbol settings:', error);
+      setBlockedSymbols(blockedRes.blocked_symbols || []);
+    } catch (err) {
+      console.error('Failed to fetch symbol settings:', err);
+      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch symbol performance data';
+      setError(errorMsg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const isSymbolBlocked = (symbol: string) => {
+    return blockedSymbols.some(b => b.symbol === symbol);
+  };
+
+  const getBlockedInfo = (symbol: string) => {
+    return blockedSymbols.find(b => b.symbol === symbol);
+  };
+
+  const handleBlockForDay = async (symbol: string, reason?: string) => {
+    try {
+      setUpdating(symbol);
+      await futuresApi.blockSymbolForDay(symbol, reason || 'manual_block');
+      await fetchData();
+    } catch (error) {
+      console.error('Failed to block symbol:', error);
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  const handleUnblock = async (symbol: string) => {
+    try {
+      setUpdating(symbol);
+      await futuresApi.unblockSymbol(symbol);
+      await fetchData();
+    } catch (error) {
+      console.error('Failed to unblock symbol:', error);
+    } finally {
+      setUpdating(null);
+    }
+  };
+
+  const handleAutoBlockWorst = async () => {
+    try {
+      setAutoBlocking(true);
+      const result = await futuresApi.autoBlockWorstPerformers();
+      console.log('Auto-blocked:', result);
+      await fetchData();
+    } catch (error) {
+      console.error('Failed to auto-block worst performers:', error);
+    } finally {
+      setAutoBlocking(false);
     }
   };
 
   const refreshFromDatabase = async () => {
     try {
       setRefreshing(true);
+      setError(null);
       const result = await futuresApi.refreshSymbolPerformance();
       setReport(result.report || []);
       // Also refresh settings data
       const settingsRes = await futuresApi.getSymbolPerformanceSettings();
       setData(settingsRes);
-    } catch (error) {
-      console.error('Failed to refresh symbol performance:', error);
+    } catch (err) {
+      console.error('Failed to refresh symbol performance:', err);
+      const errorMsg = err instanceof Error ? err.message : 'Failed to refresh performance data';
+      setError(errorMsg);
     } finally {
       setRefreshing(false);
     }
@@ -170,6 +233,21 @@ export default function SymbolPerformancePanel() {
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+      {/* Error Banner */}
+      {error && (
+        <div className="p-4 bg-red-50 border-b border-red-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-5 h-5 text-red-500" />
+            <span className="text-red-700">{error}</span>
+            <button
+              onClick={() => setError(null)}
+              className="ml-auto text-red-500 hover:text-red-700"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="p-4 border-b border-gray-200">
         <div className="flex items-center justify-between">
@@ -178,6 +256,15 @@ export default function SymbolPerformancePanel() {
             <h2 className="text-lg font-semibold text-gray-900">Symbol Performance Settings</h2>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleAutoBlockWorst}
+              disabled={autoBlocking}
+              className="px-3 py-1.5 text-sm bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg flex items-center gap-1"
+              title="Block all 'worst' category symbols for the day"
+            >
+              <Lock className={`w-4 h-4 ${autoBlocking ? 'animate-pulse' : ''}`} />
+              {autoBlocking ? 'Blocking...' : 'Auto Block Worst'}
+            </button>
             <button
               onClick={refreshFromDatabase}
               disabled={refreshing}
@@ -235,7 +322,7 @@ export default function SymbolPerformancePanel() {
       {/* Global Settings */}
       {data && (
         <div className="p-4 border-b border-gray-200 bg-blue-50">
-          <div className="flex items-center gap-4 text-sm">
+          <div className="flex items-center gap-4 text-sm flex-wrap">
             <div className="flex items-center gap-1">
               <Shield className="w-4 h-4 text-blue-600" />
               <span className="text-gray-600">Global Min Confidence:</span>
@@ -246,6 +333,12 @@ export default function SymbolPerformancePanel() {
               <span className="text-gray-600">Global Max Position:</span>
               <span className="font-semibold text-blue-800">{formatUSD(data.global_max_usd)}</span>
             </div>
+            {blockedSymbols.length > 0 && (
+              <div className="flex items-center gap-1 bg-orange-100 px-2 py-1 rounded-full">
+                <Lock className="w-4 h-4 text-orange-600" />
+                <span className="text-orange-700 font-semibold">{blockedSymbols.length} Blocked Today</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -299,6 +392,12 @@ export default function SymbolPerformancePanel() {
                     <span className="capitalize">{sym.category}</span>
                   </div>
                   <span className="font-semibold text-gray-900">{sym.symbol}</span>
+                  {isSymbolBlocked(sym.symbol) && (
+                    <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs rounded-full flex items-center gap-1" title={`Blocked until ${getBlockedInfo(sym.symbol)?.remaining || 'end of day'}`}>
+                      <Clock className="w-3 h-3" />
+                      Blocked
+                    </span>
+                  )}
                   {!sym.enabled && (
                     <span className="px-2 py-0.5 bg-red-100 text-red-600 text-xs rounded-full">Disabled</span>
                   )}
@@ -378,6 +477,30 @@ export default function SymbolPerformancePanel() {
                       <option value="blacklist">Blacklist</option>
                     </select>
 
+                    {/* Block/Unblock for Day */}
+                    {isSymbolBlocked(sym.symbol) ? (
+                      <button
+                        onClick={() => handleUnblock(sym.symbol)}
+                        disabled={updating === sym.symbol}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-green-100 text-green-700 rounded-lg text-sm hover:bg-green-200 disabled:opacity-50"
+                        title={`Blocked until ${getBlockedInfo(sym.symbol)?.remaining}`}
+                      >
+                        <Unlock className="w-4 h-4" />
+                        Unblock
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => handleBlockForDay(sym.symbol, 'worst_performer_manual')}
+                        disabled={updating === sym.symbol}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-orange-100 text-orange-700 rounded-lg text-sm hover:bg-orange-200 disabled:opacity-50"
+                        title="Block this symbol for the rest of the day"
+                      >
+                        <Lock className="w-4 h-4" />
+                        Block Day
+                      </button>
+                    )}
+
+                    {/* Blacklist (permanent) */}
                     {sym.category !== 'blacklist' ? (
                       <button
                         onClick={() => handleBlacklist(sym.symbol)}

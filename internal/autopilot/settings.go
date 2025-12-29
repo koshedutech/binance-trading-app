@@ -812,6 +812,8 @@ type SymbolSettings struct {
 	Enabled             bool                      `json:"enabled"`              // Whether to trade this symbol
 	CustomROIPercent    float64                   `json:"custom_roi_percent"`   // Custom ROI% for early profit booking (0 = use mode defaults)
 	Notes               string                    `json:"notes"`                // User notes about this symbol
+	BlockedUntil        string                    `json:"blocked_until"`        // ISO timestamp until when symbol is blocked (empty = not blocked)
+	BlockReason         string                    `json:"block_reason"`         // Reason for blocking (e.g., "worst_performer", "manual")
 
 	// Performance metrics (updated periodically)
 	TotalTrades         int                       `json:"total_trades"`
@@ -953,11 +955,24 @@ type AutopilotSettings struct {
 
 	// Ultra-fast specific counters for rate limiting
 	UltraFastTodayTrades    int     `json:"ultra_fast_today_trades"`    // Trades executed today
-	UltraFastMaxDailyTrades int     `json:"ultra_fast_max_daily_trades"` // Max daily trades
+	UltraFastMaxDailyTrades int     `json:"ultra_fast_max_daily_trades"` // Max daily trades (0 = unlimited)
 	UltraFastDailyPnL       float64 `json:"ultra_fast_daily_pnl"`       // Today's PnL
 	UltraFastTotalPnL       float64 `json:"ultra_fast_total_pnl"`       // Lifetime PnL
 	UltraFastWinRate        float64 `json:"ultra_fast_win_rate"`        // Current win rate %
 	UltraFastLastUpdate     string  `json:"ultra_fast_last_update"`     // Last update date
+
+	// Ultra-fast profit and loss management
+	UltraFastMinProfitUSD        float64 `json:"ultra_fast_min_profit_usd"`         // Min profit in USD to auto-close (default $0.50)
+	UltraFastUseLLMForLoss       bool    `json:"ultra_fast_use_llm_for_loss"`       // Use AI/LLM to decide on losses (average or book)
+	UltraFastConsecutiveLosses   int     `json:"ultra_fast_consecutive_losses"`    // Current consecutive loss streak
+	UltraFastTotalLosses         int     `json:"ultra_fast_total_losses"`          // Total losing trades today
+	UltraFastTotalWins           int     `json:"ultra_fast_total_wins"`            // Total winning trades today
+
+	// Ultra-fast circuit breaker settings
+	UltraFastCircuitBreakerEnabled bool    `json:"ultra_fast_circuit_breaker_enabled"` // Enable circuit breaker
+	UltraFastCircuitBreakerTripped bool    `json:"ultra_fast_circuit_breaker_tripped"` // Circuit breaker is currently active
+	UltraFastMaxConsecutiveLosses  int     `json:"ultra_fast_max_consecutive_losses"`  // Max consecutive losses before trip (default 10)
+	UltraFastMaxDailyLossUSD       float64 `json:"ultra_fast_max_daily_loss_usd"`      // Max daily loss USD before trip (default $10)
 
 	// ====== PER-MODE SAFETY CONTROLS ======
 	// Independent safety settings per trading mode (rate limiting, profit monitoring, win-rate)
@@ -1111,11 +1126,24 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastMinProfitPct:    0.0,   // Dynamic calculation (fee-aware)
 		UltraFastMaxHoldMS:       3000,  // Force exit after 3 seconds
 		UltraFastTodayTrades:     0,
-		UltraFastMaxDailyTrades:  50,    // Max 50 trades per day
+		UltraFastMaxDailyTrades:  0,     // 0 = unlimited trades (was 50)
 		UltraFastDailyPnL:        0,
 		UltraFastTotalPnL:        0,
 		UltraFastWinRate:         0,
 		UltraFastLastUpdate:      "",
+
+		// Profit and loss management
+		UltraFastMinProfitUSD:      0.50, // Close trade when profit >= $0.50 after fees
+		UltraFastUseLLMForLoss:     true, // Use AI/LLM to decide on losses
+		UltraFastConsecutiveLosses: 0,
+		UltraFastTotalLosses:       0,
+		UltraFastTotalWins:         0,
+
+		// Circuit breaker - trips on 10 consecutive losses OR $10 total daily loss
+		UltraFastCircuitBreakerEnabled: true,
+		UltraFastCircuitBreakerTripped: false,
+		UltraFastMaxConsecutiveLosses:  10,   // Trip after 10 consecutive losses
+		UltraFastMaxDailyLossUSD:       10.0, // Trip if daily loss exceeds $10
 
 		// Spot autopilot defaults
 		SpotAutopilotEnabled:  false,
@@ -2497,7 +2525,185 @@ func (sm *SettingsManager) GetEffectivePositionSize(symbol string, globalMaxUSD 
 // IsSymbolEnabled returns whether trading is enabled for a symbol
 func (sm *SettingsManager) IsSymbolEnabled(symbol string) bool {
 	symbolSettings := sm.GetSymbolSettings(symbol)
+
+	// Check if symbol is blocked
+	if sm.IsSymbolBlocked(symbol) {
+		return false
+	}
+
 	return symbolSettings.Enabled && symbolSettings.Category != PerformanceBlacklist
+}
+
+// IsSymbolBlocked checks if a symbol is temporarily blocked
+func (sm *SettingsManager) IsSymbolBlocked(symbol string) bool {
+	symbolSettings := sm.GetSymbolSettings(symbol)
+	if symbolSettings.BlockedUntil == "" {
+		return false
+	}
+
+	blockedUntil, err := time.Parse(time.RFC3339, symbolSettings.BlockedUntil)
+	if err != nil {
+		// Invalid timestamp, clear the block
+		return false
+	}
+
+	return time.Now().Before(blockedUntil)
+}
+
+// GetBlockedReason returns the reason why a symbol is blocked
+func (sm *SettingsManager) GetBlockedReason(symbol string) (string, time.Time, bool) {
+	symbolSettings := sm.GetSymbolSettings(symbol)
+	if symbolSettings.BlockedUntil == "" {
+		return "", time.Time{}, false
+	}
+
+	blockedUntil, err := time.Parse(time.RFC3339, symbolSettings.BlockedUntil)
+	if err != nil {
+		return "", time.Time{}, false
+	}
+
+	if time.Now().After(blockedUntil) {
+		return "", time.Time{}, false
+	}
+
+	return symbolSettings.BlockReason, blockedUntil, true
+}
+
+// BlockSymbolUntil blocks a symbol until the specified time
+func (sm *SettingsManager) BlockSymbolUntil(symbol string, until time.Time, reason string) error {
+	settings := sm.GetCurrentSettings()
+
+	if settings.SymbolSettings == nil {
+		settings.SymbolSettings = make(map[string]*SymbolSettings)
+	}
+
+	if _, exists := settings.SymbolSettings[symbol]; !exists {
+		settings.SymbolSettings[symbol] = &SymbolSettings{
+			Symbol:         symbol,
+			Category:       PerformanceNeutral,
+			SizeMultiplier: 1.0,
+			Enabled:        true,
+		}
+	}
+
+	settings.SymbolSettings[symbol].BlockedUntil = until.Format(time.RFC3339)
+	settings.SymbolSettings[symbol].BlockReason = reason
+	settings.SymbolSettings[symbol].LastUpdated = time.Now().Format("2006-01-02 15:04:05")
+
+	log.Printf("[BLOCK] Symbol %s blocked until %s. Reason: %s", symbol, until.Format("2006-01-02 15:04:05"), reason)
+	return sm.SaveSettings(settings)
+}
+
+// BlockSymbolForDay blocks a symbol until the end of the current day (UTC)
+func (sm *SettingsManager) BlockSymbolForDay(symbol string, reason string) error {
+	now := time.Now().UTC()
+	endOfDay := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
+	return sm.BlockSymbolUntil(symbol, endOfDay, reason)
+}
+
+// UnblockSymbol removes the block from a symbol
+func (sm *SettingsManager) UnblockSymbol(symbol string) error {
+	settings := sm.GetCurrentSettings()
+
+	if settings.SymbolSettings == nil {
+		return nil
+	}
+
+	if symbolSettings, exists := settings.SymbolSettings[symbol]; exists {
+		symbolSettings.BlockedUntil = ""
+		symbolSettings.BlockReason = ""
+		symbolSettings.LastUpdated = time.Now().Format("2006-01-02 15:04:05")
+		log.Printf("[UNBLOCK] Symbol %s unblocked", symbol)
+		return sm.SaveSettings(settings)
+	}
+
+	return nil
+}
+
+// AutoBlockWorstPerformers automatically blocks all "worst" category symbols for the day
+func (sm *SettingsManager) AutoBlockWorstPerformers() ([]string, error) {
+	settings := sm.GetCurrentSettings()
+	blockedSymbols := []string{}
+
+	if settings.SymbolSettings == nil {
+		return blockedSymbols, nil
+	}
+
+	for symbol, symbolSettings := range settings.SymbolSettings {
+		if symbolSettings.Category == PerformanceWorst {
+			// Only block if not already blocked
+			if !sm.IsSymbolBlocked(symbol) {
+				err := sm.BlockSymbolForDay(symbol, "worst_performer_auto")
+				if err != nil {
+					log.Printf("[AUTO-BLOCK] Error blocking %s: %v", symbol, err)
+					continue
+				}
+				blockedSymbols = append(blockedSymbols, symbol)
+			}
+		}
+	}
+
+	if len(blockedSymbols) > 0 {
+		log.Printf("[AUTO-BLOCK] Blocked %d worst performers for the day: %v", len(blockedSymbols), blockedSymbols)
+	}
+
+	return blockedSymbols, nil
+}
+
+// GetAllBlockedSymbols returns all currently blocked symbols
+func (sm *SettingsManager) GetAllBlockedSymbols() map[string]struct {
+	Until  time.Time
+	Reason string
+} {
+	settings := sm.GetCurrentSettings()
+	blocked := make(map[string]struct {
+		Until  time.Time
+		Reason string
+	})
+
+	if settings.SymbolSettings == nil {
+		return blocked
+	}
+
+	for symbol := range settings.SymbolSettings {
+		if reason, until, isBlocked := sm.GetBlockedReason(symbol); isBlocked {
+			blocked[symbol] = struct {
+				Until  time.Time
+				Reason string
+			}{Until: until, Reason: reason}
+		}
+	}
+
+	return blocked
+}
+
+// ClearExpiredBlocks removes expired blocks from all symbols
+func (sm *SettingsManager) ClearExpiredBlocks() int {
+	settings := sm.GetCurrentSettings()
+	cleared := 0
+
+	if settings.SymbolSettings == nil {
+		return 0
+	}
+
+	now := time.Now()
+	for _, symbolSettings := range settings.SymbolSettings {
+		if symbolSettings.BlockedUntil != "" {
+			blockedUntil, err := time.Parse(time.RFC3339, symbolSettings.BlockedUntil)
+			if err != nil || now.After(blockedUntil) {
+				symbolSettings.BlockedUntil = ""
+				symbolSettings.BlockReason = ""
+				cleared++
+			}
+		}
+	}
+
+	if cleared > 0 {
+		sm.SaveSettings(settings)
+		log.Printf("[BLOCK] Cleared %d expired blocks", cleared)
+	}
+
+	return cleared
 }
 
 // UpdateSymbolSettings updates settings for a specific symbol
