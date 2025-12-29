@@ -207,18 +207,18 @@ export default function GinieDiagnosticsPanel() {
               <div className="grid grid-cols-3 gap-4 text-sm">
                 <div>
                   <p className="text-gray-400">Last Scan</p>
-                  <p className="text-white">{formatTime(diagnostics.scanning.last_scan_time)}</p>
+                  <p className="text-white">{formatTime(diagnostics.scanning?.last_scan_time ?? '')}</p>
                 </div>
                 <div>
                   <p className="text-gray-400">Symbols</p>
-                  <p className="text-white">{diagnostics.scanning.symbols_in_watchlist}</p>
+                  <p className="text-white">{diagnostics.scanning?.symbols_in_watchlist ?? 0}</p>
                 </div>
                 <div>
                   <p className="text-gray-400">Modes</p>
                   <div className="flex space-x-1">
-                    {diagnostics.scanning.scalp_enabled && <span className="text-xs bg-blue-500/20 text-blue-400 px-1 rounded">S</span>}
-                    {diagnostics.scanning.swing_enabled && <span className="text-xs bg-green-500/20 text-green-400 px-1 rounded">W</span>}
-                    {diagnostics.scanning.position_enabled && <span className="text-xs bg-purple-500/20 text-purple-400 px-1 rounded">P</span>}
+                    {diagnostics.scanning?.scalp_enabled && <span className="text-xs bg-blue-500/20 text-blue-400 px-1 rounded">S</span>}
+                    {diagnostics.scanning?.swing_enabled && <span className="text-xs bg-green-500/20 text-green-400 px-1 rounded">W</span>}
+                    {diagnostics.scanning?.position_enabled && <span className="text-xs bg-purple-500/20 text-purple-400 px-1 rounded">P</span>}
                   </div>
                 </div>
               </div>
@@ -232,18 +232,18 @@ export default function GinieDiagnosticsPanel() {
               </h3>
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-2">
-                  {diagnostics.llm_status.connected ? (
+                  {diagnostics.llm_status?.connected ? (
                     <CheckCircle className="w-4 h-4 text-green-400" />
                   ) : (
                     <XCircle className="w-4 h-4 text-red-400" />
                   )}
                   <span className="text-sm text-white">
-                    {diagnostics.llm_status.connected ? diagnostics.llm_status.provider : 'Not Connected'}
+                    {diagnostics.llm_status?.connected ? diagnostics.llm_status?.provider : 'Not Connected'}
                   </span>
                 </div>
-                {diagnostics.llm_status.disabled_symbols.length > 0 && (
+                {(diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
                   <span className="text-xs text-red-400">
-                    {diagnostics.llm_status.disabled_symbols.length} symbols disabled
+                    {diagnostics.llm_status?.disabled_symbols?.length ?? 0} symbols disabled
                   </span>
                 )}
               </div>
@@ -258,20 +258,20 @@ export default function GinieDiagnosticsPanel() {
               <div className="grid grid-cols-4 gap-4 text-sm">
                 <div>
                   <p className="text-gray-400">Pending TPs</p>
-                  <p className="text-white">{diagnostics.profit_booking.positions_with_pending_tp}</p>
+                  <p className="text-white">{diagnostics.profit_booking?.positions_with_pending_tp ?? 0}</p>
                 </div>
                 <div>
                   <p className="text-gray-400">TP Hits</p>
-                  <p className="text-green-400">{diagnostics.profit_booking.tp_hits_last_hour}</p>
+                  <p className="text-green-400">{diagnostics.profit_booking?.tp_hits_last_hour ?? 0}</p>
                 </div>
                 <div>
                   <p className="text-gray-400">Partials</p>
-                  <p className="text-blue-400">{diagnostics.profit_booking.partial_closes_last_hour}</p>
+                  <p className="text-blue-400">{diagnostics.profit_booking?.partial_closes_last_hour ?? 0}</p>
                 </div>
                 <div>
                   <p className="text-gray-400">Failed</p>
-                  <p className={diagnostics.profit_booking.failed_closes_last_hour > 0 ? 'text-red-400' : 'text-gray-400'}>
-                    {diagnostics.profit_booking.failed_closes_last_hour}
+                  <p className={(diagnostics.profit_booking?.failed_closes_last_hour ?? 0) > 0 ? 'text-red-400' : 'text-gray-400'}>
+                    {diagnostics.profit_booking?.failed_closes_last_hour ?? 0}
                   </p>
                 </div>
               </div>

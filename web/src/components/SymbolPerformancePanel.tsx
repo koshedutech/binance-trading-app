@@ -51,13 +51,23 @@ interface BlockedSymbol {
   remaining: string;
 }
 
+interface MorningAutoBlockConfig {
+  enabled: boolean;
+  hour_utc: number;
+  minute_utc: number;
+  next_run: string;
+  time_until: string;
+}
+
 export default function SymbolPerformancePanel() {
   const [data, setData] = useState<SymbolPerformanceData | null>(null);
   const [report, setReport] = useState<SymbolPerformanceReport[]>([]);
   const [blockedSymbols, setBlockedSymbols] = useState<BlockedSymbol[]>([]);
+  const [morningAutoBlock, setMorningAutoBlock] = useState<MorningAutoBlockConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [autoBlocking, setAutoBlocking] = useState(false);
+  const [updatingAutoBlock, setUpdatingAutoBlock] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'pnl' | 'winrate' | 'trades'>('pnl');
@@ -69,14 +79,16 @@ export default function SymbolPerformancePanel() {
     try {
       setLoading(true);
       setError(null);
-      const [settingsRes, reportRes, blockedRes] = await Promise.all([
+      const [settingsRes, reportRes, blockedRes, autoBlockRes] = await Promise.all([
         futuresApi.getSymbolPerformanceSettings(),
         futuresApi.getSymbolPerformanceReport(),
         futuresApi.getBlockedSymbols(),
+        futuresApi.getMorningAutoBlockConfig(),
       ]);
       setData(settingsRes);
       setReport(reportRes.report || []);
       setBlockedSymbols(blockedRes.blocked_symbols || []);
+      setMorningAutoBlock(autoBlockRes);
     } catch (err) {
       console.error('Failed to fetch symbol settings:', err);
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch symbol performance data';
@@ -128,6 +140,30 @@ export default function SymbolPerformancePanel() {
       console.error('Failed to auto-block worst performers:', error);
     } finally {
       setAutoBlocking(false);
+    }
+  };
+
+  const handleMorningAutoBlockToggle = async (enabled: boolean) => {
+    try {
+      setUpdatingAutoBlock(true);
+      const result = await futuresApi.updateMorningAutoBlockConfig({ enabled });
+      setMorningAutoBlock(result);
+    } catch (error) {
+      console.error('Failed to toggle morning auto-block:', error);
+    } finally {
+      setUpdatingAutoBlock(false);
+    }
+  };
+
+  const handleMorningAutoBlockTimeChange = async (hour: number, minute: number) => {
+    try {
+      setUpdatingAutoBlock(true);
+      const result = await futuresApi.updateMorningAutoBlockConfig({ hour_utc: hour, minute_utc: minute });
+      setMorningAutoBlock(result);
+    } catch (error) {
+      console.error('Failed to update morning auto-block time:', error);
+    } finally {
+      setUpdatingAutoBlock(false);
     }
   };
 
@@ -340,6 +376,73 @@ export default function SymbolPerformancePanel() {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Morning Auto-Block Settings */}
+      {morningAutoBlock && (
+        <div className="p-4 border-b border-gray-200 bg-orange-50">
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div className="flex items-center gap-3">
+              <Clock className="w-5 h-5 text-orange-600" />
+              <span className="text-sm font-medium text-gray-700">Morning Auto-Block</span>
+              <button
+                onClick={() => handleMorningAutoBlockToggle(!morningAutoBlock.enabled)}
+                disabled={updatingAutoBlock}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  morningAutoBlock.enabled ? 'bg-orange-600' : 'bg-gray-300'
+                } ${updatingAutoBlock ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    morningAutoBlock.enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+              {morningAutoBlock.enabled && (
+                <span className="text-xs text-green-600 font-medium bg-green-100 px-2 py-0.5 rounded-full">
+                  Active
+                </span>
+              )}
+            </div>
+
+            {morningAutoBlock.enabled && (
+              <div className="flex items-center gap-4 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-600">Time (UTC):</span>
+                  <select
+                    value={morningAutoBlock.hour_utc}
+                    onChange={(e) => handleMorningAutoBlockTimeChange(parseInt(e.target.value), morningAutoBlock.minute_utc)}
+                    disabled={updatingAutoBlock}
+                    className="px-2 py-1 border border-gray-300 rounded text-sm bg-white disabled:opacity-50"
+                  >
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{i.toString().padStart(2, '0')}</option>
+                    ))}
+                  </select>
+                  <span>:</span>
+                  <select
+                    value={morningAutoBlock.minute_utc}
+                    onChange={(e) => handleMorningAutoBlockTimeChange(morningAutoBlock.hour_utc, parseInt(e.target.value))}
+                    disabled={updatingAutoBlock}
+                    className="px-2 py-1 border border-gray-300 rounded text-sm bg-white disabled:opacity-50"
+                  >
+                    {Array.from({ length: 60 }, (_, i) => (
+                      <option key={i} value={i}>{i.toString().padStart(2, '0')}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="text-xs text-gray-500">
+                  Next run: {new Date(morningAutoBlock.next_run).toLocaleString()}
+                </div>
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            {morningAutoBlock.enabled
+              ? 'Worst performers will be automatically blocked at the scheduled time each day'
+              : 'Enable to automatically block worst performers at a scheduled time daily'}
+          </p>
         </div>
       )}
 

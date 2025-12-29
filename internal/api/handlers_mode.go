@@ -50,9 +50,13 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 	}
 
 	// Fee constants for Binance Futures
+	// NOTE: These are standard Binance Futures fee rates (non-VIP tier)
+	// VIP users may have lower fees. Consider making these configurable
+	// via settings if users request fee customization.
+	// Fee rates: https://www.binance.com/en/fee/futureFee
 	const (
-		takerFeePercent      = 0.05  // 0.05% taker fee
-		makerFeePercent      = 0.02  // 0.02% maker fee
+		takerFeePercent      = 0.05  // 0.05% taker fee (standard tier)
+		makerFeePercent      = 0.02  // 0.02% maker fee (standard tier)
 		roundTripFeePercent  = 0.10  // 0.10% total (taker open + taker close)
 		minRecommendedUSD    = 100.0 // Minimum recommended position size in USD
 		optimalMinUSD        = 200.0 // Optimal minimum for better fee ratio
@@ -200,6 +204,10 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 	}
 
 	// Validate percentages sum to 100
+	// NOTE: We allow ±1% tolerance to account for:
+	// 1. Floating point rounding errors in UI sliders/inputs
+	// 2. User convenience when distributing percentages (e.g., 33.3% + 33.3% + 33.4% = 100%)
+	// The system normalizes to exactly 100% internally before applying allocations
 	total := req.UltraFastPercent + req.ScalpPercent + req.SwingPercent + req.PositionPercent
 	if total < 99.0 || total > 101.0 {
 		errorResponse(c, http.StatusBadRequest, "Percentages must sum to 100% (tolerance: ±1%)")
@@ -322,47 +330,85 @@ func (s *Server) handleGetModeSafetyStatus(c *gin.Context) {
 	// Log user access for read operation
 	log.Printf("User %s accessing mode safety status", userID)
 
-	// Return comprehensive safety status including rate limits, win rates, profit thresholds
+	// Get REAL circuit breaker status for each mode
+	modes := []autopilot.GinieTradingMode{
+		autopilot.GinieModeUltraFast,
+		autopilot.GinieModeScalp,
+		autopilot.GinieModeSwing,
+		autopilot.GinieModePosition,
+	}
+
+	// Default min win rates per mode (fallback if not in circuit breaker config)
+	minWinRates := map[string]float64{
+		"ultra_fast": 50.0,
+		"scalp":      50.0,
+		"swing":      55.0,
+		"position":   60.0,
+	}
+
+	// Default max loss windows per mode
+	maxLossWindows := map[string]float64{
+		"ultra_fast": -1.5,
+		"scalp":      -2.0,
+		"swing":      -3.0,
+		"position":   -5.0,
+	}
+
+	modesStatus := make(gin.H)
+	for _, mode := range modes {
+		modeStr := string(mode)
+
+		// Get real circuit breaker status from Ginie
+		cbStatus := ginie.GetModeCircuitBreakerStatus(mode)
+
+		// Extract real values from circuit breaker status
+		paused := false
+		pauseReason := ""
+		var pauseUntil interface{} = nil
+		currentWinRate := 0.0
+		recentTradesPct := 0.0
+		cooldownRemaining := ""
+
+		if cbStatus != nil {
+			if v, ok := cbStatus["is_paused"].(bool); ok {
+				paused = v
+			}
+			if v, ok := cbStatus["pause_reason"].(string); ok {
+				pauseReason = v
+			}
+			if v, ok := cbStatus["paused_until"]; ok && v != nil {
+				pauseUntil = v
+			}
+			if v, ok := cbStatus["current_win_rate"].(float64); ok {
+				currentWinRate = v
+			}
+			if v, ok := cbStatus["recent_trades_pct"].(float64); ok {
+				recentTradesPct = v
+			}
+			if v, ok := cbStatus["cooldown_remaining"].(string); ok {
+				cooldownRemaining = v
+			}
+			// Use circuit breaker's min_win_rate if available
+			if v, ok := cbStatus["min_win_rate"].(float64); ok && v > 0 {
+				minWinRates[modeStr] = v
+			}
+		}
+
+		modesStatus[modeStr] = gin.H{
+			"paused":             paused,
+			"pause_reason":       pauseReason,
+			"pause_until":        pauseUntil,
+			"current_win_rate":   currentWinRate,
+			"min_win_rate":       minWinRates[modeStr],
+			"recent_trades_pct":  recentTradesPct,
+			"max_loss_window":    maxLossWindows[modeStr],
+			"cooldown_remaining": cooldownRemaining,
+		}
+	}
+
 	safetyStatus := gin.H{
-		"success": true,
-		"modes": gin.H{
-			"ultra_fast": gin.H{
-				"paused":             false,
-				"pause_reason":       "",
-				"pause_until":        nil,
-				"current_win_rate":   0.0,
-				"min_win_rate":       50.0,
-				"recent_trades_pct":  0.0,
-				"max_loss_window":    -1.5,
-			},
-			"scalp": gin.H{
-				"paused":             false,
-				"pause_reason":       "",
-				"pause_until":        nil,
-				"current_win_rate":   0.0,
-				"min_win_rate":       50.0,
-				"recent_trades_pct":  0.0,
-				"max_loss_window":    -2.0,
-			},
-			"swing": gin.H{
-				"paused":             false,
-				"pause_reason":       "",
-				"pause_until":        nil,
-				"current_win_rate":   0.0,
-				"min_win_rate":       55.0,
-				"recent_trades_pct":  0.0,
-				"max_loss_window":    -3.0,
-			},
-			"position": gin.H{
-				"paused":             false,
-				"pause_reason":       "",
-				"pause_until":        nil,
-				"current_win_rate":   0.0,
-				"min_win_rate":       60.0,
-				"recent_trades_pct":  0.0,
-				"max_loss_window":    -5.0,
-			},
-		},
+		"success":   true,
+		"modes":     modesStatus,
 		"timestamp": c.GetTime("request_time"),
 	}
 
@@ -374,6 +420,20 @@ func (s *Server) handleResumeMode(c *gin.Context) {
 	userID := s.getUserID(c)
 	mode := c.Param("mode")
 
+	// Validate mode
+	validModes := map[string]autopilot.GinieTradingMode{
+		"ultra_fast": autopilot.GinieModeUltraFast,
+		"scalp":      autopilot.GinieModeScalp,
+		"swing":      autopilot.GinieModeSwing,
+		"position":   autopilot.GinieModePosition,
+	}
+
+	ginieMode, valid := validModes[mode]
+	if !valid {
+		errorResponse(c, http.StatusBadRequest, "Invalid mode: "+mode+". Valid modes are: ultra_fast, scalp, swing, position")
+		return
+	}
+
 	// Use per-user Ginie autopilot for multi-user isolation (includes ownership check)
 	ginie := s.getGinieAutopilotForUser(c)
 	if ginie == nil {
@@ -383,13 +443,22 @@ func (s *Server) handleResumeMode(c *gin.Context) {
 
 	log.Printf("User %s resuming mode %s", userID, mode)
 
-	// Resume mode would clear the pause flags in the safety state
+	// Actually reset the circuit breaker to clear the pause state
+	err := ginie.ResetModeCircuitBreaker(ginieMode)
+	if err != nil {
+		log.Printf("Failed to reset circuit breaker for mode %s: %v", mode, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to resume mode: "+err.Error())
+		return
+	}
+
+	log.Printf("Successfully resumed mode %s for user %s", mode, userID)
+
 	c.JSON(http.StatusOK, gin.H{
-		"success":       true,
-		"message":       "Mode " + mode + " resumed",
-		"mode":          mode,
-		"status":        "active",
-		"resumed_at":    c.GetTime("request_time"),
+		"success":    true,
+		"message":    "Mode " + mode + " resumed successfully",
+		"mode":       mode,
+		"status":     "active",
+		"resumed_at": c.GetTime("request_time"),
 	})
 }
 

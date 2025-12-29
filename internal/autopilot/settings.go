@@ -974,6 +974,34 @@ type AutopilotSettings struct {
 	UltraFastMaxConsecutiveLosses  int     `json:"ultra_fast_max_consecutive_losses"`  // Max consecutive losses before trip (default 10)
 	UltraFastMaxDailyLossUSD       float64 `json:"ultra_fast_max_daily_loss_usd"`      // Max daily loss USD before trip (default $10)
 
+	// ====== ULTRA-FAST SIGNAL QUALITY FILTERS ======
+	// Filters to improve entry quality and reject low-quality signals
+	UltraFastVolumeFilterEnabled     bool    `json:"ultra_fast_volume_filter_enabled"`      // Enable volume confirmation filter
+	UltraFastVolumeMultiplier        float64 `json:"ultra_fast_volume_multiplier"`          // Volume must be > avg * this (default 1.5)
+	UltraFastMomentumFilterEnabled   bool    `json:"ultra_fast_momentum_filter_enabled"`    // Enable momentum strength filter
+	UltraFastMinMomentum             float64 `json:"ultra_fast_min_momentum"`               // Min momentum % (default 0.05)
+	UltraFastMinTrendStrength        float64 `json:"ultra_fast_min_trend_strength"`         // Min trend strength (default 60)
+	UltraFastCandleBodyFilterEnabled bool    `json:"ultra_fast_candle_body_filter_enabled"` // Filter out doji/small body candles
+	UltraFastMinCandleBodyPct        float64 `json:"ultra_fast_min_candle_body_pct"`        // Min candle body % (default 0.1)
+
+	// ====== ULTRA-FAST TIERED TAKE PROFIT ======
+	// Multi-level profit taking for improved win rate
+	UltraFastTP1Percent      float64 `json:"ultra_fast_tp1_percent"`       // TP1 trigger at 0.5%
+	UltraFastTP1ClosePercent float64 `json:"ultra_fast_tp1_close_percent"` // Close 40% of position at TP1
+	UltraFastTP2Percent      float64 `json:"ultra_fast_tp2_percent"`       // TP2 trigger at 1.0%
+	UltraFastTP2ClosePercent float64 `json:"ultra_fast_tp2_close_percent"` // Close 30% of position at TP2
+	UltraFastTP3Percent      float64 `json:"ultra_fast_tp3_percent"`       // TP3 trigger at 2.0%
+	UltraFastTP3ClosePercent float64 `json:"ultra_fast_tp3_close_percent"` // Close remaining 30% at TP3
+
+	// ====== ULTRA-FAST TRAILING STOP ======
+	// Dynamic trailing stop after first TP hit
+	UltraFastTrailingEnabled       bool    `json:"ultra_fast_trailing_enabled"`        // Enable trailing for ultra-fast
+	UltraFastTrailingActivationPct float64 `json:"ultra_fast_trailing_activation_pct"` // Activate after 0.5% profit (TP1)
+	UltraFastTrailingDistancePct   float64 `json:"ultra_fast_trailing_distance_pct"`   // Trail distance 0.3%
+
+	// ====== ULTRA-FAST STOP LOSS ======
+	UltraFastStopLossPercent float64 `json:"ultra_fast_stop_loss_percent"` // Stop loss % from entry (default 1%)
+
 	// ====== PER-MODE SAFETY CONTROLS ======
 	// Independent safety settings per trading mode (rate limiting, profit monitoring, win-rate)
 	SafetyUltraFast  *ModeSafetyConfig `json:"safety_ultra_fast"`
@@ -1127,8 +1155,8 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastScanInterval:    5000,  // Scan every 5 seconds
 		UltraFastMonitorInterval: 2000,  // Monitor every 2 seconds for exits (reduced from 500ms to lower API load)
 		UltraFastMaxPositions:    3,     // Conservative - max 3 concurrent positions
-		UltraFastMaxUSDPerPos:    200,   // Conservative - $200 per position
-		UltraFastMinConfidence:   50.0,  // Lower confidence for quick moves
+		UltraFastMaxUSDPerPos:    250,   // $200-300 range for better fee efficiency
+		UltraFastMinConfidence:   60.0,  // Raised from 50% for better signal quality
 		UltraFastMinProfitPct:    0.0,   // Dynamic calculation (fee-aware)
 		UltraFastMaxHoldMS:       3000,  // Force exit after 3 seconds
 		UltraFastTodayTrades:     0,
@@ -1139,7 +1167,7 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastLastUpdate:      "",
 
 		// Profit and loss management
-		UltraFastMinProfitUSD:      0.50, // Close trade when profit >= $0.50 after fees
+		UltraFastMinProfitUSD:      1.00, // Raised from $0.50 to reduce noise exits
 		UltraFastUseLLMForLoss:     true, // Use AI/LLM to decide on losses
 		UltraFastConsecutiveLosses: 0,
 		UltraFastTotalLosses:       0,
@@ -1150,6 +1178,31 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastCircuitBreakerTripped: false,
 		UltraFastMaxConsecutiveLosses:  10,   // Trip after 10 consecutive losses
 		UltraFastMaxDailyLossUSD:       10.0, // Trip if daily loss exceeds $10
+
+		// Signal quality filters (aggressive scalping)
+		UltraFastVolumeFilterEnabled:     true,
+		UltraFastVolumeMultiplier:        1.5,   // Volume > 1.5x average
+		UltraFastMomentumFilterEnabled:   true,
+		UltraFastMinMomentum:             0.05,  // 0.05% minimum momentum
+		UltraFastMinTrendStrength:        60.0,  // Raised from 40 to 60
+		UltraFastCandleBodyFilterEnabled: true,
+		UltraFastMinCandleBodyPct:        0.1,   // 0.1% min candle body (reject doji)
+
+		// Tiered take profit (TP1/TP2/TP3)
+		UltraFastTP1Percent:      0.5,  // TP1 at 0.5%
+		UltraFastTP1ClosePercent: 40.0, // Close 40% at TP1
+		UltraFastTP2Percent:      1.0,  // TP2 at 1.0%
+		UltraFastTP2ClosePercent: 30.0, // Close 30% at TP2
+		UltraFastTP3Percent:      2.0,  // TP3 at 2.0%
+		UltraFastTP3ClosePercent: 30.0, // Close remaining 30% at TP3
+
+		// Trailing stop (activates after TP1)
+		UltraFastTrailingEnabled:       true,
+		UltraFastTrailingActivationPct: 0.5, // Activate after 0.5% profit (TP1)
+		UltraFastTrailingDistancePct:   0.3, // 0.3% trail distance
+
+		// Stop loss
+		UltraFastStopLossPercent: 1.0, // 1% stop loss from entry
 
 		// Spot autopilot defaults
 		SpotAutopilotEnabled:  false,

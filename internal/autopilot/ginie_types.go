@@ -16,11 +16,12 @@ const (
 type GinieScanStatus string
 
 const (
-	ScanStatusScalpReady    GinieScanStatus = "SCALP-READY"
-	ScanStatusSwingReady    GinieScanStatus = "SWING-READY"
-	ScanStatusPositionReady GinieScanStatus = "POSITION-READY"
-	ScanStatusHedgeRequired GinieScanStatus = "HEDGE-REQUIRED"
-	ScanStatusAvoid         GinieScanStatus = "AVOID"
+	ScanStatusScalpReady     GinieScanStatus = "SCALP-READY"
+	ScanStatusSwingReady     GinieScanStatus = "SWING-READY"
+	ScanStatusPositionReady  GinieScanStatus = "POSITION-READY"
+	ScanStatusUltraFastReady GinieScanStatus = "ULTRAFAST-READY"
+	ScanStatusHedgeRequired  GinieScanStatus = "HEDGE-REQUIRED"
+	ScanStatusAvoid          GinieScanStatus = "AVOID"
 )
 
 // GenieRecommendation represents overall recommendation
@@ -53,6 +54,9 @@ type GinieCoinScan struct {
 	// Correlation Check
 	Correlation CorrelationCheck `json:"correlation"`
 
+	// Price Action Analysis (FVG + Order Blocks)
+	PriceAction PriceActionAnalysis `json:"price_action"`
+
 	// Overall Score
 	Score       float64 `json:"score"`
 	TradeReady  bool    `json:"trade_ready"`
@@ -84,6 +88,9 @@ type VolatilityProfile struct {
 	Volatility30d   float64 `json:"volatility_30d"`
 	Regime          string  `json:"regime"` // Low, Medium, High, Extreme
 	VolatilityScore float64 `json:"volatility_score"`
+	// 24h volatility for mode selection
+	PriceChange24h  float64 `json:"price_change_24h"`  // 24h price change percent (absolute)
+	HighLowRange24h float64 `json:"high_low_range_24h"` // (High - Low) / Low * 100
 }
 
 // TrendHealth contains trend assessment
@@ -124,6 +131,258 @@ type CorrelationCheck struct {
 	SectorCorrelation  float64 `json:"sector_correlation"`
 	IndependentCapable bool    `json:"independent_capable"` // Can move independently
 	CorrelationScore   float64 `json:"correlation_score"`
+}
+
+// FairValueGap represents a price imbalance (3-candle pattern where wicks don't overlap)
+type FairValueGap struct {
+	Type       string    `json:"type"`        // "bullish" or "bearish"
+	TopPrice   float64   `json:"top_price"`   // Upper boundary of the gap
+	BottomPrice float64  `json:"bottom_price"` // Lower boundary of the gap
+	MidPrice   float64   `json:"mid_price"`   // Middle of the gap (50% level)
+	GapSize    float64   `json:"gap_size"`    // Size in price units
+	GapPercent float64   `json:"gap_percent"` // Size as percentage of price
+	CandleIndex int      `json:"candle_index"` // Index of the middle candle (imbalance candle)
+	Timestamp  time.Time `json:"timestamp"`   // When the FVG was created
+	Filled     bool      `json:"filled"`      // Whether price has returned to fill it
+	Tested     bool      `json:"tested"`      // Whether price has touched the zone
+	Strength   string    `json:"strength"`    // "strong", "moderate", "weak"
+}
+
+// FVGAnalysis contains all detected Fair Value Gaps
+type FVGAnalysis struct {
+	BullishFVGs     []FairValueGap `json:"bullish_fvgs"`     // Gaps expecting price to come down to fill
+	BearishFVGs     []FairValueGap `json:"bearish_fvgs"`     // Gaps expecting price to come up to fill
+	NearestBullish  *FairValueGap  `json:"nearest_bullish"`  // Closest unfilled bullish FVG below price
+	NearestBearish  *FairValueGap  `json:"nearest_bearish"`  // Closest unfilled bearish FVG above price
+	TotalUnfilled   int            `json:"total_unfilled"`   // Count of unfilled FVGs
+	InFVGZone       bool           `json:"in_fvg_zone"`      // Is current price inside an FVG?
+	FVGZoneType     string         `json:"fvg_zone_type"`    // "bullish", "bearish", or ""
+	FVGConfluence   bool           `json:"fvg_confluence"`   // FVG aligns with trade direction
+}
+
+// OrderBlock represents an institutional order flow zone
+type OrderBlock struct {
+	Type        string    `json:"type"`         // "bullish" (demand) or "bearish" (supply)
+	HighPrice   float64   `json:"high_price"`   // Upper boundary of the OB
+	LowPrice    float64   `json:"low_price"`    // Lower boundary of the OB
+	MidPrice    float64   `json:"mid_price"`    // Middle of the OB (50% level)
+	OpenPrice   float64   `json:"open_price"`   // Open of the OB candle
+	ClosePrice  float64   `json:"close_price"`  // Close of the OB candle
+	Volume      float64   `json:"volume"`       // Volume of the OB candle
+	CandleIndex int       `json:"candle_index"` // Index of the OB candle
+	Timestamp   time.Time `json:"timestamp"`    // When the OB was created
+	Mitigated   bool      `json:"mitigated"`    // Whether price has returned and mitigated it
+	Tested      bool      `json:"tested"`       // Whether price has touched the zone
+	TestCount   int       `json:"test_count"`   // Number of times tested
+	Strength    string    `json:"strength"`     // "strong", "moderate", "weak" based on move after
+	MovePercent float64   `json:"move_percent"` // % move that followed this OB
+}
+
+// OrderBlockAnalysis contains all detected Order Blocks
+type OrderBlockAnalysis struct {
+	BullishOBs      []OrderBlock `json:"bullish_obs"`      // Demand zones (last bearish before up move)
+	BearishOBs      []OrderBlock `json:"bearish_obs"`      // Supply zones (last bullish before down move)
+	NearestBullish  *OrderBlock  `json:"nearest_bullish"`  // Closest unmitigated bullish OB below price
+	NearestBearish  *OrderBlock  `json:"nearest_bearish"`  // Closest unmitigated bearish OB above price
+	TotalUnmitigated int         `json:"total_unmitigated"` // Count of unmitigated OBs
+	InOBZone        bool         `json:"in_ob_zone"`       // Is current price inside an OB?
+	OBZoneType      string       `json:"ob_zone_type"`     // "bullish", "bearish", or ""
+	OBConfluence    bool         `json:"ob_confluence"`    // OB aligns with trade direction
+}
+
+// PriceActionAnalysis combines FVG, Order Block, and Chart Pattern analysis
+type PriceActionAnalysis struct {
+	FVG              FVGAnalysis          `json:"fvg"`
+	OrderBlocks      OrderBlockAnalysis   `json:"order_blocks"`
+	ChartPatterns    ChartPatternAnalysis `json:"chart_patterns"`     // Chart pattern detection
+	HasBullishSetup  bool                 `json:"has_bullish_setup"`  // Price at demand zone with bullish FVG
+	HasBearishSetup  bool                 `json:"has_bearish_setup"`  // Price at supply zone with bearish FVG
+	SetupQuality     string               `json:"setup_quality"`      // "premium", "good", "average", "poor"
+	ConfluenceScore  float64              `json:"confluence_score"`   // 0-100 based on FVG+OB alignment
+}
+
+// ============ CHART PATTERN TYPES ============
+
+// SwingPoint represents a significant price swing (high or low) with full context
+type SwingPoint struct {
+	Price     float64   `json:"price"`
+	Index     int       `json:"index"`
+	Timestamp time.Time `json:"timestamp"`
+	Volume    float64   `json:"volume,omitempty"`
+}
+
+// Trendline represents a line connecting swing points
+type Trendline struct {
+	StartPrice  float64 `json:"start_price"`
+	EndPrice    float64 `json:"end_price"`
+	StartIndex  int     `json:"start_index"`
+	EndIndex    int     `json:"end_index"`
+	Slope       float64 `json:"slope"`        // Price change per bar
+	TouchPoints []int   `json:"touch_points"` // Indices where price touches line
+}
+
+// HeadAndShouldersPattern represents a head and shoulders or inverse H&S pattern
+type HeadAndShouldersPattern struct {
+	Type          string     `json:"type"`           // "head_and_shoulders" or "inverse_head_and_shoulders"
+	LeftShoulder  SwingPoint `json:"left_shoulder"`
+	Head          SwingPoint `json:"head"`
+	RightShoulder SwingPoint `json:"right_shoulder"`
+	NecklineLeft  SwingPoint `json:"neckline_left"`
+	NecklineRight SwingPoint `json:"neckline_right"`
+	NecklineSlope float64    `json:"neckline_slope"`  // Slope of neckline
+	NecklinePrice float64    `json:"neckline_price"`  // Current neckline price at right shoulder
+	TargetPrice   float64    `json:"target_price"`    // Projected price target
+	PatternHeight float64    `json:"pattern_height"`  // Head to neckline distance
+	PatternPercent float64   `json:"pattern_percent"` // Height as % of price
+	SymmetryScore float64    `json:"symmetry_score"`  // 0-100 based on shoulder symmetry
+	VolumeConfirmed bool     `json:"volume_confirmed"` // Volume pattern matches
+	Completed     bool       `json:"completed"`       // Neckline broken
+	CandleIndex   int        `json:"candle_index"`    // Index of right shoulder
+	Timestamp     time.Time  `json:"timestamp"`
+	Strength      string     `json:"strength"`        // "strong", "moderate", "weak"
+}
+
+// DoubleTopBottomPattern represents a double top or double bottom pattern
+type DoubleTopBottomPattern struct {
+	Type            string     `json:"type"`              // "double_top" or "double_bottom"
+	FirstPeak       SwingPoint `json:"first_peak"`
+	SecondPeak      SwingPoint `json:"second_peak"`
+	Neckline        SwingPoint `json:"neckline"`          // Trough between peaks (or peak between bottoms)
+	NecklinePrice   float64    `json:"neckline_price"`
+	TargetPrice     float64    `json:"target_price"`       // Projected target
+	PatternHeight   float64    `json:"pattern_height"`     // Distance from peaks to neckline
+	PatternPercent  float64    `json:"pattern_percent"`
+	PeakDifference  float64    `json:"peak_difference"`    // % difference between peaks
+	BarsBetween     int        `json:"bars_between"`       // Bars between the two peaks
+	VolumeConfirmed bool       `json:"volume_confirmed"`   // V1 > V2 confirmation
+	Status          string     `json:"status"`             // "forming", "confirmed", "invalid"
+	Completed       bool       `json:"completed"`          // Neckline broken
+	CandleIndex     int        `json:"candle_index"`
+	Timestamp       time.Time  `json:"timestamp"`
+	Strength        string     `json:"strength"`
+}
+
+// TrianglePattern represents an ascending, descending, or symmetrical triangle
+type TrianglePattern struct {
+	Type            string    `json:"type"`              // "ascending", "descending", "symmetrical"
+	UpperTrendline  Trendline `json:"upper_trendline"`
+	LowerTrendline  Trendline `json:"lower_trendline"`
+	ApexPrice       float64   `json:"apex_price"`        // Convergence point price
+	ApexIndex       int       `json:"apex_index"`        // Estimated convergence bar
+	PatternStart    int       `json:"pattern_start"`     // Start index
+	PatternWidth    int       `json:"pattern_width"`     // Number of bars
+	BaseHeight      float64   `json:"base_height"`       // Height at pattern start
+	BasePercent     float64   `json:"base_percent"`      // As % of price
+	CurrentHeight   float64   `json:"current_height"`    // Current contracted height
+	Contraction     float64   `json:"contraction_pct"`   // How much pattern has contracted
+	VolumeDecline   bool      `json:"volume_decline"`    // Volume contracting
+	BreakoutBias    string    `json:"breakout_bias"`     // "up", "down", "neutral"
+	BreakoutTarget  float64   `json:"breakout_target"`
+	TouchesUpper    int       `json:"touches_upper"`
+	TouchesLower    int       `json:"touches_lower"`
+	Completed       bool      `json:"completed"`         // Breakout occurred
+	BreakoutDir     string    `json:"breakout_dir"`      // "up" or "down" after break
+	CandleIndex     int       `json:"candle_index"`
+	Timestamp       time.Time `json:"timestamp"`
+	Strength        string    `json:"strength"`
+}
+
+// WedgePattern represents a rising or falling wedge
+type WedgePattern struct {
+	Type            string    `json:"type"`              // "rising_wedge" or "falling_wedge"
+	UpperTrendline  Trendline `json:"upper_trendline"`
+	LowerTrendline  Trendline `json:"lower_trendline"`
+	ApexPrice       float64   `json:"apex_price"`        // Convergence price
+	ApexIndex       int       `json:"apex_index"`
+	PatternStart    int       `json:"pattern_start"`
+	PatternWidth    int       `json:"pattern_width"`
+	SlopeRatio      float64   `json:"slope_ratio"`       // Ratio of slopes
+	BaseHeight      float64   `json:"base_height"`
+	BasePercent     float64   `json:"base_percent"`
+	BreakoutBias    string    `json:"breakout_bias"`     // "up" for falling, "down" for rising
+	BreakoutTarget  float64   `json:"breakout_target"`
+	TouchesUpper    int       `json:"touches_upper"`
+	TouchesLower    int       `json:"touches_lower"`
+	VolumeDecline   bool      `json:"volume_decline"`
+	Completed       bool      `json:"completed"`
+	BreakoutDir     string    `json:"breakout_dir"`
+	CandleIndex     int       `json:"candle_index"`
+	Timestamp       time.Time `json:"timestamp"`
+	Strength        string    `json:"strength"`
+}
+
+// FlagPennantPattern represents a flag or pennant continuation pattern
+type FlagPennantPattern struct {
+	Type            string    `json:"type"`              // "bull_flag", "bear_flag", "bull_pennant", "bear_pennant"
+	Direction       string    `json:"direction"`         // "bullish" or "bearish"
+
+	// Flagpole
+	FlagpoleStart   SwingPoint `json:"flagpole_start"`
+	FlagpoleEnd     SwingPoint `json:"flagpole_end"`
+	FlagpoleHeight  float64   `json:"flagpole_height"`   // In price units
+	FlagpolePercent float64   `json:"flagpole_percent"`  // As % move
+	FlagpoleBars    int       `json:"flagpole_bars"`
+	FlagpoleVolume  float64   `json:"flagpole_volume"`   // Average volume during impulse
+
+	// Consolidation
+	ConsolidationType string  `json:"consolidation_type"` // "channel" or "triangle"
+	ConsolidationHigh float64 `json:"consolidation_high"`
+	ConsolidationLow  float64 `json:"consolidation_low"`
+	ConsolidationBars int     `json:"consolidation_bars"`
+	RetracementPct    float64 `json:"retracement_pct"`   // How much flagpole was retraced
+	ConsolidationVol  float64 `json:"consolidation_vol"` // Average volume during consolidation
+
+	// Targets
+	BreakoutLevel   float64   `json:"breakout_level"`
+	TargetPrice     float64   `json:"target_price"`
+	StopLoss        float64   `json:"stop_loss"`
+
+	// Status
+	Completed       bool      `json:"completed"`
+	VolumeConfirmed bool      `json:"volume_confirmed"`
+	CandleIndex     int       `json:"candle_index"`
+	Timestamp       time.Time `json:"timestamp"`
+	Strength        string    `json:"strength"`
+}
+
+// PatternSummary provides a quick overview of the most significant pattern
+type PatternSummary struct {
+	Type           string  `json:"type"`
+	Direction      string  `json:"direction"`      // "bullish" or "bearish"
+	Strength       string  `json:"strength"`
+	TargetPrice    float64 `json:"target_price"`
+	BreakoutLevel  float64 `json:"breakout_level"`
+	CompletionPct  float64 `json:"completion_pct"` // How close to breakout (0-100)
+}
+
+// ChartPatternAnalysis contains all detected chart patterns
+type ChartPatternAnalysis struct {
+	// Detected patterns
+	HeadAndShoulders  []HeadAndShouldersPattern  `json:"head_and_shoulders"`
+	DoubleTopsBottoms []DoubleTopBottomPattern   `json:"double_tops_bottoms"`
+	Triangles         []TrianglePattern          `json:"triangles"`
+	Wedges            []WedgePattern             `json:"wedges"`
+	FlagsPennants     []FlagPennantPattern       `json:"flags_pennants"`
+
+	// Active/nearest pattern summary
+	ActivePattern     *PatternSummary            `json:"active_pattern"`
+
+	// Scoring
+	PatternScore      float64                    `json:"pattern_score"`      // 0-100
+	PatternBias       string                     `json:"pattern_bias"`       // "bullish", "bearish", "neutral"
+	PatternConfluence bool                       `json:"pattern_confluence"` // Aligns with trend
+
+	// Trading signals
+	HasBullishPattern bool                       `json:"has_bullish_pattern"`
+	HasBearishPattern bool                       `json:"has_bearish_pattern"`
+	NearBreakout      bool                       `json:"near_breakout"`
+	EstimatedTarget   float64                    `json:"estimated_target"`
+
+	// Pattern counts for quick reference
+	TotalPatterns     int                        `json:"total_patterns"`
+	ReversalPatterns  int                        `json:"reversal_patterns"`  // H&S, Double Top/Bottom
+	ContinuationPatterns int                     `json:"continuation_patterns"` // Flags, Pennants
+	ConsolidationPatterns int                    `json:"consolidation_patterns"` // Triangles, Wedges
 }
 
 // GinieSignalSet contains signals for a specific mode
@@ -191,6 +450,10 @@ type GinieTradeExecution struct {
 	StopLossPct  float64                `json:"stop_loss_pct"`
 	RiskReward   float64                `json:"risk_reward"`
 	TrailingStop float64                `json:"trailing_stop"`
+
+	// AI/LLM Sizing - suggested position size from LLM analysis
+	LLMSuggestedSizeUSD float64 `json:"llm_suggested_size_usd,omitempty"` // LLM recommended position size in USD
+	LLMSizeReasoning    string  `json:"llm_size_reasoning,omitempty"`     // LLM reasoning for size recommendation
 }
 
 // GinieDecisionReport is the full structured decision output
@@ -318,7 +581,7 @@ func DefaultGinieConfig() *GinieConfig {
 
 		// Mode Selection
 		ScalpADXMax:         20,
-		SwingADXMin:         25,
+		SwingADXMin:         30,
 		SwingADXMax:         45,
 		PositionADXMin:      35,
 

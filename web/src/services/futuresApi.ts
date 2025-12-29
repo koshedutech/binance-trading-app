@@ -1724,6 +1724,37 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== MORNING AUTO-BLOCK ====================
+
+  async getMorningAutoBlockConfig(): Promise<{
+    success: boolean;
+    enabled: boolean;
+    hour_utc: number;
+    minute_utc: number;
+    next_run: string;
+    time_until: string;
+  }> {
+    const { data } = await this.client.get('/autopilot/morning-auto-block/config');
+    return data;
+  }
+
+  async updateMorningAutoBlockConfig(config: {
+    enabled?: boolean;
+    hour_utc?: number;
+    minute_utc?: number;
+  }): Promise<{
+    success: boolean;
+    enabled: boolean;
+    hour_utc: number;
+    minute_utc: number;
+    next_run: string;
+    time_until: string;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/autopilot/morning-auto-block/config', config);
+    return data;
+  }
+
   async updateCategoryConfig(config: {
     confidence_boost: Record<string, number>;
     size_multiplier: Record<string, number>;

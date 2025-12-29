@@ -332,6 +332,14 @@ type GiniePosition struct {
 	UltraFastTargetPercent float64         `json:"ultra_fast_target_percent,omitempty"` // Fee-aware profit target %
 	MaxHoldTime           time.Duration    `json:"max_hold_time,omitempty"`            // 3s for ultra-fast
 
+	// Ultra-Fast Tiered Take Profit Tracking
+	UltraFastTP1Hit       bool    `json:"ultra_fast_tp1_hit"`        // TP1 (0.5%) hit - closed 40%
+	UltraFastTP2Hit       bool    `json:"ultra_fast_tp2_hit"`        // TP2 (1.0%) hit - closed 30%
+	UltraFastTP3Hit       bool    `json:"ultra_fast_tp3_hit"`        // TP3 (2.0%) hit - closed 30%
+	UltraFastTotalClosed  float64 `json:"ultra_fast_total_closed"`   // Total % of position closed
+	UltraFastHighestPnL   float64 `json:"ultra_fast_highest_pnl"`    // Highest PnL % reached (for trailing)
+	UltraFastTrailingActive bool  `json:"ultra_fast_trailing_active"` // Trailing stop activated
+
 	// Early Profit Booking (per-position custom ROI target)
 	CustomROIPercent *float64 `json:"custom_roi_percent,omitempty"` // Custom ROI% for this position (nil = use mode defaults)
 }
@@ -2046,8 +2054,30 @@ func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availa
 			continue
 		}
 
+		// Get min confidence from settings (default 60%)
+		settingsManager := GetSettingsManager()
+		currentSettings := settingsManager.GetCurrentSettings()
+		minConfidence := currentSettings.UltraFastMinConfidence
+		if minConfidence <= 0 {
+			minConfidence = 60.0 // Default 60%
+		}
+
 		// Skip neutral or low confidence
-		if signal.TrendBias == "NEUTRAL" || signal.EntryConfidence < 50 {
+		if signal.TrendBias == "NEUTRAL" || signal.EntryConfidence < minConfidence {
+			continue
+		}
+
+		// Skip if quality filters failed (when enabled)
+		if currentSettings.UltraFastVolumeFilterEnabled && !signal.VolumeConfirmed {
+			log.Printf("[SMART-MARGIN] %s: SKIP - volume filter failed (%.2fx avg)", symbol, signal.VolumeMultiplier)
+			continue
+		}
+		if currentSettings.UltraFastMomentumFilterEnabled && !signal.MomentumConfirmed {
+			log.Printf("[SMART-MARGIN] %s: SKIP - momentum filter failed (%.4f%%)", symbol, signal.MomentumStrength)
+			continue
+		}
+		if currentSettings.UltraFastCandleBodyFilterEnabled && !signal.CandleBodyConfirmed {
+			log.Printf("[SMART-MARGIN] %s: SKIP - candle body filter failed (%.4f%%)", symbol, signal.AvgCandleBodyPct)
 			continue
 		}
 
@@ -10928,27 +10958,28 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 }
 
 // checkUltraFastExits checks all ultra-fast positions for exit conditions
-// Exit priority:
+// Exit priority (TIERED TAKE PROFIT):
 // 1. Circuit breaker check - if tripped, close all positions
 // 2. STOP LOSS hit → EXIT immediately (100% loss booking)
-// 3. Profit >= $0.50 after fees → EXIT immediately (small profit collection)
-// 4. Profit target % hit → EXIT immediately (100% profit booking)
-// 5. Trailing stop triggered → EXIT (capture max profit with pullback protection)
-// 6. In loss → Call AI/LLM for decision (average down or book loss)
-// 7. Time > max_hold_ms → FORCE EXIT (emergency timeout)
+// 3. TP1 (0.5%) hit → Close 40%, activate trailing stop
+// 4. TP2 (1.0%) hit → Close 30%
+// 5. TP3 (2.0%) hit → Close remaining 30%
+// 6. Trailing stop triggered → EXIT remaining (pullback protection)
+// 7. Min profit USD hit → EXIT remaining (minimum profit collection)
+// 8. Timeout (only if in loss) → Ask AI/LLM or force exit
 func (ga *GinieAutopilot) checkUltraFastExits() {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
 	now := time.Now()
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings()
+	settings := settingsManager.GetCurrentSettings()
 
 	// Check if circuit breaker is tripped
-	if currentSettings.UltraFastCircuitBreakerTripped {
+	if settings.UltraFastCircuitBreakerTripped {
 		ga.logger.Warn("Ultra-fast: Circuit breaker is TRIPPED - ultra-fast trading paused",
-			"consecutive_losses", currentSettings.UltraFastConsecutiveLosses,
-			"daily_pnl", currentSettings.UltraFastDailyPnL)
+			"consecutive_losses", settings.UltraFastConsecutiveLosses,
+			"daily_pnl", settings.UltraFastDailyPnL)
 		return
 	}
 
@@ -10964,14 +10995,53 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 		return
 	}
 
-	// Get min profit USD threshold from settings (default $0.50)
-	minProfitUSD := currentSettings.UltraFastMinProfitUSD
-	if minProfitUSD <= 0 {
-		minProfitUSD = 0.50 // Fallback default
+	// Get tiered TP settings with fallback defaults
+	tp1Pct := settings.UltraFastTP1Percent
+	if tp1Pct <= 0 {
+		tp1Pct = 0.5 // Default 0.5%
+	}
+	tp1ClosePct := settings.UltraFastTP1ClosePercent
+	if tp1ClosePct <= 0 {
+		tp1ClosePct = 40.0 // Default 40%
 	}
 
-	// Get max hold time from settings
-	maxHoldMS := currentSettings.UltraFastMaxHoldMS
+	tp2Pct := settings.UltraFastTP2Percent
+	if tp2Pct <= 0 {
+		tp2Pct = 1.0 // Default 1.0%
+	}
+	tp2ClosePct := settings.UltraFastTP2ClosePercent
+	if tp2ClosePct <= 0 {
+		tp2ClosePct = 30.0 // Default 30%
+	}
+
+	tp3Pct := settings.UltraFastTP3Percent
+	if tp3Pct <= 0 {
+		tp3Pct = 2.0 // Default 2.0%
+	}
+	tp3ClosePct := settings.UltraFastTP3ClosePercent
+	if tp3ClosePct <= 0 {
+		tp3ClosePct = 30.0 // Default 30%
+	}
+
+	// Trailing stop settings
+	trailingEnabled := settings.UltraFastTrailingEnabled
+	trailingActivationPct := settings.UltraFastTrailingActivationPct
+	if trailingActivationPct <= 0 {
+		trailingActivationPct = 0.5 // Default: activate after 0.5% profit
+	}
+	trailingDistancePct := settings.UltraFastTrailingDistancePct
+	if trailingDistancePct <= 0 {
+		trailingDistancePct = 0.3 // Default: 0.3% trailing distance
+	}
+
+	// Min profit USD threshold
+	minProfitUSD := settings.UltraFastMinProfitUSD
+	if minProfitUSD <= 0 {
+		minProfitUSD = 1.00 // Default $1.00 (raised from $0.50)
+	}
+
+	// Max hold time
+	maxHoldMS := settings.UltraFastMaxHoldMS
 	if maxHoldMS <= 0 {
 		maxHoldMS = 15000 // Default 15 seconds
 	}
@@ -10987,110 +11057,169 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			continue
 		}
 
-		// Calculate PnL in both % and USD
-		var pnlPercent, pnlUSD, exitFeeUSD float64
+		// Calculate PnL in both % and USD (for remaining quantity)
+		var pnlPercent, pnlUSD float64
 		closeQty := pos.RemainingQty
 
 		if pos.Side == "LONG" {
 			pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
-			exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+			exitFeeUSD := currentPrice * closeQty * 0.0004 // 0.04% taker fee
 			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
 		} else {
 			pnlBeforeFees := (pos.EntryPrice - currentPrice) * closeQty
-			exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+			exitFeeUSD := currentPrice * closeQty * 0.0004 // 0.04% taker fee
 			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
 		}
 
 		holdTime := now.Sub(pos.EntryTime)
 
-		// Exit Condition 1: STOP LOSS HIT → 100% LOSS BOOKING (priority 1)
+		// Track highest PnL for trailing stop
+		if pnlPercent > pos.UltraFastHighestPnL {
+			pos.UltraFastHighestPnL = pnlPercent
+			// Update high/low water marks
+			if pos.Side == "LONG" && currentPrice > pos.HighestPrice {
+				pos.HighestPrice = currentPrice
+			} else if pos.Side == "SHORT" && (pos.LowestPrice == 0 || currentPrice < pos.LowestPrice) {
+				pos.LowestPrice = currentPrice
+			}
+		}
+
+		// ============ EXIT PRIORITY 1: STOP LOSS HIT ============
 		if pos.StopLoss > 0 && ga.checkStopLossHit(pos, currentPrice) {
-			ga.logger.Warn("Ultra-fast: STOP LOSS HIT - closing entire position (100% loss booking)",
+			totalPnL := pnlUSD + pos.RealizedPnL // Include any partial close PnL
+			ga.logger.Warn("Ultra-fast: STOP LOSS HIT - closing entire position",
 				"symbol", pos.Symbol,
 				"stop_loss", pos.StopLoss,
 				"current_price", currentPrice,
-				"pnl_usd", pnlUSD,
-				"pnl_pct", pnlPercent)
-			ga.executeUltraFastExitWithTracking(pos, currentPrice, "stop_loss_hit", pnlUSD)
+				"pnl_usd", totalPnL,
+				"pnl_pct", pnlPercent,
+				"tp1_hit", pos.UltraFastTP1Hit,
+				"tp2_hit", pos.UltraFastTP2Hit,
+				"realized_pnl", pos.RealizedPnL)
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "stop_loss_hit", totalPnL)
 			continue
 		}
 
-		// Exit Condition 2: Profit >= $0.50 after fees → COLLECT SMALL PROFIT (priority 2)
-		if pnlUSD >= minProfitUSD {
-			ga.logger.Info("Ultra-fast: MIN PROFIT HIT - collecting small profit",
+		// ============ EXIT PRIORITY 2: TP1 (0.5%) → Close 40% ============
+		if !pos.UltraFastTP1Hit && pnlPercent >= tp1Pct {
+			partialPnL := ga.executeUltraFastPartialClose(pos, currentPrice, tp1ClosePct, 1, pnlPercent)
+			ga.logger.Info("Ultra-fast: TP1 HIT - closed 40%, activating trailing stop",
 				"symbol", pos.Symbol,
-				"pnl_usd", pnlUSD,
+				"tp1_pct", tp1Pct,
+				"current_pnl_pct", pnlPercent,
+				"partial_pnl_usd", partialPnL,
+				"remaining_qty", pos.RemainingQty)
+
+			// Activate trailing stop after TP1
+			if trailingEnabled {
+				pos.UltraFastTrailingActive = true
+				ga.logger.Info("Ultra-fast: Trailing stop ACTIVATED after TP1",
+					"symbol", pos.Symbol,
+					"trailing_distance_pct", trailingDistancePct)
+			}
+
+			// Update win tracking for partial close
+			settingsManager := GetSettingsManager()
+			s := settingsManager.GetCurrentSettings()
+			s.UltraFastDailyPnL += partialPnL
+			s.UltraFastTotalPnL += partialPnL
+			settingsManager.SaveSettings(s)
+		}
+
+		// ============ EXIT PRIORITY 3: TP2 (1.0%) → Close 30% ============
+		if pos.UltraFastTP1Hit && !pos.UltraFastTP2Hit && pnlPercent >= tp2Pct {
+			partialPnL := ga.executeUltraFastPartialClose(pos, currentPrice, tp2ClosePct, 2, pnlPercent)
+			ga.logger.Info("Ultra-fast: TP2 HIT - closed 30%",
+				"symbol", pos.Symbol,
+				"tp2_pct", tp2Pct,
+				"current_pnl_pct", pnlPercent,
+				"partial_pnl_usd", partialPnL,
+				"remaining_qty", pos.RemainingQty)
+
+			// Update tracking
+			settingsManager := GetSettingsManager()
+			s := settingsManager.GetCurrentSettings()
+			s.UltraFastDailyPnL += partialPnL
+			s.UltraFastTotalPnL += partialPnL
+			settingsManager.SaveSettings(s)
+		}
+
+		// ============ EXIT PRIORITY 4: TP3 (2.0%) → Close remaining 30% ============
+		if pos.UltraFastTP2Hit && !pos.UltraFastTP3Hit && pnlPercent >= tp3Pct {
+			partialPnL := ga.executeUltraFastPartialClose(pos, currentPrice, 100.0, 3, pnlPercent) // Close all remaining
+			totalPnL := partialPnL + pos.RealizedPnL
+			ga.logger.Info("Ultra-fast: TP3 HIT - closed remaining, position complete",
+				"symbol", pos.Symbol,
+				"tp3_pct", tp3Pct,
+				"current_pnl_pct", pnlPercent,
+				"final_pnl_usd", totalPnL,
+				"total_closed", pos.UltraFastTotalClosed)
+
+			// Remove position from tracking
+			delete(ga.positions, pos.Symbol)
+			ga.dailyTrades++
+			ga.winningTrades++
+			ga.totalTrades++
+			continue
+		}
+
+		// ============ EXIT PRIORITY 5: TRAILING STOP HIT ============
+		if pos.UltraFastTrailingActive && ga.checkUltraFastTrailingStopHit(pos, currentPrice, trailingDistancePct) {
+			totalPnL := pnlUSD + pos.RealizedPnL
+			ga.logger.Info("Ultra-fast: TRAILING STOP HIT - closing remaining",
+				"symbol", pos.Symbol,
+				"highest_pnl_pct", pos.UltraFastHighestPnL,
+				"current_pnl_pct", pnlPercent,
+				"trailing_distance_pct", trailingDistancePct,
+				"total_pnl_usd", totalPnL)
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "trailing_stop_hit", totalPnL)
+			continue
+		}
+
+		// ============ EXIT PRIORITY 6: MIN PROFIT USD HIT ============
+		totalUnrealizedPnL := pnlUSD + pos.RealizedPnL
+		if totalUnrealizedPnL >= minProfitUSD && pos.RemainingQty > 0 {
+			ga.logger.Info("Ultra-fast: MIN PROFIT HIT - collecting profit",
+				"symbol", pos.Symbol,
+				"total_pnl_usd", totalUnrealizedPnL,
 				"min_profit_usd", minProfitUSD,
 				"pnl_pct", pnlPercent,
 				"hold_time_ms", holdTime.Milliseconds())
-			ga.executeUltraFastExitWithTracking(pos, currentPrice, "min_profit_hit", pnlUSD)
+			ga.executeUltraFastExitWithTracking(pos, currentPrice, "min_profit_hit", totalUnrealizedPnL)
 			continue
 		}
 
-		// Exit Condition 3: Profit target % hit → 100% PROFIT BOOKING (priority 3)
-		if pos.UltraFastTargetPercent > 0 && pnlPercent >= pos.UltraFastTargetPercent {
-			ga.logger.Info("Ultra-fast: Profit target hit - 100% profit booking - exiting",
-				"symbol", pos.Symbol,
-				"target_pct", pos.UltraFastTargetPercent,
-				"current_pnl_pct", pnlPercent,
-				"pnl_usd", pnlUSD,
-				"hold_time_ms", holdTime.Milliseconds())
-			ga.executeUltraFastExitWithTracking(pos, currentPrice, "target_hit", pnlUSD)
-			continue
-		}
-
-		// Exit Condition 4: Trailing stop triggered (priority 4)
-		if pos.TrailingActive && ga.checkTrailingStop(pos, currentPrice) {
-			ga.logger.Info("Ultra-fast: Trailing stop hit - exiting with profit protection",
-				"symbol", pos.Symbol,
-				"highest_price", pos.HighestPrice,
-				"current_price", currentPrice,
-				"trailing_pct", pos.TrailingPercent,
-				"pnl_usd", pnlUSD,
-				"pnl_pct", pnlPercent)
-			ga.executeUltraFastExitWithTracking(pos, currentPrice, "trailing_stop_hit", pnlUSD)
-			continue
-		}
-
-		// Update trailing stop if position is profitable (activate and trail upward)
-		if pnlPercent > 0 {
-			ga.updateUltraFastTrailingStop(pos, currentPrice)
-		}
-
-		// Exit Condition 5: In loss AND past hold time → Ask AI/LLM for decision
+		// ============ EXIT PRIORITY 7: TIMEOUT (only if in loss) ============
 		if pnlUSD < 0 && holdTime >= maxHoldDuration {
-			// Check if we should use LLM for loss decisions
-			if currentSettings.UltraFastUseLLMForLoss {
+			totalPnL := pnlUSD + pos.RealizedPnL
+			if settings.UltraFastUseLLMForLoss {
 				decision := ga.getUltraFastLossDecision(pos, currentPrice, pnlUSD, pnlPercent)
 				if decision == "average" {
-					// AI suggests averaging down - skip exit, will re-enter on next scan
-					ga.logger.Info("Ultra-fast: AI suggests AVERAGE DOWN - holding position",
+					ga.logger.Info("Ultra-fast: AI suggests AVERAGE DOWN - holding",
 						"symbol", pos.Symbol,
-						"pnl_usd", pnlUSD,
+						"pnl_usd", totalPnL,
 						"pnl_pct", pnlPercent,
 						"hold_time_ms", holdTime.Milliseconds())
 					continue
 				} else {
-					// AI suggests booking loss
-					ga.logger.Warn("Ultra-fast: AI suggests BOOK LOSS - closing position",
+					ga.logger.Warn("Ultra-fast: AI suggests BOOK LOSS - closing",
 						"symbol", pos.Symbol,
-						"pnl_usd", pnlUSD,
+						"pnl_usd", totalPnL,
 						"pnl_pct", pnlPercent,
 						"hold_time_ms", holdTime.Milliseconds())
-					ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_book_loss", pnlUSD)
+					ga.executeUltraFastExitWithTracking(pos, currentPrice, "ai_book_loss", totalPnL)
 					continue
 				}
 			} else {
-				// No LLM - just force exit on timeout
 				ga.logger.Warn("Ultra-fast: Force exit after timeout",
 					"symbol", pos.Symbol,
 					"hold_time_ms", holdTime.Milliseconds(),
 					"max_hold_ms", maxHoldMS,
-					"pnl_usd", pnlUSD,
+					"pnl_usd", totalPnL,
 					"pnl_pct", pnlPercent)
-				ga.executeUltraFastExitWithTracking(pos, currentPrice, "force_exit_timeout", pnlUSD)
+				ga.executeUltraFastExitWithTracking(pos, currentPrice, "force_exit_timeout", totalPnL)
 			}
 		}
 	}
@@ -11481,6 +11610,169 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 	}
 }
 
+// executeUltraFastPartialClose closes a portion of an ultra-fast position at a TP level
+// Returns the PnL USD from the partial close
+func (ga *GinieAutopilot) executeUltraFastPartialClose(pos *GiniePosition, currentPrice float64, closePercent float64, tpLevel int, pnlPercent float64) float64 {
+	symbol := pos.Symbol
+
+	// Calculate quantity to close (percentage of remaining)
+	closeQty := pos.RemainingQty * (closePercent / 100.0)
+	if closeQty <= 0 {
+		return 0
+	}
+
+	// Calculate PnL for this partial close
+	var pnlUSD, exitFeeUSD float64
+	if pos.Side == "LONG" {
+		pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
+		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+		pnlUSD = pnlBeforeFees - exitFeeUSD
+	} else {
+		pnlBeforeFees := (pos.EntryPrice - currentPrice) * closeQty
+		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+		pnlUSD = pnlBeforeFees - exitFeeUSD
+	}
+
+	ga.logger.Info("Ultra-fast: TIERED TP HIT - partial close",
+		"symbol", symbol,
+		"tp_level", tpLevel,
+		"close_percent", closePercent,
+		"close_qty", closeQty,
+		"remaining_qty", pos.RemainingQty-closeQty,
+		"pnl_pct", pnlPercent,
+		"pnl_usd", pnlUSD,
+		"hold_time_ms", time.Since(pos.EntryTime).Milliseconds())
+
+	if !ga.config.DryRun {
+		// Close partial position using LIMIT order
+		side := "SELL"
+		positionSide := binance.PositionSideLong
+		if pos.Side == "SHORT" {
+			side = "BUY"
+			positionSide = binance.PositionSideShort
+		}
+
+		effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
+		// Use LIMIT order at slightly worse price for guaranteed fill
+		limitPrice := currentPrice
+		if pos.Side == "LONG" {
+			limitPrice = currentPrice * 0.999 // 0.1% buffer below
+		} else {
+			limitPrice = currentPrice * 1.001 // 0.1% buffer above
+		}
+		limitPrice = roundPrice(symbol, limitPrice)
+
+		orderParams := binance.FuturesOrderParams{
+			Symbol:       symbol,
+			Side:         side,
+			PositionSide: effectivePositionSide,
+			Type:         binance.FuturesOrderTypeLimit,
+			Quantity:     closeQty,
+			Price:        limitPrice,
+		}
+
+		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
+		if err != nil {
+			// Fallback to MARKET order
+			errStr := err.Error()
+			if strings.Contains(errStr, "-1111") || strings.Contains(errStr, "-4014") ||
+				strings.Contains(errStr, "Precision") || strings.Contains(errStr, "tick size") {
+				marketParams := binance.FuturesOrderParams{
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: effectivePositionSide,
+					Type:         binance.FuturesOrderTypeMarket,
+					Quantity:     closeQty,
+				}
+				marketOrder, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
+				if marketErr != nil {
+					ga.logger.Error("Ultra-fast partial close MARKET order failed",
+						"symbol", symbol,
+						"tp_level", tpLevel,
+						"error", marketErr.Error())
+					return 0
+				}
+				ga.logger.Info("Ultra-fast partial close MARKET order placed",
+					"symbol", symbol,
+					"order_id", marketOrder.OrderId,
+					"tp_level", tpLevel)
+			} else {
+				ga.logger.Error("Ultra-fast partial close LIMIT order failed",
+					"symbol", symbol,
+					"tp_level", tpLevel,
+					"error", err.Error())
+				return 0
+			}
+		} else {
+			ga.logger.Info("Ultra-fast partial close LIMIT order placed",
+				"symbol", symbol,
+				"order_id", order.OrderId,
+				"tp_level", tpLevel)
+		}
+	}
+
+	// Update position tracking
+	pos.RemainingQty -= closeQty
+	pos.UltraFastTotalClosed += closePercent
+	pos.RealizedPnL += pnlUSD
+
+	// Mark TP level as hit
+	switch tpLevel {
+	case 1:
+		pos.UltraFastTP1Hit = true
+	case 2:
+		pos.UltraFastTP2Hit = true
+	case 3:
+		pos.UltraFastTP3Hit = true
+	}
+
+	// Record partial close trade
+	ga.recordTrade(GinieTradeResult{
+		Symbol:     symbol,
+		Action:     "partial_close",
+		Side:       pos.Side,
+		Quantity:   closeQty,
+		Price:      currentPrice,
+		PnL:        pnlUSD,
+		PnLPercent: pnlPercent,
+		Reason:     fmt.Sprintf("ultra_fast_tp%d_hit", tpLevel),
+		TPLevel:    tpLevel,
+		Timestamp:  time.Now(),
+		Mode:       GinieModeUltraFast,
+		Confidence: pos.UltraFastSignal.EntryConfidence,
+	})
+
+	// Update daily tracking
+	ga.dailyPnL += pnlUSD
+	ga.totalPnL += pnlUSD
+
+	return pnlUSD
+}
+
+// checkUltraFastTrailingStopHit checks if the trailing stop has been triggered
+// Returns true if price has pulled back from highest by trailingPct
+func (ga *GinieAutopilot) checkUltraFastTrailingStopHit(pos *GiniePosition, currentPrice float64, trailingPct float64) bool {
+	if !pos.UltraFastTrailingActive {
+		return false
+	}
+
+	if pos.Side == "LONG" {
+		// For LONG: trailing stop hit if price drops trailingPct from highest
+		if pos.UltraFastHighestPnL > 0 {
+			pullbackPct := ((pos.HighestPrice - currentPrice) / pos.HighestPrice) * 100
+			return pullbackPct >= trailingPct
+		}
+	} else {
+		// For SHORT: trailing stop hit if price rises trailingPct from lowest
+		if pos.UltraFastHighestPnL > 0 {
+			pullbackPct := ((currentPrice - pos.LowestPrice) / pos.LowestPrice) * 100
+			return pullbackPct >= trailingPct
+		}
+	}
+	return false
+}
+
 // executeUltraFastEntry opens an ultra-fast position with signal-derived parameters
 // Validates safety checks and applies fee-aware profit targets
 func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFastSignal) error {
@@ -11608,7 +11900,19 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 			"fill_qty", actualQty)
 	}
 
-	// Create ultra-fast position
+	// Calculate stop loss (1% from entry) - use mode config
+	stopLossPct := 1.0 // Default 1% SL
+	if modeConfig := currentSettings.ModeConfigs["ultra_fast"]; modeConfig != nil && modeConfig.SLTP != nil && modeConfig.SLTP.StopLossPercent > 0 {
+		stopLossPct = modeConfig.SLTP.StopLossPercent
+	}
+	var stopLoss float64
+	if signal.TrendBias == "LONG" {
+		stopLoss = actualPrice * (1 - stopLossPct/100)
+	} else {
+		stopLoss = actualPrice * (1 + stopLossPct/100)
+	}
+
+	// Create ultra-fast position with tiered TP tracking
 	position := &GiniePosition{
 		Symbol:                 symbol,
 		Side:                   signal.TrendBias,
@@ -11618,10 +11922,10 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 		RemainingQty:           actualQty,
 		Leverage:               leverage,
 		EntryTime:              time.Now(),
-		TakeProfits:            []GinieTakeProfitLevel{}, // Ultra-fast uses profit target, not multi-level TPs
+		TakeProfits:            []GinieTakeProfitLevel{}, // Ultra-fast uses tiered TPs now
 		CurrentTPLevel:         0,
-		StopLoss:               0, // SL managed by circuit breaker, not individual positions
-		OriginalSL:             0,
+		StopLoss:               stopLoss, // 1% SL for protection
+		OriginalSL:             stopLoss,
 		MovedToBreakeven:       false,
 		TrailingActive:         false,
 		HighestPrice:           actualPrice,
@@ -11632,6 +11936,14 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 		UltraFastTargetPercent: signal.MinProfitTarget,
 		MaxHoldTime:            3 * time.Second,
 		Protection:             NewProtectionStatus(), // Initialize protection tracking
+
+		// Tiered TP tracking fields (NEW)
+		UltraFastTP1Hit:         false,
+		UltraFastTP2Hit:         false,
+		UltraFastTP3Hit:         false,
+		UltraFastTotalClosed:    0,
+		UltraFastHighestPnL:     0,
+		UltraFastTrailingActive: false,
 	}
 
 	ga.positions[symbol] = position
@@ -11795,7 +12107,19 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 			"position_usd", positionUSD)
 	}
 
-	// Create ultra-fast position
+	// Calculate stop loss (1% from entry) - use mode config
+	stopLossPct := 1.0 // Default 1% SL
+	if modeConfig := currentSettings.ModeConfigs["ultra_fast"]; modeConfig != nil && modeConfig.SLTP != nil && modeConfig.SLTP.StopLossPercent > 0 {
+		stopLossPct = modeConfig.SLTP.StopLossPercent
+	}
+	var stopLoss float64
+	if signal.TrendBias == "LONG" {
+		stopLoss = actualPrice * (1 - stopLossPct/100)
+	} else {
+		stopLoss = actualPrice * (1 + stopLossPct/100)
+	}
+
+	// Create ultra-fast position with tiered TP tracking
 	position := &GiniePosition{
 		Symbol:                 symbol,
 		Side:                   signal.TrendBias,
@@ -11805,10 +12129,10 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 		RemainingQty:           actualQty,
 		Leverage:               leverage,
 		EntryTime:              time.Now(),
-		TakeProfits:            []GinieTakeProfitLevel{},
+		TakeProfits:            []GinieTakeProfitLevel{}, // Ultra-fast uses tiered TPs now
 		CurrentTPLevel:         0,
-		StopLoss:               0,
-		OriginalSL:             0,
+		StopLoss:               stopLoss, // 1% SL for protection
+		OriginalSL:             stopLoss,
 		MovedToBreakeven:       false,
 		TrailingActive:         false,
 		HighestPrice:           actualPrice,
@@ -11819,6 +12143,14 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 		UltraFastTargetPercent: signal.MinProfitTarget,
 		MaxHoldTime:            3 * time.Second,
 		Protection:             NewProtectionStatus(),
+
+		// Tiered TP tracking fields (NEW)
+		UltraFastTP1Hit:         false,
+		UltraFastTP2Hit:         false,
+		UltraFastTP3Hit:         false,
+		UltraFastTotalClosed:    0,
+		UltraFastHighestPnL:     0,
+		UltraFastTrailingActive: false,
 	}
 
 	ga.positions[symbol] = position

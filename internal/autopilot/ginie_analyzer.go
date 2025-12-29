@@ -191,15 +191,25 @@ type VolatilityRegime struct {
 
 // UltraFastSignal represents a multi-layer signal for ultra-fast scalping
 type UltraFastSignal struct {
-	Symbol           string              `json:"symbol"`
-	TrendBias        string              `json:"trend_bias"`         // LONG, SHORT, NEUTRAL
-	TrendStrength    float64             `json:"trend_strength"`     // 0-100
-	VolatilityRegime *VolatilityRegime   `json:"volatility_regime"`
-	EntryConfidence  float64             `json:"entry_confidence"`   // 0-100
-	MinProfitTarget  float64             `json:"min_profit_target"`  // % (fee + ATR buffer)
-	MaxHoldTime      time.Duration       `json:"max_hold_time"`      // Maximum time to hold
-	SignalTime       time.Time           `json:"signal_time"`        // When signal was generated
-	GeneratedAt      time.Time           `json:"generated_at"`
+	Symbol           string            `json:"symbol"`
+	TrendBias        string            `json:"trend_bias"`        // LONG, SHORT, NEUTRAL
+	TrendStrength    float64           `json:"trend_strength"`    // 0-100
+	VolatilityRegime *VolatilityRegime `json:"volatility_regime"`
+	EntryConfidence  float64           `json:"entry_confidence"`  // 0-100
+	MinProfitTarget  float64           `json:"min_profit_target"` // % (fee + ATR buffer)
+	MaxHoldTime      time.Duration     `json:"max_hold_time"`     // Maximum time to hold
+	SignalTime       time.Time         `json:"signal_time"`       // When signal was generated
+	GeneratedAt      time.Time         `json:"generated_at"`
+
+	// Signal quality filter results
+	VolumeConfirmed     bool     `json:"volume_confirmed"`      // Volume > threshold
+	VolumeMultiplier    float64  `json:"volume_multiplier"`     // Actual volume/avg ratio
+	MomentumStrength    float64  `json:"momentum_strength"`     // Price momentum %
+	MomentumConfirmed   bool     `json:"momentum_confirmed"`    // Meets momentum threshold
+	AvgCandleBodyPct    float64  `json:"avg_candle_body_pct"`   // Avg body size of entry candles
+	CandleBodyConfirmed bool     `json:"candle_body_confirmed"` // Meets body size threshold
+	FiltersApplied      []string `json:"filters_applied"`       // List of filters that passed
+	FiltersFailed       []string `json:"filters_failed"`        // List of filters that failed
 }
 
 // LoadLLMSelectedCoins asks DeepSeek to provide 100 coins based on market criteria
@@ -768,6 +778,21 @@ func (g *GinieAnalyzer) ScanCoin(symbol string) (*GinieCoinScan, error) {
 	// 2. Volatility Profile
 	scan.Volatility = g.analyzeVolatility(klines)
 
+	// Add 24h volatility from ticker for mode selection
+	if ticker.PriceChangePercent != 0 {
+		// Absolute value of 24h price change
+		priceChange := ticker.PriceChangePercent
+		if priceChange < 0 {
+			priceChange = -priceChange
+		}
+		scan.Volatility.PriceChange24h = priceChange
+
+		// Calculate 24h high-low range
+		if ticker.LowPrice > 0 {
+			scan.Volatility.HighLowRange24h = ((ticker.HighPrice - ticker.LowPrice) / ticker.LowPrice) * 100
+		}
+	}
+
 	// 3. Trend Health
 	scan.Trend = g.analyzeTrend(klines, "1h")
 
@@ -776,6 +801,9 @@ func (g *GinieAnalyzer) ScanCoin(symbol string) (*GinieCoinScan, error) {
 
 	// 5. Correlation Check (simplified - would need BTC data)
 	scan.Correlation = g.analyzeCorrelation(symbol)
+
+	// 6. Price Action Analysis (FVG and Order Blocks)
+	scan.PriceAction = g.analyzePriceAction(klines, price, "")
 
 	// Calculate overall score and determine status
 	g.calculateScanScore(scan)
@@ -1057,20 +1085,41 @@ func (g *GinieAnalyzer) calculateScanScore(scan *GinieCoinScan) {
 		return
 	}
 
-	// Determine best mode
-	if scan.Trend.IsRanging && scan.Volatility.ATRRatio > 1.0 && scan.Liquidity.PassedScalp {
+	// Determine best mode using 24h volatility-based routing
+	// Priority: Volatility-based selection first, then ADX refinement
+	volatility24h := scan.Volatility.HighLowRange24h // Use high-low range for better volatility measure
+	if volatility24h == 0 {
+		volatility24h = scan.Volatility.PriceChange24h // Fallback to price change
+	}
+
+	// === VOLATILITY-BASED MODE SELECTION ===
+	// Ultra-fast: High volatility coins (30%+ 24h range) - quick in/out trades
+	// Scalp: Moderate volatility (10-30% 24h range) - short-term momentum
+	// Swing: Low-moderate volatility (5-15% 24h range) - trend following
+	// Position: Stable coins (<10% 24h range) - long-term holds
+
+	if volatility24h >= 30 && scan.Liquidity.PassedScalp {
+		// High volatility = Ultra-fast mode (quick scalps on volatile moves)
+		scan.Status = ScanStatusUltraFastReady
+		scan.TradeReady = true
+		scan.Reason = fmt.Sprintf("High volatility (%.1f%% 24h) - ideal for ultra-fast scalping", volatility24h)
+	} else if volatility24h >= 10 && volatility24h < 30 && scan.Liquidity.PassedScalp {
+		// Moderate volatility = Scalp mode
 		scan.Status = ScanStatusScalpReady
 		scan.TradeReady = true
-		scan.Reason = "Ranging market with good volatility - ideal for scalping"
-	} else if scan.Trend.IsTrending && scan.Trend.ADXValue >= 25 && scan.Trend.ADXValue <= 45 {
-		scan.Status = ScanStatusSwingReady
-		scan.TradeReady = true
-		scan.Reason = "Clear trend with moderate ADX - ideal for swing trading"
-	} else if scan.Trend.IsTrending && scan.Trend.ADXValue > 35 && scan.Trend.MTFAlignment {
+		scan.Reason = fmt.Sprintf("Moderate volatility (%.1f%% 24h) - ideal for scalping", volatility24h)
+	} else if volatility24h < 10 && scan.Trend.IsTrending && scan.Trend.ADXValue > 35 && scan.Trend.MTFAlignment {
+		// Stable + strong trend + MTF alignment = Position mode
 		scan.Status = ScanStatusPositionReady
 		scan.TradeReady = true
-		scan.Reason = "Strong trend with MTF alignment - ideal for position trading"
+		scan.Reason = fmt.Sprintf("Stable coin (%.1f%% 24h) with strong trend - ideal for position trading", volatility24h)
+	} else if volatility24h >= 5 && volatility24h < 15 && scan.Trend.IsTrending && scan.Trend.ADXValue >= 25 {
+		// Low-moderate volatility with trend = Swing mode
+		scan.Status = ScanStatusSwingReady
+		scan.TradeReady = true
+		scan.Reason = fmt.Sprintf("Low volatility (%.1f%% 24h) with trend - ideal for swing trading", volatility24h)
 	} else if scan.Volatility.Regime == "Extreme" || score < 40 {
+		// Extreme conditions
 		scan.Status = ScanStatusHedgeRequired
 		scan.TradeReady = true
 		scan.Reason = "High risk environment - hedge recommended"
@@ -1079,20 +1128,25 @@ func (g *GinieAnalyzer) calculateScanScore(scan *GinieCoinScan) {
 		scan.TradeReady = false
 		scan.Reason = "Poor trading conditions"
 	} else {
+		// Default to swing for anything else that passes liquidity
 		scan.Status = ScanStatusSwingReady
 		scan.TradeReady = true
-		scan.Reason = "Acceptable conditions for swing trading"
+		scan.Reason = fmt.Sprintf("Acceptable conditions (%.1f%% 24h volatility) - swing trading", volatility24h)
 	}
 }
 
-// SelectMode determines the best trading mode
+// SelectMode determines the best trading mode based on 24h volatility scan
 func (g *GinieAnalyzer) SelectMode(scan *GinieCoinScan) GinieTradingMode {
-	// Auto-select based on scan results
+	// Auto-select based on scan results (volatility-based)
 	switch scan.Status {
+	case ScanStatusUltraFastReady:
+		return GinieModeUltraFast
 	case ScanStatusScalpReady:
 		return GinieModeScalp
 	case ScanStatusPositionReady:
 		return GinieModePosition
+	case ScanStatusSwingReady:
+		return GinieModeSwing
 	default:
 		return GinieModeSwing
 	}
@@ -1113,6 +1167,12 @@ func (g *GinieAnalyzer) GenerateSignals(symbol string, mode GinieTradingMode, kl
 	currentPrice := klines[len(klines)-1].Close
 
 	switch mode {
+	case GinieModeUltraFast:
+		// Ultra-fast uses faster signals for high volatility coins
+		signalSet.PrimaryTimeframe = "1m"
+		signalSet.ConfirmTimeframe = "5m"
+		signalSet.PrimaryRequired = 2 // Lower requirement for quick entries
+		g.generateScalpSignals(signalSet, klines, currentPrice) // Reuse scalp signals
 	case GinieModeScalp:
 		signalSet.PrimaryTimeframe = "1m"
 		signalSet.ConfirmTimeframe = "15m"
@@ -1362,11 +1422,11 @@ func (g *GinieAnalyzer) generateSwingSignals(ss *GinieSignalSet, klines []binanc
 	// ADX/DMI Signal
 	adxSignal := GinieSignal{
 		Name:      "ADX/DMI Trend",
-		Weight:    0.2,
+		Weight:    0.25,
 		Value:     adx,
-		Threshold: 25,
+		Threshold: 30,
 	}
-	if adx > 25 {
+	if adx > 30 {
 		adxSignal.Met = true
 		if plusDI > minusDI {
 			adxSignal.Status = "met"
@@ -1805,6 +1865,19 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		report.TradeExecution.PositionPct = float64(positionPct)
 		report.TradeExecution.Leverage = leverage
 
+		// Calculate AI/LLM suggested position size
+		// This provides an AI-driven sizing recommendation based on market conditions
+		llmSizeUSD, llmSizeReasoning := g.calculateLLMPositionSize(
+			symbol,
+			mode,
+			report.ConfidenceScore,
+			scan.Volatility.Regime,
+			atrPct,
+			scan.Trend.TrendDirection,
+		)
+		report.TradeExecution.LLMSuggestedSizeUSD = llmSizeUSD
+		report.TradeExecution.LLMSizeReasoning = llmSizeReasoning
+
 		// Calculate ATR-based SL/TP
 		atrSLPct := atrPct * baseSLMultiplier
 		atrTPPct := atrPct * baseTPMultiplier
@@ -1917,11 +1990,11 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		var adxThreshold float64
 		switch mode {
 		case GinieModeScalp:
-			adxThreshold = 30
-		case GinieModeSwing:
-			adxThreshold = 20
-		case GinieModePosition:
 			adxThreshold = 25
+		case GinieModeSwing:
+			adxThreshold = 30
+		case GinieModePosition:
+			adxThreshold = 35
 		default:
 			adxThreshold = 20
 		}
@@ -2081,6 +2154,56 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 					"trend", trendAnalysis.TrendDirection,
 					"confidence", report.ConfidenceScore)
 			}
+		}
+	}
+
+	// === FVG/ORDER BLOCK CONFLUENCE BOOST ===
+	// Apply confidence boost/penalty based on price action confluence
+	priceActionBoost := 0.0
+	if signals.Direction == "long" && scan.PriceAction.HasBullishSetup {
+		// Bullish setup aligns with long signal
+		priceActionBoost = scan.PriceAction.ConfluenceScore * 0.15 // Up to +15 confidence
+		if scan.PriceAction.FVG.InFVGZone && scan.PriceAction.FVG.FVGZoneType == "bullish" {
+			priceActionBoost += 5 // Extra boost for being in FVG zone
+		}
+		if scan.PriceAction.OrderBlocks.InOBZone && scan.PriceAction.OrderBlocks.OBZoneType == "bullish" {
+			priceActionBoost += 5 // Extra boost for being in OB zone
+		}
+	} else if signals.Direction == "short" && scan.PriceAction.HasBearishSetup {
+		// Bearish setup aligns with short signal
+		priceActionBoost = scan.PriceAction.ConfluenceScore * 0.15
+		if scan.PriceAction.FVG.InFVGZone && scan.PriceAction.FVG.FVGZoneType == "bearish" {
+			priceActionBoost += 5
+		}
+		if scan.PriceAction.OrderBlocks.InOBZone && scan.PriceAction.OrderBlocks.OBZoneType == "bearish" {
+			priceActionBoost += 5
+		}
+	} else if (signals.Direction == "long" && scan.PriceAction.HasBearishSetup) ||
+		(signals.Direction == "short" && scan.PriceAction.HasBullishSetup) {
+		// Price action setup contradicts signal - apply penalty
+		priceActionBoost = -10
+	}
+
+	if priceActionBoost != 0 {
+		oldConfidence := report.ConfidenceScore
+		report.ConfidenceScore += priceActionBoost
+		if report.ConfidenceScore > 100 {
+			report.ConfidenceScore = 100
+		}
+		if report.ConfidenceScore < 0 {
+			report.ConfidenceScore = 0
+		}
+
+		if g.logger != nil {
+			g.logger.Debug("Price action confluence applied",
+				"symbol", symbol,
+				"fvg_zone", scan.PriceAction.FVG.InFVGZone,
+				"ob_zone", scan.PriceAction.OrderBlocks.InOBZone,
+				"confluence_score", scan.PriceAction.ConfluenceScore,
+				"setup_quality", scan.PriceAction.SetupQuality,
+				"boost", priceActionBoost,
+				"old_confidence", oldConfidence,
+				"new_confidence", report.ConfidenceScore)
 		}
 	}
 
@@ -3418,5 +3541,703 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 	// Set max hold time to 3 seconds for ultra-fast
 	signal.MaxHoldTime = 3 * time.Second
 
+	// Apply signal quality filters
+	g.applyUltraFastQualityFilters(signal, klines1m)
+
 	return signal, nil
+}
+
+// applyUltraFastQualityFilters applies volume, momentum, and candle body filters to the signal
+func (g *GinieAnalyzer) applyUltraFastQualityFilters(signal *UltraFastSignal, klines1m []binance.Kline) {
+	settings := GetSettingsManager().GetCurrentSettings()
+	filtersApplied := []string{}
+	filtersFailed := []string{}
+
+	// Volume Confirmation Filter
+	if settings.UltraFastVolumeFilterEnabled {
+		threshold := settings.UltraFastVolumeMultiplier
+		if threshold <= 0 {
+			threshold = 1.5
+		}
+		confirmed, multiplier := g.checkUltraFastVolumeConfirmation(klines1m, threshold)
+		signal.VolumeMultiplier = multiplier
+		signal.VolumeConfirmed = confirmed
+		if confirmed {
+			filtersApplied = append(filtersApplied, fmt.Sprintf("Volume:%.2fx", multiplier))
+		} else {
+			filtersFailed = append(filtersFailed, fmt.Sprintf("Volume:%.2fx<%.2fx", multiplier, threshold))
+		}
+	} else {
+		signal.VolumeConfirmed = true // Disabled = always pass
+	}
+
+	// Momentum Strength Filter
+	if settings.UltraFastMomentumFilterEnabled {
+		minMomentum := settings.UltraFastMinMomentum
+		if minMomentum <= 0 {
+			minMomentum = 0.05
+		}
+		confirmed, momentum := g.checkUltraFastMomentumStrength(klines1m, minMomentum)
+		signal.MomentumStrength = momentum
+		signal.MomentumConfirmed = confirmed
+		if confirmed {
+			filtersApplied = append(filtersApplied, fmt.Sprintf("Momentum:%.3f%%", momentum))
+		} else {
+			filtersFailed = append(filtersFailed, fmt.Sprintf("Momentum:%.3f%%<%.3f%%", momentum, minMomentum))
+		}
+	} else {
+		signal.MomentumConfirmed = true // Disabled = always pass
+	}
+
+	// Candle Body Size Filter
+	if settings.UltraFastCandleBodyFilterEnabled {
+		minBodyPct := settings.UltraFastMinCandleBodyPct
+		if minBodyPct <= 0 {
+			minBodyPct = 0.1
+		}
+		confirmed, avgBody := g.checkUltraFastCandleBodySize(klines1m, minBodyPct, 3)
+		signal.AvgCandleBodyPct = avgBody
+		signal.CandleBodyConfirmed = confirmed
+		if confirmed {
+			filtersApplied = append(filtersApplied, fmt.Sprintf("Body:%.3f%%", avgBody))
+		} else {
+			filtersFailed = append(filtersFailed, fmt.Sprintf("Body:%.3f%%<%.3f%%", avgBody, minBodyPct))
+		}
+	} else {
+		signal.CandleBodyConfirmed = true // Disabled = always pass
+	}
+
+	// Trend strength filter
+	minTrendStrength := settings.UltraFastMinTrendStrength
+	if minTrendStrength <= 0 {
+		minTrendStrength = 60.0
+	}
+	if signal.TrendStrength >= minTrendStrength {
+		filtersApplied = append(filtersApplied, fmt.Sprintf("Trend:%.1f", signal.TrendStrength))
+	} else {
+		filtersFailed = append(filtersFailed, fmt.Sprintf("Trend:%.1f<%.1f", signal.TrendStrength, minTrendStrength))
+	}
+
+	signal.FiltersApplied = filtersApplied
+	signal.FiltersFailed = filtersFailed
+
+	// Reduce confidence based on failed filters (10% penalty per failed filter)
+	if len(filtersFailed) > 0 {
+		penalty := float64(len(filtersFailed)) * 10.0
+		signal.EntryConfidence -= penalty
+		if signal.EntryConfidence < 0 {
+			signal.EntryConfidence = 0
+		}
+	}
+}
+
+// checkUltraFastVolumeConfirmation checks if 1m volume is above threshold
+// Returns (confirmed bool, volumeMultiplier float64)
+func (g *GinieAnalyzer) checkUltraFastVolumeConfirmation(klines1m []binance.Kline, threshold float64) (bool, float64) {
+	if len(klines1m) < 6 {
+		return false, 0
+	}
+
+	// Current candle volume
+	currentVolume := klines1m[len(klines1m)-1].Volume
+
+	// Calculate average of previous 5 candles
+	avgVolume := 0.0
+	for i := len(klines1m) - 6; i < len(klines1m)-1; i++ {
+		avgVolume += klines1m[i].Volume
+	}
+	avgVolume /= 5
+
+	if avgVolume == 0 {
+		return false, 0
+	}
+
+	multiplier := currentVolume / avgVolume
+	return multiplier >= threshold, multiplier
+}
+
+// checkUltraFastMomentumStrength calculates price momentum from recent 1m candles
+// Returns (confirmed bool, momentumPct float64)
+func (g *GinieAnalyzer) checkUltraFastMomentumStrength(klines1m []binance.Kline, minMomentumPct float64) (bool, float64) {
+	if len(klines1m) < 3 {
+		return false, 0
+	}
+
+	// Calculate momentum as % change over last 3 candles
+	startPrice := klines1m[len(klines1m)-3].Open
+	endPrice := klines1m[len(klines1m)-1].Close
+
+	if startPrice == 0 {
+		return false, 0
+	}
+
+	momentumPct := math.Abs((endPrice-startPrice)/startPrice) * 100
+	return momentumPct >= minMomentumPct, momentumPct
+}
+
+// checkUltraFastCandleBodySize validates candles have sufficient body (not doji)
+// Returns (confirmed bool, avgBodyPct float64)
+func (g *GinieAnalyzer) checkUltraFastCandleBodySize(klines1m []binance.Kline, minBodyPct float64, count int) (bool, float64) {
+	if len(klines1m) < count {
+		return false, 0
+	}
+
+	totalBodyPct := 0.0
+	validCount := 0
+
+	// Check last 'count' candles
+	for i := len(klines1m) - count; i < len(klines1m); i++ {
+		k := klines1m[i]
+		if k.Open == 0 {
+			continue
+		}
+		bodyPct := math.Abs((k.Close-k.Open)/k.Open) * 100
+		totalBodyPct += bodyPct
+		validCount++
+	}
+
+	if validCount == 0 {
+		return false, 0
+	}
+
+	avgBodyPct := totalBodyPct / float64(validCount)
+	return avgBodyPct >= minBodyPct, avgBodyPct
+}
+
+// calculateLLMPositionSize calculates an AI-suggested position size based on market conditions
+// This considers volatility, confidence, mode, and market sentiment to suggest optimal sizing
+// Returns (suggestedSizeUSD float64, reasoning string)
+func (g *GinieAnalyzer) calculateLLMPositionSize(symbol string, mode GinieTradingMode, confidence float64, volatility string, atrPct float64, sentiment string) (float64, string) {
+	// Get mode-specific base size from settings
+	var baseSizeUSD float64 = 50.0 // Default
+	var maxSizeUSD float64 = 100.0 // Default max
+
+	if g.settings != nil {
+		modeKey := string(mode)
+		if modeConfig, ok := g.settings.ModeConfigs[modeKey]; ok && modeConfig != nil && modeConfig.Size != nil {
+			if modeConfig.Size.BaseSizeUSD > 0 {
+				baseSizeUSD = modeConfig.Size.BaseSizeUSD
+			}
+			if modeConfig.Size.MaxSizeUSD > 0 {
+				maxSizeUSD = modeConfig.Size.MaxSizeUSD
+			}
+		}
+	}
+
+	// AI-driven size calculation factors:
+	// 1. Volatility adjustment (high vol = smaller size)
+	volMultiplier := 1.0
+	switch volatility {
+	case "Low":
+		volMultiplier = 1.2 // Can be more aggressive in low vol
+	case "Medium":
+		volMultiplier = 1.0 // Standard
+	case "High":
+		volMultiplier = 0.7 // Reduce size in high vol
+	case "Extreme":
+		volMultiplier = 0.4 // Significantly reduce in extreme vol
+	}
+
+	// 2. Confidence adjustment (higher confidence = larger size)
+	// Scale: 50% conf = 0.7x, 70% = 1.0x, 90% = 1.3x
+	confMultiplier := 0.5 + (confidence / 100.0 * 0.8)
+	if confMultiplier > 1.5 {
+		confMultiplier = 1.5
+	}
+
+	// 3. Sentiment adjustment
+	sentMultiplier := 1.0
+	switch sentiment {
+	case "strongly_bullish", "strongly_bearish":
+		sentMultiplier = 1.1 // Slight boost when sentiment aligns
+	case "bullish", "bearish":
+		sentMultiplier = 1.0
+	case "neutral", "mixed":
+		sentMultiplier = 0.9 // Slightly reduce when unclear
+	}
+
+	// 4. ATR-based volatility fine-tuning
+	// If ATR% > 3%, reduce size; if < 1%, increase slightly
+	atrMultiplier := 1.0
+	if atrPct > 5.0 {
+		atrMultiplier = 0.5 // Very volatile
+	} else if atrPct > 3.0 {
+		atrMultiplier = 0.7
+	} else if atrPct > 2.0 {
+		atrMultiplier = 0.85
+	} else if atrPct < 1.0 {
+		atrMultiplier = 1.15 // Low volatility, can size up
+	}
+
+	// Calculate final size
+	suggestedSize := baseSizeUSD * volMultiplier * confMultiplier * sentMultiplier * atrMultiplier
+
+	// Ensure within bounds
+	if suggestedSize < 10.0 {
+		suggestedSize = 10.0 // Minimum viable size
+	}
+	if suggestedSize > maxSizeUSD {
+		suggestedSize = maxSizeUSD
+	}
+
+	// Build reasoning string
+	reasoning := fmt.Sprintf("AI sizing: base=$%.0f, vol=%s(%.2fx), conf=%.0f%%(%.2fx), sent=%s(%.2fx), atr=%.1f%%(%.2fx) → $%.2f",
+		baseSizeUSD, volatility, volMultiplier, confidence, confMultiplier, sentiment, sentMultiplier, atrPct, atrMultiplier, suggestedSize)
+
+	if g.logger != nil {
+		g.logger.Debug("LLM position size calculated",
+			"symbol", symbol,
+			"mode", mode,
+			"base_size_usd", baseSizeUSD,
+			"vol_multiplier", volMultiplier,
+			"conf_multiplier", confMultiplier,
+			"sent_multiplier", sentMultiplier,
+			"atr_multiplier", atrMultiplier,
+			"suggested_size_usd", suggestedSize)
+	}
+
+	return suggestedSize, reasoning
+}
+
+// detectFairValueGaps identifies Fair Value Gaps (FVGs) in price action
+// FVG occurs when candle 2's body doesn't overlap with candle 1 and candle 3's wicks
+// Bullish FVG: gap between candle 1 high and candle 3 low (price should fill up)
+// Bearish FVG: gap between candle 1 low and candle 3 high (price should fill down)
+func (g *GinieAnalyzer) detectFairValueGaps(klines []binance.Kline, currentPrice float64) FVGAnalysis {
+	analysis := FVGAnalysis{
+		BullishFVGs: []FairValueGap{},
+		BearishFVGs: []FairValueGap{},
+	}
+
+	if len(klines) < 3 {
+		return analysis
+	}
+
+	// Look at last 50 candles for FVGs
+	lookback := 50
+	if len(klines) < lookback {
+		lookback = len(klines)
+	}
+
+	for i := lookback - 1; i >= 2; i-- {
+		candle1 := klines[i-2] // First candle
+		candle2 := klines[i-1] // Middle candle (the big move)
+		candle3 := klines[i]   // Third candle
+
+		// Check for Bullish FVG: gap between candle1 high and candle3 low
+		if candle3.Low > candle1.High {
+			gapSize := candle3.Low - candle1.High
+			gapPercent := (gapSize / currentPrice) * 100
+			midPrice := (candle3.Low + candle1.High) / 2
+
+			// Only consider significant gaps (> 0.1%)
+			if gapPercent > 0.1 {
+				fvg := FairValueGap{
+					Type:        "bullish",
+					TopPrice:    candle3.Low,
+					BottomPrice: candle1.High,
+					MidPrice:    midPrice,
+					GapSize:     gapSize,
+					GapPercent:  gapPercent,
+					CandleIndex: i,
+					Timestamp:   time.Unix(candle2.OpenTime/1000, 0),
+					Filled:      currentPrice <= candle1.High, // Price has come back to fill
+					Tested:      currentPrice >= candle1.High && currentPrice <= candle3.Low,
+					Strength:    g.classifyFVGStrength(gapPercent),
+				}
+				analysis.BullishFVGs = append(analysis.BullishFVGs, fvg)
+			}
+		}
+
+		// Check for Bearish FVG: gap between candle1 low and candle3 high
+		if candle3.High < candle1.Low {
+			gapSize := candle1.Low - candle3.High
+			gapPercent := (gapSize / currentPrice) * 100
+			midPrice := (candle1.Low + candle3.High) / 2
+
+			// Only consider significant gaps (> 0.1%)
+			if gapPercent > 0.1 {
+				fvg := FairValueGap{
+					Type:        "bearish",
+					TopPrice:    candle1.Low,
+					BottomPrice: candle3.High,
+					MidPrice:    midPrice,
+					GapSize:     gapSize,
+					GapPercent:  gapPercent,
+					CandleIndex: i,
+					Timestamp:   time.Unix(candle2.OpenTime/1000, 0),
+					Filled:      currentPrice >= candle1.Low, // Price has come back to fill
+					Tested:      currentPrice <= candle1.Low && currentPrice >= candle3.High,
+					Strength:    g.classifyFVGStrength(gapPercent),
+				}
+				analysis.BearishFVGs = append(analysis.BearishFVGs, fvg)
+			}
+		}
+	}
+
+	// Find nearest unfilled FVGs to current price
+	for i := range analysis.BullishFVGs {
+		if !analysis.BullishFVGs[i].Filled {
+			if analysis.NearestBullish == nil ||
+				analysis.BullishFVGs[i].TopPrice > analysis.NearestBullish.TopPrice {
+				fvg := analysis.BullishFVGs[i]
+				analysis.NearestBullish = &fvg
+			}
+		}
+	}
+
+	for i := range analysis.BearishFVGs {
+		if !analysis.BearishFVGs[i].Filled {
+			if analysis.NearestBearish == nil ||
+				analysis.BearishFVGs[i].BottomPrice < analysis.NearestBearish.BottomPrice {
+				fvg := analysis.BearishFVGs[i]
+				analysis.NearestBearish = &fvg
+			}
+		}
+	}
+
+	// Count unfilled FVGs
+	for _, fvg := range analysis.BullishFVGs {
+		if !fvg.Filled {
+			analysis.TotalUnfilled++
+		}
+	}
+	for _, fvg := range analysis.BearishFVGs {
+		if !fvg.Filled {
+			analysis.TotalUnfilled++
+		}
+	}
+
+	// Check if current price is in an FVG zone
+	for _, fvg := range analysis.BullishFVGs {
+		if !fvg.Filled && currentPrice >= fvg.BottomPrice && currentPrice <= fvg.TopPrice {
+			analysis.InFVGZone = true
+			analysis.FVGZoneType = "bullish"
+			break
+		}
+	}
+	if !analysis.InFVGZone {
+		for _, fvg := range analysis.BearishFVGs {
+			if !fvg.Filled && currentPrice >= fvg.BottomPrice && currentPrice <= fvg.TopPrice {
+				analysis.InFVGZone = true
+				analysis.FVGZoneType = "bearish"
+				break
+			}
+		}
+	}
+
+	return analysis
+}
+
+// classifyFVGStrength classifies FVG strength based on gap percentage
+func (g *GinieAnalyzer) classifyFVGStrength(gapPercent float64) string {
+	if gapPercent > 1.0 {
+		return "strong"
+	} else if gapPercent > 0.5 {
+		return "medium"
+	}
+	return "weak"
+}
+
+// detectOrderBlocks identifies Order Blocks in price action
+// Bullish OB: Last bearish candle before a strong bullish move (demand zone)
+// Bearish OB: Last bullish candle before a strong bearish move (supply zone)
+func (g *GinieAnalyzer) detectOrderBlocks(klines []binance.Kline, currentPrice float64) OrderBlockAnalysis {
+	analysis := OrderBlockAnalysis{
+		BullishOBs: []OrderBlock{},
+		BearishOBs: []OrderBlock{},
+	}
+
+	if len(klines) < 5 {
+		return analysis
+	}
+
+	// Look at last 100 candles for Order Blocks
+	lookback := 100
+	if len(klines) < lookback {
+		lookback = len(klines)
+	}
+
+	// Threshold for "strong move" - at least 1% move in following candles
+	strongMoveThreshold := 1.0
+
+	for i := lookback - 1; i >= 3; i-- {
+		candle := klines[i]
+		isBullish := candle.Close > candle.Open
+		isBearish := candle.Close < candle.Open
+
+		// Calculate the subsequent move (next 3 candles)
+		maxHigh := candle.High
+		minLow := candle.Low
+		for j := i + 1; j < i+4 && j < len(klines); j++ {
+			if klines[j].High > maxHigh {
+				maxHigh = klines[j].High
+			}
+			if klines[j].Low < minLow {
+				minLow = klines[j].Low
+			}
+		}
+
+		// Check for Bullish Order Block (bearish candle before bullish move)
+		if isBearish {
+			moveUp := ((maxHigh - candle.High) / candle.High) * 100
+			if moveUp >= strongMoveThreshold {
+				ob := OrderBlock{
+					Type:        "bullish",
+					HighPrice:   candle.High,
+					LowPrice:    candle.Low,
+					MidPrice:    (candle.High + candle.Low) / 2,
+					OpenPrice:   candle.Open,
+					ClosePrice:  candle.Close,
+					Volume:      candle.Volume,
+					CandleIndex: i,
+					Timestamp:   time.Unix(candle.OpenTime/1000, 0),
+					Mitigated:   currentPrice < candle.Low, // Price has gone through the OB
+					Tested:      currentPrice >= candle.Low && currentPrice <= candle.High,
+					Strength:    g.classifyOBStrength(moveUp),
+					MovePercent: moveUp,
+				}
+				// Count tests (how many times price touched this zone)
+				for j := i + 1; j < len(klines); j++ {
+					if klines[j].Low <= candle.High && klines[j].High >= candle.Low {
+						ob.TestCount++
+					}
+				}
+				analysis.BullishOBs = append(analysis.BullishOBs, ob)
+			}
+		}
+
+		// Check for Bearish Order Block (bullish candle before bearish move)
+		if isBullish {
+			moveDown := ((candle.Low - minLow) / candle.Low) * 100
+			if moveDown >= strongMoveThreshold {
+				ob := OrderBlock{
+					Type:        "bearish",
+					HighPrice:   candle.High,
+					LowPrice:    candle.Low,
+					MidPrice:    (candle.High + candle.Low) / 2,
+					OpenPrice:   candle.Open,
+					ClosePrice:  candle.Close,
+					Volume:      candle.Volume,
+					CandleIndex: i,
+					Timestamp:   time.Unix(candle.OpenTime/1000, 0),
+					Mitigated:   currentPrice > candle.High, // Price has gone through the OB
+					Tested:      currentPrice >= candle.Low && currentPrice <= candle.High,
+					Strength:    g.classifyOBStrength(moveDown),
+					MovePercent: moveDown,
+				}
+				// Count tests
+				for j := i + 1; j < len(klines); j++ {
+					if klines[j].Low <= candle.High && klines[j].High >= candle.Low {
+						ob.TestCount++
+					}
+				}
+				analysis.BearishOBs = append(analysis.BearishOBs, ob)
+			}
+		}
+	}
+
+	// Find nearest unmitigated Order Blocks
+	for i := range analysis.BullishOBs {
+		if !analysis.BullishOBs[i].Mitigated {
+			if analysis.NearestBullish == nil ||
+				analysis.BullishOBs[i].HighPrice > analysis.NearestBullish.HighPrice {
+				ob := analysis.BullishOBs[i]
+				analysis.NearestBullish = &ob
+			}
+		}
+	}
+
+	for i := range analysis.BearishOBs {
+		if !analysis.BearishOBs[i].Mitigated {
+			if analysis.NearestBearish == nil ||
+				analysis.BearishOBs[i].LowPrice < analysis.NearestBearish.LowPrice {
+				ob := analysis.BearishOBs[i]
+				analysis.NearestBearish = &ob
+			}
+		}
+	}
+
+	// Count unmitigated OBs
+	for _, ob := range analysis.BullishOBs {
+		if !ob.Mitigated {
+			analysis.TotalUnmitigated++
+		}
+	}
+	for _, ob := range analysis.BearishOBs {
+		if !ob.Mitigated {
+			analysis.TotalUnmitigated++
+		}
+	}
+
+	// Check if current price is in an OB zone
+	for _, ob := range analysis.BullishOBs {
+		if !ob.Mitigated && currentPrice >= ob.LowPrice && currentPrice <= ob.HighPrice {
+			analysis.InOBZone = true
+			analysis.OBZoneType = "bullish"
+			break
+		}
+	}
+	if !analysis.InOBZone {
+		for _, ob := range analysis.BearishOBs {
+			if !ob.Mitigated && currentPrice >= ob.LowPrice && currentPrice <= ob.HighPrice {
+				analysis.InOBZone = true
+				analysis.OBZoneType = "bearish"
+				break
+			}
+		}
+	}
+
+	return analysis
+}
+
+// classifyOBStrength classifies Order Block strength based on the move percentage
+func (g *GinieAnalyzer) classifyOBStrength(movePercent float64) string {
+	if movePercent > 3.0 {
+		return "strong"
+	} else if movePercent > 1.5 {
+		return "medium"
+	}
+	return "weak"
+}
+
+// analyzePriceAction performs complete price action analysis including FVG, Order Blocks, and Chart Patterns
+func (g *GinieAnalyzer) analyzePriceAction(klines []binance.Kline, currentPrice float64, tradeDirection string) PriceActionAnalysis {
+	fvgAnalysis := g.detectFairValueGaps(klines, currentPrice)
+	obAnalysis := g.detectOrderBlocks(klines, currentPrice)
+	chartPatterns := g.detectChartPatterns(klines, currentPrice)
+
+	analysis := PriceActionAnalysis{
+		FVG:           fvgAnalysis,
+		OrderBlocks:   obAnalysis,
+		ChartPatterns: chartPatterns,
+	}
+
+	// Calculate confluence score (0-100)
+	confluenceScore := 0.0
+
+	// Check for bullish setup
+	hasBullishFVG := fvgAnalysis.NearestBullish != nil && !fvgAnalysis.NearestBullish.Filled
+	hasBullishOB := obAnalysis.NearestBullish != nil && !obAnalysis.NearestBullish.Mitigated
+	inBullishFVG := fvgAnalysis.InFVGZone && fvgAnalysis.FVGZoneType == "bullish"
+	inBullishOB := obAnalysis.InOBZone && obAnalysis.OBZoneType == "bullish"
+
+	if tradeDirection == "long" || tradeDirection == "" {
+		if hasBullishFVG {
+			confluenceScore += 15
+			if fvgAnalysis.NearestBullish.Strength == "strong" {
+				confluenceScore += 10
+			}
+		}
+		if hasBullishOB {
+			confluenceScore += 20
+			if obAnalysis.NearestBullish.Strength == "strong" {
+				confluenceScore += 10
+			}
+			if obAnalysis.NearestBullish.TestCount == 0 {
+				confluenceScore += 5 // Fresh OB is stronger
+			}
+		}
+		if inBullishFVG {
+			confluenceScore += 15 // Currently in the FVG zone
+		}
+		if inBullishOB {
+			confluenceScore += 20 // Currently in the OB zone
+		}
+		// Confluence bonus: FVG and OB overlap
+		if hasBullishFVG && hasBullishOB {
+			fvgTop := fvgAnalysis.NearestBullish.TopPrice
+			fvgBottom := fvgAnalysis.NearestBullish.BottomPrice
+			obTop := obAnalysis.NearestBullish.HighPrice
+			obBottom := obAnalysis.NearestBullish.LowPrice
+			// Check if zones overlap
+			if fvgBottom <= obTop && fvgTop >= obBottom {
+				confluenceScore += 20 // Strong confluence
+				analysis.FVG.FVGConfluence = true
+				analysis.OrderBlocks.OBConfluence = true
+			}
+		}
+		analysis.HasBullishSetup = confluenceScore > 30
+	}
+
+	// Check for bearish setup
+	hasBearishFVG := fvgAnalysis.NearestBearish != nil && !fvgAnalysis.NearestBearish.Filled
+	hasBearishOB := obAnalysis.NearestBearish != nil && !obAnalysis.NearestBearish.Mitigated
+	inBearishFVG := fvgAnalysis.InFVGZone && fvgAnalysis.FVGZoneType == "bearish"
+	inBearishOB := obAnalysis.InOBZone && obAnalysis.OBZoneType == "bearish"
+
+	if tradeDirection == "short" || tradeDirection == "" {
+		bearishScore := 0.0
+		if hasBearishFVG {
+			bearishScore += 15
+			if fvgAnalysis.NearestBearish.Strength == "strong" {
+				bearishScore += 10
+			}
+		}
+		if hasBearishOB {
+			bearishScore += 20
+			if obAnalysis.NearestBearish.Strength == "strong" {
+				bearishScore += 10
+			}
+			if obAnalysis.NearestBearish.TestCount == 0 {
+				bearishScore += 5
+			}
+		}
+		if inBearishFVG {
+			bearishScore += 15
+		}
+		if inBearishOB {
+			bearishScore += 20
+		}
+		// Confluence bonus
+		if hasBearishFVG && hasBearishOB {
+			fvgTop := fvgAnalysis.NearestBearish.TopPrice
+			fvgBottom := fvgAnalysis.NearestBearish.BottomPrice
+			obTop := obAnalysis.NearestBearish.HighPrice
+			obBottom := obAnalysis.NearestBearish.LowPrice
+			if fvgBottom <= obTop && fvgTop >= obBottom {
+				bearishScore += 20
+				analysis.FVG.FVGConfluence = true
+				analysis.OrderBlocks.OBConfluence = true
+			}
+		}
+		if tradeDirection == "short" {
+			confluenceScore = bearishScore
+		} else if bearishScore > confluenceScore {
+			confluenceScore = bearishScore
+		}
+		analysis.HasBearishSetup = bearishScore > 30
+	}
+
+	// Add chart pattern confluence
+	if chartPatterns.TotalPatterns > 0 {
+		// Check if chart patterns align with trade direction
+		if (tradeDirection == "long" || tradeDirection == "") && chartPatterns.HasBullishPattern {
+			confluenceScore += chartPatterns.PatternScore * 0.3 // Up to 30 points bonus
+			analysis.ChartPatterns.PatternConfluence = true
+		}
+		if (tradeDirection == "short" || tradeDirection == "") && chartPatterns.HasBearishPattern {
+			confluenceScore += chartPatterns.PatternScore * 0.3
+			analysis.ChartPatterns.PatternConfluence = true
+		}
+		// Near breakout bonus
+		if chartPatterns.NearBreakout {
+			confluenceScore += 10
+		}
+	}
+
+	analysis.ConfluenceScore = confluenceScore
+
+	// Classify setup quality
+	if confluenceScore >= 70 {
+		analysis.SetupQuality = "excellent"
+	} else if confluenceScore >= 50 {
+		analysis.SetupQuality = "good"
+	} else if confluenceScore >= 30 {
+		analysis.SetupQuality = "moderate"
+	} else {
+		analysis.SetupQuality = "weak"
+	}
+
+	return analysis
 }

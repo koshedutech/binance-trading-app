@@ -146,6 +146,7 @@ export default function ModeAllocationPanel() {
 
   const renderModeCard = (mode: string, alloc: ModeAllocation | undefined) => {
     const percent = alloc?.allocated_percent || 0;
+    const allocatedUsd = alloc?.allocated_usd || 0;
     const used = alloc?.used_usd || 0;
     const available = alloc?.available_usd || 0;
     const capacity = alloc?.capacity_percent || 0;
@@ -183,11 +184,15 @@ export default function ModeAllocationPanel() {
         <div className="space-y-2">
           <div>
             <div className="flex justify-between text-sm mb-1">
+              <span className="text-gray-300">Capital Allocated</span>
+              <span className="text-white font-medium">{formatUSD(allocatedUsd)}</span>
+            </div>
+            <div className="flex justify-between text-sm mb-1">
               <span className="text-gray-300">Capital Used</span>
-              <span className="text-gray-400">{formatUSD(used)} / {formatUSD(used + available)}</span>
+              <span className="text-gray-400">{formatUSD(used)} / {formatUSD(allocatedUsd)}</span>
             </div>
             <div className="w-full bg-gray-700 rounded-full h-2">
-              <div className={`bg-gradient-to-r ${modeColors[mode]} h-2 rounded-full`} style={{ width: `${Math.min((used / (used + available)) * 100, 100)}%` }} />
+              <div className={`bg-gradient-to-r ${modeColors[mode]} h-2 rounded-full`} style={{ width: `${Math.min(allocatedUsd > 0 ? (used / allocatedUsd) * 100 : 0, 100)}%` }} />
             </div>
           </div>
 
