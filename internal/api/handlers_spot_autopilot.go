@@ -184,58 +184,6 @@ func (s *Server) handleSetSpotAutopilotDryRun(c *gin.Context) {
 	})
 }
 
-// handleSetSpotAutopilotRiskLevel changes the risk level for spot
-func (s *Server) handleSetSpotAutopilotRiskLevel(c *gin.Context) {
-	userID := s.getUserID(c)
-	if userID == "" && s.authEnabled {
-		errorResponse(c, http.StatusUnauthorized, "Authentication required")
-		return
-	}
-
-	var req struct {
-		RiskLevel string `json:"risk_level" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid request: risk_level is required")
-		return
-	}
-
-	controller := s.getSpotAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Spot autopilot not configured")
-		return
-	}
-
-	// Check ownership
-	ownerUserID := controller.GetOwnerUserID()
-	if ownerUserID != "" && ownerUserID != userID {
-		errorResponse(c, http.StatusForbidden, "Spot autopilot is owned by another user")
-		return
-	}
-
-	if err := controller.SetRiskLevel(req.RiskLevel); err != nil {
-		errorResponse(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Persist risk level to settings file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateSpotRiskLevel(req.RiskLevel); err != nil {
-			fmt.Printf("Failed to persist spot risk level: %v\n", err)
-		}
-	}()
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"message":    "Spot risk level updated to " + req.RiskLevel,
-		"risk_level": controller.GetRiskLevel(),
-		"status":     controller.GetStatus(),
-		"user_id":    userID,
-	})
-}
-
 // handleSetSpotAutopilotAllocation sets max USD allocation for spot
 func (s *Server) handleSetSpotAutopilotAllocation(c *gin.Context) {
 	userID := s.getUserID(c)
@@ -377,50 +325,6 @@ func (s *Server) handleSetSpotAutopilotTPSL(c *gin.Context) {
 		"stop_loss_percent":   sl,
 		"status":              controller.GetStatus(),
 		"user_id":             userID,
-	})
-}
-
-// handleSetSpotAutopilotMinConfidence sets minimum confidence threshold for spot
-func (s *Server) handleSetSpotAutopilotMinConfidence(c *gin.Context) {
-	userID := s.getUserID(c)
-	if userID == "" && s.authEnabled {
-		errorResponse(c, http.StatusUnauthorized, "Authentication required")
-		return
-	}
-
-	var req struct {
-		MinConfidence float64 `json:"min_confidence" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid request: min_confidence is required")
-		return
-	}
-
-	controller := s.getSpotAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Spot autopilot not configured")
-		return
-	}
-
-	// Check ownership
-	ownerUserID := controller.GetOwnerUserID()
-	if ownerUserID != "" && ownerUserID != userID {
-		errorResponse(c, http.StatusForbidden, "Spot autopilot is owned by another user")
-		return
-	}
-
-	if err := controller.SetMinConfidence(req.MinConfidence); err != nil {
-		errorResponse(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":        true,
-		"message":        "Spot min confidence updated",
-		"min_confidence": controller.GetMinConfidence(),
-		"status":         controller.GetStatus(),
-		"user_id":        userID,
 	})
 }
 

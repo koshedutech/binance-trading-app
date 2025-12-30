@@ -5,12 +5,10 @@ export interface SpotAutopilotStatus {
   enabled: boolean;
   running: boolean;
   dry_run: boolean;
-  risk_level: string;
   max_positions: number;
   max_usd_per_position: number;
   take_profit_percent: number;
   stop_loss_percent: number;
-  min_confidence: number;
   active_positions: number;
   total_trades: number;
   winning_trades: number;
@@ -216,11 +214,6 @@ class SpotAutopilotAPIService {
     return data;
   }
 
-  async setRiskLevel(riskLevel: string): Promise<{ success: boolean; message: string; risk_level: string; status: SpotAutopilotStatus }> {
-    const { data } = await this.client.post('/autopilot/risk-level', { risk_level: riskLevel });
-    return data;
-  }
-
   async setAllocation(maxUsdPerPosition: number): Promise<{ success: boolean; message: string; max_usd_per_position: number; status: SpotAutopilotStatus }> {
     const { data } = await this.client.post('/autopilot/allocation', { max_usd_per_position: maxUsdPerPosition });
     return data;
@@ -233,11 +226,6 @@ class SpotAutopilotAPIService {
 
   async setTPSL(takeProfitPercent: number, stopLossPercent: number): Promise<{ success: boolean; message: string; take_profit_percent: number; stop_loss_percent: number; status: SpotAutopilotStatus }> {
     const { data } = await this.client.post('/autopilot/tpsl', { take_profit_percent: takeProfitPercent, stop_loss_percent: stopLossPercent });
-    return data;
-  }
-
-  async setMinConfidence(minConfidence: number): Promise<{ success: boolean; message: string; min_confidence: number; status: SpotAutopilotStatus }> {
-    const { data } = await this.client.post('/autopilot/min-confidence', { min_confidence: minConfidence });
     return data;
   }
 

@@ -182,7 +182,6 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/ginie/circuit-breaker/status":    true,
 		"/api/futures/ginie/decisions":                 true,
 		"/api/futures/ginie/blocked-coins":             true,
-		"/api/futures/ginie/risk-level":                true,
 		"/api/futures/ginie/rate-limiter/status":       true,
 		// LLM & Adaptive AI endpoints (internal state only - Story 2.8)
 		"/api/futures/ginie/llm-config":                true,
@@ -465,14 +464,12 @@ func (s *Server) setupRoutes() {
 			futures.GET("/autopilot/status", s.handleGetFuturesAutopilotStatus)
 			futures.POST("/autopilot/toggle", s.handleToggleFuturesAutopilot)
 			futures.POST("/autopilot/dry-run", s.handleSetFuturesAutopilotDryRun)
-			futures.POST("/autopilot/risk-level", s.handleSetFuturesAutopilotRiskLevel)
 			futures.POST("/autopilot/allocation", s.handleSetFuturesAutopilotAllocation)
 			futures.POST("/autopilot/profit-reinvest", s.handleSetFuturesAutopilotProfitReinvest)
 			futures.GET("/autopilot/profit-stats", s.handleGetFuturesAutopilotProfitStats)
 			futures.POST("/autopilot/reset-allocation", s.handleResetFuturesAutopilotAllocation)
 			futures.POST("/autopilot/tpsl", s.handleSetFuturesAutopilotTPSL)
 			futures.POST("/autopilot/leverage", s.handleSetFuturesAutopilotLeverage)
-			futures.POST("/autopilot/min-confidence", s.handleSetFuturesAutopilotMinConfidence)
 			futures.POST("/autopilot/confluence", s.handleSetFuturesAutopilotConfluence)
 			futures.POST("/autopilot/max-position-size", s.handleSetFuturesAutopilotMaxPositionSize)
 
@@ -613,9 +610,6 @@ func (s *Server) setupRoutes() {
 			// Per-Position ROI Target (MUST be registered LAST due to :symbol parameter)
 			futures.POST("/ginie/positions/:symbol/roi-target", s.handleSetPositionROITarget)
 
-			// Ginie Risk Level endpoints
-			futures.GET("/ginie/risk-level", s.handleGetGinieRiskLevel)
-			futures.POST("/ginie/risk-level", s.handleSetGinieRiskLevel)
 
 			// Ginie Market Movers endpoints (dynamic symbol selection)
 			futures.GET("/ginie/market-movers", s.handleGetMarketMovers)
@@ -644,20 +638,6 @@ func (s *Server) setupRoutes() {
 			// Ginie Rate Limiter status endpoint
 			futures.GET("/ginie/rate-limiter/status", s.handleGetRateLimiterStatus)
 
-			// Ginie Trend Timeframes endpoints (multi-timeframe divergence detection)
-			futures.GET("/ginie/trend-timeframes", s.handleGetGinieTrendTimeframes)
-			futures.POST("/ginie/trend-timeframes", s.handleUpdateGinieTrendTimeframes)
-
-			// SL/TP configuration endpoints
-			futures.GET("/ginie/sltp-config", s.handleGetGinieSLTPConfig)
-			futures.POST("/ginie/sltp/:mode", s.handleUpdateGinieSLTP)  // :mode = scalp/swing/position
-			futures.POST("/ginie/tp-mode", s.handleUpdateGinieTPMode)
-
-			// Ultrafast scalping mode configuration
-			futures.GET("/ultrafast/config", s.handleGetUltraFastConfig)
-			futures.POST("/ultrafast/config", s.handleUpdateUltraFastConfig)
-			futures.POST("/ultrafast/toggle", s.handleToggleUltraFast)
-			futures.POST("/ultrafast/reset-stats", s.handleResetUltraFastStats)
 
 			// Enhanced Trade History and Performance Metrics (with date filtering)
 			futures.GET("/ginie/trade-history", s.handleGetGinieTradeHistoryWithDateRange)
@@ -725,11 +705,9 @@ func (s *Server) setupRoutes() {
 			spot.GET("/autopilot/status", s.handleGetSpotAutopilotStatus)
 			spot.POST("/autopilot/toggle", s.handleToggleSpotAutopilot)
 			spot.POST("/autopilot/dry-run", s.handleSetSpotAutopilotDryRun)
-			spot.POST("/autopilot/risk-level", s.handleSetSpotAutopilotRiskLevel)
 			spot.POST("/autopilot/allocation", s.handleSetSpotAutopilotAllocation)
 			spot.POST("/autopilot/max-positions", s.handleSetSpotAutopilotMaxPositions)
 			spot.POST("/autopilot/tpsl", s.handleSetSpotAutopilotTPSL)
-			spot.POST("/autopilot/min-confidence", s.handleSetSpotAutopilotMinConfidence)
 			spot.GET("/autopilot/profit-stats", s.handleGetSpotAutopilotProfitStats)
 
 			// Circuit breaker

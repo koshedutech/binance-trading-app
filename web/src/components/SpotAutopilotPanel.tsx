@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { spotAutopilotApi, SpotAutopilotStatus, SpotCircuitBreakerStatus, SpotProfitStats } from '../services/spotAutopilotApi';
-import { Bot, Power, PowerOff, Settings, AlertTriangle, RefreshCw, TrendingUp, DollarSign, Shield, Percent, Target, Check, RotateCcw, Save, X } from 'lucide-react';
+import { Bot, Power, PowerOff, AlertTriangle, RefreshCw, TrendingUp, DollarSign, Shield, Percent, Target, Check, RotateCcw, X } from 'lucide-react';
 
 const formatUSD = (value: number): string => {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(value);
@@ -15,7 +15,6 @@ export default function SpotAutopilotPanel() {
   const [profitStats, setProfitStats] = useState<SpotProfitStats | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   // Circuit Breaker state
@@ -23,28 +22,13 @@ export default function SpotAutopilotPanel() {
   const [showCircuitBreaker, setShowCircuitBreaker] = useState(false);
   const [isResettingCB, setIsResettingCB] = useState(false);
 
-  // Setting inputs
-  const [riskLevel, setRiskLevel] = useState('moderate');
-  const [maxUsdPerPosition, setMaxUsdPerPosition] = useState('100');
-  const [maxPositions, setMaxPositions] = useState('5');
-  const [takeProfitPercent, setTakeProfitPercent] = useState('3');
-  const [stopLossPercent, setStopLossPercent] = useState('2');
-  const [minConfidence, setMinConfidence] = useState('65');
-
-  const [isEditing, setIsEditing] = useState(false);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
 
   const fetchStatus = async () => {
     try {
       const data = await spotAutopilotApi.getStatus();
       setStatus(data);
-      setRiskLevel(data.risk_level || 'moderate');
-      if (!isEditing && !initialLoadDone) {
-        setMaxUsdPerPosition(data.max_usd_per_position?.toString() || '100');
-        setMaxPositions(data.max_positions?.toString() || '5');
-        setTakeProfitPercent(data.take_profit_percent?.toString() || '3');
-        setStopLossPercent(data.stop_loss_percent?.toString() || '2');
-        setMinConfidence(data.min_confidence?.toString() || '65');
+      if (!initialLoadDone) {
         setInitialLoadDone(true);
       }
       setError(null);
@@ -118,45 +102,6 @@ export default function SpotAutopilotPanel() {
     }
   };
 
-  const handleRiskLevelChange = async (level: string) => {
-    setRiskLevel(level);
-    try {
-      const result = await spotAutopilotApi.setRiskLevel(level);
-      if (result.success) {
-        fetchStatus();
-        showSuccess(`Risk level set to ${level}`);
-      }
-    } catch (err) {
-      setError('Failed to update risk level');
-    }
-  };
-
-  const handleSaveSettings = async () => {
-    setLoading(true);
-    setIsEditing(false);
-    try {
-      // Save allocation
-      await spotAutopilotApi.setAllocation(parseFloat(maxUsdPerPosition) || 100);
-      // Save max positions
-      await spotAutopilotApi.setMaxPositions(parseInt(maxPositions) || 5);
-      // Save TP/SL
-      await spotAutopilotApi.setTPSL(
-        parseFloat(takeProfitPercent) || 3,
-        parseFloat(stopLossPercent) || 2
-      );
-      // Save min confidence
-      await spotAutopilotApi.setMinConfidence(parseFloat(minConfidence) || 65);
-
-      fetchStatus();
-      showSuccess('Settings saved successfully');
-      setShowSettings(false);
-    } catch (err) {
-      setError('Failed to save settings');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleResetCircuitBreaker = async () => {
     setIsResettingCB(true);
     try {
@@ -223,12 +168,6 @@ export default function SpotAutopilotPanel() {
             <Shield className="w-4 h-4" />
           </button>
           <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="p-1.5 hover:bg-gray-700 rounded transition-colors text-gray-400"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
-          <button
             onClick={fetchStatus}
             className="p-1.5 hover:bg-gray-700 rounded transition-colors text-gray-400"
           >
@@ -289,106 +228,6 @@ export default function SpotAutopilotPanel() {
               Reset Circuit Breaker
             </button>
           )}
-        </div>
-      )}
-
-      {/* Settings Panel */}
-      {showSettings && (
-        <div className="mb-4 p-3 bg-gray-700/50 rounded-lg">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-sm font-medium text-white">Settings</span>
-            <button
-              onClick={() => { setShowSettings(false); setIsEditing(false); }}
-              className="text-gray-400 hover:text-white"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* Risk Level */}
-          <div className="mb-3">
-            <label className="text-xs text-gray-400 mb-1 block">Risk Level</label>
-            <div className="flex gap-2">
-              {['conservative', 'moderate', 'aggressive'].map((level) => (
-                <button
-                  key={level}
-                  onClick={() => handleRiskLevelChange(level)}
-                  className={`flex-1 py-1.5 text-xs rounded capitalize ${
-                    riskLevel === level
-                      ? level === 'conservative'
-                        ? 'bg-blue-600 text-white'
-                        : level === 'moderate'
-                        ? 'bg-yellow-600 text-white'
-                        : 'bg-red-600 text-white'
-                      : 'bg-gray-600 text-gray-300 hover:bg-gray-500'
-                  }`}
-                >
-                  {level}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Inputs */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-gray-400 mb-1 block">Max USD/Position</label>
-              <input
-                type="number"
-                value={maxUsdPerPosition}
-                onChange={(e) => { setMaxUsdPerPosition(e.target.value); setIsEditing(true); }}
-                className="w-full bg-gray-600 text-white text-sm rounded px-2 py-1.5"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 mb-1 block">Max Positions</label>
-              <input
-                type="number"
-                value={maxPositions}
-                onChange={(e) => { setMaxPositions(e.target.value); setIsEditing(true); }}
-                className="w-full bg-gray-600 text-white text-sm rounded px-2 py-1.5"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 mb-1 block">Take Profit %</label>
-              <input
-                type="number"
-                step="0.1"
-                value={takeProfitPercent}
-                onChange={(e) => { setTakeProfitPercent(e.target.value); setIsEditing(true); }}
-                className="w-full bg-gray-600 text-white text-sm rounded px-2 py-1.5"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400 mb-1 block">Stop Loss %</label>
-              <input
-                type="number"
-                step="0.1"
-                value={stopLossPercent}
-                onChange={(e) => { setStopLossPercent(e.target.value); setIsEditing(true); }}
-                className="w-full bg-gray-600 text-white text-sm rounded px-2 py-1.5"
-              />
-            </div>
-            <div className="col-span-2">
-              <label className="text-xs text-gray-400 mb-1 block">Min Confidence %</label>
-              <input
-                type="number"
-                value={minConfidence}
-                onChange={(e) => { setMinConfidence(e.target.value); setIsEditing(true); }}
-                className="w-full bg-gray-600 text-white text-sm rounded px-2 py-1.5"
-              />
-            </div>
-          </div>
-
-          {/* Save Button */}
-          <button
-            onClick={handleSaveSettings}
-            disabled={loading}
-            className="mt-3 w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded flex items-center justify-center gap-2"
-          >
-            <Save className="w-4 h-4" />
-            Save Settings
-          </button>
         </div>
       )}
 
@@ -473,15 +312,6 @@ export default function SpotAutopilotPanel() {
         </button>
       </div>
 
-      {/* Risk Level Indicator */}
-      <div className="mt-3 text-center text-xs text-gray-400">
-        Risk: <span className={`font-medium ${
-          riskLevel === 'conservative' ? 'text-blue-400' :
-          riskLevel === 'moderate' ? 'text-yellow-400' : 'text-red-400'
-        }`}>{riskLevel.toUpperCase()}</span>
-        {' | '}
-        Max: <span className="text-white">{formatUSD(parseFloat(maxUsdPerPosition) || 100)}</span>/position
-      </div>
     </div>
   );
 }

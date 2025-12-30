@@ -338,44 +338,6 @@ func (s *Server) handleSetFuturesAutopilotDryRun(c *gin.Context) {
 	})
 }
 
-// handleSetFuturesAutopilotRiskLevel changes the risk level
-func (s *Server) handleSetFuturesAutopilotRiskLevel(c *gin.Context) {
-	var req struct {
-		RiskLevel string `json:"risk_level" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid request: risk_level is required")
-		return
-	}
-
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures autopilot not configured")
-		return
-	}
-
-	if err := controller.SetRiskLevel(req.RiskLevel); err != nil {
-		errorResponse(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Persist risk level to settings file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateRiskLevel(req.RiskLevel); err != nil {
-			fmt.Printf("Failed to persist risk level: %v\n", err)
-		}
-	}()
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"message":    "Risk level updated to " + req.RiskLevel,
-		"risk_level": controller.GetRiskLevel(),
-		"status":     controller.GetStatus(),
-	})
-}
-
 // handleSetFuturesAutopilotAllocation sets max USD allocation
 func (s *Server) handleSetFuturesAutopilotAllocation(c *gin.Context) {
 	var req struct {
@@ -501,36 +463,6 @@ func (s *Server) handleSetFuturesAutopilotLeverage(c *gin.Context) {
 		"message":  "Default leverage updated",
 		"leverage": controller.GetDefaultLeverage(),
 		"status":   controller.GetStatus(),
-	})
-}
-
-// handleSetFuturesAutopilotMinConfidence sets custom minimum confidence threshold
-func (s *Server) handleSetFuturesAutopilotMinConfidence(c *gin.Context) {
-	var req struct {
-		MinConfidence float64 `json:"min_confidence" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid request: min_confidence is required")
-		return
-	}
-
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures autopilot not configured")
-		return
-	}
-
-	if err := controller.SetMinConfidence(req.MinConfidence); err != nil {
-		errorResponse(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":        true,
-		"message":        "Min confidence updated",
-		"min_confidence": controller.GetMinConfidence(),
-		"status":         controller.GetStatus(),
 	})
 }
 
