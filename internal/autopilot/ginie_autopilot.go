@@ -9854,12 +9854,20 @@ func (ga *GinieAutopilot) calculateATR(klines []binance.Kline) float64 {
 // 2. Max SL move per update < 10%
 // 3. Min distance from current price = ATR * 0.5
 // 4. HARD FLOOR: Min 0.3% distance from ENTRY price (prevents over-tightening)
+// 5. BREAKEVEN FLOOR: Once SL moved to breakeven (after TP1), LLM cannot adjust - trailing stop takes over
 func (ga *GinieAutopilot) validateSLUpdate(pos *GiniePosition, newSL, currentPrice float64, klines []binance.Kline) (bool, string) {
 	currentSL := pos.StopLoss
 
 	// Skip validation if this is initial SL setup
 	if currentSL <= 0 {
 		return true, ""
+	}
+
+	// Rule 5: BREAKEVEN FLOOR - Once SL moved to breakeven (after TP1), LLM cannot adjust
+	// After TP1 hit and breakeven set, trailing stop manages SL, not LLM
+	// This prevents LLM from over-tightening after profit has been secured
+	if pos.MovedToBreakeven {
+		return false, fmt.Sprintf("Rule 5: SL locked at breakeven (%.6f) - trailing stop manages SL after TP1", currentSL)
 	}
 
 	// Rule 1: Never widen SL
