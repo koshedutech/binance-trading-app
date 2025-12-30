@@ -3397,88 +3397,144 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			return
 		}
 
-		// Place market order (standard entry)
-		orderParams := binance.FuturesOrderParams{
-			Symbol:       symbol,
-			Side:         side,
-			PositionSide: effectivePositionSide,
-			Type:         binance.FuturesOrderTypeMarket,
-			Quantity:     quantity,
-		}
+		// === LIMIT ORDER ENTRY AT PREVIOUS CANDLE EXTREME ===
+		// For ALL modes: Place LIMIT order at previous candle's low (LONG) or high (SHORT)
+		// This ensures entries have a price gap from current LTP to avoid starting in loss
+		isLongTrade := decision.TradeExecution.Action == "LONG"
+		limitEntryPrice, priceErr := ga.getPrevCandleEntryPrice(symbol, decision.SelectedMode, isLongTrade)
+		if priceErr != nil {
+			ga.logger.Error("Failed to get prev candle entry price, falling back to MARKET order",
+				"symbol", symbol,
+				"mode", decision.SelectedMode,
+				"error", priceErr.Error())
 
-		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
-		if err != nil {
-			ga.logger.Error("Ginie trade execution failed", "symbol", symbol, "error", err.Error())
-			return
-		}
+			// Fallback to MARKET order if we can't get prev candle price
+			orderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeMarket,
+				Quantity:     quantity,
+			}
 
-		// CRITICAL: Verify order fill - commercial grade trading must confirm execution
-		fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
-		if fillErr != nil {
-			ga.logger.Error("Ginie order fill verification failed",
+			order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
+			if err != nil {
+				ga.logger.Error("Ginie MARKET trade execution failed", "symbol", symbol, "error", err.Error())
+				return
+			}
+
+			// Verify order fill
+			fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+			if fillErr != nil {
+				ga.logger.Error("Ginie order fill verification failed",
+					"symbol", symbol,
+					"order_id", order.OrderId,
+					"error", fillErr.Error())
+				return
+			}
+
+			actualPrice = fillPrice
+			actualQty = fillQty
+
+			ga.logger.Info("Ginie MARKET trade executed (fallback)",
 				"symbol", symbol,
 				"order_id", order.OrderId,
-				"error", fillErr.Error())
-			// Don't create position if we can't verify fill
-			return
-		}
+				"side", side,
+				"fill_price", actualPrice)
+		} else {
+			// Round limit price to symbol precision
+			limitEntryPrice = roundPrice(symbol, limitEntryPrice)
 
-		// Use actual fill values for position tracking
-		actualPrice = fillPrice
-		actualQty = fillQty
-
-		// CRITICAL FIX: Recalculate TPs and SL based on actual fill price
-		// The decision's TP/SL were calculated with pre-execution estimated price
-		// which can differ significantly from actual fill price
-		if actualPrice != price && actualPrice > 0 {
-			isLong := decision.TradeExecution.Action == "LONG"
-			sideForRounding := "LONG"
-			if !isLong {
-				sideForRounding = "SHORT"
-			}
-
-			// Recalculate each TP level with actual fill price (with directional rounding)
-			for i := range takeProfits {
-				gainPct := takeProfits[i].GainPct
-				var rawTP float64
-				if isLong {
-					rawTP = actualPrice * (1 + gainPct/100)
-				} else {
-					rawTP = actualPrice * (1 - gainPct/100)
+			// Get timeout from reversal config or default to 300 seconds (5 min)
+			limitTimeoutSec := 300
+			if modeConfig := ga.getModeConfig(decision.SelectedMode); modeConfig != nil && modeConfig.Reversal != nil {
+				if modeConfig.Reversal.LimitTimeoutSec > 0 {
+					limitTimeoutSec = modeConfig.Reversal.LimitTimeoutSec
 				}
-				// Apply Binance directional precision rounding for TP orders
-				takeProfits[i].Price = roundPriceForTP(symbol, rawTP, sideForRounding)
 			}
 
-			// Recalculate SL with actual fill price (with directional rounding)
-			slPct := decision.TradeExecution.StopLossPct
-			if slPct > 0 {
-				var rawSL float64
-				if isLong {
-					rawSL = actualPrice * (1 - slPct/100)
-				} else {
-					rawSL = actualPrice * (1 + slPct/100)
+			// Place LIMIT order at previous candle extreme
+			limitOrderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeLimit,
+				Quantity:     quantity,
+				Price:        limitEntryPrice,
+				TimeInForce:  "GTC", // Good Till Cancel
+			}
+
+			limitOrder, err := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
+			if err != nil {
+				ga.logger.Error("Ginie LIMIT order failed, falling back to MARKET",
+					"symbol", symbol,
+					"limit_price", limitEntryPrice,
+					"error", err.Error())
+
+				// Fallback to MARKET order
+				marketParams := binance.FuturesOrderParams{
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: effectivePositionSide,
+					Type:         binance.FuturesOrderTypeMarket,
+					Quantity:     quantity,
 				}
-				// Apply Binance directional precision rounding for SL orders
-				decision.TradeExecution.StopLoss = roundPriceForSL(symbol, rawSL, sideForRounding)
+
+				order, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
+				if marketErr != nil {
+					ga.logger.Error("Ginie MARKET fallback also failed", "symbol", symbol, "error", marketErr.Error())
+					return
+				}
+
+				fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+				if fillErr != nil {
+					ga.logger.Error("MARKET order fill verification failed",
+						"symbol", symbol,
+						"order_id", order.OrderId,
+						"error", fillErr.Error())
+					return
+				}
+
+				actualPrice = fillPrice
+				actualQty = fillQty
+
+				ga.logger.Info("Ginie MARKET trade executed (LIMIT fallback)",
+					"symbol", symbol,
+					"order_id", order.OrderId,
+					"fill_price", actualPrice)
+			} else {
+				// Track pending LIMIT order with timeout
+				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
+				ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
+					OrderID:      limitOrder.OrderId,
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: string(effectivePositionSide),
+					Price:        limitEntryPrice,
+					Quantity:     quantity,
+					PlacedAt:     time.Now(),
+					TimeoutAt:    timeoutAt,
+					Source:       "prev_candle_entry",
+					Mode:         decision.SelectedMode,
+				}
+
+				timeframe := ga.getEntryTimeframe(decision.SelectedMode)
+				ga.logger.Info("LIMIT order placed at prev candle extreme - awaiting fill",
+					"symbol", symbol,
+					"order_id", limitOrder.OrderId,
+					"side", side,
+					"mode", decision.SelectedMode,
+					"timeframe", timeframe,
+					"limit_price", limitEntryPrice,
+					"current_price", price,
+					"price_gap_pct", ((price-limitEntryPrice)/price)*100,
+					"quantity", quantity,
+					"timeout_sec", limitTimeoutSec)
+
+				// Return early - position will be created when order fills (handled by monitorPendingLimitOrders)
+				return
 			}
-
-			ga.logger.Info("Recalculated TP/SL with actual fill price",
-				"symbol", symbol,
-				"estimated_price", price,
-				"actual_price", actualPrice,
-				"price_diff_pct", ((actualPrice-price)/price)*100,
-				"new_sl", decision.TradeExecution.StopLoss)
 		}
-
-		ga.logger.Info("Ginie trade executed and verified",
-			"symbol", symbol,
-			"order_id", order.OrderId,
-			"side", side,
-			"requested_qty", quantity,
-			"filled_qty", actualQty,
-			"expected_price", price,
-			"fill_price", actualPrice)
 	}
 
 	// Create position record with ACTUAL fill price and quantity
@@ -5515,6 +5571,80 @@ func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 		}
 	}
 	return nil
+}
+
+// getEntryTimeframe returns the entry timeframe for a given mode
+// This is used to fetch the previous candle for LIMIT order entry pricing
+func (ga *GinieAutopilot) getEntryTimeframe(mode GinieTradingMode) string {
+	// Try to read from Mode Config first
+	if modeConfig := ga.getModeConfig(mode); modeConfig != nil && modeConfig.Timeframe != nil {
+		if modeConfig.Timeframe.EntryTimeframe != "" {
+			return modeConfig.Timeframe.EntryTimeframe
+		}
+	}
+
+	// Fallback to defaults
+	switch mode {
+	case GinieModeUltraFast:
+		return "1m"
+	case GinieModeScalp:
+		return "5m"
+	case GinieModeSwing:
+		return "15m"
+	case GinieModePosition:
+		return "1h"
+	default:
+		return "5m"
+	}
+}
+
+// getPrevCandleEntryPrice fetches the previous candle's extreme price for LIMIT order entry
+// For LONG: Returns the LOW of the previous candle (buy at the dip)
+// For SHORT: Returns the HIGH of the previous candle (sell at the peak)
+// This ensures entries have a price gap from current LTP to avoid starting in loss
+func (ga *GinieAutopilot) getPrevCandleEntryPrice(symbol string, mode GinieTradingMode, isLong bool) (float64, error) {
+	timeframe := ga.getEntryTimeframe(mode)
+
+	// Fetch last 2 candles (current + previous)
+	klines, err := ga.futuresClient.GetFuturesKlines(symbol, timeframe, 2)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch %s klines: %w", timeframe, err)
+	}
+
+	if len(klines) < 2 {
+		return 0, fmt.Errorf("insufficient klines returned: got %d, need 2", len(klines))
+	}
+
+	// Previous candle is at index 0 (klines are sorted oldest first)
+	// Current candle is at index 1
+	prevCandle := klines[len(klines)-2]
+
+	var entryPrice float64
+	if isLong {
+		// For LONG: Entry at previous candle's LOW (buy the dip)
+		entryPrice = prevCandle.Low
+		ga.logger.Debug("LIMIT entry price calculated",
+			"symbol", symbol,
+			"mode", mode,
+			"direction", "LONG",
+			"timeframe", timeframe,
+			"prev_candle_low", prevCandle.Low,
+			"prev_candle_high", prevCandle.High,
+			"entry_price", entryPrice)
+	} else {
+		// For SHORT: Entry at previous candle's HIGH (sell the peak)
+		entryPrice = prevCandle.High
+		ga.logger.Debug("LIMIT entry price calculated",
+			"symbol", symbol,
+			"mode", mode,
+			"direction", "SHORT",
+			"timeframe", timeframe,
+			"prev_candle_low", prevCandle.Low,
+			"prev_candle_high", prevCandle.High,
+			"entry_price", entryPrice)
+	}
+
+	return entryPrice, nil
 }
 
 // getTrailingPercent reads trailing stop percent from Mode Config
@@ -12822,34 +12952,112 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 			return fmt.Errorf("failed to set leverage: %w", err)
 		}
 
-		// Place market order
-		orderParams := binance.FuturesOrderParams{
-			Symbol:       symbol,
-			Side:         side,
-			PositionSide: effectivePositionSide,
-			Type:         binance.FuturesOrderTypeMarket,
-			Quantity:     quantity,
+		// === LIMIT ORDER ENTRY AT PREVIOUS CANDLE EXTREME (Ultra-fast) ===
+		// For LONG: Entry at previous 1m candle's LOW
+		// For SHORT: Entry at previous 1m candle's HIGH
+		limitEntryPrice, priceErr := ga.getPrevCandleEntryPrice(symbol, GinieModeUltraFast, isLong)
+		if priceErr != nil {
+			ga.logger.Warn("Failed to get prev candle price for ultra-fast, using MARKET",
+				"symbol", symbol,
+				"error", priceErr.Error())
+
+			// Fallback to MARKET order
+			orderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeMarket,
+				Quantity:     quantity,
+			}
+
+			order, orderErr := ga.futuresClient.PlaceFuturesOrder(orderParams)
+			if orderErr != nil {
+				return fmt.Errorf("failed to place MARKET order: %w", orderErr)
+			}
+
+			fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+			if fillErr != nil {
+				return fmt.Errorf("order fill verification failed: %w", fillErr)
+			}
+
+			actualPrice = fillPrice
+			actualQty = fillQty
+		} else {
+			// Round limit price to symbol precision
+			limitEntryPrice = roundPrice(symbol, limitEntryPrice)
+
+			// Ultra-fast uses shorter timeout (60 seconds)
+			limitTimeoutSec := 60
+
+			// Place LIMIT order at previous 1m candle extreme
+			limitOrderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeLimit,
+				Quantity:     quantity,
+				Price:        limitEntryPrice,
+				TimeInForce:  "GTC",
+			}
+
+			limitOrder, limitErr := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
+			if limitErr != nil {
+				ga.logger.Warn("Ultra-fast LIMIT order failed, using MARKET",
+					"symbol", symbol,
+					"limit_price", limitEntryPrice,
+					"error", limitErr.Error())
+
+				// Fallback to MARKET order
+				marketParams := binance.FuturesOrderParams{
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: effectivePositionSide,
+					Type:         binance.FuturesOrderTypeMarket,
+					Quantity:     quantity,
+				}
+
+				order, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
+				if marketErr != nil {
+					return fmt.Errorf("failed to place MARKET order: %w", marketErr)
+				}
+
+				fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+				if fillErr != nil {
+					return fmt.Errorf("order fill verification failed: %w", fillErr)
+				}
+
+				actualPrice = fillPrice
+				actualQty = fillQty
+			} else {
+				// Track pending LIMIT order
+				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
+				ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
+					OrderID:      limitOrder.OrderId,
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: string(effectivePositionSide),
+					Price:        limitEntryPrice,
+					Quantity:     quantity,
+					PlacedAt:     time.Now(),
+					TimeoutAt:    timeoutAt,
+					Source:       "ultra_fast_prev_candle",
+					Mode:         GinieModeUltraFast,
+				}
+
+				ga.logger.Info("Ultra-fast LIMIT order placed at prev 1m candle extreme",
+					"symbol", symbol,
+					"order_id", limitOrder.OrderId,
+					"side", side,
+					"limit_price", limitEntryPrice,
+					"current_price", price,
+					"price_gap_pct", ((price-limitEntryPrice)/price)*100,
+					"quantity", quantity,
+					"timeout_sec", limitTimeoutSec)
+
+				// Return nil - position will be created when order fills
+				return nil
+			}
 		}
-
-		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
-		if err != nil {
-			return fmt.Errorf("failed to place order: %w", err)
-		}
-
-		// Verify fill
-		fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
-		if fillErr != nil {
-			return fmt.Errorf("order fill verification failed: %w", fillErr)
-		}
-
-		actualPrice = fillPrice
-		actualQty = fillQty
-
-		ga.logger.Info("Ultra-fast order filled",
-			"symbol", symbol,
-			"order_id", order.OrderId,
-			"fill_price", actualPrice,
-			"fill_qty", actualQty)
 	}
 
 	// Calculate stop loss (1% from entry) - use mode config
@@ -13034,35 +13242,111 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 			return fmt.Errorf("failed to set leverage: %w", err)
 		}
 
-		// Place market order
-		orderParams := binance.FuturesOrderParams{
-			Symbol:       symbol,
-			Side:         side,
-			PositionSide: effectivePositionSide,
-			Type:         binance.FuturesOrderTypeMarket,
-			Quantity:     quantity,
+		// === LIMIT ORDER ENTRY AT PREVIOUS CANDLE EXTREME (Ultra-fast smart margin) ===
+		limitEntryPrice, priceErr := ga.getPrevCandleEntryPrice(symbol, GinieModeUltraFast, isLong)
+		if priceErr != nil {
+			ga.logger.Warn("Failed to get prev candle price for ultra-fast, using MARKET",
+				"symbol", symbol,
+				"error", priceErr.Error())
+
+			// Fallback to MARKET order
+			orderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeMarket,
+				Quantity:     quantity,
+			}
+
+			order, orderErr := ga.futuresClient.PlaceFuturesOrder(orderParams)
+			if orderErr != nil {
+				return fmt.Errorf("failed to place MARKET order: %w", orderErr)
+			}
+
+			fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+			if fillErr != nil {
+				return fmt.Errorf("order fill verification failed: %w", fillErr)
+			}
+
+			actualPrice = fillPrice
+			actualQty = fillQty
+		} else {
+			// Round limit price to symbol precision
+			limitEntryPrice = roundPrice(symbol, limitEntryPrice)
+
+			// Ultra-fast uses shorter timeout (60 seconds)
+			limitTimeoutSec := 60
+
+			// Place LIMIT order at previous 1m candle extreme
+			limitOrderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeLimit,
+				Quantity:     quantity,
+				Price:        limitEntryPrice,
+				TimeInForce:  "GTC",
+			}
+
+			limitOrder, limitErr := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
+			if limitErr != nil {
+				ga.logger.Warn("Ultra-fast LIMIT order failed, using MARKET",
+					"symbol", symbol,
+					"limit_price", limitEntryPrice,
+					"error", limitErr.Error())
+
+				// Fallback to MARKET order
+				marketParams := binance.FuturesOrderParams{
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: effectivePositionSide,
+					Type:         binance.FuturesOrderTypeMarket,
+					Quantity:     quantity,
+				}
+
+				order, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
+				if marketErr != nil {
+					return fmt.Errorf("failed to place MARKET order: %w", marketErr)
+				}
+
+				fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
+				if fillErr != nil {
+					return fmt.Errorf("order fill verification failed: %w", fillErr)
+				}
+
+				actualPrice = fillPrice
+				actualQty = fillQty
+			} else {
+				// Track pending LIMIT order
+				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
+				ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
+					OrderID:      limitOrder.OrderId,
+					Symbol:       symbol,
+					Side:         side,
+					PositionSide: string(effectivePositionSide),
+					Price:        limitEntryPrice,
+					Quantity:     quantity,
+					PlacedAt:     time.Now(),
+					TimeoutAt:    timeoutAt,
+					Source:       "ultra_fast_smart_margin",
+					Mode:         GinieModeUltraFast,
+				}
+
+				ga.logger.Info("Ultra-fast LIMIT order placed (smart margin)",
+					"symbol", symbol,
+					"order_id", limitOrder.OrderId,
+					"side", side,
+					"limit_price", limitEntryPrice,
+					"current_price", price,
+					"price_gap_pct", ((price-limitEntryPrice)/price)*100,
+					"quantity", quantity,
+					"position_usd", positionUSD,
+					"timeout_sec", limitTimeoutSec)
+
+				// Return nil - position will be created when order fills
+				return nil
+			}
 		}
-
-		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
-		if err != nil {
-			return fmt.Errorf("failed to place order: %w", err)
-		}
-
-		// Verify fill
-		fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
-		if fillErr != nil {
-			return fmt.Errorf("order fill verification failed: %w", fillErr)
-		}
-
-		actualPrice = fillPrice
-		actualQty = fillQty
-
-		ga.logger.Info("Ultra-fast order filled (smart margin)",
-			"symbol", symbol,
-			"order_id", order.OrderId,
-			"fill_price", actualPrice,
-			"fill_qty", actualQty,
-			"position_usd", positionUSD)
 	}
 
 	// Calculate stop loss (1% from entry) - use mode config
