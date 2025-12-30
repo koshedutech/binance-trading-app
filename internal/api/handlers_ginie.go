@@ -2244,8 +2244,9 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 		settings.UltraFastMinProfitPct = *req.MinProfitPct
 	}
 	if req.MaxHoldMs != nil {
-		if *req.MaxHoldMs < 500 || *req.MaxHoldMs > 60000 {
-			errorResponse(c, http.StatusBadRequest, "Max hold time must be between 500-60000ms")
+		// 0 = no limit (disabled), otherwise 500-60000ms
+		if *req.MaxHoldMs != 0 && (*req.MaxHoldMs < 500 || *req.MaxHoldMs > 60000) {
+			errorResponse(c, http.StatusBadRequest, "Max hold time must be 0 (disabled) or between 500-60000ms")
 			return
 		}
 		settings.UltraFastMaxHoldMS = *req.MaxHoldMs
