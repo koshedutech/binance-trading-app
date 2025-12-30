@@ -889,22 +889,33 @@ func NewGinieAutopilot(
 }
 
 // selectEnabledModeForPosition returns the first enabled trading mode for synced/external positions.
-// This replaces hardcoded GinieModeSwing defaults to respect user mode preferences.
-// Priority: swing > scalp > position (swing is most common default)
+// This replaces hardcoded defaults to respect user mode preferences.
+// Priority: scalp > swing > position > ultra_fast (scalp is most common for active trading)
 func (ga *GinieAutopilot) selectEnabledModeForPosition() GinieTradingMode {
 	// Check modes in order of preference for position management
-	if ga.config.EnableSwingMode {
-		return GinieModeSwing
-	}
+	// Get current settings to check ultra_fast
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Check scalp first (most common for active trading)
 	if ga.config.EnableScalpMode {
 		return GinieModeScalp
 	}
+	// Then swing
+	if ga.config.EnableSwingMode {
+		return GinieModeSwing
+	}
+	// Then position
 	if ga.config.EnablePositionMode {
 		return GinieModePosition
 	}
-	// Fallback: if no modes enabled, default to swing (should not happen normally)
-	log.Printf("[GINIE-WARNING] No modes enabled, defaulting to swing for position management")
-	return GinieModeSwing
+	// Finally ultra_fast
+	if settings.UltraFastEnabled {
+		return GinieModeUltraFast
+	}
+	// Fallback: if no modes enabled, default to scalp (most common)
+	log.Printf("[GINIE-WARNING] No modes enabled, defaulting to scalp mode")
+	return GinieModeScalp
 }
 
 // isModeEnabled checks if a specific trading mode is enabled in user settings.
@@ -6472,7 +6483,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 						tradeID,
 						symbol,
 						side,
-						string(GinieModeSwing), // Synced positions default to swing mode
+						string(ga.selectEnabledModeForPosition()), // Use user's enabled mode preference
 						pos.EntryPrice,
 						qty,
 						pos.Leverage,
@@ -9655,7 +9666,7 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 	// Determine mode for this position
 	mode := pos.Mode
 	if mode == "" {
-		mode = "swing" // Default
+		mode = ga.selectEnabledModeForPosition() // Use user's enabled mode preference
 	}
 
 	// Get manual SL/TP override if set from ModeConfigs
@@ -9842,6 +9853,7 @@ func (ga *GinieAutopilot) calculateATR(klines []binance.Kline) float64 {
 // 1. Never widen SL (LONG: new SL >= current SL, SHORT: new SL <= current SL)
 // 2. Max SL move per update < 10%
 // 3. Min distance from current price = ATR * 0.5
+// 4. HARD FLOOR: Min 0.3% distance from ENTRY price (prevents over-tightening)
 func (ga *GinieAutopilot) validateSLUpdate(pos *GiniePosition, newSL, currentPrice float64, klines []binance.Kline) (bool, string) {
 	currentSL := pos.StopLoss
 
@@ -9871,22 +9883,50 @@ func (ga *GinieAutopilot) validateSLUpdate(pos *GiniePosition, newSL, currentPri
 
 	// Rule 3: Min distance = ATR * 0.5
 	atr := ga.calculateATR(klines)
-	if atr <= 0 {
-		// If we can't calculate ATR, skip this rule
-		return true, ""
+	if atr > 0 {
+		minDistance := atr * 0.5 // Half ATR minimum buffer
+
+		if pos.Side == "LONG" {
+			distance := currentPrice - newSL
+			if distance < minDistance {
+				return false, fmt.Sprintf("Rule 3: SL too close to price (distance %.6f < min %.6f ATR)", distance, minDistance)
+			}
+		} else {
+			distance := newSL - currentPrice
+			if distance < minDistance {
+				return false, fmt.Sprintf("Rule 3: SL too close to price (distance %.6f < min %.6f ATR)", distance, minDistance)
+			}
+		}
 	}
 
-	minDistance := atr * 0.5 // Half ATR minimum buffer
+	// Rule 4: HARD FLOOR - Minimum percentage distance from ENTRY price
+	// This prevents the LLM from over-tightening SL to near-entry levels
+	// which caused trade #11 to close at 0.03% from entry
+	minFloorPercent := 0.3 // 0.3% minimum distance from entry - NON-NEGOTIABLE
+	if pos.Mode == GinieModeSwing {
+		minFloorPercent = 0.5 // Swing trades need more room
+	} else if pos.Mode == GinieModePosition {
+		minFloorPercent = 1.0 // Position trades need even more room
+	}
 
-	if pos.Side == "LONG" {
-		distance := currentPrice - newSL
-		if distance < minDistance {
-			return false, fmt.Sprintf("Rule 3: SL too close to price (distance %.6f < min %.6f ATR)", distance, minDistance)
-		}
-	} else {
-		distance := newSL - currentPrice
-		if distance < minDistance {
-			return false, fmt.Sprintf("Rule 3: SL too close to price (distance %.6f < min %.6f ATR)", distance, minDistance)
+	entryPrice := pos.EntryPrice
+	if entryPrice > 0 {
+		minDistanceFromEntry := entryPrice * minFloorPercent / 100.0
+
+		if pos.Side == "LONG" {
+			// For LONG: SL must be below entry by at least minFloorPercent
+			distanceFromEntry := entryPrice - newSL
+			if distanceFromEntry < minDistanceFromEntry {
+				actualPct := (distanceFromEntry / entryPrice) * 100
+				return false, fmt.Sprintf("Rule 4: SL too close to entry (%.4f%% < %.1f%% min floor, distance %.6f < %.6f)", actualPct, minFloorPercent, distanceFromEntry, minDistanceFromEntry)
+			}
+		} else {
+			// For SHORT: SL must be above entry by at least minFloorPercent
+			distanceFromEntry := newSL - entryPrice
+			if distanceFromEntry < minDistanceFromEntry {
+				actualPct := (distanceFromEntry / entryPrice) * 100
+				return false, fmt.Sprintf("Rule 4: SL too close to entry (%.4f%% < %.1f%% min floor, distance %.6f < %.6f)", actualPct, minFloorPercent, distanceFromEntry, minDistanceFromEntry)
+			}
 		}
 	}
 
@@ -11085,8 +11125,8 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 			"price", price)
 	}
 
-	// Generate default TPs based on mode (use swing as default for strategies)
-	takeProfits := ga.generateDefaultTPs(symbol, actualPrice, GinieModeSwing, isLong)
+	// Generate default TPs based on user's enabled mode preference
+	takeProfits := ga.generateDefaultTPs(symbol, actualPrice, strategyMode, isLong)
 
 	// Create strategy ID and name pointers
 	stratID := signal.StrategyID
