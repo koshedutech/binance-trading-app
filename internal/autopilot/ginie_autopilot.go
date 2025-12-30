@@ -297,9 +297,10 @@ type GiniePosition struct {
 	CurrentTPLevel  int                    `json:"current_tp_level"` // 0 = none hit, 1-4 = levels hit
 
 	// Stop Loss
-	StopLoss        float64 `json:"stop_loss"`
-	OriginalSL      float64 `json:"original_sl"`      // Original SL before breakeven move
-	MovedToBreakeven bool   `json:"moved_to_breakeven"`
+	StopLoss         float64 `json:"stop_loss"`
+	OriginalSL       float64 `json:"original_sl"`       // Original SL before breakeven move
+	MovedToBreakeven bool    `json:"moved_to_breakeven"`
+	IsClosing        bool    `json:"is_closing"`        // Prevents duplicate close calls
 
 	// Trailing
 	TrailingActive      bool    `json:"trailing_active"`
@@ -3436,26 +3437,81 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 
 	// Create initial futures trade record in database for lifecycle tracking
 	if ga.repo != nil {
-		trade := &database.FuturesTrade{
-			Symbol:       symbol,
-			PositionSide: decision.TradeExecution.Action,
-			Side:         decision.TradeExecution.Action,
-			EntryPrice:   actualPrice,
-			Quantity:     actualQty,
-			Leverage:     leverage,
-			MarginType:   "CROSSED",
-			Status:       "OPEN",
-			EntryTime:    time.Now(),
-			TradeSource:  "ginie",
-		}
-		if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
-			ga.logger.Warn("Failed to create futures trade record", "error", err, "symbol", symbol)
-		} else {
-			position.FuturesTradeID = trade.ID
-			ga.logger.Debug("Futures trade record created", "symbol", symbol, "trade_id", trade.ID)
+		var tradeID int64
+		var shouldLogOpen bool = true
 
-			// Log position opened event to lifecycle
-			if ga.eventLogger != nil {
+		// FIX #3: Check for existing open trade in database before creating new
+		// This prevents duplicate trades when server restarts or sync issues occur
+		if ga.userID != "" {
+			existingTrade, err := ga.repo.GetDB().GetOpenFuturesTradeBySymbolForUser(context.Background(), ga.userID, symbol)
+			if err != nil {
+				ga.logger.Warn("Failed to check for existing trade before entry", "error", err, "symbol", symbol)
+			} else if existingTrade != nil {
+				// Check if entry prices match (within 1%)
+				priceDiff := math.Abs(existingTrade.EntryPrice-actualPrice) / actualPrice * 100
+				if priceDiff < 1.0 {
+					// Entry prices match - reuse existing trade ID
+					tradeID = existingTrade.ID
+					shouldLogOpen = false // Don't log position_opened again
+					ga.logger.Debug("Reusing existing open trade record for new entry",
+						"symbol", symbol,
+						"trade_id", tradeID,
+						"existing_entry", existingTrade.EntryPrice,
+						"new_entry", actualPrice)
+				} else {
+					// Entry prices differ - close old trade first
+					ga.logger.Warn("Entry price mismatch - closing stale trade before new entry",
+						"symbol", symbol,
+						"old_trade_id", existingTrade.ID,
+						"old_entry", existingTrade.EntryPrice,
+						"new_entry", actualPrice,
+						"diff_percent", priceDiff)
+
+					exitTime := time.Now()
+					zeroPnL := float64(0)
+					closedTrade := &database.FuturesTrade{
+						ID:          existingTrade.ID,
+						Status:      "CLOSED",
+						ExitPrice:   &actualPrice,
+						ExitTime:    &exitTime,
+						RealizedPnL: &zeroPnL,
+					}
+					if updateErr := ga.repo.GetDB().UpdateFuturesTradeForUser(context.Background(), ga.userID, closedTrade); updateErr != nil {
+						ga.logger.Error("Failed to close stale trade before new entry", "error", updateErr, "trade_id", existingTrade.ID)
+					}
+				}
+			}
+		}
+
+		// Only create new trade if we didn't reuse an existing one
+		if tradeID == 0 {
+			trade := &database.FuturesTrade{
+				UserID:       ga.userID, // Set user ID for duplicate detection
+				Symbol:       symbol,
+				PositionSide: decision.TradeExecution.Action,
+				Side:         decision.TradeExecution.Action,
+				EntryPrice:   actualPrice,
+				Quantity:     actualQty,
+				Leverage:     leverage,
+				MarginType:   "CROSSED",
+				Status:       "OPEN",
+				EntryTime:    time.Now(),
+				TradeSource:  "ginie",
+			}
+			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
+				ga.logger.Warn("Failed to create futures trade record", "error", err, "symbol", symbol)
+			} else {
+				tradeID = trade.ID
+				ga.logger.Debug("Futures trade record created", "symbol", symbol, "trade_id", tradeID)
+			}
+		}
+
+		// Set trade ID on position and log event if needed
+		if tradeID > 0 {
+			position.FuturesTradeID = tradeID
+
+			// Log position opened event to lifecycle (only for new trades)
+			if shouldLogOpen && ga.eventLogger != nil {
 				conditionsMet := make(map[string]interface{})
 				for _, sig := range decision.SignalAnalysis.PrimarySignals {
 					if sig.Met {
@@ -3464,7 +3520,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 				}
 				go ga.eventLogger.LogPositionOpened(
 					context.Background(),
-					trade.ID,
+					tradeID,
 					symbol,
 					decision.TradeExecution.Action,
 					string(decision.SelectedMode),
@@ -4801,6 +4857,16 @@ func (ga *GinieAutopilot) checkTrailingStop(pos *GiniePosition, currentPrice flo
 
 // closePosition closes the entire remaining position
 func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, currentPrice float64, reason string, tpLevel int) {
+	// CRITICAL: Prevent duplicate close calls using IsClosing flag
+	ga.mu.Lock()
+	if pos.IsClosing {
+		ga.mu.Unlock()
+		log.Printf("[GINIE] %s: Skipping duplicate close call (already closing)", symbol)
+		return
+	}
+	pos.IsClosing = true
+	ga.mu.Unlock()
+
 	// CRITICAL: Cancel all remaining algo orders FIRST to prevent orphan orders
 	// This must happen before anything else to avoid race conditions
 	log.Printf("[GINIE] %s: Closing position, cancelling all algo orders (SL_ID=%d, TP_IDs=%v)",
@@ -5004,8 +5070,10 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 
 	ga.recordTrade(tradeResult)
 
-	// Remove position
+	// Remove position with lock to prevent race conditions
+	ga.mu.Lock()
 	delete(ga.positions, symbol)
+	ga.mu.Unlock()
 }
 
 // closePositionAtMarket closes a position immediately using a TRUE MARKET order
@@ -5017,6 +5085,16 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 	}
 
 	symbol := pos.Symbol
+
+	// CRITICAL: Prevent duplicate close calls using IsClosing flag
+	ga.mu.Lock()
+	if pos.IsClosing {
+		ga.mu.Unlock()
+		log.Printf("[GINIE] %s: Skipping duplicate MARKET close call (already closing)", symbol)
+		return nil
+	}
+	pos.IsClosing = true
+	ga.mu.Unlock()
 
 	// Cancel all algo orders first to prevent orphan orders
 	log.Printf("[MARKET-CLOSE] %s: Cancelling all algo orders before market close", symbol)
@@ -6301,10 +6379,40 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 				if err != nil {
 					ga.logger.Warn("Failed to check for existing trade", "error", err, "symbol", symbol)
 				} else if existingTrade != nil {
-					// Use existing trade ID instead of creating a duplicate
-					tradeID = existingTrade.ID
-					isNewTrade = false
-					ga.logger.Debug("Using existing open trade record for synced position", "symbol", symbol, "trade_id", tradeID)
+					// CRITICAL FIX: Validate entry prices match before reusing trade ID
+					// If prices differ significantly (>1%), this is a NEW position and old trade should be closed
+					priceDiff := math.Abs(existingTrade.EntryPrice-pos.EntryPrice) / pos.EntryPrice * 100
+					if priceDiff < 1.0 {
+						// Entry prices match - reuse existing trade ID
+						tradeID = existingTrade.ID
+						isNewTrade = false
+						ga.logger.Debug("Using existing open trade record for synced position", "symbol", symbol, "trade_id", tradeID)
+					} else {
+						// Entry prices differ significantly - close old trade and create new
+						ga.logger.Warn("Entry price mismatch - closing stale trade and creating new",
+							"symbol", symbol,
+							"old_trade_id", existingTrade.ID,
+							"old_entry", existingTrade.EntryPrice,
+							"new_entry", pos.EntryPrice,
+							"diff_percent", priceDiff)
+
+						// Close the stale trade as "closed_by_new_position"
+						exitTime := time.Now()
+						zeroPnL := float64(0)
+						closedTrade := &database.FuturesTrade{
+							ID:          existingTrade.ID,
+							Status:      "CLOSED",
+							ExitPrice:   &pos.EntryPrice, // Use current position's entry as approximate exit
+							ExitTime:    &exitTime,
+							RealizedPnL: &zeroPnL, // Unknown PnL for stale trades
+						}
+						if updateErr := ga.repo.GetDB().UpdateFuturesTradeForUser(context.Background(), ga.userID, closedTrade); updateErr != nil {
+							ga.logger.Error("Failed to close stale trade", "error", updateErr, "trade_id", existingTrade.ID)
+						} else {
+							ga.logger.Info("Closed stale trade due to entry price mismatch", "trade_id", existingTrade.ID)
+						}
+						// tradeID remains 0, so a new trade will be created below
+					}
 				}
 			}
 
