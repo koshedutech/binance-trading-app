@@ -1364,6 +1364,14 @@ func (ga *GinieAutopilot) Start() error {
 		ga.logger.Info("Adaptive SL/TP monitor started with LLM")
 	}
 
+	// Start early warning monitor (multi-timeframe LLM analysis for early loss detection)
+	settingsForEW := GetSettingsManager().GetCurrentSettings()
+	if settingsForEW.EarlyWarningEnabled && ga.llmAnalyzer != nil {
+		ga.wg.Add(1)
+		go ga.runEarlyWarningMonitor()
+		ga.logger.Info("Early warning monitor started with LLM")
+	}
+
 	// Start ultra-fast scalping monitor (500ms polling for rapid exits)
 	settingsManager := GetSettingsManager()
 	currentSettings := settingsManager.GetCurrentSettings()
@@ -8350,6 +8358,337 @@ func (ga *GinieAutopilot) runAdaptiveSLTPMonitor() {
 			ga.checkAndUpdateAdaptiveSLTP()
 		}
 	}
+}
+
+// runEarlyWarningMonitor monitors positions for early trend reversal using multi-timeframe analysis
+// This uses DeepSeek LLM to analyze 1m, 3m, 5m, 15m candles to detect reversals early
+func (ga *GinieAutopilot) runEarlyWarningMonitor() {
+	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in early warning monitor - restarting", "panic", r)
+			log.Printf("[EARLY-WARNING-PANIC] Early warning monitor panic: %v", r)
+			time.Sleep(5 * time.Second)
+			ga.wg.Add(1)
+			go ga.runEarlyWarningMonitor()
+		}
+	}()
+
+	// Get settings
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	if !settings.EarlyWarningEnabled {
+		ga.logger.Info("Early warning monitor disabled by settings")
+		return
+	}
+
+	checkInterval := time.Duration(settings.EarlyWarningCheckIntervalSecs) * time.Second
+	if checkInterval < 10*time.Second {
+		checkInterval = 30 * time.Second // Minimum 30 seconds
+	}
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	ga.logger.Info("Early warning monitor started",
+		"check_interval", checkInterval,
+		"start_after_minutes", settings.EarlyWarningStartAfterMinutes,
+		"only_underwater", settings.EarlyWarningOnlyUnderwater)
+
+	for {
+		select {
+		case <-ga.stopChan:
+			ga.logger.Info("Early warning monitor stopped")
+			return
+		case <-ticker.C:
+			ga.checkPositionsForEarlyWarning()
+		}
+	}
+}
+
+// checkPositionsForEarlyWarning analyzes underwater positions using multi-timeframe LLM analysis
+func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
+	if ga.llmAnalyzer == nil || !ga.llmAnalyzer.IsEnabled() {
+		return
+	}
+
+	// Get fresh settings
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	if !settings.EarlyWarningEnabled {
+		return
+	}
+
+	ga.mu.RLock()
+	positionCount := len(ga.positions)
+	if positionCount == 0 {
+		ga.mu.RUnlock()
+		return
+	}
+
+	// Copy positions to check (avoid holding lock during API calls)
+	positionsToCheck := make([]*GiniePosition, 0, positionCount)
+	for _, pos := range ga.positions {
+		positionsToCheck = append(positionsToCheck, pos)
+	}
+	ga.mu.RUnlock()
+
+	startAfter := time.Duration(settings.EarlyWarningStartAfterMinutes) * time.Minute
+	minLossPercent := settings.EarlyWarningMinLossPercent
+	minConfidence := settings.EarlyWarningMinConfidence
+
+	for _, pos := range positionsToCheck {
+		// Skip if position too new
+		if time.Since(pos.EntryTime) < startAfter {
+			continue
+		}
+
+		// Skip if only checking underwater and position is profitable
+		if settings.EarlyWarningOnlyUnderwater && pos.UnrealizedPnL >= 0 {
+			continue
+		}
+
+		// Get current price and calculate PnL%
+		currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(pos.Symbol)
+		if err != nil {
+			continue
+		}
+
+		pnlPercent := 0.0
+		if pos.EntryPrice > 0 {
+			if pos.Side == "LONG" {
+				pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
+			} else {
+				pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
+			}
+		}
+
+		// Skip if loss not significant enough
+		if pnlPercent > -minLossPercent {
+			continue
+		}
+
+		log.Printf("[EARLY-WARNING] %s: Position at %.2f%% loss, analyzing MTF data...", pos.Symbol, pnlPercent)
+
+		// Fetch multi-timeframe klines in parallel
+		klines1m, err1 := ga.futuresClient.GetFuturesKlines(pos.Symbol, "1m", 30)
+		klines3m, err3 := ga.futuresClient.GetFuturesKlines(pos.Symbol, "3m", 30)
+		klines5m, err5 := ga.futuresClient.GetFuturesKlines(pos.Symbol, "5m", 30)
+		klines15m, err15 := ga.futuresClient.GetFuturesKlines(pos.Symbol, "15m", 30)
+
+		if err1 != nil || err3 != nil || err5 != nil || err15 != nil {
+			ga.logger.Debug("Failed to get MTF klines for early warning",
+				"symbol", pos.Symbol,
+				"errors", fmt.Sprintf("1m:%v, 3m:%v, 5m:%v, 15m:%v", err1, err3, err5, err15))
+			continue
+		}
+
+		// Build position info for LLM
+		posInfo := &llm.PositionInfo{
+			Symbol:        pos.Symbol,
+			Side:          pos.Side,
+			EntryPrice:    pos.EntryPrice,
+			CurrentPrice:  currentPrice,
+			Quantity:      pos.RemainingQty,
+			UnrealizedPnL: pos.UnrealizedPnL,
+			PnLPercent:    pnlPercent,
+			CurrentSL:     pos.StopLoss,
+			CurrentTP:     0,
+			HoldDuration:  time.Since(pos.EntryTime).Round(time.Second).String(),
+			Mode:          string(pos.Mode),
+		}
+		if len(pos.TakeProfits) > 0 {
+			posInfo.CurrentTP = pos.TakeProfits[0].Price
+		}
+
+		// Call LLM for multi-timeframe analysis
+		analysis, err := ga.llmAnalyzer.AnalyzePositionHealth(posInfo, klines1m, klines3m, klines5m, klines15m)
+		if err != nil {
+			ga.logger.Debug("LLM early warning analysis failed",
+				"symbol", pos.Symbol,
+				"error", err.Error())
+			continue
+		}
+
+		// Log the analysis result
+		ga.logger.Info("Early warning analysis complete",
+			"symbol", pos.Symbol,
+			"action", analysis.Action,
+			"confidence", analysis.Confidence,
+			"reversal_detected", analysis.TrendReversalDetected,
+			"reversal_strength", analysis.ReversalStrength,
+			"urgency", analysis.Urgency,
+			"reasoning", analysis.Reasoning)
+
+		log.Printf("[EARLY-WARNING] %s: Action=%s, Confidence=%.2f, Reversal=%v (%s), Urgency=%s",
+			pos.Symbol, analysis.Action, analysis.Confidence,
+			analysis.TrendReversalDetected, analysis.ReversalStrength, analysis.Urgency)
+
+		// Only act if confidence is high enough
+		if analysis.Confidence < minConfidence {
+			ga.logger.Debug("Early warning confidence too low",
+				"symbol", pos.Symbol,
+				"confidence", analysis.Confidence,
+				"min_required", minConfidence)
+			continue
+		}
+
+		// Take action based on analysis
+		switch analysis.Action {
+		case "close_now":
+			if settings.EarlyWarningCloseOnReversal && analysis.TrendReversalDetected {
+				log.Printf("[EARLY-WARNING] %s: CLOSING POSITION - Trend reversal detected (strength: %s)",
+					pos.Symbol, analysis.ReversalStrength)
+				ga.logger.Info("Early warning triggered position close",
+					"symbol", pos.Symbol,
+					"reason", "mtf_trend_reversal",
+					"reversal_strength", analysis.ReversalStrength,
+					"pnl_percent", pnlPercent)
+
+				// Close the position
+				ga.mu.Lock()
+				if p, exists := ga.positions[pos.Symbol]; exists {
+					ga.mu.Unlock()
+					err := ga.closePositionAtMarket(p)
+					if err != nil {
+						ga.logger.Error("Failed to close position from early warning",
+							"symbol", pos.Symbol,
+							"error", err.Error())
+					} else {
+						log.Printf("[EARLY-WARNING] %s: Position closed successfully", pos.Symbol)
+					}
+				} else {
+					ga.mu.Unlock()
+				}
+			}
+
+		case "tighten_sl":
+			if settings.EarlyWarningTightenSLOnWarning && analysis.RecommendedSL > 0 {
+				log.Printf("[EARLY-WARNING] %s: TIGHTENING SL from %.8f to %.8f",
+					pos.Symbol, pos.StopLoss, analysis.RecommendedSL)
+				ga.logger.Info("Early warning tightening stop loss",
+					"symbol", pos.Symbol,
+					"old_sl", pos.StopLoss,
+					"new_sl", analysis.RecommendedSL,
+					"reason", "mtf_warning")
+
+				// Validate the new SL is on the correct side
+				validSL := false
+				if pos.Side == "LONG" && analysis.RecommendedSL < currentPrice && analysis.RecommendedSL > pos.StopLoss {
+					validSL = true
+				} else if pos.Side == "SHORT" && analysis.RecommendedSL > currentPrice && analysis.RecommendedSL < pos.StopLoss {
+					validSL = true
+				}
+
+				if validSL {
+					ga.mu.Lock()
+					if p, exists := ga.positions[pos.Symbol]; exists {
+						p.StopLoss = analysis.RecommendedSL
+						ga.mu.Unlock()
+						// Update the stop loss order on exchange
+						ga.updateStopLossOrder(pos.Symbol, analysis.RecommendedSL)
+					} else {
+						ga.mu.Unlock()
+					}
+				} else {
+					ga.logger.Debug("Early warning SL recommendation invalid",
+						"symbol", pos.Symbol,
+						"side", pos.Side,
+						"current_price", currentPrice,
+						"recommended_sl", analysis.RecommendedSL,
+						"current_sl", pos.StopLoss)
+				}
+			}
+
+		case "move_to_breakeven":
+			// Move SL to entry price (breakeven)
+			if settings.EarlyWarningTightenSLOnWarning {
+				log.Printf("[EARLY-WARNING] %s: MOVING TO BREAKEVEN at %.8f", pos.Symbol, pos.EntryPrice)
+				ga.logger.Info("Early warning moving to breakeven",
+					"symbol", pos.Symbol,
+					"entry_price", pos.EntryPrice)
+
+				ga.mu.Lock()
+				if p, exists := ga.positions[pos.Symbol]; exists {
+					p.StopLoss = pos.EntryPrice
+					ga.mu.Unlock()
+					ga.updateStopLossOrder(pos.Symbol, pos.EntryPrice)
+				} else {
+					ga.mu.Unlock()
+				}
+			}
+
+		case "hold":
+			// No action needed, just log
+			ga.logger.Debug("Early warning recommends hold",
+				"symbol", pos.Symbol,
+				"reasoning", analysis.Reasoning)
+		}
+	}
+}
+
+// updateStopLossOrder updates the stop loss order on the exchange
+func (ga *GinieAutopilot) updateStopLossOrder(symbol string, newSL float64) {
+	ga.mu.RLock()
+	pos, exists := ga.positions[symbol]
+	if !exists {
+		ga.mu.RUnlock()
+		return
+	}
+	slOrderID := pos.StopLossAlgoID
+	ga.mu.RUnlock()
+
+	// Cancel existing SL order
+	if slOrderID > 0 {
+		err := ga.futuresClient.CancelAlgoOrder(symbol, slOrderID)
+		if err != nil {
+			ga.logger.Debug("Failed to cancel old SL order", "symbol", symbol, "error", err.Error())
+		}
+	}
+
+	// Place new SL order
+	ga.mu.RLock()
+	pos, exists = ga.positions[symbol]
+	if !exists {
+		ga.mu.RUnlock()
+		return
+	}
+	side := "SELL"
+	positionSide := "LONG"
+	if pos.Side == "SHORT" {
+		side = "BUY"
+		positionSide = "SHORT"
+	}
+	qty := pos.RemainingQty
+	ga.mu.RUnlock()
+
+	slParams := binance.AlgoOrderParams{
+		Symbol:       symbol,
+		Side:         side,
+		PositionSide: binance.PositionSide(positionSide),
+		Type:         binance.FuturesOrderTypeStopMarket,
+		Quantity:     qty,
+		TriggerPrice: newSL,
+		WorkingType:  binance.WorkingTypeMarkPrice,
+		ReduceOnly:   true,
+	}
+
+	resp, err := ga.futuresClient.PlaceAlgoOrder(slParams)
+	if err != nil {
+		ga.logger.Error("Failed to place new SL order", "symbol", symbol, "error", err.Error())
+		return
+	}
+
+	ga.mu.Lock()
+	if p, exists := ga.positions[symbol]; exists {
+		p.StopLossAlgoID = resp.AlgoId
+		p.StopLoss = newSL
+	}
+	ga.mu.Unlock()
+
+	log.Printf("[EARLY-WARNING] %s: SL order updated, new order ID: %d, SL: %.8f", symbol, resp.AlgoId, newSL)
 }
 
 // checkAndUpdateAdaptiveSLTP checks each position for SL/TP updates based on mode intervals
