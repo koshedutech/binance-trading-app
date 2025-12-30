@@ -215,7 +215,8 @@ export default function GiniePanel() {
     setResettingModeCB(mode);
     try {
       await futuresApi.resetModeCircuitBreaker(mode);
-      showSuccess(`${mode.toUpperCase()} circuit breaker reset`);
+      setSuccessMsg(`${mode.toUpperCase()} circuit breaker reset`);
+      setTimeout(() => setSuccessMsg(null), 3000);
       await fetchModeCBStatus();
     } catch (err: any) {
       setError(`Failed to reset ${mode} circuit breaker`);
@@ -2158,74 +2159,74 @@ export default function GiniePanel() {
 
                         {/* TP Gain Levels - Individual inputs */}
                         <div className="space-y-1">
-                          <span className="text-gray-400 text-[10px] block">Take Profit Levels (%)</span>
+                          <span className="text-gray-400 text-[10px] block">Take Profit Levels (% profit from entry)</span>
                           <div className="grid grid-cols-4 gap-1">
                             <div className="text-center">
-                              <label className="text-gray-500 text-[9px]" title="Take profit level 1 as percentage of full TP. Partial close at this level.">TP1</label>
+                              <label className="text-gray-500 text-[9px]" title="TP1: First take profit level. Close partial position when profit reaches this %.">TP1 %</label>
                               <input
                                 type="number"
                                 min="0"
-                                max="50"
-                                step="0.5"
-                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[0] ?? 0.25) * 100).toFixed(1)}
+                                max="20"
+                                step="0.1"
+                                value={(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[0] ?? 0.5).toFixed(2)}
                                 onChange={(e) => {
-                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
-                                  levels[0] = Number(e.target.value) / 100;
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.5, 1.0, 0, 0])];
+                                  levels[0] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
                             <div className="text-center">
-                              <label className="text-gray-500 text-[9px]" title="Take profit level 2 as percentage of full TP. Partial close at this level.">TP2</label>
+                              <label className="text-gray-500 text-[9px]" title="TP2: Second take profit level. Close more when profit reaches this %.">TP2 %</label>
                               <input
                                 type="number"
                                 min="0"
-                                max="50"
-                                step="0.5"
-                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[1] ?? 0.5) * 100).toFixed(1)}
+                                max="20"
+                                step="0.1"
+                                value={(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[1] ?? 1.0).toFixed(2)}
                                 onChange={(e) => {
-                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
-                                  levels[1] = Number(e.target.value) / 100;
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.5, 1.0, 0, 0])];
+                                  levels[1] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
                             <div className="text-center">
-                              <label className="text-gray-500 text-[9px]" title="Take profit level 3 as percentage of full TP. Partial close at this level.">TP3</label>
+                              <label className="text-gray-500 text-[9px]" title="TP3: Third take profit level. Set to 0 to disable.">TP3 %</label>
                               <input
                                 type="number"
                                 min="0"
-                                max="50"
-                                step="0.5"
-                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[2] ?? 0.75) * 100).toFixed(1)}
+                                max="20"
+                                step="0.1"
+                                value={(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[2] ?? 0).toFixed(2)}
                                 onChange={(e) => {
-                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
-                                  levels[2] = Number(e.target.value) / 100;
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.5, 1.0, 0, 0])];
+                                  levels[2] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
                             <div className="text-center">
-                              <label className="text-gray-500 text-[9px]" title="Take profit level 4 as percentage of full TP. Final close at this level.">TP4</label>
+                              <label className="text-gray-500 text-[9px]" title="TP4: Final take profit level. Set to 0 to disable.">TP4 %</label>
                               <input
                                 type="number"
                                 min="0"
-                                max="50"
-                                step="0.5"
-                                value={((modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[3] ?? 1.0) * 100).toFixed(1)}
+                                max="20"
+                                step="0.1"
+                                value={(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels?.[3] ?? 0).toFixed(2)}
                                 onChange={(e) => {
-                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.25, 0.5, 0.75, 1.0])];
-                                  levels[3] = Number(e.target.value) / 100;
+                                  const levels = [...(modeConfigs[selectedModeConfig]?.sltp?.tp_gain_levels || [0.5, 1.0, 0, 0])];
+                                  levels[3] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
                           </div>
-                          <div className="text-[9px] text-gray-500 mt-1">Percentage gains for each TP level (e.g., 25%, 50%, 75%, 100%)</div>
+                          <div className="text-[9px] text-gray-500 mt-1">E.g., TP1=0.65%, TP2=1.3% means close 50% at 0.65% profit, remaining at 1.3% profit</div>
                         </div>
                       </div>
                     </div>
