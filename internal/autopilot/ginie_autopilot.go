@@ -732,6 +732,9 @@ type GinieAutopilot struct {
 	// Per-mode circuit breaker tracking (Story 2.7 Task 2.7.4)
 	modeCircuitBreakers map[GinieTradingMode]*ModeCircuitBreaker // Mode-specific circuit breaker state
 
+	// Reversal LIMIT order tracking (120s timeout)
+	pendingLimitOrders map[string]*PendingLimitOrder // symbol -> pending LIMIT order
+
 	// Performance stats
 	totalTrades   int
 	winningTrades int
@@ -828,6 +831,7 @@ func NewGinieAutopilot(
 		modeSafetyConfigs:    make(map[string]*ModeSafetyConfig),
 		lastDayReset:         time.Now().Truncate(24 * time.Hour),
 		modeCircuitBreakers:  make(map[GinieTradingMode]*ModeCircuitBreaker),
+		pendingLimitOrders:   make(map[string]*PendingLimitOrder),
 	}
 
 	// Initialize safety configs and states from settings
@@ -1417,6 +1421,11 @@ func (ga *GinieAutopilot) Start() error {
 	// This is the core of the bulletproof protection system
 	ga.wg.Add(1)
 	go ga.runProtectionGuardian()
+
+	// Start pending LIMIT order monitor (reversal entries with 120s timeout)
+	ga.wg.Add(1)
+	go ga.monitorPendingLimitOrders()
+	ga.logger.Info("Pending LIMIT order monitor started - 120s timeout for reversal entries")
 
 	ga.mu.Unlock()
 	// CRITICAL: Release lock BEFORE doing any blocking operations (prevents API handler timeouts)
@@ -3332,7 +3341,63 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			return
 		}
 
-		// Place market order
+		// === REVERSAL LIMIT ORDER HANDLING ===
+		// If this is a reversal entry, place LIMIT order and track for timeout
+		if decision.TradeExecution.UseReversal && decision.TradeExecution.EntryType == "LIMIT" {
+			limitPrice := decision.TradeExecution.LimitEntryPrice
+			if limitPrice <= 0 {
+				ga.logger.Error("Invalid LIMIT price for reversal entry", "symbol", symbol, "price", limitPrice)
+				return
+			}
+
+			// Round limit price to symbol precision
+			limitPrice = roundPrice(symbol, limitPrice)
+
+			// Place LIMIT order
+			limitOrderParams := binance.FuturesOrderParams{
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: effectivePositionSide,
+				Type:         binance.FuturesOrderTypeLimit,
+				Quantity:     quantity,
+				Price:        limitPrice,
+				TimeInForce:  "GTC", // Good Till Cancel
+			}
+
+			limitOrder, err := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
+			if err != nil {
+				ga.logger.Error("Reversal LIMIT order failed", "symbol", symbol, "error", err.Error())
+				return
+			}
+
+			// Track pending LIMIT order with 120-second timeout
+			timeoutAt := time.Now().Add(120 * time.Second)
+			ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
+				OrderID:      limitOrder.OrderId,
+				Symbol:       symbol,
+				Side:         side,
+				PositionSide: string(effectivePositionSide),
+				Price:        limitPrice,
+				Quantity:     quantity,
+				PlacedAt:     time.Now(),
+				TimeoutAt:    timeoutAt,
+				Source:       "reversal",
+				Mode:         decision.SelectedMode,
+			}
+
+			ga.logger.Info("Reversal LIMIT order placed - awaiting fill",
+				"symbol", symbol,
+				"order_id", limitOrder.OrderId,
+				"side", side,
+				"limit_price", limitPrice,
+				"quantity", quantity,
+				"timeout_at", timeoutAt.Format(time.RFC3339))
+
+			// Return early - position will be created when order fills (handled by monitorPendingLimitOrders)
+			return
+		}
+
+		// Place market order (standard entry)
 		orderParams := binance.FuturesOrderParams{
 			Symbol:       symbol,
 			Side:         side,
@@ -13929,4 +13994,191 @@ func (ga *GinieAutopilot) GetTradeHistoryCount() int {
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
 	return len(ga.tradeHistory)
+}
+
+// === REVERSAL LIMIT ORDER MONITORING ===
+
+// monitorPendingLimitOrders monitors pending LIMIT orders from reversal entries
+// Orders that aren't filled within 120 seconds are cancelled
+func (ga *GinieAutopilot) monitorPendingLimitOrders() {
+	defer ga.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			ga.logger.Error("PANIC in pending LIMIT order monitor - restarting", "panic", r)
+			log.Printf("[GINIE-PANIC] Pending LIMIT order monitor panic: %v", r)
+			time.Sleep(2 * time.Second)
+			ga.wg.Add(1)
+			go ga.monitorPendingLimitOrders()
+		}
+	}()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ga.stopChan:
+			ga.logger.Info("Pending LIMIT order monitor stopping")
+			return
+		case <-ticker.C:
+			ga.checkPendingLimitOrders()
+		}
+	}
+}
+
+// checkPendingLimitOrders checks all pending LIMIT orders for fill or timeout
+func (ga *GinieAutopilot) checkPendingLimitOrders() {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	if len(ga.pendingLimitOrders) == 0 {
+		return
+	}
+
+	now := time.Now()
+	toRemove := make([]string, 0)
+
+	for symbol, pending := range ga.pendingLimitOrders {
+		// Check if order has been filled by querying order status
+		ga.mu.Unlock()
+		orderStatus, err := ga.futuresClient.GetOrder(symbol, pending.OrderID)
+		ga.mu.Lock()
+
+		if err != nil {
+			ga.logger.Warn("Failed to check LIMIT order status",
+				"symbol", symbol,
+				"order_id", pending.OrderID,
+				"error", err.Error())
+			// Continue to check timeout
+		} else if orderStatus.Status == "FILLED" {
+			// Order filled! Create position
+			ga.logger.Info("Reversal LIMIT order FILLED - creating position",
+				"symbol", symbol,
+				"order_id", pending.OrderID,
+				"fill_price", orderStatus.AvgPrice,
+				"fill_qty", orderStatus.ExecutedQty)
+
+			// Create position from filled order
+			ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
+			toRemove = append(toRemove, symbol)
+			continue
+		} else if orderStatus.Status == "CANCELED" || orderStatus.Status == "EXPIRED" || orderStatus.Status == "REJECTED" {
+			// Order was cancelled/expired/rejected externally
+			ga.logger.Warn("Reversal LIMIT order was cancelled/expired/rejected externally",
+				"symbol", symbol,
+				"order_id", pending.OrderID,
+				"status", orderStatus.Status)
+			toRemove = append(toRemove, symbol)
+			continue
+		}
+
+		// Check timeout (120 seconds)
+		if now.After(pending.TimeoutAt) {
+			ga.logger.Warn("Reversal LIMIT order TIMEOUT - cancelling",
+				"symbol", symbol,
+				"order_id", pending.OrderID,
+				"placed_at", pending.PlacedAt.Format(time.RFC3339),
+				"timeout_at", pending.TimeoutAt.Format(time.RFC3339))
+
+			// Cancel the order
+			ga.mu.Unlock()
+			err := ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
+			ga.mu.Lock()
+
+			if err != nil {
+				ga.logger.Error("Failed to cancel timed-out LIMIT order",
+					"symbol", symbol,
+					"order_id", pending.OrderID,
+					"error", err.Error())
+			} else {
+				ga.logger.Info("Timed-out LIMIT order cancelled successfully",
+					"symbol", symbol,
+					"order_id", pending.OrderID)
+			}
+
+			toRemove = append(toRemove, symbol)
+		}
+	}
+
+	// Remove processed orders
+	for _, symbol := range toRemove {
+		delete(ga.pendingLimitOrders, symbol)
+	}
+}
+
+// createPositionFromLimitFill creates a position after a LIMIT order is filled
+func (ga *GinieAutopilot) createPositionFromLimitFill(pending *PendingLimitOrder, fillPrice float64, fillQty float64) {
+	// Build default TPs based on mode
+	isLong := pending.Side == "BUY"
+	takeProfits := ga.generateDefaultTPs(pending.Symbol, fillPrice, pending.Mode, isLong)
+
+	// Get trailing stop settings from Mode Config
+	trailingEnabled := ga.isTrailingEnabled(pending.Mode)
+	trailingPercent := 0.0
+	trailingActivation := 0.0
+	if trailingEnabled {
+		trailingPercent = ga.getTrailingPercent(pending.Mode)
+		trailingActivation = ga.getTrailingActivation(pending.Mode)
+	}
+
+	// Calculate default SL based on mode
+	slPct := ga.getDefaultSLPercent(pending.Mode)
+	var stopLoss float64
+	if isLong {
+		stopLoss = roundPriceForSL(pending.Symbol, fillPrice*(1-slPct/100), "LONG")
+	} else {
+		stopLoss = roundPriceForSL(pending.Symbol, fillPrice*(1+slPct/100), "SHORT")
+	}
+
+	side := "LONG"
+	if pending.Side == "SELL" {
+		side = "SHORT"
+	}
+
+	position := &GiniePosition{
+		Symbol:                pending.Symbol,
+		Side:                  side,
+		Mode:                  pending.Mode,
+		EntryPrice:           fillPrice,
+		OriginalQty:          fillQty,
+		RemainingQty:         fillQty,
+		Leverage:             10, // Default leverage for scalp reversal
+		EntryTime:            time.Now(),
+		TakeProfits:          takeProfits,
+		CurrentTPLevel:       0,
+		StopLoss:             stopLoss,
+		OriginalSL:           stopLoss,
+		MovedToBreakeven:     false,
+		TrailingActive:       false,
+		HighestPrice:         fillPrice,
+		LowestPrice:          fillPrice,
+		TrailingPercent:      trailingPercent,
+		TrailingActivationPct: trailingActivation,
+		Source:               "reversal", // Mark as reversal entry
+		Protection:           NewProtectionStatus(),
+	}
+
+	ga.positions[pending.Symbol] = position
+	ga.dailyTrades++
+
+	ga.logger.Info("Position created from reversal LIMIT fill",
+		"symbol", pending.Symbol,
+		"side", side,
+		"entry_price", fillPrice,
+		"quantity", fillQty,
+		"stop_loss", stopLoss)
+}
+
+// getDefaultSLPercent returns default SL percentage for a mode
+func (ga *GinieAutopilot) getDefaultSLPercent(mode GinieTradingMode) float64 {
+	switch mode {
+	case GinieModeScalp:
+		return 0.5 // 0.5% for scalp
+	case GinieModeSwing:
+		return 2.0 // 2% for swing
+	case GinieModePosition:
+		return 5.0 // 5% for position
+	default:
+		return 1.0 // 1% default
+	}
 }

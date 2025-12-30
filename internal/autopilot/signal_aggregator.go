@@ -178,6 +178,13 @@ func (sa *SignalAggregator) SetLLMAnalyzer(a *llm.Analyzer) {
 	sa.llmAnalyzer = a
 }
 
+// GetLLMAnalyzer returns the LLM analyzer for direct use
+func (sa *SignalAggregator) GetLLMAnalyzer() *llm.Analyzer {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+	return sa.llmAnalyzer
+}
+
 // SetSentimentAnalyzer sets the sentiment analyzer
 func (sa *SignalAggregator) SetSentimentAnalyzer(a *sentiment.Analyzer) {
 	sa.mu.Lock()

@@ -6,6 +6,7 @@ import (
 	"binance-trading-bot/internal/logging"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"regexp"
 	"sort"
@@ -1805,11 +1806,100 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		rejectionTracker.AddRejection(fmt.Sprintf("Liquidity: $%.0f volume (need $1M+)", scan.Liquidity.VolumeUSD))
 	}
 
+	// === REVERSAL ENTRY CHECK (Scalp Mode Only) ===
+	// For scalp mode, check for reversal patterns before regular signal-based entry
+	var useReversalEntry bool
+	var reversalDirection string
+	var reversalEntryPrice float64
+
+	if mode == GinieModeScalp && g.signalAggregator != nil {
+		log.Printf("[REVERSAL-CHECK] %s: Starting reversal check for SCALP mode", symbol)
+
+		// Analyze multi-timeframe reversal patterns (3 consecutive LL or HH)
+		mtfReversal := g.AnalyzeMTFReversal(symbol, 3) // 3 consecutive candles
+
+		if mtfReversal != nil && mtfReversal.Aligned && mtfReversal.AlignedCount >= 2 {
+			log.Printf("[REVERSAL-CHECK] %s: MTF Reversal ALIGNED! direction=%s, alignedCount=%d, entryPrice=%.6f",
+				symbol, mtfReversal.Direction, mtfReversal.AlignedCount, mtfReversal.EntryPrice)
+			// Get LLM confirmation for reversal
+			llmAnalyzer := g.signalAggregator.GetLLMAnalyzer()
+			if llmAnalyzer != nil && llmAnalyzer.IsEnabled() {
+				// Fetch klines for LLM analysis (already have some from scan)
+				klines5m, _ := g.futuresClient.GetFuturesKlines(symbol, "5m", 30)
+				klines15m, _ := g.futuresClient.GetFuturesKlines(symbol, "15m", 30)
+				klines1h, _ := g.futuresClient.GetFuturesKlines(symbol, "1h", 30)
+
+				patternType := "lower_lows"
+				if mtfReversal.Direction == "SHORT" {
+					patternType = "higher_highs"
+				}
+
+				llmConfirm, err := llmAnalyzer.AnalyzeReversalProbability(
+					symbol,
+					patternType,
+					mtfReversal.Direction,
+					mtfReversal.AlignedCount,
+					klines5m,
+					klines15m,
+					klines1h,
+				)
+
+				if err == nil && llmConfirm != nil && llmConfirm.IsReversal && llmConfirm.Confidence >= 0.65 {
+					// LLM confirmed reversal - use LIMIT entry
+					useReversalEntry = true
+					reversalDirection = mtfReversal.Direction
+					reversalEntryPrice = mtfReversal.EntryPrice
+
+					if g.logger != nil {
+						g.logger.Info("Reversal entry confirmed by LLM",
+							"symbol", symbol,
+							"direction", reversalDirection,
+							"entry_price", reversalEntryPrice,
+							"llm_confidence", llmConfirm.Confidence,
+							"pattern", patternType,
+							"aligned_tfs", mtfReversal.AlignedCount)
+					}
+				} else if err != nil && g.logger != nil {
+					g.logger.Warn("LLM reversal confirmation failed",
+						"symbol", symbol,
+						"error", err.Error())
+				}
+			} else if g.logger != nil {
+				g.logger.Debug("Reversal pattern detected but LLM not available for confirmation",
+					"symbol", symbol,
+					"direction", mtfReversal.Direction,
+					"aligned_tfs", mtfReversal.AlignedCount)
+			}
+		} else if mtfReversal != nil {
+			log.Printf("[REVERSAL-CHECK] %s: MTF Reversal NOT aligned (alignedCount=%d, need 2+)",
+				symbol, mtfReversal.AlignedCount)
+		}
+
+		log.Printf("[REVERSAL-CHECK] %s: Final result - useReversalEntry=%v", symbol, useReversalEntry)
+	} else if mode != GinieModeScalp {
+		log.Printf("[REVERSAL-CHECK] %s: Skipping reversal check (mode=%s, not scalp)", symbol, mode)
+	}
+
 	// Trade execution
 	if signals.PrimaryPassed && scan.TradeReady {
 		report.TradeExecution.Action = "LONG"
 		if signals.Direction == "short" {
 			report.TradeExecution.Action = "SHORT"
+		}
+
+		// Apply reversal entry override if detected and confirmed
+		if useReversalEntry {
+			report.TradeExecution.Action = reversalDirection
+			report.TradeExecution.UseReversal = true
+			report.TradeExecution.EntryType = "LIMIT"
+			report.TradeExecution.LimitEntryPrice = reversalEntryPrice
+
+			if g.logger != nil {
+				g.logger.Info("Using reversal LIMIT entry",
+					"symbol", symbol,
+					"action", reversalDirection,
+					"limit_price", reversalEntryPrice)
+			}
 		}
 
 		// Entry zone based on ATR
@@ -3633,7 +3723,7 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 			signal.TrendAligned = false
 			signal.AlignmentReason = fmt.Sprintf("MTF weak consensus=%d<%d or strength=%.0f<%.0f [%s]",
 				max(longConsensus, shortConsensus), minConsensus,
-				max(longScore, shortScore), minStrength,
+				math.Max(longScore, shortScore), minStrength,
 				strings.Join(alignmentDetails, ", "))
 		}
 

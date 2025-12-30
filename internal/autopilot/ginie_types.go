@@ -454,6 +454,11 @@ type GinieTradeExecution struct {
 	// AI/LLM Sizing - suggested position size from LLM analysis
 	LLMSuggestedSizeUSD float64 `json:"llm_suggested_size_usd,omitempty"` // LLM recommended position size in USD
 	LLMSizeReasoning    string  `json:"llm_size_reasoning,omitempty"`     // LLM reasoning for size recommendation
+
+	// Reversal Entry - for LIMIT order entries at previous candle's extreme
+	UseReversal     bool    `json:"use_reversal,omitempty"`      // Whether this is a reversal entry
+	EntryType       string  `json:"entry_type,omitempty"`        // "MARKET" or "LIMIT"
+	LimitEntryPrice float64 `json:"limit_entry_price,omitempty"` // Price for LIMIT order (prev candle low/high)
 }
 
 // GinieDecisionReport is the full structured decision output
@@ -925,4 +930,72 @@ func (rt *RejectionTracker) AddRejection(reason string) {
 		rt.IsBlocked = true
 		rt.BlockReason = reason // First rejection becomes primary reason
 	}
+}
+
+// ===== REVERSAL ENTRY TYPES =====
+
+// ReversalCandleData holds OHLCV data for a single candle in reversal analysis
+type ReversalCandleData struct {
+	Open   float64   `json:"open"`
+	High   float64   `json:"high"`
+	Low    float64   `json:"low"`
+	Close  float64   `json:"close"`
+	Volume float64   `json:"volume"`
+	Time   time.Time `json:"time"`
+}
+
+// ReversalPattern represents a detected Lower Lows or Higher Highs pattern
+type ReversalPattern struct {
+	PatternType    string               `json:"pattern_type"`     // "lower_lows" or "higher_highs"
+	Direction      string               `json:"direction"`        // "LONG" for LL (reversal up), "SHORT" for HH (reversal down)
+	Timeframe      string               `json:"timeframe"`        // "5m", "15m", "1h"
+	CandleCount    int                  `json:"candle_count"`     // Number of consecutive candles analyzed (default: 3)
+	Candles        []ReversalCandleData `json:"candles"`          // The analyzed candles
+	PrevCandleLow  float64              `json:"prev_candle_low"`  // Entry price for LONG (previous candle's low)
+	PrevCandleHigh float64              `json:"prev_candle_high"` // Entry price for SHORT (previous candle's high)
+	Confidence     float64              `json:"confidence"`       // Pattern confidence 0-100
+	DetectedAt     time.Time            `json:"detected_at"`
+}
+
+// MTFReversalAnalysis holds multi-timeframe reversal pattern confirmation
+type MTFReversalAnalysis struct {
+	Symbol         string           `json:"symbol"`
+	Pattern5m      *ReversalPattern `json:"pattern_5m"`      // 5-minute pattern (primary for scalp)
+	Pattern15m     *ReversalPattern `json:"pattern_15m"`     // 15-minute pattern (secondary)
+	Pattern1h      *ReversalPattern `json:"pattern_1h"`      // 1-hour pattern (tertiary)
+	Aligned        bool             `json:"aligned"`         // True if 2+ timeframes agree on direction
+	AlignedCount   int              `json:"aligned_count"`   // Number of aligned timeframes (0-3)
+	AlignmentScore float64          `json:"alignment_score"` // Weighted alignment score 0-100
+	Direction      string           `json:"direction"`       // Final direction if aligned ("LONG" or "SHORT")
+	EntryPrice     float64          `json:"entry_price"`     // Entry price from 5m previous candle
+	Reason         string           `json:"reason"`          // Explanation of alignment
+	AnalyzedAt     time.Time        `json:"analyzed_at"`
+}
+
+// LLMReversalConfirmation holds LLM analysis result for reversal probability
+type LLMReversalConfirmation struct {
+	IsReversal      bool     `json:"is_reversal"`       // Whether LLM confirms reversal
+	Confidence      float64  `json:"confidence"`        // LLM confidence 0.0-1.0
+	ReversalType    string   `json:"reversal_type"`     // "exhaustion", "capitulation", "structural", "false_signal"
+	EntryPrice      float64  `json:"entry_price"`       // LLM recommended entry
+	StopLossPrice   float64  `json:"stop_loss_price"`   // LLM recommended SL
+	TakeProfitPrice float64  `json:"take_profit_price"` // LLM recommended TP
+	Reasoning       string   `json:"reasoning"`         // LLM reasoning
+	CautionFlags    []string `json:"caution_flags"`     // Warning flags
+	NearestSupport  float64  `json:"nearest_support"`   // Key support level
+	NearestResist   float64  `json:"nearest_resistance"` // Key resistance level
+}
+
+// PendingLimitOrder tracks unfilled LIMIT orders for reversal entries
+type PendingLimitOrder struct {
+	OrderID      int64       `json:"order_id"`
+	Symbol       string      `json:"symbol"`
+	Side         string      `json:"side"`         // "BUY" or "SELL"
+	PositionSide string      `json:"position_side"` // "LONG" or "SHORT"
+	Price        float64     `json:"price"`
+	Quantity     float64     `json:"quantity"`
+	PlacedAt     time.Time   `json:"placed_at"`
+	TimeoutAt    time.Time   `json:"timeout_at"`
+	Source       string      `json:"source"`       // "reversal_entry"
+	Mode         GinieTradingMode `json:"mode"`
 }

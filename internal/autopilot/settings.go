@@ -317,6 +317,17 @@ type ModeDynamicAIExitConfig struct {
 	MaxHoldTimeMS     int  `json:"max_hold_time_ms"`        // Maximum hold time before forced exit (0 = no limit)
 }
 
+// ====== REVERSAL ENTRY CONFIGURATION ======
+// ModeReversalConfig holds reversal entry settings (LIMIT orders at candle extremes)
+// Detects 3 consecutive Lower Lows (LONG) or Higher Highs (SHORT) with LLM confirmation
+type ModeReversalConfig struct {
+	Enabled            bool    `json:"reversal_enabled"`             // Enable reversal entry detection
+	MinLLMConfidence   float64 `json:"reversal_min_llm_confidence"`  // Min LLM confidence for entry (0.0-1.0, default: 0.65)
+	ConsecutiveCandles int     `json:"reversal_consecutive_candles"` // Number of consecutive LL/HH candles (default: 3)
+	LimitTimeoutSec    int     `json:"reversal_limit_timeout_sec"`   // LIMIT order timeout in seconds (default: 120)
+	RequireAllTFs      bool    `json:"reversal_require_all_tfs"`     // Require 3/3 TFs (false = 2/3 ok)
+}
+
 // ModeFullConfig holds ALL settings for a single trading mode
 type ModeFullConfig struct {
 	ModeName       string `json:"mode_name"` // "ultra_fast", "scalp", "swing", "position"
@@ -339,6 +350,7 @@ type ModeFullConfig struct {
 	// ====== NEW: Multi-Timeframe and Dynamic AI Exit ======
 	MTF           *ModeMTFConfig           `json:"mtf"`             // Multi-timeframe weighted consensus
 	DynamicAIExit *ModeDynamicAIExitConfig `json:"dynamic_ai_exit"` // AI-driven adaptive exit logic
+	Reversal      *ModeReversalConfig      `json:"reversal"`        // Reversal entry via LIMIT orders
 }
 
 // ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
@@ -680,6 +692,14 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UseLLMForLoss:     true,   // AI decides hold/exit on loss
 				UseLLMForProfit:   true,   // AI optimizes profit timing
 				MaxHoldTimeMS:     14400000, // 4 hours max hold
+			},
+			// ====== Scalp Reversal Entry ======
+			Reversal: &ModeReversalConfig{
+				Enabled:            true,  // Enable reversal entries for scalp mode
+				MinLLMConfidence:   0.65,  // 65% min LLM confidence required
+				ConsecutiveCandles: 3,     // 3 consecutive LL/HH to trigger
+				LimitTimeoutSec:    120,   // 120 second timeout for LIMIT orders
+				RequireAllTFs:      false, // 2/3 TFs alignment is sufficient
 			},
 		},
 		"swing": {
@@ -1183,6 +1203,18 @@ type AutopilotSettings struct {
 	ModeLLMSettings map[GinieTradingMode]ModeLLMSettings `json:"mode_llm_settings"`
 	// Adaptive AI learning configuration
 	AdaptiveAIConfig AdaptiveAIConfig `json:"adaptive_ai_config"`
+
+	// ====== EARLY WARNING SYSTEM (Multi-Timeframe Position Health Monitor) ======
+	// AI-driven early loss detection using 1m, 3m, 5m, 15m candle analysis
+	EarlyWarningEnabled            bool    `json:"early_warning_enabled"`              // Master toggle for early warning system
+	EarlyWarningStartAfterMinutes  int     `json:"early_warning_start_after_minutes"`  // Start monitoring after X minutes (default: 1)
+	EarlyWarningCheckIntervalSecs  int     `json:"early_warning_check_interval_secs"`  // Check interval in seconds (default: 30)
+	EarlyWarningOnlyUnderwater     bool    `json:"early_warning_only_underwater"`      // Only check positions with negative PnL
+	EarlyWarningMinLossPercent     float64 `json:"early_warning_min_loss_percent"`     // Min loss % to activate (default: 0.3)
+	EarlyWarningCloseOnReversal    bool    `json:"early_warning_close_on_reversal"`    // Auto-close if trend reversal detected
+	EarlyWarningTightenSLOnWarning bool    `json:"early_warning_tighten_sl_on_warning"` // Tighten SL if warning detected
+	EarlyWarningMinConfidence      float64 `json:"early_warning_min_confidence"`       // Min LLM confidence to act (default: 0.7)
+	EarlyWarningMaxLLMCallsPerPos  int     `json:"early_warning_max_llm_calls_per_pos"` // Max LLM calls per position per cycle (default: 3)
 }
 
 // SettingsManager handles persistent settings storage
@@ -1520,6 +1552,17 @@ func DefaultSettings() *AutopilotSettings {
 		LLMConfig:        DefaultLLMConfig(),
 		ModeLLMSettings:  DefaultModeLLMSettings(),
 		AdaptiveAIConfig: DefaultAdaptiveAIConfig(),
+
+		// Early Warning System defaults (Multi-Timeframe Position Health Monitor)
+		EarlyWarningEnabled:            true,  // Enabled by default
+		EarlyWarningStartAfterMinutes:  1,     // Start checking 1 minute after entry
+		EarlyWarningCheckIntervalSecs:  30,    // Check every 30 seconds
+		EarlyWarningOnlyUnderwater:     true,  // Only check losing positions
+		EarlyWarningMinLossPercent:     0.3,   // Activate when loss > 0.3%
+		EarlyWarningCloseOnReversal:    true,  // Auto-close on detected reversal
+		EarlyWarningTightenSLOnWarning: true,  // Tighten SL on warning signals
+		EarlyWarningMinConfidence:      0.7,   // Require 70% LLM confidence to act
+		EarlyWarningMaxLLMCallsPerPos:  3,     // Max 3 LLM calls per position per cycle
 	}
 }
 
