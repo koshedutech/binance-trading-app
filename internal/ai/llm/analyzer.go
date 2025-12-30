@@ -233,6 +233,30 @@ type PositionInfo struct {
 	Mode          string // scalp, swing, position
 }
 
+// MultiTimeframePositionAnalysis represents LLM analysis using multiple timeframes for early warning
+type MultiTimeframePositionAnalysis struct {
+	Action                string            `json:"action"`                   // close_now, tighten_sl, move_to_breakeven, hold
+	Confidence            float64           `json:"confidence"`               // 0.0-1.0
+	Reasoning             string            `json:"reasoning"`                // Detailed explanation
+	RecommendedSL         float64           `json:"recommended_sl"`           // New SL price if tightening
+	TrendReversalDetected bool              `json:"trend_reversal_detected"`  // True if reversal detected
+	ReversalStrength      string            `json:"reversal_strength"`        // weak, moderate, strong
+	TimeframeSummary      map[string]string `json:"timeframe_summary"`        // 1m: bullish, 3m: bullish...
+	Urgency               string            `json:"urgency"`                  // immediate, high, normal, low
+	MomentumAgainstPosition bool            `json:"momentum_against_position"` // True if momentum working against us
+	RecommendedAction     string            `json:"recommended_action"`       // Specific action recommendation
+}
+
+// TimeframeData holds candle data summary for a single timeframe
+type TimeframeData struct {
+	Timeframe string  `json:"timeframe"`
+	Trend     string  `json:"trend"`     // bullish, bearish, neutral
+	Momentum  string  `json:"momentum"`  // strong, moderate, weak
+	ADX       float64 `json:"adx"`       // Trend strength
+	RSI       float64 `json:"rsi"`       // Oversold/overbought
+	LastClose float64 `json:"last_close"`
+}
+
 // CachedAnalysis holds cached analysis result
 type CachedAnalysis struct {
 	Analysis  interface{}
@@ -622,6 +646,282 @@ Trading Mode: %s`,
 	return &analysis, nil
 }
 
+// AnalyzePositionHealth performs multi-timeframe analysis to detect early warning signs
+// This is called every 30 seconds for underwater positions after 1 minute hold time
+func (a *Analyzer) AnalyzePositionHealth(
+	pos *PositionInfo,
+	klines1m, klines3m, klines5m, klines15m []binance.Kline,
+) (*MultiTimeframePositionAnalysis, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled")
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	// Build position summary
+	pnlStatus := "PROFIT"
+	if pos.PnLPercent < 0 {
+		pnlStatus = "LOSS"
+	}
+
+	// Calculate indicators for each timeframe
+	tf1m := calculateTimeframeSummary("1m", klines1m)
+	tf3m := calculateTimeframeSummary("3m", klines3m)
+	tf5m := calculateTimeframeSummary("5m", klines5m)
+	tf15m := calculateTimeframeSummary("15m", klines15m)
+
+	// Build the prompt with all timeframe data
+	prompt := fmt.Sprintf(`URGENT: Multi-Timeframe Position Health Analysis
+
+CURRENT POSITION (NEEDS IMMEDIATE EVALUATION):
+Symbol: %s
+Side: %s (we are %s)
+Entry Price: %.8f
+Current Price: %.8f
+P&L: %.2f%% (%s)
+Current Stop Loss: %.8f
+Hold Duration: %s
+Mode: %s
+
+MULTI-TIMEFRAME ANALYSIS:
+
+=== 1-MINUTE TIMEFRAME ===
+%s
+
+=== 3-MINUTE TIMEFRAME ===
+%s
+
+=== 5-MINUTE TIMEFRAME ===
+%s
+
+=== 15-MINUTE TIMEFRAME ===
+%s
+
+CRITICAL QUESTION:
+We have a %s position that is currently showing %s.
+Analyze ALL 4 timeframes to determine:
+1. Is there a trend reversal forming AGAINST our position?
+2. Is momentum accelerating AGAINST our position?
+3. Should we EXIT NOW to minimize loss, or HOLD?
+4. If we should tighten SL, what price?
+
+Consider:
+- If all timeframes show opposite trend to our position = HIGH URGENCY to exit
+- If momentum is accelerating against us = TIGHTEN SL immediately
+- If reversal signals present = Consider early exit
+
+Respond in JSON format:
+{
+  "action": "close_now|tighten_sl|move_to_breakeven|hold",
+  "confidence": 0.0-1.0,
+  "reasoning": "detailed explanation of multi-timeframe analysis",
+  "recommended_sl": price_or_0_if_not_applicable,
+  "trend_reversal_detected": true/false,
+  "reversal_strength": "weak|moderate|strong",
+  "timeframe_summary": {"1m": "bullish/bearish/neutral", "3m": "...", "5m": "...", "15m": "..."},
+  "urgency": "immediate|high|normal|low",
+  "momentum_against_position": true/false,
+  "recommended_action": "specific action description"
+}`,
+		pos.Symbol,
+		pos.Side,
+		pos.Side,
+		pos.EntryPrice,
+		pos.CurrentPrice,
+		pos.PnLPercent,
+		pnlStatus,
+		pos.CurrentSL,
+		pos.HoldDuration,
+		pos.Mode,
+		tf1m,
+		tf3m,
+		tf5m,
+		tf15m,
+		pos.Side,
+		pnlStatus)
+
+	systemPrompt := `You are an expert crypto trading analyst specializing in multi-timeframe analysis and position management.
+Your job is to analyze open positions and detect early warning signs of trend reversals or momentum shifts.
+When multiple timeframes align AGAINST a position, recommend immediate action to minimize losses.
+Be decisive - if 3+ timeframes show opposite trend, recommend closing the position.
+Always prioritize capital preservation over hoping for a reversal.`
+
+	response, err := a.client.Complete(systemPrompt, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	cleanResponse := stripMarkdownCodeBlock(response)
+	var analysis MultiTimeframePositionAnalysis
+	if err := json.Unmarshal([]byte(cleanResponse), &analysis); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	return &analysis, nil
+}
+
+// calculateTimeframeSummary builds a summary string for a single timeframe
+func calculateTimeframeSummary(tf string, klines []binance.Kline) string {
+	if len(klines) < 10 {
+		return fmt.Sprintf("Insufficient data for %s timeframe", tf)
+	}
+
+	// Calculate basic indicators
+	closes := make([]float64, len(klines))
+	highs := make([]float64, len(klines))
+	lows := make([]float64, len(klines))
+	volumes := make([]float64, len(klines))
+
+	for i, k := range klines {
+		closes[i] = k.Close
+		highs[i] = k.High
+		lows[i] = k.Low
+		volumes[i] = k.Volume
+	}
+
+	// EMA calculations
+	ema9 := calculateEMA(closes, 9)
+	ema21 := calculateEMA(closes, 21)
+
+	// RSI
+	rsi := calculateRSI(closes, 14)
+
+	// Simple trend detection
+	trend := "neutral"
+	if len(ema9) > 0 && len(ema21) > 0 {
+		if ema9[len(ema9)-1] > ema21[len(ema21)-1] {
+			trend = "bullish"
+		} else if ema9[len(ema9)-1] < ema21[len(ema21)-1] {
+			trend = "bearish"
+		}
+	}
+
+	// Momentum (price vs EMA)
+	momentum := "neutral"
+	lastClose := closes[len(closes)-1]
+	if len(ema9) > 0 {
+		if lastClose > ema9[len(ema9)-1]*1.002 {
+			momentum = "bullish"
+		} else if lastClose < ema9[len(ema9)-1]*0.998 {
+			momentum = "bearish"
+		}
+	}
+
+	// Recent price action
+	priceChange := 0.0
+	if len(closes) >= 5 {
+		priceChange = ((closes[len(closes)-1] - closes[len(closes)-5]) / closes[len(closes)-5]) * 100
+	}
+
+	// Volume trend
+	avgVol := 0.0
+	for _, v := range volumes {
+		avgVol += v
+	}
+	avgVol /= float64(len(volumes))
+	volTrend := "normal"
+	if len(volumes) > 0 && volumes[len(volumes)-1] > avgVol*1.5 {
+		volTrend = "high"
+	} else if len(volumes) > 0 && volumes[len(volumes)-1] < avgVol*0.5 {
+		volTrend = "low"
+	}
+
+	return fmt.Sprintf(`Trend: %s
+Momentum: %s
+RSI(14): %.1f
+EMA9: %.8f
+EMA21: %.8f
+Last Close: %.8f
+5-bar Change: %.2f%%
+Volume: %s
+Recent Candles: %s`,
+		trend,
+		momentum,
+		rsi,
+		ema9[len(ema9)-1],
+		ema21[len(ema21)-1],
+		lastClose,
+		priceChange,
+		volTrend,
+		formatRecentCandles(klines, 5))
+}
+
+// formatRecentCandles formats the last N candles for the prompt
+func formatRecentCandles(klines []binance.Kline, n int) string {
+	if len(klines) < n {
+		n = len(klines)
+	}
+
+	var result []string
+	start := len(klines) - n
+	for i := start; i < len(klines); i++ {
+		k := klines[i]
+		candleType := "DOJI"
+		if k.Close > k.Open {
+			candleType = "GREEN"
+		} else if k.Close < k.Open {
+			candleType = "RED"
+		}
+		result = append(result, fmt.Sprintf("%s(%.2f%%)", candleType, ((k.Close-k.Open)/k.Open)*100))
+	}
+	return strings.Join(result, " → ")
+}
+
+// calculateEMA calculates Exponential Moving Average
+func calculateEMA(data []float64, period int) []float64 {
+	if len(data) < period {
+		return []float64{data[len(data)-1]}
+	}
+
+	multiplier := 2.0 / float64(period+1)
+	ema := make([]float64, len(data))
+
+	// Start with SMA
+	sum := 0.0
+	for i := 0; i < period; i++ {
+		sum += data[i]
+	}
+	ema[period-1] = sum / float64(period)
+
+	// Calculate EMA
+	for i := period; i < len(data); i++ {
+		ema[i] = (data[i]-ema[i-1])*multiplier + ema[i-1]
+	}
+
+	return ema
+}
+
+// calculateRSI calculates Relative Strength Index
+func calculateRSI(closes []float64, period int) float64 {
+	if len(closes) < period+1 {
+		return 50.0
+	}
+
+	gains := 0.0
+	losses := 0.0
+
+	for i := len(closes) - period; i < len(closes); i++ {
+		change := closes[i] - closes[i-1]
+		if change > 0 {
+			gains += change
+		} else {
+			losses -= change
+		}
+	}
+
+	avgGain := gains / float64(period)
+	avgLoss := losses / float64(period)
+
+	if avgLoss == 0 {
+		return 100.0
+	}
+
+	rs := avgGain / avgLoss
+	return 100.0 - (100.0 / (1.0 + rs))
+}
+
 // GetSignalFromAnalysis converts market analysis to trading signal
 func (a *Analyzer) GetSignalFromAnalysis(analysis *MarketAnalysis, currentPrice float64) (direction string, confidence float64, entry, stop, target float64) {
 	if analysis == nil || analysis.Confidence < a.config.MinConfidence {
@@ -745,7 +1045,7 @@ func calculateIndicatorsSummary(klines []binance.Kline) string {
 	}
 
 	// Calculate RSI
-	rsi := calculateRSI(klines, 14)
+	rsi := calculateRSIFromKlines(klines, 14)
 
 	// Calculate volatility (ATR-like)
 	volatility := calculateVolatility(klines, 14)
@@ -787,8 +1087,8 @@ func calculateSMA(klines []binance.Kline, period int) float64 {
 	return sum / float64(period)
 }
 
-// calculateRSI calculates RSI indicator
-func calculateRSI(klines []binance.Kline, period int) float64 {
+// calculateRSIFromKlines calculates RSI indicator from klines
+func calculateRSIFromKlines(klines []binance.Kline, period int) float64 {
 	if len(klines) < period+1 {
 		return 50
 	}
