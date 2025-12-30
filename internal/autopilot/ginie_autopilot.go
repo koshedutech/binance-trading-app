@@ -5611,12 +5611,21 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 		} else {
 			price = entryPrice * (1 - gain/100)
 		}
+
+		// Get TP allocation percent from mode config first, fallback to global config
+		var tpPercent float64
+		if modeConfig != nil && modeConfig.SLTP != nil && i < len(modeConfig.SLTP.TPAllocation) {
+			tpPercent = modeConfig.SLTP.TPAllocation[i]
+		} else {
+			tpPercent = ga.getTPPercent(i + 1)
+		}
+
 		// FIX: Use roundPriceForTP with symbol and side for proper tick precision
 		// This prevents TP prices from being rounded to values <= entry price
 		tps[i] = GinieTakeProfitLevel{
 			Level:   i + 1,
 			Price:   roundPriceForTP(symbol, price, side),
-			Percent: ga.getTPPercent(i + 1),
+			Percent: tpPercent,
 			GainPct: gain,
 			Status:  "pending",
 		}
