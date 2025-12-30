@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import { useFuturesStore } from '../store/futuresStore';
 import {
@@ -17,6 +17,9 @@ export default function GiniePanel() {
   const [status, setStatus] = useState<GinieStatus | null>(null);
   const [autopilotStatus, setAutopilotStatus] = useState<GinieAutopilotStatus | null>(null);
   const [circuitBreaker, setCircuitBreaker] = useState<GinieCircuitBreakerStatus | null>(null);
+  const [modeCBStatus, setModeCBStatus] = useState<ModeCircuitBreakerStatusResponse | null>(null);
+  const [showModeCB, setShowModeCB] = useState(false);
+  const [resettingModeCB, setResettingModeCB] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [togglingAutopilot, setTogglingAutopilot] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -196,6 +199,31 @@ export default function GiniePanel() {
     }
   };
 
+  // Fetch per-mode circuit breaker status
+  const fetchModeCBStatus = async () => {
+    try {
+      const data = await futuresApi.getModeCircuitBreakerStatus();
+      setModeCBStatus(data);
+    } catch (err: any) {
+      if (err?.response?.status === 401 || err?.response?.status === 403) return;
+      console.error('Failed to fetch mode circuit breaker status:', err);
+    }
+  };
+
+  // Reset circuit breaker for a specific mode
+  const handleResetModeCB = async (mode: string) => {
+    setResettingModeCB(mode);
+    try {
+      await futuresApi.resetModeCircuitBreaker(mode);
+      showSuccess(`${mode.toUpperCase()} circuit breaker reset`);
+      await fetchModeCBStatus();
+    } catch (err: any) {
+      setError(`Failed to reset ${mode} circuit breaker`);
+    } finally {
+      setResettingModeCB(null);
+    }
+  };
+
   const fetchMarketMovers = async () => {
     try {
       const data = await futuresApi.getMarketMovers(15);
@@ -310,6 +338,7 @@ export default function GiniePanel() {
     fetchStatus();
     fetchAutopilotStatus(true); // Initialize settings on first load
     fetchCircuitBreaker();
+    fetchModeCBStatus(); // Fetch per-mode circuit breaker status
     fetchMarketMovers();
     fetchDiagnostics();
     fetchSignalLogs();
@@ -323,6 +352,7 @@ export default function GiniePanel() {
       fetchStatus();
       fetchAutopilotStatus(false); // Don't overwrite user input on subsequent fetches
       fetchCircuitBreaker();
+      fetchModeCBStatus(); // Fetch per-mode circuit breaker status
       if (activeTab === 'diagnostics') {
         fetchDiagnostics();
         fetchSignalLogs();
@@ -1226,6 +1256,106 @@ export default function GiniePanel() {
                   {savingCB ? 'Saving...' : 'Save'}
                 </button>
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Per-Mode Circuit Breaker Status */}
+      {modeCBStatus && modeCBStatus.mode_status && (
+        <div className="mb-3">
+          <div
+            className="flex items-center justify-between px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+            onClick={() => setShowModeCB(!showModeCB)}
+          >
+            <div className="flex items-center gap-2">
+              <Shield className="w-3.5 h-3.5 text-purple-400" />
+              <span className="text-xs text-gray-300 font-medium">Mode Circuit Breakers</span>
+              {modeCBStatus.mode_status.summary && modeCBStatus.mode_status.summary.tripped_count > 0 && (
+                <span className="px-1.5 py-0.5 rounded text-[10px] bg-red-900/50 text-red-400 font-bold animate-pulse">
+                  {modeCBStatus.mode_status.summary.tripped_count} TRIPPED
+                </span>
+              )}
+              {modeCBStatus.mode_status.summary && modeCBStatus.mode_status.summary.all_clear && (
+                <span className="px-1.5 py-0.5 rounded text-[10px] bg-green-900/50 text-green-400">
+                  ALL CLEAR
+                </span>
+              )}
+            </div>
+            {showModeCB ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+          </div>
+
+          {showModeCB && (
+            <div className="mt-2 space-y-1.5">
+              {['ultra_fast', 'scalp', 'swing', 'position'].map((mode) => {
+                const modeStatus = modeCBStatus.mode_status[mode] as ModeCircuitBreakerStatusItem | undefined;
+                if (!modeStatus) return null;
+
+                const isPaused = modeStatus.is_paused;
+                const cooldownMin = Math.ceil((modeStatus.cooldown_remaining || 0) / 60);
+
+                return (
+                  <div
+                    key={mode}
+                    className={`flex items-center justify-between px-2 py-1.5 rounded text-xs border ${
+                      isPaused
+                        ? 'bg-red-900/30 border-red-800'
+                        : 'bg-gray-700/20 border-gray-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={`font-medium uppercase ${isPaused ? 'text-red-400' : 'text-gray-300'}`}>
+                        {mode.replace('_', ' ')}
+                      </span>
+                      {isPaused ? (
+                        <span className="px-1 py-0.5 rounded text-[10px] bg-red-900/50 text-red-400 font-bold">
+                          PAUSED
+                        </span>
+                      ) : (
+                        <span className="px-1 py-0.5 rounded text-[10px] bg-green-900/50 text-green-400">
+                          ACTIVE
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                      {isPaused && modeStatus.pause_reason && (
+                        <span className="text-red-400" title={modeStatus.pause_reason}>
+                          {modeStatus.pause_reason.length > 25
+                            ? modeStatus.pause_reason.substring(0, 25) + '...'
+                            : modeStatus.pause_reason}
+                        </span>
+                      )}
+                      {isPaused && cooldownMin > 0 && (
+                        <span className="text-yellow-400">
+                          {cooldownMin}m left
+                        </span>
+                      )}
+                      <span>
+                        Loss: <span className={modeStatus.daily_loss > 0 ? 'text-red-400' : 'text-gray-300'}>
+                          ${Number(modeStatus.daily_loss || 0).toFixed(0)}
+                        </span>
+                      </span>
+                      <span>
+                        W/L: {modeStatus.win_count}/{modeStatus.loss_count}
+                      </span>
+                      <span>
+                        WR: <span className={modeStatus.win_rate > 50 ? 'text-green-400' : 'text-yellow-400'}>
+                          {modeStatus.win_rate?.toFixed(0) || 0}%
+                        </span>
+                      </span>
+                      {isPaused && (
+                        <button
+                          onClick={() => handleResetModeCB(mode)}
+                          disabled={resettingModeCB === mode}
+                          className="px-1.5 py-0.5 bg-blue-900/50 hover:bg-blue-900/70 text-blue-400 rounded text-[10px] transition-colors disabled:opacity-50"
+                        >
+                          {resettingModeCB === mode ? 'Resetting...' : 'Reset'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

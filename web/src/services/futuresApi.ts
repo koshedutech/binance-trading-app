@@ -1262,6 +1262,19 @@ class FuturesAPIService {
     return data;
   }
 
+  async getModeCircuitBreakerStatus(): Promise<ModeCircuitBreakerStatusResponse> {
+    const { data } = await this.client.get('/ginie/mode-circuit-breaker-status');
+    return data;
+  }
+
+  async resetModeCircuitBreaker(mode: string): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post(`/ginie/mode-circuit-breaker/${mode}/reset`);
+    return data;
+  }
+
   // ==================== GINIE POSITION SYNC ====================
 
   async syncGiniePositions(): Promise<{
@@ -3072,6 +3085,43 @@ export interface ModeCircuitBreakerConfig {
   max_trades_per_day: number;      // e.g., 100, 50, 20, 10
   win_rate_check_after: number;    // Trades before evaluation
   min_win_rate: number;            // Threshold %
+}
+
+// Per-mode circuit breaker status
+export interface ModeCircuitBreakerStatusItem {
+  mode: string;
+  is_paused: boolean;
+  pause_reason: string;
+  cooldown_remaining: number;  // seconds
+  hourly_loss: number;
+  daily_loss: number;
+  hourly_pnl: number;
+  daily_pnl: number;
+  consecutive_losses: number;
+  consecutive_wins: number;
+  trades_last_minute: number;
+  trades_last_hour: number;
+  trades_today: number;
+  win_count: number;
+  loss_count: number;
+  win_rate: number;
+}
+
+export interface ModeCircuitBreakerSummary {
+  total_modes: number;
+  tripped_modes: string[];
+  tripped_count: number;
+  all_clear: boolean;
+}
+
+export interface ModeCircuitBreakerStatusResponse {
+  success: boolean;
+  circuit_breaker_configs: Record<string, ModeCircuitBreakerConfig>;
+  mode_status: Record<string, ModeCircuitBreakerStatusItem> & {
+    summary?: ModeCircuitBreakerSummary;
+  };
+  global_status: GinieCircuitBreakerStatus;
+  valid_modes: string[];
 }
 
 export interface ModeSLTPConfig {

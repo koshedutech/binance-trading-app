@@ -1676,20 +1676,63 @@ func (s *Server) handleGetModeCircuitBreakerStatus(c *gin.Context) {
 
 	// Get runtime state from Ginie autopilot if available (per-user)
 	giniePilot := s.getGinieAutopilotForUser(c)
-	var runtimeStatus map[string]interface{}
+	var modeStatus map[string]interface{}
+	var globalStatus map[string]interface{}
 
 	if giniePilot != nil {
-		// Get runtime circuit breaker status if method exists
-		runtimeStatus = map[string]interface{}{
-			"ginie_cb_status": giniePilot.GetCircuitBreakerStatus(),
-		}
+		// Get per-mode circuit breaker runtime status
+		modeStatus = giniePilot.GetAllModeCircuitBreakerStatus()
+		// Get global circuit breaker status
+		globalStatus = giniePilot.GetCircuitBreakerStatus()
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":                  true,
 		"circuit_breaker_configs":  cbConfigs,
-		"runtime_status":           runtimeStatus,
+		"mode_status":              modeStatus,
+		"global_status":            globalStatus,
 		"valid_modes":              []string{"ultra_fast", "scalp", "swing", "position"},
+	})
+}
+
+// handleResetModeCircuitBreaker resets the circuit breaker for a specific mode
+// POST /api/futures/ginie/mode-circuit-breaker/:mode/reset
+func (s *Server) handleResetModeCircuitBreaker(c *gin.Context) {
+	mode := c.Param("mode")
+	log.Printf("[MODE-CONFIG] Resetting circuit breaker for mode: %s", mode)
+
+	// Validate mode
+	validModes := map[string]autopilot.GinieTradingMode{
+		"ultra_fast": autopilot.GinieModeUltraFast,
+		"scalp":      autopilot.GinieModeScalp,
+		"swing":      autopilot.GinieModeSwing,
+		"position":   autopilot.GinieModePosition,
+	}
+
+	ginieMode, ok := validModes[mode]
+	if !ok {
+		errorResponse(c, http.StatusBadRequest, "Invalid mode. Must be one of: ultra_fast, scalp, swing, position")
+		return
+	}
+
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
+	}
+
+	// Reset the mode circuit breaker
+	err := giniePilot.ResetModeCircuitBreaker(ginieMode)
+	if err != nil {
+		log.Printf("[MODE-CONFIG] Failed to reset circuit breaker for mode %s: %v", mode, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to reset circuit breaker: "+err.Error())
+		return
+	}
+
+	log.Printf("[MODE-CONFIG] Successfully reset circuit breaker for mode: %s", mode)
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("Circuit breaker for %s mode has been reset", mode),
 	})
 }
 

@@ -13158,6 +13158,36 @@ func (ga *GinieAutopilot) ResetModeCircuitBreaker(mode GinieTradingMode) error {
 	return nil
 }
 
+// GetAllModeCircuitBreakerStatus returns circuit breaker status for all modes
+func (ga *GinieAutopilot) GetAllModeCircuitBreakerStatus() map[string]interface{} {
+	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition}
+	result := make(map[string]interface{})
+
+	for _, mode := range modes {
+		status := ga.GetModeCircuitBreakerStatus(mode)
+		result[string(mode)] = status
+	}
+
+	// Add summary
+	trippedModes := []string{}
+	for _, mode := range modes {
+		if status, ok := result[string(mode)].(map[string]interface{}); ok {
+			if isPaused, exists := status["is_paused"].(bool); exists && isPaused {
+				trippedModes = append(trippedModes, string(mode))
+			}
+		}
+	}
+
+	result["summary"] = map[string]interface{}{
+		"total_modes":   len(modes),
+		"tripped_modes": trippedModes,
+		"tripped_count": len(trippedModes),
+		"all_clear":     len(trippedModes) == 0,
+	}
+
+	return result
+}
+
 // ==================== Adaptive AI & LLM Diagnostics (Story 2.8) ====================
 
 // AdaptiveAIData holds adaptive AI recommendations and statistics

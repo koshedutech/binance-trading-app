@@ -681,6 +681,7 @@ func (s *Server) setupRoutes() {
 			futures.PUT("/ginie/mode-config/:mode", s.handleUpdateModeConfig)
 			futures.POST("/ginie/mode-config/reset", s.handleResetModeConfigs)
 			futures.GET("/ginie/mode-circuit-breaker-status", s.handleGetModeCircuitBreakerStatus)
+			futures.POST("/ginie/mode-circuit-breaker/:mode/reset", s.handleResetModeCircuitBreaker)
 
 			// Mode Allocation endpoints (per-mode capital management)
 			futures.GET("/modes/allocations", s.handleGetModeAllocations)
