@@ -269,6 +269,11 @@ func (s *Server) setupRoutes() {
 	// Public API endpoints (no auth required)
 	s.router.GET("/api/health/status", s.handleGetAPIHealthStatus)
 
+	// Convenience alias for circuit breaker status
+	s.router.GET("/api/circuit-breaker/status", func(c *gin.Context) {
+		c.Redirect(http.StatusTemporaryRedirect, "/api/settings/circuit-breaker")
+	})
+
 	// API routes (protected when auth is enabled)
 	api := s.router.Group("/api")
 
@@ -553,6 +558,10 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/autopilot/status", s.handleGetGinieAutopilotStatus)
 			futures.GET("/ginie/autopilot/config", s.handleGetGinieAutopilotConfig)
 			futures.POST("/ginie/autopilot/config", s.handleUpdateGinieAutopilotConfig)
+
+			// Convenience aliases for shorter autopilot config path
+			futures.GET("/autopilot/config", s.handleGetGinieAutopilotConfig)
+			futures.POST("/autopilot/config", s.handleUpdateGinieAutopilotConfig)
 			futures.POST("/ginie/autopilot/start", s.handleStartGinieAutopilot)
 			futures.POST("/ginie/autopilot/stop", s.handleStopGinieAutopilot)
 			futures.GET("/ginie/autopilot/positions", s.handleGetGinieAutopilotPositions)
@@ -637,6 +646,19 @@ func (s *Server) setupRoutes() {
 
 			// Ginie Rate Limiter status endpoint
 			futures.GET("/ginie/rate-limiter/status", s.handleGetRateLimiterStatus)
+
+			// Ginie SLTP Configuration endpoints
+			futures.GET("/ginie/sltp-config", s.handleGetGinieSLTPConfig)
+			futures.POST("/ginie/sltp-config/:mode", s.handleUpdateGinieSLTPConfig)
+
+			// Ginie Trend Timeframe endpoints
+			futures.GET("/ginie/trend-timeframes", s.handleGetGinieTrendTimeframes)
+			futures.POST("/ginie/trend-timeframes", s.handleUpdateGinieTrendTimeframes)
+
+			// Ultra-Fast Mode Configuration endpoints
+			futures.GET("/ultrafast/config", s.handleGetUltraFastConfig)
+			futures.POST("/ultrafast/config", s.handleUpdateUltraFastConfig)
+			futures.POST("/ultrafast/toggle", s.handleToggleUltraFast)
 
 
 			// Enhanced Trade History and Performance Metrics (with date filtering)

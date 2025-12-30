@@ -3062,3 +3062,296 @@ func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 		"message":        "Morning auto-block configuration updated",
 	})
 }
+
+// ==================== SLTP Configuration Endpoints ====================
+
+// handleGetGinieSLTPConfig returns SL/TP configuration for all modes
+// GET /api/futures/ginie/sltp-config
+func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
+	log.Println("[SLTP-CONFIG] Getting SL/TP configuration for all modes")
+
+	sm := autopilot.GetSettingsManager()
+	configs := sm.GetAllModeConfigs()
+
+	// Extract just the SLTP config from each mode
+	sltpConfigs := make(map[string]interface{})
+	for modeName, config := range configs {
+		if config.SLTP != nil {
+			sltpConfigs[modeName] = config.SLTP
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":      true,
+		"sltp_configs": sltpConfigs,
+		"valid_modes":  []string{"ultra_fast", "scalp", "swing", "position"},
+	})
+}
+
+// handleUpdateGinieSLTPConfig updates SL/TP configuration for a specific mode
+// POST /api/futures/ginie/sltp-config/:mode
+func (s *Server) handleUpdateGinieSLTPConfig(c *gin.Context) {
+	mode := c.Param("mode")
+	log.Printf("[SLTP-CONFIG] Updating SL/TP configuration for mode: %s", mode)
+
+	// Validate mode parameter
+	if !autopilot.ValidModes[mode] {
+		errorResponse(c, http.StatusBadRequest,
+			fmt.Sprintf("Invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode))
+		return
+	}
+
+	var sltpConfig autopilot.ModeSLTPConfig
+	if err := c.ShouldBindJSON(&sltpConfig); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+
+	// Get current config and update SLTP section
+	config, err := sm.GetModeConfig(mode)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to get mode config: "+err.Error())
+		return
+	}
+
+	config.SLTP = &sltpConfig
+
+	if err := sm.UpdateModeConfig(mode, config); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update SLTP config: "+err.Error())
+		return
+	}
+
+	log.Printf("[SLTP-CONFIG] Successfully updated SL/TP configuration for mode: %s", mode)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("SL/TP configuration updated for %s", mode),
+		"mode":    mode,
+		"sltp":    sltpConfig,
+	})
+}
+
+// ==================== Trend Timeframe Endpoints ====================
+
+// handleGetGinieTrendTimeframes returns trend timeframe configuration for all modes
+// GET /api/futures/ginie/trend-timeframes
+func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
+	log.Println("[TREND-TF] Getting trend timeframe configuration for all modes")
+
+	sm := autopilot.GetSettingsManager()
+	configs := sm.GetAllModeConfigs()
+
+	// Extract timeframe config from each mode
+	timeframeConfigs := make(map[string]interface{})
+	for modeName, config := range configs {
+		if config.Timeframe != nil {
+			timeframeConfigs[modeName] = config.Timeframe
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":    true,
+		"timeframes": timeframeConfigs,
+		"valid_modes": []string{"ultra_fast", "scalp", "swing", "position"},
+	})
+}
+
+// handleUpdateGinieTrendTimeframes updates trend timeframe configuration
+// POST /api/futures/ginie/trend-timeframes
+func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
+	log.Println("[TREND-TF] Updating trend timeframe configuration")
+
+	var req struct {
+		Mode              string `json:"mode"`               // Optional: if provided, update only this mode
+		TrendTimeframe    string `json:"trend_timeframe"`    // e.g., "5m", "15m", "1h", "4h"
+		EntryTimeframe    string `json:"entry_timeframe"`    // e.g., "1m", "5m", "15m"
+		AnalysisTimeframe string `json:"analysis_timeframe"` // e.g., "1m", "15m", "4h"
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+
+	// If mode is specified, update only that mode
+	if req.Mode != "" {
+		if !autopilot.ValidModes[req.Mode] {
+			errorResponse(c, http.StatusBadRequest,
+				fmt.Sprintf("Invalid mode '%s': must be ultra_fast, scalp, swing, or position", req.Mode))
+			return
+		}
+
+		config, err := sm.GetModeConfig(req.Mode)
+		if err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to get mode config: "+err.Error())
+			return
+		}
+
+		if config.Timeframe == nil {
+			config.Timeframe = &autopilot.ModeTimeframeConfig{}
+		}
+
+		if req.TrendTimeframe != "" {
+			config.Timeframe.TrendTimeframe = req.TrendTimeframe
+		}
+		if req.EntryTimeframe != "" {
+			config.Timeframe.EntryTimeframe = req.EntryTimeframe
+		}
+		if req.AnalysisTimeframe != "" {
+			config.Timeframe.AnalysisTimeframe = req.AnalysisTimeframe
+		}
+
+		if err := sm.UpdateModeConfig(req.Mode, config); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to update timeframe config: "+err.Error())
+			return
+		}
+
+		log.Printf("[TREND-TF] Successfully updated timeframe configuration for mode: %s", req.Mode)
+
+		c.JSON(http.StatusOK, gin.H{
+			"success":   true,
+			"message":   fmt.Sprintf("Timeframe configuration updated for %s", req.Mode),
+			"mode":      req.Mode,
+			"timeframe": config.Timeframe,
+		})
+		return
+	}
+
+	// No mode specified - return current configs
+	configs := sm.GetAllModeConfigs()
+	timeframeConfigs := make(map[string]interface{})
+	for modeName, config := range configs {
+		if config.Timeframe != nil {
+			timeframeConfigs[modeName] = config.Timeframe
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":    true,
+		"message":    "Provide 'mode' parameter to update a specific mode's timeframes",
+		"timeframes": timeframeConfigs,
+	})
+}
+
+// ==================== Ultra-Fast Mode Configuration Endpoints ====================
+
+// handleGetUltraFastConfig returns ultra-fast mode configuration
+// GET /api/futures/ultrafast/config
+func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
+	log.Println("[ULTRAFAST] Getting ultra-fast mode configuration")
+
+	sm := autopilot.GetSettingsManager()
+	modeConfig, err := sm.GetModeConfig("ultra_fast")
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to get ultra-fast config: "+err.Error())
+		return
+	}
+
+	// Get the global enable flag from Ginie config
+	giniePilot := s.getGinieAutopilotForUser(c)
+	enabled := false
+	if giniePilot != nil {
+		ginieConfig := giniePilot.GetConfig()
+		enabled = ginieConfig.EnableUltraFastMode
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"mode":    "ultra_fast",
+		"enabled": enabled,
+		"config":  modeConfig,
+	})
+}
+
+// handleUpdateUltraFastConfig updates ultra-fast mode configuration
+// POST /api/futures/ultrafast/config
+func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
+	log.Println("[ULTRAFAST] Updating ultra-fast mode configuration")
+
+	var req struct {
+		Enabled *bool                     `json:"enabled"` // Enable/disable ultra-fast mode globally
+		Config  *autopilot.ModeFullConfig `json:"config"`  // Full config update (optional)
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+
+	// Update enabled flag if provided via Ginie config
+	if req.Enabled != nil {
+		giniePilot := s.getGinieAutopilotForUser(c)
+		if giniePilot == nil {
+			errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
+			return
+		}
+		ginieConfig := giniePilot.GetConfig()
+		ginieConfig.EnableUltraFastMode = *req.Enabled
+		giniePilot.SetConfig(ginieConfig)
+		log.Printf("[ULTRAFAST] Ultra-fast mode enabled: %v", *req.Enabled)
+	}
+
+	// Update full config if provided
+	if req.Config != nil {
+		req.Config.ModeName = "ultra_fast"
+		if err := sm.UpdateModeConfig("ultra_fast", req.Config); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to update ultra-fast config: "+err.Error())
+			return
+		}
+		log.Println("[ULTRAFAST] Ultra-fast mode configuration updated")
+	}
+
+	// Return current state
+	modeConfig, _ := sm.GetModeConfig("ultra_fast")
+	enabled := false
+	if giniePilot := s.getGinieAutopilotForUser(c); giniePilot != nil {
+		enabled = giniePilot.GetConfig().EnableUltraFastMode
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Ultra-fast configuration updated",
+		"mode":    "ultra_fast",
+		"enabled": enabled,
+		"config":  modeConfig,
+	})
+}
+
+// handleToggleUltraFast toggles ultra-fast mode on/off
+// POST /api/futures/ultrafast/toggle
+func (s *Server) handleToggleUltraFast(c *gin.Context) {
+	log.Println("[ULTRAFAST] Toggling ultra-fast mode")
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
+		return
+	}
+
+	ginieConfig := giniePilot.GetConfig()
+	ginieConfig.EnableUltraFastMode = req.Enabled
+	giniePilot.SetConfig(ginieConfig)
+
+	log.Printf("[ULTRAFAST] Ultra-fast mode toggled to: %v", req.Enabled)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"enabled": req.Enabled,
+		"message": fmt.Sprintf("Ultra-fast mode %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
+	})
+}
