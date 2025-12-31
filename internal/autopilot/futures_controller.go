@@ -587,11 +587,17 @@ func (fc *FuturesController) LoadSavedSettings() {
 		ginieConfig := fc.ginieAutopilot.GetConfig()
 		ginieConfig.DryRun = settings.GinieDryRunMode
 
+		// PRIORITY: Use global RiskLevel setting if set (user's explicit preference)
+		if settings.RiskLevel != "" {
+			ginieConfig.RiskLevel = settings.RiskLevel
+		}
+
 		// Read configuration from ModeConfigs (use swing as default reference mode)
 		// Individual mode-specific settings are read by GinieAutopilot at runtime
 		refMode := "swing" // Reference mode for global config values
 		if modeConfig := settings.ModeConfigs[refMode]; modeConfig != nil {
-			if modeConfig.Risk != nil && modeConfig.Risk.RiskLevel != "" {
+			// Only override risk level from mode config if global wasn't set
+			if ginieConfig.RiskLevel == "" && modeConfig.Risk != nil && modeConfig.Risk.RiskLevel != "" {
 				ginieConfig.RiskLevel = modeConfig.Risk.RiskLevel
 			}
 			if modeConfig.Size != nil {
@@ -619,8 +625,18 @@ func (fc *FuturesController) LoadSavedSettings() {
 		if ginieConfig.DefaultLeverage == 0 {
 			ginieConfig.DefaultLeverage = 10
 		}
-		if ginieConfig.MinConfidenceToTrade == 0 {
+		// Set MinConfidenceToTrade based on RiskLevel
+		switch ginieConfig.RiskLevel {
+		case "conservative":
+			ginieConfig.MinConfidenceToTrade = 60.0
+		case "moderate":
 			ginieConfig.MinConfidenceToTrade = 50.0
+		case "aggressive":
+			ginieConfig.MinConfidenceToTrade = 45.0
+		default:
+			if ginieConfig.MinConfidenceToTrade == 0 {
+				ginieConfig.MinConfidenceToTrade = 50.0
+			}
 		}
 		if ginieConfig.MaxPositions == 0 && settings.GinieMaxPositions > 0 {
 			ginieConfig.MaxPositions = settings.GinieMaxPositions
@@ -696,6 +712,13 @@ func (fc *FuturesController) LoadSavedSettings() {
 			"trend_timeframes", trendTimeframes,
 			"block_on_divergence", blockOnDivergence,
 			"auto_start", settings.GinieAutoStart)
+
+		// Apply risk level to GinieAutopilot's internal state (updates MinConfidenceToTrade)
+		if ginieConfig.RiskLevel != "" {
+			if err := fc.ginieAutopilot.SetRiskLevel(ginieConfig.RiskLevel); err != nil {
+				fc.logger.Warn("Failed to apply risk level to Ginie autopilot", "error", err)
+			}
+		}
 
 		// NOTE: Ginie analyzer automatically reads trend timeframes and divergence settings
 		// from SettingsManager, so no additional configuration needed here.

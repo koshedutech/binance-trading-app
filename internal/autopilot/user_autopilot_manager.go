@@ -229,6 +229,19 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		autopilot.SetLLMAnalyzer(llmAnalyzer)
 	}
 
+	// Apply global settings (RiskLevel, etc.) from SettingsManager
+	settingsManager := GetSettingsManager()
+	if settingsManager != nil {
+		settings := settingsManager.GetCurrentSettings()
+		if settings.RiskLevel != "" {
+			if err := autopilot.SetRiskLevel(settings.RiskLevel); err != nil {
+				m.logger.Warn("Failed to apply risk level to user autopilot", "error", err, "user_id", userID)
+			} else {
+				m.logger.Info("Applied risk level to user autopilot", "risk_level", settings.RiskLevel, "user_id", userID)
+			}
+		}
+	}
+
 	// Load persisted stats
 	autopilot.LoadPnLStats()
 
