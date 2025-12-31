@@ -2873,9 +2873,9 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 			"effective_max_usd", maxSizeUSD)
 	}
 
-	// Minimum position size check: use mode config or fallback to $10
-	minPositionSize := 10.0
-	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinPositionSizeUSD > 0 {
+	// Minimum position size check: ALWAYS use mode config value (required)
+	minPositionSize := 5.0 // Absolute minimum fallback only if mode config missing
+	if modeConfig != nil && modeConfig.Size != nil {
 		minPositionSize = modeConfig.Size.MinPositionSizeUSD
 	}
 	if positionUSD < minPositionSize {
