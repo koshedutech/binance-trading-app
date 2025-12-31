@@ -151,13 +151,18 @@ func (el *TradeEventLogger) LogMovedToBreakeven(
 	entryPrice float64,
 	newSL float64,
 	buffer float64,
+	breakevenReason string, // "tp1_hit" or "proactive" or custom reason
 ) error {
 	if el.db == nil {
 		return nil
 	}
 
 	subtype := "moved_to_breakeven"
-	reason := "Moved SL to breakeven after TP1 hit"
+	// Use provided reason or default
+	reason := breakevenReason
+	if reason == "" {
+		reason = "Moved SL to breakeven"
+	}
 	event := &database.TradeLifecycleEvent{
 		FuturesTradeID: &futuresTradeID,
 		EventType:      database.EventTypeMovedToBreakeven,

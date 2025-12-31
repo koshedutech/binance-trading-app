@@ -3893,7 +3893,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				"symbol", pos.Symbol,
 				"pnl_percent", pnlPercent,
 				"threshold", ga.config.ProactiveBreakevenPercent)
-			ga.moveToBreakeven(pos)
+			ga.moveToBreakeven(pos, fmt.Sprintf("Proactive breakeven at %.2f%% profit (before TP1)", pnlPercent))
 			// FIX: Release lock BEFORE network call to prevent blocking GetStatus API
 			ga.mu.Unlock()
 			ga.updateBinanceSLOrder(pos)
@@ -4352,7 +4352,7 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 
 			// Move SL to breakeven after TP1 and update Binance order
 			if tpLevel == 1 && ga.config.MoveToBreakevenAfterTP1 && !pos.MovedToBreakeven {
-				ga.moveToBreakeven(pos)
+				ga.moveToBreakeven(pos, "After TP1 hit")
 				ga.updateBinanceSLOrder(pos) // CRITICAL: Update the actual Binance SL order
 			}
 
@@ -4590,7 +4590,8 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 }
 
 // moveToBreakeven moves stop loss to entry price + buffer
-func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition) {
+// reason should describe why breakeven was triggered (e.g., "Proactive breakeven at X% profit" or "After TP1 hit")
+func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition, reason string) {
 	buffer := pos.EntryPrice * (ga.config.BreakevenBuffer / 100)
 
 	if pos.Side == "LONG" {
@@ -4605,7 +4606,8 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition) {
 		"symbol", pos.Symbol,
 		"entry", pos.EntryPrice,
 		"new_sl", pos.StopLoss,
-		"buffer", ga.config.BreakevenBuffer)
+		"buffer", ga.config.BreakevenBuffer,
+		"reason", reason)
 
 	// Log breakeven event to trade lifecycle
 	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
@@ -4616,6 +4618,7 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition) {
 			pos.EntryPrice,
 			pos.StopLoss,
 			ga.config.BreakevenBuffer,
+			reason,
 		)
 	}
 }
@@ -7386,7 +7389,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 
 					// Move to breakeven after TP1
 					if ga.config.MoveToBreakevenAfterTP1 && !pos.MovedToBreakeven {
-						ga.moveToBreakeven(pos)
+						ga.moveToBreakeven(pos, "After TP1 hit (immediate execution)")
 						ga.updateBinanceSLOrder(pos)
 					}
 
