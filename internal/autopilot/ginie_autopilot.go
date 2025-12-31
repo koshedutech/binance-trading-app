@@ -353,6 +353,9 @@ type GiniePosition struct {
 
 	// Early Profit Booking (per-position custom ROI target)
 	CustomROIPercent *float64 `json:"custom_roi_percent,omitempty"` // Custom ROI% for this position (nil = use mode defaults)
+
+	// Scalp Re-entry Mode (progressive TP with re-entry at breakeven)
+	ScalpReentry *ScalpReentryStatus `json:"scalp_reentry,omitempty"` // Scalp re-entry state tracking
 }
 
 // GinieTradeResult tracks the result of a trade action with full signal info for study
@@ -932,6 +935,11 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 		return ga.config.EnableSwingMode
 	case GinieModePosition:
 		return ga.config.EnablePositionMode
+	case GinieModeScalpReentry:
+		// Scalp re-entry mode is enabled via settings config
+		sm := GetSettingsManager()
+		settings := sm.GetCurrentSettings()
+		return settings.ScalpReentryConfig.Enabled
 	case GinieModeUltraFast:
 		// UltraFast has its own config in settings, check there
 		sm := GetSettingsManager()
@@ -1083,6 +1091,12 @@ func (ga *GinieAutopilot) SetLLMAnalyzer(analyzer *llm.Analyzer) {
 	ga.llmAnalyzer = analyzer
 	if analyzer != nil {
 		ga.logger.Info("LLM analyzer set for Ginie adaptive SL/TP")
+		// CRITICAL: Also set the LLM client on the GinieAnalyzer for AI-based coin selection
+		// Without this, LoadLLMSelectedCoins() will fall back to market movers
+		if ga.analyzer != nil {
+			ga.analyzer.SetLLMClient(analyzer.GetClient())
+			ga.logger.Info("LLM client propagated to GinieAnalyzer for coin selection")
+		}
 	}
 }
 
@@ -1183,6 +1197,18 @@ func (ga *GinieAutopilot) GetPositions() []*GiniePosition {
 		positions = append(positions, pos)
 	}
 	return positions
+}
+
+// GetCurrentPrice returns the current price for a symbol from the exchange
+func (ga *GinieAutopilot) GetCurrentPrice(symbol string) float64 {
+	if ga.futuresClient == nil {
+		return 0
+	}
+	price, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+	if err != nil {
+		return 0
+	}
+	return price
 }
 
 // GetFuturesClient returns the futures client used by this autopilot
@@ -2322,6 +2348,19 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				}
 				ga.logger.Error("Ginie decision generation failed", "symbol", symbol, "mode", mode, "error", err)
 				continue
+			}
+
+			// ===== SCALP RE-ENTRY MODE SELECTION =====
+			// If scanning for scalp mode and scalp_reentry is enabled, use scalp_reentry mode instead
+			// This allows scalp_reentry to share entry logic with scalp but use different position management
+			if mode == GinieModeScalp {
+				sm := GetSettingsManager()
+				settings := sm.GetCurrentSettings()
+				if settings.ScalpReentryConfig.Enabled {
+					// Override to scalp_reentry mode for progressive TP and re-entry at breakeven
+					decision.SelectedMode = GinieModeScalpReentry
+					log.Printf("[SCALP-REENTRY] %s: Upgrading scalp entry to scalp_reentry mode (progressive TP)", symbol)
+				}
 			}
 
 			// Scalp mode: Log detailed signal evaluation per symbol (AC-2.2.2)
@@ -3847,6 +3886,32 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			continue
 		}
 
+		// === SCALP/SWING TO SCALP_REENTRY UPGRADE ===
+		// Upgrade existing scalp or swing positions to scalp_reentry if feature is enabled
+		if (pos.Mode == GinieModeScalp || pos.Mode == GinieModeSwing) && pos.ScalpReentry == nil {
+			sm := GetSettingsManager()
+			settings := sm.GetCurrentSettings()
+			if settings.ScalpReentryConfig.Enabled {
+				// Upgrade the position mode
+				oldMode := pos.Mode
+				pos.Mode = GinieModeScalpReentry
+				pos.ScalpReentry = ga.initScalpReentry(pos)
+				log.Printf("[SCALP-UPGRADE] %s: Upgraded %s position to scalp_reentry mode", symbol, oldMode)
+				log.Printf("[SCALP-UPGRADE] %s: Entry=%.8f, Qty=%.4f, Side=%s - now using progressive TP",
+					symbol, pos.EntryPrice, pos.OriginalQty, pos.Side)
+			}
+		}
+
+		// === SCALP RE-ENTRY MODE HANDLING ===
+		// Delegate scalp_reentry positions to specialized monitor
+		if pos.Mode == GinieModeScalpReentry {
+			ga.mu.Unlock()
+			if err := ga.monitorScalpReentryPosition(pos); err != nil {
+				log.Printf("[SCALP-REENTRY-MONITOR] %s: Error monitoring position: %v", symbol, err)
+			}
+			continue // Skip regular monitoring for scalp_reentry positions
+		}
+
 		// Update high/low tracking
 		if currentPrice > pos.HighestPrice {
 			pos.HighestPrice = currentPrice
@@ -3915,10 +3980,11 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 			// Check if trailing is enabled for this mode (read from ModeConfigs)
 			modeToConfigKey := map[string]string{
-				string(GinieModeUltraFast): "ultra_fast",
-				string(GinieModeScalp):     "scalp",
-				string(GinieModeSwing):     "swing",
-				string(GinieModePosition):  "position",
+				string(GinieModeUltraFast):    "ultra_fast",
+				string(GinieModeScalp):        "scalp",
+				string(GinieModeSwing):        "swing",
+				string(GinieModePosition):     "position",
+				string(GinieModeScalpReentry): "scalp_reentry",
 			}
 			trailingEnabled := false
 			if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
@@ -7264,7 +7330,21 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 
 	// Round SL price with directional rounding to ensure trigger protects capital
 	roundedSL := roundPriceForSL(pos.Symbol, pos.StopLoss, pos.Side)
-	roundedQty := roundQuantity(pos.Symbol, pos.RemainingQty)
+
+	// CRITICAL FIX: Ensure we have a valid quantity for SL order
+	// RemainingQty might be 0 after sync/upgrade - fallback to OriginalQty or ScalpReentry.RemainingQuantity
+	slQty := pos.RemainingQty
+	if slQty <= 0 {
+		// For scalp_reentry positions, check ScalpReentry.RemainingQuantity first
+		if pos.ScalpReentry != nil && pos.ScalpReentry.RemainingQuantity > 0 {
+			slQty = pos.ScalpReentry.RemainingQuantity
+			log.Printf("[GINIE] %s: Using ScalpReentry.RemainingQuantity=%.4f for SL (RemainingQty was 0)", pos.Symbol, slQty)
+		} else if pos.OriginalQty > 0 {
+			slQty = pos.OriginalQty
+			log.Printf("[GINIE] %s: Using OriginalQty=%.4f for SL (RemainingQty was 0)", pos.Symbol, slQty)
+		}
+	}
+	roundedQty := roundQuantity(pos.Symbol, slQty)
 
 	// Place Stop Loss order using Algo Order API (STOP_MARKET requires Algo API)
 	// Note: Don't set ReduceOnly - in Hedge mode, positionSide determines direction
@@ -13770,7 +13850,7 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 
 // initModeCircuitBreakers initializes mode circuit breakers from default configs
 func (ga *GinieAutopilot) initModeCircuitBreakers() {
-	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition}
+	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeScalpReentry, GinieModeSwing, GinieModePosition}
 
 	for _, mode := range modes {
 		config := ga.GetDefaultModeConfig(mode)
