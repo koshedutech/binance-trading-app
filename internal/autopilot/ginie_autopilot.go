@@ -172,8 +172,8 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		MoveToBreakevenAfterTP1: true,
 		BreakevenBuffer:         0.1, // 0.1% above entry
 
-		// Proactive profit protection
-		ProactiveBreakevenPercent:  0.5,  // Move to breakeven when profit >= 0.5% (before TP1)
+		// Proactive profit protection (DISABLED - let trades run to TP1 naturally)
+		ProactiveBreakevenPercent:  0,    // 0 = disabled. Was 0.5% but caused early exits before TP1
 		TrailingActivationPercent:  0,    // DEPRECATED: Trailing now activates after TP1+breakeven (from settings)
 		TrailingStepPercent:        1.5,  // Default trailing step % (overridden by per-mode settings)
 		TrailingSLUpdateThreshold:  0.2,  // Update Binance order when SL improves by >= 0.2%
@@ -3887,7 +3887,8 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		}
 
 		// 1. Proactive breakeven: Move SL to entry when profit >= threshold (before TP1)
-		if !pos.MovedToBreakeven && pnlPercent >= ga.config.ProactiveBreakevenPercent && pos.CurrentTPLevel == 0 {
+		// NOTE: If ProactiveBreakevenPercent is 0, this feature is disabled
+		if ga.config.ProactiveBreakevenPercent > 0 && !pos.MovedToBreakeven && pnlPercent >= ga.config.ProactiveBreakevenPercent && pos.CurrentTPLevel == 0 {
 			log.Printf("[GINIE-MONITOR] %s: Triggering proactive breakeven at %.2f%% profit", symbol, pnlPercent)
 			ga.logger.Info("Proactive breakeven triggered",
 				"symbol", pos.Symbol,
