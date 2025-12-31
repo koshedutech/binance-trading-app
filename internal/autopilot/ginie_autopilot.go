@@ -3625,6 +3625,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 
 		// Only create new trade if we didn't reuse an existing one
 		if tradeID == 0 {
+			tradingMode := string(decision.SelectedMode)
 			trade := &database.FuturesTrade{
 				UserID:       ga.userID, // Set user ID for duplicate detection
 				Symbol:       symbol,
@@ -3637,6 +3638,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 				Status:       "OPEN",
 				EntryTime:    time.Now(),
 				TradeSource:  "ginie",
+				TradingMode:  &tradingMode,
 			}
 			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 				ga.logger.Warn("Failed to create futures trade record", "error", err, "symbol", symbol)
@@ -5991,93 +5993,69 @@ func (ga *GinieAutopilot) isTrailingEnabled(mode GinieTradingMode) bool {
 }
 
 func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, mode GinieTradingMode, isLong bool) []GinieTakeProfitLevel {
-	var gains []float64
+	// SIMPLIFIED TP LOGIC:
+	// 1. Read TPAllocation (TP1%, TP2%, TP3%, TP4%) from mode config
+	// 2. Auto-detect single vs multi-TP by counting non-zero allocations
+	// 3. Generate only TP levels that have allocation > 0
+	// 4. Use TPGainLevels for price calculation (ROI % per level)
+	//
+	// Examples:
+	//   TPAllocation: [100, 0, 0, 0] → Single TP (100% at TP1)
+	//   TPAllocation: [50, 50, 0, 0] → 2 TP levels (50% each)
+	//   TPAllocation: [25, 25, 25, 25] → 4 TP levels (25% each)
 
-	// Check if single TP mode is enabled for this mode
-	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
-	useSingleTP := false
-
-	// Also check mode config for use_single_tp
 	modeConfig := ga.getModeConfig(mode)
-	if modeConfig != nil && modeConfig.SLTP != nil {
-		useSingleTP = modeConfig.SLTP.UseSingleTP
+
+	// Get TP allocation percentages (how much qty to close at each level)
+	var tpAllocation []float64
+	if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
+		tpAllocation = modeConfig.SLTP.TPAllocation[:4]
+	} else {
+		// Default allocation based on mode
+		switch mode {
+		case GinieModeUltraFast, GinieModeScalp:
+			tpAllocation = []float64{100, 0, 0, 0} // Single TP default
+		case GinieModeSwing:
+			tpAllocation = []float64{50, 50, 0, 0} // 2 TP levels
+		case GinieModePosition:
+			tpAllocation = []float64{25, 25, 25, 25} // 4 TP levels
+		default:
+			tpAllocation = []float64{100, 0, 0, 0}
+		}
 	}
 
-	// For single TP modes, only use TP1 gain (first valid gain)
-	if useSingleTP {
-		var singleGain float64
-		// Try to get from mode config
-		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) > 0 {
-			// Find first non-zero gain
-			for _, g := range modeConfig.SLTP.TPGainLevels {
-				if g > 0.01 { // Skip near-zero values
-					singleGain = g
-					break
-				}
-			}
-		}
-		// Fallback to mode-specific defaults from ModeConfigs if no valid gain found
-		if singleGain < 0.01 {
-			modeToConfigKey := map[string]string{
-				string(GinieModeUltraFast): "ultra_fast",
-				string(GinieModeScalp):     "scalp",
-				string(GinieModeSwing):     "swing",
-				string(GinieModePosition):  "position",
-			}
-			modeDefaults := map[string]float64{
-				"ultra_fast": 0.5,
-				"scalp":      1.0,
-				"swing":      2.0,
-				"position":   3.0,
-			}
-
-			modeKey, ok := modeToConfigKey[string(mode)]
-			if !ok {
-				singleGain = 1.0
-			} else {
-				singleGain = modeDefaults[modeKey]
-				if mc := settings.ModeConfigs[modeKey]; mc != nil && mc.SLTP != nil {
-					if mc.SLTP.SingleTPPercent > 0 {
-						singleGain = mc.SLTP.SingleTPPercent
-					} else if mc.SLTP.TakeProfitPercent > 0 {
-						singleGain = mc.SLTP.TakeProfitPercent
-					}
-				}
-			}
-		}
-		gains = []float64{singleGain}
+	// Get TP gain levels (ROI % for price calculation at each level)
+	var tpGains []float64
+	if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
+		tpGains = modeConfig.SLTP.TPGainLevels[:4]
 	} else {
-		// Multi-TP mode: Try to get TP gain levels from mode config first
-		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) > 0 {
-			gains = modeConfig.SLTP.TPGainLevels
+		// Default gains based on mode
+		switch mode {
+		case GinieModeUltraFast:
+			tpGains = []float64{0.3, 0.5, 0.8, 1.0}
+		case GinieModeScalp:
+			tpGains = []float64{0.5, 1.0, 1.5, 2.0}
+		case GinieModeSwing:
+			tpGains = []float64{1.0, 2.0, 3.0, 4.0}
+		case GinieModePosition:
+			tpGains = []float64{2.0, 4.0, 6.0, 8.0}
+		default:
+			tpGains = []float64{1.0, 2.0, 3.0, 4.0}
 		}
+	}
 
-		// Validate gains - filter out 0% or near-zero values
-		validGains := make([]float64, 0, len(gains))
-		for _, g := range gains {
-			if g >= 0.05 { // Minimum 0.05% gain to be meaningful
-				validGains = append(validGains, g)
-			}
+	// Count how many TP levels are active (allocation > 0)
+	activeTPCount := 0
+	for _, alloc := range tpAllocation {
+		if alloc > 0 {
+			activeTPCount++
 		}
+	}
 
-		// If no valid gains after filtering, use hardcoded defaults
-		if len(validGains) == 0 {
-			switch mode {
-			case GinieModeUltraFast:
-				gains = []float64{0.15, 0.3, 0.5, 0.8}
-			case GinieModeScalp:
-				gains = []float64{0.3, 0.6, 1.0, 1.5}
-			case GinieModeSwing:
-				gains = []float64{1.0, 2.0, 3.0, 4.0}
-			case GinieModePosition:
-				gains = []float64{2.0, 4.0, 6.0, 8.0}
-			default:
-				gains = []float64{1.0, 2.0, 3.0, 4.0} // Default to swing-like
-			}
-		} else {
-			gains = validGains
-		}
+	// If no active TPs, default to single TP at 100%
+	if activeTPCount == 0 {
+		tpAllocation[0] = 100
+		activeTPCount = 1
 	}
 
 	// Determine side string for proper rounding
@@ -6086,9 +6064,19 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 		side = "SHORT"
 	}
 
-	// Create TP levels based on gains (variable number of levels)
-	tps := make([]GinieTakeProfitLevel, len(gains))
-	for i, gain := range gains {
+	// Create TP levels only for active allocations (allocation > 0)
+	tps := make([]GinieTakeProfitLevel, 0, activeTPCount)
+	for i := 0; i < 4; i++ {
+		if tpAllocation[i] <= 0 {
+			continue // Skip levels with 0% allocation
+		}
+
+		gain := tpGains[i]
+		if gain < 0.01 {
+			// Use default gain if not set
+			gain = float64(i+1) * 0.5 // 0.5%, 1.0%, 1.5%, 2.0%
+		}
+
 		var price float64
 		if isLong {
 			price = entryPrice * (1 + gain/100)
@@ -6096,24 +6084,24 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 			price = entryPrice * (1 - gain/100)
 		}
 
-		// Get TP allocation percent from mode config first, fallback to global config
-		var tpPercent float64
-		if modeConfig != nil && modeConfig.SLTP != nil && i < len(modeConfig.SLTP.TPAllocation) {
-			tpPercent = modeConfig.SLTP.TPAllocation[i]
-		} else {
-			tpPercent = ga.getTPPercent(i + 1)
-		}
-
-		// FIX: Use roundPriceForTP with symbol and side for proper tick precision
-		// This prevents TP prices from being rounded to values <= entry price
-		tps[i] = GinieTakeProfitLevel{
+		tps = append(tps, GinieTakeProfitLevel{
 			Level:   i + 1,
 			Price:   roundPriceForTP(symbol, price, side),
-			Percent: tpPercent,
+			Percent: tpAllocation[i],
 			GainPct: gain,
 			Status:  "pending",
-		}
+		})
 	}
+
+	// Log the TP configuration for debugging
+	ga.logger.Debug("Generated TP levels",
+		"symbol", symbol,
+		"mode", mode,
+		"entry_price", entryPrice,
+		"is_long", isLong,
+		"tp_allocation", tpAllocation,
+		"tp_gains", tpGains,
+		"active_levels", len(tps))
 
 	return tps
 }
@@ -6173,6 +6161,7 @@ func (ga *GinieAutopilot) persistTradeToDatabase(result GinieTradeResult) {
 	if result.Action == "full_close" || result.Action == "partial_close" {
 		// Create a trade record for tracking
 		pnlPercent := result.PnLPercent
+		tradingMode := string(result.Mode)
 		trade := &database.FuturesTrade{
 			Symbol:             result.Symbol,
 			PositionSide:       result.Side,
@@ -6189,6 +6178,7 @@ func (ga *GinieAutopilot) persistTradeToDatabase(result GinieTradeResult) {
 			ExitTime:           &result.Timestamp,
 			TradeSource:        "ginie",
 			AIDecisionID:       &aiDecision.ID,
+			TradingMode:        &tradingMode,
 		}
 
 		if err := ga.repo.CreateFuturesTrade(ctx, trade); err != nil {
@@ -6634,6 +6624,7 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 
 			// Only create new trade if no existing one found
 			if tradeID == 0 {
+				tradingMode := string(syncedMode)
 				trade := &database.FuturesTrade{
 					UserID:       ga.userID, // CRITICAL: Set user ID for duplicate detection
 					Symbol:       symbol,
@@ -6646,6 +6637,7 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 					Status:       "OPEN",
 					EntryTime:    time.Now(),
 					TradeSource:  "force_sync", // Mark as force synced from exchange
+					TradingMode:  &tradingMode,
 				}
 				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 					ga.logger.Warn("Failed to create futures trade record for force-synced position", "error", err, "symbol", symbol)
@@ -6911,6 +6903,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 
 			// Only create new trade if no existing one found
 			if tradeID == 0 {
+				tradingMode := string(syncMode)
 				trade := &database.FuturesTrade{
 					UserID:       ga.userID, // CRITICAL: Set user ID for duplicate detection
 					Symbol:       symbol,
@@ -6923,6 +6916,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 					Status:       "OPEN",
 					EntryTime:    time.Now(),
 					TradeSource:  "sync", // Mark as synced from exchange
+					TradingMode:  &tradingMode,
 				}
 				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 					ga.logger.Warn("Failed to create futures trade record for synced position", "error", err, "symbol", symbol)
