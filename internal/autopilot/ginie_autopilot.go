@@ -3302,23 +3302,16 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	// Check actual Binance position mode to avoid API error -4061
 	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
 
-	// Build TP levels with prices
-	takeProfits := make([]GinieTakeProfitLevel, len(decision.TradeExecution.TakeProfits))
-	for i, tp := range decision.TradeExecution.TakeProfits {
-		takeProfits[i] = GinieTakeProfitLevel{
-			Level:   tp.Level,
-			Price:   tp.Price,
-			Percent: ga.getTPPercent(i + 1), // Use our configured percentages
-			GainPct: tp.GainPct,
-			Status:  "pending",
-		}
-	}
+	// BUG FIX: Always use generateDefaultTPs to respect mode config's TP allocation
+	// The analyzer's hardcoded 4-level 25% allocation was ignoring mode_configs settings
+	// (e.g., scalp with use_single_tp=true and tp_allocation=[100,0,0,0] was being ignored)
+	takeProfits := ga.generateDefaultTPs(symbol, price, decision.SelectedMode, isLong)
 
-	// Ensure we have 4 TP levels
-	if len(takeProfits) < 4 {
-		// Generate default TPs based on mode
-		takeProfits = ga.generateDefaultTPs(symbol, price, decision.SelectedMode, decision.TradeExecution.Action == "LONG")
-	}
+	ga.logger.Debug("TP levels from mode config",
+		"symbol", symbol,
+		"mode", decision.SelectedMode,
+		"tp_count", len(takeProfits),
+		"is_single_tp", len(takeProfits) == 1)
 
 	ga.logger.Info("Ginie executing trade",
 		"symbol", symbol,
@@ -5355,6 +5348,21 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 	ga.mu.Lock()
 	delete(ga.positions, symbol)
 	ga.mu.Unlock()
+
+	// Log position closed to trade lifecycle
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+		go ga.eventLogger.LogPositionClosed(
+			context.Background(),
+			pos.FuturesTradeID,
+			symbol,
+			currentPrice,
+			pos.OriginalQty,
+			totalPnL,
+			pnlPercent,
+			"market_close",
+			database.EventSourceGinie,
+		)
+	}
 
 	log.Printf("[MARKET-CLOSE] %s: Position closed successfully via MARKET order", symbol)
 
@@ -12946,6 +12954,21 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 		Confidence: pos.UltraFastSignal.EntryConfidence,
 	})
 
+
+	// Log position closed to trade lifecycle
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+		go ga.eventLogger.LogPositionClosed(
+			context.Background(),
+			pos.FuturesTradeID,
+			symbol,
+			currentPrice,
+			closeQty,
+			pnlUSD,
+			pnlPercent,
+			fmt.Sprintf("ultra_fast_%s", reason),
+			database.EventSourceGinie,
+		)
+	}
 	// Check for re-entry opportunity based on volatility regime
 	if pos.UltraFastSignal != nil && pos.UltraFastSignal.VolatilityRegime != nil {
 		reEntryDelay := pos.UltraFastSignal.VolatilityRegime.ReEntryDelay
