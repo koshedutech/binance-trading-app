@@ -1,6 +1,7 @@
 package autopilot
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"time"
@@ -365,4 +366,162 @@ func joinStrings(strs []string, sep string) string {
 		result += sep + strs[i]
 	}
 	return result
+}
+
+// ===== MTF CONTINUATION ANALYSIS =====
+// This section handles multi-timeframe analysis for CONTINUATION trades only
+// (NOT reversals - those use pivot points, day extremes, small candle detection)
+
+// MTFContinuationAnalysis holds multi-timeframe trend continuation confirmation
+type MTFContinuationAnalysis struct {
+	Symbol         string    `json:"symbol"`
+	IsContinuation bool      `json:"is_continuation"`  // True if MTF confirms continuation
+	Direction      string    `json:"direction"`        // "LONG" or "SHORT"
+	Trend5m        string    `json:"trend_5m"`         // "UP", "DOWN", "NEUTRAL"
+	Trend15m       string    `json:"trend_15m"`        // "UP", "DOWN", "NEUTRAL"
+	Trend1h        string    `json:"trend_1h"`         // "UP", "DOWN", "NEUTRAL"
+	AlignedCount   int       `json:"aligned_count"`    // How many timeframes agree
+	TrendStrength  float64   `json:"trend_strength"`   // 0-100
+	Reason         string    `json:"reason"`
+	AnalyzedAt     time.Time `json:"analyzed_at"`
+}
+
+// AnalyzeMTFContinuation checks if higher timeframes support trend CONTINUATION
+// Use this for continuation trades only - NOT for reversal entries
+// Returns analysis showing if 5m, 15m, 1h trends are aligned in same direction
+func (g *GinieAnalyzer) AnalyzeMTFContinuation(symbol string, direction string) *MTFContinuationAnalysis {
+	log.Printf("[MTF-CONT] ========== MTF CONTINUATION ANALYSIS START ==========")
+	log.Printf("[MTF-CONT] symbol=%s, checking_direction=%s", symbol, direction)
+
+	result := &MTFContinuationAnalysis{
+		Symbol:     symbol,
+		Direction:  direction,
+		AnalyzedAt: time.Now(),
+	}
+
+	// Fetch klines for each timeframe (need 20 for trend detection)
+	klineLimit := 20
+
+	// Analyze 5m trend
+	klines5m, err := g.futuresClient.GetFuturesKlines(symbol, "5m", klineLimit)
+	if err != nil || len(klines5m) < 10 {
+		result.Reason = "Failed to fetch 5m klines"
+		return result
+	}
+	result.Trend5m = g.detectTrendDirection(klines5m)
+
+	// Analyze 15m trend
+	klines15m, err := g.futuresClient.GetFuturesKlines(symbol, "15m", klineLimit)
+	if err != nil || len(klines15m) < 10 {
+		result.Reason = "Failed to fetch 15m klines"
+		return result
+	}
+	result.Trend15m = g.detectTrendDirection(klines15m)
+
+	// Analyze 1h trend
+	klines1h, err := g.futuresClient.GetFuturesKlines(symbol, "1h", klineLimit)
+	if err != nil || len(klines1h) < 10 {
+		result.Reason = "Failed to fetch 1h klines"
+		return result
+	}
+	result.Trend1h = g.detectTrendDirection(klines1h)
+
+	log.Printf("[MTF-CONT] Trends: 5m=%s, 15m=%s, 1h=%s", result.Trend5m, result.Trend15m, result.Trend1h)
+
+	// Count how many timeframes align with the requested direction
+	alignedCount := 0
+	expectedTrend := "UP"
+	if direction == "SHORT" {
+		expectedTrend = "DOWN"
+	}
+
+	if result.Trend5m == expectedTrend {
+		alignedCount++
+	}
+	if result.Trend15m == expectedTrend {
+		alignedCount++
+	}
+	if result.Trend1h == expectedTrend {
+		alignedCount++
+	}
+
+	result.AlignedCount = alignedCount
+
+	// Calculate trend strength (weighted: 1h=50%, 15m=30%, 5m=20%)
+	strength := 0.0
+	if result.Trend1h == expectedTrend {
+		strength += 50
+	}
+	if result.Trend15m == expectedTrend {
+		strength += 30
+	}
+	if result.Trend5m == expectedTrend {
+		strength += 20
+	}
+	result.TrendStrength = strength
+
+	// Need at least 2/3 timeframes aligned for confirmation
+	if alignedCount >= 2 {
+		result.IsContinuation = true
+		result.Reason = fmt.Sprintf("MTF continuation confirmed: %d/3 timeframes trending %s", alignedCount, expectedTrend)
+		log.Printf("[MTF-CONT] ✓ CONTINUATION CONFIRMED: %s, aligned=%d/3, strength=%.0f%%",
+			direction, alignedCount, strength)
+	} else {
+		result.IsContinuation = false
+		result.Reason = fmt.Sprintf("MTF divergence: only %d/3 timeframes trending %s", alignedCount, expectedTrend)
+		log.Printf("[MTF-CONT] ✗ NOT A CONTINUATION: aligned=%d/3, strength=%.0f%% (need 2+ aligned)",
+			alignedCount, strength)
+	}
+
+	log.Printf("[MTF-CONT] ========== MTF CONTINUATION ANALYSIS END ==========")
+	return result
+}
+
+// detectTrendDirection analyzes klines to determine trend direction
+// Uses EMA crossover and higher-highs/lower-lows pattern
+func (g *GinieAnalyzer) detectTrendDirection(klines []binance.Kline) string {
+	if len(klines) < 10 {
+		return "NEUTRAL"
+	}
+
+	// Method 1: Compare first half average to second half average
+	mid := len(klines) / 2
+	firstHalf := klines[:mid]
+	secondHalf := klines[mid:]
+
+	var firstAvg, secondAvg float64
+	for _, k := range firstHalf {
+		firstAvg += k.Close
+	}
+	firstAvg /= float64(len(firstHalf))
+
+	for _, k := range secondHalf {
+		secondAvg += k.Close
+	}
+	secondAvg /= float64(len(secondHalf))
+
+	// Method 2: Count higher-highs vs lower-lows in recent candles
+	recentCandles := klines[len(klines)-5:]
+	higherHighs := 0
+	lowerLows := 0
+	for i := 1; i < len(recentCandles); i++ {
+		if recentCandles[i].High > recentCandles[i-1].High {
+			higherHighs++
+		}
+		if recentCandles[i].Low < recentCandles[i-1].Low {
+			lowerLows++
+		}
+	}
+
+	// Determine trend
+	avgChange := (secondAvg - firstAvg) / firstAvg * 100
+	threshold := 0.1 // 0.1% threshold for trend detection
+
+	if avgChange > threshold && higherHighs > lowerLows {
+		return "UP"
+	} else if avgChange < -threshold && lowerLows > higherHighs {
+		return "DOWN"
+	}
+
+	return "NEUTRAL"
 }

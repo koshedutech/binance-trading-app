@@ -5598,53 +5598,323 @@ func (ga *GinieAutopilot) getEntryTimeframe(mode GinieTradingMode) string {
 	}
 }
 
-// getPrevCandleEntryPrice fetches the previous candle's extreme price for LIMIT order entry
-// For LONG: Returns the LOW of the previous candle (buy at the dip)
-// For SHORT: Returns the HIGH of the previous candle (sell at the peak)
-// This ensures entries have a price gap from current LTP to avoid starting in loss
+// SmartEntryResult holds the calculated entry price and analysis details
+type SmartEntryResult struct {
+	EntryPrice       float64
+	EntryType        string  // "prev_candle", "avg_range", "pivot", "day_extreme", "mtf_continuation"
+	IsReversal       bool    // True if this is a reversal trade
+	IsImmediate      bool    // True if near day high/low - immediate trade
+	IsContinuation   bool    // True if MTF confirmed continuation (NOT reversal)
+	MTFConfirmed     bool    // True if MTF analysis was used and confirmed
+	MTFTrendStrength float64 // MTF trend strength 0-100
+	PivotLevel       float64 // Nearest pivot level
+	DayHigh          float64
+	DayLow           float64
+	AvgRange         float64
+	Reason           string
+}
+
+// getPrevCandleEntryPrice fetches the smart entry price for LIMIT order entry
+// Implements multiple conditions:
+// 1. Small candle detection - uses 3-5 candle average range
+// 2. Pivot point levels for reversal/hold decisions
+// 3. Day high/low proximity for immediate trades or reversals
 func (ga *GinieAutopilot) getPrevCandleEntryPrice(symbol string, mode GinieTradingMode, isLong bool) (float64, error) {
+	result, err := ga.calculateSmartEntryPrice(symbol, mode, isLong)
+	if err != nil {
+		return 0, err
+	}
+	return result.EntryPrice, nil
+}
+
+// calculateSmartEntryPrice performs comprehensive entry price calculation
+func (ga *GinieAutopilot) calculateSmartEntryPrice(symbol string, mode GinieTradingMode, isLong bool) (*SmartEntryResult, error) {
 	timeframe := ga.getEntryTimeframe(mode)
 
-	// Fetch last 2 candles (current + previous)
-	klines, err := ga.futuresClient.GetFuturesKlines(symbol, timeframe, 2)
+	// Fetch last 6 candles (5 for analysis + 1 current)
+	klines, err := ga.futuresClient.GetFuturesKlines(symbol, timeframe, 6)
 	if err != nil {
-		return 0, fmt.Errorf("failed to fetch %s klines: %w", timeframe, err)
+		return nil, fmt.Errorf("failed to fetch %s klines: %w", timeframe, err)
 	}
 
-	if len(klines) < 2 {
-		return 0, fmt.Errorf("insufficient klines returned: got %d, need 2", len(klines))
+	if len(klines) < 3 {
+		return nil, fmt.Errorf("insufficient klines returned: got %d, need at least 3", len(klines))
 	}
 
-	// Previous candle is at index 0 (klines are sorted oldest first)
-	// Current candle is at index 1
-	prevCandle := klines[len(klines)-2]
+	// Get current price
+	currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get current price: %w", err)
+	}
 
-	var entryPrice float64
+	// Fetch daily kline for day high/low and pivot calculation
+	dailyKlines, err := ga.futuresClient.GetFuturesKlines(symbol, "1d", 2)
+	if err != nil {
+		ga.logger.Warn("Failed to fetch daily klines for pivot calculation", "symbol", symbol, "error", err)
+	}
+
+	result := &SmartEntryResult{}
+
+	// === CONDITION 3: Check Day High/Low Proximity ===
+	if len(dailyKlines) >= 1 {
+		todayCandle := dailyKlines[len(dailyKlines)-1]
+		result.DayHigh = todayCandle.High
+		result.DayLow = todayCandle.Low
+
+		// Calculate proximity to day extremes (within 0.3% of day high/low)
+		proximityThreshold := 0.003 // 0.3%
+		distanceToHigh := (result.DayHigh - currentPrice) / currentPrice
+		distanceToLow := (currentPrice - result.DayLow) / currentPrice
+
+		// Near day HIGH
+		if distanceToHigh < proximityThreshold && distanceToHigh >= 0 {
+			if isLong {
+				// Price near day high, going LONG = CONTINUATION trade
+				// Use MTF to confirm trend continuation
+				mtfAnalysis := ga.analyzer.AnalyzeMTFContinuation(symbol, "LONG")
+				if mtfAnalysis != nil && mtfAnalysis.IsContinuation {
+					result.IsImmediate = true
+					result.IsContinuation = true
+					result.MTFConfirmed = true
+					result.MTFTrendStrength = mtfAnalysis.TrendStrength
+					result.EntryType = "mtf_continuation"
+					result.EntryPrice = currentPrice * 0.9995 // Slight buffer below
+					result.Reason = fmt.Sprintf("MTF continuation LONG confirmed (%d/3 TFs aligned, strength=%.0f%%)", mtfAnalysis.AlignedCount, mtfAnalysis.TrendStrength)
+					ga.logger.Info("Smart entry: MTF CONTINUATION - LONG at day high",
+						"symbol", symbol,
+						"day_high", result.DayHigh,
+						"current", currentPrice,
+						"mtf_aligned", mtfAnalysis.AlignedCount,
+						"mtf_strength", mtfAnalysis.TrendStrength,
+						"entry_price", result.EntryPrice)
+					return result, nil
+				} else {
+					// MTF not aligned for continuation - skip this trade
+					ga.logger.Warn("Smart entry: Near day HIGH but MTF not aligned for LONG continuation - skipping",
+						"symbol", symbol,
+						"day_high", result.DayHigh,
+						"current", currentPrice,
+						"mtf_reason", mtfAnalysis.Reason)
+					// Fall through to other conditions
+				}
+			} else {
+				// Price near day high, going SHORT = REVERSAL trade
+				// Do NOT use MTF for reversal - use pivot levels instead
+				result.IsReversal = true
+				result.EntryType = "day_extreme_reversal"
+				result.EntryPrice = result.DayHigh * 1.0005 // Just above day high
+				result.Reason = "Near day high - reversal SHORT (no MTF for reversals)"
+				ga.logger.Info("Smart entry: REVERSAL SHORT at day HIGH (no MTF)",
+					"symbol", symbol,
+					"day_high", result.DayHigh,
+					"current", currentPrice,
+					"entry_price", result.EntryPrice)
+				return result, nil
+			}
+		}
+
+		// Near day LOW
+		if distanceToLow < proximityThreshold && distanceToLow >= 0 {
+			if !isLong {
+				// Price near day low, going SHORT = CONTINUATION trade
+				// Use MTF to confirm trend continuation
+				mtfAnalysis := ga.analyzer.AnalyzeMTFContinuation(symbol, "SHORT")
+				if mtfAnalysis != nil && mtfAnalysis.IsContinuation {
+					result.IsImmediate = true
+					result.IsContinuation = true
+					result.MTFConfirmed = true
+					result.MTFTrendStrength = mtfAnalysis.TrendStrength
+					result.EntryType = "mtf_continuation"
+					result.EntryPrice = currentPrice * 1.0005 // Slight buffer above
+					result.Reason = fmt.Sprintf("MTF continuation SHORT confirmed (%d/3 TFs aligned, strength=%.0f%%)", mtfAnalysis.AlignedCount, mtfAnalysis.TrendStrength)
+					ga.logger.Info("Smart entry: MTF CONTINUATION - SHORT at day low",
+						"symbol", symbol,
+						"day_low", result.DayLow,
+						"current", currentPrice,
+						"mtf_aligned", mtfAnalysis.AlignedCount,
+						"mtf_strength", mtfAnalysis.TrendStrength,
+						"entry_price", result.EntryPrice)
+					return result, nil
+				} else {
+					// MTF not aligned for continuation - skip this trade
+					ga.logger.Warn("Smart entry: Near day LOW but MTF not aligned for SHORT continuation - skipping",
+						"symbol", symbol,
+						"day_low", result.DayLow,
+						"current", currentPrice,
+						"mtf_reason", mtfAnalysis.Reason)
+					// Fall through to other conditions
+				}
+			} else {
+				// Price near day low, going LONG = REVERSAL trade
+				// Do NOT use MTF for reversal - use pivot levels instead
+				result.IsReversal = true
+				result.EntryType = "day_extreme_reversal"
+				result.EntryPrice = result.DayLow * 0.9995 // Just below day low
+				result.Reason = "Near day low - reversal LONG (no MTF for reversals)"
+				ga.logger.Info("Smart entry: REVERSAL LONG at day LOW (no MTF)",
+					"symbol", symbol,
+					"day_low", result.DayLow,
+					"current", currentPrice,
+					"entry_price", result.EntryPrice)
+				return result, nil
+			}
+		}
+
+		// === CONDITION 2: Calculate Pivot Points ===
+		if len(dailyKlines) >= 2 {
+			prevDay := dailyKlines[len(dailyKlines)-2]
+			pivot := ga.calculatePivotPoints(prevDay.High, prevDay.Low, prevDay.Close)
+			result.PivotLevel = pivot.PP
+
+			// Check if price is near pivot levels (within 0.2%)
+			pivotProximity := 0.002
+			for _, level := range []struct {
+				name  string
+				price float64
+			}{
+				{"PP", pivot.PP}, {"R1", pivot.R1}, {"S1", pivot.S1},
+				{"R2", pivot.R2}, {"S2", pivot.S2},
+			} {
+				distance := math.Abs(currentPrice-level.price) / currentPrice
+				if distance < pivotProximity {
+					// Price at pivot level - use pivot for entry
+					if isLong && (level.name == "S1" || level.name == "S2" || level.name == "PP") {
+						// Support levels for LONG
+						result.EntryType = "pivot_support"
+						result.EntryPrice = level.price * 0.999 // Just below support
+						result.Reason = fmt.Sprintf("At pivot %s support - LONG entry", level.name)
+						ga.logger.Info("Smart entry: Pivot support",
+							"symbol", symbol,
+							"pivot_level", level.name,
+							"pivot_price", level.price,
+							"entry_price", result.EntryPrice)
+						return result, nil
+					} else if !isLong && (level.name == "R1" || level.name == "R2" || level.name == "PP") {
+						// Resistance levels for SHORT
+						result.EntryType = "pivot_resistance"
+						result.EntryPrice = level.price * 1.001 // Just above resistance
+						result.Reason = fmt.Sprintf("At pivot %s resistance - SHORT entry", level.name)
+						ga.logger.Info("Smart entry: Pivot resistance",
+							"symbol", symbol,
+							"pivot_level", level.name,
+							"pivot_price", level.price,
+							"entry_price", result.EntryPrice)
+						return result, nil
+					}
+				}
+			}
+		}
+	}
+
+	// === CONDITION 1: Small Candle Detection with Average Range ===
+	// Exclude current candle, analyze last 5 candles
+	analysisCandles := klines[:len(klines)-1]
+	if len(analysisCandles) > 5 {
+		analysisCandles = analysisCandles[len(analysisCandles)-5:]
+	}
+
+	prevCandle := analysisCandles[len(analysisCandles)-1]
+	prevCandleRange := prevCandle.High - prevCandle.Low
+
+	// Calculate average range of earlier candles (excluding the most recent)
+	var totalRange float64
+	var rangeCount int
+	for i := 0; i < len(analysisCandles)-1; i++ {
+		candleRange := analysisCandles[i].High - analysisCandles[i].Low
+		totalRange += candleRange
+		rangeCount++
+	}
+
+	if rangeCount > 0 {
+		avgRange := totalRange / float64(rangeCount)
+		result.AvgRange = avgRange
+
+		// If previous candle is less than 50% of average range, it's a small candle
+		smallCandleThreshold := 0.5
+		if prevCandleRange < avgRange*smallCandleThreshold {
+			// Small candle detected - use average range for entry calculation
+			// Calculate average high and low from analysis candles
+			var avgHigh, avgLow float64
+			for _, c := range analysisCandles {
+				avgHigh += c.High
+				avgLow += c.Low
+			}
+			avgHigh /= float64(len(analysisCandles))
+			avgLow /= float64(len(analysisCandles))
+			avgMid := (avgHigh + avgLow) / 2
+
+			if isLong {
+				// For LONG: Entry between avg low and mid
+				result.EntryPrice = avgLow + (avgMid-avgLow)*0.3 // 30% from low to mid
+				result.EntryType = "avg_range_long"
+				result.Reason = fmt.Sprintf("Small candle (%.4f < avg %.4f) - using avg range entry", prevCandleRange, avgRange)
+			} else {
+				// For SHORT: Entry between mid and avg high
+				result.EntryPrice = avgMid + (avgHigh-avgMid)*0.7 // 70% from mid to high
+				result.EntryType = "avg_range_short"
+				result.Reason = fmt.Sprintf("Small candle (%.4f < avg %.4f) - using avg range entry", prevCandleRange, avgRange)
+			}
+
+			ga.logger.Info("Smart entry: Small candle detected - using avg range",
+				"symbol", symbol,
+				"mode", mode,
+				"prev_candle_range", prevCandleRange,
+				"avg_range", avgRange,
+				"avg_high", avgHigh,
+				"avg_low", avgLow,
+				"entry_price", result.EntryPrice,
+				"is_long", isLong)
+
+			return result, nil
+		}
+	}
+
+	// === DEFAULT: Use previous candle extreme ===
 	if isLong {
-		// For LONG: Entry at previous candle's LOW (buy the dip)
-		entryPrice = prevCandle.Low
-		ga.logger.Debug("LIMIT entry price calculated",
-			"symbol", symbol,
-			"mode", mode,
-			"direction", "LONG",
-			"timeframe", timeframe,
-			"prev_candle_low", prevCandle.Low,
-			"prev_candle_high", prevCandle.High,
-			"entry_price", entryPrice)
+		result.EntryPrice = prevCandle.Low
+		result.EntryType = "prev_candle"
+		result.Reason = "Standard entry at previous candle low"
 	} else {
-		// For SHORT: Entry at previous candle's HIGH (sell the peak)
-		entryPrice = prevCandle.High
-		ga.logger.Debug("LIMIT entry price calculated",
-			"symbol", symbol,
-			"mode", mode,
-			"direction", "SHORT",
-			"timeframe", timeframe,
-			"prev_candle_low", prevCandle.Low,
-			"prev_candle_high", prevCandle.High,
-			"entry_price", entryPrice)
+		result.EntryPrice = prevCandle.High
+		result.EntryType = "prev_candle"
+		result.Reason = "Standard entry at previous candle high"
 	}
 
-	return entryPrice, nil
+	ga.logger.Info("Smart entry: Using prev candle extreme",
+		"symbol", symbol,
+		"mode", mode,
+		"direction", map[bool]string{true: "LONG", false: "SHORT"}[isLong],
+		"timeframe", timeframe,
+		"prev_candle_low", prevCandle.Low,
+		"prev_candle_high", prevCandle.High,
+		"entry_price", result.EntryPrice)
+
+	return result, nil
+}
+
+// PivotPoints holds calculated pivot point levels
+type PivotPoints struct {
+	PP float64 // Pivot Point
+	R1 float64 // Resistance 1
+	R2 float64 // Resistance 2
+	R3 float64 // Resistance 3
+	S1 float64 // Support 1
+	S2 float64 // Support 2
+	S3 float64 // Support 3
+}
+
+// calculatePivotPoints calculates standard pivot points from previous day's HLC
+func (ga *GinieAutopilot) calculatePivotPoints(high, low, close float64) *PivotPoints {
+	pp := (high + low + close) / 3
+	return &PivotPoints{
+		PP: pp,
+		R1: 2*pp - low,
+		R2: pp + (high - low),
+		R3: high + 2*(pp-low),
+		S1: 2*pp - high,
+		S2: pp - (high - low),
+		S3: low - 2*(high-pp),
+	}
 }
 
 // getTrailingPercent reads trailing stop percent from Mode Config
