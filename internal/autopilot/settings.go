@@ -2531,9 +2531,9 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 	}
 
 	// Validate mode
-	validModes := map[string]bool{"ultra_fast": true, "scalp": true, "swing": true, "position": true}
+	validModes := map[string]bool{"ultra_fast": true, "scalp": true, "swing": true, "position": true, "scalp_reentry": true}
 	if !validModes[mode] {
-		return fmt.Errorf("invalid mode: %s (must be ultra_fast, scalp, swing, or position)", mode)
+		return fmt.Errorf("invalid mode: %s (must be ultra_fast, scalp, swing, position, or scalp_reentry)", mode)
 	}
 
 	settings := sm.GetCurrentSettings()
@@ -3727,10 +3727,11 @@ func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital floa
 
 // ValidModes lists all valid trading mode names
 var ValidModes = map[string]bool{
-	"ultra_fast": true,
-	"scalp":      true,
-	"swing":      true,
-	"position":   true,
+	"ultra_fast":    true,
+	"scalp":         true,
+	"swing":         true,
+	"position":      true,
+	"scalp_reentry": true,
 }
 
 // ValidateModeConfig validates a ModeFullConfig for consistency and bounds
@@ -3741,7 +3742,7 @@ func ValidateModeConfig(config *ModeFullConfig) error {
 
 	// Validate mode name
 	if !ValidModes[config.ModeName] {
-		return fmt.Errorf("invalid mode name '%s': must be ultra_fast, scalp, swing, or position", config.ModeName)
+		return fmt.Errorf("invalid mode name '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", config.ModeName)
 	}
 
 	// Validate timeframe config if present
@@ -3918,7 +3919,7 @@ func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeF
 // GetModeConfig returns the configuration for a specific mode
 func (sm *SettingsManager) GetModeConfig(mode string) (*ModeFullConfig, error) {
 	if !ValidModes[mode] {
-		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode)
+		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", mode)
 	}
 
 	configs := sm.GetAllModeConfigs()
@@ -3938,7 +3939,7 @@ func (sm *SettingsManager) GetModeConfig(mode string) (*ModeFullConfig, error) {
 // UpdateModeConfig updates the configuration for a specific mode
 func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig) error {
 	if !ValidModes[mode] {
-		return fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode)
+		return fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", mode)
 	}
 
 	// Ensure mode name matches
