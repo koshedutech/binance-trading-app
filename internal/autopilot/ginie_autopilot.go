@@ -3903,9 +3903,10 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			continue
 		}
 
-		// === SCALP/SWING TO SCALP_REENTRY UPGRADE ===
-		// Upgrade existing scalp or swing positions to scalp_reentry if feature is enabled
-		if (pos.Mode == GinieModeScalp || pos.Mode == GinieModeSwing) && pos.ScalpReentry == nil {
+		// === SCALP TO SCALP_REENTRY UPGRADE ===
+		// Only upgrade SCALP positions to scalp_reentry (swing stays as swing)
+		// This ensures the 3x multiplier at entry time is the only path to scalp_reentry
+		if pos.Mode == GinieModeScalp && pos.ScalpReentry == nil {
 			sm := GetSettingsManager()
 			settings := sm.GetCurrentSettings()
 			if settings.ScalpReentryConfig.Enabled {
