@@ -24,16 +24,22 @@ type Service struct {
 	jwtManager      *JWTManager
 	passwordManager *PasswordManager
 	emailService    EmailService
+	eventBus        EventBus
 	config          Config
+}
+
+// EventBus interface for publishing events
+type EventBus interface {
+	PublishUserLogout(userID string)
 }
 
 // NewService creates a new authentication service
 func NewService(repo *database.Repository, config Config) *Service {
-	return NewServiceWithEmail(repo, config, nil)
+	return NewServiceWithEmail(repo, config, nil, nil)
 }
 
 // NewServiceWithEmail creates a new authentication service with email support
-func NewServiceWithEmail(repo *database.Repository, config Config, emailService EmailService) *Service {
+func NewServiceWithEmail(repo *database.Repository, config Config, emailService EmailService, eventBus EventBus) *Service {
 	if config.JWTSecret == "" {
 		log.Fatal("JWT secret is required")
 	}
@@ -50,6 +56,7 @@ func NewServiceWithEmail(repo *database.Repository, config Config, emailService 
 		jwtManager:      NewJWTManager(config.JWTSecret, config.AccessTokenDuration, config.RefreshTokenDuration),
 		passwordManager: NewPasswordManager(DefaultBcryptCost, config.MinPasswordLength),
 		emailService:    emailService,
+		eventBus:        eventBus,
 		config:          config,
 	}
 }
@@ -340,12 +347,33 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 		return nil // Already logged out or invalid token
 	}
 
-	return s.repo.RevokeSession(ctx, session.ID)
+	userID := session.UserID
+
+	// Revoke the session
+	if err := s.repo.RevokeSession(ctx, session.ID); err != nil {
+		return err
+	}
+
+	// Publish logout event for cleanup (autopilot, clients, websockets)
+	if s.eventBus != nil {
+		s.eventBus.PublishUserLogout(userID)
+	}
+
+	return nil
 }
 
 // LogoutAll revokes all sessions for a user
 func (s *Service) LogoutAll(ctx context.Context, userID string) error {
-	return s.repo.RevokeAllUserSessions(ctx, userID)
+	if err := s.repo.RevokeAllUserSessions(ctx, userID); err != nil {
+		return err
+	}
+
+	// Publish logout event for cleanup (autopilot, clients, websockets)
+	if s.eventBus != nil {
+		s.eventBus.PublishUserLogout(userID)
+	}
+
+	return nil
 }
 
 // ChangePassword changes a user's password

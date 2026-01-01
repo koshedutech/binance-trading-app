@@ -119,6 +119,8 @@ services:
       - AUTH_REQUIRE_EMAIL_VERIFICATION=false
       - AUTH_ACCESS_TOKEN_DURATION=24h
       - AUTH_REFRESH_TOKEN_DURATION=720h
+      # API Key Encryption
+      - ENCRYPTION_KEY=dev-encryption-key-32-chars-1234567890ab
       # Subscription Configuration
       - SUBSCRIPTION_ENABLED=false
     volumes:

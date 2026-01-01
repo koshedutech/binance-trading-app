@@ -684,7 +684,7 @@ func main() {
 			RequireEmailVerification: cfg.AuthConfig.RequireEmailVerification,
 			MaxSessionsPerUser:       cfg.AuthConfig.MaxSessionsPerUser,
 		}
-		authService = auth.NewServiceWithEmail(repo, authConfig, emailService)
+		authService = auth.NewServiceWithEmail(repo, authConfig, emailService, eventBus)
 		logger.Info("Authentication service initialized", "email_verification", cfg.AuthConfig.RequireEmailVerification)
 	} else {
 		logger.Info("Authentication disabled - running in single-user mode")
@@ -747,6 +747,38 @@ func main() {
 
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
+
+	// Subscribe to user logout events for cleanup (after all components are initialized)
+	eventBus.Subscribe(events.EventUserLogout, func(event events.Event) {
+		userID, ok := event.Data["user_id"].(string)
+		if !ok || userID == "" {
+			logger.Warn("User logout event missing user_id")
+			return
+		}
+
+		logger.Info("User logout cleanup triggered", "user_id", userID)
+
+		// Stop user's autopilot if running
+		if userAutopilotManager != nil {
+			if err := userAutopilotManager.StopAutopilot(userID); err != nil {
+				logger.WithError(err).Warn("Failed to stop user autopilot on logout", "user_id", userID)
+			} else {
+				logger.Info("Stopped user autopilot on logout", "user_id", userID)
+			}
+		}
+
+		// Invalidate user's Binance client
+		if clientFactory != nil {
+			clientFactory.InvalidateClient(userID)
+			logger.Info("Invalidated user Binance client on logout", "user_id", userID)
+		}
+
+		// Disconnect user's WebSocket
+		if wsHub != nil {
+			wsHub.DisconnectUser(userID)
+			logger.Info("Disconnected user WebSocket on logout", "user_id", userID)
+		}
+	})
 
 	// Initialize Billing service if enabled
 	var billingService *billing.StripeService

@@ -28,26 +28,29 @@ type WSClient struct {
 	conn      *websocket.Conn
 	send      chan []byte
 	hub       *WSHub
+	userID    string // User ID for tracking user-specific connections
 	mu        sync.Mutex
 	closeChan chan struct{}
 }
 
 // WSHub manages all WebSocket clients
 type WSHub struct {
-	clients    map[*WSClient]bool
-	broadcast  chan []byte
-	register   chan *WSClient
-	unregister chan *WSClient
-	mu         sync.RWMutex
+	clients     map[*WSClient]bool
+	userClients map[string][]*WSClient // Maps userID to their active connections
+	broadcast   chan []byte
+	register    chan *WSClient
+	unregister  chan *WSClient
+	mu          sync.RWMutex
 }
 
 // NewWSHub creates a new WebSocket hub
 func NewWSHub() *WSHub {
 	return &WSHub{
-		clients:    make(map[*WSClient]bool),
-		broadcast:  make(chan []byte, 4096),
-		register:   make(chan *WSClient),
-		unregister: make(chan *WSClient),
+		clients:     make(map[*WSClient]bool),
+		userClients: make(map[string][]*WSClient),
+		broadcast:   make(chan []byte, 4096),
+		register:    make(chan *WSClient),
+		unregister:  make(chan *WSClient),
 	}
 }
 
@@ -58,6 +61,10 @@ func (h *WSHub) Run() {
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
+			// Track user-to-client mapping
+			if client.userID != "" {
+				h.userClients[client.userID] = append(h.userClients[client.userID], client)
+			}
 			h.mu.Unlock()
 			// Reduced logging - only log at debug level if needed
 
@@ -66,22 +73,28 @@ func (h *WSHub) Run() {
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
 				close(client.send)
+				// Remove from userClients map
+				if client.userID != "" {
+					h.removeClientFromUserMap(client)
+				}
 			}
 			h.mu.Unlock()
 			// Reduced logging - only log at debug level if needed
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- message:
 				default:
-					// Client's send channel is full, close it
-					close(client.send)
-					delete(h.clients, client)
+					// Client's send channel is full, unregister it
+					// Don't close or delete here - let unregister handle it
+					go func(c *WSClient) {
+						h.unregister <- c
+					}(client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
@@ -106,6 +119,63 @@ func (h *WSHub) GetClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// removeClientFromUserMap removes a client from the userClients map
+// Caller must hold the write lock (h.mu.Lock())
+func (h *WSHub) removeClientFromUserMap(client *WSClient) {
+	if clients, ok := h.userClients[client.userID]; ok {
+		// Find and remove the client from the slice
+		for i, c := range clients {
+			if c == client {
+				// Remove by replacing with last element and truncating
+				h.userClients[client.userID] = append(clients[:i], clients[i+1:]...)
+				break
+			}
+		}
+		// Clean up empty slices
+		if len(h.userClients[client.userID]) == 0 {
+			delete(h.userClients, client.userID)
+		}
+	}
+}
+
+// DisconnectUser disconnects all WebSocket connections for a specific user
+// This is called when a user logs out to clean up their active sessions
+func (h *WSHub) DisconnectUser(userID string) {
+	if userID == "" {
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Get all clients for this user
+	clients, ok := h.userClients[userID]
+	if !ok || len(clients) == 0 {
+		return
+	}
+
+	// Close all connections for this user
+	for _, client := range clients {
+		// Remove from clients map
+		if _, exists := h.clients[client]; exists {
+			delete(h.clients, client)
+			// Close the send channel (will trigger connection close in writePump)
+			close(client.send)
+			// Signal the close channel
+			select {
+			case client.closeChan <- struct{}{}:
+			default:
+				// Channel already closed or blocked
+			}
+		}
+	}
+
+	// Remove all user's clients from the userClients map
+	delete(h.userClients, userID)
+
+	log.Printf("Disconnected %d WebSocket connections for user %s", len(clients), userID)
 }
 
 // writePump pumps messages from the hub to the websocket connection
@@ -189,6 +259,14 @@ func InitWebSocket(eventBus *events.EventBus) *WSHub {
 	return wsHub
 }
 
+// DisconnectUserWebSockets disconnects all WebSocket connections for a specific user
+// This is a public function that can be called from other packages (e.g., auth during logout)
+func DisconnectUserWebSockets(userID string) {
+	if wsHub != nil {
+		wsHub.DisconnectUser(userID)
+	}
+}
+
 // handleWebSocket handles WebSocket connections
 func (s *Server) handleWebSocket(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -197,10 +275,14 @@ func (s *Server) handleWebSocket(c *gin.Context) {
 		return
 	}
 
+	// Get user ID from context (empty string if not authenticated)
+	userID := s.getUserID(c)
+
 	client := &WSClient{
 		conn:      conn,
 		send:      make(chan []byte, 256),
 		hub:       wsHub,
+		userID:    userID,
 		closeChan: make(chan struct{}),
 	}
 

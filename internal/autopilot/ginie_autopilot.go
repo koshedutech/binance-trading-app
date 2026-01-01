@@ -3659,42 +3659,11 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 
 			limitOrder, err := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
 			if err != nil {
-				ga.logger.Error("Ginie LIMIT order failed, falling back to MARKET",
+				ga.logger.Error("Ginie LIMIT order failed - not falling back to MARKET order",
 					"symbol", symbol,
 					"limit_price", limitEntryPrice,
 					"error", err.Error())
-
-				// Fallback to MARKET order
-				marketParams := binance.FuturesOrderParams{
-					Symbol:       symbol,
-					Side:         side,
-					PositionSide: effectivePositionSide,
-					Type:         binance.FuturesOrderTypeMarket,
-					Quantity:     quantity,
-				}
-
-				order, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
-				if marketErr != nil {
-					ga.logger.Error("Ginie MARKET fallback also failed", "symbol", symbol, "error", marketErr.Error())
-					return
-				}
-
-				fillPrice, fillQty, fillErr := ga.verifyOrderFill(order, quantity)
-				if fillErr != nil {
-					ga.logger.Error("MARKET order fill verification failed",
-						"symbol", symbol,
-						"order_id", order.OrderId,
-						"error", fillErr.Error())
-					return
-				}
-
-				actualPrice = fillPrice
-				actualQty = fillQty
-
-				ga.logger.Info("Ginie MARKET trade executed (LIMIT fallback)",
-					"symbol", symbol,
-					"order_id", order.OrderId,
-					"fill_price", actualPrice)
+				return
 			} else {
 				// Track pending LIMIT order with timeout
 				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
@@ -5358,36 +5327,13 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 
 		_, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
 		if err != nil {
-			ga.logger.Warn("LIMIT close order failed, falling back to MARKET order",
+			ga.logger.Error("LIMIT close order failed - not falling back to MARKET order",
 				"symbol", symbol,
 				"error", err.Error(),
 				"limit_price", roundedPrice,
-				"qty", roundedQty)
-
-			// FALLBACK: Use MARKET order if LIMIT fails (e.g., due to price precision issues)
-			marketParams := binance.FuturesOrderParams{
-				Symbol:       symbol,
-				Side:         side,
-				PositionSide: effectivePositionSide,
-				Type:         binance.FuturesOrderTypeMarket,
-				Quantity:     roundedQty,
-			}
-
-			_, marketErr := ga.futuresClient.PlaceFuturesOrder(marketParams)
-			if marketErr != nil {
-				ga.logger.Error("Both LIMIT and MARKET close orders failed",
-					"symbol", symbol,
-					"limit_error", err.Error(),
-					"market_error", marketErr.Error(),
-					"qty", roundedQty,
-					"reason", reason)
-				return
-			}
-
-			ga.logger.Info("MARKET fallback close order placed successfully",
-				"symbol", symbol,
-				"reason", reason,
-				"qty", roundedQty)
+				"qty", roundedQty,
+				"reason", reason)
+			return
 		} else {
 			ga.logger.Info("Ginie full close order placed (LIMIT - SL/Trailing)",
 				"symbol", symbol,

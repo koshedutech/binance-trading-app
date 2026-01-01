@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { api } from '../services/api';
+import { wsService } from '../services/websocket';
 
 // Types
 export interface User {
@@ -110,43 +111,35 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   // Refresh authentication on mount
   useEffect(() => {
     const initAuth = async () => {
-      // First check if auth is disabled on backend
-      try {
-        const statusResponse = await api.get('/auth/status');
-        if (statusResponse.data?.auth_enabled === false) {
-          // Auth disabled - use local user
-          setAuthDisabled(true);
-          setUser(LOCAL_USER);
-          setIsLoading(false);
-          return;
-        }
-        // Check subscription status
-        setSubscriptionDisabled(statusResponse.data?.subscription_enabled === false);
-      } catch {
-        // If /auth/status fails, continue with normal auth flow
+      const { accessToken } = getStoredTokens();
+
+      // If no token, immediately set loading to false and return
+      // DO NOT make any API calls
+      if (!accessToken) {
+        setIsLoading(false);
+        return;
       }
 
-      const { accessToken } = getStoredTokens();
-      if (accessToken) {
+      // Only validate if we have a token
+      try {
+        // Verify token is still valid
+        const response = await api.get('/auth/me');
+        // /auth/me returns user data directly
+        const userData = response.data as User;
+        setUser(userData);
+        setStoredUser(userData);
+      } catch (error) {
+        // Token invalid, try refresh
         try {
-          // Verify token is still valid
-          const response = await api.get('/auth/me');
-          // /auth/me returns user data directly
-          const userData = response.data as User;
-          setUser(userData);
-          setStoredUser(userData);
-        } catch (error) {
-          // Token invalid, try refresh
-          try {
-            await refreshAuth();
-          } catch {
-            // Refresh failed, clear tokens
-            clearStoredTokens();
-            setUser(null);
-          }
+          await refreshAuth();
+        } catch {
+          // Refresh failed, clear tokens
+          clearStoredTokens();
+          setUser(null);
         }
+      } finally {
+        setIsLoading(false);
       }
-      setIsLoading(false);
     };
 
     initAuth();
@@ -199,6 +192,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     } catch {
       // Ignore logout errors
     } finally {
+      // CRITICAL: Reset WebSocket BEFORE clearing tokens to prevent data leakage
+      wsService.reset();
       clearStoredTokens();
       setUser(null);
     }

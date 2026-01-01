@@ -29,7 +29,7 @@ type Service struct {
 func NewService(repo *database.Repository) *Service {
 	encryptionKey := os.Getenv("ENCRYPTION_KEY")
 	if encryptionKey == "" {
-		encryptionKey = "binance-trading-bot-default-encryption-key-32bytes!"
+		panic("ENCRYPTION_KEY environment variable is required but not set")
 	}
 
 	key := []byte(encryptionKey)
@@ -86,15 +86,10 @@ func (s *Service) GetAdminUserID(ctx context.Context) (string, error) {
 }
 
 // GetActiveAIKey returns the active AI API key for a user
-// Falls back to admin's key if userID is empty
 func (s *Service) GetActiveAIKey(ctx context.Context, userID string) (*AIKeyResult, error) {
-	// If no userID provided, use admin's key
+	// User ID is required
 	if userID == "" {
-		var err error
-		userID, err = s.GetAdminUserID(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get admin user for AI key: %w", err)
-		}
+		return nil, fmt.Errorf("user ID required: please log in to access AI keys")
 	}
 
 	// Get all AI keys for the user
@@ -127,15 +122,10 @@ func (s *Service) GetActiveAIKey(ctx context.Context, userID string) (*AIKeyResu
 }
 
 // GetActiveBinanceKey returns the active Binance API key for a user
-// Falls back to admin's key if userID is empty
 func (s *Service) GetActiveBinanceKey(ctx context.Context, userID string, isTestnet bool) (*BinanceKeyResult, error) {
-	// If no userID provided, use admin's key
+	// User ID is required
 	if userID == "" {
-		var err error
-		userID, err = s.GetAdminUserID(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get admin user for Binance key: %w", err)
-		}
+		return nil, fmt.Errorf("user ID required: please log in to access Binance keys")
 	}
 
 	// Get API key from database using repository method
@@ -220,11 +210,7 @@ func getDefaultModel(provider database.AIProvider) string {
 // HasActiveAIKey checks if a user has an active AI key configured
 func (s *Service) HasActiveAIKey(ctx context.Context, userID string) bool {
 	if userID == "" {
-		var err error
-		userID, err = s.GetAdminUserID(ctx)
-		if err != nil {
-			return false
-		}
+		return false
 	}
 
 	keys, err := s.repo.GetUserAIKeys(ctx, userID)
@@ -243,11 +229,7 @@ func (s *Service) HasActiveAIKey(ctx context.Context, userID string) bool {
 // HasActiveBinanceKey checks if a user has an active Binance key configured
 func (s *Service) HasActiveBinanceKey(ctx context.Context, userID string, isTestnet bool) bool {
 	if userID == "" {
-		var err error
-		userID, err = s.GetAdminUserID(ctx)
-		if err != nil {
-			return false
-		}
+		return false
 	}
 
 	key, err := s.repo.GetActiveAPIKey(ctx, userID, "binance", isTestnet)

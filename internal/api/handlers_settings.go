@@ -58,31 +58,8 @@ func (s *Server) handleGetTradingMode(c *gin.Context) {
 	// Get user ID from auth context
 	userID := s.getUserID(c)
 	if userID == "" {
-		// Fallback to global mode for unauthenticated requests
-		settingsAPI := s.getSettingsAPI()
-		if settingsAPI == nil {
-			c.JSON(http.StatusOK, gin.H{
-				"dry_run":      true,
-				"mode":         "paper",
-				"mode_label":   "Paper Trading",
-				"can_switch":   false,
-				"switch_error": "Settings API not available",
-			})
-			return
-		}
-		dryRun := settingsAPI.GetDryRunMode()
-		mode := "live"
-		modeLabel := "Live Trading"
-		if dryRun {
-			mode = "paper"
-			modeLabel = "Paper Trading"
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"dry_run":    dryRun,
-			"mode":       mode,
-			"mode_label": modeLabel,
-			"can_switch": true,
-		})
+		// No fallback - authentication is required
+		errorResponse(c, http.StatusUnauthorized, "User authentication required")
 		return
 	}
 
@@ -91,8 +68,8 @@ func (s *Server) handleGetTradingMode(c *gin.Context) {
 	dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
 	if err != nil {
 		log.Printf("[TRADING-MODE] Error getting user dry run mode for %s: %v", userID, err)
-		// Default to paper trading on error (safe default)
-		dryRun = true
+		errorResponse(c, http.StatusInternalServerError, "Failed to retrieve trading mode: "+err.Error())
+		return
 	}
 
 	mode := "live"
@@ -198,144 +175,9 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 		return
 	}
 
-	// Fallback: Global mode for unauthenticated requests (legacy behavior)
-	settingsAPI := s.getSettingsAPI()
-	if settingsAPI == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Settings API not available")
-		return
-	}
-
-	// SAFETY CHECK: Stop Ginie autopilot if running before mode switch
-	// This prevents lock contention and timeouts during client switching
-	// Use non-blocking goroutine with timeout to prevent hangs
-	// IMPORTANT: Remember if Ginie was running to restart it after mode switch
-	futuresController := s.getFuturesAutopilot()
-	ginieWasRunning := false
-
-	// Check if Ginie is running BEFORE launching the stop goroutine (avoid race condition)
-	// GinieAutopilot.IsRunning() checks if the trading loop is active
-	// GinieAnalyzer.IsEnabled() checks if the analyzer is enabled
-	if futuresController != nil {
-		if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
-			ginieWasRunning = giniePilot.IsRunning()
-		}
-		// Also check if analyzer is enabled (backup check)
-		if !ginieWasRunning {
-			if ginieAnalyzer := futuresController.GetGinieAnalyzer(); ginieAnalyzer != nil {
-				ginieWasRunning = ginieAnalyzer.IsEnabled()
-			}
-		}
-		if ginieWasRunning {
-			log.Printf("[MODE-SWITCH] Ginie was running/enabled, will restart after mode switch")
-		}
-	}
-
-	if futuresController != nil && ginieWasRunning {
-		stopDone := make(chan bool, 1)
-		go func() {
-			if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
-				if giniePilot.IsRunning() {
-					log.Println("[MODE-SWITCH] Ginie autopilot is running, stopping it before mode switch...")
-					if err := futuresController.StopGinieAutopilot(); err != nil {
-						log.Printf("[MODE-SWITCH] Warning: Failed to stop Ginie before mode switch: %v\n", err)
-					} else {
-						log.Println("[MODE-SWITCH] Ginie autopilot stopped successfully")
-					}
-				}
-			}
-			stopDone <- true
-		}()
-
-		// Wait max 2 seconds for Ginie to stop, don't block request further
-		select {
-		case <-stopDone:
-			log.Println("[MODE-SWITCH] Ginie stop completed, proceeding with mode switch")
-			time.Sleep(500 * time.Millisecond) // Brief cleanup wait
-		case <-time.After(2 * time.Second):
-			log.Println("[MODE-SWITCH] Ginie stop timeout (2s), proceeding with mode switch anyway")
-		}
-	}
-
-	log.Printf("[MODE-SWITCH] Starting GLOBAL trading mode switch to dry_run=%v (no user context)\n", req.DryRun)
-	if err := settingsAPI.SetDryRunMode(req.DryRun); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to update trading mode: "+err.Error())
-		return
-	}
-	log.Println("[MODE-SWITCH] Global trading mode switch completed successfully")
-
-	// Verify the change was applied by reading back the current mode
-	currentMode := settingsAPI.GetDryRunMode()
-	if currentMode != req.DryRun {
-		// Mode didn't change as expected
-		errorResponse(c, http.StatusInternalServerError, "Trading mode change was not applied correctly")
-		return
-	}
-
-	mode := "live"
-	modeLabel := "Live Trading"
-	if req.DryRun {
-		mode = "paper"
-		modeLabel = "Paper Trading"
-	}
-
-	// CRITICAL FIX: Restart Ginie autopilot if it was running before mode switch
-	// This ensures autopilot stays ON continuously until explicitly disabled
-	ginieRestarted := false
-	if ginieWasRunning && futuresController != nil {
-		log.Println("[MODE-SWITCH] Ginie was running before mode switch, restarting it...")
-		// Give system a moment to complete mode switch before restart
-		time.Sleep(500 * time.Millisecond)
-
-		// SAFETY CHECK: Ensure Ginie is fully stopped before restarting
-		// This prevents race conditions if the stop timed out
-		if giniePilot := futuresController.GetGinieAutopilot(); giniePilot != nil {
-			if giniePilot.IsRunning() {
-				log.Println("[MODE-SWITCH] Ginie still running after timeout, force-stopping...")
-				giniePilot.Stop()
-				time.Sleep(300 * time.Millisecond) // Brief wait for cleanup
-			}
-		}
-
-		// Re-enable the analyzer first
-		if ginieAnalyzer := futuresController.GetGinieAnalyzer(); ginieAnalyzer != nil {
-			ginieAnalyzer.Enable()
-			log.Println("[MODE-SWITCH] Ginie analyzer re-enabled")
-		}
-
-		// Start the autopilot trading loop
-		if err := futuresController.StartGinieAutopilot(); err != nil {
-			log.Printf("[MODE-SWITCH] Warning: Failed to restart Ginie after mode switch: %v\n", err)
-		} else {
-			log.Println("[MODE-SWITCH] Ginie autopilot restarted successfully after mode switch")
-			ginieRestarted = true
-		}
-	}
-
-	// Broadcast trading mode change to all connected clients via WebSocket (global mode)
-	if userWSHub != nil {
-		userWSHub.BroadcastToAll(events.Event{
-			Type:      events.EventTradingModeChanged,
-			Timestamp: time.Now(),
-			Data: map[string]interface{}{
-				"dry_run":         req.DryRun,
-				"mode":            mode,
-				"mode_label":      modeLabel,
-				"ginie_restarted": ginieRestarted,
-				"global":          true, // Flag indicating this is a global mode change
-			},
-		})
-		log.Printf("[MODE-SWITCH] Broadcasted TRADING_MODE_CHANGED event to all clients (global mode)")
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"success":         true,
-		"dry_run":         req.DryRun,
-		"mode":            mode,
-		"mode_label":      modeLabel,
-		"can_switch":      true,
-		"message":         "Trading mode updated successfully (global)",
-		"ginie_restarted": ginieRestarted,
-	})
+	// No fallback to global mode - user authentication is required
+	// This ensures trading mode is always tied to a specific user account
+	errorResponse(c, http.StatusUnauthorized, "User authentication required to change trading mode")
 }
 
 // handleGetWalletBalance returns the wallet balance from Binance
@@ -765,15 +607,10 @@ func (s *Server) getBinanceClientForUser(c *gin.Context) binance.BinanceClient {
 			return s.getBinanceClient() // Returns mock client in paper mode
 		}
 	} else {
-		// Fallback to global mode for unauthenticated requests
-		if s.botAPI != nil {
-			if settingsAPI, ok := s.botAPI.(SettingsAPI); ok {
-				if settingsAPI.GetDryRunMode() {
-					log.Printf("[DEBUG] getBinanceClientForUser: Global paper trading mode, using mock client")
-					return s.getBinanceClient() // Returns mock client in paper mode
-				}
-			}
-		}
+		// No user authentication - return nil
+		// Client must authenticate to use trading features
+		log.Printf("[DEBUG] getBinanceClientForUser: No user authentication, cannot provide client")
+		return nil
 	}
 
 	// Live mode - must use user-specific keys from database

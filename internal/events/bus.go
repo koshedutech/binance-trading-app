@@ -26,6 +26,7 @@ const (
 	EventError             EventType = "ERROR"
 	EventTradingModeChanged EventType = "TRADING_MODE_CHANGED"
 	EventAutopilotToggled   EventType = "AUTOPILOT_TOGGLED"
+	EventUserLogout         EventType = "USER_LOGOUT"
 )
 
 // Event represents a system event
@@ -187,5 +188,15 @@ func (eb *EventBus) PublishError(source, message string, err error) {
 	eb.Publish(Event{
 		Type: EventError,
 		Data: data,
+	})
+}
+
+// PublishUserLogout publishes a user logout event
+func (eb *EventBus) PublishUserLogout(userID string) {
+	eb.Publish(Event{
+		Type: EventUserLogout,
+		Data: map[string]interface{}{
+			"user_id": userID,
+		},
 	})
 }
