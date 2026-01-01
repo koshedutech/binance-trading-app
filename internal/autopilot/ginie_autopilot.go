@@ -1160,7 +1160,7 @@ func (ga *GinieAutopilot) SetRiskLevel(level string) error {
 		ga.config.MaxUSDPerPosition = 500
 		ga.config.DefaultLeverage = 5
 	case "aggressive":
-		ga.config.MinConfidenceToTrade = 45.0 // FIXED: Lowered from 55% to be truly aggressive
+		ga.config.MinConfidenceToTrade = 40.0 // Lowered to 40% for more aggressive trading
 		ga.config.MaxUSDPerPosition = 800
 		ga.config.DefaultLeverage = 10
 	}

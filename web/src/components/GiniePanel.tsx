@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import { useFuturesStore } from '../store/futuresStore';
 import {
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
+import ScalpReentryMonitor from './ScalpReentryMonitor';
 
 export default function GiniePanel() {
   const [status, setStatus] = useState<GinieStatus | null>(null);
@@ -132,6 +133,14 @@ export default function GiniePanel() {
   const [savingScanConfig, setSavingScanConfig] = useState(false);
   const [loadingScanPreview, setLoadingScanPreview] = useState(false);
   const [savedCoinsInput, setSavedCoinsInput] = useState('');
+
+  // Scalp Re-entry Mode Configuration state
+  const [scalpReentryConfig, setScalpReentryConfig] = useState<ScalpReentryConfig | null>(null);
+  const [showScalpReentry, setShowScalpReentry] = useState(false);
+  const [savingScalpReentry, setSavingScalpReentry] = useState(false);
+  const [togglingScalpReentry, setTogglingScalpReentry] = useState(false);
+  const [expandedScalpReentrySection, setExpandedScalpReentrySection] = useState<string | null>(null);
+  const [scalpReentryTab, setScalpReentryTab] = useState<'monitor' | 'config'>('monitor');
 
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -280,6 +289,55 @@ export default function GiniePanel() {
     }
   };
 
+  // Fetch scalp re-entry configuration
+  const fetchScalpReentryConfig = async () => {
+    try {
+      const config = await futuresApi.getScalpReentryConfig();
+      setScalpReentryConfig(config);
+    } catch (err) {
+      console.error('Failed to fetch scalp re-entry config:', err);
+    }
+  };
+
+  // Toggle scalp re-entry mode
+  const handleToggleScalpReentry = async () => {
+    if (!scalpReentryConfig) return;
+    setTogglingScalpReentry(true);
+    try {
+      const result = await futuresApi.toggleScalpReentry(!scalpReentryConfig.enabled);
+      setScalpReentryConfig({ ...scalpReentryConfig, enabled: result.enabled });
+      setSuccessMsg(result.message);
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setError(err?.response?.data?.error || 'Failed to toggle scalp re-entry mode');
+    } finally {
+      setTogglingScalpReentry(false);
+    }
+  };
+
+  // Update scalp re-entry configuration
+  const updateScalpReentryConfig = async (field: string, value: any) => {
+    if (!scalpReentryConfig) return;
+    const updated = { ...scalpReentryConfig, [field]: value };
+    setScalpReentryConfig(updated);
+  };
+
+  // Save scalp re-entry configuration
+  const saveScalpReentryConfig = async () => {
+    if (!scalpReentryConfig) return;
+    setSavingScalpReentry(true);
+    try {
+      const result = await futuresApi.updateScalpReentryConfig(scalpReentryConfig);
+      setScalpReentryConfig(result.config);
+      setSuccessMsg('Scalp re-entry configuration saved');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (err: any) {
+      setError(err?.response?.data?.error || 'Failed to save scalp re-entry config');
+    } finally {
+      setSavingScalpReentry(false);
+    }
+  };
+
   // Save scan source configuration
   const handleSaveScanConfig = async () => {
     if (!scanSourceConfig) return;
@@ -348,6 +406,7 @@ export default function GiniePanel() {
     fetchLLMSwitches(); // Fetch LLM diagnostics
     fetchModeConfigs(); // Fetch mode configurations (Story 2.7)
     fetchScanSourceConfig(); // Fetch scan source configuration
+    fetchScalpReentryConfig(); // Fetch scalp re-entry configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
     const interval = setInterval(() => {
       fetchStatus();
@@ -2765,6 +2824,414 @@ export default function GiniePanel() {
             {/* Help Text */}
             <div className="px-2 py-1.5 bg-indigo-900/20 border border-indigo-700/30 rounded text-[10px] text-indigo-400">
               Configure each trading mode independently. Ultra-Fast for quick scalps, Scalp for short-term, Swing for medium-term, Position for long-term trades.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Scalp Re-entry Mode Section */}
+      <div className="space-y-2 mb-3">
+        <div
+          className="flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+          onClick={() => {
+            setShowScalpReentry(!showScalpReentry);
+            if (!showScalpReentry) fetchScalpReentryConfig();
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <Repeat className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
+            <span className="text-xs text-gray-300 font-medium">Scalp Re-entry Mode</span>
+            {scalpReentryConfig?.enabled && (
+              <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px]">ON</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleToggleScalpReentry(); }}
+              disabled={togglingScalpReentry}
+              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 ${
+                scalpReentryConfig?.enabled
+                  ? 'bg-green-900/50 text-green-400 border border-green-700'
+                  : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+              }`}
+            >
+              {togglingScalpReentry ? '...' : scalpReentryConfig?.enabled ? 'Enabled' : 'Disabled'}
+            </button>
+            {showScalpReentry ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+          </div>
+        </div>
+
+        {showScalpReentry && scalpReentryConfig && (
+          <div className="px-2 py-2 bg-gray-800/50 border border-gray-600 rounded space-y-3">
+            <p className="text-[10px] text-gray-500">
+              Progressive TP with re-entry: Takes partial profits at increasing levels, buys back at breakeven for more upside.
+            </p>
+
+            {/* Tab Navigation */}
+            <div className="flex gap-1 border-b border-gray-700 pb-1">
+              <button
+                onClick={() => setScalpReentryTab('monitor')}
+                className={`px-2 py-1 text-[10px] rounded-t transition-colors ${
+                  scalpReentryTab === 'monitor'
+                    ? 'bg-purple-900/50 text-purple-400 border border-purple-700 border-b-0'
+                    : 'text-gray-400 hover:text-gray-300 hover:bg-gray-700/30'
+                }`}
+              >
+                <Eye className="w-3 h-3 inline mr-1" />
+                Monitor
+              </button>
+              <button
+                onClick={() => setScalpReentryTab('config')}
+                className={`px-2 py-1 text-[10px] rounded-t transition-colors ${
+                  scalpReentryTab === 'config'
+                    ? 'bg-gray-700 text-gray-300 border border-gray-600 border-b-0'
+                    : 'text-gray-400 hover:text-gray-300 hover:bg-gray-700/30'
+                }`}
+              >
+                <Settings className="w-3 h-3 inline mr-1" />
+                Config
+              </button>
+            </div>
+
+            {/* Monitor Tab */}
+            {scalpReentryTab === 'monitor' && (
+              <ScalpReentryMonitor autoRefresh={true} refreshInterval={5000} />
+            )}
+
+            {/* Config Tab */}
+            {scalpReentryTab === 'config' && (
+            <>
+            {/* TP Levels Section */}
+            <div className="border border-gray-700 rounded">
+              <button
+                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'tp_levels' ? null : 'tp_levels')}
+                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+              >
+                <span className="font-medium">TP Levels</span>
+                {expandedScalpReentrySection === 'tp_levels' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+              {expandedScalpReentrySection === 'tp_levels' && (
+                <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] text-gray-400 mb-1">TP1 % Profit</label>
+                      <input
+                        type="number"
+                        min="0.1"
+                        max="5"
+                        step="0.1"
+                        value={scalpReentryConfig.tp1_percent}
+                        onChange={(e) => updateScalpReentryConfig('tp1_percent', Number(e.target.value))}
+                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-400 mb-1">TP2 % Profit</label>
+                      <input
+                        type="number"
+                        min="0.2"
+                        max="5"
+                        step="0.1"
+                        value={scalpReentryConfig.tp2_percent}
+                        onChange={(e) => updateScalpReentryConfig('tp2_percent', Number(e.target.value))}
+                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-400 mb-1">TP3 % Profit</label>
+                      <input
+                        type="number"
+                        min="0.3"
+                        max="10"
+                        step="0.1"
+                        value={scalpReentryConfig.tp3_percent}
+                        onChange={(e) => updateScalpReentryConfig('tp3_percent', Number(e.target.value))}
+                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] text-gray-400 mb-1">TP1 Sell %</label>
+                      <input
+                        type="number"
+                        min="10"
+                        max="50"
+                        step="5"
+                        value={scalpReentryConfig.tp1_sell_percent}
+                        onChange={(e) => updateScalpReentryConfig('tp1_sell_percent', Number(e.target.value))}
+                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-400 mb-1">TP2 Sell %</label>
+                      <input
+                        type="number"
+                        min="20"
+                        max="80"
+                        step="5"
+                        value={scalpReentryConfig.tp2_sell_percent}
+                        onChange={(e) => updateScalpReentryConfig('tp2_sell_percent', Number(e.target.value))}
+                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] text-gray-400 mb-1">TP3 Sell %</label>
+                      <input
+                        type="number"
+                        min="50"
+                        max="100"
+                        step="5"
+                        value={scalpReentryConfig.tp3_sell_percent}
+                        onChange={(e) => updateScalpReentryConfig('tp3_sell_percent', Number(e.target.value))}
+                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-gray-500 text-[9px]">
+                    Default: 0.3%/30%, 0.6%/50%, 1%/80% - Progressive profit taking at each level.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Re-entry Settings */}
+            <div className="border border-gray-700 rounded">
+              <button
+                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'reentry' ? null : 'reentry')}
+                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+              >
+                <span className="font-medium">Re-entry Settings</span>
+                {expandedScalpReentrySection === 'reentry' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+              {expandedScalpReentrySection === 'reentry' && (
+                <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of sold quantity to buy back at breakeven">Re-entry %</label>
+                    <input
+                      type="number"
+                      min="50"
+                      max="100"
+                      step="5"
+                      value={scalpReentryConfig.reentry_percent}
+                      onChange={(e) => updateScalpReentryConfig('reentry_percent', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Buffer % from breakeven price for re-entry">Price Buffer %</label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={scalpReentryConfig.reentry_price_buffer}
+                      onChange={(e) => updateScalpReentryConfig('reentry_price_buffer', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Max attempts before skipping re-entry">Max Attempts</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={scalpReentryConfig.max_reentry_attempts}
+                      onChange={(e) => updateScalpReentryConfig('max_reentry_attempts', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Timeout in seconds before re-entry fails">Timeout (sec)</label>
+                    <input
+                      type="number"
+                      min="60"
+                      max="900"
+                      step="30"
+                      value={scalpReentryConfig.reentry_timeout_sec}
+                      onChange={(e) => updateScalpReentryConfig('reentry_timeout_sec', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Final Trailing & Dynamic SL */}
+            <div className="border border-gray-700 rounded">
+              <button
+                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'final' ? null : 'final')}
+                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+              >
+                <span className="font-medium">Final Trailing & Dynamic SL</span>
+                {expandedScalpReentrySection === 'final' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+              {expandedScalpReentrySection === 'final' && (
+                <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Trailing % from peak for final 20% position">Final Trailing %</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="15"
+                      step="0.5"
+                      value={scalpReentryConfig.final_trailing_percent}
+                      onChange={(e) => updateScalpReentryConfig('final_trailing_percent', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Minimum % to hold for final trailing">Min Hold %</label>
+                    <input
+                      type="number"
+                      min="10"
+                      max="30"
+                      step="5"
+                      value={scalpReentryConfig.final_hold_min_percent}
+                      onChange={(e) => updateScalpReentryConfig('final_hold_min_percent', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="Max % of accumulated profit that can be lost">Max Loss %</label>
+                    <input
+                      type="number"
+                      min="20"
+                      max="60"
+                      step="5"
+                      value={scalpReentryConfig.dynamic_sl_max_loss_pct}
+                      onChange={(e) => updateScalpReentryConfig('dynamic_sl_max_loss_pct', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1" title="% of accumulated profit to protect">Protect %</label>
+                    <input
+                      type="number"
+                      min="40"
+                      max="80"
+                      step="5"
+                      value={scalpReentryConfig.dynamic_sl_protect_pct}
+                      onChange={(e) => updateScalpReentryConfig('dynamic_sl_protect_pct', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* AI Configuration */}
+            <div className="border border-gray-700 rounded">
+              <button
+                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'ai' ? null : 'ai')}
+                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+              >
+                <span className="font-medium">AI Configuration</span>
+                {expandedScalpReentrySection === 'ai' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+              {expandedScalpReentrySection === 'ai' && (
+                <div className="px-2 py-2 border-t border-gray-700 space-y-2">
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={scalpReentryConfig.use_ai_decisions}
+                        onChange={(e) => updateScalpReentryConfig('use_ai_decisions', e.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      Use AI Decisions
+                    </label>
+                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={scalpReentryConfig.ai_tp_optimization}
+                        onChange={(e) => updateScalpReentryConfig('ai_tp_optimization', e.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      AI TP Optimization
+                    </label>
+                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={scalpReentryConfig.ai_dynamic_sl}
+                        onChange={(e) => updateScalpReentryConfig('ai_dynamic_sl', e.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      AI Dynamic SL
+                    </label>
+                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
+                      <input
+                        type="checkbox"
+                        checked={scalpReentryConfig.use_multi_agent}
+                        onChange={(e) => updateScalpReentryConfig('use_multi_agent', e.target.checked)}
+                        className="w-3 h-3"
+                      />
+                      Multi-Agent System
+                    </label>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-gray-400 mb-1">Min AI Confidence</label>
+                    <input
+                      type="number"
+                      min="0.3"
+                      max="0.95"
+                      step="0.05"
+                      value={scalpReentryConfig.ai_min_confidence}
+                      onChange={(e) => updateScalpReentryConfig('ai_min_confidence', Number(e.target.value))}
+                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                    />
+                  </div>
+                  {scalpReentryConfig.use_multi_agent && (
+                    <div className="grid grid-cols-3 gap-2 pt-1 border-t border-gray-600">
+                      <label className="flex items-center gap-1 text-[10px] text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={scalpReentryConfig.enable_sentiment_agent}
+                          onChange={(e) => updateScalpReentryConfig('enable_sentiment_agent', e.target.checked)}
+                          className="w-3 h-3"
+                        />
+                        Sentiment
+                      </label>
+                      <label className="flex items-center gap-1 text-[10px] text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={scalpReentryConfig.enable_risk_agent}
+                          onChange={(e) => updateScalpReentryConfig('enable_risk_agent', e.target.checked)}
+                          className="w-3 h-3"
+                        />
+                        Risk
+                      </label>
+                      <label className="flex items-center gap-1 text-[10px] text-gray-300">
+                        <input
+                          type="checkbox"
+                          checked={scalpReentryConfig.enable_tp_agent}
+                          onChange={(e) => updateScalpReentryConfig('enable_tp_agent', e.target.checked)}
+                          className="w-3 h-3"
+                        />
+                        TP Agent
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Save Button */}
+            <div className="flex justify-end pt-1">
+              <button
+                onClick={saveScalpReentryConfig}
+                disabled={savingScalpReentry}
+                className="px-3 py-1 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded text-xs transition-colors disabled:opacity-50"
+              >
+                {savingScalpReentry ? 'Saving...' : 'Save Config'}
+              </button>
+            </div>
+            </>
+            )}
+
+            {/* Help Text */}
+            <div className="px-2 py-1.5 bg-green-900/20 border border-green-700/30 rounded text-[10px] text-green-400">
+              Upgrades scalp mode entries to use progressive TP with re-entry. Shares entry rules with scalp mode but has independent position management.
             </div>
           </div>
         )}

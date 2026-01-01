@@ -6,22 +6,24 @@ import "time"
 type GinieTradingMode string
 
 const (
-	GinieModeScalp     GinieTradingMode = "scalp"
-	GinieModeSwing     GinieTradingMode = "swing"
-	GinieModePosition  GinieTradingMode = "position"
-	GinieModeUltraFast GinieTradingMode = "ultra_fast"
+	GinieModeScalp        GinieTradingMode = "scalp"
+	GinieModeSwing        GinieTradingMode = "swing"
+	GinieModePosition     GinieTradingMode = "position"
+	GinieModeUltraFast    GinieTradingMode = "ultra_fast"
+	GinieModeScalpReentry GinieTradingMode = "scalp_reentry" // Scalp with progressive TP and re-entry
 )
 
 // GinieScanStatus represents the coin scan classification
 type GinieScanStatus string
 
 const (
-	ScanStatusScalpReady     GinieScanStatus = "SCALP-READY"
-	ScanStatusSwingReady     GinieScanStatus = "SWING-READY"
-	ScanStatusPositionReady  GinieScanStatus = "POSITION-READY"
-	ScanStatusUltraFastReady GinieScanStatus = "ULTRAFAST-READY"
-	ScanStatusHedgeRequired  GinieScanStatus = "HEDGE-REQUIRED"
-	ScanStatusAvoid          GinieScanStatus = "AVOID"
+	ScanStatusScalpReady        GinieScanStatus = "SCALP-READY"
+	ScanStatusSwingReady        GinieScanStatus = "SWING-READY"
+	ScanStatusPositionReady     GinieScanStatus = "POSITION-READY"
+	ScanStatusUltraFastReady    GinieScanStatus = "ULTRAFAST-READY"
+	ScanStatusScalpReentryReady GinieScanStatus = "SCALP-REENTRY-READY" // Ready for scalp re-entry mode
+	ScanStatusHedgeRequired     GinieScanStatus = "HEDGE-REQUIRED"
+	ScanStatusAvoid             GinieScanStatus = "AVOID"
 )
 
 // GenieRecommendation represents overall recommendation

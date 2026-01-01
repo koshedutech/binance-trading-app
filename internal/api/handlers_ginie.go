@@ -3398,3 +3398,496 @@ func (s *Server) handleToggleUltraFast(c *gin.Context) {
 		"message": fmt.Sprintf("Ultra-fast mode %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
 	})
 }
+
+// ==================== Scalp Re-entry Configuration ====================
+
+// handleGetScalpReentryConfig returns the current scalp re-entry mode configuration
+// GET /api/futures/ginie/scalp-reentry-config
+func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
+	log.Println("[SCALP-REENTRY] Getting scalp re-entry configuration")
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	config := settings.ScalpReentryConfig
+
+	// Apply defaults if config has zero values (not yet initialized)
+	if config.TP1Percent == 0 && config.TP2Percent == 0 && config.TP3Percent == 0 {
+		log.Println("[SCALP-REENTRY] Config has zero values, applying defaults")
+		defaults := autopilot.DefaultScalpReentryConfig()
+		// Preserve enabled state but apply all other defaults
+		defaults.Enabled = config.Enabled
+		config = defaults
+
+		// Save the defaults to settings
+		settings.ScalpReentryConfig = config
+		if err := sm.SaveSettings(settings); err != nil {
+			log.Printf("[SCALP-REENTRY] Warning: Failed to save default config: %v", err)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"config":  config,
+	})
+}
+
+// handleUpdateScalpReentryConfig updates the scalp re-entry mode configuration
+// POST /api/futures/ginie/scalp-reentry-config
+func (s *Server) handleUpdateScalpReentryConfig(c *gin.Context) {
+	log.Println("[SCALP-REENTRY] Updating scalp re-entry configuration")
+
+	var req autopilot.ScalpReentryConfig
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate TP levels
+	if req.TP1Percent <= 0 || req.TP1Percent >= req.TP2Percent {
+		errorResponse(c, http.StatusBadRequest, "TP1 percent must be positive and less than TP2")
+		return
+	}
+	if req.TP2Percent <= req.TP1Percent || req.TP2Percent >= req.TP3Percent {
+		errorResponse(c, http.StatusBadRequest, "TP2 percent must be between TP1 and TP3")
+		return
+	}
+	if req.TP3Percent <= req.TP2Percent || req.TP3Percent > 10 {
+		errorResponse(c, http.StatusBadRequest, "TP3 percent must be greater than TP2 and at most 10%")
+		return
+	}
+
+	// Validate sell percentages
+	if req.TP1SellPercent <= 0 || req.TP1SellPercent > 50 {
+		errorResponse(c, http.StatusBadRequest, "TP1 sell percent must be 1-50%")
+		return
+	}
+	if req.TP2SellPercent <= 0 || req.TP2SellPercent > 80 {
+		errorResponse(c, http.StatusBadRequest, "TP2 sell percent must be 1-80%")
+		return
+	}
+	if req.TP3SellPercent <= 0 || req.TP3SellPercent > 100 {
+		errorResponse(c, http.StatusBadRequest, "TP3 sell percent must be 1-100%")
+		return
+	}
+
+	// Validate re-entry config
+	if req.ReentryPercent < 50 || req.ReentryPercent > 100 {
+		errorResponse(c, http.StatusBadRequest, "Re-entry percent must be 50-100%")
+		return
+	}
+	if req.ReentryPriceBuffer < 0 || req.ReentryPriceBuffer > 1 {
+		errorResponse(c, http.StatusBadRequest, "Re-entry price buffer must be 0-1%")
+		return
+	}
+
+	// Validate dynamic SL config
+	if req.DynamicSLProtectPct+req.DynamicSLMaxLossPct != 100 {
+		errorResponse(c, http.StatusBadRequest, "Dynamic SL protect + max loss must equal 100%")
+		return
+	}
+
+	// Update settings
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	settings.ScalpReentryConfig = req
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+		return
+	}
+
+	log.Printf("[SCALP-REENTRY] Configuration updated - Enabled: %v, TP levels: %.2f%%, %.2f%%, %.2f%%",
+		req.Enabled, req.TP1Percent, req.TP2Percent, req.TP3Percent)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"config":  req,
+		"message": "Scalp re-entry configuration updated",
+	})
+}
+
+// handleToggleScalpReentry toggles the scalp re-entry mode on/off
+// POST /api/futures/ginie/scalp-reentry/toggle
+func (s *Server) handleToggleScalpReentry(c *gin.Context) {
+	log.Println("[SCALP-REENTRY] Toggling scalp re-entry mode")
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	settings.ScalpReentryConfig.Enabled = req.Enabled
+
+	if err := sm.SaveSettings(settings); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+		return
+	}
+
+	status := "disabled"
+	if req.Enabled {
+		status = "enabled"
+	}
+	log.Printf("[SCALP-REENTRY] Mode toggled to: %s", status)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"enabled": req.Enabled,
+		"message": fmt.Sprintf("Scalp re-entry mode %s", status),
+	})
+}
+
+// ==================== Scalp Re-entry Monitor Endpoints ====================
+
+// ScalpReentryPositionStatus provides enhanced status for a position in scalp_reentry mode
+type ScalpReentryPositionStatus struct {
+	Symbol             string                       `json:"symbol"`
+	Side               string                       `json:"side"`
+	Mode               string                       `json:"mode"`
+	EntryPrice         float64                      `json:"entry_price"`
+	CurrentPrice       float64                      `json:"current_price"`
+	UnrealizedPnL      float64                      `json:"unrealized_pnl"`
+	UnrealizedPnLPct   float64                      `json:"unrealized_pnl_pct"`
+
+	// Scalp Re-entry specific fields
+	ScalpReentryActive bool                         `json:"scalp_reentry_active"`
+	TPLevelUnlocked    int                          `json:"tp_level_unlocked"`     // 0, 1, 2, or 3
+	NextTPLevel        int                          `json:"next_tp_level"`         // Next target TP
+	NextTPPercent      float64                      `json:"next_tp_percent"`       // Target % for next TP
+	NextTPBlocked      bool                         `json:"next_tp_blocked"`       // Waiting for reentry
+
+	// Current cycle info
+	CurrentCycleNum    int                          `json:"current_cycle_num"`
+	CurrentCycleState  string                       `json:"current_cycle_state"`   // WAITING, EXECUTING, COMPLETED, etc
+	ReentryTargetPrice float64                      `json:"reentry_target_price"`  // Breakeven target
+	DistanceToReentry  float64                      `json:"distance_to_reentry"`   // % distance to reentry price
+
+	// Accumulated stats
+	AccumulatedProfit  float64                      `json:"accumulated_profit"`
+	TotalCycles        int                          `json:"total_cycles"`
+	SuccessfulReentries int                         `json:"successful_reentries"`
+	SkippedReentries   int                          `json:"skipped_reentries"`
+
+	// Final portion tracking
+	FinalPortionActive bool                         `json:"final_portion_active"`
+	FinalPortionQty    float64                      `json:"final_portion_qty"`
+	FinalTrailingPeak  float64                      `json:"final_trailing_peak"`
+	DynamicSLActive    bool                         `json:"dynamic_sl_active"`
+	DynamicSLPrice     float64                      `json:"dynamic_sl_price"`
+
+	// Cycle history
+	Cycles             []ScalpReentryCycleInfo      `json:"cycles"`
+
+	// Debug info
+	LastUpdate         string                       `json:"last_update"`
+}
+
+// ScalpReentryCycleInfo provides info about a single sell->buyback cycle
+type ScalpReentryCycleInfo struct {
+	CycleNumber    int     `json:"cycle_number"`
+	TPLevel        int     `json:"tp_level"`
+	State          string  `json:"state"`           // NONE, WAITING, EXECUTING, COMPLETED, FAILED, SKIPPED
+
+	// Sell info
+	SellPrice      float64 `json:"sell_price"`
+	SellQuantity   float64 `json:"sell_quantity"`
+	SellPnL        float64 `json:"sell_pnl"`
+	SellTime       string  `json:"sell_time"`
+
+	// Reentry info
+	ReentryTarget  float64 `json:"reentry_target"`
+	ReentryFilled  float64 `json:"reentry_filled"`
+	ReentryPrice   float64 `json:"reentry_price"`
+	ReentryTime    string  `json:"reentry_time"`
+
+	// Outcome
+	Outcome        string  `json:"outcome"`         // profit, loss, skipped, pending
+	OutcomePnL     float64 `json:"outcome_pnl"`
+	OutcomeReason  string  `json:"outcome_reason"`
+
+	// AI Decision
+	AIReasoning    string  `json:"ai_reasoning,omitempty"`
+	AIConfidence   float64 `json:"ai_confidence,omitempty"`
+}
+
+// handleGetScalpReentryPositions returns all positions in scalp_reentry mode with enhanced status
+// GET /api/futures/ginie/scalp-reentry/positions
+func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
+	log.Println("[SCALP-REENTRY-MONITOR] Getting scalp re-entry positions")
+
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
+		return
+	}
+
+	// Get all positions
+	allPositions := giniePilot.GetPositions()
+
+	// Get scalp reentry config for TP level info
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	config := settings.ScalpReentryConfig
+
+	// Filter and enhance positions with scalp_reentry mode or ScalpReentry status
+	var scalpPositions []ScalpReentryPositionStatus
+
+	for _, pos := range allPositions {
+		// Include if mode is scalp_reentry OR has ScalpReentry tracking
+		if pos.Mode != autopilot.GinieModeScalpReentry && pos.ScalpReentry == nil {
+			continue
+		}
+
+		// Get current price from Ginie
+		currentPrice := giniePilot.GetCurrentPrice(pos.Symbol)
+		if currentPrice == 0 {
+			currentPrice = pos.EntryPrice // Fallback
+		}
+
+		// Calculate unrealized PnL
+		var unrealizedPnL, unrealizedPnLPct float64
+		if pos.Side == "LONG" {
+			unrealizedPnL = (currentPrice - pos.EntryPrice) * pos.RemainingQty
+			unrealizedPnLPct = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		} else {
+			unrealizedPnL = (pos.EntryPrice - currentPrice) * pos.RemainingQty
+			unrealizedPnLPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+		}
+
+		status := ScalpReentryPositionStatus{
+			Symbol:           pos.Symbol,
+			Side:             pos.Side,
+			Mode:             string(pos.Mode),
+			EntryPrice:       pos.EntryPrice,
+			CurrentPrice:     currentPrice,
+			UnrealizedPnL:    unrealizedPnL,
+			UnrealizedPnLPct: unrealizedPnLPct,
+		}
+
+		// Populate scalp reentry specific fields if available
+		if pos.ScalpReentry != nil {
+			sr := pos.ScalpReentry
+			status.ScalpReentryActive = sr.Enabled
+			status.TPLevelUnlocked = sr.TPLevelUnlocked
+			status.NextTPLevel = sr.TPLevelUnlocked + 1
+			status.NextTPBlocked = sr.NextTPBlocked
+			status.CurrentCycleNum = sr.CurrentCycle
+			status.AccumulatedProfit = sr.AccumulatedProfit
+			status.TotalCycles = len(sr.Cycles)
+			status.SuccessfulReentries = sr.SuccessfulReentries
+			status.SkippedReentries = sr.SkippedReentries
+			status.FinalPortionActive = sr.FinalPortionActive
+			status.FinalPortionQty = sr.FinalPortionQty
+			status.FinalTrailingPeak = sr.FinalTrailingPeak
+			status.DynamicSLActive = sr.DynamicSLActive
+			status.DynamicSLPrice = sr.DynamicSLPrice
+			status.LastUpdate = sr.LastUpdate.Format("2006-01-02 15:04:05")
+
+			// Get next TP percent from config
+			if status.NextTPLevel <= 3 {
+				tpPct, _ := config.GetTPConfig(status.NextTPLevel)
+				status.NextTPPercent = tpPct
+			}
+
+			// Get current cycle state
+			if cycle := sr.GetCurrentCycle(); cycle != nil {
+				status.CurrentCycleState = string(cycle.ReentryState)
+				status.ReentryTargetPrice = cycle.ReentryTargetPrice
+
+				// Calculate distance to reentry
+				if cycle.ReentryTargetPrice > 0 {
+					if pos.Side == "LONG" {
+						status.DistanceToReentry = (currentPrice - cycle.ReentryTargetPrice) / cycle.ReentryTargetPrice * 100
+					} else {
+						status.DistanceToReentry = (cycle.ReentryTargetPrice - currentPrice) / cycle.ReentryTargetPrice * 100
+					}
+				}
+			}
+
+			// Convert cycles to simplified info
+			for _, cycle := range sr.Cycles {
+				cycleInfo := ScalpReentryCycleInfo{
+					CycleNumber:   cycle.CycleNumber,
+					TPLevel:       cycle.TPLevel,
+					State:         string(cycle.ReentryState),
+					SellPrice:     cycle.SellPrice,
+					SellQuantity:  cycle.SellQuantity,
+					SellPnL:       cycle.SellPnL,
+					ReentryTarget: cycle.ReentryTargetPrice,
+					ReentryFilled: cycle.ReentryFilledQty,
+					ReentryPrice:  cycle.ReentryFilledPrice,
+					Outcome:       cycle.Outcome,
+					OutcomePnL:    cycle.OutcomePnL,
+					OutcomeReason: cycle.OutcomeReason,
+				}
+
+				if !cycle.SellTime.IsZero() {
+					cycleInfo.SellTime = cycle.SellTime.Format("15:04:05")
+				}
+				if !cycle.ReentryFillTime.IsZero() {
+					cycleInfo.ReentryTime = cycle.ReentryFillTime.Format("15:04:05")
+				}
+
+				// Include AI decision info if available
+				if cycle.AIDecision != nil {
+					cycleInfo.AIReasoning = cycle.AIDecision.Reasoning
+					cycleInfo.AIConfidence = cycle.AIDecision.Confidence
+				}
+
+				status.Cycles = append(status.Cycles, cycleInfo)
+			}
+		} else {
+			// Position is in scalp_reentry mode but not yet initialized
+			status.ScalpReentryActive = false
+			status.CurrentCycleState = "INITIALIZING"
+		}
+
+		scalpPositions = append(scalpPositions, status)
+	}
+
+	// Get global stats
+	totalAccumulatedProfit := 0.0
+	totalCycles := 0
+	totalReentries := 0
+	for _, pos := range scalpPositions {
+		totalAccumulatedProfit += pos.AccumulatedProfit
+		totalCycles += pos.TotalCycles
+		totalReentries += pos.SuccessfulReentries
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"positions": scalpPositions,
+		"count":     len(scalpPositions),
+		"summary": gin.H{
+			"total_positions":      len(scalpPositions),
+			"total_accumulated_pnl": totalAccumulatedProfit,
+			"total_cycles":         totalCycles,
+			"total_reentries":      totalReentries,
+			"config_enabled":       config.Enabled,
+		},
+	})
+}
+
+// handleGetScalpReentryPositionStatus returns detailed status for a single position
+// GET /api/futures/ginie/scalp-reentry/positions/:symbol
+func (s *Server) handleGetScalpReentryPositionStatus(c *gin.Context) {
+	symbol := c.Param("symbol")
+	log.Printf("[SCALP-REENTRY-MONITOR] Getting status for %s", symbol)
+
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
+		return
+	}
+
+	// Find the position
+	positions := giniePilot.GetPositions()
+	var targetPos *autopilot.GiniePosition
+	for _, pos := range positions {
+		if pos.Symbol == symbol {
+			targetPos = pos
+			break
+		}
+	}
+
+	if targetPos == nil {
+		errorResponse(c, http.StatusNotFound, fmt.Sprintf("Position %s not found", symbol))
+		return
+	}
+
+	if targetPos.ScalpReentry == nil {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Position %s is not in scalp_reentry mode", symbol))
+		return
+	}
+
+	sr := targetPos.ScalpReentry
+	sm := autopilot.GetSettingsManager()
+	config := sm.GetCurrentSettings().ScalpReentryConfig
+	currentPrice := giniePilot.GetCurrentPrice(symbol)
+
+	// Build detailed response
+	var unrealizedPnL, unrealizedPnLPct float64
+	if targetPos.Side == "LONG" {
+		unrealizedPnL = (currentPrice - targetPos.EntryPrice) * targetPos.RemainingQty
+		unrealizedPnLPct = (currentPrice - targetPos.EntryPrice) / targetPos.EntryPrice * 100
+	} else {
+		unrealizedPnL = (targetPos.EntryPrice - currentPrice) * targetPos.RemainingQty
+		unrealizedPnLPct = (targetPos.EntryPrice - currentPrice) / targetPos.EntryPrice * 100
+	}
+
+	response := gin.H{
+		"success": true,
+		"symbol":  symbol,
+		"side":    targetPos.Side,
+		"mode":    string(targetPos.Mode),
+		"entry_price": targetPos.EntryPrice,
+		"current_price": currentPrice,
+		"unrealized_pnl": unrealizedPnL,
+		"unrealized_pnl_pct": unrealizedPnLPct,
+		"original_qty": targetPos.OriginalQty,
+		"remaining_qty": sr.RemainingQuantity,
+
+		// Scalp Re-entry Status
+		"scalp_reentry": gin.H{
+			"enabled": sr.Enabled,
+			"tp_level_unlocked": sr.TPLevelUnlocked,
+			"next_tp_blocked": sr.NextTPBlocked,
+			"current_cycle": sr.CurrentCycle,
+			"accumulated_profit": sr.AccumulatedProfit,
+			"original_entry_price": sr.OriginalEntryPrice,
+			"current_breakeven": sr.CurrentBreakeven,
+			"remaining_quantity": sr.RemainingQuantity,
+
+			// Dynamic SL
+			"dynamic_sl_active": sr.DynamicSLActive,
+			"dynamic_sl_price": sr.DynamicSLPrice,
+			"protected_profit": sr.ProtectedProfit,
+			"max_allowable_loss": sr.MaxAllowableLoss,
+
+			// Final portion
+			"final_portion_active": sr.FinalPortionActive,
+			"final_portion_qty": sr.FinalPortionQty,
+			"final_trailing_peak": sr.FinalTrailingPeak,
+			"final_trailing_percent": sr.FinalTrailingPercent,
+			"final_trailing_active": sr.FinalTrailingActive,
+
+			// Stats
+			"total_cycles_completed": sr.TotalCyclesCompleted,
+			"total_reentries": sr.TotalReentries,
+			"successful_reentries": sr.SuccessfulReentries,
+			"skipped_reentries": sr.SkippedReentries,
+			"total_cycle_pnl": sr.TotalCyclePnL,
+
+			// Timestamps
+			"started_at": sr.StartedAt.Format("2006-01-02 15:04:05"),
+			"last_update": sr.LastUpdate.Format("2006-01-02 15:04:05"),
+
+			// Debug log (last 10 entries)
+			"debug_log": func() []string {
+				if len(sr.DebugLog) > 10 {
+					return sr.DebugLog[len(sr.DebugLog)-10:]
+				}
+				return sr.DebugLog
+			}(),
+		},
+
+		// TP Level configurations
+		"tp_levels": gin.H{
+			"tp1": gin.H{"percent": config.TP1Percent, "sell_percent": config.TP1SellPercent, "hit": sr.TPLevelUnlocked >= 1},
+			"tp2": gin.H{"percent": config.TP2Percent, "sell_percent": config.TP2SellPercent, "hit": sr.TPLevelUnlocked >= 2},
+			"tp3": gin.H{"percent": config.TP3Percent, "sell_percent": config.TP3SellPercent, "hit": sr.TPLevelUnlocked >= 3},
+		},
+
+		// Cycles detail
+		"cycles": sr.Cycles,
+	}
+
+	c.JSON(http.StatusOK, response)
+}

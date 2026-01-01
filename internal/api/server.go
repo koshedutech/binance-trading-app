@@ -454,6 +454,7 @@ func (s *Server) setupRoutes() {
 			futures.GET("/account/trades", s.handleGetFuturesAccountTrades) // Direct from Binance API
 			futures.GET("/funding-fees/history", s.handleGetFundingFeeHistory)
 			futures.GET("/transactions/history", s.handleGetFuturesTransactionHistory)
+			futures.GET("/income-history", s.handleGetIncomeHistory) // PnL, fees, funding from Binance
 			futures.GET("/metrics", s.handleGetFuturesMetrics)
 			futures.GET("/trade-source-stats", s.handleGetTradeSourceStats)
 			futures.GET("/position-trade-sources", s.handleGetPositionTradeSources)
@@ -717,6 +718,15 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/saved-coins", s.handleGetSavedCoins)
 			futures.POST("/ginie/saved-coins", s.handleUpdateSavedCoins)
 			futures.GET("/ginie/scan-preview", s.handleGetScanPreview)
+
+			// Scalp Re-entry Mode Configuration endpoints
+			futures.GET("/ginie/scalp-reentry-config", s.handleGetScalpReentryConfig)
+			futures.POST("/ginie/scalp-reentry-config", s.handleUpdateScalpReentryConfig)
+			futures.POST("/ginie/scalp-reentry/toggle", s.handleToggleScalpReentry)
+
+			// Scalp Re-entry Monitor endpoints
+			futures.GET("/ginie/scalp-reentry/positions", s.handleGetScalpReentryPositions)
+			futures.GET("/ginie/scalp-reentry/positions/:symbol", s.handleGetScalpReentryPositionStatus)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

@@ -239,6 +239,50 @@ Your response must be in valid JSON format:
   "reasoning": "brief explanation",
   "caution_flags": ["list of warning signs"]
 }`
+
+	// SystemPromptReversalAnalysis is for confirming reversal pattern probability
+	SystemPromptReversalAnalysis = `You are an expert cryptocurrency reversal pattern analyst specializing in identifying trend exhaustion and reversal setups.
+
+A potential reversal pattern has been detected across multiple timeframes (5m, 15m, 1h):
+- Lower Lows (LL) pattern → Potential LONG reversal (sellers exhausted)
+- Higher Highs (HH) pattern → Potential SHORT reversal (buyers exhausted)
+
+Analyze the provided candlestick data from multiple timeframes and determine:
+1. Is this a GENUINE reversal setup or a continuation pattern trap?
+2. What is the probability of successful reversal?
+3. Where should entry, stop-loss, and take-profit be placed?
+
+Consider these factors:
+- Volume patterns (exhaustion volume, climax volume, decreasing volume on pattern)
+- Candle body sizes and wicks (absorption, rejection wicks, doji formations)
+- Key support/resistance levels (is price at a major level?)
+- Market structure (break of structure, change of character, swing failure)
+- RSI divergence (hidden/regular divergence visible?)
+- Whether this is capitulation, exhaustion, or just a normal pullback
+
+Your response must be in valid JSON format:
+{
+  "is_reversal": true | false,
+  "confidence": 0.0-1.0,
+  "reversal_type": "exhaustion" | "capitulation" | "structural" | "false_signal",
+  "entry_price": number,
+  "stop_loss_price": number,
+  "take_profit_price": number,
+  "reasoning": "detailed analysis of why this is/isn't a reversal",
+  "caution_flags": ["list of concerns or warning signs"],
+  "nearest_support": number,
+  "nearest_resistance": number
+}
+
+BE CONSERVATIVE - False reversals are common and costly.
+Only confirm with HIGH confidence (>0.65) when:
+1. Clear exhaustion/capitulation signals visible (climax volume, long wicks)
+2. Multiple timeframes (2+) align on same direction
+3. Key level interaction present (support/resistance touch)
+4. Volume confirms the reversal thesis (decreasing on pattern, spike on reversal)
+5. No strong momentum against the reversal direction
+
+If uncertain, set is_reversal=false and explain why in reasoning.`
 )
 
 // BuildMarketAnalysisPrompt builds the user prompt for market analysis
@@ -332,6 +376,31 @@ func BuildPositionSLTPPrompt(positionInfo string, marketData string, indicators 
 Based on the position status and current market conditions, recommend optimal SL/TP levels.
 If the position is in profit, consider trailing the stop to protect gains.
 If the position is at a loss, evaluate if the original thesis is still valid.
+
+Provide your analysis in the specified JSON format.`
+}
+
+// BuildReversalAnalysisPrompt builds the prompt for reversal pattern confirmation
+func BuildReversalAnalysisPrompt(symbol string, patternInfo string, klines5m string, klines15m string, klines1h string) string {
+	return `Analyze this potential reversal setup:
+
+=== SYMBOL ===
+` + symbol + `
+
+=== DETECTED PATTERN ===
+` + patternInfo + `
+
+=== 5-MINUTE CANDLES (Last 15) ===
+` + klines5m + `
+
+=== 15-MINUTE CANDLES (Last 15) ===
+` + klines15m + `
+
+=== 1-HOUR CANDLES (Last 15) ===
+` + klines1h + `
+
+Based on the multi-timeframe data, determine if this is a genuine reversal or a false signal.
+Look for exhaustion patterns, volume confirmation, and key level interactions.
 
 Provide your analysis in the specified JSON format.`
 }

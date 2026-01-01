@@ -1887,6 +1887,50 @@ class FuturesAPIService {
     const { data } = await this.client.get('/ginie/scan-preview');
     return data;
   }
+
+  // ==================== SCALP RE-ENTRY CONFIG ====================
+
+  /**
+   * Get scalp re-entry mode configuration
+   */
+  async getScalpReentryConfig(): Promise<ScalpReentryConfig> {
+    const { data } = await this.client.get('/ginie/scalp-reentry-config');
+    return data.config;
+  }
+
+  /**
+   * Update scalp re-entry mode configuration
+   */
+  async updateScalpReentryConfig(config: Partial<ScalpReentryConfig>): Promise<{ success: boolean; config: ScalpReentryConfig }> {
+    const { data } = await this.client.post('/ginie/scalp-reentry-config', config);
+    return data;
+  }
+
+  /**
+   * Toggle scalp re-entry mode on/off
+   */
+  async toggleScalpReentry(enabled: boolean): Promise<{ success: boolean; enabled: boolean; message: string }> {
+    const { data } = await this.client.post('/ginie/scalp-reentry/toggle', { enabled });
+    return data;
+  }
+
+  // ==================== SCALP RE-ENTRY MONITOR ====================
+
+  /**
+   * Get all positions in scalp_reentry mode with enhanced status
+   */
+  async getScalpReentryPositions(): Promise<ScalpReentryPositionsResponse> {
+    const { data } = await this.client.get('/ginie/scalp-reentry/positions');
+    return data;
+  }
+
+  /**
+   * Get detailed status for a single scalp_reentry position
+   */
+  async getScalpReentryPositionStatus(symbol: string): Promise<ScalpReentryPositionDetailResponse> {
+    const { data } = await this.client.get(`/ginie/scalp-reentry/positions/${symbol}`);
+    return data;
+  }
 }
 
 // ==================== SCAN SOURCE CONFIG TYPES ====================
@@ -1920,6 +1964,204 @@ export interface ScanPreview {
   coins: ScanPreviewCoin[];
   total_count: number;
   max_coins: number;
+}
+
+// ==================== SCALP RE-ENTRY CONFIG TYPES ====================
+
+export interface ScalpReentryConfig {
+  // Master toggle
+  enabled: boolean;
+
+  // TP Levels configuration
+  tp1_percent: number;      // 0.3 (0.3% profit)
+  tp1_sell_percent: number; // 30 (sell 30%)
+  tp2_percent: number;      // 0.6 (0.6% profit)
+  tp2_sell_percent: number; // 50 (sell 50% of remaining)
+  tp3_percent: number;      // 1.0 (1% profit)
+  tp3_sell_percent: number; // 80 (sell 80%, keep 20%)
+
+  // Re-entry configuration
+  reentry_percent: number;      // 80 (buy back 80% of sold qty)
+  reentry_price_buffer: number; // 0.05 (0.05% buffer from breakeven)
+  max_reentry_attempts: number; // 3 max attempts before skipping
+  reentry_timeout_sec: number;  // 300 (5 min timeout)
+
+  // Final portion (20% remaining after 1%)
+  final_trailing_percent: number; // 5.0 (5% trailing from peak)
+  final_hold_min_percent: number; // 20 (minimum 20% to hold)
+
+  // Dynamic SL after 1% reached
+  dynamic_sl_max_loss_pct: number; // 40 (can lose 40% of profit max)
+  dynamic_sl_protect_pct: number;  // 60 (protect 60% of profit)
+  dynamic_sl_update_int: number;   // 30 (update every 30s)
+
+  // AI Configuration
+  use_ai_decisions: boolean;    // Enable AI for re-entry decisions
+  ai_min_confidence: number;    // 0.65 minimum confidence
+  ai_tp_optimization: boolean;  // Use AI to optimize TP timing
+  ai_dynamic_sl: boolean;       // Use AI for dynamic SL decisions
+
+  // Multi-agent configuration
+  use_multi_agent: boolean;         // Enable multi-agent system
+  enable_sentiment_agent: boolean;  // Enable sentiment analysis
+  enable_risk_agent: boolean;       // Enable risk management agent
+  enable_tp_agent: boolean;         // Enable TP timing agent
+
+  // Adaptive learning
+  enable_adaptive_learning: boolean;
+  adaptive_window_trades: number;      // 20 trades window
+  adaptive_min_trades: number;         // 10 trades before adjusting
+  adaptive_max_reentry_adjust: number; // Max 20% adjustment
+
+  // Risk limits
+  max_cycles_per_position: number; // 10 max cycles
+  max_daily_reentries: number;     // 50 max per day
+  min_position_size_usd: number;   // $10 minimum
+}
+
+// ==================== SCALP RE-ENTRY MONITOR TYPES ====================
+
+export interface ScalpReentryCycleInfo {
+  cycle_number: number;
+  tp_level: number;
+  state: string;           // NONE, WAITING, EXECUTING, COMPLETED, FAILED, SKIPPED
+
+  // Sell info
+  sell_price: number;
+  sell_quantity: number;
+  sell_pnl: number;
+  sell_time: string;
+
+  // Reentry info
+  reentry_target: number;
+  reentry_filled: number;
+  reentry_price: number;
+  reentry_time: string;
+
+  // Outcome
+  outcome: string;         // profit, loss, skipped, pending
+  outcome_pnl: number;
+  outcome_reason: string;
+
+  // AI Decision
+  ai_reasoning?: string;
+  ai_confidence?: number;
+}
+
+export interface ScalpReentryPositionStatus {
+  symbol: string;
+  side: string;
+  mode: string;
+  entry_price: number;
+  current_price: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+
+  // Scalp Re-entry specific fields
+  scalp_reentry_active: boolean;
+  tp_level_unlocked: number;     // 0, 1, 2, or 3
+  next_tp_level: number;         // Next target TP
+  next_tp_percent: number;       // Target % for next TP
+  next_tp_blocked: boolean;      // Waiting for reentry
+
+  // Current cycle info
+  current_cycle_num: number;
+  current_cycle_state: string;   // WAITING, EXECUTING, COMPLETED, etc
+  reentry_target_price: number;  // Breakeven target
+  distance_to_reentry: number;   // % distance to reentry price
+
+  // Accumulated stats
+  accumulated_profit: number;
+  total_cycles: number;
+  successful_reentries: number;
+  skipped_reentries: number;
+
+  // Final portion tracking
+  final_portion_active: boolean;
+  final_portion_qty: number;
+  final_trailing_peak: number;
+  dynamic_sl_active: boolean;
+  dynamic_sl_price: number;
+
+  // Cycle history
+  cycles: ScalpReentryCycleInfo[];
+
+  // Debug info
+  last_update: string;
+}
+
+export interface ScalpReentryPositionsSummary {
+  total_positions: number;
+  total_accumulated_pnl: number;
+  total_cycles: number;
+  total_reentries: number;
+  config_enabled: boolean;
+}
+
+export interface ScalpReentryPositionsResponse {
+  success: boolean;
+  positions: ScalpReentryPositionStatus[];
+  count: number;
+  summary: ScalpReentryPositionsSummary;
+}
+
+export interface ScalpReentryPositionDetailResponse {
+  success: boolean;
+  symbol: string;
+  side: string;
+  mode: string;
+  entry_price: number;
+  current_price: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  original_qty: number;
+  remaining_qty: number;
+
+  scalp_reentry: {
+    enabled: boolean;
+    tp_level_unlocked: number;
+    next_tp_blocked: boolean;
+    current_cycle: number;
+    accumulated_profit: number;
+    original_entry_price: number;
+    current_breakeven: number;
+    remaining_quantity: number;
+
+    // Dynamic SL
+    dynamic_sl_active: boolean;
+    dynamic_sl_price: number;
+    protected_profit: number;
+    max_allowable_loss: number;
+
+    // Final portion
+    final_portion_active: boolean;
+    final_portion_qty: number;
+    final_trailing_peak: number;
+    final_trailing_percent: number;
+    final_trailing_active: boolean;
+
+    // Stats
+    total_cycles_completed: number;
+    total_reentries: number;
+    successful_reentries: number;
+    skipped_reentries: number;
+    total_cycle_pnl: number;
+
+    // Timestamps
+    started_at: string;
+    last_update: string;
+
+    // Debug log
+    debug_log: string[];
+  };
+
+  tp_levels: {
+    tp1: { percent: number; sell_percent: number; hit: boolean };
+    tp2: { percent: number; sell_percent: number; hit: boolean };
+    tp3: { percent: number; sell_percent: number; hit: boolean };
+  };
+
+  cycles: ScalpReentryCycleInfo[];
 }
 
 // ==================== MARKET MOVERS TYPES ====================

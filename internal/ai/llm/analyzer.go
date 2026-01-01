@@ -118,6 +118,20 @@ type RiskAssessment struct {
 	Reasoning                  string   `json:"reasoning"`
 }
 
+// ReversalAnalysis represents LLM's reversal pattern confirmation
+type ReversalAnalysis struct {
+	IsReversal        bool     `json:"is_reversal"`
+	Confidence        float64  `json:"confidence"`
+	ReversalType      string   `json:"reversal_type"` // exhaustion, capitulation, structural, false_signal
+	EntryPrice        float64  `json:"entry_price"`
+	StopLossPrice     float64  `json:"stop_loss_price"`
+	TakeProfitPrice   float64  `json:"take_profit_price"`
+	Reasoning         string   `json:"reasoning"`
+	CautionFlags      []string `json:"caution_flags"`
+	NearestSupport    float64  `json:"nearest_support"`
+	NearestResistance float64  `json:"nearest_resistance"`
+}
+
 // AutoTradingDecision represents LLM's autonomous trading decisions
 // When Auto Mode is enabled, the LLM decides everything: size, leverage, coins, averaging
 type AutoTradingDecision struct {
@@ -434,6 +448,95 @@ func (a *Analyzer) AssessRisk(tradeDetails map[string]interface{}, accountBalanc
 	}
 
 	return &assessment, nil
+}
+
+// AnalyzeReversalProbability uses LLM to confirm a potential reversal pattern
+// Takes multi-timeframe kline data and pattern info to determine if reversal is genuine
+func (a *Analyzer) AnalyzeReversalProbability(
+	symbol string,
+	patternType string, // "lower_lows" or "higher_highs"
+	direction string, // "LONG" or "SHORT"
+	alignedCount int, // How many timeframes aligned (1-3)
+	klines5m []binance.Kline,
+	klines15m []binance.Kline,
+	klines1h []binance.Kline,
+) (*ReversalAnalysis, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled or configured")
+	}
+
+	// Check cache (short TTL for reversal since it's time-sensitive)
+	cacheKey := fmt.Sprintf("reversal_%s_%s", symbol, direction)
+	if cached := a.getFromCache(cacheKey); cached != nil {
+		if analysis, ok := cached.(*ReversalAnalysis); ok {
+			return analysis, nil
+		}
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	// Build pattern info string
+	patternInfo := fmt.Sprintf(`Pattern Type: %s
+Direction: %s
+Timeframes Aligned: %d/3
+Signal: %s reversal detected (consecutive %s across %d timeframes)`,
+		patternType,
+		direction,
+		alignedCount,
+		direction,
+		patternType,
+		alignedCount)
+
+	// Format klines for each timeframe (limit to last 15 candles for context)
+	klines5mStr := formatKlinesLimited(klines5m, 15)
+	klines15mStr := formatKlinesLimited(klines15m, 15)
+	klines1hStr := formatKlinesLimited(klines1h, 15)
+
+	// Build the prompt
+	prompt := BuildReversalAnalysisPrompt(symbol, patternInfo, klines5mStr, klines15mStr, klines1hStr)
+
+	// Call LLM with reversal analysis system prompt
+	response, err := a.client.Complete(SystemPromptReversalAnalysis, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	// Strip markdown code blocks if present
+	cleanResponse := stripMarkdownCodeBlock(response)
+
+	var analysis ReversalAnalysis
+	if err := json.Unmarshal([]byte(cleanResponse), &analysis); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	// Cache the result (short duration since reversal signals are time-sensitive)
+	a.setCache(cacheKey, &analysis)
+
+	return &analysis, nil
+}
+
+// formatKlinesLimited formats kline data for LLM consumption, limited to N candles
+func formatKlinesLimited(klines []binance.Kline, limit int) string {
+	if len(klines) == 0 {
+		return "No data"
+	}
+
+	// Limit to last N candles
+	start := 0
+	if len(klines) > limit {
+		start = len(klines) - limit
+	}
+
+	result := "Time | Open | High | Low | Close | Volume\n"
+	for i := start; i < len(klines); i++ {
+		k := klines[i]
+		openTime := time.Unix(k.OpenTime/1000, 0)
+		result += fmt.Sprintf("%s | %.8f | %.8f | %.8f | %.8f | %.2f\n",
+			openTime.Format("15:04"), k.Open, k.High, k.Low, k.Close, k.Volume)
+	}
+	return result
 }
 
 // AnalyzeAutoTrading performs autonomous trading analysis
@@ -1140,4 +1243,379 @@ func calculateAvgVolume(klines []binance.Kline, period int) float64 {
 		sum += klines[i].Volume
 	}
 	return sum / float64(period)
+}
+
+// ============ SCALP RE-ENTRY ANALYSIS METHODS ============
+
+// ScalpReentryAnalysisRequest contains data for re-entry analysis
+type ScalpReentryAnalysisRequest struct {
+	Symbol            string
+	Side              string
+	EntryPrice        float64
+	CurrentPrice      float64
+	Breakeven         float64
+	DistanceFromBE    float64
+	TPLevel           int
+	TPPercent         float64
+	SoldQty           float64
+	ReentryQty        float64
+	ReentryPercent    float64
+	Trend5m           string
+	TrendStrength5m   float64
+	Trend15m          string
+	RSI14             float64
+	VolumeRatio       float64
+	ADX               float64
+	ATR               float64
+	PriceChange1m     float64
+	PriceChange5m     float64
+	PriceChange15m    float64
+	DistanceToSupport float64
+	DistanceToResistance float64
+}
+
+// ScalpReentryAnalysisResponse contains AI decision for re-entry
+type ScalpReentryAnalysisResponse struct {
+	ShouldReenter     bool     `json:"should_reenter"`
+	Confidence        float64  `json:"confidence"`
+	RecommendedQtyPct float64  `json:"recommended_qty_pct"`
+	Reasoning         string   `json:"reasoning"`
+	MarketCondition   string   `json:"market_condition"`
+	TrendAligned      bool     `json:"trend_aligned"`
+	RiskLevel         string   `json:"risk_level"`
+	CautionFlags      []string `json:"caution_flags"`
+}
+
+// AnalyzeScalpReentry analyzes whether to execute a re-entry
+func (a *Analyzer) AnalyzeScalpReentry(req *ScalpReentryAnalysisRequest) (*ScalpReentryAnalysisResponse, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled")
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	prompt := fmt.Sprintf(`You are an AI trading assistant analyzing a scalp re-entry opportunity.
+
+## Current Position
+- Symbol: %s
+- Side: %s
+- Entry Price: $%.8f
+- Current Price: $%.8f
+- Breakeven: $%.8f
+- Distance from BE: %.2f%%
+- TP Level Just Hit: %d (%.2f%%)
+- Sold Quantity: %.4f
+- Potential Re-entry Qty: %.4f (%.0f%% of sold)
+
+## Market Context
+- 5m Trend: %s (strength: %.0f)
+- 15m Trend: %s
+- RSI (14): %.1f
+- Volume Ratio: %.2fx average
+- ADX: %.1f
+- ATR: %.8f
+
+## Recent Price Action
+- 1m Change: %.2f%%
+- 5m Change: %.2f%%
+- 15m Change: %.2f%%
+- Distance to Support: %.2f%%
+- Distance to Resistance: %.2f%%
+
+## Task
+Analyze whether we should execute this re-entry when price returns to breakeven.
+
+Consider:
+1. Is the trend still favorable for our position side?
+2. Is there enough momentum for another push to the next TP level?
+3. What's the risk/reward ratio of re-entering vs staying flat?
+4. Are there any warning signs (divergences, exhaustion, reversal patterns)?
+5. Volume profile - is it confirming the move?
+
+Respond ONLY with valid JSON (no markdown, no code blocks):
+{
+  "should_reenter": true or false,
+  "confidence": 0.0 to 1.0,
+  "recommended_qty_pct": 0.5 to 1.0 (of configured reentry%%),
+  "reasoning": "brief 1-2 sentence explanation",
+  "market_condition": "trending" or "ranging" or "volatile" or "calm",
+  "trend_aligned": true or false,
+  "risk_level": "low" or "medium" or "high",
+  "caution_flags": ["list", "of", "warnings"] or []
+}`,
+		req.Symbol,
+		req.Side,
+		req.EntryPrice,
+		req.CurrentPrice,
+		req.Breakeven,
+		req.DistanceFromBE,
+		req.TPLevel,
+		req.TPPercent,
+		req.SoldQty,
+		req.ReentryQty,
+		req.ReentryPercent,
+		req.Trend5m,
+		req.TrendStrength5m,
+		req.Trend15m,
+		req.RSI14,
+		req.VolumeRatio,
+		req.ADX,
+		req.ATR,
+		req.PriceChange1m,
+		req.PriceChange5m,
+		req.PriceChange15m,
+		req.DistanceToSupport,
+		req.DistanceToResistance)
+
+	systemPrompt := `You are an expert crypto scalp trading AI specializing in re-entry decisions.
+Your job is to analyze whether a position should re-enter after taking partial profit.
+Consider trend alignment, momentum, volume, and risk carefully.
+Be conservative - only recommend re-entry if the setup is favorable.`
+
+	response, err := a.client.Complete(systemPrompt, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	cleanResponse := stripMarkdownCodeBlock(response)
+	var analysis ScalpReentryAnalysisResponse
+	if err := json.Unmarshal([]byte(cleanResponse), &analysis); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	return &analysis, nil
+}
+
+// TPTimingAnalysisRequest contains data for TP timing analysis
+type TPTimingAnalysisRequest struct {
+	Symbol              string
+	Side                string
+	EntryPrice          float64
+	CurrentPrice        float64
+	CurrentProfitPct    float64
+	TargetTPLevel       int
+	TargetTPPercent     float64
+	RemainingQty        float64
+	AccumulatedProfit   float64
+	RSI14               float64
+	MACDHist            float64
+	MACDTrend           string
+	VolumeTrend         string
+	ADX                 float64
+	DistanceToTP        float64
+	NearResistance      bool
+	ResistanceLevel     float64
+	SupportLevel        float64
+}
+
+// TPTimingAnalysisResponse contains AI decision for TP timing
+type TPTimingAnalysisResponse struct {
+	ShouldTakeNow   bool    `json:"should_take_now"`
+	Confidence      float64 `json:"confidence"`
+	OptimalPercent  float64 `json:"optimal_percent"`
+	Reasoning       string  `json:"reasoning"`
+	MomentumStatus  string  `json:"momentum_status"`
+	VolumeStatus    string  `json:"volume_status"`
+}
+
+// AnalyzeTPTiming analyzes optimal TP timing
+func (a *Analyzer) AnalyzeTPTiming(req *TPTimingAnalysisRequest) (*TPTimingAnalysisResponse, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled")
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	prompt := fmt.Sprintf(`You are an AI trading assistant optimizing take profit timing.
+
+## Current Position
+- Symbol: %s
+- Side: %s
+- Entry Price: $%.8f
+- Current Price: $%.8f
+- Current Profit: %.2f%%
+- Target TP Level: %d at %.2f%%
+- Remaining Quantity: %.4f
+- Accumulated Profit: $%.2f
+
+## Market Momentum
+- RSI: %.1f
+- MACD Histogram: %.6f (%s)
+- Volume Trend: %s
+- Trend Strength (ADX): %.1f
+
+## Price Structure
+- Distance to TP: %.2f%%
+- Near Resistance: %t
+- Resistance Level: $%.8f
+- Support Level: $%.8f
+
+## Task
+Decide if we should take profit NOW or wait for the configured TP level.
+
+Consider:
+1. Is momentum accelerating or decelerating?
+2. Is there strong resistance preventing further upside?
+3. Is volume confirming the move?
+4. Are there signs of exhaustion or reversal?
+
+Respond ONLY with valid JSON:
+{
+  "should_take_now": true or false,
+  "confidence": 0.0 to 1.0,
+  "optimal_percent": 0 to 100 (%% to close now, 0 = wait),
+  "reasoning": "brief explanation",
+  "momentum_status": "accelerating" or "stable" or "decelerating" or "reversing",
+  "volume_status": "increasing" or "stable" or "decreasing"
+}`,
+		req.Symbol,
+		req.Side,
+		req.EntryPrice,
+		req.CurrentPrice,
+		req.CurrentProfitPct,
+		req.TargetTPLevel,
+		req.TargetTPPercent,
+		req.RemainingQty,
+		req.AccumulatedProfit,
+		req.RSI14,
+		req.MACDHist,
+		req.MACDTrend,
+		req.VolumeTrend,
+		req.ADX,
+		req.DistanceToTP,
+		req.NearResistance,
+		req.ResistanceLevel,
+		req.SupportLevel)
+
+	systemPrompt := `You are an expert crypto trading AI specializing in take profit optimization.
+Your job is to determine the optimal moment to take profit.
+Balance between capturing gains and not exiting too early.
+Consider momentum, volume, and resistance levels carefully.`
+
+	response, err := a.client.Complete(systemPrompt, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	cleanResponse := stripMarkdownCodeBlock(response)
+	var analysis TPTimingAnalysisResponse
+	if err := json.Unmarshal([]byte(cleanResponse), &analysis); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	return &analysis, nil
+}
+
+// DynamicSLAnalysisRequest contains data for dynamic SL analysis
+type DynamicSLAnalysisRequest struct {
+	Symbol            string
+	Side              string
+	EntryPrice        float64
+	CurrentPrice      float64
+	AccumulatedProfit float64
+	ProtectedProfit   float64
+	MaxAllowableLoss  float64
+	CurrentSL         float64
+	ATR14             float64
+	ATRPercent        float64
+	VolatilityRegime  string
+	RecentSwingRange  float64
+	NearestSupport    float64
+	NearestResistance float64
+}
+
+// DynamicSLAnalysisResponse contains AI decision for dynamic SL
+type DynamicSLAnalysisResponse struct {
+	RecommendedSL    float64 `json:"recommended_sl"`
+	ProtectionPct    float64 `json:"protection_percent"`
+	Reasoning        string  `json:"reasoning"`
+	SLBasis          string  `json:"sl_basis"`
+	VolatilityBuffer float64 `json:"volatility_buffer"`
+	Confidence       float64 `json:"confidence"`
+}
+
+// AnalyzeDynamicSL analyzes optimal dynamic stop loss
+func (a *Analyzer) AnalyzeDynamicSL(req *DynamicSLAnalysisRequest) (*DynamicSLAnalysisResponse, error) {
+	if !a.config.Enabled || !a.client.IsConfigured() {
+		return nil, fmt.Errorf("LLM analyzer not enabled")
+	}
+
+	if !a.checkRateLimit() {
+		return nil, fmt.Errorf("rate limit exceeded")
+	}
+
+	prompt := fmt.Sprintf(`You are an AI risk manager calculating dynamic stop loss.
+
+## Position Details
+- Symbol: %s
+- Side: %s
+- Entry Price: $%.8f
+- Current Price: $%.8f
+- Accumulated Profit: $%.2f
+- Protected Profit (60%%): $%.2f
+- Max Allowable Loss (40%%): $%.2f
+- Current SL: $%.8f
+
+## Market Volatility
+- ATR (14): %.8f
+- ATR %%: %.2f%%
+- Volatility Regime: %s
+- Recent Swings: %.2f%%
+
+## Support/Resistance
+- Nearest Support: $%.8f
+- Nearest Resistance: $%.8f
+
+## Task
+Calculate the optimal dynamic stop loss that:
+1. Protects at least 60%% of accumulated profit
+2. Allows room for normal volatility
+3. Is placed at a logical technical level (support/resistance)
+4. Balances protection with not getting stopped out prematurely
+
+Respond ONLY with valid JSON:
+{
+  "recommended_sl": price as number,
+  "protection_percent": 60 to 80 (%% of profit protected),
+  "reasoning": "brief technical explanation",
+  "sl_basis": "atr" or "support" or "swing_low" or "hybrid",
+  "volatility_buffer": 0.0 to 2.0 (ATR multiplier used),
+  "confidence": 0.0 to 1.0
+}`,
+		req.Symbol,
+		req.Side,
+		req.EntryPrice,
+		req.CurrentPrice,
+		req.AccumulatedProfit,
+		req.ProtectedProfit,
+		req.MaxAllowableLoss,
+		req.CurrentSL,
+		req.ATR14,
+		req.ATRPercent,
+		req.VolatilityRegime,
+		req.RecentSwingRange,
+		req.NearestSupport,
+		req.NearestResistance)
+
+	systemPrompt := `You are an expert crypto risk management AI.
+Your job is to calculate optimal stop loss levels that protect profits while allowing trades to breathe.
+Balance between protection and not getting stopped out on normal volatility.
+Always ensure the recommended SL protects at least 60% of accumulated profit.`
+
+	response, err := a.client.Complete(systemPrompt, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("LLM request failed: %w", err)
+	}
+
+	cleanResponse := stripMarkdownCodeBlock(response)
+	var analysis DynamicSLAnalysisResponse
+	if err := json.Unmarshal([]byte(cleanResponse), &analysis); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	return &analysis, nil
 }

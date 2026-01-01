@@ -26,22 +26,25 @@ const (
 // ModeAllocationConfig holds capital allocation settings per trading mode
 type ModeAllocationConfig struct {
 	// Capital allocation (must sum to 100%)
-	UltraFastScalpPercent float64 `json:"ultra_fast_scalp_percent"` // e.g., 20%
-	ScalpPercent          float64 `json:"scalp_percent"`            // e.g., 30%
-	SwingPercent          float64 `json:"swing_percent"`            // e.g., 35%
+	UltraFastScalpPercent float64 `json:"ultra_fast_scalp_percent"` // e.g., 15%
+	ScalpPercent          float64 `json:"scalp_percent"`            // e.g., 25%
+	ScalpReentryPercent   float64 `json:"scalp_reentry_percent"`    // e.g., 15% - progressive TP with re-entry
+	SwingPercent          float64 `json:"swing_percent"`            // e.g., 30%
 	PositionPercent       float64 `json:"position_percent"`         // e.g., 15%
 
 	// Position limits per mode
-	MaxUltraFastPositions int `json:"max_ultra_fast_positions"` // e.g., 3
-	MaxScalpPositions     int `json:"max_scalp_positions"`      // e.g., 4
-	MaxSwingPositions     int `json:"max_swing_positions"`      // e.g., 3
-	MaxPositionPositions  int `json:"max_position_positions"`   // e.g., 2
+	MaxUltraFastPositions    int `json:"max_ultra_fast_positions"`    // e.g., 3
+	MaxScalpPositions        int `json:"max_scalp_positions"`         // e.g., 4
+	MaxScalpReentryPositions int `json:"max_scalp_reentry_positions"` // e.g., 3
+	MaxSwingPositions        int `json:"max_swing_positions"`         // e.g., 3
+	MaxPositionPositions     int `json:"max_position_positions"`      // e.g., 2
 
 	// Max USD per position per mode
-	MaxUltraFastUSDPerPosition float64 `json:"max_ultra_fast_usd_per_position"` // e.g., $200
-	MaxScalpUSDPerPosition     float64 `json:"max_scalp_usd_per_position"`      // e.g., $300
-	MaxSwingUSDPerPosition     float64 `json:"max_swing_usd_per_position"`      // e.g., $500
-	MaxPositionUSDPerPosition  float64 `json:"max_position_usd_per_position"`   // e.g., $750
+	MaxUltraFastUSDPerPosition    float64 `json:"max_ultra_fast_usd_per_position"`    // e.g., $200
+	MaxScalpUSDPerPosition        float64 `json:"max_scalp_usd_per_position"`         // e.g., $300
+	MaxScalpReentryUSDPerPosition float64 `json:"max_scalp_reentry_usd_per_position"` // e.g., $400
+	MaxSwingUSDPerPosition        float64 `json:"max_swing_usd_per_position"`         // e.g., $500
+	MaxPositionUSDPerPosition     float64 `json:"max_position_usd_per_position"`      // e.g., $750
 
 	// Dynamic rebalancing (optional)
 	AllowDynamicRebalance bool    `json:"allow_dynamic_rebalance"` // false = fixed
@@ -438,6 +441,14 @@ func DefaultModeLLMSettings() map[GinieTradingMode]ModeLLMSettings {
 			BlockOnDisagreement: true,
 			CacheEnabled:        false,
 		},
+		GinieModeScalpReentry: {
+			LLMEnabled:          true,
+			LLMWeight:           0.35, // Higher weight for re-entry decisions
+			SkipOnTimeout:       false,
+			MinLLMConfidence:    55,
+			BlockOnDisagreement: false,
+			CacheEnabled:        true,
+		},
 	}
 }
 
@@ -700,6 +711,132 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				ConsecutiveCandles: 3,     // 3 consecutive LL/HH to trigger
 				LimitTimeoutSec:    120,   // 120 second timeout for LIMIT orders
 				RequireAllTFs:      false, // 2/3 TFs alignment is sufficient
+			},
+		},
+		// ====== SCALP RE-ENTRY MODE ======
+		// Uses scalp entry logic but progressive TP (0.3%, 0.6%, 1%) with re-entry at breakeven
+		"scalp_reentry": {
+			ModeName: "scalp_reentry",
+			Enabled:  false, // Disabled by default - enable via ScalpReentryConfig
+			Timeframe: &ModeTimeframeConfig{
+				TrendTimeframe:    "15m", // Same as scalp
+				EntryTimeframe:    "5m",
+				AnalysisTimeframe: "15m",
+			},
+			Confidence: &ModeConfidenceConfig{
+				MinConfidence:   60.0,
+				HighConfidence:  75.0,
+				UltraConfidence: 88.0,
+			},
+			Size: &ModeSizeConfig{
+				BaseSizeUSD:         250.0,  // Slightly higher for re-entry cycles
+				MaxSizeUSD:          500.0,
+				MaxPositions:        3,      // Fewer positions due to complexity
+				Leverage:            8,
+				SizeMultiplierLo:    1.0,
+				SizeMultiplierHi:    1.5,
+				AutoSizeEnabled:     false,
+				AutoSizeMinCoverFee: 15.0,
+			},
+			CircuitBreaker: &ModeCircuitBreakerConfig{
+				MaxLossPerHour:       50.0,  // Higher due to re-entry complexity
+				MaxLossPerDay:        120.0,
+				MaxConsecutiveLosses: 4,
+				CooldownMinutes:      30,
+				MaxTradesPerMinute:   4,     // Higher due to re-entry orders
+				MaxTradesPerHour:     25,
+				MaxTradesPerDay:      60,
+				WinRateCheckAfter:    15,
+				MinWinRate:           50.0,
+			},
+			SLTP: &ModeSLTPConfig{
+				// Progressive TP: 0.3% -> 0.6% -> 1% (managed by scalp_reentry logic)
+				StopLossPercent:         2.0,   // Wider SL for re-entry cycles
+				TakeProfitPercent:       1.0,   // Final TP at 1%
+				TrailingStopEnabled:     true,  // For final 20%
+				TrailingStopPercent:     5.0,   // 5% from peak for final portion
+				TrailingStopActivation:  1.0,   // After 1% profit
+				TrailingActivationPrice: 0,
+				MaxHoldDuration:         "6h",  // Longer hold for re-entry cycles
+				UseSingleTP:             false, // Multi-level TP
+				SingleTPPercent:         1.0,
+				TPAllocation:            []float64{30, 35, 35, 0}, // Managed by scalp_reentry
+				TrailingActivationMode:  "after_tp3",
+				UseROIBasedSLTP:         false,
+				ROIStopLossPercent:      -10,
+				ROITakeProfitPercent:    10,
+				MarginType:              "CROSS",
+				IsolatedMarginPercent:   30,
+				AutoSLTPEnabled:         false,
+				AutoTrailingEnabled:     false,
+				MinProfitToTrailPct:     1.0,
+				MinSLDistanceFromZero:   0.2,
+			},
+			Hedge: &HedgeModeConfig{
+				AllowHedge:                false, // No hedging in re-entry mode
+				MinConfidenceForHedge:     80.0,
+				ExistingMustBeInProfit:    0.0,
+				MaxHedgeSizePercent:       50.0,
+				AllowSameModeHedge:        false,
+				MaxTotalExposureMultiplier: 1.5,
+			},
+			Averaging: &PositionAveragingConfig{
+				AllowAveraging:         false, // Re-entry handles averaging differently
+				AverageUpProfitPercent: 0.5,
+				AverageDownLossPercent: -1.0,
+				AddSizePercent:         50.0,
+				MaxAverages:            0,
+				MinConfidenceForAverage: 70.0,
+				UseLLMForAveraging:     false,
+			},
+			StaleRelease: &StalePositionReleaseConfig{
+				Enabled:              true,
+				MaxHoldDuration:      "8h",
+				MinProfitToKeep:      0.3,
+				MaxLossToForceClose:  -1.5,
+				StaleZoneLo:          -0.5,
+				StaleZoneHi:          0.3,
+				StaleZoneCloseAction: "close",
+			},
+			Assignment: &ModeAssignmentConfig{
+				VolatilityMin:       "medium",
+				VolatilityMax:       "high",
+				ExpectedHoldMin:     "30m",
+				ExpectedHoldMax:     "6h",
+				ConfidenceMin:       60.0,
+				ConfidenceMax:       75.0,
+				RiskScoreMax:        40,
+				ProfitPotentialMin:  0.5,
+				ProfitPotentialMax:  2.0,
+				RequiresTrendAlign:  true,
+				PriorityWeight:      0.9,
+			},
+			MTF: &ModeMTFConfig{
+				Enabled:             true,
+				PrimaryTimeframe:    "15m",
+				PrimaryWeight:       0.40,
+				SecondaryTimeframe:  "5m",
+				SecondaryWeight:     0.35,
+				TertiaryTimeframe:   "1m",
+				TertiaryWeight:      0.25,
+				MinConsensus:        2,
+				MinWeightedStrength: 60.0,
+				TrendStabilityCheck: true,
+			},
+			DynamicAIExit: &ModeDynamicAIExitConfig{
+				Enabled:           true,
+				MinHoldBeforeAIMS: 15000,
+				AICheckIntervalMS: 20000,  // More frequent for re-entry
+				UseLLMForLoss:     true,
+				UseLLMForProfit:   true,
+				MaxHoldTimeMS:     21600000, // 6 hours
+			},
+			Reversal: &ModeReversalConfig{
+				Enabled:            true,
+				MinLLMConfidence:   0.70,  // Higher confidence for re-entry mode
+				ConsecutiveCandles: 3,
+				LimitTimeoutSec:    90,
+				RequireAllTFs:      false,
 			},
 		},
 		"swing": {
@@ -1204,6 +1341,10 @@ type AutopilotSettings struct {
 	// Adaptive AI learning configuration
 	AdaptiveAIConfig AdaptiveAIConfig `json:"adaptive_ai_config"`
 
+	// ====== SCALP RE-ENTRY MODE CONFIGURATION ======
+	// Progressive TP with re-entry at breakeven for maximizing gains
+	ScalpReentryConfig ScalpReentryConfig `json:"scalp_reentry_config"`
+
 	// ====== EARLY WARNING SYSTEM (Multi-Timeframe Position Health Monitor) ======
 	// AI-driven early loss detection using 1m, 3m, 5m, 15m candle analysis
 	EarlyWarningEnabled            bool    `json:"early_warning_enabled"`              // Master toggle for early warning system
@@ -1501,26 +1642,29 @@ func DefaultSettings() *AutopilotSettings {
 		// Per-mode capital allocation defaults (conservative)
 		ModeAllocation: &ModeAllocationConfig{
 			// Capital allocation: must sum to 100%
-			UltraFastScalpPercent: 20.0, // 20% to ultra-fast scalping
-			ScalpPercent:          30.0, // 30% to scalping
-			SwingPercent:          35.0, // 35% to swing trading
+			UltraFastScalpPercent: 15.0, // 15% to ultra-fast scalping
+			ScalpPercent:          25.0, // 25% to scalping
+			ScalpReentryPercent:   15.0, // 15% to scalp re-entry (progressive TP)
+			SwingPercent:          30.0, // 30% to swing trading
 			PositionPercent:       15.0, // 15% to position trading
 
 			// Position limits per mode
-			MaxUltraFastPositions: 3, // Max 3 concurrent ultra-fast positions
-			MaxScalpPositions:     4, // Max 4 concurrent scalp positions
-			MaxSwingPositions:     3, // Max 3 concurrent swing positions
-			MaxPositionPositions:  2, // Max 2 concurrent position trades
+			MaxUltraFastPositions:    3, // Max 3 concurrent ultra-fast positions
+			MaxScalpPositions:        4, // Max 4 concurrent scalp positions
+			MaxScalpReentryPositions: 3, // Max 3 concurrent scalp re-entry positions
+			MaxSwingPositions:        3, // Max 3 concurrent swing positions
+			MaxPositionPositions:     2, // Max 2 concurrent position trades
 
 			// Max USD per position per mode
-			MaxUltraFastUSDPerPosition: 200,  // $200 per ultra-fast position
-			MaxScalpUSDPerPosition:     300,  // $300 per scalp position
-			MaxSwingUSDPerPosition:     500,  // $500 per swing position
-			MaxPositionUSDPerPosition:  750,  // $750 per position trade
+			MaxUltraFastUSDPerPosition:    200, // $200 per ultra-fast position
+			MaxScalpUSDPerPosition:        300, // $300 per scalp position
+			MaxScalpReentryUSDPerPosition: 400, // $400 per scalp re-entry position
+			MaxSwingUSDPerPosition:        500, // $500 per swing position
+			MaxPositionUSDPerPosition:     750, // $750 per position trade
 
 			// Dynamic rebalancing
-			AllowDynamicRebalance: false,   // Fixed allocation by default
-			RebalanceThresholdPct: 20.0,    // Allow 20% drift before rebalancing
+			AllowDynamicRebalance: false, // Fixed allocation by default
+			RebalanceThresholdPct: 20.0,  // Allow 20% drift before rebalancing
 		},
 
 		// Per-symbol settings defaults
@@ -1553,6 +1697,9 @@ func DefaultSettings() *AutopilotSettings {
 		ModeLLMSettings:  DefaultModeLLMSettings(),
 		AdaptiveAIConfig: DefaultAdaptiveAIConfig(),
 
+		// Scalp Re-entry Mode configuration defaults (Progressive TP with re-entry)
+		ScalpReentryConfig: DefaultScalpReentryConfig(),
+
 		// Early Warning System defaults (Multi-Timeframe Position Health Monitor)
 		EarlyWarningEnabled:            true,  // Enabled by default
 		EarlyWarningStartAfterMinutes:  1,     // Start checking 1 minute after entry
@@ -1581,15 +1728,16 @@ func patchMigrateTPAllocation(settings *AutopilotSettings) bool {
 		return false
 	}
 
-	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	modes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
 	migrated := false
 
 	// Default allocations per mode
 	defaultAllocations := map[string][]float64{
-		"ultra_fast": {100, 0, 0, 0},   // 100% at TP1
-		"scalp":      {100, 0, 0, 0},   // 100% at TP1
-		"swing":      {50, 50, 0, 0},   // 50% at TP1, 50% at TP2
-		"position":   {40, 30, 20, 10}, // Multi-level
+		"ultra_fast":    {100, 0, 0, 0},   // 100% at TP1
+		"scalp":         {100, 0, 0, 0},   // 100% at TP1
+		"scalp_reentry": {30, 35, 35, 0},  // Progressive TP managed by scalp_reentry logic
+		"swing":         {50, 50, 0, 0},   // 50% at TP1, 50% at TP2
+		"position":      {40, 30, 20, 10}, // Multi-level
 	}
 
 	for _, mode := range modes {
@@ -1625,6 +1773,8 @@ func migrateSettings(settings *AutopilotSettings) bool {
 
 	// Already migrated to v2 or higher - no full migration needed
 	if settings.SettingsVersion >= SettingsVersionConsolidated {
+		// Always sync mode_configs to root settings (mode_configs is source of truth)
+		syncModeConfigsToRootSettings(settings)
 		return patchMigrated
 	}
 
@@ -1634,7 +1784,7 @@ func migrateSettings(settings *AutopilotSettings) bool {
 	}
 
 	// Initialize mode configs with defaults if they don't exist
-	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	modes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
 	for _, mode := range modes {
 		if settings.ModeConfigs[mode] == nil {
 			settings.ModeConfigs[mode] = &ModeFullConfig{
@@ -1648,6 +1798,9 @@ func migrateSettings(settings *AutopilotSettings) bool {
 
 	// Apply sensible defaults for each mode
 	applyModeDefaults(settings)
+
+	// Sync mode_configs to root-level settings (mode_configs is now source of truth)
+	syncModeConfigsToRootSettings(settings)
 
 	// Bump version to v2 after successful migration
 	settings.SettingsVersion = SettingsVersionConsolidated
@@ -1747,6 +1900,59 @@ func ensureModeSubConfigs(config *ModeFullConfig) {
 	}
 	if config.FundingRate == nil {
 		config.FundingRate = &ModeFundingRateConfig{}
+	}
+}
+
+// syncModeConfigsToRootSettings syncs mode_configs values to root-level settings
+// This makes mode_configs the source of truth while maintaining backward compatibility
+// with code that reads root-level UltraFast* settings
+func syncModeConfigsToRootSettings(settings *AutopilotSettings) {
+	// Sync ultra_fast mode_config to root-level UltraFast* settings
+	if cfg := settings.ModeConfigs["ultra_fast"]; cfg != nil {
+		settings.UltraFastEnabled = cfg.Enabled
+
+		// Size settings
+		if cfg.Size != nil {
+			if cfg.Size.MaxSizeUSD > 0 {
+				settings.UltraFastMaxUSDPerPos = cfg.Size.MaxSizeUSD
+			}
+			if cfg.Size.MaxPositions > 0 {
+				settings.UltraFastMaxPositions = cfg.Size.MaxPositions
+			}
+		}
+
+		// Confidence settings
+		if cfg.Confidence != nil {
+			if cfg.Confidence.MinConfidence > 0 {
+				settings.UltraFastMinConfidence = cfg.Confidence.MinConfidence
+			}
+		}
+
+		// SLTP settings
+		if cfg.SLTP != nil {
+			if cfg.SLTP.StopLossPercent > 0 {
+				// Map to trailing settings if trailing enabled
+				if cfg.SLTP.TrailingStopEnabled {
+					settings.UltraFastTrailingEnabled = true
+					settings.UltraFastTrailingActivationPct = cfg.SLTP.TrailingStopActivation
+					settings.UltraFastTrailingDistancePct = cfg.SLTP.TrailingStopPercent
+				}
+			}
+			if cfg.SLTP.TakeProfitPercent > 0 {
+				// Use TP percent for TP1
+				settings.UltraFastTP1Percent = cfg.SLTP.TakeProfitPercent
+			}
+		}
+
+		// Circuit breaker settings
+		if cfg.CircuitBreaker != nil {
+			if cfg.CircuitBreaker.MaxConsecutiveLosses > 0 {
+				settings.UltraFastMaxConsecutiveLosses = cfg.CircuitBreaker.MaxConsecutiveLosses
+			}
+			if cfg.CircuitBreaker.MaxTradesPerDay > 0 {
+				settings.UltraFastMaxDailyTrades = cfg.CircuitBreaker.MaxTradesPerDay
+			}
+		}
 	}
 }
 
@@ -3444,7 +3650,7 @@ func (sm *SettingsManager) UpdateModeAllocation(config *ModeAllocationConfig) er
 	settings := sm.GetCurrentSettings()
 
 	// Validate that allocation percentages sum to 100%
-	total := config.UltraFastScalpPercent + config.ScalpPercent + config.SwingPercent + config.PositionPercent
+	total := config.UltraFastScalpPercent + config.ScalpPercent + config.ScalpReentryPercent + config.SwingPercent + config.PositionPercent
 	if total < 99.0 || total > 101.0 { // Allow 1% rounding error
 		return fmt.Errorf("mode allocation percentages must sum to 100%%, got %.1f%%", total)
 	}
@@ -3467,6 +3673,9 @@ func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital floa
 	case "scalp":
 		allocatedPercent = config.ScalpPercent
 		maxPositions = float64(config.MaxScalpPositions)
+	case "scalp_reentry":
+		allocatedPercent = config.ScalpReentryPercent
+		maxPositions = float64(config.MaxScalpReentryPositions)
 	case "swing":
 		allocatedPercent = config.SwingPercent
 		maxPositions = float64(config.MaxSwingPositions)
