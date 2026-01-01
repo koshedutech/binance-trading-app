@@ -33,8 +33,8 @@ services:
       # No global/environment API keys supported
       - BINANCE_BASE_URL=https://fapi.binance.com
       - BINANCE_TESTNET=false
-      - MOCK_MODE=false
-      - TRADING_DRY_RUN=false
+      - MOCK_MODE=true
+      - TRADING_DRY_RUN=true
       # Database
       - DB_HOST=postgres
       - DB_PORT=5432
@@ -52,6 +52,8 @@ services:
       - TELEGRAM_CHAT_ID=
       - DISCORD_ENABLED=false
       - DISCORD_WEBHOOK_URL=
+      # Skip frontend build (use pre-built dist)
+      - SKIP_FRONTEND=0
       # Logging
       - LOG_LEVEL=INFO
       - LOG_OUTPUT=stdout
@@ -115,8 +117,8 @@ services:
       - AUTH_ENABLED=true
       - AUTH_JWT_SECRET=binance-trading-bot-jwt-secret-key-2025-change-in-prod
       - AUTH_REQUIRE_EMAIL_VERIFICATION=false
-      - AUTH_ACCESS_TOKEN_DURATION=15m
-      - AUTH_REFRESH_TOKEN_DURATION=168h
+      - AUTH_ACCESS_TOKEN_DURATION=24h
+      - AUTH_REFRESH_TOKEN_DURATION=720h
       # Subscription Configuration
       - SUBSCRIPTION_ENABLED=false
     volumes:

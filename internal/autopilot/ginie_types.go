@@ -618,12 +618,12 @@ func DefaultGinieConfig() *GinieConfig {
 		// Override
 		AutoOverrideEnabled: true,
 
-		// Counter-Trend Trading (more permissive defaults)
-		AllowCounterTrend:              true,
-		CounterTrendMinConfidence:      50.0, // 50% instead of 80% - allow contrarian trades with decent signals
-		CounterTrendRequireReversal:    true,  // Still require reversal pattern for safety
-		CounterTrendRequireRSIExtreme:  false, // Don't require extreme RSI (too restrictive)
-		CounterTrendRequireADXWeakening: false, // Don't require ADX weakening (too restrictive)
+		// Counter-Trend Trading (VERY permissive for testing)
+		AllowCounterTrend:               true,
+		CounterTrendMinConfidence:       5.0,   // Very low confidence for counter-trend testing
+		CounterTrendRequireReversal:     false, // DISABLED - allow counter-trend without reversal patterns
+		CounterTrendRequireRSIExtreme:   false, // Don't require extreme RSI
+		CounterTrendRequireADXWeakening: false, // Don't require ADX weakening
 
 		// Monitoring
 		ScalpMonitorInterval:    900,

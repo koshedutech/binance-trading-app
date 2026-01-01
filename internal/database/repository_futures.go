@@ -15,9 +15,9 @@ func (db *DB) CreateFuturesTrade(ctx context.Context, trade *FuturesTrade) error
 			user_id, symbol, position_side, side, entry_price, quantity, leverage,
 			margin_type, isolated_margin, liquidation_price, stop_loss, take_profit,
 			status, entry_time, trade_source, notes, ai_decision_id,
-			strategy_id, strategy_name, created_at, updated_at
+			strategy_id, strategy_name, trading_mode, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
 		) RETURNING id`
 
 	now := time.Now()
@@ -46,6 +46,7 @@ func (db *DB) CreateFuturesTrade(ctx context.Context, trade *FuturesTrade) error
 		trade.AIDecisionID,
 		trade.StrategyID,
 		trade.StrategyName,
+		trade.TradingMode,
 		now,
 		now,
 	).Scan(&trade.ID)

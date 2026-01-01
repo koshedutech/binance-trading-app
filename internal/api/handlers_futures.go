@@ -1847,6 +1847,63 @@ func (s *Server) getFuturesClientForUser(c *gin.Context) binance.FuturesClient {
 	return nil
 }
 
+// handleGetIncomeHistory retrieves income history from Binance (realized PnL, fees, funding)
+// GET /api/futures/income-history?type=&limit=100&start_time=&end_time=
+// type: REALIZED_PNL, FUNDING_FEE, COMMISSION, TRANSFER, or empty for all
+func (s *Server) handleGetIncomeHistory(c *gin.Context) {
+	client := s.getFuturesClientForUser(c)
+	if client == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "no_api_keys",
+			"message": "Please configure your Binance API keys in Settings",
+		})
+		return
+	}
+
+	// Parse query parameters
+	incomeType := c.Query("type") // REALIZED_PNL, FUNDING_FEE, COMMISSION, etc.
+	limitStr := c.DefaultQuery("limit", "100")
+	startTimeStr := c.Query("start_time")
+	endTimeStr := c.Query("end_time")
+
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit < 1 || limit > 1000 {
+		limit = 100
+	}
+
+	var startTime, endTime int64
+	if startTimeStr != "" {
+		startTime, _ = strconv.ParseInt(startTimeStr, 10, 64)
+	}
+	if endTimeStr != "" {
+		endTime, _ = strconv.ParseInt(endTimeStr, 10, 64)
+	}
+
+	// Fetch income history from Binance
+	records, err := client.GetIncomeHistory(incomeType, startTime, endTime, limit)
+	if err != nil {
+		log.Printf("[ERROR] handleGetIncomeHistory: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "failed_to_fetch",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Calculate summaries by type
+	summary := make(map[string]float64)
+	for _, r := range records {
+		summary[r.IncomeType] += r.Income
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"records": records,
+		"count":   len(records),
+		"summary": summary,
+	})
+}
+
 // getOppositeSide returns the opposite side for TP/SL orders
 func getOppositeSide(side string) string {
 	if side == "BUY" {

@@ -632,7 +632,7 @@ func (fc *FuturesController) LoadSavedSettings() {
 		case "moderate":
 			ginieConfig.MinConfidenceToTrade = 50.0
 		case "aggressive":
-			ginieConfig.MinConfidenceToTrade = 45.0
+			ginieConfig.MinConfidenceToTrade = 40.0
 		default:
 			if ginieConfig.MinConfidenceToTrade == 0 {
 				ginieConfig.MinConfidenceToTrade = 50.0
