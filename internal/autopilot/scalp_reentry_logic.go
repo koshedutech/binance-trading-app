@@ -559,8 +559,10 @@ func (g *GinieAutopilot) getCurrentPrice(symbol string) float64 {
 
 // roundQuantity rounds quantity to appropriate precision for a symbol
 func (g *GinieAutopilot) roundQuantity(symbol string, qty float64) float64 {
-	// Placeholder - actual implementation should use symbol info
-	return math.Floor(qty*1000) / 1000
+	// Use the proper precision lookup from futures_controller.go
+	precision := getQuantityPrecision(symbol)
+	multiplier := math.Pow(10, float64(precision))
+	return math.Floor(qty*multiplier) / multiplier
 }
 
 // NOTE: getMinQuantity is implemented in ginie_autopilot.go
