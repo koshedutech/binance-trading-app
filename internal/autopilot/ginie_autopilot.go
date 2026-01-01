@@ -4301,16 +4301,18 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 			// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
 			settings := settingsManager.GetCurrentSettings()
 			modeToConfigKey := map[string]string{
-				string(GinieModeUltraFast): "ultra_fast",
-				string(GinieModeScalp):     "scalp",
-				string(GinieModeSwing):     "swing",
-				string(GinieModePosition):  "position",
+				string(GinieModeUltraFast):    "ultra_fast",
+				string(GinieModeScalp):        "scalp",
+				string(GinieModeSwing):        "swing",
+				string(GinieModePosition):     "position",
+				string(GinieModeScalpReentry): "scalp_reentry",
 			}
 			modeDefaults := map[string]float64{
-				"ultra_fast": 2.0,
-				"scalp":      3.0,
-				"swing":      5.0,
-				"position":   8.0,
+				"ultra_fast":    2.0,
+				"scalp":         3.0,
+				"swing":         5.0,
+				"position":      8.0,
+				"scalp_reentry": 1.0, // Progressive TP for scalp_reentry
 			}
 
 			var tpPercent float64
@@ -9665,10 +9667,11 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		var manualSLPct, manualTPPct float64
 
 		modeToConfigKey := map[string]string{
-			string(GinieModeUltraFast): "ultra_fast",
-			string(GinieModeScalp):     "scalp",
-			string(GinieModeSwing):     "swing",
-			string(GinieModePosition):  "position",
+			string(GinieModeUltraFast):    "ultra_fast",
+			string(GinieModeScalp):        "scalp",
+			string(GinieModeSwing):        "swing",
+			string(GinieModePosition):     "position",
+			string(GinieModeScalpReentry): "scalp_reentry",
 		}
 		if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
 			if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
@@ -10223,10 +10226,11 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 	// Get manual SL/TP override if set from ModeConfigs
 	var manualSL, manualTP float64
 	modeToConfigKey := map[string]string{
-		"ultra_fast": "ultra_fast",
-		"scalp":      "scalp",
-		"swing":      "swing",
-		"position":   "position",
+		"ultra_fast":    "ultra_fast",
+		"scalp":         "scalp",
+		"swing":         "swing",
+		"position":      "position",
+		"scalp_reentry": "scalp_reentry",
 	}
 	if modeKey, ok := modeToConfigKey[string(mode)]; ok {
 		if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
