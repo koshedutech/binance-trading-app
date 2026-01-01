@@ -3321,6 +3321,23 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		leverage = ga.config.DefaultLeverage
 	}
 
+	// SCALP_REENTRY POSITION SIZING: Use 3x quantity and minimum 10x leverage
+	// This ensures that when we sell 30% at each TP level, the quantity stays above Binance minimums
+	// Example: If regular scalp uses 10 units, scalp_reentry uses 30 units
+	//          TP1 sells 9 units (30% of 30), which is above minimum
+	if decision.SelectedMode == GinieModeScalpReentry {
+		// Minimum 10x leverage for scalp_reentry (required for adequate position sizes)
+		if leverage < 10 {
+			log.Printf("[SCALP-REENTRY] %s: Upgrading leverage from %dx to 10x (minimum for scalp_reentry)", symbol, leverage)
+			leverage = 10
+		}
+		// 3x position size to ensure TP sell quantities stay above minimums
+		originalUSD := positionUSD
+		positionUSD = positionUSD * 3.0
+		log.Printf("[SCALP-REENTRY] %s: Position size 3x multiplier applied: $%.2f -> $%.2f (leverage: %dx)",
+			symbol, originalUSD, positionUSD, leverage)
+	}
+
 	// Calculate quantity based on adaptive position size
 	quantity := (positionUSD * float64(leverage)) / price
 	quantity = roundQuantity(symbol, quantity)
