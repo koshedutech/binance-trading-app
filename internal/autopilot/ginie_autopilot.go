@@ -7394,6 +7394,18 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 			"sl_price", roundedSL)
 	}
 
+	// CRITICAL FIX: Skip placing TP orders for scalp_reentry mode
+	// Scalp_reentry mode has its own progressive TP logic (0.3%, 0.6%, 1%) with re-entry at breakeven
+	// Placing standard TPs would conflict with this logic and cause premature exits
+	if pos.Mode == GinieModeScalpReentry {
+		log.Printf("[GINIE] %s: Skipping TP order placement for scalp_reentry mode - TPs managed by specialized monitor", pos.Symbol)
+		ga.logger.Info("Skipping TP orders for scalp_reentry mode",
+			"symbol", pos.Symbol,
+			"mode", pos.Mode,
+			"sl_placed", pos.StopLossAlgoID > 0)
+		return
+	}
+
 	// Place Take Profit orders for each level (only TP1 initially, others placed as we hit levels)
 	// SAFETY NET: If TakeProfits is empty, regenerate them now
 	if len(pos.TakeProfits) == 0 {
