@@ -77,9 +77,13 @@ func (g *GinieAutopilot) checkScalpReentryTP(pos *GiniePosition, currentPrice fl
 	var tpPrice float64
 	if pos.Side == "LONG" {
 		tpPrice = pos.EntryPrice * (1 + tpPercent/100)
+		// Round TP price for proper precision comparison
+		tpPrice = roundPriceForTP(pos.Symbol, tpPrice, pos.Side)
 		return currentPrice >= tpPrice, tpPrice
 	} else {
 		tpPrice = pos.EntryPrice * (1 - tpPercent/100)
+		// Round TP price for proper precision comparison
+		tpPrice = roundPriceForTP(pos.Symbol, tpPrice, pos.Side)
 		return currentPrice <= tpPrice, tpPrice
 	}
 }
@@ -95,13 +99,15 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sr.AddDebugLog(fmt.Sprintf("TP%d: Target profit %.2f%%, sell %.0f%% of position", tpLevel, tpPercent, sellPercent))
 
 	// Calculate quantity to sell
+	// Use integer percentage to avoid floating point errors: int(30) / 100.0 = 0.3 exactly
+	sellPercentExact := float64(int(sellPercent)) / 100.0
 	var sellQty float64
 	if tpLevel == 3 {
 		// At TP3 (1%), sell 80% of remaining, keep 20%
-		sellQty = sr.RemainingQuantity * (sellPercent / 100)
+		sellQty = sr.RemainingQuantity * sellPercentExact
 	} else {
 		// At TP1/TP2, sell configured percentage
-		sellQty = sr.RemainingQuantity * (sellPercent / 100)
+		sellQty = sr.RemainingQuantity * sellPercentExact
 	}
 
 	// Round quantity to appropriate precision
@@ -149,6 +155,10 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sr.AccumulatedProfit += pnl
 	sr.TPLevelUnlocked = tpLevel
 
+	// CRITICAL: Sync pos.RemainingQty with sr.RemainingQuantity to avoid divergence
+	// sr.RemainingQuantity is the source of truth for scalp_reentry mode
+	pos.RemainingQty = sr.RemainingQuantity
+
 	// Handle TP3 (1%) - activate dynamic SL and final trailing
 	if tpLevel == 3 {
 		sr.FinalPortionActive = true
@@ -166,8 +176,12 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 			sr.FinalPortionQty, sr.FinalTrailingPercent))
 	} else {
 		// For TP1/TP2, set up re-entry
-		cycle.ReentryTargetPrice = sr.CurrentBreakeven
-		cycle.ReentryQuantity = sellQty * (config.ReentryPercent / 100)
+		// Round the reentry target price for proper precision
+		reentryTargetPrice := roundPrice(pos.Symbol, sr.CurrentBreakeven)
+		cycle.ReentryTargetPrice = reentryTargetPrice
+		// Use integer percentage to avoid floating point errors: int(80) / 100.0 = 0.8
+		reentryPercent := float64(int(config.ReentryPercent)) / 100.0
+		cycle.ReentryQuantity = sellQty * reentryPercent
 		cycle.ReentryState = ReentryStateWaiting
 
 		sr.NextTPBlocked = true
@@ -251,6 +265,20 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 	cycle.ReentryState = ReentryStateExecuting
 
 	reentryQty := g.roundQuantity(pos.Symbol, cycle.ReentryQuantity)
+
+	// Validate minimum quantity after rounding
+	minQty := g.getMinQuantity(pos.Symbol)
+	if reentryQty < minQty {
+		sr.AddDebugLog(fmt.Sprintf("Re-entry qty %.8f below minimum %.8f after rounding, skipping", reentryQty, minQty))
+		cycle.ReentryState = ReentryStateSkipped
+		cycle.EndTime = time.Now()
+		cycle.Outcome = "skipped"
+		cycle.OutcomeReason = "below_minimum_qty"
+		sr.SkippedReentries++
+		sr.NextTPBlocked = false
+		return nil
+	}
+
 	err := g.executeReentryOrder(pos, reentryQty, currentPrice)
 	if err != nil {
 		cycle.ReentryAttempts++
@@ -278,6 +306,10 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 	sr.TotalReentries++
 	sr.SuccessfulReentries++
 	sr.NextTPBlocked = false
+
+	// CRITICAL: Sync pos.RemainingQty with sr.RemainingQuantity after reentry
+	// sr.RemainingQuantity is the source of truth for scalp_reentry mode
+	pos.RemainingQty = sr.RemainingQuantity
 
 	// Update breakeven after re-entry
 	sr.CurrentBreakeven = g.calculateNewBreakeven(pos, sr)
@@ -338,8 +370,23 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 		}
 		sr.AddDebugLog(fmt.Sprintf("Final exit triggered: %s at %.8f", reason, currentPrice))
 
+		// Validate and round the final portion quantity
+		finalQty := g.roundQuantity(pos.Symbol, sr.FinalPortionQty)
+		minQty := g.getMinQuantity(pos.Symbol)
+		if finalQty < minQty {
+			sr.AddDebugLog(fmt.Sprintf("Final portion qty %.8f below minimum %.8f, using minimum", finalQty, minQty))
+			// If below minimum, try to close whatever is available
+			if sr.RemainingQuantity > 0 {
+				finalQty = g.roundQuantity(pos.Symbol, sr.RemainingQuantity)
+			}
+			if finalQty < minQty {
+				sr.AddDebugLog("Cannot close: quantity below minimum even with remaining")
+				return nil
+			}
+		}
+
 		// Close final portion
-		err := g.executeScalpPartialClose(pos, sr.FinalPortionQty, fmt.Sprintf("scalp_reentry_final_%s", reason))
+		err := g.executeScalpPartialClose(pos, finalQty, fmt.Sprintf("scalp_reentry_final_%s", reason))
 		if err != nil {
 			return err
 		}
@@ -362,6 +409,9 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 		sr.FinalPortionQty = 0
 		sr.RemainingQuantity = 0
 		sr.Enabled = false
+
+		// CRITICAL: Sync pos.RemainingQty to zero after full close
+		pos.RemainingQty = 0
 
 		// Check if we should use AI for exit decision
 		if config.UseAIDecisions {
@@ -427,16 +477,18 @@ func (g *GinieAutopilot) updateDynamicSL(pos *GiniePosition, currentPrice float6
 
 	if shouldUpdate {
 		oldSL := sr.DynamicSLPrice
-		sr.DynamicSLPrice = newSLPrice
+		// Round the SL price for proper precision before storing and placing order
+		roundedSLPrice := roundPriceForSL(pos.Symbol, newSLPrice, pos.Side)
+		sr.DynamicSLPrice = roundedSLPrice
 		sr.ProtectedProfit = protectedAmount
 		sr.MaxAllowableLoss = maxLoss
 		sr.LastUpdate = time.Now()
 
 		sr.AddDebugLog(fmt.Sprintf("Dynamic SL updated: %.8f -> %.8f (protecting $%.2f, max loss $%.2f)",
-			oldSL, newSLPrice, protectedAmount, maxLoss))
+			oldSL, roundedSLPrice, protectedAmount, maxLoss))
 
-		// Update the actual SL order on exchange
-		return g.updatePositionStopLoss(pos, newSLPrice)
+		// Update the actual SL order on exchange (already rounded)
+		return g.updatePositionStopLoss(pos, roundedSLPrice)
 	}
 
 	return nil
@@ -514,28 +566,38 @@ func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, pr
 }
 
 // calculateNewBreakeven calculates the new breakeven after re-entry
+// CORRECT FORMULA: breakeven = netCost / remainingQty
+// where netCost = (original_cost - sold_value + reentry_costs)
+// and remainingQty = (original_qty - sold_qty + reentry_qty)
 func (g *GinieAutopilot) calculateNewBreakeven(pos *GiniePosition, sr *ScalpReentryStatus) float64 {
-	// Weighted average of all entries
-	totalCost := 0.0
-	totalQty := 0.0
+	// Start with original entry
+	netCost := pos.EntryPrice * pos.OriginalQty
+	netQty := pos.OriginalQty
 
-	// Original entry
-	totalCost += pos.EntryPrice * pos.OriginalQty
-	totalQty += pos.OriginalQty
-
-	// Subtract sold quantities and add re-entries
+	// Process each cycle: subtract sells, add reentries
 	for _, cycle := range sr.Cycles {
-		if cycle.ReentryState == ReentryStateCompleted {
-			totalCost += cycle.ReentryFilledPrice * cycle.ReentryFilledQty
-			totalQty += cycle.ReentryFilledQty
+		// ALWAYS subtract the sold quantity and value
+		// This was the BUG - we were not subtracting sold quantities!
+		if cycle.SellQuantity > 0 {
+			netCost -= cycle.SellPrice * cycle.SellQuantity
+			netQty -= cycle.SellQuantity
+		}
+
+		// Add back reentry if completed
+		if cycle.ReentryState == ReentryStateCompleted && cycle.ReentryFilledQty > 0 {
+			netCost += cycle.ReentryFilledPrice * cycle.ReentryFilledQty
+			netQty += cycle.ReentryFilledQty
 		}
 	}
 
-	if totalQty == 0 {
+	// Guard against division by zero or negative qty
+	if netQty <= 0 {
 		return pos.EntryPrice
 	}
 
-	return totalCost / totalQty
+	// Round the breakeven price for consistency
+	breakeven := netCost / netQty
+	return roundPrice(pos.Symbol, breakeven)
 }
 
 // recordFinalExitForLearning records exit data for adaptive learning
@@ -550,11 +612,18 @@ func (g *GinieAutopilot) recordFinalExitForLearning(pos *GiniePosition, reason s
 // ============ PLACEHOLDER METHODS ============
 // These methods should be implemented or already exist in ginie_autopilot.go
 
-// getCurrentPrice gets current price for a symbol
+// getCurrentPrice gets current price for a symbol from Binance API
 func (g *GinieAutopilot) getCurrentPrice(symbol string) float64 {
-	// This should fetch from price cache or API
-	// Placeholder returns 0, actual implementation exists in ginie_autopilot.go
-	return 0
+	if g.futuresClient == nil {
+		log.Printf("[SCALP-REENTRY] %s: futuresClient is nil, cannot get price", symbol)
+		return 0
+	}
+	price, err := g.futuresClient.GetFuturesCurrentPrice(symbol)
+	if err != nil {
+		log.Printf("[SCALP-REENTRY] %s: Failed to get current price: %v", symbol, err)
+		return 0
+	}
+	return price
 }
 
 // roundQuantity rounds quantity to appropriate precision for a symbol
