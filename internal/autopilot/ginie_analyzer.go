@@ -2377,6 +2377,23 @@ func (g *GinieAnalyzer) GetRecentDecisions(limit int) []GinieDecisionReport {
 	return result
 }
 
+// UpdateDecisionRecommendation updates the recommendation of the most recent decision for a symbol.
+// This is used when MTF rejects a trade after the initial decision was made.
+func (g *GinieAnalyzer) UpdateDecisionRecommendation(symbol string, newRecommendation GenieRecommendation, reason string) {
+	g.decisionLock.Lock()
+	defer g.decisionLock.Unlock()
+
+	// Find the most recent decision for this symbol and update it
+	for i := len(g.decisions) - 1; i >= 0; i-- {
+		if g.decisions[i].Symbol == symbol {
+			g.decisions[i].Recommendation = newRecommendation
+			g.decisions[i].RecommendationNote = fmt.Sprintf("[MTF REJECTED] %s", reason)
+			log.Printf("[DECISION-UPDATE] %s: Updated recommendation to %s - %s", symbol, newRecommendation, reason)
+			return
+		}
+	}
+}
+
 
 // ===== LLM TREND CONFIRMATION SYSTEM =====
 // trendConfirmationCache stores cached LLM trend confirmations

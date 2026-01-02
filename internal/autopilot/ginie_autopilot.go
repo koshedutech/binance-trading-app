@@ -2703,6 +2703,8 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = fmt.Sprintf("low_confidence (%.1f < %.1f)%s",
 					decision.ConfidenceScore, effectiveMinConfidence, boostInfo)
+				// Update the stored decision so UI shows correct rejected status
+				ga.analyzer.UpdateDecisionRecommendation(symbol, RecommendationSkip, signalLog.RejectionReason)
 				ga.LogSignal(signalLog)
 				continue
 			}
@@ -2723,6 +2725,8 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				}
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = "coin_blocked: " + reason
+				// Update the stored decision so UI shows correct rejected status
+				ga.analyzer.UpdateDecisionRecommendation(symbol, RecommendationSkip, signalLog.RejectionReason)
 				ga.LogSignal(signalLog)
 				continue
 			}
@@ -2829,6 +2833,8 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 					signalLog.Status = "rejected"
 					signalLog.RejectionReason = fmt.Sprintf("mtf_misaligned: %s", mtfResult.AlignmentReason)
+					// Update the stored decision so UI shows correct rejected status
+					ga.analyzer.UpdateDecisionRecommendation(symbol, RecommendationSkip, mtfResult.AlignmentReason)
 					ga.LogSignal(signalLog)
 					continue
 				}
@@ -4778,6 +4784,9 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 		ga.circuitBreaker.RecordTrade(pnlPercent)
 	}
 
+	// Record to MODE circuit breaker for mode-specific loss tracking
+	ga.RecordModeTradeResult(pos.Mode, pnl)
+
 	// Record trade with original signal info for study
 	tradeResult := GinieTradeResult{
 		Symbol:     pos.Symbol,
@@ -5396,6 +5405,9 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	if ga.config.CircuitBreakerEnabled && ga.circuitBreaker != nil {
 		ga.circuitBreaker.RecordTrade(pnlPercent)
 	}
+
+	// Record to MODE circuit breaker for mode-specific loss tracking
+	ga.RecordModeTradeResult(pos.Mode, totalPnL)
 
 	// Per-coin consecutive loss tracking and blocking
 	ga.updateCoinLossTracking(symbol, totalPnL, pnlPercent)
@@ -11067,6 +11079,9 @@ func (ga *GinieAutopilot) CloseAllPositions() (int, float64, error) {
 		if ga.config.CircuitBreakerEnabled && ga.circuitBreaker != nil {
 			ga.circuitBreaker.RecordTrade(pnlPercent)
 		}
+
+		// Record to MODE circuit breaker for mode-specific loss tracking
+		ga.RecordModeTradeResult(pos.Mode, pnl)
 
 		// Record trade
 		ga.recordTrade(GinieTradeResult{
