@@ -193,6 +193,10 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sr.CurrentCycle = len(sr.Cycles)
 	sr.LastUpdate = time.Now()
 
+	// CRITICAL: Save position state after TP hit to survive restarts
+	// This ensures scalp_reentry doesn't reset to TP1 on refresh/restart
+	go g.SavePositionState()
+
 	return nil
 }
 
@@ -316,6 +320,9 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 
 	sr.AddDebugLog(fmt.Sprintf("Re-entry complete! New remaining qty %.4f, new BE %.8f",
 		sr.RemainingQuantity, sr.CurrentBreakeven))
+
+	// CRITICAL: Save position state after re-entry to survive restarts
+	go g.SavePositionState()
 
 	return nil
 }

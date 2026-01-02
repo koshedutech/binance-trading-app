@@ -7,10 +7,12 @@ import (
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/logging"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -34,6 +36,134 @@ func calculateTradingFee(quantity, price float64) float64 {
 	notionalValue := quantity * price
 	return notionalValue * TakerFeeRate
 }
+
+// ==================== POSITION STATE PERSISTENCE ====================
+// This section handles saving/loading critical position state that must survive restarts
+// Primary use case: scalp_reentry mode needs to remember which TPs have been hit
+
+const positionStateFile = "ginie_position_state.json"
+
+// PersistedPositionState stores critical state that must survive restarts
+type PersistedPositionState struct {
+	Symbol         string              `json:"symbol"`
+	Side           string              `json:"side"`
+	Mode           GinieTradingMode    `json:"mode"`
+	CurrentTPLevel int                 `json:"current_tp_level"`
+	ScalpReentry   *ScalpReentryStatus `json:"scalp_reentry,omitempty"` // Full scalp_reentry state
+	SavedAt        time.Time           `json:"saved_at"`
+}
+
+// PositionStateStore holds all persisted position states
+type PositionStateStore struct {
+	Positions map[string]PersistedPositionState `json:"positions"` // key: symbol
+	UpdatedAt time.Time                         `json:"updated_at"`
+}
+
+// SavePositionState saves critical position state to disk
+// Call this after TP hits, state changes, or periodically
+func (ga *GinieAutopilot) SavePositionState() error {
+	ga.mu.RLock()
+	store := PositionStateStore{
+		Positions: make(map[string]PersistedPositionState),
+		UpdatedAt: time.Now(),
+	}
+
+	for symbol, pos := range ga.positions {
+		state := PersistedPositionState{
+			Symbol:         symbol,
+			Side:           pos.Side,
+			Mode:           pos.Mode,
+			CurrentTPLevel: pos.CurrentTPLevel,
+			SavedAt:        time.Now(),
+		}
+
+		// Save scalp_reentry state if present
+		if pos.ScalpReentry != nil {
+			state.ScalpReentry = pos.ScalpReentry
+		}
+
+		store.Positions[symbol] = state
+	}
+	ga.mu.RUnlock()
+
+	// Write to file atomically
+	data, err := json.MarshalIndent(store, "", "  ")
+	if err != nil {
+		log.Printf("[POSITION-STATE] Failed to marshal position state: %v", err)
+		return err
+	}
+
+	tmpFile := positionStateFile + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		log.Printf("[POSITION-STATE] Failed to write temp file: %v", err)
+		return err
+	}
+
+	if err := os.Rename(tmpFile, positionStateFile); err != nil {
+		log.Printf("[POSITION-STATE] Failed to rename to final file: %v", err)
+		os.Remove(tmpFile)
+		return err
+	}
+
+	log.Printf("[POSITION-STATE] Saved state for %d positions", len(store.Positions))
+	return nil
+}
+
+// LoadPositionState loads persisted position state from disk
+// Returns map[symbol]PersistedPositionState
+func LoadPositionState() (map[string]PersistedPositionState, error) {
+	data, err := os.ReadFile(positionStateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("[POSITION-STATE] No state file found, starting fresh")
+			return make(map[string]PersistedPositionState), nil
+		}
+		log.Printf("[POSITION-STATE] Failed to read state file: %v", err)
+		return nil, err
+	}
+
+	var store PositionStateStore
+	if err := json.Unmarshal(data, &store); err != nil {
+		log.Printf("[POSITION-STATE] Failed to parse state file: %v", err)
+		return nil, err
+	}
+
+	log.Printf("[POSITION-STATE] Loaded state for %d positions (saved at %s)",
+		len(store.Positions), store.UpdatedAt.Format("15:04:05"))
+
+	return store.Positions, nil
+}
+
+// RestorePositionState restores saved state to a position after reconciliation
+// Call this when syncing positions from Binance
+func (ga *GinieAutopilot) RestorePositionState(pos *GiniePosition, savedState PersistedPositionState) {
+	if pos == nil {
+		return
+	}
+
+	// Only restore if the position matches (same symbol and side)
+	if pos.Symbol != savedState.Symbol || pos.Side != savedState.Side {
+		log.Printf("[POSITION-STATE] State mismatch for %s: pos side=%s, saved side=%s",
+			pos.Symbol, pos.Side, savedState.Side)
+		return
+	}
+
+	// Restore CurrentTPLevel
+	if savedState.CurrentTPLevel > 0 {
+		log.Printf("[POSITION-STATE] Restoring %s: CurrentTPLevel %d -> %d",
+			pos.Symbol, pos.CurrentTPLevel, savedState.CurrentTPLevel)
+		pos.CurrentTPLevel = savedState.CurrentTPLevel
+	}
+
+	// Restore ScalpReentry state if position is in scalp_reentry mode
+	if pos.Mode == GinieModeScalpReentry && savedState.ScalpReentry != nil {
+		log.Printf("[POSITION-STATE] Restoring %s ScalpReentry state: TPUnlocked=%d, Cycles=%d",
+			pos.Symbol, savedState.ScalpReentry.TPLevelUnlocked, len(savedState.ScalpReentry.Cycles))
+		pos.ScalpReentry = savedState.ScalpReentry
+	}
+}
+
+// ==================== END POSITION STATE PERSISTENCE ====================
 
 // ===== EARLY PROFIT BOOKING (ROI-BASED) =====
 // calculateROIAfterFees calculates the ROI% after accounting for both entry and exit trading fees
@@ -4676,14 +4806,22 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 	ga.recordTrade(tradeResult)
 }
 
-// moveToBreakeven moves stop loss to entry price + buffer
+// moveToBreakeven moves stop loss to entry price +/- buffer to cover trading fees
 // reason should describe why breakeven was triggered (e.g., "Proactive breakeven at X% profit" or "After TP1 hit")
+// Buffer direction ensures we exit with a tiny profit (to cover fees) when "breakeven" triggers:
+//   - LONG: SL = entry + buffer (STOP_MARKET SELL triggers when price falls TO 100.1, we exit with +0.1)
+//   - SHORT: SL = entry - buffer (STOP_MARKET BUY triggers when price rises TO 99.9, we exit with +0.1)
 func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition, reason string) {
 	buffer := pos.EntryPrice * (ga.config.BreakevenBuffer / 100)
 
 	if pos.Side == "LONG" {
+		// LONG: STOP_MARKET SELL triggers when price FALLS to trigger.
+		// Set SL above entry so we exit with tiny profit to cover fees.
 		pos.StopLoss = pos.EntryPrice + buffer
 	} else {
+		// SHORT: STOP_MARKET BUY triggers when price RISES to trigger.
+		// Set SL below entry so we exit with tiny profit to cover fees.
+		// (When we buy back at 99.9 after selling at 100, profit = 0.1 covers fees)
 		pos.StopLoss = pos.EntryPrice - buffer
 	}
 
@@ -4860,6 +4998,9 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 				"order_id", order.OrderId,
 				"executed_qty", tpQty,
 				"pnl", pnl)
+
+			// CRITICAL: Save position state after TP hit to survive restarts
+			go ga.SavePositionState()
 
 			// Place next TP order if available
 			if nextTPIndex+1 < len(pos.TakeProfits) {
@@ -7512,6 +7653,9 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 						"executed_qty", tp1Qty,
 						"pnl", pnl)
 
+					// CRITICAL: Save position state after TP1 hit to survive restarts
+					go ga.SavePositionState()
+
 					// Place TP2 order
 					if len(pos.TakeProfits) > 1 {
 						ga.placeNextTPOrder(pos, 1)
@@ -8352,6 +8496,14 @@ func (ga *GinieAutopilot) reconcilePositions() {
 		}
 	}
 
+	// CRITICAL: Load persisted position state BEFORE processing
+	// This ensures we can restore scalp_reentry state and CurrentTPLevel
+	savedStates, stateErr := LoadPositionState()
+	if stateErr != nil {
+		log.Printf("[RECONCILE] Warning: Failed to load saved position state: %v", stateErr)
+		savedStates = make(map[string]PersistedPositionState)
+	}
+
 	// Check each internal position against Binance
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
@@ -8608,6 +8760,11 @@ func (ga *GinieAutopilot) reconcilePositions() {
 
 			ga.positions[exchangePos.Symbol] = newPos
 			addedPerMode[externalMode]++
+
+			// CRITICAL: Restore saved state if available (scalp_reentry TPs, CurrentTPLevel)
+			if savedState, found := savedStates[exchangePos.Symbol]; found {
+				ga.RestorePositionState(newPos, savedState)
+			}
 
 			ga.logger.Info("Position reconciliation: added untracked position to Ginie",
 				"symbol", exchangePos.Symbol,
@@ -12293,6 +12450,15 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 			ga.logger.Info("Ultra-fast position monitor stopping")
 			return
 		case <-ticker.C:
+			// FIX: Re-check if ultra-fast mode is still enabled
+			// If disabled at runtime, stop the monitor goroutine
+			currentSettings := GetSettingsManager().GetCurrentSettings()
+			if !currentSettings.UltraFastEnabled {
+				ga.logger.Info("Ultra-fast mode disabled - stopping position monitor")
+				log.Printf("[ULTRA-FAST] Mode disabled at runtime - stopping monitor goroutine")
+				return
+			}
+
 			// Check rate limiter - skip if circuit breaker is open
 			if binance.GetRateLimiter().IsCircuitOpen() {
 				log.Printf("[ULTRA-FAST] Skipping cycle - rate limiter circuit breaker is open")
