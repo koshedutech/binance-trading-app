@@ -14891,3 +14891,228 @@ func (ga *GinieAutopilot) getDefaultSLPercent(mode GinieTradingMode) float64 {
 		return 1.0 // 1% default
 	}
 }
+
+// ConvertPositionMode converts an active position from one trading mode to another.
+// This cancels existing SL/TP orders and reconfigures based on the new mode's settings.
+func (ga *GinieAutopilot) ConvertPositionMode(symbol string, targetMode GinieTradingMode, options map[string]interface{}) (*GiniePosition, error) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	// Validate target mode
+	validModes := map[GinieTradingMode]bool{
+		GinieModeUltraFast:    true,
+		GinieModeScalp:        true,
+		GinieModeScalpReentry: true,
+		GinieModeSwing:        true,
+		GinieModePosition:     true,
+	}
+	if !validModes[targetMode] {
+		return nil, fmt.Errorf("invalid target mode: %s", targetMode)
+	}
+
+	// Find the position
+	pos, exists := ga.positions[symbol]
+	if !exists {
+		return nil, fmt.Errorf("no active position found for %s", symbol)
+	}
+
+	oldMode := pos.Mode
+	if oldMode == targetMode {
+		return nil, fmt.Errorf("position is already in %s mode", targetMode)
+	}
+
+	ga.logger.Info("[MODE-CONVERT] Starting position mode conversion",
+		"symbol", symbol,
+		"old_mode", oldMode,
+		"target_mode", targetMode,
+		"entry_price", pos.EntryPrice,
+		"remaining_qty", pos.RemainingQty)
+
+	// Cancel existing SL/TP algo orders
+	if pos.StopLossAlgoID > 0 {
+		if err := ga.futuresClient.CancelAlgoOrder(symbol, pos.StopLossAlgoID); err != nil {
+			ga.logger.Warn("[MODE-CONVERT] Failed to cancel existing SL order",
+				"symbol", symbol,
+				"order_id", pos.StopLossAlgoID,
+				"error", err)
+		} else {
+			ga.logger.Info("[MODE-CONVERT] Cancelled existing SL order",
+				"symbol", symbol,
+				"order_id", pos.StopLossAlgoID)
+		}
+		pos.StopLossAlgoID = 0
+	}
+
+	for _, tpID := range pos.TakeProfitAlgoIDs {
+		if tpID > 0 {
+			if err := ga.futuresClient.CancelAlgoOrder(symbol, tpID); err != nil {
+				ga.logger.Warn("[MODE-CONVERT] Failed to cancel existing TP order",
+					"symbol", symbol,
+					"order_id", tpID,
+					"error", err)
+			} else {
+				ga.logger.Info("[MODE-CONVERT] Cancelled existing TP order",
+					"symbol", symbol,
+					"order_id", tpID)
+			}
+		}
+	}
+	pos.TakeProfitAlgoIDs = nil
+
+	// Get the new mode's configuration
+	modeConfig := ga.getModeConfig(targetMode)
+	if modeConfig == nil {
+		return nil, fmt.Errorf("failed to get config for mode %s", targetMode)
+	}
+
+	// Update position mode
+	pos.Mode = targetMode
+
+	// Update leverage if specified in options or use mode default
+	if newLeverage, ok := options["leverage"].(int); ok && newLeverage > 0 {
+		pos.Leverage = newLeverage
+	} else if modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
+		pos.Leverage = modeConfig.Size.Leverage
+	}
+
+	// Calculate new SL/TP based on target mode
+	var slPercent, tpPercent float64
+	if modeConfig.SLTP != nil {
+		slPercent = modeConfig.SLTP.StopLossPercent
+		tpPercent = modeConfig.SLTP.TakeProfitPercent
+	} else {
+		slPercent = ga.getDefaultSLPercent(targetMode)
+		tpPercent = slPercent * 2
+	}
+
+	// Calculate new SL price
+	var newSL float64
+	if pos.Side == "LONG" {
+		newSL = pos.EntryPrice * (1 - slPercent/100)
+	} else {
+		newSL = pos.EntryPrice * (1 + slPercent/100)
+	}
+	pos.StopLoss = newSL
+	pos.OriginalSL = newSL
+	pos.MovedToBreakeven = false
+
+	// Calculate new TP levels based on mode
+	pos.TakeProfits = ga.calculateNewTPLevels(pos, targetMode, tpPercent)
+	pos.CurrentTPLevel = 0
+
+	// Reset protection state for new mode
+	pos.Protection = NewProtectionStatus()
+	ga.logger.Info("[MODE-CONVERT] Protection state reset",
+		"symbol", symbol,
+		"note", fmt.Sprintf("Mode converted from %s to %s", oldMode, targetMode))
+
+	// Handle scalp_reentry specific setup
+	if targetMode == GinieModeScalpReentry {
+		config := DefaultScalpReentryConfig()
+		pos.ScalpReentry = NewScalpReentryStatus(pos.EntryPrice, pos.RemainingQty, config)
+
+		tp1Pct, tp1Sell := config.GetTPConfig(1)
+		tp2Pct, tp2Sell := config.GetTPConfig(2)
+		tp3Pct, tp3Sell := config.GetTPConfig(3)
+
+		if pos.Side == "LONG" {
+			pos.TakeProfits = []GinieTakeProfitLevel{
+				{Level: 1, Price: pos.EntryPrice * (1 + tp1Pct/100), Percent: tp1Sell, GainPct: tp1Pct, Status: "pending"},
+				{Level: 2, Price: pos.EntryPrice * (1 + tp2Pct/100), Percent: tp2Sell, GainPct: tp2Pct, Status: "pending"},
+				{Level: 3, Price: pos.EntryPrice * (1 + tp3Pct/100), Percent: tp3Sell, GainPct: tp3Pct, Status: "pending"},
+			}
+		} else {
+			pos.TakeProfits = []GinieTakeProfitLevel{
+				{Level: 1, Price: pos.EntryPrice * (1 - tp1Pct/100), Percent: tp1Sell, GainPct: tp1Pct, Status: "pending"},
+				{Level: 2, Price: pos.EntryPrice * (1 - tp2Pct/100), Percent: tp2Sell, GainPct: tp2Pct, Status: "pending"},
+				{Level: 3, Price: pos.EntryPrice * (1 - tp3Pct/100), Percent: tp3Sell, GainPct: tp3Pct, Status: "pending"},
+			}
+		}
+	}
+
+	// Set trailing activation based on mode config
+	if modeConfig.SLTP != nil && modeConfig.SLTP.TrailingStopEnabled {
+		pos.TrailingPercent = modeConfig.SLTP.TrailingStopPercent
+		pos.TrailingActivationPct = modeConfig.SLTP.TrailingStopActivation
+		pos.TrailingActive = false
+	}
+
+	ga.logger.Info("[MODE-CONVERT] Position mode conversion completed",
+		"symbol", symbol,
+		"old_mode", oldMode,
+		"new_mode", targetMode,
+		"new_sl", newSL,
+		"new_tp_levels", len(pos.TakeProfits),
+		"leverage", pos.Leverage)
+
+	// Place new SL/TP orders
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		ga.placeSLTPOrders(pos)
+	}()
+
+	return pos, nil
+}
+
+// calculateNewTPLevels calculates new TP levels for a position based on target mode
+func (ga *GinieAutopilot) calculateNewTPLevels(pos *GiniePosition, mode GinieTradingMode, baseTpPercent float64) []GinieTakeProfitLevel {
+	var levels []GinieTakeProfitLevel
+
+	modeConfig := ga.getModeConfig(mode)
+	var allocation []float64
+	if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) > 0 {
+		allocation = modeConfig.SLTP.TPAllocation
+	} else {
+		allocation = []float64{25, 25, 25, 25}
+	}
+
+	tpMultipliers := []float64{0.33, 0.66, 1.0, 1.5}
+	switch mode {
+	case GinieModeScalp, GinieModeScalpReentry:
+		tpMultipliers = []float64{0.3, 0.6, 1.0, 0}
+	case GinieModeSwing:
+		tpMultipliers = []float64{0.5, 1.0, 1.5, 2.0}
+	case GinieModePosition:
+		tpMultipliers = []float64{0.33, 0.66, 1.0, 1.5}
+	}
+
+	for i, mult := range tpMultipliers {
+		if mult <= 0 || (i < len(allocation) && allocation[i] <= 0) {
+			continue
+		}
+		tpPct := baseTpPercent * mult
+		var tpPrice float64
+		if pos.Side == "LONG" {
+			tpPrice = pos.EntryPrice * (1 + tpPct/100)
+		} else {
+			tpPrice = pos.EntryPrice * (1 - tpPct/100)
+		}
+		closePercent := 25.0
+		if i < len(allocation) {
+			closePercent = allocation[i]
+		}
+		if closePercent > 0 {
+			levels = append(levels, GinieTakeProfitLevel{
+				Level:   i + 1,
+				Price:   tpPrice,
+				Percent: closePercent,
+				GainPct: tpPct,
+				Status:  "pending",
+			})
+		}
+	}
+
+	return levels
+}
+
+// GetPositionMode returns the current trading mode of a position
+func (ga *GinieAutopilot) GetPositionMode(symbol string) (GinieTradingMode, error) {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	pos, exists := ga.positions[symbol]
+	if !exists {
+		return "", fmt.Errorf("no active position found for %s", symbol)
+	}
+	return pos.Mode, nil
+}

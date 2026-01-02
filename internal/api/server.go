@@ -727,6 +727,9 @@ func (s *Server) setupRoutes() {
 			// Scalp Re-entry Monitor endpoints
 			futures.GET("/ginie/scalp-reentry/positions", s.handleGetScalpReentryPositions)
 			futures.GET("/ginie/scalp-reentry/positions/:symbol", s.handleGetScalpReentryPositionStatus)
+
+			// Position Mode Conversion endpoint
+			futures.POST("/ginie/positions/:symbol/convert-mode", s.handleConvertPositionMode)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

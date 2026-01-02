@@ -729,10 +729,10 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 88.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:         250.0,  // Slightly higher for re-entry cycles
-				MaxSizeUSD:          500.0,
-				MaxPositions:        3,      // Fewer positions due to complexity
-				Leverage:            8,
+				BaseSizeUSD:         300.0,  // 3x position size for re-entry cycles
+				MaxSizeUSD:          600.0,  // 3x max size
+				MaxPositions:        4,      // More positions with re-entry
+				Leverage:            10,     // 10x leverage per user request
 				SizeMultiplierLo:    1.0,
 				SizeMultiplierHi:    1.5,
 				AutoSizeEnabled:     false,
@@ -781,13 +781,13 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				MaxTotalExposureMultiplier: 1.5,
 			},
 			Averaging: &PositionAveragingConfig{
-				AllowAveraging:         false, // Re-entry handles averaging differently
+				AllowAveraging:         true,   // Enable 3x averaging for scalp_reentry
 				AverageUpProfitPercent: 0.5,
 				AverageDownLossPercent: -1.0,
-				AddSizePercent:         50.0,
-				MaxAverages:            0,
-				MinConfidenceForAverage: 70.0,
-				UseLLMForAveraging:     false,
+				AddSizePercent:         100.0,  // 100% of original size per average
+				MaxAverages:            3,      // Allow up to 3 averaging entries
+				MinConfidenceForAverage: 65.0,  // Lower confidence for re-entry averaging
+				UseLLMForAveraging:     true,   // Use LLM to decide averaging
 			},
 			StaleRelease: &StalePositionReleaseConfig{
 				Enabled:              true,
@@ -4231,21 +4231,77 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			},
 		}
 
+	case GinieModeScalpReentry:
+		return GinieModeConfig{
+			Mode:    GinieModeScalpReentry,
+			Enabled: true,
+
+			// Timeframes - same as scalp but optimized for re-entry cycles
+			TrendTimeframe:    "15m",
+			EntryTimeframe:    "5m",
+			AnalysisTimeframe: "15m",
+
+			// Confidence - moderate thresholds for quick re-entries
+			MinConfidence:   55,
+			HighConfidence:  72,
+			UltraConfidence: 85,
+
+			// Position Sizing - 3x size with 10x leverage for scalp_reentry
+			BaseSizeUSD:    300,  // 3x position size (scalp is 100)
+			MaxSizeUSD:     600,  // 3x max size
+			MaxPositions:   4,
+			Leverage:       10,   // 10x leverage per user request
+			SizeMultiplier: 2.0,
+
+			// SL/TP - tighter for scalp reentry with progressive TP
+			StopLossPercent:   1.2,
+			TakeProfitPercent: 2.5,
+			TrailingEnabled:   false,  // Uses progressive TP instead
+			TrailingPercent:   0.4,
+			TrailingActivation: 0.8,
+			TrailingActivationPrice: 0,
+			MaxHoldDuration:   "2h",
+
+			// ROI-based SL/TP
+			UseROIBasedSLTP:      false,
+			ROIStopLossPercent:   -10,
+			ROITakeProfitPercent: 20,
+
+			// Margin
+			MarginType:            "CROSS",
+			IsolatedMarginPercent: 50,
+
+			// Circuit Breaker - aggressive for high-frequency re-entry trading
+			CircuitBreaker: ModeCircuitBreaker{
+				MaxLossPerHour:     35,
+				MaxLossPerDay:      80,
+				MaxConsecutiveLoss: 4,
+				MaxTradesPerMinute: 4,
+				MaxTradesPerHour:   25,
+				MaxTradesPerDay:    60,
+				WinRateCheckAfter:  12,
+				MinWinRatePercent:  48,
+				CooldownMinutes:    20,
+				AutoRecovery:       true,
+			},
+		}
+
 	default:
 		// Return scalp as default if unknown mode
 		return GetDefaultModeConfig(GinieModeScalp)
 	}
 }
 
-// GetAllDefaultModeConfigs returns a map of all 4 trading mode configurations with their defaults.
+// GetAllDefaultModeConfigs returns a map of all 5 trading mode configurations with their defaults.
 // This is useful for displaying all mode configurations in the UI or for initialization.
 // Returns map keyed by GinieTradingMode containing GinieModeConfig values.
 func GetAllDefaultModeConfigs() map[GinieTradingMode]GinieModeConfig {
 	return map[GinieTradingMode]GinieModeConfig{
-		GinieModeUltraFast: GetDefaultModeConfig(GinieModeUltraFast),
-		GinieModeScalp:     GetDefaultModeConfig(GinieModeScalp),
-		GinieModeSwing:     GetDefaultModeConfig(GinieModeSwing),
-		GinieModePosition:  GetDefaultModeConfig(GinieModePosition),
+		GinieModeUltraFast:    GetDefaultModeConfig(GinieModeUltraFast),
+		GinieModeScalp:        GetDefaultModeConfig(GinieModeScalp),
+		GinieModeScalpReentry: GetDefaultModeConfig(GinieModeScalpReentry),
+		GinieModeSwing:        GetDefaultModeConfig(GinieModeSwing),
+		GinieModePosition:     GetDefaultModeConfig(GinieModePosition),
 	}
 }
 
@@ -4254,7 +4310,7 @@ func GetAllDefaultModeConfigs() map[GinieTradingMode]GinieModeConfig {
 // The configuration is validated before saving.
 func (sm *SettingsManager) UpdateGinieModeConfig(mode GinieTradingMode, config GinieModeConfig) error {
 	// Validate mode
-	if mode != GinieModeUltraFast && mode != GinieModeScalp && mode != GinieModeSwing && mode != GinieModePosition {
+	if mode != GinieModeUltraFast && mode != GinieModeScalp && mode != GinieModeScalpReentry && mode != GinieModeSwing && mode != GinieModePosition {
 		return fmt.Errorf("invalid trading mode: %s", mode)
 	}
 

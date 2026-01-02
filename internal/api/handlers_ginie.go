@@ -3891,3 +3891,105 @@ func (s *Server) handleGetScalpReentryPositionStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, response)
 }
+
+// handleConvertPositionMode converts a position from one trading mode to another
+// POST /api/futures/ginie/positions/:symbol/convert-mode
+func (s *Server) handleConvertPositionMode(c *gin.Context) {
+	symbol := c.Param("symbol")
+	log.Printf("[MODE-CONVERT] Mode conversion request for position: %s", symbol)
+
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
+	}
+
+	// Parse request body
+	var req struct {
+		TargetMode string                 `json:"target_mode" binding:"required"`
+		Leverage   int                    `json:"leverage,omitempty"`
+		Options    map[string]interface{} `json:"options,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate target mode
+	validModes := map[string]autopilot.GinieTradingMode{
+		"ultra_fast":    autopilot.GinieModeUltraFast,
+		"scalp":         autopilot.GinieModeScalp,
+		"scalp_reentry": autopilot.GinieModeScalpReentry,
+		"swing":         autopilot.GinieModeSwing,
+		"position":      autopilot.GinieModePosition,
+	}
+
+	targetMode, ok := validModes[req.TargetMode]
+	if !ok {
+		errorResponse(c, http.StatusBadRequest,
+			"Invalid target_mode. Must be one of: ultra_fast, scalp, scalp_reentry, swing, position")
+		return
+	}
+
+	// Get current position mode
+	currentMode, err := giniePilot.GetPositionMode(symbol)
+	if err != nil {
+		errorResponse(c, http.StatusNotFound, "Position not found: "+err.Error())
+		return
+	}
+
+	// Build options map
+	options := make(map[string]interface{})
+	if req.Leverage > 0 {
+		options["leverage"] = req.Leverage
+	}
+	if req.Options != nil {
+		for k, v := range req.Options {
+			options[k] = v
+		}
+	}
+
+	// Perform conversion
+	updatedPos, err := giniePilot.ConvertPositionMode(symbol, targetMode, options)
+	if err != nil {
+		log.Printf("[MODE-CONVERT] Conversion failed for %s: %v", symbol, err)
+		errorResponse(c, http.StatusBadRequest, "Mode conversion failed: "+err.Error())
+		return
+	}
+
+	log.Printf("[MODE-CONVERT] Successfully converted %s from %s to %s", symbol, currentMode, targetMode)
+
+	// Build response with position details
+	tpLevels := make([]map[string]interface{}, len(updatedPos.TakeProfits))
+	for i, tp := range updatedPos.TakeProfits {
+		tpLevels[i] = map[string]interface{}{
+			"level":    tp.Level,
+			"price":    tp.Price,
+			"percent":  tp.Percent,
+			"gain_pct": tp.GainPct,
+			"status":   tp.Status,
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"message":  fmt.Sprintf("Position %s converted from %s to %s", symbol, currentMode, targetMode),
+		"symbol":   symbol,
+		"old_mode": string(currentMode),
+		"new_mode": string(targetMode),
+		"position": gin.H{
+			"symbol":              updatedPos.Symbol,
+			"side":                updatedPos.Side,
+			"mode":                string(updatedPos.Mode),
+			"entry_price":         updatedPos.EntryPrice,
+			"remaining_qty":       updatedPos.RemainingQty,
+			"leverage":            updatedPos.Leverage,
+			"stop_loss":           updatedPos.StopLoss,
+			"take_profits":        tpLevels,
+			"trailing_pct":        updatedPos.TrailingPercent,
+			"trailing_activation": updatedPos.TrailingActivationPct,
+		},
+		"scalp_reentry": updatedPos.ScalpReentry != nil,
+	})
+}
