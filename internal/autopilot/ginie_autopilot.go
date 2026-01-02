@@ -7961,6 +7961,18 @@ func (ga *GinieAutopilot) checkSinglePositionProtection(pos *GiniePosition) {
 
 	// Handle partially protected (SL only, no TP)
 	if pos.Protection.State == StateSLVerified && !pos.Protection.TPVerified {
+		// CRITICAL FIX: Skip TP placement for scalp_reentry mode
+		// Scalp_reentry manages its own TPs internally via market orders (0.3%, 0.6%, 1% levels)
+		// Placing standard TP orders would conflict and cause premature full position closes
+		if pos.Mode == GinieModeScalpReentry {
+			// For scalp_reentry, mark TP as "verified" since it's managed internally
+			pos.Protection.TPVerified = true
+			pos.Protection.TPVerifiedAt = time.Now()
+			pos.Protection.SetState(StateFullyProtected)
+			log.Printf("[PROTECTION] %s: Skipping TP placement for scalp_reentry mode - TPs managed by specialized monitor", pos.Symbol)
+			return
+		}
+
 		// TP missing but SL in place - try to add TP without canceling SL
 		if pos.Protection.TimeSinceStateChange() > 10*time.Second {
 			log.Printf("[PROTECTION] %s: TP missing for %v, attempting to add TP", pos.Symbol, pos.Protection.TimeSinceStateChange().Round(time.Second))
@@ -7977,6 +7989,14 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 		log.Printf("[PROTECTION-TP] placeTPOrderOnly called with nil position")
 		return
 	}
+
+	// CRITICAL SAFETY CHECK: Never place TP orders for scalp_reentry mode
+	// Scalp_reentry manages TPs internally via market orders at progressive levels
+	if pos.Mode == GinieModeScalpReentry {
+		log.Printf("[PROTECTION-TP] %s: Skipping - scalp_reentry mode manages TPs internally", pos.Symbol)
+		return
+	}
+
 	if len(pos.TakeProfits) == 0 {
 		log.Printf("[PROTECTION-TP] %s: No TakeProfits defined (len=0), cannot place TP", pos.Symbol)
 		return
