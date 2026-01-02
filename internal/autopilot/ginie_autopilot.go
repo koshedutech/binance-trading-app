@@ -2954,8 +2954,16 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 	}
 
 	// Calculate allocation per potential new position
-	// Divide usable balance across available slots
+	// Use base_size_usd from mode config if set, otherwise divide usable balance across slots
 	baseAllocationPerPosition := usableBalance / float64(availableSlots)
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.BaseSizeUSD > 0 {
+		// Use configured base size instead of balance-based calculation
+		baseAllocationPerPosition = modeConfig.Size.BaseSizeUSD
+		ga.logger.Debug("Using configured base_size_usd",
+			"mode", mode,
+			"base_size_usd", modeConfig.Size.BaseSizeUSD,
+			"balance_based_would_be", usableBalance/float64(availableSlots))
+	}
 
 	// Get risk multipliers from mode config with fallbacks
 	riskMultiplierConservative := 0.6
