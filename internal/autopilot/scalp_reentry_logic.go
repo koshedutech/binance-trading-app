@@ -560,14 +560,27 @@ func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, pr
 		positionSide = "SHORT"
 	}
 
-	// Use market order for immediate execution
+	// Use LIMIT order with slight offset for quick fill
+	// For BUY: place slightly above current price to ensure fill
+	// For SELL: place slightly below current price to ensure fill
+	limitPrice := price
+	if orderSide == "BUY" {
+		limitPrice = price * 1.0005 // 0.05% above for quick fill
+	} else {
+		limitPrice = price * 0.9995 // 0.05% below for quick fill
+	}
+	limitPrice = roundPrice(pos.Symbol, limitPrice)
+
 	order := &FuturesOrder{
 		Symbol:       pos.Symbol,
 		Side:         orderSide,
 		PositionSide: positionSide,
-		Type:         "MARKET",
+		Type:         "LIMIT",
 		Quantity:     qty,
+		Price:        limitPrice,
 	}
+
+	log.Printf("[SCALP-REENTRY] %s: Placing LIMIT re-entry order at %.8f (current: %.8f)", pos.Symbol, limitPrice, price)
 
 	return g.placeOrder(order)
 }
@@ -646,7 +659,7 @@ func (g *GinieAutopilot) roundQuantity(symbol string, qty float64) float64 {
 // executeScalpPartialClose executes a partial close for scalp re-entry mode
 // This differs from the standard executePartialClose by taking explicit qty and reason
 func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float64, reason string) error {
-	// Use the existing partial close mechanism via market order
+	// Use LIMIT order for better price execution
 	if qty <= 0 {
 		return fmt.Errorf("invalid quantity: %.8f", qty)
 	}
@@ -659,16 +672,44 @@ func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float6
 		closeSide = "BUY"
 	}
 
-	// Place market close order
+	// Get current price for LIMIT order
+	currentPrice := g.getCurrentPrice(pos.Symbol)
+	if currentPrice <= 0 {
+		// Fallback to market order if price unavailable
+		log.Printf("[SCALP-REENTRY] %s: Price unavailable, using MARKET order for close", pos.Symbol)
+		order := &FuturesOrder{
+			Symbol:       pos.Symbol,
+			Side:         closeSide,
+			PositionSide: pos.Side,
+			Type:         "MARKET",
+			Quantity:     qty,
+		}
+		return g.placeOrder(order)
+	}
+
+	// Calculate LIMIT price with slight offset for quick fill
+	// For SELL (closing LONG): place slightly below current price
+	// For BUY (closing SHORT): place slightly above current price
+	limitPrice := currentPrice
+	if closeSide == "SELL" {
+		limitPrice = currentPrice * 0.9995 // 0.05% below for quick fill
+	} else {
+		limitPrice = currentPrice * 1.0005 // 0.05% above for quick fill
+	}
+	limitPrice = roundPrice(pos.Symbol, limitPrice)
+
+	// Place LIMIT close order
 	order := &FuturesOrder{
 		Symbol:       pos.Symbol,
 		Side:         closeSide,
 		PositionSide: pos.Side,
-		Type:         "MARKET",
+		Type:         "LIMIT",
 		Quantity:     qty,
+		Price:        limitPrice,
 	}
 
-	log.Printf("[SCALP-REENTRY] %s: Executing partial close: qty=%.8f, reason=%s", pos.Symbol, qty, reason)
+	log.Printf("[SCALP-REENTRY] %s: Executing LIMIT partial close at %.8f (current: %.8f): qty=%.8f, reason=%s",
+		pos.Symbol, limitPrice, currentPrice, qty, reason)
 
 	return g.placeOrder(order)
 }
