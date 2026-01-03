@@ -409,6 +409,9 @@ func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
 		stats["combined_pnl"] = dailyPnL + unrealizedPnL
 	}
 
+	// Get stuck positions that need manual intervention
+	stuckPositions := autopilot.GetStuckPositions()
+
 	c.JSON(http.StatusOK, gin.H{
 		"stats":             stats,
 		"config":            config,
@@ -417,7 +420,37 @@ func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
 		"available_balance": availableBalance,
 		"wallet_balance":    walletBalance,
 		"blocked_coins":     blockedCoins,
+		"stuck_positions":   stuckPositions,
+		"has_stuck_positions": len(stuckPositions) > 0,
 	})
+}
+
+// handleGetStuckPositions returns positions that need manual intervention
+func (s *Server) handleGetStuckPositions(c *gin.Context) {
+	autopilot := s.getGinieAutopilotForUser(c)
+	if autopilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
+	}
+
+	stuckPositions := autopilot.GetStuckPositions()
+
+	c.JSON(http.StatusOK, gin.H{
+		"stuck_positions": stuckPositions,
+		"count":           len(stuckPositions),
+		"has_alerts":      len(stuckPositions) > 0,
+		"message":         getStuckPositionsMessage(len(stuckPositions)),
+	})
+}
+
+func getStuckPositionsMessage(count int) string {
+	if count == 0 {
+		return "No positions need manual intervention"
+	}
+	if count == 1 {
+		return "1 position needs manual intervention - please close manually"
+	}
+	return fmt.Sprintf("%d positions need manual intervention - please close manually", count)
 }
 
 // handleGetGinieAutopilotConfig returns Ginie autopilot configuration
@@ -1154,6 +1187,46 @@ func (s *Server) handleGetMarketMovers(c *gin.Context) {
 		"top_losers":      movers.TopLosers,
 		"top_volume":      movers.TopVolume,
 		"high_volatility": movers.HighVolatility,
+	})
+}
+
+// handleGetAllMarketMovers returns ALL market movers WITHOUT volume filtering
+// This shows the real top gainers/losers including low-volume coins (like Binance app shows)
+func (s *Server) handleGetAllMarketMovers(c *gin.Context) {
+	controller := s.getFuturesAutopilot()
+	if controller == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		return
+	}
+
+	ginie := controller.GetGinieAnalyzer()
+	if ginie == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
+		return
+	}
+
+	// Get topN from query param, default to 20
+	topN := 20
+	if v := c.Query("top"); v != "" {
+		if n, err := parseIntParam(v); err == nil && n > 0 {
+			topN = n
+		}
+	}
+
+	movers, err := ginie.GetAllMarketMovers(topN)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to get all market movers: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"top_n":           topN,
+		"top_gainers":     movers.TopGainers,
+		"top_losers":      movers.TopLosers,
+		"top_volume":      movers.TopVolume,
+		"high_volatility": movers.HighVolatility,
+		"note":            "No volume filter applied - includes all coins",
 	})
 }
 

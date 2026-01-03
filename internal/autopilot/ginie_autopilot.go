@@ -1334,6 +1334,39 @@ func (ga *GinieAutopilot) GetPositions() []*GiniePosition {
 	return positions
 }
 
+// StuckPositionAlert represents a position that needs manual intervention
+type StuckPositionAlert struct {
+	Symbol    string  `json:"symbol"`
+	Side      string  `json:"side"`
+	Mode      string  `json:"mode"`
+	Reason    string  `json:"reason"`
+	AlertedAt string  `json:"alerted_at"`
+	Quantity  float64 `json:"remaining_quantity"`
+	EntryPrice float64 `json:"entry_price"`
+}
+
+// GetStuckPositions returns positions that need manual intervention
+func (ga *GinieAutopilot) GetStuckPositions() []StuckPositionAlert {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	alerts := make([]StuckPositionAlert, 0)
+	for _, pos := range ga.positions {
+		if pos.ScalpReentry != nil && pos.ScalpReentry.NeedsManualIntervention {
+			alerts = append(alerts, StuckPositionAlert{
+				Symbol:     pos.Symbol,
+				Side:       pos.Side,
+				Mode:       string(pos.Mode),
+				Reason:     pos.ScalpReentry.ManualInterventionReason,
+				AlertedAt:  pos.ScalpReentry.ManualInterventionAlertAt,
+				Quantity:   pos.ScalpReentry.RemainingQuantity,
+				EntryPrice: pos.EntryPrice,
+			})
+		}
+	}
+	return alerts
+}
+
 // GetCurrentPrice returns the current price for a symbol from the exchange
 func (ga *GinieAutopilot) GetCurrentPrice(symbol string) float64 {
 	if ga.futuresClient == nil {

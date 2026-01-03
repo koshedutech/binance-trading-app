@@ -106,6 +106,11 @@ type ScalpReentryStatus struct {
 
 	// Debug/Audit
 	DebugLog []string `json:"debug_log,omitempty"`
+
+	// Manual Intervention Alert (visible to UI)
+	NeedsManualIntervention   bool   `json:"needs_manual_intervention"`   // True when position is stuck
+	ManualInterventionReason  string `json:"manual_intervention_reason"`  // Reason for manual intervention
+	ManualInterventionAlertAt string `json:"manual_intervention_alert_at"` // Timestamp when alert was triggered
 }
 
 // ============ AI DECISION TYPES ============

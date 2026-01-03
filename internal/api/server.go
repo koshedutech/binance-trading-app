@@ -570,6 +570,7 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ginie/autopilot/start", s.handleStartGinieAutopilot)
 			futures.POST("/ginie/autopilot/stop", s.handleStopGinieAutopilot)
 			futures.GET("/ginie/autopilot/positions", s.handleGetGinieAutopilotPositions)
+			futures.GET("/ginie/autopilot/stuck", s.handleGetStuckPositions)
 			futures.GET("/ginie/autopilot/history", s.handleGetGinieAutopilotTradeHistory)
 			futures.POST("/ginie/autopilot/clear", s.handleClearGinieAutopilotPositions)
 			futures.POST("/ginie/refresh-symbols", s.handleRefreshGinieSymbols)
@@ -627,6 +628,7 @@ func (s *Server) setupRoutes() {
 
 			// Ginie Market Movers endpoints (dynamic symbol selection)
 			futures.GET("/ginie/market-movers", s.handleGetMarketMovers)
+			futures.GET("/ginie/all-gainers", s.handleGetAllMarketMovers) // No volume filter - shows real top gainers
 			futures.POST("/ginie/symbols/refresh-dynamic", s.handleRefreshDynamicSymbols)
 
 			// Ginie Blocked Coins endpoints (per-coin circuit breaker)

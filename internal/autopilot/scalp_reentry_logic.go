@@ -123,7 +123,20 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 			sellQty = remainingQty
 			sellPercent = 100.0
 		} else {
-			sr.AddDebugLog(fmt.Sprintf("TP%d: Position too small (%.4f < min %.4f), skipping", tpLevel, remainingQty, minQty))
+			// ALERT: Position is stuck - too small to execute any trade
+			alertMsg := fmt.Sprintf("TP%d: Position too small (%.4f < min %.4f) - NEEDS MANUAL INTERVENTION", tpLevel, remainingQty, minQty)
+			sr.AddDebugLog(alertMsg)
+
+			// Set visible alert flags for UI
+			sr.NeedsManualIntervention = true
+			sr.ManualInterventionReason = fmt.Sprintf("Position quantity %.6f is below minimum tradeable %.6f. Cannot execute TP%d sell. Please close manually.", remainingQty, minQty, tpLevel)
+			sr.ManualInterventionAlertAt = time.Now().Format(time.RFC3339)
+			sr.LastUpdate = time.Now()
+
+			// Log prominently for visibility
+			log.Printf("[STUCK-POSITION-ALERT] %s %s: %s (remaining: %.6f, min: %.6f, entry: %.4f)",
+				pos.Symbol, pos.Side, alertMsg, remainingQty, minQty, pos.EntryPrice)
+
 			return nil
 		}
 	}
@@ -413,7 +426,18 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 				finalQty = g.roundQuantity(pos.Symbol, sr.RemainingQuantity)
 			}
 			if finalQty < minQty {
-				sr.AddDebugLog("Cannot close: quantity below minimum even with remaining")
+				// ALERT: Final portion stuck - too small to close
+				alertMsg := "Final portion too small to close - NEEDS MANUAL INTERVENTION"
+				sr.AddDebugLog(alertMsg)
+
+				sr.NeedsManualIntervention = true
+				sr.ManualInterventionReason = fmt.Sprintf("Final portion quantity %.6f is below minimum %.6f. Cannot close trailing position. Please close manually.", sr.RemainingQuantity, minQty)
+				sr.ManualInterventionAlertAt = time.Now().Format(time.RFC3339)
+				sr.LastUpdate = time.Now()
+
+				log.Printf("[STUCK-POSITION-ALERT] %s %s: %s (remaining: %.6f, min: %.6f)",
+					pos.Symbol, pos.Side, alertMsg, sr.RemainingQuantity, minQty)
+
 				return nil
 			}
 		}
