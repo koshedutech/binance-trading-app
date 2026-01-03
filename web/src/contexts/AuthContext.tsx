@@ -34,7 +34,7 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   subscriptionEnabled: boolean;
-  login: (credentials: LoginCredentials) => Promise<void>;
+  login: (credentials: LoginCredentials, rememberMe?: boolean) => Promise<void>;
   register: (data: RegisterData) => Promise<User>;
   logout: () => Promise<void>;
   refreshAuth: () => Promise<void>;
@@ -47,26 +47,47 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const ACCESS_TOKEN_KEY = 'access_token';
 const REFRESH_TOKEN_KEY = 'refresh_token';
 const USER_KEY = 'user';
+const REMEMBER_ME_KEY = 'remember_me';
 
 // Helper functions for token storage
-const getStoredTokens = () => ({
-  accessToken: localStorage.getItem(ACCESS_TOKEN_KEY),
-  refreshToken: localStorage.getItem(REFRESH_TOKEN_KEY),
-});
+const getStoredTokens = () => {
+  // Check both localStorage and sessionStorage
+  const localAccessToken = localStorage.getItem(ACCESS_TOKEN_KEY);
+  const localRefreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+  const sessionAccessToken = sessionStorage.getItem(ACCESS_TOKEN_KEY);
+  const sessionRefreshToken = sessionStorage.getItem(REFRESH_TOKEN_KEY);
 
-const setStoredTokens = (accessToken: string, refreshToken: string) => {
-  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
-  localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+  return {
+    accessToken: localAccessToken || sessionAccessToken,
+    refreshToken: localRefreshToken || sessionRefreshToken,
+  };
+};
+
+const setStoredTokens = (accessToken: string, refreshToken: string, rememberMe = true) => {
+  const storage = rememberMe ? localStorage : sessionStorage;
+  storage.setItem(ACCESS_TOKEN_KEY, accessToken);
+  storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+
+  // Store the preference in localStorage
+  localStorage.setItem(REMEMBER_ME_KEY, rememberMe.toString());
 };
 
 const clearStoredTokens = () => {
+  // Clear from both storages to ensure complete logout
   localStorage.removeItem(ACCESS_TOKEN_KEY);
   localStorage.removeItem(REFRESH_TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
+  sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+  sessionStorage.removeItem(REFRESH_TOKEN_KEY);
+  sessionStorage.removeItem(USER_KEY);
 };
 
 const getStoredUser = (): User | null => {
-  const userStr = localStorage.getItem(USER_KEY);
+  // Check both localStorage and sessionStorage
+  const localUserStr = localStorage.getItem(USER_KEY);
+  const sessionUserStr = sessionStorage.getItem(USER_KEY);
+  const userStr = localUserStr || sessionUserStr;
+
   if (userStr) {
     try {
       return JSON.parse(userStr);
@@ -77,8 +98,9 @@ const getStoredUser = (): User | null => {
   return null;
 };
 
-const setStoredUser = (user: User) => {
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+const setStoredUser = (user: User, rememberMe = true) => {
+  const storage = rememberMe ? localStorage : sessionStorage;
+  storage.setItem(USER_KEY, JSON.stringify(user));
 };
 
 // Auth Provider Props
@@ -146,7 +168,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   }, []);
 
   // Login function
-  const login = useCallback(async (credentials: LoginCredentials) => {
+  const login = useCallback(async (credentials: LoginCredentials, rememberMe = true) => {
     const response = await api.post('/auth/login', credentials);
     // Auth endpoints return data directly, not wrapped in a 'data' field
     const { user: userData, access_token, refresh_token } = response.data as {
@@ -156,8 +178,8 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       expires_in: number;
     };
 
-    setStoredTokens(access_token, refresh_token);
-    setStoredUser(userData);
+    setStoredTokens(access_token, refresh_token, rememberMe);
+    setStoredUser(userData, rememberMe);
     setUser(userData);
   }, []);
 
@@ -166,7 +188,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     // First register the user
     await api.post('/auth/register', data);
 
-    // After registration, automatically log them in
+    // After registration, automatically log them in (default to remember)
     const loginResponse = await api.post('/auth/login', { email: data.email, password: data.password });
     const { user: userData, access_token, refresh_token } = loginResponse.data as {
       user: User;
@@ -175,8 +197,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       expires_in: number;
     };
 
-    setStoredTokens(access_token, refresh_token);
-    setStoredUser(userData);
+    const rememberMe = true; // Default to persistent storage for new registrations
+    setStoredTokens(access_token, refresh_token, rememberMe);
+    setStoredUser(userData, rememberMe);
     setUser(userData);
 
     return userData;
@@ -214,12 +237,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       expires_in: number;
     };
 
-    setStoredTokens(access_token, newRefreshToken);
+    // Maintain the same storage type (check if user preference exists)
+    const rememberMePref = localStorage.getItem(REMEMBER_ME_KEY);
+    const rememberMe = rememberMePref === 'true';
+    setStoredTokens(access_token, newRefreshToken, rememberMe);
 
     // Fetch updated user data
     const userResponse = await api.get('/auth/me');
     const userData = userResponse.data as User;
-    setStoredUser(userData);
+    setStoredUser(userData, rememberMe);
     setUser(userData);
   }, []);
 
@@ -227,7 +253,11 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const refreshUser = useCallback(async () => {
     const userResponse = await api.get('/auth/me');
     const userData = userResponse.data as User;
-    setStoredUser(userData);
+
+    // Maintain the same storage type (check if user preference exists)
+    const rememberMePref = localStorage.getItem(REMEMBER_ME_KEY);
+    const rememberMe = rememberMePref === 'true';
+    setStoredUser(userData, rememberMe);
     setUser(userData);
   }, []);
 

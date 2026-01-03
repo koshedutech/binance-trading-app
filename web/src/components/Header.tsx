@@ -150,8 +150,8 @@ export default function Header() {
           </div>
 
           <div className="flex items-center space-x-4">
-            {/* API Health Status */}
-            <APIHealthIndicator />
+            {/* API Health Status - only show when logged in */}
+            {user && <APIHealthIndicator />}
 
             {botStatus && (
               <div className="flex items-center space-x-2">

@@ -7,6 +7,11 @@ const Login: React.FC = () => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [rememberMe, setRememberMe] = useState(() => {
+    // Initialize from localStorage preference
+    const savedPreference = localStorage.getItem('remember_me');
+    return savedPreference === 'true';
+  });
   const { login } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -20,7 +25,7 @@ const Login: React.FC = () => {
     setIsLoading(true);
 
     try {
-      await login({ email, password });
+      await login({ email, password }, rememberMe);
       navigate(from, { replace: true });
     } catch (err: unknown) {
       const errorMessage = err instanceof Error
@@ -95,6 +100,8 @@ const Login: React.FC = () => {
                 id="remember-me"
                 name="remember-me"
                 type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
                 className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-600 rounded bg-gray-800"
               />
               <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-400">
