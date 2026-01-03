@@ -3596,6 +3596,15 @@ type EntryConfluenceResult struct {
 	EMA20          float64
 	EMA50          float64
 	EMATrend       string // "bullish" or "bearish"
+
+	// Extension Filter Results (Prevent Late Entries)
+	ExtensionValid       bool    // True if price is not over-extended
+	EMA20Distance        float64 // % distance from EMA20
+	EMA50Distance        float64 // % distance from EMA50
+	ConsecutiveCandlesOK bool    // True if not too many same-direction candles
+	ConsecutiveCandles   int     // Count of consecutive same-direction candles
+	RSIExhaustionOK      bool    // True if RSI not in exhaustion zone
+	RSI14Value           float64 // Current RSI(14) value
 }
 
 // calculateVWAP calculates Volume Weighted Average Price
@@ -3855,6 +3864,89 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 		result.Details = append(result.Details, fmt.Sprintf("✗ EMA20=%.4f, EMA50=%.4f [%s] - misaligned for %s", ema20, ema50, result.EMATrend, direction))
 	}
 
+	// === 6. EXTENSION FILTER (Prevent Late Entries) ===
+	// This is the CRITICAL filter that prevents entering after price has already moved too far
+	extensionBlocked := false
+	if g.config != nil && g.config.ExtensionFilterEnabled {
+		// Calculate EMA distances
+		ema20Dist := math.Abs((currentPrice - ema20) / ema20 * 100)
+		ema50Dist := math.Abs((currentPrice - ema50) / ema50 * 100)
+		result.EMA20Distance = ema20Dist
+		result.EMA50Distance = ema50Dist
+
+		// Check if price is over-extended from EMAs
+		maxEMA20Ext := g.config.MaxEMA20ExtensionPct
+		maxEMA50Ext := g.config.MaxEMA50ExtensionPct
+		if maxEMA20Ext == 0 {
+			maxEMA20Ext = 2.5 // Default 2.5%
+		}
+		if maxEMA50Ext == 0 {
+			maxEMA50Ext = 4.0 // Default 4%
+		}
+
+		if ema20Dist > maxEMA20Ext {
+			extensionBlocked = true
+			result.Details = append(result.Details, fmt.Sprintf("🚫 EXTENSION BLOCK: Price %.2f%% from EMA20 (max %.1f%%)", ema20Dist, maxEMA20Ext))
+		} else if ema50Dist > maxEMA50Ext {
+			extensionBlocked = true
+			result.Details = append(result.Details, fmt.Sprintf("🚫 EXTENSION BLOCK: Price %.2f%% from EMA50 (max %.1f%%)", ema50Dist, maxEMA50Ext))
+		} else {
+			result.ExtensionValid = true
+			result.Details = append(result.Details, fmt.Sprintf("✓ Extension OK: EMA20=%.2f%%, EMA50=%.2f%%", ema20Dist, ema50Dist))
+		}
+
+		// === 7. CONSECUTIVE CANDLES CHECK ===
+		// Don't enter after too many same-direction candles (trend exhaustion)
+		maxConsec := g.config.MaxConsecutiveCandles
+		if maxConsec == 0 {
+			maxConsec = 3 // Default 3 candles
+		}
+		consecCount := g.countConsecutiveDirectionalCandles(klines, direction)
+		result.ConsecutiveCandles = consecCount
+
+		if consecCount > maxConsec {
+			extensionBlocked = true
+			result.ConsecutiveCandlesOK = false
+			result.Details = append(result.Details, fmt.Sprintf("🚫 CANDLE BLOCK: %d consecutive %s candles (max %d)", consecCount, direction, maxConsec))
+		} else {
+			result.ConsecutiveCandlesOK = true
+			result.Details = append(result.Details, fmt.Sprintf("✓ Candles OK: %d consecutive (max %d)", consecCount, maxConsec))
+		}
+
+		// === 8. RSI EXHAUSTION CHECK ===
+		// Don't enter LONG if RSI is too high (overbought), SHORT if too low (oversold)
+		rsi14 := g.calculateRSI(klines, 14)
+		result.RSI14Value = rsi14
+
+		rsiLongMax := g.config.RSIExhaustionLongMax
+		rsiShortMin := g.config.RSIExhaustionShortMin
+		if rsiLongMax == 0 {
+			rsiLongMax = 65.0 // Default
+		}
+		if rsiShortMin == 0 {
+			rsiShortMin = 35.0 // Default
+		}
+
+		if direction == "long" && rsi14 > rsiLongMax {
+			extensionBlocked = true
+			result.RSIExhaustionOK = false
+			result.Details = append(result.Details, fmt.Sprintf("🚫 RSI BLOCK: RSI=%.1f too high for LONG entry (max %.0f)", rsi14, rsiLongMax))
+		} else if direction == "short" && rsi14 < rsiShortMin {
+			extensionBlocked = true
+			result.RSIExhaustionOK = false
+			result.Details = append(result.Details, fmt.Sprintf("🚫 RSI BLOCK: RSI=%.1f too low for SHORT entry (min %.0f)", rsi14, rsiShortMin))
+		} else {
+			result.RSIExhaustionOK = true
+			result.Details = append(result.Details, fmt.Sprintf("✓ RSI OK: %.1f (range %.0f-%.0f for entry)", rsi14, rsiShortMin, rsiLongMax))
+		}
+	} else {
+		// Extension filter disabled - mark all as OK
+		result.ExtensionValid = true
+		result.ConsecutiveCandlesOK = true
+		result.RSIExhaustionOK = true
+		result.Details = append(result.Details, "⚠ Extension filter disabled")
+	}
+
 	// === Final Confluence Decision ===
 	result.ConfluenceScore = confluenceCount
 
@@ -3864,11 +3956,17 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 		minRequired = 3 // Slightly more lenient for scalp
 	}
 
-	result.Passed = confluenceCount >= minRequired
+	// CRITICAL: Extension filter is a hard block - even if confluence passes
+	if extensionBlocked {
+		result.Passed = false
+		result.Details = append(result.Details, fmt.Sprintf("🛑 BLOCKED BY EXTENSION FILTER: Price over-extended, RSI exhausted, or too many consecutive candles"))
+	} else {
+		result.Passed = confluenceCount >= minRequired
+	}
 
 	if result.Passed {
 		result.Details = append(result.Details, fmt.Sprintf("★ CONFLUENCE PASSED: %d/%d filters (min %d)", confluenceCount, 5, minRequired))
-	} else {
+	} else if !extensionBlocked {
 		result.Details = append(result.Details, fmt.Sprintf("✗ CONFLUENCE FAILED: %d/%d filters (need %d)", confluenceCount, 5, minRequired))
 	}
 
@@ -3879,15 +3977,49 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 			"direction", direction,
 			"mode", mode,
 			"passed", result.Passed,
+			"extension_blocked", extensionBlocked,
 			"score", fmt.Sprintf("%d/5", confluenceCount),
 			"adx", fmt.Sprintf("%.1f", adx),
 			"vwap", fmt.Sprintf("%.4f", vwap),
 			"volume_ratio", fmt.Sprintf("%.2fx", volRatio),
 			"pivot_zone", zone,
-			"ema_trend", result.EMATrend)
+			"ema_trend", result.EMATrend,
+			"ema20_dist", fmt.Sprintf("%.2f%%", result.EMA20Distance),
+			"ema50_dist", fmt.Sprintf("%.2f%%", result.EMA50Distance),
+			"consec_candles", result.ConsecutiveCandles,
+			"rsi14", fmt.Sprintf("%.1f", result.RSI14Value))
 	}
 
 	return result
+}
+
+// countConsecutiveDirectionalCandles counts how many consecutive candles
+// have moved in the same direction (for detecting trend exhaustion)
+func (g *GinieAnalyzer) countConsecutiveDirectionalCandles(klines []binance.Kline, direction string) int {
+	if len(klines) < 2 {
+		return 0
+	}
+
+	count := 0
+	// Start from the most recent candle and count backwards
+	for i := len(klines) - 1; i >= 1; i-- {
+		candle := klines[i]
+		isBullish := candle.Close > candle.Open
+		isBearish := candle.Close < candle.Open
+
+		// For LONG entries, we're worried about too many bullish candles (overbought)
+		// For SHORT entries, we're worried about too many bearish candles (oversold)
+		if direction == "long" && isBullish {
+			count++
+		} else if direction == "short" && isBearish {
+			count++
+		} else {
+			// Different direction candle found, stop counting
+			break
+		}
+	}
+
+	return count
 }
 
 func (g *GinieAnalyzer) findSwingPoints(klines []binance.Kline, lookback int) (highs, lows []float64) {
