@@ -3734,20 +3734,40 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 		return result
 	}
 
+	// === Get per-coin confluence config ===
+	coinConfig := GetSettingsManager().GetCoinConfluenceConfig(symbol)
+	result.Details = append(result.Details, fmt.Sprintf("📊 Using %s tier config (ADX×%.2f, Vol×%.2f)", coinConfig.Tier, coinConfig.ADXMultiplier, coinConfig.VolumeMultiplier))
+
 	currentPrice := klines[len(klines)-1].Close
 	confluenceCount := 0
 
 	// === 1. ADX + DI Check ===
 	adxPeriod := 14
-	adxThreshold := 20.0
+
+	// Get base ADX threshold by mode, then apply coin multiplier
+	baseADXThreshold := 20.0
 	switch mode {
 	case GinieModeSwing:
-		adxThreshold = 20.0 // Lowered from 25
+		if coinConfig.SwingADX > 0 {
+			baseADXThreshold = coinConfig.SwingADX // Use custom override
+		} else {
+			baseADXThreshold = 20.0
+		}
 	case GinieModePosition:
-		adxThreshold = 25.0 // Lowered from 30
+		if coinConfig.PositionADX > 0 {
+			baseADXThreshold = coinConfig.PositionADX // Use custom override
+		} else {
+			baseADXThreshold = 25.0
+		}
 	default: // Scalp
-		adxThreshold = 15.0 // Lowered from 20
+		if coinConfig.ScalpADX > 0 {
+			baseADXThreshold = coinConfig.ScalpADX // Use custom override
+		} else {
+			baseADXThreshold = 15.0
+		}
 	}
+	// Apply coin-specific ADX multiplier (e.g., 0.75 for BTC/ETH)
+	adxThreshold := baseADXThreshold * coinConfig.ADXMultiplier
 
 	adx, plusDI, minusDI := g.calculateADX(klines, adxPeriod)
 	result.ADXValue = adx
@@ -3773,7 +3793,11 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 	}
 
 	// === 2. VWAP Check ===
-	vwapPeriod := 20 // Use 20 periods for VWAP
+	// Use per-coin VWAP period (or default 20)
+	vwapPeriod := coinConfig.VWAPPeriod
+	if vwapPeriod <= 0 {
+		vwapPeriod = 20
+	}
 	vwap := g.calculateVWAP(klines, vwapPeriod)
 	result.VWAPValue = vwap
 
@@ -3797,8 +3821,13 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 	}
 
 	// === 3. Volume Spike Check ===
-	volumeMultiplier := 1.2 // Require 1.2x average volume (lowered from 1.5x)
-	avgPeriod := 20
+	// Use per-coin volume multiplier (applies coin tier multiplier to base 1.2x)
+	baseVolumeMultiplier := 1.2
+	volumeMultiplier := baseVolumeMultiplier * coinConfig.VolumeMultiplier
+	avgPeriod := coinConfig.VolumePeriod
+	if avgPeriod <= 0 {
+		avgPeriod = 20
+	}
 	hasSpike, volRatio := g.detectVolumeSpike(klines, volumeMultiplier, avgPeriod)
 	result.VolumeRatio = volRatio
 
@@ -3812,7 +3841,11 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 
 	// === 4. Pivot Point Check ===
 	pp, r1, r2, s1, s2 := g.calculatePivotPoints(klines)
-	pivotThreshold := 0.5 // 0.5% threshold for "near" pivot
+	// Use per-coin pivot proximity threshold (default 0.5%)
+	pivotThreshold := coinConfig.PivotProximity
+	if pivotThreshold <= 0 {
+		pivotThreshold = 0.5
+	}
 
 	zone, nearestLevel := g.checkPivotProximity(currentPrice, pp, r1, r2, s1, s2, pivotThreshold)
 	result.PivotZone = zone
@@ -3836,8 +3869,17 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 	}
 
 	// === 5. EMA 20/50 Check ===
-	ema20 := g.calculateEMA(klines, 20)
-	ema50 := g.calculateEMA(klines, 50)
+	// Use per-coin EMA periods (default 20/50)
+	emaFastPeriod := coinConfig.EMAFastPeriod
+	emaSlowPeriod := coinConfig.EMASlowPeriod
+	if emaFastPeriod <= 0 {
+		emaFastPeriod = 20
+	}
+	if emaSlowPeriod <= 0 {
+		emaSlowPeriod = 50
+	}
+	ema20 := g.calculateEMA(klines, emaFastPeriod)
+	ema50 := g.calculateEMA(klines, emaSlowPeriod)
 	result.EMA20 = ema20
 	result.EMA50 = ema50
 
@@ -3950,10 +3992,17 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 	// === Final Confluence Decision ===
 	result.ConfluenceScore = confluenceCount
 
-	// Require at least 4 out of 5 filters to pass
-	minRequired := 4
+	// Require minimum filters to pass (use per-coin config if available)
+	minRequired := coinConfig.MinConfluence
+	if minRequired <= 0 {
+		minRequired = 4 // Default 4 out of 5
+	}
 	if mode == GinieModeScalp {
-		minRequired = 3 // Slightly more lenient for scalp
+		if coinConfig.ScalpMinConfluence > 0 {
+			minRequired = coinConfig.ScalpMinConfluence
+		} else {
+			minRequired = 3 // Slightly more lenient for scalp
+		}
 	}
 
 	// CRITICAL: Extension filter is a hard block - even if confluence passes

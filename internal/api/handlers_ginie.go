@@ -2877,7 +2877,9 @@ func (s *Server) handleGetScanPreview(c *gin.Context) {
 					maxLimit = 10
 				}
 
-				movers, err := ginie.GetMarketMovers(maxLimit)
+				// Use GetAllMarketMovers to include ALL top gainers (no volume filter)
+				// This allows trading coins like BUSDT, USELESSUSDT, PIEVERSEUSDT etc.
+				movers, err := ginie.GetAllMarketMovers(maxLimit)
 				if err == nil {
 					if settings.MoverGainers && len(movers.TopGainers) > 0 {
 						for i, coin := range movers.TopGainers {
@@ -4064,5 +4066,155 @@ func (s *Server) handleConvertPositionMode(c *gin.Context) {
 			"trailing_activation": updatedPos.TrailingActivationPct,
 		},
 		"scalp_reentry": updatedPos.ScalpReentry != nil,
+	})
+}
+
+// ============================================================================
+// PER-COIN CONFLUENCE CONFIGURATION ENDPOINTS
+// ============================================================================
+
+// handleGetAllCoinConfluenceConfigs returns all coin confluence configurations
+// GET /api/futures/ginie/coin-confluence
+func (s *Server) handleGetAllCoinConfluenceConfigs(c *gin.Context) {
+	sm := autopilot.GetSettingsManager()
+
+	// Get all configs including tier defaults for common coins
+	configs := sm.GetCoinConfluenceConfigWithDefaults()
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"configs": configs,
+		"tiers": gin.H{
+			"blue_chip": "BTC, ETH - Lower ADX threshold, standard volume",
+			"major_alt": "SOL, XRP, BNB, ADA, etc. - Standard settings",
+			"mid_cap":   "DOGE, SHIB, etc. - Higher ADX, more volume confirmation",
+			"small_cap": "Other coins - Strictest settings, all filters required",
+		},
+	})
+}
+
+// handleGetCoinConfluenceConfig returns confluence config for a specific coin
+// GET /api/futures/ginie/coin-confluence/:symbol
+func (s *Server) handleGetCoinConfluenceConfig(c *gin.Context) {
+	symbol := strings.ToUpper(c.Param("symbol"))
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	config := sm.GetCoinConfluenceConfig(symbol)
+
+	// Check if this is a custom config or tier default
+	allConfigs := sm.GetAllCoinConfluenceConfigs()
+	_, isCustom := allConfigs[symbol]
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"symbol":    symbol,
+		"config":    config,
+		"is_custom": isCustom,
+		"tier":      config.Tier,
+	})
+}
+
+// handleUpdateCoinConfluenceConfig updates confluence config for a specific coin
+// POST /api/futures/ginie/coin-confluence/:symbol
+func (s *Server) handleUpdateCoinConfluenceConfig(c *gin.Context) {
+	symbol := strings.ToUpper(c.Param("symbol"))
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	var config autopilot.CoinConfluenceConfig
+	if err := c.ShouldBindJSON(&config); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate config values
+	if config.ADXMultiplier < 0.1 || config.ADXMultiplier > 3.0 {
+		errorResponse(c, http.StatusBadRequest, "ADX multiplier must be between 0.1 and 3.0")
+		return
+	}
+	if config.VolumeMultiplier < 0.1 || config.VolumeMultiplier > 5.0 {
+		errorResponse(c, http.StatusBadRequest, "Volume multiplier must be between 0.1 and 5.0")
+		return
+	}
+	if config.MinConfluence < 1 || config.MinConfluence > 5 {
+		errorResponse(c, http.StatusBadRequest, "Min confluence must be between 1 and 5")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateCoinConfluenceConfig(symbol, &config); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to update config: "+err.Error())
+		return
+	}
+
+	log.Printf("[COIN-CONFLUENCE] Updated config for %s: ADX×%.2f, Vol×%.2f, MinConf=%d",
+		symbol, config.ADXMultiplier, config.VolumeMultiplier, config.MinConfluence)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("Updated confluence config for %s", symbol),
+		"symbol":  symbol,
+		"config":  config,
+	})
+}
+
+// handleDeleteCoinConfluenceConfig removes custom config for a coin (reverts to tier defaults)
+// DELETE /api/futures/ginie/coin-confluence/:symbol
+func (s *Server) handleDeleteCoinConfluenceConfig(c *gin.Context) {
+	symbol := strings.ToUpper(c.Param("symbol"))
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	if err := sm.DeleteCoinConfluenceConfig(symbol); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to delete config: "+err.Error())
+		return
+	}
+
+	// Get the tier default that will now be used
+	tierDefault := autopilot.DefaultCoinConfluenceConfig(symbol)
+
+	log.Printf("[COIN-CONFLUENCE] Deleted custom config for %s, reverting to %s tier defaults", symbol, tierDefault.Tier)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":         true,
+		"message":         fmt.Sprintf("Deleted custom config for %s, reverting to %s tier defaults", symbol, tierDefault.Tier),
+		"symbol":          symbol,
+		"tier":            tierDefault.Tier,
+		"default_config":  tierDefault,
+	})
+}
+
+// handleGetCoinTier returns the tier classification for a coin
+// GET /api/futures/ginie/coin-tier/:symbol
+func (s *Server) handleGetCoinTier(c *gin.Context) {
+	symbol := strings.ToUpper(c.Param("symbol"))
+	if symbol == "" {
+		errorResponse(c, http.StatusBadRequest, "Symbol is required")
+		return
+	}
+
+	tier := autopilot.GetCoinTier(symbol)
+	defaultConfig := autopilot.DefaultCoinConfluenceConfig(symbol)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"symbol":         symbol,
+		"tier":           tier,
+		"default_config": defaultConfig,
+		"description": map[autopilot.CoinTier]string{
+			autopilot.TierBlueChip: "Blue chip (BTC, ETH) - Lower ADX threshold, trends at lower values",
+			autopilot.TierMajorAlt: "Major altcoin - Standard settings, good liquidity",
+			autopilot.TierMidCap:   "Mid-cap coin - Needs stronger confirmation signals",
+			autopilot.TierSmallCap: "Small cap - Strictest settings, all filters required",
+		}[tier],
 	})
 }

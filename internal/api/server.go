@@ -662,6 +662,13 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/trend-timeframes", s.handleGetGinieTrendTimeframes)
 			futures.POST("/ginie/trend-timeframes", s.handleUpdateGinieTrendTimeframes)
 
+			// Per-Coin Confluence Configuration endpoints
+			futures.GET("/ginie/coin-confluence", s.handleGetAllCoinConfluenceConfigs)
+			futures.GET("/ginie/coin-confluence/:symbol", s.handleGetCoinConfluenceConfig)
+			futures.POST("/ginie/coin-confluence/:symbol", s.handleUpdateCoinConfluenceConfig)
+			futures.DELETE("/ginie/coin-confluence/:symbol", s.handleDeleteCoinConfluenceConfig)
+			futures.GET("/ginie/coin-tier/:symbol", s.handleGetCoinTier)
+
 			// Ultra-Fast Mode Configuration endpoints
 			futures.GET("/ultrafast/config", s.handleGetUltraFastConfig)
 			futures.POST("/ultrafast/config", s.handleUpdateUltraFastConfig)

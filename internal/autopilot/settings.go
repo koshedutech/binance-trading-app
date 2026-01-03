@@ -1362,6 +1362,11 @@ type AutopilotSettings struct {
 	// Detects volume spikes, price acceleration, momentum shifts, and order book imbalances
 	BreakoutDetectionEnabled bool            `json:"breakout_detection_enabled"` // Master toggle for breakout detection
 	BreakoutConfig           *BreakoutConfig `json:"breakout_config"`            // Detailed breakout configuration
+
+	// ====== PER-COIN CONFLUENCE CONFIGURATION ======
+	// Each coin can have custom entry confluence thresholds (ADX, VWAP, Volume, Pivots, EMA)
+	// to account for different market characteristics (BTC vs meme coins vs altcoins)
+	CoinConfluenceConfigs map[string]*CoinConfluenceConfig `json:"coin_confluence_configs"`
 }
 
 // SettingsManager handles persistent settings storage
@@ -1720,6 +1725,9 @@ func DefaultSettings() *AutopilotSettings {
 		// Breakout Detection defaults (Leading indicator system for catching rallies)
 		BreakoutDetectionEnabled: true, // Enable breakout detection by default
 		BreakoutConfig:           DefaultBreakoutConfig(),
+
+		// Per-coin confluence configuration (empty by default - uses tier defaults)
+		CoinConfluenceConfigs: make(map[string]*CoinConfluenceConfig),
 	}
 }
 
@@ -4676,4 +4684,96 @@ func (sm *SettingsManager) GetAllModeLLMSettings() map[GinieTradingMode]ModeLLMS
 	}
 
 	return DefaultModeLLMSettings()
+}
+
+// ====== PER-COIN CONFLUENCE CONFIGURATION METHODS ======
+
+// GetCoinConfluenceConfig returns the confluence config for a specific coin.
+// If no custom config exists, returns tier-based defaults.
+func (sm *SettingsManager) GetCoinConfluenceConfig(symbol string) *CoinConfluenceConfig {
+	settings := sm.GetCurrentSettings()
+
+	// Check for custom config first
+	if settings.CoinConfluenceConfigs != nil {
+		if config, exists := settings.CoinConfluenceConfigs[symbol]; exists && config.Enabled {
+			return config
+		}
+	}
+
+	// Return tier-based defaults
+	return DefaultCoinConfluenceConfig(symbol)
+}
+
+// UpdateCoinConfluenceConfig updates or creates a confluence config for a specific coin.
+func (sm *SettingsManager) UpdateCoinConfluenceConfig(symbol string, config *CoinConfluenceConfig) error {
+	settings := sm.GetCurrentSettings()
+
+	// Initialize map if nil
+	if settings.CoinConfluenceConfigs == nil {
+		settings.CoinConfluenceConfigs = make(map[string]*CoinConfluenceConfig)
+	}
+
+	// Set symbol in config if not set
+	if config.Symbol == "" {
+		config.Symbol = symbol
+	}
+
+	// Set tier if not set
+	if config.Tier == "" {
+		config.Tier = GetCoinTier(symbol)
+	}
+
+	settings.CoinConfluenceConfigs[symbol] = config
+	return sm.SaveSettings(settings)
+}
+
+// DeleteCoinConfluenceConfig removes a custom confluence config for a coin (reverts to tier defaults).
+func (sm *SettingsManager) DeleteCoinConfluenceConfig(symbol string) error {
+	settings := sm.GetCurrentSettings()
+
+	if settings.CoinConfluenceConfigs != nil {
+		delete(settings.CoinConfluenceConfigs, symbol)
+		return sm.SaveSettings(settings)
+	}
+
+	return nil
+}
+
+// GetAllCoinConfluenceConfigs returns all custom coin confluence configs.
+func (sm *SettingsManager) GetAllCoinConfluenceConfigs() map[string]*CoinConfluenceConfig {
+	settings := sm.GetCurrentSettings()
+
+	if settings.CoinConfluenceConfigs != nil {
+		return settings.CoinConfluenceConfigs
+	}
+
+	return make(map[string]*CoinConfluenceConfig)
+}
+
+// GetCoinConfluenceConfigWithDefaults returns all coins with their configs (custom + tier defaults for common coins).
+func (sm *SettingsManager) GetCoinConfluenceConfigWithDefaults() map[string]*CoinConfluenceConfig {
+	settings := sm.GetCurrentSettings()
+
+	result := make(map[string]*CoinConfluenceConfig)
+
+	// Add custom configs first
+	if settings.CoinConfluenceConfigs != nil {
+		for symbol, config := range settings.CoinConfluenceConfigs {
+			result[symbol] = config
+		}
+	}
+
+	// Add default configs for common coins if not already customized
+	commonCoins := []string{
+		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+		"ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+	}
+
+	for _, symbol := range commonCoins {
+		if _, exists := result[symbol]; !exists {
+			result[symbol] = DefaultCoinConfluenceConfig(symbol)
+		}
+	}
+
+	return result
 }

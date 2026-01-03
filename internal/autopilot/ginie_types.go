@@ -958,6 +958,142 @@ type EntryConfluenceRejection struct {
 	Reason          string   `json:"reason"`
 }
 
+// ============================================================================
+// PER-COIN CONFLUENCE CONFIGURATION
+// ============================================================================
+
+// CoinTier represents the market cap/behavior tier of a coin
+type CoinTier string
+
+const (
+	TierBlueChip  CoinTier = "blue_chip"  // BTC, ETH
+	TierMajorAlt  CoinTier = "major_alt"  // SOL, XRP, BNB, ADA
+	TierMidCap    CoinTier = "mid_cap"    // DOGE, AVAX, LINK, etc.
+	TierSmallCap  CoinTier = "small_cap"  // Lower liquidity coins
+	TierCustom    CoinTier = "custom"     // User-defined settings
+)
+
+// CoinConfluenceConfig holds per-coin entry confluence settings
+type CoinConfluenceConfig struct {
+	Symbol            string   `json:"symbol"`
+	Tier              CoinTier `json:"tier"`
+	Enabled           bool     `json:"enabled"`             // Whether to use custom config
+
+	// ADX Thresholds (multiplier applied to base threshold)
+	ADXMultiplier     float64  `json:"adx_multiplier"`      // 1.0 = use base, 0.75 = 25% lower
+	ScalpADX          float64  `json:"scalp_adx"`           // Override for scalp mode (0 = use default)
+	SwingADX          float64  `json:"swing_adx"`           // Override for swing mode
+	PositionADX       float64  `json:"position_adx"`        // Override for position mode
+
+	// Volume Settings
+	VolumeMultiplier  float64  `json:"volume_multiplier"`   // Multiplier for volume spike threshold
+	VolumePeriod      int      `json:"volume_period"`       // Period for volume average (default 20)
+
+	// VWAP Settings
+	VWAPPeriod        int      `json:"vwap_period"`         // VWAP calculation period
+	VWAPEnabled       bool     `json:"vwap_enabled"`        // Whether to check VWAP
+
+	// Pivot Settings
+	PivotProximity    float64  `json:"pivot_proximity"`     // % threshold for "near" pivot
+	PivotEnabled      bool     `json:"pivot_enabled"`       // Whether to check pivots
+
+	// EMA Settings
+	EMAFastPeriod     int      `json:"ema_fast_period"`     // Fast EMA (default 20)
+	EMASlowPeriod     int      `json:"ema_slow_period"`     // Slow EMA (default 50)
+	EMAEnabled        bool     `json:"ema_enabled"`         // Whether to check EMA
+
+	// Confluence Requirements
+	MinConfluence     int      `json:"min_confluence"`      // Minimum filters required (default 4)
+	ScalpMinConfluence int     `json:"scalp_min_confluence"` // For scalp mode (default 3)
+
+	// Notes
+	Notes             string   `json:"notes"`               // User notes about this config
+}
+
+// DefaultCoinConfluenceConfig returns default config for a coin based on tier
+func DefaultCoinConfluenceConfig(symbol string) *CoinConfluenceConfig {
+	tier := GetCoinTier(symbol)
+
+	config := &CoinConfluenceConfig{
+		Symbol:            symbol,
+		Tier:              tier,
+		Enabled:           true,
+		ADXMultiplier:     1.0,
+		ScalpADX:          0, // 0 means use base * multiplier
+		SwingADX:          0,
+		PositionADX:       0,
+		VolumeMultiplier:  1.0,
+		VolumePeriod:      20,
+		VWAPPeriod:        20,
+		VWAPEnabled:       true,
+		PivotProximity:    0.5,
+		PivotEnabled:      true,
+		EMAFastPeriod:     20,
+		EMASlowPeriod:     50,
+		EMAEnabled:        true,
+		MinConfluence:     4,
+		ScalpMinConfluence: 3,
+	}
+
+	// Apply tier-specific defaults
+	switch tier {
+	case TierBlueChip:
+		config.ADXMultiplier = 0.75    // BTC/ETH trend at lower ADX
+		config.VolumeMultiplier = 1.0  // Massive volume, normal threshold
+		config.Notes = "Blue chip - trends at lower ADX"
+	case TierMajorAlt:
+		config.ADXMultiplier = 1.0
+		config.VolumeMultiplier = 1.0
+		config.Notes = "Major alt - standard settings"
+	case TierMidCap:
+		config.ADXMultiplier = 1.15
+		config.VolumeMultiplier = 1.2
+		config.Notes = "Mid cap - needs stronger confirmation"
+	case TierSmallCap:
+		config.ADXMultiplier = 1.25
+		config.VolumeMultiplier = 1.5
+		config.MinConfluence = 5       // Require all filters for small caps
+		config.ScalpMinConfluence = 4
+		config.Notes = "Small cap - strictest settings"
+	}
+
+	return config
+}
+
+// GetCoinTier determines the tier for a given symbol
+func GetCoinTier(symbol string) CoinTier {
+	// Blue chip coins
+	blueChips := map[string]bool{
+		"BTCUSDT": true, "ETHUSDT": true,
+	}
+
+	// Major alts
+	majorAlts := map[string]bool{
+		"BNBUSDT": true, "SOLUSDT": true, "XRPUSDT": true, "ADAUSDT": true,
+		"AVAXUSDT": true, "DOTUSDT": true, "MATICUSDT": true, "LINKUSDT": true,
+		"ATOMUSDT": true, "LTCUSDT": true, "ETCUSDT": true, "XLMUSDT": true,
+	}
+
+	// Mid caps (meme coins and mid-tier)
+	midCaps := map[string]bool{
+		"DOGEUSDT": true, "SHIBUSDT": true, "PEPEUSDT": true, "FLOKIUSDT": true,
+		"APTUSDT": true, "ARBUSDT": true, "OPUSDT": true, "INJUSDT": true,
+		"SUIUSDT": true, "SEIUSDT": true, "TIAUSDT": true, "NEARUSDT": true,
+		"FILUSDT": true, "AAVEUSDT": true, "UNIUSDT": true, "LDOUSDT": true,
+	}
+
+	if blueChips[symbol] {
+		return TierBlueChip
+	}
+	if majorAlts[symbol] {
+		return TierMajorAlt
+	}
+	if midCaps[symbol] {
+		return TierMidCap
+	}
+	return TierSmallCap
+}
+
 // NewRejectionTracker creates a new rejection tracker
 func NewRejectionTracker() *RejectionTracker {
 	return &RejectionTracker{
