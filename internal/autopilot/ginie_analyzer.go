@@ -82,7 +82,7 @@ func NewGinieAnalyzer(
 		decisions:        make([]GinieDecisionReport, 0, 500),
 		maxDecisions:     500, // Increased for study purposes
 		enabled:          true,
-		activeMode:       GinieModeSwing,
+		activeMode:       GinieModeScalp, // Default to scalp mode for faster trades
 		watchSymbols:     coreSymbols, // Start with core coins, LLM will update
 		llmCoinsCacheTTL: 30 * time.Minute, // Refresh LLM coin list every 30 minutes
 	}
@@ -1033,6 +1033,8 @@ func (g *GinieAnalyzer) analyzeTrend(klines []binance.Kline, timeframe string) T
 	// Calculate ADX
 	adx, plusDI, minusDI := g.calculateADX(klines, 14)
 	trend.ADXValue = adx
+	trend.PlusDI = plusDI
+	trend.MinusDI = minusDI
 
 	// Classify ADX strength
 	if adx < 20 {
@@ -1241,10 +1243,10 @@ func (g *GinieAnalyzer) calculateScanScore(scan *GinieCoinScan) {
 		scan.TradeReady = false
 		scan.Reason = "Poor trading conditions"
 	} else {
-		// Default to swing for anything else that passes liquidity
-		scan.Status = ScanStatusSwingReady
+		// Default to scalp for anything else that passes liquidity
+		scan.Status = ScanStatusScalpReady
 		scan.TradeReady = true
-		scan.Reason = fmt.Sprintf("Acceptable conditions (%.1f%% 24h volatility) - swing trading", volatility24h)
+		scan.Reason = fmt.Sprintf("Acceptable conditions (%.1f%% 24h volatility) - scalp trading", volatility24h)
 	}
 }
 
@@ -1261,7 +1263,7 @@ func (g *GinieAnalyzer) SelectMode(scan *GinieCoinScan) GinieTradingMode {
 	case ScanStatusSwingReady:
 		return GinieModeSwing
 	default:
-		return GinieModeSwing
+		return GinieModeScalp // Default to scalp instead of swing
 	}
 }
 
@@ -1991,14 +1993,14 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			rejectionTracker.EntryConfluence = &EntryConfluenceRejection{
 				Blocked:         true,
 				ConfluenceScore: confluenceResult.ConfluenceScore,
-				RequiredScore:   4,
+				RequiredScore:   3,
 				ADXValid:        confluenceResult.ADXValid,
 				VWAPValid:       confluenceResult.VWAPValid,
 				VolumeValid:     confluenceResult.VolumeSpikeValid,
 				PivotValid:      confluenceResult.PivotValid,
 				EMAValid:        confluenceResult.EMAValid,
 				Details:         confluenceResult.Details,
-				Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 4)", confluenceResult.ConfluenceScore),
+				Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 3)", confluenceResult.ConfluenceScore),
 			}
 			rejectionTracker.AddRejection(fmt.Sprintf("Entry Confluence: %d/5 (ADX:%v VWAP:%v Vol:%v Pivot:%v EMA:%v)",
 				confluenceResult.ConfluenceScore,
@@ -2247,17 +2249,18 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 	// === ADAPTIVE ADX STRENGTH FILTER (HARD BLOCK) ===
 	// Check if trend is strong enough for the selected mode - NO TREND = NO TRADE
-	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, mode)
+	// Now also checks +DI/-DI as alternative (if either >= 25, allows trade even with low ADX)
+	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, trendAnalysis.PlusDI, trendAnalysis.MinusDI, mode)
 	if !adxPassed {
 		// Determine threshold based on mode
 		var adxThreshold float64
 		switch mode {
 		case GinieModeScalp:
-			adxThreshold = 25
+			adxThreshold = 20 // Standard threshold for scalp
 		case GinieModeSwing:
-			adxThreshold = 30
+			adxThreshold = 25 // Swing needs moderate trend
 		case GinieModePosition:
-			adxThreshold = 35
+			adxThreshold = 30 // Position needs strong trends
 		default:
 			adxThreshold = 20
 		}
@@ -2267,13 +2270,15 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			ADXValue:  trendAnalysis.ADXValue,
 			Threshold: adxThreshold,
 			Penalty:   adxPenalty,
-			Reason:    fmt.Sprintf("BLOCKED: Weak trend - ADX %.1f below threshold %.0f for %s mode", trendAnalysis.ADXValue, adxThreshold, mode),
+			Reason:    fmt.Sprintf("BLOCKED: Weak trend - ADX %.1f below %.0f, +DI=%.1f, -DI=%.1f (need ADX>=%.0f OR DI>=25) for %s mode", trendAnalysis.ADXValue, adxThreshold, trendAnalysis.PlusDI, trendAnalysis.MinusDI, adxThreshold, mode),
 		}
 
 		if g.logger != nil {
 			g.logger.Warn("HARD BLOCK: Weak trend detected - no trade allowed",
 				"symbol", symbol,
 				"adx", trendAnalysis.ADXValue,
+				"plus_di", trendAnalysis.PlusDI,
+				"minus_di", trendAnalysis.MinusDI,
 				"threshold", adxThreshold,
 				"mode", mode)
 		}
@@ -2285,7 +2290,7 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			ScanStatus:         scan.Status,
 			SelectedMode:       mode,
 			Recommendation:     RecommendationSkip,
-			RecommendationNote: fmt.Sprintf("BLOCKED: No trend detected - ADX %.1f is below %.0f threshold for %s mode. Trading without trend confirmation leads to losses.", trendAnalysis.ADXValue, adxThreshold, mode),
+			RecommendationNote: fmt.Sprintf("BLOCKED: No trend detected - ADX %.1f is below %.0f threshold AND +DI=%.1f/-DI=%.1f both below 25 for %s mode. Need ADX>=%.0f OR DI>=25.", trendAnalysis.ADXValue, adxThreshold, trendAnalysis.PlusDI, trendAnalysis.MinusDI, mode, adxThreshold),
 			ConfidenceScore:    0.0,
 			RejectionTracking:  rejectionTracker,
 		}
@@ -3259,26 +3264,34 @@ func (g *GinieAnalyzer) PerformLLMAnalysis(symbol string, klines []binance.Kline
 	return parsed, ctx, nil
 }
 
-func (g *GinieAnalyzer) checkADXStrengthRequirement(adx float64, mode GinieTradingMode) (bool, float64) {
+func (g *GinieAnalyzer) checkADXStrengthRequirement(adx, plusDI, minusDI float64, mode GinieTradingMode) (bool, float64) {
 	thresholds := map[GinieTradingMode]float64{
-		GinieModeUltraFast: 30.0, // Scalp needs strong trends
-		GinieModeScalp:     30.0,
-		GinieModeSwing:     20.0, // Swing more forgiving
-		GinieModePosition:  25.0, // Position needs moderate strength
+		GinieModeUltraFast: 15.0, // Ultra-fast catches momentum, lower threshold
+		GinieModeScalp:     20.0, // Standard threshold for scalp
+		GinieModeSwing:     25.0, // Swing needs moderate trend
+		GinieModePosition:  30.0, // Position needs strong trends
 	}
 
 	threshold, exists := thresholds[mode]
 	if !exists {
-		threshold = 25.0 // Default
+		threshold = 20.0 // Default
 	}
 
-	if adx < threshold {
-		// Weak trend - apply 10% confidence penalty
-		return false, 0.90
+	// Primary check: ADX above threshold
+	if adx >= threshold {
+		return true, 1.0
 	}
 
-	// Strong enough trend - no penalty
-	return true, 1.0
+	// Alternative check: Strong directional movement (+DI or -DI >= 25)
+	// This allows trades when there's clear directional movement even if ADX is building
+	diThreshold := 25.0
+	if plusDI >= diThreshold || minusDI >= diThreshold {
+		// Directional strength is good - apply small 5% penalty since ADX is weak
+		return true, 0.95
+	}
+
+	// Both ADX and DI checks failed - weak trend
+	return false, 0.90
 }
 
 // ===== COUNTER-TREND TRADE VALIDATION =====
@@ -4056,7 +4069,7 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 	// Require minimum filters to pass (use per-coin config if available)
 	minRequired := coinConfig.MinConfluence
 	if minRequired <= 0 {
-		minRequired = 4 // Default 4 out of 5
+		minRequired = 3 // Default 3 out of 5 (lowered from 4 for more trades)
 	}
 	if mode == GinieModeScalp {
 		if coinConfig.ScalpMinConfluence > 0 {
