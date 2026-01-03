@@ -491,6 +491,17 @@ type GiniePosition struct {
 
 	// Scalp Re-entry Mode (progressive TP with re-entry at breakeven)
 	ScalpReentry *ScalpReentryStatus `json:"scalp_reentry,omitempty"` // Scalp re-entry state tracking
+
+	// === 3-LEVEL STAGED ENTRY TRACKING ===
+	// Tracks progress of intelligent 3-level averaging for better entry prices
+	StagedEntryActive     bool      `json:"staged_entry_active,omitempty"`      // Whether this position uses staged entry
+	StagedEntryLevel      int       `json:"staged_entry_level,omitempty"`       // Current entry level (1-3)
+	StagedEntryMaxLevels  int       `json:"staged_entry_max_levels,omitempty"`  // Total levels to fill (default: 3)
+	StagedEntryTargetQty  float64   `json:"staged_entry_target_qty,omitempty"`  // Total target quantity across all levels
+	StagedEntryFilledQty  float64   `json:"staged_entry_filled_qty,omitempty"`  // Quantity filled so far
+	StagedEntryLastFill   time.Time `json:"staged_entry_last_fill,omitempty"`   // Time of last staged entry fill
+	StagedEntryNextPrice  float64   `json:"staged_entry_next_price,omitempty"`  // Price target for next level
+	StagedEntryStartTime  time.Time `json:"staged_entry_start_time,omitempty"`  // When staged entry started (for max wait)
 }
 
 // GinieTradeResult tracks the result of a trade action with full signal info for study
@@ -3113,13 +3124,29 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 			"effective_max_usd", maxSizeUSD)
 	}
 
-	// Minimum position size check: ALWAYS use mode config value (required)
-	minPositionSize := 5.0 // Absolute minimum fallback only if mode config missing
-	if modeConfig != nil && modeConfig.Size != nil {
+	// Minimum position size enforcement: ENFORCE minimum instead of rejecting
+	// This ensures we always use at least the minimum notional size for visible profits
+	minPositionSize := 500.0 // Default minimum notional: $500 = $50 margin at 10x
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinPositionSizeUSD > 0 {
 		minPositionSize = modeConfig.Size.MinPositionSizeUSD
 	}
+
+	// If calculated position is below minimum, enforce the minimum
 	if positionUSD < minPositionSize {
-		return 0, false, fmt.Sprintf("calculated position too small: $%.2f (min $%.2f)", positionUSD, minPositionSize)
+		// Check if we can afford the minimum position
+		if minPositionSize > usableBalance*0.9 {
+			return 0, false, fmt.Sprintf("insufficient balance for minimum position: need $%.2f, have $%.2f usable", minPositionSize, usableBalance*0.9)
+		}
+		// Also check against max size cap
+		if minPositionSize > maxSizeUSD {
+			return 0, false, fmt.Sprintf("minimum position $%.2f exceeds max size $%.2f for %s", minPositionSize, maxSizeUSD, symbol)
+		}
+		ga.logger.Info("Enforcing minimum position size",
+			"symbol", symbol,
+			"mode", mode,
+			"calculated_usd", fmt.Sprintf("$%.2f", positionUSD),
+			"enforced_min_usd", fmt.Sprintf("$%.2f", minPositionSize))
+		positionUSD = minPositionSize
 	}
 
 	// Determine sizing method for logging
@@ -3410,6 +3437,209 @@ func (ga *GinieAutopilot) verifyOrderFill(order *binance.FuturesOrderResponse, e
 
 // ==================== END ORDER FILL VERIFICATION ====================
 
+// ==================== 3-LEVEL STAGED ENTRY HELPERS ====================
+
+// calculateNextStagedEntryPrice calculates the price target for the next staged entry level
+// For LONG: next level price = current entry * (1 - priceImprove%)
+// For SHORT: next level price = current entry * (1 + priceImprove%)
+func (ga *GinieAutopilot) calculateNextStagedEntryPrice(entryPrice float64, isLong bool, mode GinieTradingMode) float64 {
+	// Get price improvement from config, default to 0.3%
+	priceImprove := 0.3
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.Averaging != nil && modeConfig.Averaging.StagedEntryPriceImprove > 0 {
+		priceImprove = modeConfig.Averaging.StagedEntryPriceImprove
+	}
+
+	if isLong {
+		// For LONG: buy at lower price for better average
+		return entryPrice * (1 - priceImprove/100)
+	}
+	// For SHORT: sell at higher price for better average
+	return entryPrice * (1 + priceImprove/100)
+}
+
+// checkAndExecuteStagedEntry checks if a position needs more staged entries and executes if price is right
+func (ga *GinieAutopilot) checkAndExecuteStagedEntry(pos *GiniePosition) {
+	if !pos.StagedEntryActive {
+		return
+	}
+
+	// Check if all levels are filled
+	if pos.StagedEntryLevel >= pos.StagedEntryMaxLevels {
+		pos.StagedEntryActive = false
+		ga.logger.Info("Staged entry completed - all levels filled",
+			"symbol", pos.Symbol,
+			"total_qty", pos.StagedEntryFilledQty,
+			"levels", pos.StagedEntryLevel)
+		return
+	}
+
+	// Get mode config for cooldown and max wait
+	modeConfig := ga.getModeConfig(pos.Mode)
+	cooldownSec := 30
+	maxWaitSec := 300
+	if modeConfig != nil && modeConfig.Averaging != nil {
+		if modeConfig.Averaging.StagedEntryCooldownSec > 0 {
+			cooldownSec = modeConfig.Averaging.StagedEntryCooldownSec
+		}
+		if modeConfig.Averaging.StagedEntryMaxWaitSec > 0 {
+			maxWaitSec = modeConfig.Averaging.StagedEntryMaxWaitSec
+		}
+	}
+
+	// Check cooldown
+	if time.Since(pos.StagedEntryLastFill) < time.Duration(cooldownSec)*time.Second {
+		return
+	}
+
+	// Check max wait time - if exceeded, cancel remaining staged entries
+	if time.Since(pos.StagedEntryStartTime) > time.Duration(maxWaitSec)*time.Second {
+		ga.logger.Info("Staged entry timeout - proceeding with partial fill",
+			"symbol", pos.Symbol,
+			"filled_qty", pos.StagedEntryFilledQty,
+			"target_qty", pos.StagedEntryTargetQty,
+			"levels_filled", pos.StagedEntryLevel,
+			"max_wait_sec", maxWaitSec)
+		pos.StagedEntryActive = false
+		return
+	}
+
+	// Get current price
+	currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(pos.Symbol)
+	if err != nil {
+		ga.logger.Warn("Failed to get price for staged entry", "symbol", pos.Symbol, "error", err)
+		return
+	}
+
+	// Check if price has improved enough for next level
+	isLong := pos.Side == "LONG"
+	priceImproved := false
+	if isLong {
+		priceImproved = currentPrice <= pos.StagedEntryNextPrice
+	} else {
+		priceImproved = currentPrice >= pos.StagedEntryNextPrice
+	}
+
+	if !priceImproved {
+		return
+	}
+
+	// Calculate next level quantity
+	levelPercent := 30.0 // Default: 30% for levels 2 and 3
+	if modeConfig != nil && modeConfig.Averaging != nil && len(modeConfig.Averaging.StagedEntryPercent) > pos.StagedEntryLevel {
+		levelPercent = modeConfig.Averaging.StagedEntryPercent[pos.StagedEntryLevel]
+	}
+
+	levelQty := pos.StagedEntryTargetQty * (levelPercent / 100.0)
+	levelQty = roundQuantity(pos.Symbol, levelQty)
+
+	if levelQty <= 0 {
+		ga.logger.Warn("Staged entry level quantity too small, skipping",
+			"symbol", pos.Symbol,
+			"level", pos.StagedEntryLevel+1)
+		pos.StagedEntryLevel++
+		return
+	}
+
+	// Execute staged entry order
+	ga.executeStagedEntryOrder(pos, levelQty, currentPrice)
+}
+
+// executeStagedEntryOrder places the order for a staged entry level
+func (ga *GinieAutopilot) executeStagedEntryOrder(pos *GiniePosition, quantity float64, currentPrice float64) {
+	symbol := pos.Symbol
+	isLong := pos.Side == "LONG"
+
+	// Determine order parameters
+	side := "BUY"
+	positionSide := binance.PositionSideLong
+	if !isLong {
+		side = "SELL"
+		positionSide = binance.PositionSideShort
+	}
+	effectivePositionSide := ga.getEffectivePositionSide(positionSide)
+
+	if !ga.config.DryRun {
+		orderParams := binance.FuturesOrderParams{
+			Symbol:       symbol,
+			Side:         side,
+			PositionSide: effectivePositionSide,
+			Type:         binance.FuturesOrderTypeMarket,
+			Quantity:     quantity,
+		}
+
+		order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
+		if err != nil {
+			ga.logger.Error("Staged entry order failed",
+				"symbol", symbol,
+				"level", pos.StagedEntryLevel+1,
+				"quantity", quantity,
+				"error", err)
+			return
+		}
+
+		// Update position with new average entry
+		oldTotalCost := pos.EntryPrice * pos.OriginalQty
+		newCost := currentPrice * quantity
+		newTotalQty := pos.OriginalQty + quantity
+		newAvgPrice := (oldTotalCost + newCost) / newTotalQty
+
+		pos.EntryPrice = newAvgPrice
+		pos.OriginalQty = newTotalQty
+		pos.RemainingQty = newTotalQty
+		pos.StagedEntryLevel++
+		pos.StagedEntryFilledQty += quantity
+		pos.StagedEntryLastFill = time.Now()
+		pos.StagedEntryNextPrice = ga.calculateNextStagedEntryPrice(currentPrice, isLong, pos.Mode)
+
+		ga.logger.Info("Staged entry level filled",
+			"symbol", symbol,
+			"level", pos.StagedEntryLevel,
+			"order_id", order.OrderId,
+			"quantity", quantity,
+			"fill_price", currentPrice,
+			"new_avg_price", newAvgPrice,
+			"total_qty", pos.OriginalQty,
+			"remaining_levels", pos.StagedEntryMaxLevels-pos.StagedEntryLevel)
+
+		// Check if all levels filled
+		if pos.StagedEntryLevel >= pos.StagedEntryMaxLevels {
+			pos.StagedEntryActive = false
+			ga.logger.Info("Staged entry completed - all levels filled",
+				"symbol", symbol,
+				"final_qty", pos.OriginalQty,
+				"final_avg_price", pos.EntryPrice)
+		}
+	} else {
+		// Dry run mode - simulate staged entry
+		oldTotalCost := pos.EntryPrice * pos.OriginalQty
+		newCost := currentPrice * quantity
+		newTotalQty := pos.OriginalQty + quantity
+		newAvgPrice := (oldTotalCost + newCost) / newTotalQty
+
+		pos.EntryPrice = newAvgPrice
+		pos.OriginalQty = newTotalQty
+		pos.RemainingQty = newTotalQty
+		pos.StagedEntryLevel++
+		pos.StagedEntryFilledQty += quantity
+		pos.StagedEntryLastFill = time.Now()
+		pos.StagedEntryNextPrice = ga.calculateNextStagedEntryPrice(currentPrice, isLong, pos.Mode)
+
+		ga.logger.Info("DRY RUN: Staged entry level simulated",
+			"symbol", symbol,
+			"level", pos.StagedEntryLevel,
+			"quantity", quantity,
+			"fill_price", currentPrice,
+			"new_avg_price", newAvgPrice)
+
+		if pos.StagedEntryLevel >= pos.StagedEntryMaxLevels {
+			pos.StagedEntryActive = false
+		}
+	}
+}
+
+// ==================== END STAGED ENTRY HELPERS ====================
+
 // executeTrade executes a trade based on Ginie decision
 func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	ga.mu.Lock()
@@ -3546,6 +3776,50 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	if quantity <= 0 {
 		ga.logger.Warn("Ginie calculated zero quantity", "symbol", symbol, "usd", positionUSD)
 		return
+	}
+
+	// === 3-LEVEL STAGED ENTRY: Reduce initial quantity if enabled ===
+	// Check if staged entry is enabled for this mode
+	var stagedEntryActive bool
+	var stagedEntryTargetQty float64
+	var stagedEntryMaxLevels int
+	var stagedEntryFirstLevelPct float64 = 40.0 // Default: 40% first level
+
+	modeConfig := ga.getModeConfig(selectedMode)
+	if modeConfig != nil && modeConfig.Averaging != nil && modeConfig.Averaging.StagedEntryEnabled {
+		stagedEntryActive = true
+		stagedEntryTargetQty = quantity // Store the full target quantity
+		stagedEntryMaxLevels = modeConfig.Averaging.StagedEntryLevels
+		if stagedEntryMaxLevels <= 0 {
+			stagedEntryMaxLevels = 3 // Default to 3 levels
+		}
+
+		// Get first level percentage from config
+		if len(modeConfig.Averaging.StagedEntryPercent) > 0 {
+			stagedEntryFirstLevelPct = modeConfig.Averaging.StagedEntryPercent[0]
+		}
+
+		// Calculate first level quantity (e.g., 40% of total)
+		firstLevelQty := quantity * (stagedEntryFirstLevelPct / 100.0)
+		firstLevelQty = roundQuantity(symbol, firstLevelQty)
+
+		// Ensure first level meets minimum quantity
+		if firstLevelQty > 0 {
+			quantity = firstLevelQty
+			ga.logger.Info("Staged entry enabled - entering with first level",
+				"symbol", symbol,
+				"mode", selectedMode,
+				"first_level_pct", stagedEntryFirstLevelPct,
+				"first_level_qty", firstLevelQty,
+				"target_qty", stagedEntryTargetQty,
+				"total_levels", stagedEntryMaxLevels)
+		} else {
+			// First level too small, disable staged entry
+			stagedEntryActive = false
+			ga.logger.Warn("Staged entry disabled - first level quantity too small",
+				"symbol", symbol,
+				"first_level_qty", firstLevelQty)
+		}
 	}
 
 	// Determine side
@@ -3788,6 +4062,15 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		DecisionReport:       decision,
 		Source:               "ai", // AI-based trade
 		Protection:           NewProtectionStatus(), // Initialize bulletproof protection tracking
+		// === 3-LEVEL STAGED ENTRY TRACKING ===
+		StagedEntryActive:    stagedEntryActive,
+		StagedEntryLevel:     1, // First level
+		StagedEntryMaxLevels: stagedEntryMaxLevels,
+		StagedEntryTargetQty: stagedEntryTargetQty,
+		StagedEntryFilledQty: actualQty, // First level filled
+		StagedEntryLastFill:  time.Now(),
+		StagedEntryNextPrice: ga.calculateNextStagedEntryPrice(actualPrice, decision.TradeExecution.Action == "LONG", selectedMode),
+		StagedEntryStartTime: time.Now(),
 	}
 
 	ga.positions[symbol] = position
@@ -4071,6 +4354,12 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		if !exists {
 			ga.mu.Unlock()
 			continue
+		}
+
+		// === 3-LEVEL STAGED ENTRY CHECK ===
+		// Check if position needs more staged entries at improved prices
+		if pos.StagedEntryActive {
+			ga.checkAndExecuteStagedEntry(pos)
 		}
 
 		// === SCALP TO SCALP_REENTRY UPGRADE ===
@@ -14108,6 +14397,9 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 func (ga *GinieAutopilot) initModeCircuitBreakers() {
 	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeScalpReentry, GinieModeSwing, GinieModePosition}
 
+	// Load persisted stats from settings
+	persistedStats := GetSettingsManager().GetAllModeCircuitBreakerStats()
+
 	for _, mode := range modes {
 		config := ga.GetDefaultModeConfig(mode)
 		if config != nil && config.CircuitBreaker != nil {
@@ -14123,7 +14415,7 @@ func (ga *GinieAutopilot) initModeCircuitBreakers() {
 				MinWinRatePercent:  config.CircuitBreaker.MinWinRate,
 				CooldownMinutes:    config.CircuitBreaker.CooldownMinutes,
 				AutoRecovery:       true,
-				// Initialize state values
+				// Initialize state values (will be overwritten by persisted stats)
 				CurrentHourLoss:   0,
 				CurrentDayLoss:    0,
 				ConsecutiveLosses: 0,
@@ -14134,6 +14426,35 @@ func (ga *GinieAutopilot) initModeCircuitBreakers() {
 				TotalTrades:       0,
 				IsPaused:          false,
 			}
+
+			// Load persisted stats if available
+			modeStr := string(mode)
+			if savedStats, exists := persistedStats[modeStr]; exists && savedStats != nil {
+				// Check and apply time-based resets first
+				GetSettingsManager().CheckAndResetTimeBasedCounters(modeStr, savedStats)
+
+				// Restore persisted values
+				ga.modeCircuitBreakers[mode].TradesThisMinute = savedStats.TradesThisMinute
+				ga.modeCircuitBreakers[mode].TradesThisHour = savedStats.TradesThisHour
+				ga.modeCircuitBreakers[mode].TradesThisDay = savedStats.TradesThisDay
+				ga.modeCircuitBreakers[mode].TotalTrades = savedStats.TotalTrades
+				ga.modeCircuitBreakers[mode].TotalWins = savedStats.TotalWins
+				ga.modeCircuitBreakers[mode].ConsecutiveLosses = savedStats.ConsecutiveLosses
+				ga.modeCircuitBreakers[mode].CurrentHourLoss = savedStats.CurrentHourLoss
+				ga.modeCircuitBreakers[mode].CurrentDayLoss = savedStats.CurrentDayLoss
+				ga.modeCircuitBreakers[mode].IsPaused = savedStats.IsPaused
+				ga.modeCircuitBreakers[mode].PauseReason = savedStats.PauseReason
+
+				if savedStats.PausedUntil != "" {
+					if pauseTime, err := time.Parse(time.RFC3339, savedStats.PausedUntil); err == nil {
+						ga.modeCircuitBreakers[mode].PausedUntil = pauseTime
+					}
+				}
+
+				log.Printf("[MODE-CIRCUIT-BREAKER] Restored persisted stats for %s: trades_day=%d, day_loss=$%.2f, consec_loss=%d, paused=%v",
+					mode, savedStats.TradesThisDay, savedStats.CurrentDayLoss, savedStats.ConsecutiveLosses, savedStats.IsPaused)
+			}
+
 			log.Printf("[MODE-CIRCUIT-BREAKER] Initialized for mode %s: MaxLoss/hr=$%.2f, MaxLoss/day=$%.2f, MaxConsecLoss=%d, Cooldown=%dm",
 				mode, config.CircuitBreaker.MaxLossPerHour, config.CircuitBreaker.MaxLossPerDay,
 				config.CircuitBreaker.MaxConsecutiveLosses, config.CircuitBreaker.CooldownMinutes)
@@ -14399,6 +14720,44 @@ func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float
 			"reason", triggerReason,
 			"paused_until", cb.PausedUntil)
 	}
+
+	// Persist the updated stats to survive restarts
+	ga.persistModeCircuitBreakerStats(mode, cb)
+}
+
+// persistModeCircuitBreakerStats saves the current circuit breaker state to disk
+// This is called after each trade to ensure counters survive restarts
+func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, cb *ModeCircuitBreaker) {
+	if cb == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	modeStr := string(mode)
+
+	stats := &ModeCircuitBreakerStats{
+		TradesThisMinute:  cb.TradesThisMinute,
+		TradesThisHour:    cb.TradesThisHour,
+		TradesThisDay:     cb.TradesThisDay,
+		TotalTrades:       cb.TotalTrades,
+		TotalWins:         cb.TotalWins,
+		ConsecutiveLosses: cb.ConsecutiveLosses,
+		CurrentHourLoss:   cb.CurrentHourLoss,
+		CurrentDayLoss:    cb.CurrentDayLoss,
+		IsPaused:          cb.IsPaused,
+		PauseReason:       cb.PauseReason,
+		LastMinuteReset:   now.Truncate(time.Minute).Format(time.RFC3339),
+		LastHourReset:     now.Truncate(time.Hour).Format(time.RFC3339),
+		LastDayReset:      now.Format("2006-01-02"),
+	}
+
+	if cb.IsPaused && !cb.PausedUntil.IsZero() {
+		stats.PausedUntil = cb.PausedUntil.Format(time.RFC3339)
+	}
+
+	if err := GetSettingsManager().SaveModeCircuitBreakerStats(modeStr, stats); err != nil {
+		log.Printf("[MODE-CB-STATS] Failed to persist stats for %s: %v", mode, err)
+	}
 }
 
 // ResetModeCircuitBreakerStats resets circuit breaker stats for a mode based on period
@@ -14418,6 +14777,7 @@ func (ga *GinieAutopilot) ResetModeCircuitBreakerStats(mode GinieTradingMode, pe
 		oldValue := cb.TradesThisMinute
 		cb.TradesThisMinute = 0
 		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset minute stats (trades_this_minute: %d -> 0)", mode, oldValue)
+		ga.persistModeCircuitBreakerStats(mode, cb)
 
 	case "hour":
 		oldTrades := cb.TradesThisHour

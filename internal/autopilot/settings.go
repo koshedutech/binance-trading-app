@@ -234,6 +234,15 @@ type PositionAveragingConfig struct {
 	MaxAverages            int     `json:"max_averages"`              // Max times to average (e.g., 0, 2, 3, 2)
 	MinConfidenceForAverage float64 `json:"min_confidence_for_average"` // Min confidence for new signal
 	UseLLMForAveraging     bool    `json:"use_llm_for_averaging"`     // Use LLM to decide if averaging is wise
+
+	// === 3-LEVEL INTELLIGENT AVERAGING (Staged Entry) ===
+	// Split initial position into 3 levels for better average entry price
+	StagedEntryEnabled      bool      `json:"staged_entry_enabled"`       // Enable staged entry (split initial position)
+	StagedEntryLevels       int       `json:"staged_entry_levels"`        // Number of entry levels (default: 3)
+	StagedEntryPercent      []float64 `json:"staged_entry_percent"`       // Size % per level (e.g., [40, 30, 30] = 40% first, 30% each subsequent)
+	StagedEntryPriceImprove float64   `json:"staged_entry_price_improve"` // Price improvement % needed for next level (e.g., 0.3 = 0.3% better price)
+	StagedEntryCooldownSec  int       `json:"staged_entry_cooldown_sec"`  // Cooldown between levels in seconds (default: 30)
+	StagedEntryMaxWaitSec   int       `json:"staged_entry_max_wait_sec"`  // Max time to wait for next level before proceeding (default: 300)
 }
 
 // StalePositionReleaseConfig holds stale position release (capital liberation) settings
@@ -1367,6 +1376,36 @@ type AutopilotSettings struct {
 	// Each coin can have custom entry confluence thresholds (ADX, VWAP, Volume, Pivots, EMA)
 	// to account for different market characteristics (BTC vs meme coins vs altcoins)
 	CoinConfluenceConfigs map[string]*CoinConfluenceConfig `json:"coin_confluence_configs"`
+
+	// ====== MODE CIRCUIT BREAKER STATS (Persisted) ======
+	// Trade counters and loss tracking per mode - survives restarts
+	ModeCircuitBreakerStats map[string]*ModeCircuitBreakerStats `json:"mode_circuit_breaker_stats"`
+}
+
+// ModeCircuitBreakerStats holds persisted circuit breaker statistics per mode
+// These counters survive Docker restarts and are reset based on time windows
+type ModeCircuitBreakerStats struct {
+	// Trade counters
+	TradesThisMinute int    `json:"trades_this_minute"`
+	TradesThisHour   int    `json:"trades_this_hour"`
+	TradesThisDay    int    `json:"trades_this_day"`
+	TotalTrades      int    `json:"total_trades"`
+	TotalWins        int    `json:"total_wins"`
+	ConsecutiveLosses int   `json:"consecutive_losses"`
+
+	// Loss tracking
+	CurrentHourLoss float64 `json:"current_hour_loss"`
+	CurrentDayLoss  float64 `json:"current_day_loss"`
+
+	// Pause state
+	IsPaused    bool   `json:"is_paused"`
+	PausedUntil string `json:"paused_until"` // RFC3339 timestamp
+	PauseReason string `json:"pause_reason"`
+
+	// Timestamps for time-based resets
+	LastMinuteReset string `json:"last_minute_reset"` // RFC3339 timestamp
+	LastHourReset   string `json:"last_hour_reset"`   // RFC3339 timestamp
+	LastDayReset    string `json:"last_day_reset"`    // RFC3339 timestamp (date only: 2024-01-03)
 }
 
 // SettingsManager handles persistent settings storage
@@ -4777,4 +4816,109 @@ func (sm *SettingsManager) GetCoinConfluenceConfigWithDefaults() map[string]*Coi
 	}
 
 	return result
+}
+
+// ====== MODE CIRCUIT BREAKER STATS PERSISTENCE ======
+
+// SaveModeCircuitBreakerStats saves the current circuit breaker stats for a specific mode
+func (sm *SettingsManager) SaveModeCircuitBreakerStats(mode string, stats *ModeCircuitBreakerStats) error {
+	settings := sm.GetCurrentSettings()
+
+	if settings.ModeCircuitBreakerStats == nil {
+		settings.ModeCircuitBreakerStats = make(map[string]*ModeCircuitBreakerStats)
+	}
+
+	settings.ModeCircuitBreakerStats[mode] = stats
+	return sm.SaveSettings(settings)
+}
+
+// SaveAllModeCircuitBreakerStats saves stats for all modes at once
+func (sm *SettingsManager) SaveAllModeCircuitBreakerStats(allStats map[string]*ModeCircuitBreakerStats) error {
+	settings := sm.GetCurrentSettings()
+	settings.ModeCircuitBreakerStats = allStats
+	return sm.SaveSettings(settings)
+}
+
+// GetModeCircuitBreakerStats retrieves persisted stats for a specific mode
+func (sm *SettingsManager) GetModeCircuitBreakerStats(mode string) *ModeCircuitBreakerStats {
+	settings := sm.GetCurrentSettings()
+
+	if settings.ModeCircuitBreakerStats == nil {
+		return nil
+	}
+
+	return settings.ModeCircuitBreakerStats[mode]
+}
+
+// GetAllModeCircuitBreakerStats retrieves persisted stats for all modes
+func (sm *SettingsManager) GetAllModeCircuitBreakerStats() map[string]*ModeCircuitBreakerStats {
+	settings := sm.GetCurrentSettings()
+
+	if settings.ModeCircuitBreakerStats == nil {
+		return make(map[string]*ModeCircuitBreakerStats)
+	}
+
+	return settings.ModeCircuitBreakerStats
+}
+
+// CheckAndResetTimeBasedCounters checks timestamps and resets counters if time windows have passed
+// Returns true if any counter was reset
+func (sm *SettingsManager) CheckAndResetTimeBasedCounters(mode string, stats *ModeCircuitBreakerStats) bool {
+	now := time.Now().UTC()
+	wasReset := false
+
+	// Check daily reset (new day)
+	today := now.Format("2006-01-02")
+	if stats.LastDayReset != today {
+		stats.TradesThisDay = 0
+		stats.CurrentDayLoss = 0
+		stats.TotalTrades = 0
+		stats.TotalWins = 0
+		stats.ConsecutiveLosses = 0
+		stats.LastDayReset = today
+		wasReset = true
+		log.Printf("[MODE-CB-STATS] %s: Daily counters reset (new day: %s)", mode, today)
+	}
+
+	// Check hourly reset (new hour)
+	currentHour := now.Truncate(time.Hour).Format(time.RFC3339)
+	if stats.LastHourReset != "" {
+		lastHour, err := time.Parse(time.RFC3339, stats.LastHourReset)
+		if err == nil && now.Sub(lastHour) >= time.Hour {
+			stats.TradesThisHour = 0
+			stats.CurrentHourLoss = 0
+			stats.LastHourReset = currentHour
+			wasReset = true
+			log.Printf("[MODE-CB-STATS] %s: Hourly counters reset (new hour)", mode)
+		}
+	} else {
+		stats.LastHourReset = currentHour
+	}
+
+	// Check minute reset (new minute)
+	currentMinute := now.Truncate(time.Minute).Format(time.RFC3339)
+	if stats.LastMinuteReset != "" {
+		lastMinute, err := time.Parse(time.RFC3339, stats.LastMinuteReset)
+		if err == nil && now.Sub(lastMinute) >= time.Minute {
+			stats.TradesThisMinute = 0
+			stats.LastMinuteReset = currentMinute
+			wasReset = true
+		}
+	} else {
+		stats.LastMinuteReset = currentMinute
+	}
+
+	// Check if pause has expired
+	if stats.IsPaused && stats.PausedUntil != "" {
+		pauseEnd, err := time.Parse(time.RFC3339, stats.PausedUntil)
+		if err == nil && now.After(pauseEnd) {
+			stats.IsPaused = false
+			stats.PausedUntil = ""
+			stats.PauseReason = ""
+			wasReset = true
+			log.Printf("[MODE-CB-STATS] %s: Pause expired, resuming trading", mode)
+		}
+	}
+
+	return wasReset
 }
