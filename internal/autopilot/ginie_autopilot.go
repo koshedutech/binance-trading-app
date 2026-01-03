@@ -155,10 +155,15 @@ func (ga *GinieAutopilot) RestorePositionState(pos *GiniePosition, savedState Pe
 		pos.CurrentTPLevel = savedState.CurrentTPLevel
 	}
 
-	// Restore ScalpReentry state if position is in scalp_reentry mode
-	if pos.Mode == GinieModeScalpReentry && savedState.ScalpReentry != nil {
-		log.Printf("[POSITION-STATE] Restoring %s ScalpReentry state: TPUnlocked=%d, Cycles=%d",
-			pos.Symbol, savedState.ScalpReentry.TPLevelUnlocked, len(savedState.ScalpReentry.Cycles))
+	// BUG FIX: Restore ScalpReentry state based on SAVED mode, not current position mode
+	// The position may have been assigned a different mode during reconciliation (e.g., "scalp" vs "scalp_reentry")
+	// We must check the SAVED mode to ensure state is properly restored
+	if savedState.Mode == GinieModeScalpReentry && savedState.ScalpReentry != nil {
+		log.Printf("[POSITION-STATE] Restoring %s ScalpReentry state: TPUnlocked=%d, Cycles=%d, Mode: %s -> %s",
+			pos.Symbol, savedState.ScalpReentry.TPLevelUnlocked, len(savedState.ScalpReentry.Cycles),
+			pos.Mode, savedState.Mode)
+		// Restore the mode to scalp_reentry (critical for proper TP tracking)
+		pos.Mode = savedState.Mode
 		pos.ScalpReentry = savedState.ScalpReentry
 	}
 }
@@ -8664,6 +8669,16 @@ func (ga *GinieAutopilot) reconcilePositions() {
 
 			// Select mode based on user's enabled modes (fixes hardcoded swing bypass)
 			externalMode := ga.selectEnabledModeForPosition()
+
+			// BUG FIX: If we have saved state for this position, use its mode instead
+			// This prevents scalp_reentry positions from being assigned "scalp" mode
+			if savedState, found := savedStates[exchangePos.Symbol]; found && savedState.Mode != "" {
+				if savedState.Side == side { // Only use saved mode if side matches
+					log.Printf("[POSITION-RECONCILE] Using saved mode for %s: %s (instead of %s)",
+						exchangePos.Symbol, savedState.Mode, externalMode)
+					externalMode = savedState.Mode
+				}
+			}
 
 			// BUG FIX: Check mode-specific position limit before adding
 			modeConfig := ga.getModeConfig(externalMode)

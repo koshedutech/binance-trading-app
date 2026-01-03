@@ -108,6 +108,10 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./config.json:/app/config.json:ro
+      # BUG FIX: Persist Ginie state files across container restarts
+      # Without this, scalp_reentry TP levels reset to TP1 on restart
+      - ./ginie_position_state.json:/app/ginie_position_state.json
+      - ./autopilot_settings.json:/app/autopilot_settings.json
     networks:
       - trading-network
     ports:
