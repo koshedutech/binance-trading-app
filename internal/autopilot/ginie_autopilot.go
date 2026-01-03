@@ -1937,7 +1937,9 @@ func (ga *GinieAutopilot) LoadUserCoinSources(ctx context.Context) error {
 			maxLimit = 10
 		}
 
-		movers, err := ga.analyzer.GetMarketMovers(maxLimit)
+		// Use GetAllMarketMovers to include ALL top gainers (no volume filter)
+		// This allows trading coins like BUSDT, USELESSUSDT, PIEVERSEUSDT etc.
+		movers, err := ga.analyzer.GetAllMarketMovers(maxLimit)
 		if err == nil {
 			if settings.MoverGainers {
 				for i, coin := range movers.TopGainers {
@@ -2343,15 +2345,32 @@ func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availa
 			continue
 		}
 
-		// Calculate efficiency score:
-		// Higher confidence + higher volatility + lower margin = higher score
-		// Formula: (confidence * volatility_atr * 100) / minMargin
+		// Calculate efficiency score: FIXED - penalize dusty low-volume coins
+		// OLD formula rewarded low margin (dusty coins), causing worst signals to trade first
+		// NEW formula: penalizes low volume and adds minimum margin floor
 		volatilityMultiplier := signal.VolatilityRegime.ATRRatio
 		if volatilityMultiplier < 0.5 {
 			volatilityMultiplier = 0.5 // Floor
 		}
 
-		efficiencyScore := (signal.EntryConfidence * volatilityMultiplier * 100) / minMarginUSD
+		// FIXED: Add volume penalty - dusty coins with low volume get penalized
+		volumePenalty := 1.0
+		if signal.VolumeMultiplier < 2.0 {
+			volumePenalty = 0.5 // 50% penalty for weak volume
+		} else if signal.VolumeMultiplier < 3.0 {
+			volumePenalty = 0.75 // 25% penalty for moderate volume
+		}
+
+		// FIXED: Add minimum margin floor to prevent dusty coins from dominating
+		// Coins with <$5 min margin get scored as if they were $5
+		adjustedMinMargin := minMarginUSD
+		if adjustedMinMargin < 5.0 {
+			adjustedMinMargin = 5.0 // Floor at $5 to reduce dusty coin priority
+		}
+
+		// FIXED: New formula prioritizes quality over cheap margin
+		// (confidence * volume_factor * volatility * 100) / adjustedMargin
+		efficiencyScore := (signal.EntryConfidence * volumePenalty * volatilityMultiplier * 100) / adjustedMinMargin
 
 		// Determine actual position size: min(maxPositionUSD, availableBalance, what we can afford)
 		positionSizeUSD := maxPositionUSD

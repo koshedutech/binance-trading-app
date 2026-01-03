@@ -3605,6 +3605,13 @@ type EntryConfluenceResult struct {
 	ConsecutiveCandles   int     // Count of consecutive same-direction candles
 	RSIExhaustionOK      bool    // True if RSI not in exhaustion zone
 	RSI14Value           float64 // Current RSI(14) value
+
+	// Candlestick Pattern Results
+	CandlestickValid     bool    // True if pattern matches direction
+	CandlestickPattern   string  // Detected pattern name
+	CandlestickSignal    string  // "BULLISH", "BEARISH", or "NEUTRAL"
+	CandlestickConfidence float64 // Pattern confidence (0-100)
+	CandlestickStrength  string  // "weak", "moderate", "strong"
 }
 
 // calculateVWAP calculates Volume Weighted Average Price
@@ -3906,7 +3913,61 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 		result.Details = append(result.Details, fmt.Sprintf("✗ EMA20=%.4f, EMA50=%.4f [%s] - misaligned for %s", ema20, ema50, result.EMATrend, direction))
 	}
 
-	// === 6. EXTENSION FILTER (Prevent Late Entries) ===
+	// === 6. CANDLESTICK PATTERN CHECK (Bonus/Confirmation) ===
+	// Analyze candlestick patterns to improve entry timing
+	if g.config != nil && g.config.CandlestickEnabled {
+		candlestickConfig := &CandlestickConfig{
+			Enabled:           true,
+			MinConfidence:     g.config.CandlestickMinConfidence,
+			DojiBodyRatio:     0.1,
+			HammerWickRatio:   2.0,
+			EngulfingMinOverlap: 1.0,
+			PinBarWickRatio:   0.6,
+			RequirePriorTrend: true,
+			PriorTrendCandles: 5,
+		}
+
+		candleAnalysis := g.AnalyzeCandlestickPatterns(symbol, klines, candlestickConfig)
+
+		if candleAnalysis != nil && candleAnalysis.BestPattern != nil {
+			result.CandlestickPattern = string(candleAnalysis.BestPattern.Type)
+			result.CandlestickSignal = string(candleAnalysis.BestPattern.Signal)
+			result.CandlestickConfidence = candleAnalysis.BestPattern.Confidence
+			result.CandlestickStrength = candleAnalysis.BestPattern.Strength
+
+			// Check if pattern matches our intended direction
+			patternMatchesDirection := (direction == "long" && candleAnalysis.PrimarySignal == SignalBullish) ||
+				(direction == "short" && candleAnalysis.PrimarySignal == SignalBearish)
+
+			if patternMatchesDirection {
+				result.CandlestickValid = true
+				// Boost confluence score if configured
+				if g.config.CandlestickBoostScore && candleAnalysis.BestPattern.Confidence >= 70 {
+					confluenceCount++ // Bonus point for strong matching pattern
+					result.Details = append(result.Details, fmt.Sprintf("★ CANDLESTICK BONUS: %s (%s, %.0f%% confidence)",
+						candleAnalysis.BestPattern.Type, candleAnalysis.BestPattern.Signal, candleAnalysis.BestPattern.Confidence))
+				} else {
+					result.Details = append(result.Details, fmt.Sprintf("✓ Candlestick: %s (%s, %.0f%% confidence)",
+						candleAnalysis.BestPattern.Type, candleAnalysis.BestPattern.Signal, candleAnalysis.BestPattern.Confidence))
+				}
+			} else if candleAnalysis.PrimarySignal != SignalNeutral {
+				// Pattern detected but opposite direction - warning
+				result.Details = append(result.Details, fmt.Sprintf("⚠ Candlestick: %s is %s (opposite to %s entry)",
+					candleAnalysis.BestPattern.Type, candleAnalysis.BestPattern.Signal, direction))
+
+				// If configured to require pattern match, this could block entry
+				if g.config.CandlestickRequireMatch && candleAnalysis.BestPattern.Confidence >= 75 {
+					result.Details = append(result.Details, "⚠ Strong opposite pattern detected - consider waiting")
+				}
+			} else {
+				result.Details = append(result.Details, fmt.Sprintf("○ Candlestick: %s (neutral)", candleAnalysis.BestPattern.Type))
+			}
+		} else if candleAnalysis != nil && len(candleAnalysis.PatternsDetected) == 0 {
+			result.Details = append(result.Details, "○ Candlestick: No significant pattern detected")
+		}
+	}
+
+	// === 7. EXTENSION FILTER (Prevent Late Entries) ===
 	// This is the CRITICAL filter that prevents entering after price has already moved too far
 	extensionBlocked := false
 	if g.config != nil && g.config.ExtensionFilterEnabled {
@@ -4036,7 +4097,10 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 			"ema20_dist", fmt.Sprintf("%.2f%%", result.EMA20Distance),
 			"ema50_dist", fmt.Sprintf("%.2f%%", result.EMA50Distance),
 			"consec_candles", result.ConsecutiveCandles,
-			"rsi14", fmt.Sprintf("%.1f", result.RSI14Value))
+			"rsi14", fmt.Sprintf("%.1f", result.RSI14Value),
+			"candlestick", result.CandlestickPattern,
+			"candle_signal", result.CandlestickSignal,
+			"candle_confidence", fmt.Sprintf("%.0f%%", result.CandlestickConfidence))
 	}
 
 	return result
@@ -4307,27 +4371,31 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 		ema20Idx = 20
 	}
 
-	// Multi-tiered trend check: more sensitive to catch more opportunities
-	// Strong trend: ±0.3% or more
-	// Weak trend: ±0.1% to ±0.3%
-	// Neutral: less than ±0.1%
+	// Multi-tiered trend check: FIXED - stricter thresholds to reduce bad entries
+	// Strong trend: ±0.5% or more (was ±0.3%)
+	// Weak trend: ±0.2% to ±0.5% (was ±0.1% to ±0.3%)
+	// Neutral: less than ±0.2% (was ±0.1%) - REJECTED, returns 0 confidence
 	priceDiffPct := ((close1h - close1hPrev) / close1hPrev) * 100.0
 
-	if priceDiffPct >= 0.3 { // Strong uptrend
+	if priceDiffPct >= 0.5 { // Strong uptrend (FIXED: was 0.3%)
 		signal.TrendBias = "LONG"
 		signal.TrendStrength = 80
-	} else if priceDiffPct >= 0.1 { // Weak uptrend
+	} else if priceDiffPct >= 0.2 { // Weak uptrend (FIXED: was 0.1%)
 		signal.TrendBias = "LONG"
 		signal.TrendStrength = 55
-	} else if priceDiffPct <= -0.3 { // Strong downtrend
+	} else if priceDiffPct <= -0.5 { // Strong downtrend (FIXED: was -0.3%)
 		signal.TrendBias = "SHORT"
 		signal.TrendStrength = 80
-	} else if priceDiffPct <= -0.1 { // Weak downtrend
+	} else if priceDiffPct <= -0.2 { // Weak downtrend (FIXED: was -0.1%)
 		signal.TrendBias = "SHORT"
 		signal.TrendStrength = 55
 	} else {
+		// FIXED: NEUTRAL signals now get 0 confidence and are rejected
 		signal.TrendBias = "NEUTRAL"
-		signal.TrendStrength = 40
+		signal.TrendStrength = 0 // Was 40
+		signal.EntryConfidence = 0
+		log.Printf("[ULTRA-FAST] %s: NEUTRAL trend (%.2f%%) - REJECTED (no directional bias)", symbol, priceDiffPct)
+		return signal, nil // Return early - don't waste API calls on doomed signal
 	}
 
 	// Calculate ADX for trend strength tracking (used by adaptive learning)
@@ -4367,15 +4435,15 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 				var bias string
 				var strength float64
 
-				// Thresholds adjusted per timeframe (shorter = more sensitive)
+				// Thresholds adjusted per timeframe - FIXED: stricter to reduce noise
 				var strongThreshold, weakThreshold float64
 				switch timeframe {
 				case "5m":
-					strongThreshold, weakThreshold = 0.20, 0.05
+					strongThreshold, weakThreshold = 0.35, 0.15 // FIXED: was 0.20, 0.05
 				case "3m":
-					strongThreshold, weakThreshold = 0.15, 0.04
+					strongThreshold, weakThreshold = 0.25, 0.10 // FIXED: was 0.15, 0.04
 				case "1m":
-					strongThreshold, weakThreshold = 0.10, 0.03
+					strongThreshold, weakThreshold = 0.15, 0.05 // FIXED: was 0.10, 0.03
 				}
 
 				if priceDiffPct >= strongThreshold {
@@ -4638,7 +4706,9 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 				signal.EntryConfidence = 40 // Trend not confirmed by 1m
 			}
 		} else if signal.TrendBias == "NEUTRAL" {
-			signal.EntryConfidence = 50
+			// FIXED: NEUTRAL signals should never reach here (early return above)
+			// But if they do, assign 0 confidence to ensure rejection
+			signal.EntryConfidence = 0
 		}
 	}
 

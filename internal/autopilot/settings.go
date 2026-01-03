@@ -1478,15 +1478,16 @@ func DefaultSettings() *AutopilotSettings {
 		AutoModeQuickProfitMode:  false, // Disabled by default
 		AutoModeMinProfitForExit: 1.0,   // 1% min profit for quick exit
 
-		// Ultra-fast scalping defaults (1-3 second exits)
+		// Ultra-fast scalping defaults (FIXED - was causing losses)
+		// Key fixes: Higher profit target, tighter SL, stricter confidence
 		UltraFastEnabled:         false, // Disabled by default - high risk mode
 		UltraFastScanInterval:    5000,  // Scan every 5 seconds
-		UltraFastMonitorInterval: 2000,  // Monitor every 2 seconds for exits (reduced from 500ms to lower API load)
-		UltraFastMaxPositions:    3,     // Conservative - max 3 concurrent positions
-		UltraFastMaxUSDPerPos:    250,   // $200-300 range for better fee efficiency
-		UltraFastMinConfidence:   60.0,  // Raised from 50% for better signal quality
-		UltraFastMinProfitPct:    0.0,   // Dynamic calculation (fee-aware)
-		UltraFastMaxHoldMS:       3000,  // Force exit after 3 seconds
+		UltraFastMonitorInterval: 2000,  // Monitor every 2 seconds for exits
+		UltraFastMaxPositions:    1,     // FIXED: Was 3, now 1 - reduce concurrent risk
+		UltraFastMaxUSDPerPos:    50,    // FIXED: Was 250, now 50 - smaller positions
+		UltraFastMinConfidence:   75.0,  // FIXED: Was 60, now 75 - stricter signals
+		UltraFastMinProfitPct:    0.8,   // FIXED: Was 0, now 0.8% - must exceed fees (~0.13%)
+		UltraFastMaxHoldMS:       5000,  // FIXED: Was 3000, now 5000 - allow more time for profit
 		UltraFastTodayTrades:     0,
 		UltraFastMaxDailyTrades:  0,     // 0 = unlimited trades (was 50)
 		UltraFastDailyPnL:        0,
@@ -1507,15 +1508,15 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastMaxConsecutiveLosses:  10,   // Trip after 10 consecutive losses
 		UltraFastMaxDailyLossUSD:       10.0, // Trip if daily loss exceeds $10
 
-		// Signal quality filters (aggressive scalping)
+		// Signal quality filters (FIXED - stricter thresholds to reduce bad entries)
 		UltraFastVolumeFilterEnabled:     true,
-		UltraFastVolumeMultiplier:        1.5,   // Volume > 1.5x average
+		UltraFastVolumeMultiplier:        2.0,   // FIXED: Was 1.5, now 2.0 - require stronger volume
 		UltraFastMomentumFilterEnabled:   true,
-		UltraFastMinMomentum:             0.05,  // 0.05% minimum momentum
-		UltraFastMinTrendStrength:        60.0,  // Raised from 40 to 60
+		UltraFastMinMomentum:             0.15,  // FIXED: Was 0.05, now 0.15 - reject flat moves
+		UltraFastMinTrendStrength:        70.0,  // FIXED: Was 60, now 70 - stricter trend
 		UltraFastCandleBodyFilterEnabled: true,
-		UltraFastMinCandleBodyPct:        0.1,   // 0.1% min candle body (reject doji)
-		UltraFastMinADX:                  8.0,   // Min ADX for AI exit (lower = more patient exits)
+		UltraFastMinCandleBodyPct:        0.15,  // FIXED: Was 0.1, now 0.15 - reject weak candles
+		UltraFastMinADX:                  15.0,  // FIXED: Was 8, now 15 - require clear trend
 
 		// Tiered take profit (TP1/TP2/TP3)
 		UltraFastTP1Percent:      0.5,  // TP1 at 0.5%
@@ -1530,8 +1531,8 @@ func DefaultSettings() *AutopilotSettings {
 		UltraFastTrailingActivationPct: 0.5, // Activate after 0.5% profit (TP1)
 		UltraFastTrailingDistancePct:   0.3, // 0.3% trail distance
 
-		// Stop loss
-		UltraFastStopLossPercent: 1.0, // 1% stop loss from entry
+		// Stop loss - FIXED: Must be <= TP1 for positive risk/reward
+		UltraFastStopLossPercent: 0.5, // FIXED: Was 1.0%, now 0.5% - tighter SL for better R:R
 
 		// Trend alignment (multi-timeframe confirmation)
 		UltraFastTrendAlignmentEnabled: true,  // Enable 5m/1h alignment check
