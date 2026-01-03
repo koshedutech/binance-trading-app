@@ -2293,6 +2293,17 @@ export interface GinieAutopilotStats {
   max_positions: number;
 }
 
+// Stuck position alert for positions that need manual intervention
+export interface StuckPositionAlert {
+  symbol: string;
+  side: string;
+  mode: string;
+  reason: string;
+  alerted_at: string;
+  remaining_quantity: number;
+  entry_price: number;
+}
+
 export interface GinieAutopilotStatus {
   stats: GinieAutopilotStats;
   config: GinieAutopilotConfig;
@@ -2300,6 +2311,8 @@ export interface GinieAutopilotStatus {
   trade_history: GinieTradeResult[];
   available_balance?: number;
   wallet_balance?: number;
+  stuck_positions?: StuckPositionAlert[];
+  has_stuck_positions?: boolean;
 }
 
 export interface GinieCircuitBreakerStatus {

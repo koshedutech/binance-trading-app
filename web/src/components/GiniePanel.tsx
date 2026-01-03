@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig, StuckPositionAlert } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import { useFuturesStore } from '../store/futuresStore';
 import {
@@ -1032,6 +1032,39 @@ export default function GiniePanel() {
           )}
         </div>
       </div>
+
+      {/* STUCK POSITIONS ALERT BANNER */}
+      {autopilotStatus?.has_stuck_positions && autopilotStatus.stuck_positions && autopilotStatus.stuck_positions.length > 0 && (
+        <div className="mb-2 p-2 bg-red-900/40 border border-red-500/50 rounded-lg animate-pulse">
+          <div className="flex items-center gap-2 mb-1">
+            <AlertOctagon className="w-4 h-4 text-red-400" />
+            <span className="text-red-400 font-semibold text-xs">
+              {autopilotStatus.stuck_positions.length} Position{autopilotStatus.stuck_positions.length > 1 ? 's' : ''} Need Manual Intervention
+            </span>
+          </div>
+          <div className="space-y-1">
+            {autopilotStatus.stuck_positions.map((stuck, idx) => (
+              <div key={idx} className="flex items-center justify-between bg-red-900/30 rounded px-2 py-1">
+                <div className="flex items-center gap-2">
+                  <span className={`text-xs font-bold ${stuck.side === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
+                    {stuck.symbol}
+                  </span>
+                  <span className="text-gray-400 text-[10px]">{stuck.side}</span>
+                  <span className="text-gray-500 text-[10px]">({stuck.mode})</span>
+                </div>
+                <div className="text-right">
+                  <div className="text-red-300 text-[10px]">Qty: {stuck.remaining_quantity.toFixed(6)}</div>
+                  <div className="text-gray-400 text-[10px]">Entry: ${stuck.entry_price.toFixed(2)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-1 text-red-300/80 text-[10px]">
+            ⚠️ These positions are too small to execute trades. Please close manually on Binance.
+          </div>
+        </div>
+      )}
+
       {/* Header Row 2 - Buttons */}
       <div className="flex items-center justify-center gap-1 mb-2">
         {/* Scan & Analyze */}
