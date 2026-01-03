@@ -112,10 +112,20 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 
 	// Round quantity to appropriate precision
 	sellQty = g.roundQuantity(pos.Symbol, sellQty)
+	minQty := g.getMinQuantity(pos.Symbol)
 
-	if sellQty < g.getMinQuantity(pos.Symbol) {
-		sr.AddDebugLog(fmt.Sprintf("TP%d: Sell qty %.4f below minimum, skipping", tpLevel, sellQty))
-		return nil
+	// Handle small positions: if partial sell is below minimum, close entire remaining
+	if sellQty < minQty {
+		remainingQty := g.roundQuantity(pos.Symbol, sr.RemainingQuantity)
+		if remainingQty >= minQty {
+			// Position is small - close 100% instead of partial
+			sr.AddDebugLog(fmt.Sprintf("TP%d: Partial qty %.4f below min, closing 100%% (%.4f) instead", tpLevel, sellQty, remainingQty))
+			sellQty = remainingQty
+			sellPercent = 100.0
+		} else {
+			sr.AddDebugLog(fmt.Sprintf("TP%d: Position too small (%.4f < min %.4f), skipping", tpLevel, remainingQty, minQty))
+			return nil
+		}
 	}
 
 	sr.AddDebugLog(fmt.Sprintf("TP%d hit at %.8f! Selling %.4f (%.0f%% of remaining)",
@@ -158,6 +168,22 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	// CRITICAL: Sync pos.RemainingQty with sr.RemainingQuantity to avoid divergence
 	// sr.RemainingQuantity is the source of truth for scalp_reentry mode
 	pos.RemainingQty = sr.RemainingQuantity
+
+	// Handle small position full close - no re-entry when position fully closed
+	if sr.RemainingQuantity <= 0 || sellPercent >= 100.0 {
+		sr.AddDebugLog(fmt.Sprintf("TP%d: Position fully closed (small position handling). Total profit: %.4f", tpLevel, sr.AccumulatedProfit))
+		cycle.ReentryState = ReentryStateNone
+		cycle.Outcome = "full_close_small_position"
+		cycle.OutcomeReason = "position_below_min_qty"
+		cycle.EndTime = time.Now()
+		sr.Cycles = append(sr.Cycles, cycle)
+		sr.TotalCyclesCompleted++
+		sr.TotalCyclePnL = sr.AccumulatedProfit
+		sr.LastUpdate = time.Now()
+		pos.IsClosing = true
+		go g.SavePositionState()
+		return nil
+	}
 
 	// Handle TP3 (1%) - activate dynamic SL and final trailing
 	if tpLevel == 3 {
