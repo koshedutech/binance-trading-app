@@ -113,16 +113,77 @@ type SetPositionModeRequest struct {
 
 // handleGetFuturesAccountInfo returns futures account information
 func (s *Server) handleGetFuturesAccountInfo(c *gin.Context) {
-	// Check if we're in dry run mode via settings API
-	settingsAPI := s.getSettingsAPI()
-	isSimulated := false // Default to real mode if settings unavailable
-	if settingsAPI != nil {
-		isSimulated = settingsAPI.GetDryRunMode()
+	// Get user ID from auth context
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// Check if we're in dry run mode - use per-user mode if authenticated
+	isSimulated := false
+	if userID != "" {
+		// Get per-user trading mode from database
+		dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
+		if err != nil {
+			log.Printf("[FUTURES-ACCOUNT] Error getting user dry run mode for %s: %v, defaulting to paper", userID, err)
+			dryRun = true
+		}
+		isSimulated = dryRun
 	}
 
 	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		// If in LIVE mode but no client, return clear error
+		if !isSimulated {
+			log.Printf("[FUTURES-ACCOUNT] User %s in LIVE mode but no client - API key configuration needed", userID)
+			c.JSON(http.StatusOK, gin.H{
+				"total_wallet_balance":              0.0,
+				"total_unrealized_profit":           0.0,
+				"total_margin_balance":              0.0,
+				"total_position_initial_margin":     0.0,
+				"total_open_order_initial_margin":   0.0,
+				"total_cross_wallet_balance":        0.0,
+				"total_cross_unrealized_pnl":        0.0,
+				"available_balance":                 0.0,
+				"max_withdraw_amount":               0.0,
+				"assets":                            []interface{}{},
+				"positions":                         []interface{}{},
+				"can_trade":                         false,
+				"can_deposit":                       false,
+				"can_withdraw":                      false,
+				"is_simulated":                      false,
+				"error":                             "api_keys_required",
+				"message":                           "Please configure your Binance API keys in Settings to access live trading",
+			})
+			return
+		}
+		// Return mock account info if in paper trading mode
+		// Get paper balance from database
+		paperBalance, _, err := s.repo.GetUserPaperBalance(ctx, userID)
+		if err != nil {
+			log.Printf("[FUTURES-ACCOUNT] Error getting paper balance for %s: %v, using default", userID, err)
+			paperBalance = 10000.0 // fallback default
+		}
+		if paperBalance == 0 {
+			paperBalance = 10000.0 // fallback for zero balance
+		}
+		availableBalance := paperBalance * 0.95 // 5% margin buffer
+
+		c.JSON(http.StatusOK, gin.H{
+			"total_wallet_balance":              paperBalance,
+			"total_unrealized_profit":           0.0,
+			"total_margin_balance":              paperBalance,
+			"total_position_initial_margin":     0.0,
+			"total_open_order_initial_margin":   0.0,
+			"total_cross_wallet_balance":        paperBalance,
+			"total_cross_unrealized_pnl":        0.0,
+			"available_balance":                 availableBalance,
+			"max_withdraw_amount":               availableBalance,
+			"assets":                            []interface{}{},
+			"positions":                         []interface{}{},
+			"can_trade":                         true,
+			"can_deposit":                       true,
+			"can_withdraw":                      true,
+			"is_simulated":                      true,
+		})
 		return
 	}
 
@@ -1598,16 +1659,63 @@ func (s *Server) handleGetFuturesKlines(c *gin.Context) {
 
 // handleGetFuturesWalletBalance returns the futures wallet balance
 func (s *Server) handleGetFuturesWalletBalance(c *gin.Context) {
-	// Check if we're in dry run mode via settings API
-	settingsAPI := s.getSettingsAPI()
-	isSimulated := false // Default to real mode if settings unavailable
-	if settingsAPI != nil {
-		isSimulated = settingsAPI.GetDryRunMode()
+	// Get user ID from auth context
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// Check if we're in dry run mode - use per-user mode if authenticated
+	isSimulated := false
+	if userID != "" {
+		// Get per-user trading mode from database
+		dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
+		if err != nil {
+			log.Printf("[FUTURES-WALLET] Error getting user dry run mode for %s: %v, defaulting to paper", userID, err)
+			dryRun = true
+		}
+		isSimulated = dryRun
 	}
 
 	futuresClient := s.getFuturesClientForUser(c)
 	if futuresClient == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		// If in LIVE mode but no client, user needs to configure API keys
+		if !isSimulated {
+			log.Printf("[FUTURES-WALLET] User %s in LIVE mode but no client - API key configuration needed", userID)
+			c.JSON(http.StatusOK, gin.H{
+				"total_balance":        0.0,
+				"available_balance":    0.0,
+				"total_margin_balance": 0.0,
+				"total_unrealized_pnl": 0.0,
+				"currency":             "USDT",
+				"is_simulated":         false,
+				"error":                "api_keys_required",
+				"message":              "Please configure your Binance API keys in Settings to access live trading",
+				"assets":               []gin.H{},
+			})
+			return
+		}
+		// Return mock balance if in paper trading mode
+		// Get paper balance from database
+		paperBalance, _, err := s.repo.GetUserPaperBalance(ctx, userID)
+		if err != nil {
+			log.Printf("[FUTURES-WALLET] Error getting paper balance for %s: %v, using default", userID, err)
+			paperBalance = 10000.0 // fallback default
+		}
+		if paperBalance == 0 {
+			paperBalance = 10000.0 // fallback for zero balance
+		}
+		availableBalance := paperBalance * 0.95 // 5% margin buffer
+
+		c.JSON(http.StatusOK, gin.H{
+			"total_balance":        paperBalance,
+			"available_balance":    availableBalance,
+			"total_margin_balance": paperBalance,
+			"total_unrealized_pnl": 0.0,
+			"currency":             "USDT",
+			"is_simulated":         true,
+			"assets": []gin.H{
+				{"asset": "USDT", "wallet_balance": paperBalance, "cross_wallet": paperBalance, "available_balance": availableBalance, "unrealized_profit": 0.0},
+			},
+		})
 		return
 	}
 
@@ -1804,22 +1912,31 @@ func (s *Server) getFuturesClient() binance.FuturesClient {
 // User must have API keys configured in the database - no global fallback
 // Returns nil if user has no API keys (caller should return error to user)
 func (s *Server) getFuturesClientForUser(c *gin.Context) binance.FuturesClient {
-	// Check if in paper trading mode - use mock client
-	if s.botAPI != nil {
-		if settingsAPI, ok := s.botAPI.(SettingsAPI); ok {
-			if settingsAPI.GetDryRunMode() {
-				log.Printf("[DEBUG] getFuturesClientForUser: Paper trading mode, using mock client")
-				return s.getFuturesClient() // Returns mock client in paper mode
-			}
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// Check if in paper trading mode - use per-user mode if authenticated
+	if userID != "" {
+		// Get per-user trading mode from database
+		dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
+		if err != nil {
+			log.Printf("[DEBUG] getFuturesClientForUser: Error getting user dry run mode: %v, defaulting to paper", err)
+			dryRun = true
 		}
+		if dryRun {
+			log.Printf("[DEBUG] getFuturesClientForUser: User %s in paper trading mode, using mock client", userID)
+			return s.getFuturesClient() // Returns mock client in paper mode
+		}
+	} else {
+		// No user authentication - return nil
+		log.Printf("[DEBUG] getFuturesClientForUser: No user authentication, cannot provide client")
+		return nil
 	}
 
 	// Live mode - must use user-specific keys from database
 	if s.authEnabled && s.apiKeyService != nil {
-		userID := s.getUserID(c)
-		log.Printf("[DEBUG] getFuturesClientForUser: authEnabled=%v, userID=%s", s.authEnabled, userID)
+		log.Printf("[DEBUG] getFuturesClientForUser: authEnabled=%v, userID=%s in LIVE mode", s.authEnabled, userID)
 		if userID != "" {
-			ctx := c.Request.Context()
 			// Try mainnet first, then testnet
 			keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
 			if err != nil {

@@ -57,6 +57,8 @@ const APIKeys: React.FC = () => {
       setShowAddModal(false);
       setNewKey({ apiKey: '', secretKey: '', isTestnet: true });
       fetchAPIKeys();
+      // Notify other components that API keys have changed
+      window.dispatchEvent(new CustomEvent('api-key-changed'));
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to add API key' });
     } finally {
@@ -73,6 +75,8 @@ const APIKeys: React.FC = () => {
       await apiService.deleteAPIKey(keyId);
       setMessage({ type: 'success', text: 'API key deleted successfully' });
       fetchAPIKeys();
+      // Notify other components that API keys have changed
+      window.dispatchEvent(new CustomEvent('api-key-changed'));
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to delete API key' });
     }

@@ -18,7 +18,7 @@ const AIKeys: React.FC = () => {
 
   // Form state for adding new key
   const [newKey, setNewKey] = useState({
-    provider: 'claude',
+    provider: 'deepseek',
     apiKey: '',
   });
   const [showAPIKey, setShowAPIKey] = useState(false);
@@ -52,7 +52,7 @@ const AIKeys: React.FC = () => {
       });
       setMessage({ type: 'success', text: 'AI key added successfully!' });
       setShowAddModal(false);
-      setNewKey({ provider: 'claude', apiKey: '' });
+      setNewKey({ provider: 'deepseek', apiKey: '' });
       fetchAIKeys();
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to add AI key' });
@@ -230,7 +230,7 @@ const AIKeys: React.FC = () => {
                 <button
                   onClick={() => {
                     setShowAddModal(false);
-                    setNewKey({ provider: 'claude', apiKey: '' });
+                    setNewKey({ provider: 'deepseek', apiKey: '' });
                     setMessage(null);
                   }}
                   className="text-gray-400 hover:text-white"
@@ -248,9 +248,9 @@ const AIKeys: React.FC = () => {
                     className="w-full px-4 py-2 bg-dark-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
                     required
                   >
+                    <option value="deepseek">DeepSeek</option>
                     <option value="claude">Anthropic Claude</option>
                     <option value="openai">OpenAI</option>
-                    <option value="deepseek">DeepSeek</option>
                   </select>
                 </div>
 
@@ -283,7 +283,7 @@ const AIKeys: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setShowAddModal(false);
-                      setNewKey({ provider: 'claude', apiKey: '' });
+                      setNewKey({ provider: 'deepseek', apiKey: '' });
                       setMessage(null);
                     }}
                     className="flex-1 px-4 py-2 bg-dark-700 text-white rounded-lg hover:bg-dark-600 transition-colors"

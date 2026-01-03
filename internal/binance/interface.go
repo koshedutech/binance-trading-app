@@ -10,6 +10,7 @@ type BinanceClient interface {
 	PlaceOrder(params map[string]string) (*OrderResponse, error)
 	CancelOrder(symbol string, orderId int64) error
 	GetAccountInfo() (*AccountInfo, error)
+	GetUSDTBalance() (float64, error)
 }
 
 // AccountInfo represents spot account information

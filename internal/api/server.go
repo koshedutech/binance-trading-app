@@ -379,6 +379,10 @@ func (s *Server) setupRoutes() {
 			settings.GET("/circuit-breaker", s.handleGetCircuitBreakerStatus)
 			settings.POST("/circuit-breaker/reset", s.handleResetCircuitBreaker)
 			settings.POST("/circuit-breaker/config", s.handleUpdateCircuitBreakerConfig)
+			// Paper balance endpoints (Story PAPER-002)
+			settings.GET("/paper-balance", s.handleGetPaperBalance)
+			settings.PUT("/paper-balance", s.handleUpdatePaperBalance)
+			settings.POST("/sync-paper-balance", s.handleSyncPaperBalance)
 		}
 
 		// User profile and API keys endpoints (requires auth)

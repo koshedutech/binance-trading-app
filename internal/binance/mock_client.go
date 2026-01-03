@@ -269,3 +269,8 @@ func (mc *MockClient) GetAccountInfo() (*AccountInfo, error) {
 		},
 	}, nil
 }
+
+// GetUSDTBalance returns simulated USDT balance
+func (mc *MockClient) GetUSDTBalance() (float64, error) {
+	return 10500.0, nil // 10000 free + 500 locked
+}

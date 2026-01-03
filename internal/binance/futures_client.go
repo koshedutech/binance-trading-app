@@ -76,6 +76,24 @@ func (c *FuturesClientImpl) GetFuturesAccountInfo() (*FuturesAccountInfo, error)
 	return &accountInfo, nil
 }
 
+// GetUSDTBalance fetches the USDT balance from futures account
+func (c *FuturesClientImpl) GetUSDTBalance() (float64, error) {
+	accountInfo, err := c.GetFuturesAccountInfo()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get account info: %w", err)
+	}
+
+	// Find USDT in assets array
+	for _, asset := range accountInfo.Assets {
+		if asset.Asset == "USDT" {
+			return asset.WalletBalance, nil
+		}
+	}
+
+	// No USDT balance found
+	return 0, nil
+}
+
 // GetPositions retrieves all futures positions
 func (c *FuturesClientImpl) GetPositions() ([]FuturesPosition, error) {
 	params := map[string]string{

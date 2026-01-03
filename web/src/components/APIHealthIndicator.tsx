@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Wifi, WifiOff, AlertTriangle, CheckCircle, Database, Bot, Activity } from 'lucide-react';
 import { apiService } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -23,6 +23,7 @@ export default function APIHealthIndicator() {
   const [loading, setLoading] = useState(true);
   const [showDetails, setShowDetails] = useState(false);
   const { isAuthenticated } = useAuth();
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Reset state immediately when auth changes to prevent showing stale status
@@ -48,8 +49,52 @@ export default function APIHealthIndicator() {
 
     fetchHealth();
     const interval = setInterval(fetchHealth, 30000); // Check every 30 seconds
-    return () => clearInterval(interval);
+
+    // Listen for API key changes to refresh immediately
+    const handleAPIKeyChange = () => {
+      fetchHealth();
+    };
+    window.addEventListener('api-key-changed', handleAPIKeyChange);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('api-key-changed', handleAPIKeyChange);
+    };
   }, [isAuthenticated]);
+
+  // Close popover on click outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setShowDetails(false);
+      }
+    };
+
+    if (showDetails) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showDetails]);
+
+  // Close popover on Escape key
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowDetails(false);
+      }
+    };
+
+    if (showDetails) {
+      document.addEventListener('keydown', handleEscape);
+    }
+
+    return () => {
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [showDetails]);
 
   const getStatusIcon = (status: string) => {
     switch (status) {
@@ -137,7 +182,7 @@ export default function APIHealthIndicator() {
   };
 
   return (
-    <div className="relative">
+    <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setShowDetails(!showDetails)}
         className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium transition-colors ${getStatusStyle()}`}

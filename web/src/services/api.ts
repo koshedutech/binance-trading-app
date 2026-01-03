@@ -761,6 +761,23 @@ class APIService {
     const { data } = await this.client.get('/user/api-status');
     return data;
   }
+
+  // ==================== Paper Trading Balance Endpoints ====================
+
+  async getPaperBalance(): Promise<{ paper_balance_usdt: string; dry_run_mode: boolean }> {
+    const { data } = await this.client.get('/settings/paper-balance');
+    return data;
+  }
+
+  async setPaperBalance(balance: number): Promise<{ paper_balance_usdt: string; message: string }> {
+    const { data } = await this.client.put('/settings/paper-balance', { balance });
+    return data;
+  }
+
+  async syncPaperBalance(): Promise<{ paper_balance_usdt: string; synced_from: string; message: string }> {
+    const { data } = await this.client.post('/settings/sync-paper-balance');
+    return data;
+  }
 }
 
 export const apiService = new APIService();

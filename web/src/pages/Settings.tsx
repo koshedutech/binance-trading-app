@@ -49,7 +49,7 @@ const Settings: React.FC = () => {
   const [aiKeys, setAIKeys] = useState<AIKey[]>([]);
   const [isLoadingAIKeys, setIsLoadingAIKeys] = useState(false);
   const [showAddAIKeyModal, setShowAddAIKeyModal] = useState(false);
-  const [newAIKey, setNewAIKey] = useState({ provider: 'claude', apiKey: '' });
+  const [newAIKey, setNewAIKey] = useState({ provider: 'deepseek', apiKey: '' });
   const [showAIAPIKey, setShowAIAPIKey] = useState(false);
   const [isSubmittingAIKey, setIsSubmittingAIKey] = useState(false);
 
@@ -67,6 +67,14 @@ const Settings: React.FC = () => {
   } | null>(null);
   const [copiedIP, setCopiedIP] = useState(false);
 
+  // Paper Trading Balance state
+  const [paperBalance, setPaperBalance] = useState<string>('');
+  const [paperBalanceInput, setPaperBalanceInput] = useState<string>('');
+  const [isDryRunMode, setIsDryRunMode] = useState<boolean>(false);
+  const [isLoadingPaperBalance, setIsLoadingPaperBalance] = useState(false);
+  const [isUpdatingBalance, setIsUpdatingBalance] = useState(false);
+  const [isSyncingBalance, setIsSyncingBalance] = useState(false);
+
   // Update URL when tab changes
   const changeTab = (tab: TabType) => {
     setActiveTab(tab);
@@ -80,6 +88,7 @@ const Settings: React.FC = () => {
       fetchAPIKeys();
       fetchUserIPAddress();
       fetchUserAPIStatus();
+      fetchPaperBalance();
     }
   }, [activeTab]);
 
@@ -107,6 +116,20 @@ const Settings: React.FC = () => {
     }
   };
 
+  const fetchPaperBalance = async () => {
+    try {
+      setIsLoadingPaperBalance(true);
+      const response = await apiService.getPaperBalance();
+      setPaperBalance(response.paper_balance_usdt);
+      setIsDryRunMode(response.dry_run_mode);
+      setPaperBalanceInput(response.paper_balance_usdt);
+    } catch (error) {
+      console.error('Failed to fetch paper balance:', error);
+    } finally {
+      setIsLoadingPaperBalance(false);
+    }
+  };
+
   const copyIPToClipboard = async () => {
     try {
       await navigator.clipboard.writeText(userIPAddress);
@@ -114,6 +137,44 @@ const Settings: React.FC = () => {
       setTimeout(() => setCopiedIP(false), 2000);
     } catch (error) {
       console.error('Failed to copy IP:', error);
+    }
+  };
+
+  const handleUpdatePaperBalance = async () => {
+    const balance = parseFloat(paperBalanceInput);
+
+    // Client-side validation
+    if (isNaN(balance) || balance < 10 || balance > 1000000) {
+      setMessage({ type: 'error', text: 'Balance must be between $10 and $1,000,000' });
+      return;
+    }
+
+    try {
+      setIsUpdatingBalance(true);
+      setMessage(null);
+      const response = await apiService.setPaperBalance(balance);
+      setPaperBalance(response.paper_balance_usdt);
+      setPaperBalanceInput(response.paper_balance_usdt);
+      setMessage({ type: 'success', text: response.message || 'Paper balance updated successfully!' });
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to update paper balance' });
+    } finally {
+      setIsUpdatingBalance(false);
+    }
+  };
+
+  const handleSyncPaperBalance = async () => {
+    try {
+      setIsSyncingBalance(true);
+      setMessage(null);
+      const response = await apiService.syncPaperBalance();
+      setPaperBalance(response.paper_balance_usdt);
+      setPaperBalanceInput(response.paper_balance_usdt);
+      setMessage({ type: 'success', text: response.message || 'Paper balance synced successfully!' });
+    } catch (error) {
+      setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to sync paper balance' });
+    } finally {
+      setIsSyncingBalance(false);
     }
   };
 
@@ -217,6 +278,9 @@ const Settings: React.FC = () => {
       setShowAddAPIKeyModal(false);
       setNewAPIKey({ apiKey: '', secretKey: '', isTestnet: true });
       fetchAPIKeys();
+      fetchUserAPIStatus(); // Refresh API status immediately
+      // Notify other components that API keys have changed
+      window.dispatchEvent(new CustomEvent('api-key-changed'));
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to add API key' });
     } finally {
@@ -233,6 +297,9 @@ const Settings: React.FC = () => {
       await apiService.deleteAPIKey(keyId);
       setMessage({ type: 'success', text: 'API key deleted successfully' });
       fetchAPIKeys();
+      fetchUserAPIStatus(); // Refresh API status immediately
+      // Notify other components that API keys have changed
+      window.dispatchEvent(new CustomEvent('api-key-changed'));
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to delete API key' });
     }
@@ -259,7 +326,7 @@ const Settings: React.FC = () => {
       });
       setMessage({ type: 'success', text: 'AI key added successfully!' });
       setShowAddAIKeyModal(false);
-      setNewAIKey({ provider: 'claude', apiKey: '' });
+      setNewAIKey({ provider: 'deepseek', apiKey: '' });
       fetchAIKeys();
     } catch (error) {
       setMessage({ type: 'error', text: error instanceof Error ? error.message : 'Failed to add AI key' });
@@ -307,6 +374,12 @@ const Settings: React.FC = () => {
       case 'deepseek': return 'DeepSeek';
       default: return provider;
     }
+  };
+
+  const formatBalance = (balance: string): string => {
+    const num = parseFloat(balance);
+    if (isNaN(num)) return '0.00';
+    return num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
   return (
@@ -558,6 +631,93 @@ const Settings: React.FC = () => {
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Paper Trading Balance - Only show in paper mode */}
+            {userAPIStatus?.services?.binance_spot?.status === 'ok' && isDryRunMode && !isLoadingPaperBalance && (
+              <div className="mt-6 p-4 bg-yellow-900/20 border border-yellow-600/50 rounded-lg">
+                <h3 className="text-yellow-400 font-medium mb-3 flex items-center gap-2">
+                  <Database className="w-5 h-5" />
+                  Paper Trading Balance
+                </h3>
+                <div className="space-y-4">
+                  {/* Current Balance Display */}
+                  <div className="p-3 bg-dark-700 rounded-lg">
+                    <p className="text-gray-400 text-sm mb-1">Current Balance</p>
+                    <p className="text-2xl font-bold text-yellow-400">
+                      ${formatBalance(paperBalance)} USDT
+                    </p>
+                  </div>
+
+                  {/* Manual Balance Input */}
+                  <div>
+                    <label htmlFor="paperBalanceInput" className="block text-sm font-medium text-gray-300 mb-2">
+                      Set Custom Balance
+                    </label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">$</span>
+                        <input
+                          id="paperBalanceInput"
+                          type="number"
+                          min="10"
+                          max="1000000"
+                          step="0.01"
+                          value={paperBalanceInput}
+                          onChange={(e) => setPaperBalanceInput(e.target.value)}
+                          className="w-full pl-7 pr-4 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
+                          placeholder="Enter amount (10 - 1,000,000)"
+                        />
+                      </div>
+                      <button
+                        onClick={handleUpdatePaperBalance}
+                        disabled={isUpdatingBalance}
+                        className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 whitespace-nowrap"
+                      >
+                        {isUpdatingBalance ? (
+                          <>
+                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            Updating...
+                          </>
+                        ) : (
+                          'Update Balance'
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      Enter a value between $10.00 and $1,000,000.00
+                    </p>
+                  </div>
+
+                  {/* Sync from Real Balance Button */}
+                  <div>
+                    <button
+                      onClick={handleSyncPaperBalance}
+                      disabled={isSyncingBalance || userAPIStatus?.services?.binance_spot?.status !== 'ok'}
+                      className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                      title={userAPIStatus?.services?.binance_spot?.status !== 'ok' ? 'Configure Binance API keys first' : 'Copy your real Binance balance'}
+                    >
+                      {isSyncingBalance ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          Syncing...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-4 h-4" />
+                          Sync from Real Balance
+                        </>
+                      )}
+                    </button>
+                    {userAPIStatus?.services?.binance_spot?.status !== 'ok' && (
+                      <p className="text-xs text-red-400 mt-1 flex items-center gap-1">
+                        <AlertTriangle className="w-3 h-3" />
+                        Configure Binance API keys to enable sync
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1031,7 +1191,7 @@ const Settings: React.FC = () => {
                 <button
                   onClick={() => {
                     setShowAddAIKeyModal(false);
-                    setNewAIKey({ provider: 'claude', apiKey: '' });
+                    setNewAIKey({ provider: 'deepseek', apiKey: '' });
                   }}
                   className="text-gray-400 hover:text-white"
                 >
@@ -1048,9 +1208,9 @@ const Settings: React.FC = () => {
                     className="w-full px-4 py-2 bg-dark-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500"
                     required
                   >
+                    <option value="deepseek">DeepSeek</option>
                     <option value="claude">Anthropic Claude</option>
                     <option value="openai">OpenAI</option>
-                    <option value="deepseek">DeepSeek</option>
                   </select>
                 </div>
 
@@ -1083,7 +1243,7 @@ const Settings: React.FC = () => {
                     type="button"
                     onClick={() => {
                       setShowAddAIKeyModal(false);
-                      setNewAIKey({ provider: 'claude', apiKey: '' });
+                      setNewAIKey({ provider: 'deepseek', apiKey: '' });
                     }}
                     className="flex-1 px-4 py-2 bg-dark-700 text-white rounded-lg hover:bg-dark-600 transition-colors"
                   >

@@ -479,7 +479,7 @@ func (r *Repository) GetUserTradingConfig(ctx context.Context, userID string) (*
 			futures_margin_type, autopilot_enabled, autopilot_risk_level, autopilot_min_confidence,
 			autopilot_require_multi_signal, allowed_symbols, blocked_symbols,
 			notification_email, notification_push, notification_telegram, telegram_chat_id,
-			COALESCE(dry_run_mode, true), created_at, updated_at
+			COALESCE(dry_run_mode, true), COALESCE(paper_balance_usdt, 10000.0), created_at, updated_at
 		FROM user_trading_configs
 		WHERE user_id = $1
 	`
@@ -493,7 +493,7 @@ func (r *Repository) GetUserTradingConfig(ctx context.Context, userID string) (*
 		&config.AutopilotMinConfidence, &config.AutopilotRequireMultiSign,
 		&config.AllowedSymbols, &config.BlockedSymbols,
 		&config.NotificationEmail, &config.NotificationPush, &config.NotificationTelegram,
-		&config.TelegramChatID, &config.DryRunMode, &config.CreatedAt, &config.UpdatedAt,
+		&config.TelegramChatID, &config.DryRunMode, &config.PaperBalanceUSDT, &config.CreatedAt, &config.UpdatedAt,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -514,8 +514,9 @@ func (r *Repository) UpsertUserTradingConfig(ctx context.Context, config *UserTr
 			default_take_profit_percent, enable_spot, enable_futures, futures_default_leverage,
 			futures_margin_type, autopilot_enabled, autopilot_risk_level, autopilot_min_confidence,
 			autopilot_require_multi_signal, allowed_symbols, blocked_symbols,
-			notification_email, notification_push, notification_telegram, telegram_chat_id, dry_run_mode
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			notification_email, notification_push, notification_telegram, telegram_chat_id, dry_run_mode,
+			paper_balance_usdt
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		ON CONFLICT (user_id) DO UPDATE SET
 			max_open_positions = EXCLUDED.max_open_positions,
 			max_risk_per_trade = EXCLUDED.max_risk_per_trade,
@@ -536,6 +537,7 @@ func (r *Repository) UpsertUserTradingConfig(ctx context.Context, config *UserTr
 			notification_telegram = EXCLUDED.notification_telegram,
 			telegram_chat_id = EXCLUDED.telegram_chat_id,
 			dry_run_mode = EXCLUDED.dry_run_mode,
+			paper_balance_usdt = EXCLUDED.paper_balance_usdt,
 			updated_at = CURRENT_TIMESTAMP
 	`
 
@@ -547,7 +549,7 @@ func (r *Repository) UpsertUserTradingConfig(ctx context.Context, config *UserTr
 		config.AutopilotMinConfidence, config.AutopilotRequireMultiSign,
 		config.AllowedSymbols, config.BlockedSymbols,
 		config.NotificationEmail, config.NotificationPush, config.NotificationTelegram,
-		config.TelegramChatID, config.DryRunMode,
+		config.TelegramChatID, config.DryRunMode, config.PaperBalanceUSDT,
 	)
 
 	if err != nil {
@@ -589,6 +591,53 @@ func (r *Repository) SetUserDryRunMode(ctx context.Context, userID string, dryRu
 	_, err := r.db.Pool.Exec(ctx, query, userID, dryRun)
 	if err != nil {
 		return fmt.Errorf("failed to set user dry run mode: %w", err)
+	}
+
+	return nil
+}
+
+// GetUserPaperBalance retrieves the paper balance for a user (returns default 10000 if not set)
+func (r *Repository) GetUserPaperBalance(ctx context.Context, userID string) (float64, bool, error) {
+	query := `
+		SELECT COALESCE(paper_balance_usdt, 10000.0), COALESCE(dry_run_mode, true)
+		FROM user_trading_configs
+		WHERE user_id = $1
+	`
+
+	var balance float64
+	var dryRunMode bool
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&balance, &dryRunMode)
+
+	if err == pgx.ErrNoRows {
+		// No config exists, return defaults
+		return 10000.0, true, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to get user paper balance: %w", err)
+	}
+
+	return balance, dryRunMode, nil
+}
+
+// SetUserPaperBalance updates the paper balance for a user (validates range $10-$1M)
+func (r *Repository) SetUserPaperBalance(ctx context.Context, userID string, balance float64) error {
+	// Validate range (same as DB constraint)
+	if balance < 10.0 || balance > 1000000.0 {
+		return fmt.Errorf("balance must be between $10 and $1,000,000")
+	}
+
+	// Use upsert to handle case where user has no config yet
+	query := `
+		INSERT INTO user_trading_configs (user_id, paper_balance_usdt)
+		VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET
+			paper_balance_usdt = EXCLUDED.paper_balance_usdt,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := r.db.Pool.Exec(ctx, query, userID, balance)
+	if err != nil {
+		return fmt.Errorf("failed to set user paper balance: %w", err)
 	}
 
 	return nil

@@ -183,26 +183,65 @@ func (s *Server) handleSetTradingMode(c *gin.Context) {
 // handleGetWalletBalance returns the wallet balance from Binance
 func (s *Server) handleGetWalletBalance(c *gin.Context) {
 	log.Printf("[WALLET-BALANCE-DEBUG] handleGetWalletBalance called")
-	// Check if we're in dry run mode via settings API
-	settingsAPI := s.getSettingsAPI()
+
+	// Get user ID from auth context
+	userID := s.getUserID(c)
+	ctx := c.Request.Context()
+
+	// Check if we're in dry run mode - use per-user mode if authenticated
 	isSimulated := true
-	if settingsAPI != nil {
-		isSimulated = settingsAPI.GetDryRunMode()
+	if userID != "" {
+		// Get per-user trading mode from database
+		dryRun, err := s.repo.GetUserDryRunMode(ctx, userID)
+		if err != nil {
+			log.Printf("[WALLET-BALANCE] Error getting user dry run mode for %s: %v, defaulting to paper", userID, err)
+			dryRun = true
+		}
+		isSimulated = dryRun
+		log.Printf("[WALLET-BALANCE-DEBUG] User %s isSimulated=%v (per-user mode)", userID, isSimulated)
+	} else {
+		log.Printf("[WALLET-BALANCE-DEBUG] No user auth, defaulting to isSimulated=true")
 	}
-	log.Printf("[WALLET-BALANCE-DEBUG] isSimulated=%v", isSimulated)
 
 	client := s.getBinanceClientForUser(c)
 	log.Printf("[WALLET-BALANCE-DEBUG] client=%v", client != nil)
 	if client == nil {
-		// Return mock balance if no client available
+		// If in LIVE mode but no client, user needs to configure API keys
+		if !isSimulated {
+			log.Printf("[WALLET-BALANCE] User %s in LIVE mode but no client - API key configuration needed", userID)
+			c.JSON(http.StatusOK, gin.H{
+				"total_balance":     0.0,
+				"available_balance": 0.0,
+				"locked_balance":    0.0,
+				"currency":          "USDT",
+				"is_simulated":      false,
+				"error":             "api_keys_required",
+				"message":           "Please configure your Binance API keys in Settings to access live trading",
+				"assets":            []gin.H{},
+			})
+			return
+		}
+		// Return mock balance if in paper trading mode with no client
+		// Get paper balance from database
+		paperBalance, _, err := s.repo.GetUserPaperBalance(ctx, userID)
+		if err != nil {
+			log.Printf("[WALLET-BALANCE] Error getting paper balance for %s: %v, using default", userID, err)
+			paperBalance = 10000.0 // fallback default
+		}
+		if paperBalance == 0 {
+			paperBalance = 10000.0 // fallback for zero balance
+		}
+		availableBalance := paperBalance * 0.95 // 5% simulated locked balance
+		lockedBalance := paperBalance * 0.05
+
 		c.JSON(http.StatusOK, gin.H{
-			"total_balance":     10000.0,
-			"available_balance": 9500.0,
-			"locked_balance":    500.0,
+			"total_balance":     paperBalance,
+			"available_balance": availableBalance,
+			"locked_balance":    lockedBalance,
 			"currency":          "USDT",
 			"is_simulated":      true,
 			"assets": []gin.H{
-				{"asset": "USDT", "free": 9500.0, "locked": 500.0},
+				{"asset": "USDT", "free": availableBalance, "locked": lockedBalance},
 				{"asset": "BTC", "free": 0.0, "locked": 0.0},
 			},
 		})

@@ -349,6 +349,26 @@ func (c *Client) GetAccountInfo() (*AccountInfo, error) {
 	return &accountInfo, nil
 }
 
+// GetUSDTBalance fetches the USDT balance from spot account
+func (c *Client) GetUSDTBalance() (float64, error) {
+	accountInfo, err := c.GetAccountInfo()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get account info: %w", err)
+	}
+
+	// Find USDT in balances array
+	for _, balance := range accountInfo.Balances {
+		if balance.Asset == "USDT" {
+			free := parseFloat(balance.Free)
+			locked := parseFloat(balance.Locked)
+			return free + locked, nil
+		}
+	}
+
+	// No USDT balance found
+	return 0, nil
+}
+
 // buildQueryString creates a query string from params (excluding signature)
 func (c *Client) buildQueryString(params map[string]string) string {
 	query := ""

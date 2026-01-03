@@ -123,6 +123,7 @@ type UserTradingConfig struct {
 	NotificationTelegram      bool      `json:"notification_telegram"`
 	TelegramChatID            string    `json:"telegram_chat_id,omitempty"`
 	DryRunMode                bool      `json:"dry_run_mode"`                   // Per-user paper/live trading mode
+	PaperBalanceUSDT          float64   `json:"paper_balance_usdt"`             // Custom paper trading balance in USDT (default 10000, range $10-$1M)
 	CreatedAt                 time.Time `json:"created_at"`
 	UpdatedAt                 time.Time `json:"updated_at"`
 }

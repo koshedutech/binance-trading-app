@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { apiService } from '../services/api';
 import { Wallet, RefreshCw, AlertCircle, TrendingUp, Lock } from 'lucide-react';
+import { useFuturesStore } from '../store/futuresStore';
 
 interface WalletBalance {
   total_balance: number;
@@ -16,11 +17,14 @@ export default function WalletBalanceCard() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Get trading mode from futures store to trigger refresh when it changes
+  const tradingMode = useFuturesStore((state) => state.tradingMode);
+
   useEffect(() => {
     fetchBalance();
     const interval = setInterval(fetchBalance, 30000); // Refresh every 30 seconds
     return () => clearInterval(interval);
-  }, []);
+  }, [tradingMode]); // Re-fetch when trading mode changes
 
   const fetchBalance = async () => {
     try {
