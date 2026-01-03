@@ -583,7 +583,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				TertiaryTimeframe:   "1m",  // Entry timing
 				TertiaryWeight:      0.25,
 				MinConsensus:        2,     // At least 2 TFs must agree
-				MinWeightedStrength: 65.0,  // Min combined weighted strength
+				MinWeightedStrength: 50.0,  // Min combined weighted strength (lowered from 65.0)
 				TrendStabilityCheck: true,  // Check for trend flips
 			},
 			// ====== Ultra-Fast Dynamic AI Exit ======
@@ -1170,9 +1170,10 @@ type AutopilotSettings struct {
 	ProfitReinvestRiskLevel string  `json:"profit_reinvest_risk_level"` // Risk level for reinvested profits
 
 	// Ginie global settings (not per-mode)
-	GinieDryRunMode   bool `json:"ginie_dry_run_mode"`   // Paper trading mode for Ginie
-	GinieAutoStart    bool `json:"ginie_auto_start"`     // Auto-start Ginie on server restart
-	GinieMaxPositions int  `json:"ginie_max_positions"`  // Max concurrent positions for Ginie
+	GinieDryRunMode       bool   `json:"ginie_dry_run_mode"`        // Paper trading mode for Ginie
+	GinieAutoStart        bool   `json:"ginie_auto_start"`          // Auto-start Ginie on server restart
+	GinieAutoStartUserID  string `json:"ginie_auto_start_user_id"`  // User ID to auto-start Ginie for
+	GinieMaxPositions     int    `json:"ginie_max_positions"`       // Max concurrent positions for Ginie
 
 	// Ginie PnL statistics (persisted)
 	GinieTotalPnL      float64 `json:"ginie_total_pnl"`       // Lifetime realized PnL
@@ -2440,10 +2441,15 @@ func (sm *SettingsManager) UpdateGinieSettings(
 	return sm.SaveSettings(settings)
 }
 
-// UpdateGinieAutoStart updates the Ginie auto-start setting
-func (sm *SettingsManager) UpdateGinieAutoStart(autoStart bool) error {
+// UpdateGinieAutoStart updates the Ginie auto-start setting with the user ID
+func (sm *SettingsManager) UpdateGinieAutoStart(autoStart bool, userID string) error {
 	settings := sm.GetCurrentSettings()
 	settings.GinieAutoStart = autoStart
+	if autoStart && userID != "" {
+		settings.GinieAutoStartUserID = userID
+	} else if !autoStart {
+		settings.GinieAutoStartUserID = "" // Clear user ID when disabling
+	}
 	return sm.SaveSettings(settings)
 }
 
@@ -2451,6 +2457,12 @@ func (sm *SettingsManager) UpdateGinieAutoStart(autoStart bool) error {
 func (sm *SettingsManager) GetGinieAutoStart() bool {
 	settings := sm.GetCurrentSettings()
 	return settings.GinieAutoStart
+}
+
+// GetGinieAutoStartUserID returns the user ID to auto-start Ginie for
+func (sm *SettingsManager) GetGinieAutoStartUserID() string {
+	settings := sm.GetCurrentSettings()
+	return settings.GinieAutoStartUserID
 }
 
 // ValidBinanceTimeframes lists all valid Binance timeframe intervals

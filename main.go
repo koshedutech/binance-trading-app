@@ -860,6 +860,19 @@ func main() {
 		}
 	}
 
+	// Auto-start Ginie for user if enabled in saved settings
+	// This restores Ginie state from before server restart
+	if userAutopilotManager != nil {
+		go func() {
+			// Wait a moment for all services to be fully initialized
+			time.Sleep(3 * time.Second)
+			ctx := context.Background()
+			if err := userAutopilotManager.AutoStartFromSettings(ctx); err != nil {
+				logger.Warn("Failed to auto-start Ginie from settings", "error", err)
+			}
+		}()
+	}
+
 	// Wait for interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

@@ -28,6 +28,7 @@
   "profit_reinvest_risk_level": "aggressive",
   "ginie_dry_run_mode": false,
   "ginie_auto_start": true,
+  "ginie_auto_start_user_id": "8dfd838e-90dd-4a8d-af1d-5812dfbb936a",
   "ginie_max_positions": 10,
   "ginie_total_pnl": -0.037794687999999806,
   "ginie_daily_pnl": 0,
@@ -181,7 +182,7 @@
     "scalp_reentry_percent": 0,
     "swing_percent": 40,
     "position_percent": 10,
-    "max_ultra_fast_positions": 5,
+    "max_ultra_fast_positions": 1,
     "max_scalp_positions": 5,
     "max_scalp_reentry_positions": 0,
     "max_swing_positions": 5,
@@ -377,7 +378,7 @@
         "analysis_timeframe": "1d"
       },
       "confidence": {
-        "min_confidence": 60,
+        "min_confidence": 50,
         "high_confidence": 85,
         "ultra_confidence": 92
       },
@@ -461,7 +462,13 @@
         "add_size_percent": 30,
         "max_averages": 2,
         "min_confidence_for_average": 80,
-        "use_llm_for_averaging": true
+        "use_llm_for_averaging": true,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": null,
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
       },
       "stale_release": {
         "enabled": true,
@@ -526,7 +533,7 @@
         "analysis_timeframe": "15m"
       },
       "confidence": {
-        "min_confidence": 60,
+        "min_confidence": 50,
         "high_confidence": 75,
         "ultra_confidence": 85
       },
@@ -613,7 +620,11 @@
         "use_llm_for_averaging": true,
         "staged_entry_enabled": true,
         "staged_entry_levels": 3,
-        "staged_entry_percent": [40, 30, 30],
+        "staged_entry_percent": [
+          40,
+          30,
+          30
+        ],
         "staged_entry_price_improve": 0.3,
         "staged_entry_cooldown_sec": 30,
         "staged_entry_max_wait_sec": 300
@@ -771,7 +782,13 @@
         "add_size_percent": 50,
         "max_averages": 0,
         "min_confidence_for_average": 70,
-        "use_llm_for_averaging": false
+        "use_llm_for_averaging": false,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": null,
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
       },
       "stale_release": {
         "enabled": true,
@@ -835,7 +852,7 @@
         "analysis_timeframe": "4h"
       },
       "confidence": {
-        "min_confidence": 60,
+        "min_confidence": 50,
         "high_confidence": 80,
         "ultra_confidence": 90
       },
@@ -922,7 +939,11 @@
         "use_llm_for_averaging": true,
         "staged_entry_enabled": true,
         "staged_entry_levels": 3,
-        "staged_entry_percent": [40, 30, 30],
+        "staged_entry_percent": [
+          40,
+          30,
+          30
+        ],
         "staged_entry_price_improve": 0.5,
         "staged_entry_cooldown_sec": 60,
         "staged_entry_max_wait_sec": 600
@@ -989,20 +1010,20 @@
     },
     "ultra_fast": {
       "mode_name": "ultra_fast",
-      "enabled": false,
+      "enabled": true,
       "timeframe": {
         "trend_timeframe": "5m",
         "entry_timeframe": "1m",
         "analysis_timeframe": "1m"
       },
       "confidence": {
-        "min_confidence": 75,
+        "min_confidence": 50,
         "high_confidence": 80,
         "ultra_confidence": 90
       },
       "size": {
         "base_size_usd": 50,
-        "max_size_usd": 50,
+        "max_size_usd": 500,
         "max_positions": 1,
         "leverage": 10,
         "size_multiplier_lo": 1,
@@ -1080,7 +1101,13 @@
         "add_size_percent": 0,
         "max_averages": 0,
         "min_confidence_for_average": 0,
-        "use_llm_for_averaging": false
+        "use_llm_for_averaging": false,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": null,
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
       },
       "stale_release": {
         "enabled": true,
@@ -1201,16 +1228,16 @@
   },
   "scalp_reentry_config": {
     "enabled": true,
-    "tp1_percent": 0.3,
+    "tp1_percent": 0.4,
     "tp1_sell_percent": 30,
-    "tp2_percent": 0.6,
+    "tp2_percent": 0.7,
     "tp2_sell_percent": 50,
-    "tp3_percent": 1,
+    "tp3_percent": 1.2,
     "tp3_sell_percent": 80,
     "reentry_percent": 80,
-    "reentry_price_buffer": 0.05,
+    "reentry_price_buffer": 0.15,
     "max_reentry_attempts": 3,
-    "reentry_timeout_sec": 300,
+    "reentry_timeout_sec": 900,
     "final_trailing_percent": 5,
     "final_hold_min_percent": 20,
     "dynamic_sl_max_loss_pct": 40,

@@ -548,3 +548,41 @@ func (m *UserAutopilotManager) GetManagerStatus() *ManagerStatus {
 		RunningUserIDs:   m.GetAllRunningUsers(),
 	}
 }
+
+// AutoStartFromSettings checks if auto-start is enabled and starts Ginie for the saved user
+// This should be called after server initialization to restore Ginie state from before restart
+func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error {
+	sm := GetSettingsManager()
+	if sm == nil {
+		m.logger.Warn("SettingsManager not available for auto-start check")
+		return nil
+	}
+
+	if !sm.GetGinieAutoStart() {
+		m.logger.Info("Ginie auto-start is disabled, skipping")
+		return nil
+	}
+
+	userID := sm.GetGinieAutoStartUserID()
+	if userID == "" {
+		m.logger.Warn("Ginie auto-start enabled but no user ID saved, skipping")
+		return nil
+	}
+
+	m.logger.Info("Auto-starting Ginie from saved settings",
+		"user_id", userID,
+		"auto_start", true)
+
+	// Start autopilot for the saved user
+	if err := m.StartAutopilot(ctx, userID); err != nil {
+		m.logger.Error("Failed to auto-start Ginie for user",
+			"user_id", userID,
+			"error", err)
+		return fmt.Errorf("failed to auto-start Ginie for user %s: %w", userID, err)
+	}
+
+	m.logger.Info("Ginie auto-started successfully",
+		"user_id", userID)
+
+	return nil
+}

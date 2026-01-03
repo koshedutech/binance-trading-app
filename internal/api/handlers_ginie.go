@@ -122,7 +122,7 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 
 	// CRITICAL FIX: Persist the auto-start setting so Ginie restarts after server reboot
 	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateGinieAutoStart(req.Enabled); err != nil {
+	if err := sm.UpdateGinieAutoStart(req.Enabled, userID); err != nil {
 		log.Printf("[GINIE-TOGGLE] Failed to persist auto-start setting: %v", err)
 	}
 
@@ -661,7 +661,7 @@ func (s *Server) handleStartGinieAutopilot(c *gin.Context) {
 
 		// Persist auto-start setting so Ginie restarts automatically after server restart
 		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateGinieAutoStart(true); err != nil {
+		if err := sm.UpdateGinieAutoStart(true, userID); err != nil {
 			// Log but don't fail - the start was successful
 			log.Printf("Failed to persist Ginie auto-start setting: %v", err)
 		}
@@ -718,7 +718,7 @@ func (s *Server) handleStopGinieAutopilot(c *gin.Context) {
 
 		// Clear auto-start setting so Ginie doesn't restart after server restart
 		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateGinieAutoStart(false); err != nil {
+		if err := sm.UpdateGinieAutoStart(false, userID); err != nil {
 			// Log but don't fail - the stop was successful
 			log.Printf("Failed to clear Ginie auto-start setting: %v", err)
 		}
