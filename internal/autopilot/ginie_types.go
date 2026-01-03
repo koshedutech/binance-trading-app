@@ -594,6 +594,13 @@ type GinieConfig struct {
 	MaxConsecutiveCandles   int     `json:"max_consecutive_candles"`    // Max same-direction candles before entry (e.g., 3)
 	RSIExhaustionLongMax    float64 `json:"rsi_exhaustion_long_max"`    // Don't enter LONG if RSI > this (e.g., 65)
 	RSIExhaustionShortMin   float64 `json:"rsi_exhaustion_short_min"`   // Don't enter SHORT if RSI < this (e.g., 35)
+
+	// === CANDLESTICK PATTERN DETECTION ===
+	// Detect classic candlestick patterns to improve entry timing
+	CandlestickEnabled       bool    `json:"candlestick_enabled"`        // Enable candlestick pattern detection
+	CandlestickMinConfidence float64 `json:"candlestick_min_confidence"` // Min confidence to consider pattern (default: 60)
+	CandlestickRequireMatch  bool    `json:"candlestick_require_match"`  // Require pattern to match direction
+	CandlestickBoostScore    bool    `json:"candlestick_boost_score"`    // Boost confluence if pattern matches
 }
 
 // DefaultGinieConfig returns default configuration
@@ -652,6 +659,12 @@ func DefaultGinieConfig() *GinieConfig {
 		MaxConsecutiveCandles:   3,     // Don't enter after 3+ same-direction candles
 		RSIExhaustionLongMax:    65.0,  // Don't enter LONG if RSI > 65 (overbought territory)
 		RSIExhaustionShortMin:   35.0,  // Don't enter SHORT if RSI < 35 (oversold territory)
+
+		// Candlestick Pattern Detection
+		CandlestickEnabled:       true,  // ENABLED by default - improves entry timing
+		CandlestickMinConfidence: 60.0,  // Minimum pattern confidence to consider
+		CandlestickRequireMatch:  false, // Don't require pattern match (use as bonus)
+		CandlestickBoostScore:    true,  // Boost confluence score when pattern matches
 	}
 }
 
