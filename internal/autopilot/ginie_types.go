@@ -509,6 +509,9 @@ type GinieDecisionReport struct {
 	// Rejection Tracking (helps users understand WHY a coin isn't being traded)
 	RejectionTracking *RejectionTracker `json:"rejection_tracking,omitempty"`
 
+	// Entry Confluence Check (ADX+DI, VWAP, Volume Spike, Pivots, EMA 20/50)
+	EntryConfluence *EntryConfluenceResult `json:"entry_confluence,omitempty"`
+
 	// Final Scores
 	ConfidenceScore    float64             `json:"confidence_score"`
 	Recommendation     GenieRecommendation `json:"recommendation"`
@@ -582,6 +585,15 @@ type GinieConfig struct {
 	ScalpMonitorInterval    int `json:"scalp_monitor_interval"`    // 900 (15 min)
 	SwingMonitorInterval    int `json:"swing_monitor_interval"`    // 14400 (4 hours)
 	PositionMonitorInterval int `json:"position_monitor_interval"` // 86400 (1 day)
+
+	// === EXTENSION FILTER (Prevent Late Entries) ===
+	// These filters prevent entering when price has already moved too far
+	ExtensionFilterEnabled  bool    `json:"extension_filter_enabled"`   // Enable extension filtering
+	MaxEMA20ExtensionPct    float64 `json:"max_ema20_extension_pct"`    // Max % distance from EMA20 (e.g., 2.5%)
+	MaxEMA50ExtensionPct    float64 `json:"max_ema50_extension_pct"`    // Max % distance from EMA50 (e.g., 4.0%)
+	MaxConsecutiveCandles   int     `json:"max_consecutive_candles"`    // Max same-direction candles before entry (e.g., 3)
+	RSIExhaustionLongMax    float64 `json:"rsi_exhaustion_long_max"`    // Don't enter LONG if RSI > this (e.g., 65)
+	RSIExhaustionShortMin   float64 `json:"rsi_exhaustion_short_min"`   // Don't enter SHORT if RSI < this (e.g., 35)
 }
 
 // DefaultGinieConfig returns default configuration
@@ -591,9 +603,9 @@ func DefaultGinieConfig() *GinieConfig {
 
 		// Mode Selection
 		ScalpADXMax:         20,
-		SwingADXMin:         30,
+		SwingADXMin:         20, // Lowered from 30
 		SwingADXMax:         45,
-		PositionADXMin:      35,
+		PositionADXMin:      25, // Lowered from 35
 
 		// Volatility
 		HighVolatilityRatio: 1.5,
@@ -632,6 +644,14 @@ func DefaultGinieConfig() *GinieConfig {
 		ScalpMonitorInterval:    900,
 		SwingMonitorInterval:    14400,
 		PositionMonitorInterval: 86400,
+
+		// Extension Filter (Prevent Late Entries)
+		ExtensionFilterEnabled:  true,  // ENABLED by default - prevents entering extended moves
+		MaxEMA20ExtensionPct:    2.5,   // Don't enter if price > 2.5% from EMA20
+		MaxEMA50ExtensionPct:    4.0,   // Don't enter if price > 4% from EMA50
+		MaxConsecutiveCandles:   3,     // Don't enter after 3+ same-direction candles
+		RSIExhaustionLongMax:    65.0,  // Don't enter LONG if RSI > 65 (overbought territory)
+		RSIExhaustionShortMin:   35.0,  // Don't enter SHORT if RSI < 35 (oversold territory)
 	}
 }
 
@@ -824,6 +844,9 @@ type RejectionTracker struct {
 
 	// Scan quality rejection
 	ScanQuality *ScanQualityRejection `json:"scan_quality,omitempty"`
+
+	// Entry confluence rejection (ADX+DI, VWAP, Volume, Pivots, EMA)
+	EntryConfluence *EntryConfluenceRejection `json:"entry_confluence,omitempty"`
 }
 
 // TrendDivergenceRejection tracks trend divergence blocking
@@ -918,6 +941,21 @@ type ScanQualityRejection struct {
 	TradeReady    bool    `json:"trade_ready"`
 	ScanStatus    string  `json:"scan_status"`
 	Reason        string  `json:"reason"`
+}
+
+// EntryConfluenceRejection tracks entry confluence filter blocking
+// This checks ADX+DI, VWAP, Volume Spike, Pivots, and EMA 20/50
+type EntryConfluenceRejection struct {
+	Blocked         bool     `json:"blocked"`
+	ConfluenceScore int      `json:"confluence_score"`  // How many filters passed (0-5)
+	RequiredScore   int      `json:"required_score"`    // Minimum required (usually 4)
+	ADXValid        bool     `json:"adx_valid"`         // ADX strong + DI aligned
+	VWAPValid       bool     `json:"vwap_valid"`        // Price vs VWAP aligned
+	VolumeValid     bool     `json:"volume_valid"`      // Volume spike detected
+	PivotValid      bool     `json:"pivot_valid"`       // Pivot zone favorable
+	EMAValid        bool     `json:"ema_valid"`         // EMA 20/50 aligned
+	Details         []string `json:"details"`           // Detailed breakdown
+	Reason          string   `json:"reason"`
 }
 
 // NewRejectionTracker creates a new rejection tracker

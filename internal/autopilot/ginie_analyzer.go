@@ -1981,6 +1981,67 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			report.TradeExecution.Action = "SHORT"
 		}
 
+		// === ENHANCED ENTRY CONFLUENCE CHECK ===
+		// Check ADX+DI, VWAP, Volume Spike, Pivots, EMA 20/50
+		confluenceResult := g.CheckEntryConfluence(symbol, klines, signals.Direction, mode)
+		report.EntryConfluence = confluenceResult
+
+		if !confluenceResult.Passed {
+			// Confluence failed - block the trade
+			rejectionTracker.EntryConfluence = &EntryConfluenceRejection{
+				Blocked:         true,
+				ConfluenceScore: confluenceResult.ConfluenceScore,
+				RequiredScore:   4,
+				ADXValid:        confluenceResult.ADXValid,
+				VWAPValid:       confluenceResult.VWAPValid,
+				VolumeValid:     confluenceResult.VolumeSpikeValid,
+				PivotValid:      confluenceResult.PivotValid,
+				EMAValid:        confluenceResult.EMAValid,
+				Details:         confluenceResult.Details,
+				Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 4)", confluenceResult.ConfluenceScore),
+			}
+			rejectionTracker.AddRejection(fmt.Sprintf("Entry Confluence: %d/5 (ADX:%v VWAP:%v Vol:%v Pivot:%v EMA:%v)",
+				confluenceResult.ConfluenceScore,
+				confluenceResult.ADXValid,
+				confluenceResult.VWAPValid,
+				confluenceResult.VolumeSpikeValid,
+				confluenceResult.PivotValid,
+				confluenceResult.EMAValid))
+
+			report.Recommendation = RecommendationWait
+			report.RecommendationNote = fmt.Sprintf("Entry confluence failed: %d/5 filters. %s",
+				confluenceResult.ConfluenceScore,
+				strings.Join(confluenceResult.Details, "; "))
+			report.ConfidenceScore = float64(confluenceResult.ConfluenceScore) * 20 // 0-100 based on filters
+
+			if g.logger != nil {
+				g.logger.Warn("Trade blocked by entry confluence",
+					"symbol", symbol,
+					"direction", signals.Direction,
+					"score", fmt.Sprintf("%d/5", confluenceResult.ConfluenceScore),
+					"adx", confluenceResult.ADXValid,
+					"vwap", confluenceResult.VWAPValid,
+					"volume", confluenceResult.VolumeSpikeValid,
+					"pivot", confluenceResult.PivotValid,
+					"ema", confluenceResult.EMAValid)
+			}
+
+			return report, nil
+		}
+
+		// Confluence passed - log success
+		if g.logger != nil {
+			g.logger.Info("Entry confluence PASSED",
+				"symbol", symbol,
+				"direction", signals.Direction,
+				"score", fmt.Sprintf("%d/5", confluenceResult.ConfluenceScore),
+				"adx", fmt.Sprintf("%.1f", confluenceResult.ADXValue),
+				"vwap", fmt.Sprintf("%.4f", confluenceResult.VWAPValue),
+				"volume", fmt.Sprintf("%.2fx", confluenceResult.VolumeRatio),
+				"pivot_zone", confluenceResult.PivotZone,
+				"ema_trend", confluenceResult.EMATrend)
+		}
+
 		// Apply reversal entry override if detected and confirmed
 		if useReversalEntry {
 			report.TradeExecution.Action = reversalDirection
@@ -3500,6 +3561,333 @@ func (g *GinieAnalyzer) calculateADX(klines []binance.Kline, period int) (adx, p
 	}
 
 	return adx, plusDI, minusDI
+}
+
+// ============================================================================
+// ENHANCED ENTRY FILTERS: ADX+DI, VWAP, Volume Spike, Pivots, EMA 20/50
+// ============================================================================
+
+// EntryConfluenceResult holds the result of entry confluence check
+type EntryConfluenceResult struct {
+	Passed          bool
+	Direction       string // "long" or "short"
+	ConfluenceScore int    // Number of filters passed (0-5)
+	Details         []string
+
+	// Individual filter results
+	ADXValid       bool
+	ADXValue       float64
+	PlusDI         float64
+	MinusDI        float64
+	DIDirection    string // "bullish" or "bearish"
+
+	VWAPValid      bool
+	VWAPValue      float64
+	PriceVsVWAP    string // "above" or "below"
+
+	VolumeSpikeValid bool
+	VolumeRatio      float64
+
+	PivotValid     bool
+	PivotZone      string // "near_support", "near_resistance", "neutral"
+	NearestPivot   float64
+
+	EMAValid       bool
+	EMA20          float64
+	EMA50          float64
+	EMATrend       string // "bullish" or "bearish"
+}
+
+// calculateVWAP calculates Volume Weighted Average Price
+func (g *GinieAnalyzer) calculateVWAP(klines []binance.Kline, period int) float64 {
+	if len(klines) < period {
+		period = len(klines)
+	}
+	if period == 0 {
+		return 0
+	}
+
+	var sumPV, sumV float64
+	startIdx := len(klines) - period
+
+	for i := startIdx; i < len(klines); i++ {
+		// Typical price = (High + Low + Close) / 3
+		typicalPrice := (klines[i].High + klines[i].Low + klines[i].Close) / 3
+		volume := klines[i].Volume
+
+		sumPV += typicalPrice * volume
+		sumV += volume
+	}
+
+	if sumV == 0 {
+		return klines[len(klines)-1].Close
+	}
+
+	return sumPV / sumV
+}
+
+// detectVolumeSpike checks if current volume is a spike above average
+func (g *GinieAnalyzer) detectVolumeSpike(klines []binance.Kline, multiplier float64, avgPeriod int) (bool, float64) {
+	if len(klines) < avgPeriod+1 {
+		return false, 0
+	}
+
+	// Calculate average volume (excluding current candle)
+	var avgVol float64
+	for i := len(klines) - avgPeriod - 1; i < len(klines)-1; i++ {
+		avgVol += klines[i].Volume
+	}
+	avgVol /= float64(avgPeriod)
+
+	if avgVol == 0 {
+		return false, 0
+	}
+
+	currentVol := klines[len(klines)-1].Volume
+	ratio := currentVol / avgVol
+
+	return ratio >= multiplier, ratio
+}
+
+// calculatePivotPoints calculates standard pivot points from daily klines
+func (g *GinieAnalyzer) calculatePivotPoints(klines []binance.Kline) (pp, r1, r2, s1, s2 float64) {
+	if len(klines) < 2 {
+		return 0, 0, 0, 0, 0
+	}
+
+	// Use previous completed candle
+	prevCandle := klines[len(klines)-2]
+	high := prevCandle.High
+	low := prevCandle.Low
+	close := prevCandle.Close
+
+	// Standard pivot point formula
+	pp = (high + low + close) / 3
+	r1 = (2 * pp) - low
+	r2 = pp + (high - low)
+	s1 = (2 * pp) - high
+	s2 = pp - (high - low)
+
+	return pp, r1, r2, s1, s2
+}
+
+// checkPivotProximity checks if price is near pivot levels
+func (g *GinieAnalyzer) checkPivotProximity(price, pp, r1, r2, s1, s2 float64, thresholdPct float64) (zone string, nearestLevel float64) {
+	threshold := price * thresholdPct / 100
+
+	// Check proximity to each level
+	levels := map[string]float64{
+		"S2": s2, "S1": s1, "PP": pp, "R1": r1, "R2": r2,
+	}
+
+	nearestDist := math.MaxFloat64
+	nearestName := "none"
+	nearestLevel = 0
+
+	for name, level := range levels {
+		dist := math.Abs(price - level)
+		if dist < nearestDist {
+			nearestDist = dist
+			nearestName = name
+			nearestLevel = level
+		}
+	}
+
+	// Determine zone based on nearest level
+	if nearestDist <= threshold {
+		if nearestName == "S1" || nearestName == "S2" {
+			return "near_support", nearestLevel
+		} else if nearestName == "R1" || nearestName == "R2" {
+			return "near_resistance", nearestLevel
+		} else {
+			return "at_pivot", nearestLevel
+		}
+	}
+
+	// Not near any pivot - determine general zone
+	if price > pp {
+		return "above_pivot", pp
+	}
+	return "below_pivot", pp
+}
+
+// CheckEntryConfluence performs comprehensive entry filter check
+// Returns confluence result with all 5 indicators validated
+func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kline, direction string, mode GinieTradingMode) *EntryConfluenceResult {
+	result := &EntryConfluenceResult{
+		Passed:    false,
+		Direction: direction,
+		Details:   make([]string, 0),
+	}
+
+	if len(klines) < 50 {
+		result.Details = append(result.Details, "Insufficient klines for confluence check")
+		return result
+	}
+
+	currentPrice := klines[len(klines)-1].Close
+	confluenceCount := 0
+
+	// === 1. ADX + DI Check ===
+	adxPeriod := 14
+	adxThreshold := 20.0
+	switch mode {
+	case GinieModeSwing:
+		adxThreshold = 20.0 // Lowered from 25
+	case GinieModePosition:
+		adxThreshold = 25.0 // Lowered from 30
+	default: // Scalp
+		adxThreshold = 15.0 // Lowered from 20
+	}
+
+	adx, plusDI, minusDI := g.calculateADX(klines, adxPeriod)
+	result.ADXValue = adx
+	result.PlusDI = plusDI
+	result.MinusDI = minusDI
+
+	if plusDI > minusDI {
+		result.DIDirection = "bullish"
+	} else {
+		result.DIDirection = "bearish"
+	}
+
+	// ADX must be strong AND DI must align with direction
+	adxStrong := adx >= adxThreshold
+	diAligned := (direction == "long" && plusDI > minusDI) || (direction == "short" && minusDI > plusDI)
+
+	if adxStrong && diAligned {
+		result.ADXValid = true
+		confluenceCount++
+		result.Details = append(result.Details, fmt.Sprintf("✓ ADX=%.1f (>%.0f), +DI=%.1f, -DI=%.1f [%s]", adx, adxThreshold, plusDI, minusDI, result.DIDirection))
+	} else {
+		result.Details = append(result.Details, fmt.Sprintf("✗ ADX=%.1f (need >%.0f), +DI=%.1f, -DI=%.1f [%s vs %s]", adx, adxThreshold, plusDI, minusDI, result.DIDirection, direction))
+	}
+
+	// === 2. VWAP Check ===
+	vwapPeriod := 20 // Use 20 periods for VWAP
+	vwap := g.calculateVWAP(klines, vwapPeriod)
+	result.VWAPValue = vwap
+
+	if currentPrice > vwap {
+		result.PriceVsVWAP = "above"
+	} else {
+		result.PriceVsVWAP = "below"
+	}
+
+	// LONG: price should be above VWAP, SHORT: price should be below VWAP
+	vwapAligned := (direction == "long" && currentPrice > vwap) || (direction == "short" && currentPrice < vwap)
+
+	if vwapAligned {
+		result.VWAPValid = true
+		confluenceCount++
+		pctFromVWAP := ((currentPrice - vwap) / vwap) * 100
+		result.Details = append(result.Details, fmt.Sprintf("✓ VWAP=%.4f, Price %s (%.2f%%)", vwap, result.PriceVsVWAP, pctFromVWAP))
+	} else {
+		pctFromVWAP := ((currentPrice - vwap) / vwap) * 100
+		result.Details = append(result.Details, fmt.Sprintf("✗ VWAP=%.4f, Price %s (%.2f%%) - want %s for %s", vwap, result.PriceVsVWAP, pctFromVWAP, map[string]string{"long": "above", "short": "below"}[direction], direction))
+	}
+
+	// === 3. Volume Spike Check ===
+	volumeMultiplier := 1.2 // Require 1.2x average volume (lowered from 1.5x)
+	avgPeriod := 20
+	hasSpike, volRatio := g.detectVolumeSpike(klines, volumeMultiplier, avgPeriod)
+	result.VolumeRatio = volRatio
+
+	if hasSpike {
+		result.VolumeSpikeValid = true
+		confluenceCount++
+		result.Details = append(result.Details, fmt.Sprintf("✓ Volume=%.2fx average (>%.1fx required)", volRatio, volumeMultiplier))
+	} else {
+		result.Details = append(result.Details, fmt.Sprintf("✗ Volume=%.2fx average (need >%.1fx)", volRatio, volumeMultiplier))
+	}
+
+	// === 4. Pivot Point Check ===
+	pp, r1, r2, s1, s2 := g.calculatePivotPoints(klines)
+	pivotThreshold := 0.5 // 0.5% threshold for "near" pivot
+
+	zone, nearestLevel := g.checkPivotProximity(currentPrice, pp, r1, r2, s1, s2, pivotThreshold)
+	result.PivotZone = zone
+	result.NearestPivot = nearestLevel
+
+	// For LONG: want near support or above pivot
+	// For SHORT: want near resistance or below pivot
+	pivotAligned := false
+	if direction == "long" {
+		pivotAligned = zone == "near_support" || zone == "at_pivot" || zone == "above_pivot"
+	} else {
+		pivotAligned = zone == "near_resistance" || zone == "at_pivot" || zone == "below_pivot"
+	}
+
+	if pivotAligned {
+		result.PivotValid = true
+		confluenceCount++
+		result.Details = append(result.Details, fmt.Sprintf("✓ Pivot zone=%s, nearest=%.4f (PP=%.4f)", zone, nearestLevel, pp))
+	} else {
+		result.Details = append(result.Details, fmt.Sprintf("✗ Pivot zone=%s doesn't favor %s entry", zone, direction))
+	}
+
+	// === 5. EMA 20/50 Check ===
+	ema20 := g.calculateEMA(klines, 20)
+	ema50 := g.calculateEMA(klines, 50)
+	result.EMA20 = ema20
+	result.EMA50 = ema50
+
+	if ema20 > ema50 {
+		result.EMATrend = "bullish"
+	} else {
+		result.EMATrend = "bearish"
+	}
+
+	// EMA20 > EMA50 for LONG, EMA20 < EMA50 for SHORT
+	// Also check price position relative to EMAs
+	emaAligned := false
+	if direction == "long" {
+		emaAligned = ema20 > ema50 && currentPrice > ema20
+	} else {
+		emaAligned = ema20 < ema50 && currentPrice < ema20
+	}
+
+	if emaAligned {
+		result.EMAValid = true
+		confluenceCount++
+		result.Details = append(result.Details, fmt.Sprintf("✓ EMA20=%.4f, EMA50=%.4f [%s], Price %s EMAs", ema20, ema50, result.EMATrend, map[bool]string{true: "above", false: "below"}[currentPrice > ema20]))
+	} else {
+		result.Details = append(result.Details, fmt.Sprintf("✗ EMA20=%.4f, EMA50=%.4f [%s] - misaligned for %s", ema20, ema50, result.EMATrend, direction))
+	}
+
+	// === Final Confluence Decision ===
+	result.ConfluenceScore = confluenceCount
+
+	// Require at least 4 out of 5 filters to pass
+	minRequired := 4
+	if mode == GinieModeScalp {
+		minRequired = 3 // Slightly more lenient for scalp
+	}
+
+	result.Passed = confluenceCount >= minRequired
+
+	if result.Passed {
+		result.Details = append(result.Details, fmt.Sprintf("★ CONFLUENCE PASSED: %d/%d filters (min %d)", confluenceCount, 5, minRequired))
+	} else {
+		result.Details = append(result.Details, fmt.Sprintf("✗ CONFLUENCE FAILED: %d/%d filters (need %d)", confluenceCount, 5, minRequired))
+	}
+
+	// Log the confluence check
+	if g.logger != nil {
+		g.logger.Info("Entry confluence check",
+			"symbol", symbol,
+			"direction", direction,
+			"mode", mode,
+			"passed", result.Passed,
+			"score", fmt.Sprintf("%d/5", confluenceCount),
+			"adx", fmt.Sprintf("%.1f", adx),
+			"vwap", fmt.Sprintf("%.4f", vwap),
+			"volume_ratio", fmt.Sprintf("%.2fx", volRatio),
+			"pivot_zone", zone,
+			"ema_trend", result.EMATrend)
+	}
+
+	return result
 }
 
 func (g *GinieAnalyzer) findSwingPoints(klines []binance.Kline, lookback int) (highs, lows []float64) {
