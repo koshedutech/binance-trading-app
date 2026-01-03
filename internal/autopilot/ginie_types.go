@@ -500,6 +500,9 @@ type GinieDecisionReport struct {
 	// Divergence Detection
 	TrendDivergence *TrendDivergence `json:"trend_divergence,omitempty"`
 
+	// Breakout Detection (for catching rallies early)
+	BreakoutAnalysis *BreakoutAnalysis `json:"breakout_analysis,omitempty"`
+
 	// LLM Decision Context (for analysis tracking)
 	DecisionContext *DecisionContext `json:"decision_context,omitempty"`
 
@@ -618,12 +621,12 @@ func DefaultGinieConfig() *GinieConfig {
 		// Override
 		AutoOverrideEnabled: true,
 
-		// Counter-Trend Trading (VERY permissive for testing)
-		AllowCounterTrend:               true,
-		CounterTrendMinConfidence:       5.0,   // Very low confidence for counter-trend testing
-		CounterTrendRequireReversal:     false, // DISABLED - allow counter-trend without reversal patterns
-		CounterTrendRequireRSIExtreme:   false, // Don't require extreme RSI
-		CounterTrendRequireADXWeakening: false, // Don't require ADX weakening
+		// Counter-Trend Trading (DISABLED - was causing losses by fighting trends)
+		AllowCounterTrend:               false, // DISABLED - counter-trend trades were losing money
+		CounterTrendMinConfidence:       80.0,  // If re-enabled, require very high confidence
+		CounterTrendRequireReversal:     true,  // Require clear reversal pattern
+		CounterTrendRequireRSIExtreme:   true,  // Require RSI at extreme (oversold/overbought)
+		CounterTrendRequireADXWeakening: true,  // Require trend weakening before counter-trend
 
 		// Monitoring
 		ScalpMonitorInterval:    900,

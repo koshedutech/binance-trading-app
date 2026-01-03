@@ -53,6 +53,9 @@ type GinieAnalyzer struct {
 	enabled        bool
 	activeMode     GinieTradingMode
 	watchSymbols   []string
+
+	// Breakout detection for catching rallies early
+	breakoutDetector *BreakoutDetector
 }
 
 // NewGinieAnalyzer creates a new Ginie AI analyzer
@@ -82,6 +85,18 @@ func NewGinieAnalyzer(
 		activeMode:       GinieModeSwing,
 		watchSymbols:     coreSymbols, // Start with core coins, LLM will update
 		llmCoinsCacheTTL: 30 * time.Minute, // Refresh LLM coin list every 30 minutes
+	}
+
+	// Initialize breakout detector for catching rallies early
+	breakoutConfig := settings.BreakoutConfig
+	if breakoutConfig == nil {
+		breakoutConfig = DefaultBreakoutConfig()
+	}
+	if settings.BreakoutDetectionEnabled {
+		g.breakoutDetector = NewBreakoutDetector(futuresClient, breakoutConfig, logger)
+		if g.logger != nil {
+			g.logger.Info("Breakout detector initialized", "enabled", true)
+		}
 	}
 
 	// Load LLM-selected coins in background (will call DeepSeek for 50 coins)
@@ -615,6 +630,85 @@ func (g *GinieAnalyzer) GetMarketMovers(topN int) (*MarketMoverCategory, error) 
 			"losers":     len(result.TopLosers),
 			"volume":     len(result.TopVolume),
 			"volatility": len(result.HighVolatility),
+		})
+	}
+
+	return result, nil
+}
+
+// GetAllMarketMovers fetches ALL market movers without volume filtering
+// This shows the real top gainers/losers including low-volume coins
+func (g *GinieAnalyzer) GetAllMarketMovers(topN int) (*MarketMoverCategory, error) {
+	if topN <= 0 {
+		topN = 20
+	}
+
+	// Get all 24hr tickers
+	tickers, err := g.futuresClient.GetAll24hrTickers()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get 24hr tickers: %w", err)
+	}
+
+	// Filter for USDT pairs only and exclude stablecoins (NO volume filter)
+	var validTickers []binance.Futures24hrTicker
+	stablecoins := map[string]bool{
+		"USDCUSDT": true, "BUSDUSDT": true, "TUSDUSDT": true,
+		"DAIUSDT": true, "FDUSDUSDT": true, "EURUSDT": true,
+	}
+
+	for _, t := range tickers {
+		if strings.HasSuffix(t.Symbol, "USDT") && !stablecoins[t.Symbol] {
+			// Include ALL coins regardless of volume
+			validTickers = append(validTickers, t)
+		}
+	}
+
+	result := &MarketMoverCategory{
+		TopGainers:     make([]string, 0, topN),
+		TopLosers:      make([]string, 0, topN),
+		TopVolume:      make([]string, 0, topN),
+		HighVolatility: make([]string, 0, topN),
+	}
+
+	// Sort by price change % (gainers - descending)
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].PriceChangePercent > validTickers[j].PriceChangePercent
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.TopGainers = append(result.TopGainers, validTickers[i].Symbol)
+	}
+
+	// Sort by price change % (losers - ascending)
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].PriceChangePercent < validTickers[j].PriceChangePercent
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.TopLosers = append(result.TopLosers, validTickers[i].Symbol)
+	}
+
+	// Sort by 24hr quote volume (descending)
+	sort.Slice(validTickers, func(i, j int) bool {
+		return validTickers[i].QuoteVolume > validTickers[j].QuoteVolume
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.TopVolume = append(result.TopVolume, validTickers[i].Symbol)
+	}
+
+	// High volatility = high absolute price change %
+	sort.Slice(validTickers, func(i, j int) bool {
+		return math.Abs(validTickers[i].PriceChangePercent) > math.Abs(validTickers[j].PriceChangePercent)
+	})
+	for i := 0; i < topN && i < len(validTickers); i++ {
+		result.HighVolatility = append(result.HighVolatility, validTickers[i].Symbol)
+	}
+
+	if g.logger != nil {
+		g.logger.Info("Fetched ALL market movers (no volume filter)", map[string]interface{}{
+			"gainers":    len(result.TopGainers),
+			"losers":     len(result.TopLosers),
+			"volume":     len(result.TopVolume),
+			"volatility": len(result.HighVolatility),
+			"total_coins": len(validTickers),
 		})
 	}
 
@@ -2090,8 +2184,8 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		report.NextReview = "1 day"
 	}
 
-	// === ADAPTIVE ADX STRENGTH FILTER ===
-	// Check if trend is strong enough for the selected mode
+	// === ADAPTIVE ADX STRENGTH FILTER (HARD BLOCK) ===
+	// Check if trend is strong enough for the selected mode - NO TREND = NO TRADE
 	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, mode)
 	if !adxPassed {
 		// Determine threshold based on mode
@@ -2108,21 +2202,33 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		}
 
 		rejectionTracker.ADXStrength = &ADXStrengthRejection{
-			Blocked:   false, // Not a hard block, just penalty
+			Blocked:   true, // HARD BLOCK - no trend = no trade
 			ADXValue:  trendAnalysis.ADXValue,
 			Threshold: adxThreshold,
 			Penalty:   adxPenalty,
-			Reason:    fmt.Sprintf("Weak trend: ADX %.1f (threshold %.0f for %s mode) - 10%% confidence penalty applied", trendAnalysis.ADXValue, adxThreshold, mode),
+			Reason:    fmt.Sprintf("BLOCKED: Weak trend - ADX %.1f below threshold %.0f for %s mode", trendAnalysis.ADXValue, adxThreshold, mode),
 		}
-		// Don't add to rejection list since it's soft (penalty, not block)
 
 		if g.logger != nil {
-			g.logger.Warn("Weak trend detected - applying ADX strength penalty",
+			g.logger.Warn("HARD BLOCK: Weak trend detected - no trade allowed",
 				"symbol", symbol,
 				"adx", trendAnalysis.ADXValue,
-				"mode", mode,
-				"penalty", "10%")
+				"threshold", adxThreshold,
+				"mode", mode)
 		}
+
+		// HARD BLOCK - Return SKIP recommendation immediately
+		adxBlockReport := &GinieDecisionReport{
+			Symbol:             symbol,
+			Timestamp:          time.Now(),
+			ScanStatus:         scan.Status,
+			SelectedMode:       mode,
+			Recommendation:     RecommendationSkip,
+			RecommendationNote: fmt.Sprintf("BLOCKED: No trend detected - ADX %.1f is below %.0f threshold for %s mode. Trading without trend confirmation leads to losses.", trendAnalysis.ADXValue, adxThreshold, mode),
+			ConfidenceScore:    0.0,
+			RejectionTracking:  rejectionTracker,
+		}
+		return adxBlockReport, nil
 	}
 
 	// === LLM TRADING ANALYSIS INTEGRATION ===
@@ -2312,6 +2418,81 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 				"boost", priceActionBoost,
 				"old_confidence", oldConfidence,
 				"new_confidence", report.ConfidenceScore)
+		}
+	}
+
+	// === BREAKOUT DETECTION BOOST ===
+	// Check for breakout conditions (volume spike, price acceleration, momentum)
+	// and boost confidence if breakout aligns with signal direction
+	if g.breakoutDetector != nil && g.settings.BreakoutDetectionEnabled {
+		// Get ticker for current price data
+		ticker, tickerErr := g.futuresClient.Get24hrTicker(symbol)
+		if tickerErr == nil {
+			breakoutAnalysis, breakoutErr := g.breakoutDetector.AnalyzeBreakout(symbol, klines, ticker)
+			if breakoutErr == nil && breakoutAnalysis != nil {
+				report.BreakoutAnalysis = breakoutAnalysis
+
+				// Apply confidence boost if breakout detected and direction matches
+				if breakoutAnalysis.BreakoutDetected {
+					directionMatch := (breakoutAnalysis.BreakoutDirection == "LONG" && signals.Direction == "long") ||
+						(breakoutAnalysis.BreakoutDirection == "SHORT" && signals.Direction == "short")
+
+					if directionMatch {
+						// Boost based on breakout strength
+						var breakoutBoost float64
+						switch breakoutAnalysis.BreakoutStrength {
+						case "very_strong":
+							breakoutBoost = 20.0 // Very strong breakout = 20% boost
+						case "strong":
+							breakoutBoost = 15.0 // Strong breakout = 15% boost
+						case "moderate":
+							breakoutBoost = 10.0 // Moderate breakout = 10% boost
+						case "weak":
+							breakoutBoost = 5.0 // Weak breakout = 5% boost
+						}
+
+						// Additional boost for high confluence
+						if breakoutAnalysis.Confluence >= 3 {
+							breakoutBoost += 5.0 // 3+ signals aligned
+						}
+
+						oldConfidence := report.ConfidenceScore
+						report.ConfidenceScore += breakoutBoost
+						if report.ConfidenceScore > 100 {
+							report.ConfidenceScore = 100
+						}
+
+						if g.logger != nil {
+							g.logger.Info("BREAKOUT DETECTED - Confidence boosted",
+								"symbol", symbol,
+								"direction", breakoutAnalysis.BreakoutDirection,
+								"strength", breakoutAnalysis.BreakoutStrength,
+								"score", breakoutAnalysis.BreakoutScore,
+								"confluence", breakoutAnalysis.Confluence,
+								"boost", breakoutBoost,
+								"old_confidence", oldConfidence,
+								"new_confidence", report.ConfidenceScore)
+						}
+					} else {
+						// Breakout detected but direction doesn't match signal - apply penalty
+						oldConfidence := report.ConfidenceScore
+						report.ConfidenceScore -= 10.0 // Penalty for counter-breakout
+						if report.ConfidenceScore < 0 {
+							report.ConfidenceScore = 0
+						}
+
+						if g.logger != nil {
+							g.logger.Warn("Breakout direction mismatch - Confidence reduced",
+								"symbol", symbol,
+								"breakout_direction", breakoutAnalysis.BreakoutDirection,
+								"signal_direction", signals.Direction,
+								"penalty", -10.0,
+								"old_confidence", oldConfidence,
+								"new_confidence", report.ConfidenceScore)
+						}
+					}
+				}
+			}
 		}
 	}
 

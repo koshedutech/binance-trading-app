@@ -1356,6 +1356,12 @@ type AutopilotSettings struct {
 	EarlyWarningTightenSLOnWarning bool    `json:"early_warning_tighten_sl_on_warning"` // Tighten SL if warning detected
 	EarlyWarningMinConfidence      float64 `json:"early_warning_min_confidence"`       // Min LLM confidence to act (default: 0.7)
 	EarlyWarningMaxLLMCallsPerPos  int     `json:"early_warning_max_llm_calls_per_pos"` // Max LLM calls per position per cycle (default: 3)
+
+	// ====== BREAKOUT DETECTION CONFIGURATION ======
+	// Leading indicator system for catching rallies early (before they happen)
+	// Detects volume spikes, price acceleration, momentum shifts, and order book imbalances
+	BreakoutDetectionEnabled bool            `json:"breakout_detection_enabled"` // Master toggle for breakout detection
+	BreakoutConfig           *BreakoutConfig `json:"breakout_config"`            // Detailed breakout configuration
 }
 
 // SettingsManager handles persistent settings storage
@@ -1710,6 +1716,10 @@ func DefaultSettings() *AutopilotSettings {
 		EarlyWarningTightenSLOnWarning: true,  // Tighten SL on warning signals
 		EarlyWarningMinConfidence:      0.7,   // Require 70% LLM confidence to act
 		EarlyWarningMaxLLMCallsPerPos:  3,     // Max 3 LLM calls per position per cycle
+
+		// Breakout Detection defaults (Leading indicator system for catching rallies)
+		BreakoutDetectionEnabled: true, // Enable breakout detection by default
+		BreakoutConfig:           DefaultBreakoutConfig(),
 	}
 }
 
