@@ -741,6 +741,12 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/scalp-reentry/positions", s.handleGetScalpReentryPositions)
 			futures.GET("/ginie/scalp-reentry/positions/:symbol", s.handleGetScalpReentryPositionStatus)
 
+			// Hedge Mode Configuration endpoints (DCA + Hedge Grid)
+			futures.GET("/ginie/hedge-config", s.handleGetHedgeModeConfig)
+			futures.POST("/ginie/hedge-config", s.handleUpdateHedgeModeConfig)
+			futures.POST("/ginie/hedge-mode/toggle", s.handleToggleHedgeMode)
+			futures.GET("/ginie/hedge-mode/positions", s.handleGetHedgeModePositions)
+
 			// Position Mode Conversion endpoint
 			futures.POST("/ginie/positions/:symbol/convert-mode", s.handleConvertPositionMode)
 		}

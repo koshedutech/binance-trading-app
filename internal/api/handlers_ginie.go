@@ -3618,6 +3618,325 @@ func (s *Server) handleToggleScalpReentry(c *gin.Context) {
 	})
 }
 
+// ==================== Hedge Mode Configuration Endpoints ====================
+
+// HedgeModeConfigRequest represents the hedge mode configuration for API
+type HedgeModeConfigRequest struct {
+	HedgeModeEnabled      bool    `json:"hedge_mode_enabled"`
+	TriggerOnProfitTP     bool    `json:"trigger_on_profit_tp"`
+	TriggerOnLossTP       bool    `json:"trigger_on_loss_tp"`
+	DCAOnLoss             bool    `json:"dca_on_loss"`
+	MaxPositionMultiple   float64 `json:"max_position_multiple"`
+	CombinedROIExitPct    float64 `json:"combined_roi_exit_pct"`
+	WideSLATRMultiplier   float64 `json:"wide_sl_atr_multiplier"`
+	DisableAISL           bool    `json:"disable_ai_sl"`
+	RallyExitEnabled      bool    `json:"rally_exit_enabled"`
+	RallyADXThreshold     float64 `json:"rally_adx_threshold"`
+	RallySustainedMovePct float64 `json:"rally_sustained_move_pct"`
+	NegTP1Percent         float64 `json:"neg_tp1_percent"`
+	NegTP1AddPercent      float64 `json:"neg_tp1_add_percent"`
+	NegTP2Percent         float64 `json:"neg_tp2_percent"`
+	NegTP2AddPercent      float64 `json:"neg_tp2_add_percent"`
+	NegTP3Percent         float64 `json:"neg_tp3_percent"`
+	NegTP3AddPercent      float64 `json:"neg_tp3_add_percent"`
+}
+
+// handleGetHedgeModeConfig returns the current hedge mode configuration
+// GET /api/futures/ginie/hedge-config
+func (s *Server) handleGetHedgeModeConfig(c *gin.Context) {
+	log.Println("[HEDGE-MODE] Getting hedge mode configuration")
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	config := settings.ScalpReentryConfig
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"config": HedgeModeConfigRequest{
+			HedgeModeEnabled:      config.HedgeModeEnabled,
+			TriggerOnProfitTP:     config.TriggerOnProfitTP,
+			TriggerOnLossTP:       config.TriggerOnLossTP,
+			DCAOnLoss:             config.DCAOnLoss,
+			MaxPositionMultiple:   config.MaxPositionMultiple,
+			CombinedROIExitPct:    config.CombinedROIExitPct,
+			WideSLATRMultiplier:   config.WideSLATRMultiplier,
+			DisableAISL:           config.DisableAISL,
+			RallyExitEnabled:      config.RallyExitEnabled,
+			RallyADXThreshold:     config.RallyADXThreshold,
+			RallySustainedMovePct: config.RallySustainedMovePct,
+			NegTP1Percent:         config.NegTP1Percent,
+			NegTP1AddPercent:      config.NegTP1AddPercent,
+			NegTP2Percent:         config.NegTP2Percent,
+			NegTP2AddPercent:      config.NegTP2AddPercent,
+			NegTP3Percent:         config.NegTP3Percent,
+			NegTP3AddPercent:      config.NegTP3AddPercent,
+		},
+	})
+}
+
+// handleUpdateHedgeModeConfig updates the hedge mode configuration
+// POST /api/futures/ginie/hedge-config
+func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
+	log.Println("[HEDGE-MODE] Updating hedge mode configuration")
+
+	// Parse request as raw JSON to detect which fields are set
+	var rawReq map[string]interface{}
+	if err := c.ShouldBindJSON(&rawReq); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Get existing settings
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	cfg := &settings.ScalpReentryConfig
+
+	// Helper to check if field was provided
+	hasField := func(name string) bool {
+		_, ok := rawReq[name]
+		return ok
+	}
+
+	// Update only provided fields with validation
+	if hasField("hedge_mode_enabled") {
+		cfg.HedgeModeEnabled = rawReq["hedge_mode_enabled"].(bool)
+	}
+	if hasField("trigger_on_profit_tp") {
+		cfg.TriggerOnProfitTP = rawReq["trigger_on_profit_tp"].(bool)
+	}
+	if hasField("trigger_on_loss_tp") {
+		cfg.TriggerOnLossTP = rawReq["trigger_on_loss_tp"].(bool)
+	}
+	if hasField("dca_on_loss") {
+		cfg.DCAOnLoss = rawReq["dca_on_loss"].(bool)
+	}
+	if hasField("disable_ai_sl") {
+		cfg.DisableAISL = rawReq["disable_ai_sl"].(bool)
+	}
+	if hasField("rally_exit_enabled") {
+		cfg.RallyExitEnabled = rawReq["rally_exit_enabled"].(bool)
+	}
+	if hasField("max_position_multiple") {
+		v := rawReq["max_position_multiple"].(float64)
+		if v < 1.5 || v > 10.0 {
+			errorResponse(c, http.StatusBadRequest, "max_position_multiple must be between 1.5 and 10.0")
+			return
+		}
+		cfg.MaxPositionMultiple = v
+	}
+	if hasField("combined_roi_exit_pct") {
+		v := rawReq["combined_roi_exit_pct"].(float64)
+		if v < 0.5 || v > 20.0 {
+			errorResponse(c, http.StatusBadRequest, "combined_roi_exit_pct must be between 0.5 and 20.0")
+			return
+		}
+		cfg.CombinedROIExitPct = v
+	}
+	if hasField("wide_sl_atr_multiplier") {
+		v := rawReq["wide_sl_atr_multiplier"].(float64)
+		if v < 1.5 || v > 5.0 {
+			errorResponse(c, http.StatusBadRequest, "wide_sl_atr_multiplier must be between 1.5 and 5.0")
+			return
+		}
+		cfg.WideSLATRMultiplier = v
+	}
+	if hasField("rally_adx_threshold") {
+		v := rawReq["rally_adx_threshold"].(float64)
+		if v < 15.0 || v > 50.0 {
+			errorResponse(c, http.StatusBadRequest, "rally_adx_threshold must be between 15.0 and 50.0")
+			return
+		}
+		cfg.RallyADXThreshold = v
+	}
+	if hasField("rally_sustained_move_pct") {
+		v := rawReq["rally_sustained_move_pct"].(float64)
+		if v < 1.0 || v > 10.0 {
+			errorResponse(c, http.StatusBadRequest, "rally_sustained_move_pct must be between 1.0 and 10.0")
+			return
+		}
+		cfg.RallySustainedMovePct = v
+	}
+	if hasField("neg_tp1_percent") {
+		cfg.NegTP1Percent = rawReq["neg_tp1_percent"].(float64)
+	}
+	if hasField("neg_tp1_add_percent") {
+		cfg.NegTP1AddPercent = rawReq["neg_tp1_add_percent"].(float64)
+	}
+	if hasField("neg_tp2_percent") {
+		cfg.NegTP2Percent = rawReq["neg_tp2_percent"].(float64)
+	}
+	if hasField("neg_tp2_add_percent") {
+		cfg.NegTP2AddPercent = rawReq["neg_tp2_add_percent"].(float64)
+	}
+	if hasField("neg_tp3_percent") {
+		cfg.NegTP3Percent = rawReq["neg_tp3_percent"].(float64)
+	}
+	if hasField("neg_tp3_add_percent") {
+		cfg.NegTP3AddPercent = rawReq["neg_tp3_add_percent"].(float64)
+	}
+
+	if err := sm.SaveSettings(settings); err != nil {
+		log.Printf("[HEDGE-MODE] Failed to save hedge mode configuration: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save configuration: "+err.Error())
+		return
+	}
+
+	log.Printf("[HEDGE-MODE] Configuration updated: enabled=%v, combined_roi_exit=%.2f%%, max_pos=%.1fx",
+		cfg.HedgeModeEnabled, cfg.CombinedROIExitPct, cfg.MaxPositionMultiple)
+
+	// Return updated config
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Hedge mode configuration updated",
+		"config": gin.H{
+			"hedge_mode_enabled":      cfg.HedgeModeEnabled,
+			"trigger_on_profit_tp":    cfg.TriggerOnProfitTP,
+			"trigger_on_loss_tp":      cfg.TriggerOnLossTP,
+			"dca_on_loss":             cfg.DCAOnLoss,
+			"max_position_multiple":   cfg.MaxPositionMultiple,
+			"combined_roi_exit_pct":   cfg.CombinedROIExitPct,
+			"wide_sl_atr_multiplier":  cfg.WideSLATRMultiplier,
+			"disable_ai_sl":           cfg.DisableAISL,
+			"rally_exit_enabled":      cfg.RallyExitEnabled,
+			"rally_adx_threshold":     cfg.RallyADXThreshold,
+			"rally_sustained_move_pct": cfg.RallySustainedMovePct,
+			"neg_tp1_percent":         cfg.NegTP1Percent,
+			"neg_tp1_add_percent":     cfg.NegTP1AddPercent,
+			"neg_tp2_percent":         cfg.NegTP2Percent,
+			"neg_tp2_add_percent":     cfg.NegTP2AddPercent,
+			"neg_tp3_percent":         cfg.NegTP3Percent,
+			"neg_tp3_add_percent":     cfg.NegTP3AddPercent,
+		},
+	})
+}
+
+// handleToggleHedgeMode toggles the hedge mode on/off
+// POST /api/futures/ginie/hedge-mode/toggle
+func (s *Server) handleToggleHedgeMode(c *gin.Context) {
+	log.Println("[HEDGE-MODE] Toggling hedge mode")
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+	settings.ScalpReentryConfig.HedgeModeEnabled = req.Enabled
+
+	if err := sm.SaveSettings(settings); err != nil {
+		log.Printf("[HEDGE-MODE] Failed to toggle hedge mode: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+		return
+	}
+
+	status := "disabled"
+	if req.Enabled {
+		status = "enabled"
+	}
+	log.Printf("[HEDGE-MODE] Mode toggled to: %s", status)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"enabled": req.Enabled,
+		"message": fmt.Sprintf("Hedge mode %s", status),
+	})
+}
+
+// handleGetHedgeModePositions returns positions with active hedge mode state
+// GET /api/futures/ginie/hedge-mode/positions
+func (s *Server) handleGetHedgeModePositions(c *gin.Context) {
+	log.Println("[HEDGE-MODE] Getting hedge mode positions")
+
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
+		return
+	}
+
+	allPositions := giniePilot.GetPositions()
+	var hedgePositions []gin.H
+
+	for _, pos := range allPositions {
+		if pos.ScalpReentry == nil || pos.ScalpReentry.HedgeMode == nil {
+			continue
+		}
+
+		hm := pos.ScalpReentry.HedgeMode
+		sr := pos.ScalpReentry
+		currentPrice := giniePilot.GetCurrentPrice(pos.Symbol)
+
+		// Calculate current PnL for both sides
+		var originalUnrealized float64
+		if pos.Side == "LONG" {
+			originalUnrealized = (currentPrice - sr.CurrentBreakeven) * sr.RemainingQuantity
+		} else {
+			originalUnrealized = (sr.CurrentBreakeven - currentPrice) * sr.RemainingQuantity
+		}
+
+		var hedgeUnrealized float64
+		if hm.HedgeActive {
+			if hm.HedgeSide == "LONG" {
+				hedgeUnrealized = (currentPrice - hm.HedgeCurrentBE) * hm.HedgeRemainingQty
+			} else {
+				hedgeUnrealized = (hm.HedgeCurrentBE - currentPrice) * hm.HedgeRemainingQty
+			}
+		}
+
+		hedgePositions = append(hedgePositions, gin.H{
+			"symbol":        pos.Symbol,
+			"original_side": pos.Side,
+			"entry_price":   pos.EntryPrice,
+			"current_price": currentPrice,
+			"original": gin.H{
+				"remaining_qty":    sr.RemainingQuantity,
+				"current_be":       sr.CurrentBreakeven,
+				"tp_level":         sr.TPLevelUnlocked,
+				"accum_profit":     sr.AccumulatedProfit,
+				"unrealized_pnl":   originalUnrealized,
+			},
+			"hedge": gin.H{
+				"active":           hm.HedgeActive,
+				"side":             hm.HedgeSide,
+				"entry_price":      hm.HedgeEntryPrice,
+				"remaining_qty":    hm.HedgeRemainingQty,
+				"current_be":       hm.HedgeCurrentBE,
+				"tp_level":         hm.HedgeTPLevel,
+				"accum_profit":     hm.HedgeAccumProfit,
+				"unrealized_pnl":   hedgeUnrealized,
+				"trigger_type":     hm.TriggerType,
+			},
+			"combined": gin.H{
+				"roi_percent":      hm.CombinedROIPercent,
+				"realized_pnl":     hm.CombinedRealizedPnL,
+				"unrealized_pnl":   hm.CombinedUnrealizedPnL,
+				"total_pnl":        hm.CombinedRealizedPnL + hm.CombinedUnrealizedPnL,
+			},
+			"dca": gin.H{
+				"enabled":          hm.DCAEnabled,
+				"additions_count":  len(hm.DCAAdditions),
+				"total_qty":        hm.OriginalTotalQty,
+				"neg_tp_triggered": hm.NegTPLevelTriggered,
+			},
+			"wide_sl": gin.H{
+				"price":            hm.WideSLPrice,
+				"atr_multiplier":   hm.WideSLATRMultiplier,
+				"ai_blocked":       hm.AICannotTriggerSL,
+			},
+			"debug_log": hm.DebugLog,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"count":     len(hedgePositions),
+		"positions": hedgePositions,
+	})
+}
+
 // ==================== Scalp Re-entry Monitor Endpoints ====================
 
 // ScalpReentryPositionStatus provides enhanced status for a position in scalp_reentry mode
@@ -3661,6 +3980,10 @@ type ScalpReentryPositionStatus struct {
 
 	// Debug info
 	LastUpdate         string                       `json:"last_update"`
+
+	// Hedge mode status
+	HedgeModeActive    bool                         `json:"hedge_mode_active"`
+	HedgeSide          string                       `json:"hedge_side,omitempty"`
 }
 
 // ScalpReentryCycleInfo provides info about a single sell->buyback cycle
@@ -3821,6 +4144,15 @@ func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 			// Position is in scalp_reentry mode but not yet initialized
 			status.ScalpReentryActive = false
 			status.CurrentCycleState = "INITIALIZING"
+		}
+
+		// Check hedge mode status
+		if pos.ScalpReentry != nil && pos.ScalpReentry.HedgeMode != nil {
+			hm := pos.ScalpReentry.HedgeMode
+			status.HedgeModeActive = hm.HedgeActive
+			if hm.HedgeActive {
+				status.HedgeSide = hm.HedgeSide
+			}
 		}
 
 		scalpPositions = append(scalpPositions, status)

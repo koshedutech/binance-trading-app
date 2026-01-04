@@ -1931,6 +1931,111 @@ class FuturesAPIService {
     const { data } = await this.client.get(`/ginie/scalp-reentry/positions/${symbol}`);
     return data;
   }
+
+  // ==================== HEDGE MODE API METHODS ====================
+
+  /**
+   * Get hedge mode configuration
+   */
+  async getHedgeModeConfig(): Promise<HedgeModeConfig> {
+    const { data } = await this.client.get('/ginie/hedge-config');
+    return data.config;
+  }
+
+  /**
+   * Update hedge mode configuration
+   */
+  async updateHedgeModeConfig(config: Partial<HedgeModeConfig>): Promise<{ success: boolean; config: HedgeModeConfig; message: string }> {
+    const { data } = await this.client.post('/ginie/hedge-config', config);
+    return data;
+  }
+
+  /**
+   * Toggle hedge mode on/off
+   */
+  async toggleHedgeMode(enabled: boolean): Promise<{ success: boolean; enabled: boolean; message: string }> {
+    const { data } = await this.client.post('/ginie/hedge-mode/toggle', { enabled });
+    return data;
+  }
+
+  /**
+   * Get all positions with active hedge mode state
+   */
+  async getHedgeModePositions(): Promise<HedgeModePositionsResponse> {
+    const { data } = await this.client.get('/ginie/hedge-mode/positions');
+    return data;
+  }
+}
+
+// ==================== HEDGE MODE TYPES ====================
+
+export interface HedgeModeConfig {
+  hedge_mode_enabled: boolean;
+  trigger_on_profit_tp: boolean;
+  trigger_on_loss_tp: boolean;
+  dca_on_loss: boolean;
+  max_position_multiple: number;
+  combined_roi_exit_pct: number;
+  wide_sl_atr_multiplier: number;
+  disable_ai_sl: boolean;
+  rally_exit_enabled: boolean;
+  rally_adx_threshold: number;
+  rally_sustained_move_pct: number;
+  neg_tp1_percent: number;
+  neg_tp1_add_percent: number;
+  neg_tp2_percent: number;
+  neg_tp2_add_percent: number;
+  neg_tp3_percent: number;
+  neg_tp3_add_percent: number;
+}
+
+export interface HedgeModePositionData {
+  symbol: string;
+  original_side: string;
+  entry_price: number;
+  current_price: number;
+  original: {
+    remaining_qty: number;
+    current_be: number;
+    tp_level: number;
+    accum_profit: number;
+    unrealized_pnl: number;
+  };
+  hedge: {
+    active: boolean;
+    side: string;
+    entry_price: number;
+    remaining_qty: number;
+    current_be: number;
+    tp_level: number;
+    accum_profit: number;
+    unrealized_pnl: number;
+    trigger_type: string;
+  };
+  combined: {
+    roi_percent: number;
+    realized_pnl: number;
+    unrealized_pnl: number;
+    total_pnl: number;
+  };
+  dca: {
+    enabled: boolean;
+    additions_count: number;
+    total_qty: number;
+    neg_tp_triggered: number;
+  };
+  wide_sl: {
+    price: number;
+    atr_multiplier: number;
+    ai_blocked: boolean;
+  };
+  debug_log?: string[];
+}
+
+export interface HedgeModePositionsResponse {
+  success: boolean;
+  count: number;
+  positions: HedgeModePositionData[];
 }
 
 // ==================== SCAN SOURCE CONFIG TYPES ====================
@@ -2088,6 +2193,10 @@ export interface ScalpReentryPositionStatus {
 
   // Debug info
   last_update: string;
+
+  // Hedge mode status
+  hedge_mode_active: boolean;
+  hedge_side?: string;
 }
 
 export interface ScalpReentryPositionsSummary {

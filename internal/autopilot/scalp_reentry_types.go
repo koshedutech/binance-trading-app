@@ -111,6 +111,9 @@ type ScalpReentryStatus struct {
 	NeedsManualIntervention   bool   `json:"needs_manual_intervention"`   // True when position is stuck
 	ManualInterventionReason  string `json:"manual_intervention_reason"`  // Reason for manual intervention
 	ManualInterventionAlertAt string `json:"manual_intervention_alert_at"` // Timestamp when alert was triggered
+
+	// Hedge Mode (DCA + Hedge Grid)
+	HedgeMode *HedgeReentryState `json:"hedge_mode,omitempty"`
 }
 
 // ============ AI DECISION TYPES ============
@@ -238,6 +241,95 @@ type MarketSentimentResult struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// ============ HEDGE MODE TYPES ============
+
+// HedgeReentryState tracks DCA + Hedge state for scalp_reentry hedge mode
+type HedgeReentryState struct {
+	// Master state
+	Enabled     bool   `json:"enabled"`
+	HedgeActive bool   `json:"hedge_active"`
+	TriggerType string `json:"trigger_type"` // "profit" or "loss" - which triggered hedge opening
+
+	// Hedge Position Details
+	HedgeSide         string  `json:"hedge_side"`          // Opposite of original: "SHORT" if original is "LONG"
+	HedgeEntryPrice   float64 `json:"hedge_entry_price"`   // Price at hedge entry
+	HedgeOriginalQty  float64 `json:"hedge_original_qty"`  // Initial hedge qty (= first trigger qty)
+	HedgeRemainingQty float64 `json:"hedge_remaining_qty"` // Current hedge qty
+	HedgeCurrentBE    float64 `json:"hedge_current_be"`    // Hedge breakeven after partial TPs/adds
+	HedgeAccumProfit  float64 `json:"hedge_accum_profit"`  // Realized profit from hedge TPs
+	HedgeTPLevel      int     `json:"hedge_tp_level"`      // Highest TP reached on hedge (0, 1, 2, 3)
+
+	// Cascading additions to hedge
+	HedgeAdditions []HedgeAddition `json:"hedge_additions"`
+
+	// DCA Tracking (for loss triggers)
+	DCAEnabled          bool          `json:"dca_enabled"`
+	DCAAdditions        []DCAAddition `json:"dca_additions"`
+	OriginalTotalQty    float64       `json:"original_total_qty"`   // Total qty after all DCA
+	OriginalInitialQty  float64       `json:"original_initial_qty"` // Initial qty before DCA
+	MaxPositionMultiple float64       `json:"max_pos_multiple"`     // 3.0 = 3x max
+
+	// Combined Exit Tracking
+	CombinedROIPercent    float64 `json:"combined_roi_percent"`
+	CombinedRealizedPnL   float64 `json:"combined_realized_pnl"`
+	CombinedUnrealizedPnL float64 `json:"combined_unrealized_pnl"`
+
+	// Wide SL (ATR-based)
+	WideSLPrice         float64   `json:"wide_sl_price"`
+	WideSLATRMultiplier float64   `json:"wide_sl_atr_mult"`       // 2.0-3.0
+	WideSLLastUpdate    time.Time `json:"wide_sl_last_update"`
+	WideSLAveragePrice  float64   `json:"wide_sl_average_price"`  // Weighted avg for SL calc
+	AICannotTriggerSL   bool      `json:"ai_cannot_trigger_sl"`   // true = AI cannot adjust SL
+
+	// Rally Detection (ADX + DI)
+	LastADXCheck        time.Time `json:"last_adx_check"`
+	SustainedMoveDir    string    `json:"sustained_move_dir"`    // "up" or "down"
+	SustainedMoveStart  time.Time `json:"sustained_move_start"`
+	SustainedMovePrice  float64   `json:"sustained_move_price"`
+
+	// Negative TP Tracking (for loss triggers)
+	NegTPLevelTriggered int `json:"neg_tp_level"` // 0, 1, 2, 3 (negative TPs triggered)
+
+	// Timing
+	StartedAt  time.Time `json:"started_at"`
+	LastUpdate time.Time `json:"last_update"`
+
+	// Debug/Audit
+	DebugLog []string `json:"debug_log,omitempty"`
+}
+
+// DCAAddition tracks each DCA add to original side (when losing)
+type DCAAddition struct {
+	TriggerLevel  int       `json:"trigger_level"`   // -1, -2, -3 (negative TPs)
+	AddedQty      float64   `json:"added_qty"`
+	AddedPrice    float64   `json:"added_price"`
+	AddedAt       time.Time `json:"added_at"`
+	OldAvgPrice   float64   `json:"old_avg_price"`
+	NewAvgPrice   float64   `json:"new_avg_price"`
+	TotalQtyAfter float64   `json:"total_qty_after"`
+}
+
+// HedgeAddition tracks each addition to hedge side
+type HedgeAddition struct {
+	SourceEvent string    `json:"source_event"` // "profit_tp1", "profit_tp2", "loss_tp1", etc.
+	AddedQty    float64   `json:"added_qty"`
+	AddedPrice  float64   `json:"added_price"`
+	AddedAt     time.Time `json:"added_at"`
+	OldBE       float64   `json:"old_be"`
+	NewBE       float64   `json:"new_be"`
+}
+
+// AddDebugLog adds a debug log entry to hedge state
+func (h *HedgeReentryState) AddDebugLog(message string) {
+	timestamp := time.Now().Format("15:04:05")
+	h.DebugLog = append(h.DebugLog, timestamp+": "+message)
+	// Keep only last 50 entries
+	if len(h.DebugLog) > 50 {
+		h.DebugLog = h.DebugLog[len(h.DebugLog)-50:]
+	}
+	h.LastUpdate = time.Now()
+}
+
 // ============ CONFIGURATION ============
 
 // ScalpReentryConfig holds configuration for scalp re-entry mode
@@ -291,6 +383,35 @@ type ScalpReentryConfig struct {
 	MaxDailyReentries    int     `json:"max_daily_reentries"`     // 50 max per day
 	MinPositionSizeUSD   float64 `json:"min_position_size_usd"`   // $10 minimum
 	StopLossPercent      float64 `json:"stop_loss_percent"`       // Initial SL percent from entry (default 1.5%)
+
+	// ============ HEDGE MODE CONFIGURATION ============
+
+	// Hedge Mode Master Toggle
+	HedgeModeEnabled    bool `json:"hedge_mode_enabled"`     // Enable DCA + Hedge grid
+	TriggerOnProfitTP   bool `json:"trigger_on_profit_tp"`   // Open hedge when profit TP hits (+0.4%, etc.)
+	TriggerOnLossTP     bool `json:"trigger_on_loss_tp"`     // Open hedge when loss trigger hits (-0.4%, etc.)
+	DCAOnLoss           bool `json:"dca_on_loss"`            // Add to losing side (average down)
+	MaxPositionMultiple float64 `json:"max_position_multiple"` // Max 3x original position size
+
+	// Combined Exit
+	CombinedROIExitPct float64 `json:"combined_roi_exit_pct"` // 2.0 = exit when combined ROI >= 2%
+
+	// Wide SL (ATR-based, no AI)
+	WideSLATRMultiplier float64 `json:"wide_sl_atr_multiplier"` // 2.5 = 2.5x ATR for stop loss
+	DisableAISL         bool    `json:"disable_ai_sl"`          // true = AI cannot trigger SL
+
+	// Rally Exit (ADX + DI detection)
+	RallyExitEnabled      bool    `json:"rally_exit_enabled"`       // Enable rally detection exit
+	RallyADXThreshold     float64 `json:"rally_adx_threshold"`      // 25 = ADX must be > 25
+	RallySustainedMovePct float64 `json:"rally_sustained_move_pct"` // 3.0 = 3% sustained move triggers exit
+
+	// Negative TP Levels (for loss triggers - used for DCA and hedge adds)
+	NegTP1Percent    float64 `json:"neg_tp1_percent"`     // 0.4 = trigger at -0.4% loss
+	NegTP1AddPercent float64 `json:"neg_tp1_add_percent"` // 30 = add 30% of original qty
+	NegTP2Percent    float64 `json:"neg_tp2_percent"`     // 0.7 = trigger at -0.7% loss
+	NegTP2AddPercent float64 `json:"neg_tp2_add_percent"` // 50 = add 50% of original qty
+	NegTP3Percent    float64 `json:"neg_tp3_percent"`     // 1.0 = trigger at -1.0% loss
+	NegTP3AddPercent float64 `json:"neg_tp3_add_percent"` // 80 = add 80% of original qty
 }
 
 // DefaultScalpReentryConfig returns default configuration
@@ -344,6 +465,33 @@ func DefaultScalpReentryConfig() ScalpReentryConfig {
 		MaxDailyReentries:    50,
 		MinPositionSizeUSD:   10,
 		StopLossPercent:      2.0, // 2.0% SL from entry - wider to avoid panic stops
+
+		// Hedge Mode defaults
+		HedgeModeEnabled:      false, // Disabled by default - opt-in feature
+		TriggerOnProfitTP:     true,  // Open hedge when profit TP hits
+		TriggerOnLossTP:       true,  // Open hedge when loss trigger hits
+		DCAOnLoss:             true,  // Add to losing side
+		MaxPositionMultiple:   3.0,   // Max 3x original position
+
+		// Combined exit
+		CombinedROIExitPct: 2.0, // Exit when combined ROI >= 2%
+
+		// Wide SL
+		WideSLATRMultiplier: 2.5,  // 2.5x ATR for wide stop loss
+		DisableAISL:         true, // AI cannot trigger SL in hedge mode
+
+		// Rally exit
+		RallyExitEnabled:      true,
+		RallyADXThreshold:     25.0, // ADX must be > 25
+		RallySustainedMovePct: 3.0,  // 3% sustained move
+
+		// Negative TP levels (for loss triggers)
+		NegTP1Percent:    0.4, // Trigger at -0.4% loss
+		NegTP1AddPercent: 30,  // Add 30% of original qty
+		NegTP2Percent:    0.7, // Trigger at -0.7% loss
+		NegTP2AddPercent: 50,  // Add 50% of original qty
+		NegTP3Percent:    1.0, // Trigger at -1.0% loss
+		NegTP3AddPercent: 80,  // Add 80% of original qty
 	}
 }
 
@@ -417,4 +565,60 @@ func (c *ScalpReentryConfig) GetTPConfig(level int) (tpPercent, sellPercent floa
 	default:
 		return 0, 0
 	}
+}
+
+// GetNegTPConfig returns negative TP percent and add percent for a level (loss triggers)
+func (c *ScalpReentryConfig) GetNegTPConfig(level int) (lossPct, addPct float64) {
+	switch level {
+	case 1:
+		return c.NegTP1Percent, c.NegTP1AddPercent
+	case 2:
+		return c.NegTP2Percent, c.NegTP2AddPercent
+	case 3:
+		return c.NegTP3Percent, c.NegTP3AddPercent
+	default:
+		return 0, 0
+	}
+}
+
+// NewHedgeReentryState creates a new hedge reentry state
+func NewHedgeReentryState(originalQty float64, config ScalpReentryConfig) *HedgeReentryState {
+	return &HedgeReentryState{
+		Enabled:             config.HedgeModeEnabled,
+		HedgeActive:         false,
+		DCAEnabled:          config.DCAOnLoss,
+		DCAAdditions:        []DCAAddition{},
+		HedgeAdditions:      []HedgeAddition{},
+		OriginalInitialQty:  originalQty,
+		OriginalTotalQty:    originalQty,
+		MaxPositionMultiple: config.MaxPositionMultiple,
+		AICannotTriggerSL:   config.DisableAISL,
+		DebugLog:            []string{},
+		StartedAt:           time.Now(),
+		LastUpdate:          time.Now(),
+	}
+}
+
+// GetOppositeSide returns the opposite position side
+func GetOppositeSide(side string) string {
+	if side == "LONG" {
+		return "SHORT"
+	}
+	return "LONG"
+}
+
+// GetSideForPositionSide returns BUY or SELL for a position side
+func GetSideForPositionSide(positionSide string) string {
+	if positionSide == "LONG" {
+		return "BUY"
+	}
+	return "SELL"
+}
+
+// GetCloseSideForPositionSide returns the close order side for a position
+func GetCloseSideForPositionSide(positionSide string) string {
+	if positionSide == "LONG" {
+		return "SELL"
+	}
+	return "BUY"
 }

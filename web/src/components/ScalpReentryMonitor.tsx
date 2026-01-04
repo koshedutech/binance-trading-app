@@ -266,6 +266,12 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
                         SCALP-REENTRY
                       </span>
                     )}
+                    {pos.hedge_mode_active && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-orange-900/50 text-orange-400 border border-orange-700 flex items-center gap-1">
+                        <ArrowRight className="w-2.5 h-2.5" />
+                        HEDGE ({pos.hedge_side})
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="text-right">
