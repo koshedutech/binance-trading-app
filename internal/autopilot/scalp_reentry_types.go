@@ -290,6 +290,7 @@ type ScalpReentryConfig struct {
 	MaxCyclesPerPosition int     `json:"max_cycles_per_position"` // 10 max cycles
 	MaxDailyReentries    int     `json:"max_daily_reentries"`     // 50 max per day
 	MinPositionSizeUSD   float64 `json:"min_position_size_usd"`   // $10 minimum
+	StopLossPercent      float64 `json:"stop_loss_percent"`       // Initial SL percent from entry (default 1.5%)
 }
 
 // DefaultScalpReentryConfig returns default configuration
@@ -297,10 +298,10 @@ func DefaultScalpReentryConfig() ScalpReentryConfig {
 	return ScalpReentryConfig{
 		Enabled: false, // Disabled by default, feature flag
 
-		// TP Levels
-		TP1Percent:     0.3,
+		// TP Levels (0.4% → 30%, 0.7% → 50%, 1.0% → 80%, remaining 20% trails)
+		TP1Percent:     0.4,
 		TP1SellPercent: 30,
-		TP2Percent:     0.6,
+		TP2Percent:     0.7,
 		TP2SellPercent: 50,
 		TP3Percent:     1.0,
 		TP3SellPercent: 80,
@@ -342,6 +343,7 @@ func DefaultScalpReentryConfig() ScalpReentryConfig {
 		MaxCyclesPerPosition: 10,
 		MaxDailyReentries:    50,
 		MinPositionSizeUSD:   10,
+		StopLossPercent:      2.0, // 2.0% SL from entry - wider to avoid panic stops
 	}
 }
 

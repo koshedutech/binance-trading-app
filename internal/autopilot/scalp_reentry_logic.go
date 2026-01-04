@@ -1,6 +1,7 @@
 package autopilot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -35,6 +36,13 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 	sr.AddDebugLog(fmt.Sprintf("Monitoring: price=%.8f, tpUnlocked=%d, blocked=%v, cycles=%d",
 		currentPrice, sr.TPLevelUnlocked, sr.NextTPBlocked, len(sr.Cycles)))
 
+	// Step 0: Check if exchange LIMIT TP has filled (qty decreased from user data stream)
+	// Exchange-based LIMIT TPs save on fees compared to internal MARKET orders
+	if g.detectExchangeTPFill(pos, currentPrice) {
+		// Exchange TP filled - state already updated, proceed with re-entry logic
+		return nil
+	}
+
 	// Step 1: Check if we're in final portion mode (after 80% sold at 1%)
 	if sr.FinalPortionActive {
 		return g.monitorFinalTrailing(pos, currentPrice)
@@ -45,12 +53,23 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 		return g.checkAndExecuteReentry(pos, currentPrice)
 	}
 
-	// Step 3: Check if TP level is reached (only if not blocked)
+	// Step 3: Check if TP level is reached but exchange order didn't fill
+	// This is a fallback - normally exchange LIMIT TP should fill first
+	// Only execute if exchange TP hasn't processed this level yet
 	if !sr.NextTPBlocked || sr.CanProceedToNextTP() {
 		nextTPLevel := sr.TPLevelUnlocked + 1
 		if nextTPLevel <= 3 {
 			tpHit, _ := g.checkScalpReentryTP(pos, currentPrice, nextTPLevel)
 			if tpHit {
+				// Check if position qty already reduced (exchange filled)
+				expectedQtyAfterTP := sr.RemainingQuantity
+				actualQty := pos.RemainingQty
+				if actualQty < expectedQtyAfterTP*0.95 {
+					// Exchange already filled - just update state
+					return g.processExchangeTPFill(pos, nextTPLevel, currentPrice)
+				}
+				// Exchange didn't fill - use internal execution as fallback
+				log.Printf("[SCALP-REENTRY] %s: TP%d hit but exchange order not filled, using internal execution", pos.Symbol, nextTPLevel)
 				return g.executeTPSell(pos, nextTPLevel)
 			}
 		}
@@ -60,6 +79,170 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 	if sr.DynamicSLActive {
 		return g.updateDynamicSL(pos, currentPrice, config)
 	}
+
+	return nil
+}
+
+// detectExchangeTPFill checks if exchange LIMIT TP order has filled
+// Returns true if a TP fill was detected and processed
+func (g *GinieAutopilot) detectExchangeTPFill(pos *GiniePosition, currentPrice float64) bool {
+	sr := pos.ScalpReentry
+	if sr == nil {
+		return false
+	}
+
+	// Compare actual position qty with our tracked qty
+	actualQty := pos.RemainingQty
+	expectedQty := sr.RemainingQuantity
+
+	// If actual qty is significantly less than expected, exchange TP must have filled
+	// Use 5% tolerance to account for rounding
+	if actualQty >= expectedQty*0.95 {
+		return false // No reduction detected
+	}
+
+	// Calculate which TP level was hit based on qty reduction
+	nextTPLevel := sr.TPLevelUnlocked + 1
+	if nextTPLevel > 3 {
+		return false // All TPs already hit
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	_, sellPercent := config.GetTPConfig(nextTPLevel)
+	sellPercentExact := float64(int(sellPercent)) / 100.0
+	expectedSellQty := expectedQty * sellPercentExact
+	actualReduction := expectedQty - actualQty
+
+	// Check if reduction matches expected TP sell qty (within 20% tolerance)
+	if actualReduction >= expectedSellQty*0.8 && actualReduction <= expectedSellQty*1.2 {
+		sr.AddDebugLog(fmt.Sprintf("Exchange TP%d filled: qty reduced %.4f -> %.4f (sold %.4f)",
+			nextTPLevel, expectedQty, actualQty, actualReduction))
+		return g.processExchangeTPFill(pos, nextTPLevel, currentPrice) == nil
+	}
+
+	return false
+}
+
+// processExchangeTPFill updates state after exchange LIMIT TP order fills
+// This is called instead of executeTPSell since exchange already executed the order
+func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, currentPrice float64) error {
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	sr := pos.ScalpReentry
+
+	tpPercent, sellPercent := config.GetTPConfig(tpLevel)
+	sellPercentExact := float64(int(sellPercent)) / 100.0
+	sellQty := sr.RemainingQuantity * sellPercentExact
+	sellQty = g.roundQuantity(pos.Symbol, sellQty)
+
+	sr.AddDebugLog(fmt.Sprintf("TP%d EXCHANGE FILL: profit %.2f%%, sold %.4f (%.0f%% of remaining)",
+		tpLevel, tpPercent, sellQty, sellPercent))
+	log.Printf("[SCALP-REENTRY] %s: Exchange LIMIT TP%d filled (saved taker fees!)", pos.Symbol, tpLevel)
+
+	// Calculate PnL for this sell
+	var pnl float64
+	if pos.Side == "LONG" {
+		pnl = (currentPrice - pos.EntryPrice) * sellQty
+	} else {
+		pnl = (pos.EntryPrice - currentPrice) * sellQty
+	}
+
+	// Calculate PnL percent for logging
+	pnlPercent := 0.0
+	if pos.EntryPrice > 0 {
+		if pos.Side == "LONG" {
+			pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
+		} else {
+			pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
+		}
+	}
+
+	// LOG TP HIT TO DATABASE - critical for tracking scalp_reentry TPs
+	go g.eventLogger.LogTPHit(
+		context.Background(),
+		pos.FuturesTradeID,
+		pos.Symbol,
+		tpLevel,
+		currentPrice,
+		sellQty,
+		pnl,
+		pnlPercent,
+	)
+
+	// Create new cycle
+	cycle := ReentryCycle{
+		CycleNumber:  len(sr.Cycles) + 1,
+		TPLevel:      tpLevel,
+		Mode:         string(GinieModeScalpReentry),
+		Side:         pos.Side,
+		SellPrice:    currentPrice,
+		SellQuantity: sellQty,
+		SellPnL:      pnl,
+		SellTime:     time.Now(),
+		StartTime:    time.Now(),
+		ReentryState: ReentryStateNone,
+	}
+
+	// Update position state - use actual qty from exchange
+	sr.RemainingQuantity = pos.RemainingQty // Trust exchange qty
+	sr.AccumulatedProfit += pnl
+	sr.TPLevelUnlocked = tpLevel
+
+	// Sync main position TP state
+	pos.CurrentTPLevel = tpLevel
+	if tpLevel > 0 && tpLevel <= len(pos.TakeProfits) {
+		pos.TakeProfits[tpLevel-1].Status = "hit"
+	}
+
+	// Handle position fully closed
+	if sr.RemainingQuantity <= 0 {
+		sr.AddDebugLog(fmt.Sprintf("TP%d: Position fully closed via exchange. Total profit: %.4f", tpLevel, sr.AccumulatedProfit))
+		cycle.ReentryState = ReentryStateNone
+		cycle.Outcome = "full_close_exchange"
+		cycle.OutcomeReason = "exchange_tp_filled_all"
+		cycle.EndTime = time.Now()
+		sr.Cycles = append(sr.Cycles, cycle)
+		sr.TotalCyclesCompleted++
+		sr.TotalCyclePnL = sr.AccumulatedProfit
+		sr.LastUpdate = time.Now()
+		pos.IsClosing = true
+		go g.SavePositionState()
+		return nil
+	}
+
+	// Handle TP3 (1%) - activate dynamic SL and final trailing
+	if tpLevel == 3 {
+		sr.FinalPortionActive = true
+		sr.FinalPortionQty = sr.RemainingQuantity
+		sr.FinalTrailingPeak = currentPrice
+		sr.FinalTrailingPercent = config.FinalTrailingPercent
+		sr.DynamicSLActive = true
+		sr.ProtectedProfit = sr.AccumulatedProfit * (config.DynamicSLProtectPct / 100)
+		sr.MaxAllowableLoss = sr.AccumulatedProfit * (config.DynamicSLMaxLossPct / 100)
+		cycle.ReentryState = ReentryStateNone
+		sr.AddDebugLog(fmt.Sprintf("TP3 exchange fill! Final portion mode. Qty=%.4f, Trailing=%.1f%%",
+			sr.FinalPortionQty, sr.FinalTrailingPercent))
+	} else {
+		// For TP1/TP2, set up re-entry and place next TP order
+		reentryTargetPrice := roundPrice(pos.Symbol, sr.CurrentBreakeven)
+		cycle.ReentryTargetPrice = reentryTargetPrice
+		reentryPercent := float64(int(config.ReentryPercent)) / 100.0
+		cycle.ReentryQuantity = sellQty * reentryPercent
+		cycle.ReentryState = ReentryStateWaiting
+		sr.NextTPBlocked = true
+		sr.AddDebugLog(fmt.Sprintf("Waiting for re-entry at breakeven %.8f", reentryTargetPrice))
+
+		// Place next TP order on exchange for next level
+		// Note: placeNextTPOrder takes the CURRENT level and places order for level+1
+		if tpLevel < 3 && tpLevel < len(pos.TakeProfits) {
+			log.Printf("[SCALP-REENTRY] %s: Placing next TP order for level %d", pos.Symbol, tpLevel+1)
+			go g.placeNextTPOrder(pos, tpLevel)
+		}
+	}
+
+	sr.Cycles = append(sr.Cycles, cycle)
+	sr.CurrentCycle = len(sr.Cycles)
+	sr.LastUpdate = time.Now()
+	go g.SavePositionState()
 
 	return nil
 }
@@ -173,6 +356,28 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 		return err
 	}
 
+	// Calculate PnL percent for logging
+	pnlPercent := 0.0
+	if pos.EntryPrice > 0 {
+		if pos.Side == "LONG" {
+			pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
+		} else {
+			pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
+		}
+	}
+
+	// LOG TP HIT TO DATABASE - critical for tracking scalp_reentry TPs
+	go g.eventLogger.LogTPHit(
+		context.Background(),
+		pos.FuturesTradeID,
+		pos.Symbol,
+		tpLevel,
+		currentPrice,
+		sellQty,
+		pnl,
+		pnlPercent,
+	)
+
 	// Update position state
 	sr.RemainingQuantity -= sellQty
 	sr.AccumulatedProfit += pnl
@@ -181,6 +386,13 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	// CRITICAL: Sync pos.RemainingQty with sr.RemainingQuantity to avoid divergence
 	// sr.RemainingQuantity is the source of truth for scalp_reentry mode
 	pos.RemainingQty = sr.RemainingQuantity
+
+	// CRITICAL: Sync main position TP state with scalp_reentry
+	// This prevents protection system from trying to re-place TP orders
+	pos.CurrentTPLevel = tpLevel
+	if tpLevel > 0 && tpLevel <= len(pos.TakeProfits) {
+		pos.TakeProfits[tpLevel-1].Status = "hit"
+	}
 
 	// Handle small position full close - no re-entry when position fully closed
 	if sr.RemainingQuantity <= 0 || sellPercent >= 100.0 {
@@ -359,6 +571,32 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 
 	sr.AddDebugLog(fmt.Sprintf("Re-entry complete! New remaining qty %.4f, new BE %.8f",
 		sr.RemainingQuantity, sr.CurrentBreakeven))
+
+	// CRITICAL: Update SL order for new quantity after reentry
+	// The old SL order covers the old quantity, but now we have more position
+	// Place SL at the new breakeven minus the SL percent
+	// Use configured SL percent from ScalpReentryConfig (default 2.0%)
+	slPercent := config.StopLossPercent
+	if slPercent <= 0 {
+		slPercent = 2.0 // Fallback to 2.0% if not configured
+	}
+
+	var newSL float64
+	if pos.Side == "LONG" {
+		newSL = sr.CurrentBreakeven * (1 - slPercent/100)
+	} else {
+		newSL = sr.CurrentBreakeven * (1 + slPercent/100)
+	}
+
+	// Update the SL order on Binance with new quantity and price
+	if err := g.updatePositionStopLoss(pos, newSL); err != nil {
+		log.Printf("[SCALP-REENTRY] %s: Failed to update SL after reentry: %v", pos.Symbol, err)
+		sr.AddDebugLog(fmt.Sprintf("WARNING: Failed to update SL after reentry: %v", err))
+	} else {
+		log.Printf("[SCALP-REENTRY] %s: SL updated for new position size %.4f, BE=%.8f, SL=%.8f",
+			pos.Symbol, sr.RemainingQuantity, sr.CurrentBreakeven, newSL)
+		sr.AddDebugLog(fmt.Sprintf("SL updated for reentry: new SL=%.8f (BE=%.8f, SL%%=%.1f)", newSL, sr.CurrentBreakeven, slPercent))
+	}
 
 	// CRITICAL: Save position state after re-entry to survive restarts
 	go g.SavePositionState()

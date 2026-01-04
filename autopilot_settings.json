@@ -35,7 +35,7 @@
   "ginie_total_trades": 42,
   "ginie_winning_trades": 8,
   "ginie_daily_trades": 0,
-  "ginie_pnl_last_update": "2026-01-03",
+  "ginie_pnl_last_update": "2026-01-04",
   "auto_mode_enabled": false,
   "auto_mode_max_positions": 5,
   "auto_mode_max_leverage": 10,
@@ -81,7 +81,7 @@
   "ultra_fast_today_trades": 0,
   "ultra_fast_max_daily_trades": 0,
   "ultra_fast_daily_pnl": 0,
-  "ultra_fast_total_pnl": -177.68242179000015,
+  "ultra_fast_total_pnl": -28.20797551,
   "ultra_fast_win_rate": 0,
   "ultra_fast_last_update": "",
   "ultra_fast_min_profit_usd": 1,
@@ -118,9 +118,9 @@
   "ultra_fast_5m_weight": 0.4,
   "ultra_fast_3m_weight": 0.35,
   "ultra_fast_1m_weight": 0.25,
-  "ultra_fast_min_consensus": 3,
-  "ultra_fast_min_weighted_strength": 75,
-  "ultra_fast_trend_stability_check": true,
+  "ultra_fast_min_consensus": 1,
+  "ultra_fast_min_weighted_strength": 40,
+  "ultra_fast_trend_stability_check": false,
   "ultra_fast_dynamic_ai_exit": true,
   "ultra_fast_min_hold_before_ai_ms": 3000,
   "ultra_fast_ai_check_interval_ms": 5000,
@@ -177,19 +177,19 @@
     "win_rate_cooldown_minutes": 180
   },
   "mode_allocation": {
-    "ultra_fast_scalp_percent": 20,
-    "scalp_percent": 30,
-    "scalp_reentry_percent": 0,
-    "swing_percent": 40,
+    "ultra_fast_scalp_percent": 10,
+    "scalp_percent": 25,
+    "scalp_reentry_percent": 30,
+    "swing_percent": 25,
     "position_percent": 10,
     "max_ultra_fast_positions": 1,
     "max_scalp_positions": 5,
-    "max_scalp_reentry_positions": 0,
+    "max_scalp_reentry_positions": 5,
     "max_swing_positions": 5,
     "max_position_positions": 2,
     "max_ultra_fast_usd_per_position": 200,
     "max_scalp_usd_per_position": 300,
-    "max_scalp_reentry_usd_per_position": 0,
+    "max_scalp_reentry_usd_per_position": 100,
     "max_swing_usd_per_position": 500,
     "max_position_usd_per_position": 750,
     "allow_dynamic_rebalance": false,
@@ -378,7 +378,7 @@
         "analysis_timeframe": "1d"
       },
       "confidence": {
-        "min_confidence": 50,
+        "min_confidence": 40,
         "high_confidence": 85,
         "ultra_confidence": 92
       },
@@ -463,12 +463,16 @@
         "max_averages": 2,
         "min_confidence_for_average": 80,
         "use_llm_for_averaging": true,
-        "staged_entry_enabled": false,
-        "staged_entry_levels": 0,
-        "staged_entry_percent": null,
-        "staged_entry_price_improve": 0,
-        "staged_entry_cooldown_sec": 0,
-        "staged_entry_max_wait_sec": 0
+        "staged_entry_enabled": true,
+        "staged_entry_levels": 3,
+        "staged_entry_percent": [
+          40,
+          30,
+          30
+        ],
+        "staged_entry_price_improve": 0.5,
+        "staged_entry_cooldown_sec": 60,
+        "staged_entry_max_wait_sec": 600
       },
       "stale_release": {
         "enabled": true,
@@ -510,9 +514,9 @@
         "secondary_weight": 0.3,
         "tertiary_timeframe": "1h",
         "tertiary_weight": 0.2,
-        "min_consensus": 2,
-        "min_weighted_strength": 50,
-        "trend_stability_check": true
+        "min_consensus": 1,
+        "min_weighted_strength": 40,
+        "trend_stability_check": false
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -533,7 +537,7 @@
         "analysis_timeframe": "15m"
       },
       "confidence": {
-        "min_confidence": 50,
+        "min_confidence": 40,
         "high_confidence": 75,
         "ultra_confidence": 85
       },
@@ -567,7 +571,7 @@
         "min_win_rate": 45
       },
       "sltp": {
-        "stop_loss_percent": 1,
+        "stop_loss_percent": 2,
         "take_profit_percent": 1.5,
         "trailing_stop_enabled": true,
         "trailing_stop_percent": 0.5,
@@ -669,9 +673,9 @@
         "secondary_weight": 0.3,
         "tertiary_timeframe": "1m",
         "tertiary_weight": 0.2,
-        "min_consensus": 2,
-        "min_weighted_strength": 50,
-        "trend_stability_check": true
+        "min_consensus": 1,
+        "min_weighted_strength": 35,
+        "trend_stability_check": false
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -691,7 +695,7 @@
     },
     "scalp_reentry": {
       "mode_name": "scalp_reentry",
-      "enabled": false,
+      "enabled": true,
       "timeframe": {
         "trend_timeframe": "15m",
         "entry_timeframe": "5m",
@@ -703,10 +707,10 @@
         "ultra_confidence": 88
       },
       "size": {
-        "base_size_usd": 250,
-        "max_size_usd": 500,
-        "max_positions": 3,
-        "leverage": 8,
+        "base_size_usd": 100,
+        "max_size_usd": 100,
+        "max_positions": 5,
+        "leverage": 10,
         "size_multiplier_lo": 1,
         "size_multiplier_hi": 1.5,
         "safety_margin": 0,
@@ -776,19 +780,23 @@
         "max_total_exposure_multiplier": 1.5
       },
       "averaging": {
-        "allow_averaging": false,
+        "allow_averaging": true,
         "average_up_profit_percent": 0.5,
         "average_down_loss_percent": -1,
         "add_size_percent": 50,
-        "max_averages": 0,
+        "max_averages": 2,
         "min_confidence_for_average": 70,
-        "use_llm_for_averaging": false,
-        "staged_entry_enabled": false,
-        "staged_entry_levels": 0,
-        "staged_entry_percent": null,
-        "staged_entry_price_improve": 0,
-        "staged_entry_cooldown_sec": 0,
-        "staged_entry_max_wait_sec": 0
+        "use_llm_for_averaging": true,
+        "staged_entry_enabled": true,
+        "staged_entry_levels": 3,
+        "staged_entry_percent": [
+          40,
+          30,
+          30
+        ],
+        "staged_entry_price_improve": 0.3,
+        "staged_entry_cooldown_sec": 30,
+        "staged_entry_max_wait_sec": 300
       },
       "stale_release": {
         "enabled": true,
@@ -823,9 +831,9 @@
         "secondary_weight": 0.35,
         "tertiary_timeframe": "1m",
         "tertiary_weight": 0.25,
-        "min_consensus": 2,
-        "min_weighted_strength": 60,
-        "trend_stability_check": true
+        "min_consensus": 1,
+        "min_weighted_strength": 35,
+        "trend_stability_check": false
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -852,7 +860,7 @@
         "analysis_timeframe": "4h"
       },
       "confidence": {
-        "min_confidence": 50,
+        "min_confidence": 40,
         "high_confidence": 80,
         "ultra_confidence": 90
       },
@@ -988,9 +996,9 @@
         "secondary_weight": 0.3,
         "tertiary_timeframe": "5m",
         "tertiary_weight": 0.2,
-        "min_consensus": 2,
-        "min_weighted_strength": 55,
-        "trend_stability_check": true
+        "min_consensus": 1,
+        "min_weighted_strength": 40,
+        "trend_stability_check": false
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -1017,7 +1025,7 @@
         "analysis_timeframe": "1m"
       },
       "confidence": {
-        "min_confidence": 50,
+        "min_confidence": 40,
         "high_confidence": 80,
         "ultra_confidence": 90
       },
@@ -1149,9 +1157,9 @@
         "secondary_weight": 0.35,
         "tertiary_timeframe": "1m",
         "tertiary_weight": 0.25,
-        "min_consensus": 3,
-        "min_weighted_strength": 75,
-        "trend_stability_check": true
+        "min_consensus": 1,
+        "min_weighted_strength": 35,
+        "trend_stability_check": false
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -1232,7 +1240,7 @@
     "tp1_sell_percent": 30,
     "tp2_percent": 0.7,
     "tp2_sell_percent": 50,
-    "tp3_percent": 1.2,
+    "tp3_percent": 1,
     "tp3_sell_percent": 80,
     "reentry_percent": 80,
     "reentry_price_buffer": 0.15,
@@ -1257,7 +1265,8 @@
     "adaptive_max_reentry_adjust": 20,
     "max_cycles_per_position": 10,
     "max_daily_reentries": 50,
-    "min_position_size_usd": 10
+    "min_position_size_usd": 10,
+    "stop_loss_percent": 1.5
   },
   "early_warning_enabled": true,
   "early_warning_start_after_minutes": 1,
@@ -1268,6 +1277,10 @@
   "early_warning_tighten_sl_on_warning": true,
   "early_warning_min_confidence": 0.7,
   "early_warning_max_llm_calls_per_pos": 3,
+  "early_warning_close_min_hold_mins": 5,
+  "early_warning_close_min_confidence": 0.85,
+  "early_warning_close_require_consecutive": 2,
+  "early_warning_close_sl_proximity_pct": 50,
   "breakout_detection_enabled": true,
   "breakout_config": {
     "enabled": true,

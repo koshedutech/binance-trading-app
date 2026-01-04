@@ -30,7 +30,7 @@ func DefaultDynamicSLTPConfig() *DynamicSLTPConfig {
 		ATRMultiplierSL: 1.5,
 		ATRMultiplierTP: 2.0,
 		MinSLPercent:    0.3,
-		MaxSLPercent:    3.0,
+		MaxSLPercent:    3.5,
 		MinTPPercent:    0.5,
 		MaxTPPercent:    5.0,
 		LLMWeight:       0.3, // 30% LLM, 70% ATR by default

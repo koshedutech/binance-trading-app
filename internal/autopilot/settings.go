@@ -1481,7 +1481,7 @@ func DefaultSettings() *AutopilotSettings {
 		ATRMultiplierTP:     2.0,
 		LLMSLTPWeight:       0.3,
 		MinSLPercent:        0.3,
-		MaxSLPercent:        3.0,
+		MaxSLPercent:        3.5,
 		MinTPPercent:        0.5,
 		MaxTPPercent:        5.0,
 
@@ -4171,8 +4171,8 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			Leverage:       8,
 			SizeMultiplier: 1.8,
 
-			// SL/TP - reasonable stops and targets
-			StopLossPercent:   1.5,
+			// SL/TP - wider stops to avoid panic exits on normal volatility
+			StopLossPercent:   2.0,
 			TakeProfitPercent: 3.0,
 			TrailingEnabled:   false,
 			TrailingPercent:   0.5,
@@ -4336,8 +4336,8 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			Leverage:       10,   // 10x leverage per user request
 			SizeMultiplier: 2.0,
 
-			// SL/TP - tighter for scalp reentry with progressive TP
-			StopLossPercent:   1.2,
+			// SL/TP - wider stops to avoid panic exits on normal volatility
+			StopLossPercent:   2.0,
 			TakeProfitPercent: 2.5,
 			TrailingEnabled:   false,  // Uses progressive TP instead
 			TrailingPercent:   0.4,
