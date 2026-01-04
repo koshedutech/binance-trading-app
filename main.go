@@ -148,6 +148,12 @@ func main() {
 			log.Printf("Warning: Trade lifecycle migrations failed: %v", err)
 		}
 		logger.Info("Trade lifecycle migrations completed")
+
+		// Run Symbol Requirements migrations for order validation
+		if err := db.RunSymbolRequirementsMigration(ctx); err != nil {
+			log.Printf("Warning: Symbol requirements migrations failed: %v", err)
+		}
+		logger.Info("Symbol requirements migrations completed")
 	}
 
 	// Run Multi-Tenant migrations if auth is enabled
@@ -526,6 +532,19 @@ func main() {
 			if err := autopilot.LoadSymbolPrecisions(activeFuturesClient); err != nil {
 				logger.Warn("Failed to load symbol precisions from Binance", "error", err)
 			}
+		}
+
+		// Initialize SymbolValidator for robust order validation
+		// This syncs symbol requirements from Binance and stores in database
+		symbolReqRepo := database.NewSymbolRequirementsRepository(db)
+		symbolValidator := autopilot.GetSymbolValidator()
+		if err := symbolValidator.Initialize(symbolReqRepo, activeFuturesClient); err != nil {
+			logger.Warn("Failed to initialize symbol validator", "error", err)
+		} else {
+			logger.Info("Symbol validator initialized",
+				"symbols_cached", symbolValidator.GetCacheSize())
+			// Start periodic sync in background
+			symbolValidator.StartPeriodicSync()
 		}
 	}
 

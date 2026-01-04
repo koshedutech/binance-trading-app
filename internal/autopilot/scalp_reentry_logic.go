@@ -1003,6 +1003,7 @@ func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float6
 }
 
 // placeOrder places a futures order using the actual Binance API
+// Uses SymbolValidator for proper precision and pre-validation
 func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
 	if order == nil {
 		return fmt.Errorf("order is nil")
@@ -1016,13 +1017,38 @@ func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
 	// Get effective position side for hedge mode compatibility
 	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(order.PositionSide))
 
-	// Round quantity for the symbol
-	roundedQty := g.roundQuantity(order.Symbol, order.Quantity)
-	if roundedQty <= 0 {
-		return fmt.Errorf("rounded quantity is 0 for %s", order.Symbol)
+	// Use SymbolValidator for proper rounding and validation
+	validator := GetSymbolValidator()
+	isMarketOrder := order.Type == "MARKET"
+
+	// Validate order BEFORE placement
+	validation := validator.ValidateOrder(order.Symbol, order.Quantity, order.Price, isMarketOrder)
+
+	// Log validation result
+	if !validation.Valid {
+		for _, verr := range validation.Errors {
+			log.Printf("[SCALP-ORDER] %s: Validation failed - %s", order.Symbol, verr.Message)
+		}
+		if len(validation.Errors) > 0 {
+			return fmt.Errorf("order validation failed for %s: %s", order.Symbol, validation.Errors[0].Message)
+		}
+		return fmt.Errorf("order validation failed for %s: unknown error", order.Symbol)
 	}
 
-	// Build order params
+	// Use validated and rounded values
+	roundedQty := validation.RoundedQty
+	roundedPrice := validation.RoundedPrice
+
+	if roundedQty <= 0 {
+		return fmt.Errorf("rounded quantity is 0 for %s (original: %.8f)", order.Symbol, order.Quantity)
+	}
+
+	// Log any warnings
+	for _, warning := range validation.Warnings {
+		log.Printf("[SCALP-ORDER] %s: Warning - %s", order.Symbol, warning)
+	}
+
+	// Build order params with validated values
 	orderParams := binance.FuturesOrderParams{
 		Symbol:       order.Symbol,
 		Side:         order.Side,
@@ -1031,14 +1057,14 @@ func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
 		Quantity:     roundedQty,
 	}
 
-	// Add price for limit orders
-	if order.Type == "LIMIT" && order.Price > 0 {
-		orderParams.Price = order.Price
+	// Add price for limit orders (use rounded price)
+	if order.Type == "LIMIT" && roundedPrice > 0 {
+		orderParams.Price = roundedPrice
 		orderParams.TimeInForce = binance.TimeInForceGTC
 	}
 
-	log.Printf("[SCALP-ORDER] %s: Placing %s %s order: qty=%.8f, side=%s, positionSide=%s",
-		order.Symbol, order.Type, order.Side, roundedQty, order.Side, effectivePositionSide)
+	log.Printf("[SCALP-ORDER] %s: Placing %s %s order: qty=%.8f (was %.8f), side=%s, positionSide=%s",
+		order.Symbol, order.Type, order.Side, roundedQty, order.Quantity, order.Side, effectivePositionSide)
 
 	// Place the order
 	result, err := g.futuresClient.PlaceFuturesOrder(orderParams)

@@ -33,6 +33,7 @@ var quantityPrecision = map[string]int{
 	"AVAXUSDT":  0, // Min qty: 1
 	"LINKUSDT":  1, // Min qty: 0.1
 	"DOTUSDT":   0, // Min qty: 1
+	"ICPUSDT":   0, // Min qty: 1 (Internet Computer)
 	// High volume
 	"LTCUSDT":   2, // Min qty: 0.01
 	"ATOMUSDT":  1, // Min qty: 0.1
@@ -339,9 +340,15 @@ func getPricePrecision(symbol string) int {
 	return 4 // Default to 4 decimals (safer than 6 for most coins)
 }
 
-// getQuantityPrecision gets quantity precision from cache, or dynamically fetches from Binance
+// getQuantityPrecision gets quantity precision - prioritizes hardcoded map for reliability
 func getQuantityPrecision(symbol string) int {
-	// Try cache first (fast path)
+	// PRIORITY 1: Hardcoded map (most reliable, manually verified)
+	// This prevents issues where Binance API returns incorrect stepSize
+	if prec, ok := quantityPrecision[symbol]; ok {
+		return prec
+	}
+
+	// PRIORITY 2: Cache from Binance API
 	precisionCacheMu.RLock()
 	if prec, ok := symbolPrecisionCache[symbol]; ok {
 		precisionCacheMu.RUnlock()
@@ -349,15 +356,10 @@ func getQuantityPrecision(symbol string) int {
 	}
 	precisionCacheMu.RUnlock()
 
-	// Not in cache - try dynamic lookup
+	// PRIORITY 3: Dynamic lookup for new symbols
 	_, qPrec, err := EnsureSymbolPrecision(symbol)
 	if err == nil {
 		return qPrec
-	}
-
-	// Final fallback to hardcoded map
-	if prec, ok := quantityPrecision[symbol]; ok {
-		return prec
 	}
 
 	return 0 // Default fallback (whole numbers)
