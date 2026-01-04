@@ -4081,6 +4081,18 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	ga.dailyTrades++
 	ga.totalTrades++
 
+	// FIX: Initialize ScalpReentry status immediately if position enters in scalp_reentry mode
+	// This ensures the position appears in the scalp-reentry/positions API endpoint right away
+	// Previously, ScalpReentry was only initialized during monitor loop, causing sync gap
+	if position.Mode == GinieModeScalpReentry {
+		position.ScalpReentry = ga.initScalpReentry(position)
+		ga.logger.Info("ScalpReentry status initialized at entry",
+			"symbol", symbol,
+			"mode", position.Mode,
+			"entry_price", position.EntryPrice,
+			"quantity", position.OriginalQty)
+	}
+
 	// Create initial futures trade record in database for lifecycle tracking
 	if ga.repo != nil {
 		var tradeID int64
@@ -7322,6 +7334,13 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 		ga.positions[symbol] = position
 		synced++
 
+		// FIX: Initialize ScalpReentry status for force-synced positions in scalp_reentry mode
+		if position.Mode == GinieModeScalpReentry {
+			position.ScalpReentry = ga.initScalpReentry(position)
+			ga.logger.Info("ScalpReentry status initialized for force-synced position",
+				"symbol", symbol)
+		}
+
 		ga.logger.Info("Force-synced position from exchange",
 			"symbol", symbol,
 			"side", side,
@@ -7604,6 +7623,14 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 		if _, exists := ga.positions[symbol]; !exists {
 			ga.positions[symbol] = position
 			synced++
+
+			// FIX: Initialize ScalpReentry status for synced positions in scalp_reentry mode
+			if position.Mode == GinieModeScalpReentry {
+				position.ScalpReentry = ga.initScalpReentry(position)
+				ga.logger.Info("ScalpReentry status initialized for synced position",
+					"symbol", symbol)
+			}
+
 			ga.logger.Info("Synced position from exchange",
 				"symbol", symbol,
 				"side", side,
@@ -9171,6 +9198,14 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			// CRITICAL: Restore saved state if available (scalp_reentry TPs, CurrentTPLevel)
 			if savedState, found := savedStates[exchangePos.Symbol]; found {
 				ga.RestorePositionState(newPos, savedState)
+			}
+
+			// FIX: Initialize ScalpReentry status for reconciled positions in scalp_reentry mode
+			// Do this after RestorePositionState in case saved state doesn't have ScalpReentry
+			if newPos.Mode == GinieModeScalpReentry && newPos.ScalpReentry == nil {
+				newPos.ScalpReentry = ga.initScalpReentry(newPos)
+				ga.logger.Info("ScalpReentry status initialized for reconciled position",
+					"symbol", exchangePos.Symbol)
 			}
 
 			ga.logger.Info("Position reconciliation: added untracked position to Ginie",
