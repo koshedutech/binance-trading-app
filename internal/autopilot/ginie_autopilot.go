@@ -3236,6 +3236,79 @@ func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool, mode Gini
 	return false, ""
 }
 
+// parseHoldDuration parses duration strings like "2h", "6h", "3d", "10s" into time.Duration
+func parseHoldDuration(durationStr string) time.Duration {
+	if durationStr == "" {
+		return 0
+	}
+
+	durationStr = strings.TrimSpace(strings.ToLower(durationStr))
+	if len(durationStr) < 2 {
+		return 0
+	}
+
+	unit := durationStr[len(durationStr)-1:]
+	valueStr := durationStr[:len(durationStr)-1]
+
+	var value int
+	_, err := fmt.Sscanf(valueStr, "%d", &value)
+	if err != nil {
+		return 0
+	}
+
+	switch unit {
+	case "s":
+		return time.Duration(value) * time.Second
+	case "m":
+		return time.Duration(value) * time.Minute
+	case "h":
+		return time.Duration(value) * time.Hour
+	case "d":
+		return time.Duration(value) * 24 * time.Hour
+	default:
+		return 0
+	}
+}
+
+// shouldCloseStalePosition checks if a position has exceeded its max hold duration
+// Returns (shouldClose bool, holdDuration time.Duration, maxHoldDuration time.Duration)
+func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, time.Duration, time.Duration) {
+	sm := GetSettingsManager()
+	settings := sm.GetCurrentSettings()
+
+	// Get mode-specific config
+	modeKey := map[GinieTradingMode]string{
+		GinieModeUltraFast:    "ultra_fast",
+		GinieModeScalp:        "scalp",
+		GinieModeSwing:        "swing",
+		GinieModePosition:     "position",
+		GinieModeScalpReentry: "scalp_reentry",
+	}[pos.Mode]
+
+	modeConfig := settings.ModeConfigs[modeKey]
+	if modeConfig == nil || modeConfig.StaleRelease == nil {
+		return false, 0, 0
+	}
+
+	staleConfig := modeConfig.StaleRelease
+	if !staleConfig.Enabled {
+		return false, 0, 0
+	}
+
+	maxHold := parseHoldDuration(staleConfig.MaxHoldDuration)
+	if maxHold == 0 {
+		return false, 0, 0
+	}
+
+	holdDuration := time.Since(pos.EntryTime)
+
+	if holdDuration >= maxHold {
+		return true, holdDuration, maxHold
+	}
+
+	return false, holdDuration, maxHold
+}
+
 // shouldExitBeforeFunding checks if we should close position to avoid funding fee
 // Uses mode-specific funding rate configuration from the position's mode
 // Returns (shouldExit bool, reason string)
@@ -4421,6 +4494,22 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		} else {
 			pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
 			pos.UnrealizedPnL = (pos.EntryPrice - currentPrice) * pos.RemainingQty
+		}
+
+		// === STALE POSITION RELEASE ===
+		// Close positions that have exceeded their max hold duration
+		if shouldClose, holdDuration, maxHold := ga.shouldCloseStalePosition(pos); shouldClose {
+			log.Printf("[STALE-RELEASE] %s: Position held %.1f mins exceeds max %.1f mins - CLOSING",
+				symbol, holdDuration.Minutes(), maxHold.Minutes())
+			ga.logger.Info("Stale position release triggered",
+				"symbol", symbol,
+				"hold_duration", holdDuration.Round(time.Second),
+				"max_hold", maxHold,
+				"pnl_percent", pnlPercent,
+				"mode", pos.Mode)
+			ga.mu.Unlock()
+			ga.closePosition(symbol, pos, currentPrice, "stale_release", pos.CurrentTPLevel)
+			continue
 		}
 
 		// === FUNDING RATE EARLY EXIT ===
@@ -5822,7 +5911,7 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 // closePositionAtMarket closes a position immediately using a TRUE MARKET order
 // Used for emergency close, LLM close signals, or when immediate execution is required
 // CRITICAL: Uses MARKET order type to guarantee execution regardless of price precision issues
-func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
+func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason string) error {
 	if pos == nil {
 		return fmt.Errorf("nil position")
 	}
@@ -5947,7 +6036,7 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 		Quantity:  pos.OriginalQty,
 		PnL:       totalPnL,
 		PnLPercent: pnlPercent,
-		Reason:    "market_close",
+		Reason:    reason,
 		Timestamp: time.Now(),
 	}
 	ga.recordTrade(tradeResult)
@@ -5967,12 +6056,12 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition) error {
 			pos.OriginalQty,
 			totalPnL,
 			pnlPercent,
-			"market_close",
+			reason,
 			database.EventSourceGinie,
 		)
 	}
 
-	log.Printf("[MARKET-CLOSE] %s: Position closed successfully via MARKET order", symbol)
+	log.Printf("[MARKET-CLOSE] %s: Position closed successfully via MARKET order (reason: %s)", symbol, reason)
 
 	return nil
 }
@@ -8456,7 +8545,7 @@ func (ga *GinieAutopilot) emergencyClosePosition(pos *GiniePosition, reason stri
 		"unprotected_duration", pos.Protection.TimeSinceStateChange())
 
 	// Close at market
-	return ga.closePositionAtMarket(pos)
+	return ga.closePositionAtMarket(pos, "emergency_close")
 }
 
 // runProtectionGuardian runs a continuous loop that monitors and heals position protection
@@ -9842,13 +9931,13 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 				ga.mu.Lock()
 				if p, exists := ga.positions[pos.Symbol]; exists {
 					ga.mu.Unlock()
-					err := ga.closePositionAtMarket(p)
+					err := ga.closePositionAtMarket(p, "early_warning_close")
 					if err != nil {
 						ga.logger.Error("Failed to close position from early warning",
 							"symbol", pos.Symbol,
 							"error", err.Error())
 					} else {
-						log.Printf("[EARLY-WARNING] %s: Position closed successfully", pos.Symbol)
+						log.Printf("[EARLY-WARNING] %s: Position closed successfully (reason logged: early_warning_close)", pos.Symbol)
 						// Reset counter after successful close
 						delete(ga.earlyWarningCounter, pos.Symbol)
 						delete(ga.lastWarningTime, pos.Symbol)
@@ -10181,7 +10270,7 @@ func (ga *GinieAutopilot) updatePositionSLTPFromLLM(symbol string, pos *GiniePos
 		}
 
 		// Close position at market
-		err = ga.closePositionAtMarket(pos)
+		err = ga.closePositionAtMarket(pos, "llm_close")
 		if err != nil {
 			ga.logger.Error("Failed to close position at market",
 				"symbol", symbol,
@@ -10189,7 +10278,8 @@ func (ga *GinieAutopilot) updatePositionSLTPFromLLM(symbol string, pos *GiniePos
 		} else {
 			ga.logger.Info("Position closed at market successfully",
 				"symbol", symbol,
-				"close_price", currentPrice)
+				"close_price", currentPrice,
+				"reason", "llm_close")
 		}
 		return
 	}
@@ -10631,50 +10721,104 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 				"tp_price", singleTPPrice,
 				"note", "no TP1/TP2/TP3/TP4 split - full position closes at TP")
 		} else {
-			// Multi-TP mode: Use per-mode TPAllocation from mode_configs, fallback to global settings
-			var tp1Pct, tp2Pct, tp3Pct, tp4Pct float64
+			// Multi-TP mode: Use TPAllocation (qty %) and TPGainLevels (ROI %) from mode_configs
+			var tpAllocation []float64
+			var tpGains []float64
 
-			// Try to get from mode_configs first
+			// Get allocation and gain levels from mode config
 			modeConfig := ga.getModeConfig(pos.Mode)
 			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
-				tp1Pct = modeConfig.SLTP.TPAllocation[0]
-				tp2Pct = modeConfig.SLTP.TPAllocation[1]
-				tp3Pct = modeConfig.SLTP.TPAllocation[2]
-				tp4Pct = modeConfig.SLTP.TPAllocation[3]
-				ga.logger.Debug("Using mode_configs TPAllocation",
+				rawAlloc := modeConfig.SLTP.TPAllocation[:4]
+				// For scalp_reentry, allocations are cumulative (30, 50, 80) - convert to per-level
+				if pos.Mode == GinieModeScalpReentry {
+					tpAllocation = []float64{
+						rawAlloc[0],
+						rawAlloc[1] - rawAlloc[0],
+						rawAlloc[2] - rawAlloc[1],
+						rawAlloc[3] - rawAlloc[2],
+					}
+				} else {
+					tpAllocation = rawAlloc
+				}
+			} else {
+				// Fallback allocation defaults
+				tpAllocation = []float64{25, 25, 25, 25}
+			}
+
+			// Get TPGainLevels for price calculation (ROI % per level)
+			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
+				tpGains = modeConfig.SLTP.TPGainLevels[:4]
+				ga.logger.Debug("Using TPGainLevels from mode_configs",
 					"symbol", symbol,
 					"mode", pos.Mode,
-					"allocation", modeConfig.SLTP.TPAllocation)
+					"gain_levels", tpGains,
+					"allocation", tpAllocation)
 			} else {
-				// Fallback to defaults (legacy fields removed)
-				tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
+				// Fallback: derive gain levels based on mode and finalTPPct
+				switch pos.Mode {
+				case GinieModeUltraFast:
+					tpGains = []float64{0.3, 0.5, 0.8, 1.0}
+				case GinieModeScalp:
+					tpGains = []float64{0.5, 1.0, 1.5, 2.0}
+				case GinieModeScalpReentry:
+					// Use scalp_reentry_config values (cumulative sell %)
+					scalpCfg := settings.ScalpReentryConfig
+					tpGains = []float64{scalpCfg.TP1Percent, scalpCfg.TP2Percent, scalpCfg.TP3Percent, 0}
+					// Convert cumulative to per-level: 30, 20, 30, 0 (30%, then 20% more, then 30% more)
+					tpAllocation = []float64{
+						scalpCfg.TP1SellPercent,
+						scalpCfg.TP2SellPercent - scalpCfg.TP1SellPercent,
+						scalpCfg.TP3SellPercent - scalpCfg.TP2SellPercent,
+						0,
+					}
+				case GinieModeSwing:
+					tpGains = []float64{1.0, 2.0, 3.0, 4.0}
+				case GinieModePosition:
+					tpGains = []float64{2.0, 4.0, 6.0, 8.0}
+				default:
+					tpGains = []float64{finalTPPct * 0.25, finalTPPct * 0.5, finalTPPct * 0.75, finalTPPct}
+				}
 			}
 
-			// Ensure allocation sums to 100%
-			totalAlloc := tp1Pct + tp2Pct + tp3Pct + tp4Pct
-			if totalAlloc < 99 || totalAlloc > 101 {
-				ga.logger.Warn("TP allocation doesn't sum to 100%, using defaults",
-					"symbol", symbol,
-					"total", totalAlloc)
-				tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
+			// Build TP levels using gain levels for price, allocation for quantity
+			var activeTPs []GinieTakeProfitLevel
+			for i := 0; i < 4; i++ {
+				if tpAllocation[i] <= 0 {
+					continue // Skip levels with 0% allocation
+				}
+				gain := tpGains[i]
+				if gain < 0.01 {
+					gain = float64(i+1) * 0.5 // Fallback: 0.5%, 1.0%, 1.5%, 2.0%
+				}
+				price := pos.EntryPrice * (1 + direction*gain/100)
+				activeTPs = append(activeTPs, GinieTakeProfitLevel{
+					Level:   i + 1,
+					Percent: tpAllocation[i],
+					GainPct: gain,
+					Price:   price,
+					Status:  "pending",
+				})
 			}
 
-			// Calculate actual gain % for each level based on allocation
-			tp1Gain := finalTPPct * (tp1Pct / 100)
-			tp2Gain := finalTPPct * (tp2Pct / 100)
-			tp3Gain := finalTPPct * (tp3Pct / 100)
-			tp4Gain := finalTPPct * (tp4Pct / 100)
-
-			pos.TakeProfits = []GinieTakeProfitLevel{
-				{Level: 1, Percent: tp1Pct, GainPct: tp1Gain, Price: pos.EntryPrice * (1 + direction*tp1Gain/100), Status: "pending"},
-				{Level: 2, Percent: tp2Pct, GainPct: tp2Gain, Price: pos.EntryPrice * (1 + direction*tp2Gain/100), Status: "pending"},
-				{Level: 3, Percent: tp3Pct, GainPct: tp3Gain, Price: pos.EntryPrice * (1 + direction*tp3Gain/100), Status: "pending"},
-				{Level: 4, Percent: tp4Pct, GainPct: tp4Gain, Price: pos.EntryPrice * (1 + direction*tp4Gain/100), Status: "pending"},
+			// If no active TPs, create single TP at finalTPPct
+			if len(activeTPs) == 0 {
+				activeTPs = append(activeTPs, GinieTakeProfitLevel{
+					Level:   1,
+					Percent: 100,
+					GainPct: finalTPPct,
+					Price:   pos.EntryPrice * (1 + direction*finalTPPct/100),
+					Status:  "pending",
+				})
 			}
 
-			ga.logger.Debug("Multi-TP mode applied",
+			pos.TakeProfits = activeTPs
+
+			ga.logger.Info("Multi-TP mode applied",
 				"symbol", symbol,
-				"allocation", fmt.Sprintf("%.0f%%/%.0f%%/%.0f%%/%.0f%%", tp1Pct, tp2Pct, tp3Pct, tp4Pct))
+				"mode", pos.Mode,
+				"gain_levels", tpGains,
+				"allocation", tpAllocation,
+				"active_tp_count", len(activeTPs))
 		}
 
 		// Apply configured trailing stop settings
@@ -11035,48 +11179,104 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 		ga.logger.Debug("Single TP mode applied (async)",
 			"symbol", pos.Symbol, "mode", mode, "tp_price", tpPrice)
 	} else {
-		// Multi-TP mode: Use per-mode TPAllocation from mode_configs, fallback to global settings
-		var tp1Pct, tp2Pct, tp3Pct, tp4Pct float64
+		// Multi-TP mode: Use TPAllocation (qty %) and TPGainLevels (ROI %) from mode_configs
+		var tpAllocation []float64
+		var tpGains []float64
 
-		// Try to get from mode_configs first
+		// Get allocation and gain levels from mode config
 		modeConfig := ga.getModeConfig(pos.Mode)
 		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
-			tp1Pct = modeConfig.SLTP.TPAllocation[0]
-			tp2Pct = modeConfig.SLTP.TPAllocation[1]
-			tp3Pct = modeConfig.SLTP.TPAllocation[2]
-			tp4Pct = modeConfig.SLTP.TPAllocation[3]
-			ga.logger.Debug("Using mode_configs TPAllocation (async)",
+			rawAlloc := modeConfig.SLTP.TPAllocation[:4]
+			// For scalp_reentry, allocations are cumulative (30, 50, 80) - convert to per-level
+			if pos.Mode == GinieModeScalpReentry {
+				tpAllocation = []float64{
+					rawAlloc[0],
+					rawAlloc[1] - rawAlloc[0],
+					rawAlloc[2] - rawAlloc[1],
+					rawAlloc[3] - rawAlloc[2],
+				}
+			} else {
+				tpAllocation = rawAlloc
+			}
+		} else {
+			// Fallback allocation defaults
+			tpAllocation = []float64{25, 25, 25, 25}
+		}
+
+		// Get TPGainLevels for price calculation (ROI % per level)
+		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
+			tpGains = modeConfig.SLTP.TPGainLevels[:4]
+			ga.logger.Debug("Using TPGainLevels from mode_configs (async)",
 				"symbol", pos.Symbol,
 				"mode", pos.Mode,
-				"allocation", modeConfig.SLTP.TPAllocation)
+				"gain_levels", tpGains,
+				"allocation", tpAllocation)
 		} else {
-			// Fallback to defaults (legacy fields removed)
-			tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
+			// Fallback: derive gain levels based on mode and finalTPPct
+			switch pos.Mode {
+			case GinieModeUltraFast:
+				tpGains = []float64{0.3, 0.5, 0.8, 1.0}
+			case GinieModeScalp:
+				tpGains = []float64{0.5, 1.0, 1.5, 2.0}
+			case GinieModeScalpReentry:
+				// Use scalp_reentry_config values (cumulative sell %)
+				scalpCfg := settings.ScalpReentryConfig
+				tpGains = []float64{scalpCfg.TP1Percent, scalpCfg.TP2Percent, scalpCfg.TP3Percent, 0}
+				// Convert cumulative to per-level: 30, 20, 30, 0 (30%, then 20% more, then 30% more)
+				tpAllocation = []float64{
+					scalpCfg.TP1SellPercent,
+					scalpCfg.TP2SellPercent - scalpCfg.TP1SellPercent,
+					scalpCfg.TP3SellPercent - scalpCfg.TP2SellPercent,
+					0,
+				}
+			case GinieModeSwing:
+				tpGains = []float64{1.0, 2.0, 3.0, 4.0}
+			case GinieModePosition:
+				tpGains = []float64{2.0, 4.0, 6.0, 8.0}
+			default:
+				tpGains = []float64{finalTPPct * 0.25, finalTPPct * 0.5, finalTPPct * 0.75, finalTPPct}
+			}
 		}
 
-		// Ensure allocation sums to 100%
-		totalAlloc := tp1Pct + tp2Pct + tp3Pct + tp4Pct
-		if totalAlloc < 99 || totalAlloc > 101 {
-			ga.logger.Warn("TP allocation doesn't sum to 100%, using defaults (async)",
-				"symbol", pos.Symbol,
-				"total", totalAlloc)
-			tp1Pct, tp2Pct, tp3Pct, tp4Pct = 25, 25, 25, 25
+		// Build TP levels using gain levels for price, allocation for quantity
+		var activeTPs []GinieTakeProfitLevel
+		for i := 0; i < 4; i++ {
+			if tpAllocation[i] <= 0 {
+				continue // Skip levels with 0% allocation
+			}
+			gain := tpGains[i]
+			if gain < 0.01 {
+				gain = float64(i+1) * 0.5 // Fallback: 0.5%, 1.0%, 1.5%, 2.0%
+			}
+			price := pos.EntryPrice * (1 + direction*gain/100)
+			activeTPs = append(activeTPs, GinieTakeProfitLevel{
+				Level:   i + 1,
+				Percent: tpAllocation[i],
+				GainPct: gain,
+				Price:   price,
+				Status:  "pending",
+			})
 		}
 
-		// Calculate actual gain % for each level based on allocation
-		tp1Gain := finalTPPct * (tp1Pct / 100)
-		tp2Gain := finalTPPct * (tp2Pct / 100)
-		tp3Gain := finalTPPct * (tp3Pct / 100)
-		tp4Gain := finalTPPct * (tp4Pct / 100)
-
-		pos.TakeProfits = []GinieTakeProfitLevel{
-			{Level: 1, Percent: tp1Pct, GainPct: tp1Gain, Price: pos.EntryPrice * (1 + direction*tp1Gain/100), Status: "pending"},
-			{Level: 2, Percent: tp2Pct, GainPct: tp2Gain, Price: pos.EntryPrice * (1 + direction*tp2Gain/100), Status: "pending"},
-			{Level: 3, Percent: tp3Pct, GainPct: tp3Gain, Price: pos.EntryPrice * (1 + direction*tp3Gain/100), Status: "pending"},
-			{Level: 4, Percent: tp4Pct, GainPct: tp4Gain, Price: pos.EntryPrice * (1 + direction*tp4Gain/100), Status: "pending"},
+		// If no active TPs, create single TP at finalTPPct
+		if len(activeTPs) == 0 {
+			activeTPs = append(activeTPs, GinieTakeProfitLevel{
+				Level:   1,
+				Percent: 100,
+				GainPct: finalTPPct,
+				Price:   pos.EntryPrice * (1 + direction*finalTPPct/100),
+				Status:  "pending",
+			})
 		}
-		ga.logger.Debug("Multi-TP mode applied (async)",
-			"symbol", pos.Symbol, "allocation", fmt.Sprintf("%.0f%%/%.0f%%/%.0f%%/%.0f%%", tp1Pct, tp2Pct, tp3Pct, tp4Pct))
+
+		pos.TakeProfits = activeTPs
+
+		ga.logger.Info("Multi-TP mode applied (async)",
+			"symbol", pos.Symbol,
+			"mode", pos.Mode,
+			"gain_levels", tpGains,
+			"allocation", tpAllocation,
+			"active_tp_count", len(activeTPs))
 	}
 
 	// Actually place the SL/TP orders on Binance
