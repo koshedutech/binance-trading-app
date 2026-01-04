@@ -33,6 +33,8 @@ export default function GinieDiagnosticsPanel() {
   const [activeTab, setActiveTab] = useState<'overview' | 'signals' | 'issues'>('overview');
   const [expandedSignal, setExpandedSignal] = useState<string | null>(null);
   const [signalFilter, setSignalFilter] = useState<'all' | 'executed' | 'rejected'>('all');
+  const [showKillSwitchDetails, setShowKillSwitchDetails] = useState(false);
+  const [resettingSymbol, setResettingSymbol] = useState<string | null>(null);
 
   const fetchDiagnostics = async () => {
     try {
@@ -59,6 +61,33 @@ export default function GinieDiagnosticsPanel() {
     setLoading(true);
     await Promise.all([fetchDiagnostics(), fetchSignals()]);
     setLoading(false);
+  };
+
+  const resetLLMKillSwitch = async (symbol: string) => {
+    try {
+      setResettingSymbol(symbol);
+      await futuresApi.resetGinieLLMSL(symbol);
+      await fetchDiagnostics(); // Refresh to show updated state
+    } catch (err) {
+      console.error('Failed to reset LLM kill switch:', err);
+    } finally {
+      setResettingSymbol(null);
+    }
+  };
+
+  const resetAllLLMKillSwitches = async () => {
+    const symbols = diagnostics?.llm_status?.disabled_symbols || [];
+    setResettingSymbol('all');
+    try {
+      for (const symbol of symbols) {
+        await futuresApi.resetGinieLLMSL(symbol);
+      }
+      await fetchDiagnostics();
+    } catch (err) {
+      console.error('Failed to reset all LLM kill switches:', err);
+    } finally {
+      setResettingSymbol(null);
+    }
   };
 
   useEffect(() => {
@@ -242,11 +271,51 @@ export default function GinieDiagnosticsPanel() {
                   </span>
                 </div>
                 {(diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
-                  <span className="text-xs text-red-400">
-                    {diagnostics.llm_status?.disabled_symbols?.length ?? 0} symbols disabled
-                  </span>
+                  <button
+                    onClick={() => setShowKillSwitchDetails(!showKillSwitchDetails)}
+                    className="flex items-center space-x-1 text-xs text-red-400 hover:text-red-300 transition-colors"
+                  >
+                    <AlertOctagon className="w-3 h-3" />
+                    <span>{diagnostics.llm_status?.disabled_symbols?.length ?? 0} kill switches active</span>
+                    {showKillSwitchDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
                 )}
               </div>
+
+              {/* Expandable Kill Switch Details */}
+              {showKillSwitchDetails && (diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
+                <div className="mt-3 pt-3 border-t border-gray-600">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-gray-400">Symbols with LLM SL updates disabled:</span>
+                    <button
+                      onClick={resetAllLLMKillSwitches}
+                      disabled={resettingSymbol === 'all'}
+                      className="text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 px-2 py-1 rounded flex items-center space-x-1 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${resettingSymbol === 'all' ? 'animate-spin' : ''}`} />
+                      <span>Reset All</span>
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {diagnostics.llm_status?.disabled_symbols?.map((symbol) => (
+                      <div key={symbol} className="flex items-center justify-between bg-gray-800/50 px-2 py-1 rounded">
+                        <span className="text-sm text-white font-mono">{symbol}</span>
+                        <button
+                          onClick={() => resetLLMKillSwitch(symbol)}
+                          disabled={resettingSymbol === symbol}
+                          className="text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 px-2 py-0.5 rounded flex items-center space-x-1 disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${resettingSymbol === symbol ? 'animate-spin' : ''}`} />
+                          <span>Reset</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
+                    Kill switch activates after 3 consecutive bad LLM SL calls. Manual reset required.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Profit Booking */}
