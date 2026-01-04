@@ -324,7 +324,7 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		SwingSLTPUpdateInterval:    300,  // 5 minutes for swing
 		PositionSLTPUpdateInterval: 900,  // 15 minutes for position
 
-		MinConfidenceToTrade: 50.0, // FIXED: Lowered from 65% to match user expectations
+		MinConfidenceToTrade: 35.0, // LOWERED 2026-01-03: From 50% to 35% - typical confidence is 25-45%
 		MaxDailyTrades:       1000,
 		MaxDailyLoss:         500,
 
@@ -923,6 +923,10 @@ type GinieAutopilot struct {
 
 	// Adaptive AI for dynamic parameter optimization
 	adaptiveAI *AdaptiveAI
+
+	// Anti-panic sell tracking (consecutive warning counter per symbol)
+	earlyWarningCounter map[string]int       // symbol -> consecutive close_now warning count
+	lastWarningTime     map[string]time.Time // symbol -> time of last warning
 }
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
@@ -989,6 +993,10 @@ func NewGinieAutopilot(
 
 	// Initialize AdaptiveAI for dynamic parameter optimization
 	ga.adaptiveAI = NewAdaptiveAI(settingsManager)
+
+	// Initialize anti-panic sell tracking maps
+	ga.earlyWarningCounter = make(map[string]int)
+	ga.lastWarningTime = make(map[string]time.Time)
 
 	// Load safety configs
 	ga.modeSafetyConfigs["ultra_fast"] = settings.SafetyUltraFast
@@ -1296,17 +1304,18 @@ func (ga *GinieAutopilot) SetRiskLevel(level string) error {
 	ga.config.RiskLevel = level
 
 	// Adjust parameters based on risk level
+	// LOWERED 2026-01-03: Previous thresholds (60/50/40) blocked all trades - confidence scores typically 25-45%
 	switch level {
 	case "conservative":
-		ga.config.MinConfidenceToTrade = 60.0 // FIXED: Lowered from 75% to allow more trades
+		ga.config.MinConfidenceToTrade = 45.0 // Was 60.0
 		ga.config.MaxUSDPerPosition = 300
 		ga.config.DefaultLeverage = 3
 	case "moderate":
-		ga.config.MinConfidenceToTrade = 50.0 // FIXED: Lowered from 65% to match user expectations
+		ga.config.MinConfidenceToTrade = 35.0 // Was 50.0 - typical confidence is 30-45%
 		ga.config.MaxUSDPerPosition = 500
 		ga.config.DefaultLeverage = 5
 	case "aggressive":
-		ga.config.MinConfidenceToTrade = 40.0 // Lowered to 40% for more aggressive trading
+		ga.config.MinConfidenceToTrade = 25.0 // Was 40.0 - allows more trades
 		ga.config.MaxUSDPerPosition = 800
 		ga.config.DefaultLeverage = 10
 	}
@@ -3126,7 +3135,7 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 
 	// Minimum position size enforcement: ENFORCE minimum instead of rejecting
 	// This ensures we always use at least the minimum notional size for visible profits
-	minPositionSize := 500.0 // Default minimum notional: $500 = $50 margin at 10x
+	minPositionSize := 100.0 // Default minimum notional: $100 = $20 margin at 5x (lowered for smaller accounts)
 	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinPositionSizeUSD > 0 {
 		minPositionSize = modeConfig.Size.MinPositionSizeUSD
 	}
@@ -3752,21 +3761,16 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		leverage = ga.config.DefaultLeverage
 	}
 
-	// SCALP_REENTRY POSITION SIZING: Use 3x quantity and minimum 10x leverage
-	// This ensures that when we sell 30% at each TP level, the quantity stays above Binance minimums
-	// Example: If regular scalp uses 10 units, scalp_reentry uses 30 units
-	//          TP1 sells 9 units (30% of 30), which is above minimum
+	// SCALP_REENTRY POSITION SIZING: Use minimum 10x leverage for adequate notional size
+	// With $50 margin and 10x leverage = $500 notional position
 	if decision.SelectedMode == GinieModeScalpReentry {
-		// Minimum 10x leverage for scalp_reentry (required for adequate position sizes)
+		// Minimum 10x leverage for scalp_reentry
 		if leverage < 10 {
 			log.Printf("[SCALP-REENTRY] %s: Upgrading leverage from %dx to 10x (minimum for scalp_reentry)", symbol, leverage)
 			leverage = 10
 		}
-		// 3x position size to ensure TP sell quantities stay above minimums
-		originalUSD := positionUSD
-		positionUSD = positionUSD * 3.0
-		log.Printf("[SCALP-REENTRY] %s: Position size 3x multiplier applied: $%.2f -> $%.2f (leverage: %dx)",
-			symbol, originalUSD, positionUSD, leverage)
+		log.Printf("[SCALP-REENTRY] %s: Position margin: $%.2f, leverage: %dx, notional: $%.2f",
+			symbol, positionUSD, leverage, positionUSD*float64(leverage))
 	}
 
 	// Calculate quantity based on adaptive position size
@@ -5183,12 +5187,38 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition, reason string) {
 // placeNextTPOrder places the next TP order on Binance after a TP level is hit
 func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel int) {
 	nextTPIndex := currentTPLevel // currentTPLevel is 1-based, so index for next is same as level
+
+	// CRITICAL: If TakeProfits is empty or has insufficient levels, regenerate them
+	// This can happen for synced positions or after config changes
+	if len(pos.TakeProfits) <= 1 && (pos.Mode == GinieModeSwing || pos.Mode == GinieModePosition) {
+		ga.logger.Warn("TakeProfits array too small for multi-TP mode - regenerating",
+			"symbol", pos.Symbol,
+			"mode", pos.Mode,
+			"current_tp_count", len(pos.TakeProfits))
+		isLong := pos.Side == "LONG"
+		pos.TakeProfits = ga.generateDefaultTPs(pos.Symbol, pos.EntryPrice, pos.Mode, isLong)
+		ga.logger.Info("Regenerated TakeProfits for position",
+			"symbol", pos.Symbol,
+			"new_tp_count", len(pos.TakeProfits))
+	}
+
 	if nextTPIndex >= len(pos.TakeProfits) {
-		ga.logger.Info("Cannot place next TP - index out of bounds",
+		// Log more details to diagnose why there are no more TPs
+		ga.logger.Info("No more TP levels to place - all TPs hit or single-TP mode",
 			"symbol", pos.Symbol,
 			"current_tp_level", currentTPLevel,
 			"next_tp_index", nextTPIndex,
-			"total_tp_levels", len(pos.TakeProfits))
+			"total_tp_levels", len(pos.TakeProfits),
+			"mode", pos.Mode,
+			"remaining_qty", pos.RemainingQty)
+
+		// For modes that should have SL protection after all TPs, ensure SL is placed
+		if pos.RemainingQty > 0 && pos.StopLossAlgoID == 0 && !pos.TrailingActive {
+			ga.logger.Info("Placing SL for remaining quantity after all TPs",
+				"symbol", pos.Symbol,
+				"remaining_qty", pos.RemainingQty)
+			ga.placeSLOrder(pos)
+		}
 		return // No more TP levels
 	}
 
@@ -5246,10 +5276,21 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 	}
 
 	if tpQty <= 0 {
-		ga.logger.Warn("Calculated TP quantity is zero or negative",
+		ga.logger.Warn("Calculated TP quantity is zero or negative - cannot place TP order",
 			"symbol", pos.Symbol,
 			"tp_level", nextTPIndex+1,
-			"remaining_qty", pos.RemainingQty)
+			"remaining_qty", pos.RemainingQty,
+			"original_qty", pos.OriginalQty,
+			"tp_percent", nextTP.Percent,
+			"calculated_tpQty", pos.OriginalQty*(nextTP.Percent/100.0),
+			"mode", pos.Mode)
+
+		// Try to recalculate RemainingQty from Binance position if it seems wrong
+		if pos.RemainingQty <= 0 && pos.OriginalQty > 0 {
+			ga.logger.Warn("RemainingQty is 0 or negative but OriginalQty is positive - position may be stale",
+				"symbol", pos.Symbol,
+				"original_qty", pos.OriginalQty)
+		}
 		return
 	}
 
@@ -5351,20 +5392,31 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 	// CRITICAL FIX: For final TP level, use ClosePosition=true to prevent residual quantity
 	isFinalTPLevel := nextTPIndex >= len(pos.TakeProfits)-1
 
+	// Use LIMIT orders to save on taker fees (maker rebate instead)
+	// For LONG (SELL): limit price slightly below trigger to ensure fill
+	// For SHORT (BUY): limit price slightly above trigger to ensure fill
+	limitPrice := roundedTPPrice * 0.999 // 0.1% below trigger for LONG
+	if closeSide == "BUY" {
+		limitPrice = roundedTPPrice * 1.001 // 0.1% above trigger for SHORT
+	}
+	limitPrice = roundPriceForTP(pos.Symbol, limitPrice, pos.Side) // Round limit price properly
+
 	var tpParams binance.AlgoOrderParams
 	if isFinalTPLevel {
 		// Final TP level - close entire remaining position
-		ga.logger.Info("Placing final TP with ClosePosition=true",
+		ga.logger.Info("Placing final TP LIMIT with ClosePosition=true",
 			"symbol", pos.Symbol,
 			"tp_level", nextTPIndex+1,
-			"trigger_price", roundedTPPrice)
+			"trigger_price", roundedTPPrice,
+			"limit_price", limitPrice)
 		tpParams = binance.AlgoOrderParams{
 			Symbol:        pos.Symbol,
 			Side:          closeSide,
 			PositionSide:  effectivePositionSide,
-			Type:          binance.FuturesOrderTypeTakeProfitMarket,
-			ClosePosition: true, // Close entire remaining position
+			Type:          binance.FuturesOrderTypeTakeProfit, // LIMIT order
+			ClosePosition: true,                               // Close entire remaining position
 			TriggerPrice:  roundedTPPrice,
+			Price:         limitPrice, // Limit execution price
 			WorkingType:   binance.WorkingTypeMarkPrice,
 		}
 	} else {
@@ -5373,9 +5425,10 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 			Symbol:       pos.Symbol,
 			Side:         closeSide,
 			PositionSide: effectivePositionSide,
-			Type:         binance.FuturesOrderTypeTakeProfitMarket,
+			Type:         binance.FuturesOrderTypeTakeProfit, // LIMIT order
 			Quantity:     tpQty,
 			TriggerPrice: roundedTPPrice,
+			Price:        limitPrice, // Limit execution price
 			WorkingType:  binance.WorkingTypeMarkPrice,
 		}
 	}
@@ -6556,6 +6609,47 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 	//   TPAllocation: [25, 25, 25, 25] → 4 TP levels (25% each)
 
 	modeConfig := ga.getModeConfig(mode)
+
+	// SCALP_REENTRY SPECIAL CASE: Use ScalpReentryConfig for TP levels
+	// This mode has its own progressive TP config (0.4%, 0.7%, 1.0% with specific sell %)
+	if mode == GinieModeScalpReentry {
+		scalpReentryConfig := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+		// TP1: tp1_percent% gain, sell tp1_sell_percent%
+		// TP2: tp2_percent% gain, sell tp2_sell_percent%
+		// TP3: tp3_percent% gain, sell tp3_sell_percent%
+		// Remaining 20%: trailing stop (handled separately)
+		tpGains := []float64{scalpReentryConfig.TP1Percent, scalpReentryConfig.TP2Percent, scalpReentryConfig.TP3Percent, 0}
+		tpAllocation := []float64{scalpReentryConfig.TP1SellPercent, scalpReentryConfig.TP2SellPercent, scalpReentryConfig.TP3SellPercent, 0}
+
+		// Determine side string for proper rounding
+		side := "LONG"
+		if !isLong {
+			side = "SHORT"
+		}
+
+		tps := make([]GinieTakeProfitLevel, 0, 3)
+		for i := 0; i < 3; i++ {
+			if tpAllocation[i] <= 0 {
+				continue
+			}
+			var price float64
+			if isLong {
+				price = entryPrice * (1 + tpGains[i]/100)
+			} else {
+				price = entryPrice * (1 - tpGains[i]/100)
+			}
+			tps = append(tps, GinieTakeProfitLevel{
+				Level:   i + 1,
+				Price:   roundPriceForTP(symbol, price, side),
+				Percent: tpAllocation[i],
+				GainPct: tpGains[i],
+				Status:  "pending",
+			})
+		}
+		log.Printf("[GINIE] %s: Generated scalp_reentry TPs from ScalpReentryConfig: TP1=%.4f (%.1f%%), TP2=%.4f (%.1f%%), TP3=%.4f (%.1f%%)",
+			symbol, tps[0].Price, tps[0].GainPct, tps[1].Price, tps[1].GainPct, tps[2].Price, tps[2].GainPct)
+		return tps
+	}
 
 	// Get TP allocation percentages (how much qty to close at each level)
 	var tpAllocation []float64
@@ -7865,19 +7959,8 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 			"sl_price", roundedSL)
 	}
 
-	// CRITICAL FIX: Skip placing TP orders for scalp_reentry mode
-	// Scalp_reentry mode has its own progressive TP logic (0.3%, 0.6%, 1%) with re-entry at breakeven
-	// Placing standard TPs would conflict with this logic and cause premature exits
-	if pos.Mode == GinieModeScalpReentry {
-		log.Printf("[GINIE] %s: Skipping TP order placement for scalp_reentry mode - TPs managed by specialized monitor", pos.Symbol)
-		ga.logger.Info("Skipping TP orders for scalp_reentry mode",
-			"symbol", pos.Symbol,
-			"mode", pos.Mode,
-			"sl_placed", pos.StopLossAlgoID > 0)
-		return
-	}
-
 	// Place Take Profit orders for each level (only TP1 initially, others placed as we hit levels)
+	// NOTE: scalp_reentry now uses exchange-based TP orders (LIMIT) to save on fees
 	// SAFETY NET: If TakeProfits is empty, regenerate them now
 	if len(pos.TakeProfits) == 0 {
 		log.Printf("[GINIE] %s: TakeProfits empty in placeSLTPOrders - regenerating", pos.Symbol)
@@ -7889,7 +7972,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 			"tp_count", len(pos.TakeProfits))
 	}
 
-	// For now, place TP1 as the first target
+	// Place TP1 as the first target (all modes including scalp_reentry use exchange-based LIMIT TPs)
 	if len(pos.TakeProfits) > 0 && pos.TakeProfits[0].Price > 0 {
 		tp1 := pos.TakeProfits[0]
 		tp1Qty := roundQuantity(pos.Symbol, pos.OriginalQty*(tp1.Percent/100.0))
@@ -7975,13 +8058,21 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 				}
 			} else {
 				// Normal case - price hasn't reached TP1, place algo order
+				// Use LIMIT orders to save on taker fees (maker rebate instead)
+				limitPrice := roundedTP1 * 0.999 // 0.1% below trigger for LONG
+				if closeSide == "BUY" {
+					limitPrice = roundedTP1 * 1.001 // 0.1% above trigger for SHORT
+				}
+				limitPrice = roundPriceForTP(pos.Symbol, limitPrice, pos.Side)
+
 				tpParams := binance.AlgoOrderParams{
 					Symbol:       pos.Symbol,
 					Side:         closeSide,
 					PositionSide: effectivePositionSide,
-					Type:         binance.FuturesOrderTypeTakeProfitMarket,
+					Type:         binance.FuturesOrderTypeTakeProfit, // LIMIT order
 					Quantity:     tp1Qty,
 					TriggerPrice: roundedTP1,
+					Price:        limitPrice, // Limit execution price
 					WorkingType:  binance.WorkingTypeMarkPrice,
 				}
 
@@ -8417,19 +8508,8 @@ func (ga *GinieAutopilot) checkSinglePositionProtection(pos *GiniePosition) {
 
 	// Handle partially protected (SL only, no TP)
 	if pos.Protection.State == StateSLVerified && !pos.Protection.TPVerified {
-		// CRITICAL FIX: Skip TP placement for scalp_reentry mode
-		// Scalp_reentry manages its own TPs internally via market orders (0.3%, 0.6%, 1% levels)
-		// Placing standard TP orders would conflict and cause premature full position closes
-		if pos.Mode == GinieModeScalpReentry {
-			// For scalp_reentry, mark TP as "verified" since it's managed internally
-			pos.Protection.TPVerified = true
-			pos.Protection.TPVerifiedAt = time.Now()
-			pos.Protection.SetState(StateFullyProtected)
-			log.Printf("[PROTECTION] %s: Skipping TP placement for scalp_reentry mode - TPs managed by specialized monitor", pos.Symbol)
-			return
-		}
-
 		// TP missing but SL in place - try to add TP without canceling SL
+		// All modes including scalp_reentry use exchange-based LIMIT TP orders
 		if pos.Protection.TimeSinceStateChange() > 10*time.Second {
 			log.Printf("[PROTECTION] %s: TP missing for %v, attempting to add TP", pos.Symbol, pos.Protection.TimeSinceStateChange().Round(time.Second))
 			// Only place TP, don't cancel SL
@@ -8440,16 +8520,10 @@ func (ga *GinieAutopilot) checkSinglePositionProtection(pos *GiniePosition) {
 
 // placeTPOrderOnly places only the TP order without touching SL
 // Used when SL is verified but TP is missing
+// All modes including scalp_reentry use exchange-based LIMIT TP orders
 func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 	if pos == nil {
 		log.Printf("[PROTECTION-TP] placeTPOrderOnly called with nil position")
-		return
-	}
-
-	// CRITICAL SAFETY CHECK: Never place TP orders for scalp_reentry mode
-	// Scalp_reentry manages TPs internally via market orders at progressive levels
-	if pos.Mode == GinieModeScalpReentry {
-		log.Printf("[PROTECTION-TP] %s: Skipping - scalp_reentry mode manages TPs internally", pos.Symbol)
 		return
 	}
 
@@ -8492,18 +8566,28 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 
 	var tpParams binance.AlgoOrderParams
 
+	// Use LIMIT orders to save on taker fees (maker rebate instead)
+	// For LONG (SELL): limit price slightly below trigger to ensure fill
+	// For SHORT (BUY): limit price slightly above trigger to ensure fill
+	limitPrice := roundedTP * 0.999 // 0.1% below trigger for LONG
+	if closeSide == "BUY" {
+		limitPrice = roundedTP * 1.001 // 0.1% above trigger for SHORT
+	}
+	limitPrice = roundPriceForTP(pos.Symbol, limitPrice, pos.Side) // Round limit price properly
+
 	if isFinalTPLevel {
 		// CRITICAL FIX: For final TP level, use ClosePosition=true to close entire remaining position
 		// This prevents residual quantity issues from rounding mismatches
-		log.Printf("[PROTECTION-TP] %s: Final TP level %d - using ClosePosition=true",
+		log.Printf("[PROTECTION-TP] %s: Final TP level %d - using ClosePosition=true (LIMIT order)",
 			pos.Symbol, tpLevel)
 		tpParams = binance.AlgoOrderParams{
 			Symbol:        pos.Symbol,
 			Side:          closeSide,
 			PositionSide:  effectivePositionSide,
-			Type:          binance.FuturesOrderTypeTakeProfitMarket,
-			ClosePosition: true, // Close entire remaining position
+			Type:          binance.FuturesOrderTypeTakeProfit, // LIMIT order
+			ClosePosition: true,                               // Close entire remaining position
 			TriggerPrice:  roundedTP,
+			Price:         limitPrice, // Limit execution price
 			WorkingType:   binance.WorkingTypeMarkPrice,
 		}
 	} else {
@@ -8520,16 +8604,17 @@ func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 				pos.Symbol, pos.RemainingQty, tpQty)
 		}
 
-		log.Printf("[PROTECTION-TP] %s: Placing TP order (level=%d, price=%.8f, qty=%.8f, side=%s)",
-			pos.Symbol, tpLevel, tp.Price, tpQty, closeSide)
+		log.Printf("[PROTECTION-TP] %s: Placing TP LIMIT order (level=%d, trigger=%.8f, limit=%.8f, qty=%.8f, side=%s)",
+			pos.Symbol, tpLevel, roundedTP, limitPrice, tpQty, closeSide)
 
 		tpParams = binance.AlgoOrderParams{
 			Symbol:       pos.Symbol,
 			Side:         closeSide,
 			PositionSide: effectivePositionSide,
-			Type:         binance.FuturesOrderTypeTakeProfitMarket,
+			Type:         binance.FuturesOrderTypeTakeProfit, // LIMIT order
 			Quantity:     tpQty,
 			TriggerPrice: roundedTP,
+			Price:        limitPrice, // Limit execution price
 			WorkingType:  binance.WorkingTypeMarkPrice,
 		}
 	}
@@ -9632,13 +9717,91 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 		switch analysis.Action {
 		case "close_now":
 			if settings.EarlyWarningCloseOnReversal && analysis.TrendReversalDetected {
-				log.Printf("[EARLY-WARNING] %s: CLOSING POSITION - Trend reversal detected (strength: %s)",
-					pos.Symbol, analysis.ReversalStrength)
+				// ====== ANTI-PANIC SELL SAFEGUARDS ======
+				// These safeguards prevent premature position closes that could miss profitable recoveries
+
+				// Safeguard 1: Minimum hold time before close_now is allowed
+				minHoldMins := settings.EarlyWarningCloseMinHoldMins
+				if minHoldMins <= 0 {
+					minHoldMins = 5 // Default 5 minutes
+				}
+				holdDuration := time.Since(pos.EntryTime)
+				if holdDuration < time.Duration(minHoldMins)*time.Minute {
+					log.Printf("[EARLY-WARNING] %s: BLOCKED close_now - position too new (held %v, need %d mins)",
+						pos.Symbol, holdDuration.Round(time.Second), minHoldMins)
+					ga.earlyWarningCounter[pos.Symbol] = 0 // Reset counter
+					continue
+				}
+
+				// Safeguard 2: Higher confidence threshold for close_now
+				closeMinConfidence := settings.EarlyWarningCloseMinConfidence
+				if closeMinConfidence <= 0 {
+					closeMinConfidence = 0.85 // Default 85%
+				}
+				if analysis.Confidence < closeMinConfidence {
+					log.Printf("[EARLY-WARNING] %s: BLOCKED close_now - confidence too low (%.2f < %.2f)",
+						pos.Symbol, analysis.Confidence, closeMinConfidence)
+					ga.earlyWarningCounter[pos.Symbol] = 0 // Reset counter
+					continue
+				}
+
+				// Safeguard 3: Check proximity to SL - only close if price is approaching SL
+				slProximityPct := settings.EarlyWarningCloseSLProximityPct
+				if slProximityPct <= 0 {
+					slProximityPct = 50 // Default 50%
+				}
+				if pos.StopLoss > 0 {
+					var priceToSLDistance, entryToSLDistance float64
+					if pos.Side == "LONG" {
+						priceToSLDistance = currentPrice - pos.StopLoss
+						entryToSLDistance = pos.EntryPrice - pos.StopLoss
+					} else {
+						priceToSLDistance = pos.StopLoss - currentPrice
+						entryToSLDistance = pos.StopLoss - pos.EntryPrice
+					}
+					// Calculate how far price has moved toward SL (as % of total distance)
+					proximityToSL := 0.0
+					if entryToSLDistance > 0 {
+						proximityToSL = 100 * (1 - priceToSLDistance/entryToSLDistance)
+					}
+					if proximityToSL < slProximityPct {
+						log.Printf("[EARLY-WARNING] %s: BLOCKED close_now - price not near SL (%.1f%% toward SL, need %.1f%%)",
+							pos.Symbol, proximityToSL, slProximityPct)
+						ga.earlyWarningCounter[pos.Symbol] = 0 // Reset counter
+						continue
+					}
+				}
+
+				// Safeguard 4: Require consecutive warnings before closing
+				requiredConsecutive := settings.EarlyWarningCloseRequireConsecutive
+				if requiredConsecutive <= 0 {
+					requiredConsecutive = 2 // Default 2 consecutive
+				}
+				ga.earlyWarningCounter[pos.Symbol]++
+				ga.lastWarningTime[pos.Symbol] = time.Now()
+				consecutiveWarnings := ga.earlyWarningCounter[pos.Symbol]
+
+				if consecutiveWarnings < requiredConsecutive {
+					log.Printf("[EARLY-WARNING] %s: WARNING %d/%d - waiting for more confirmations before close",
+						pos.Symbol, consecutiveWarnings, requiredConsecutive)
+					ga.logger.Info("Early warning consecutive count",
+						"symbol", pos.Symbol,
+						"consecutive", consecutiveWarnings,
+						"required", requiredConsecutive,
+						"action", "wait_for_confirmation")
+					continue
+				}
+
+				// All safeguards passed - proceed with close
+				log.Printf("[EARLY-WARNING] %s: CLOSING POSITION - All safeguards passed (held %v, confidence %.2f, %d consecutive warnings)",
+					pos.Symbol, holdDuration.Round(time.Second), analysis.Confidence, consecutiveWarnings)
 				ga.logger.Info("Early warning triggered position close",
 					"symbol", pos.Symbol,
 					"reason", "mtf_trend_reversal",
 					"reversal_strength", analysis.ReversalStrength,
-					"pnl_percent", pnlPercent)
+					"pnl_percent", pnlPercent,
+					"hold_duration", holdDuration.String(),
+					"consecutive_warnings", consecutiveWarnings)
 
 				// Close the position
 				ga.mu.Lock()
@@ -9651,6 +9814,9 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 							"error", err.Error())
 					} else {
 						log.Printf("[EARLY-WARNING] %s: Position closed successfully", pos.Symbol)
+						// Reset counter after successful close
+						delete(ga.earlyWarningCounter, pos.Symbol)
+						delete(ga.lastWarningTime, pos.Symbol)
 					}
 				} else {
 					ga.mu.Unlock()
@@ -9714,10 +9880,19 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 			}
 
 		case "hold":
-			// No action needed, just log
+			// No action needed, just log and reset warning counter
 			ga.logger.Debug("Early warning recommends hold",
 				"symbol", pos.Symbol,
 				"reasoning", analysis.Reasoning)
+			// Reset warning counter - LLM says hold, so no panic
+			if ga.earlyWarningCounter[pos.Symbol] > 0 {
+				log.Printf("[EARLY-WARNING] %s: Resetting warning counter (LLM recommends hold)", pos.Symbol)
+				ga.earlyWarningCounter[pos.Symbol] = 0
+			}
+
+		default:
+			// Unknown action - reset counter
+			ga.earlyWarningCounter[pos.Symbol] = 0
 		}
 	}
 }
@@ -10600,11 +10775,20 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			for i, tpPrice := range tpPrices {
 				tpQty := tpQuantities[i]
 
+				// Use LIMIT orders to save on taker fees (maker rebate instead)
+				// For LONG (SELL): limit price slightly below trigger to ensure fill
+				// For SHORT (BUY): limit price slightly above trigger to ensure fill
+				limitPrice := tpPrice * 0.999 // 0.1% below trigger for LONG
+				if tpSide == "BUY" {
+					limitPrice = tpPrice * 1.001 // 0.1% above trigger for SHORT
+				}
+
 				tpParams := binance.AlgoOrderParams{
 					Symbol:       posSymbol,
 					Side:         tpSide,
-					Type:         "TAKE_PROFIT_MARKET",
+					Type:         "TAKE_PROFIT", // LIMIT order instead of MARKET
 					TriggerPrice: tpPrice,
+					Price:        limitPrice, // Limit execution price
 					Quantity:     tpQty,
 					ReduceOnly:   true,
 				}
@@ -12326,7 +12510,7 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 
 	ga.mu.RLock()
 	for _, pos := range ga.positions {
-		// Calculate position USD cost
+		// Calculate position USD cost (margin = notional / leverage)
 		posUSD := pos.EntryPrice * pos.RemainingQty / float64(pos.Leverage)
 		modeStr := string(pos.Mode)
 		currentUsedUSD[modeStr] += posUSD
@@ -12342,10 +12526,21 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 		return false, fmt.Sprintf("position limit reached: %d/%d", allocationState.CurrentPositions, allocationState.MaxPositions)
 	}
 
-	// Check 2: Capital limit for mode
-	if allocationState.UsedUSD+requestedUSD > allocationState.AllocatedUSD {
-		return false, fmt.Sprintf("mode capital limit reached: %.2f USD allocated, %.2f used, %.2f requested",
-			allocationState.AllocatedUSD, allocationState.UsedUSD, requestedUSD)
+	// Get leverage for mode to calculate margin requirement
+	// With leverage, a $500 notional position only needs $50 margin (10x leverage)
+	leverage := 10 // default
+	modeConfig, err := settings.GetModeConfig(string(mode))
+	if err == nil && modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
+		leverage = modeConfig.Size.Leverage
+	}
+
+	// Calculate margin required (notional / leverage)
+	marginRequired := requestedUSD / float64(leverage)
+
+	// Check 2: Capital limit for mode (compare margin, not notional)
+	if allocationState.UsedUSD+marginRequired > allocationState.AllocatedUSD {
+		return false, fmt.Sprintf("mode capital limit reached: %.2f USD allocated, %.2f used, %.2f margin required (%.2f notional / %dx leverage)",
+			allocationState.AllocatedUSD, allocationState.UsedUSD, marginRequired, requestedUSD, leverage)
 	}
 
 	// Check 3: Per-position max
@@ -12355,6 +12550,8 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 		maxPerPosition = allocationConfig.MaxUltraFastUSDPerPosition
 	case GinieModeScalp:
 		maxPerPosition = allocationConfig.MaxScalpUSDPerPosition
+	case GinieModeScalpReentry:
+		maxPerPosition = allocationConfig.MaxScalpReentryUSDPerPosition
 	case GinieModeSwing:
 		maxPerPosition = allocationConfig.MaxSwingUSDPerPosition
 	case GinieModePosition:

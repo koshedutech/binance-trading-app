@@ -1367,6 +1367,13 @@ type AutopilotSettings struct {
 	EarlyWarningMinConfidence      float64 `json:"early_warning_min_confidence"`       // Min LLM confidence to act (default: 0.7)
 	EarlyWarningMaxLLMCallsPerPos  int     `json:"early_warning_max_llm_calls_per_pos"` // Max LLM calls per position per cycle (default: 3)
 
+	// ====== ANTI-PANIC SELL SAFEGUARDS ======
+	// Prevents premature position closes by requiring multiple confirmations
+	EarlyWarningCloseMinHoldMins       int     `json:"early_warning_close_min_hold_mins"`       // Min hold time before close_now allowed (default: 5)
+	EarlyWarningCloseMinConfidence     float64 `json:"early_warning_close_min_confidence"`      // Higher confidence for close_now action (default: 0.85)
+	EarlyWarningCloseRequireConsecutive int    `json:"early_warning_close_require_consecutive"` // Require X consecutive warnings (default: 2)
+	EarlyWarningCloseSLProximityPct    float64 `json:"early_warning_close_sl_proximity_pct"`    // Only close if within X% of SL distance (default: 50)
+
 	// ====== BREAKOUT DETECTION CONFIGURATION ======
 	// Leading indicator system for catching rallies early (before they happen)
 	// Detects volume spikes, price acceleration, momentum shifts, and order book imbalances
@@ -1762,6 +1769,12 @@ func DefaultSettings() *AutopilotSettings {
 		EarlyWarningTightenSLOnWarning: true,  // Tighten SL on warning signals
 		EarlyWarningMinConfidence:      0.7,   // Require 70% LLM confidence to act
 		EarlyWarningMaxLLMCallsPerPos:  3,     // Max 3 LLM calls per position per cycle
+
+		// Anti-panic sell safeguards (prevents premature exits)
+		EarlyWarningCloseMinHoldMins:        5,    // Wait 5 minutes before allowing close_now
+		EarlyWarningCloseMinConfidence:      0.85, // Require 85% confidence for close_now
+		EarlyWarningCloseRequireConsecutive: 2,    // Require 2 consecutive warnings before close
+		EarlyWarningCloseSLProximityPct:     50,   // Only close if price is within 50% of SL distance
 
 		// Breakout Detection defaults (Leading indicator system for catching rallies)
 		BreakoutDetectionEnabled: true, // Enable breakout detection by default
