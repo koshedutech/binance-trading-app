@@ -344,29 +344,42 @@ type PositionModeResponse struct {
 
 // ==================== SYMBOL INFO TYPES ====================
 
+// FuturesSymbolFilter represents a filter from the symbol's filters array
+type FuturesSymbolFilter struct {
+	FilterType string  `json:"filterType"`
+	MinPrice   string  `json:"minPrice,omitempty"`
+	MaxPrice   string  `json:"maxPrice,omitempty"`
+	TickSize   string  `json:"tickSize,omitempty"`
+	MinQty     string  `json:"minQty,omitempty"`
+	MaxQty     string  `json:"maxQty,omitempty"`
+	StepSize   string  `json:"stepSize,omitempty"`
+	Notional   string  `json:"notional,omitempty"`
+}
+
 // FuturesSymbolInfo represents futures symbol information
 type FuturesSymbolInfo struct {
-	Symbol                string   `json:"symbol"`
-	Pair                  string   `json:"pair"`
-	ContractType          string   `json:"contractType"`
-	DeliveryDate          int64    `json:"deliveryDate"`
-	OnboardDate           int64    `json:"onboardDate"`
-	Status                string   `json:"status"`
-	MaintMarginPercent    float64  `json:"maintMarginPercent,string"`
-	RequiredMarginPercent float64  `json:"requiredMarginPercent,string"`
-	BaseAsset             string   `json:"baseAsset"`
-	QuoteAsset            string   `json:"quoteAsset"`
-	MarginAsset           string   `json:"marginAsset"`
-	PricePrecision        int      `json:"pricePrecision"`
-	QuantityPrecision     int      `json:"quantityPrecision"`
-	BaseAssetPrecision    int      `json:"baseAssetPrecision"`
-	QuotePrecision        int      `json:"quotePrecision"`
-	UnderlyingType        string   `json:"underlyingType"`
-	UnderlyingSubType     []string `json:"underlyingSubType"`
-	SettlePlan            int      `json:"settlePlan"`
-	TriggerProtect        float64  `json:"triggerProtect,string"`
-	OrderTypes            []string `json:"orderTypes"`
-	TimeInForce           []string `json:"timeInForce"`
+	Symbol                string                `json:"symbol"`
+	Pair                  string                `json:"pair"`
+	ContractType          string                `json:"contractType"`
+	DeliveryDate          int64                 `json:"deliveryDate"`
+	OnboardDate           int64                 `json:"onboardDate"`
+	Status                string                `json:"status"`
+	MaintMarginPercent    float64               `json:"maintMarginPercent,string"`
+	RequiredMarginPercent float64               `json:"requiredMarginPercent,string"`
+	BaseAsset             string                `json:"baseAsset"`
+	QuoteAsset            string                `json:"quoteAsset"`
+	MarginAsset           string                `json:"marginAsset"`
+	PricePrecision        int                   `json:"pricePrecision"`
+	QuantityPrecision     int                   `json:"quantityPrecision"`
+	BaseAssetPrecision    int                   `json:"baseAssetPrecision"`
+	QuotePrecision        int                   `json:"quotePrecision"`
+	UnderlyingType        string                `json:"underlyingType"`
+	UnderlyingSubType     []string              `json:"underlyingSubType"`
+	SettlePlan            int                   `json:"settlePlan"`
+	TriggerProtect        float64               `json:"triggerProtect,string"`
+	OrderTypes            []string              `json:"orderTypes"`
+	TimeInForce           []string              `json:"timeInForce"`
+	Filters               []FuturesSymbolFilter `json:"filters"`
 }
 
 // FuturesExchangeInfo represents futures exchange information

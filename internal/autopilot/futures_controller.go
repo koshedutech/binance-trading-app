@@ -11,7 +11,9 @@ import (
 	"binance-trading-bot/internal/logging"
 	"context"
 	"fmt"
+	"log"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,10 +145,70 @@ var (
 	symbolPrecisionCache   = make(map[string]SymbolPrecision)
 	precisionCacheMu       sync.RWMutex
 	precisionCacheLoaded   bool
+	precisionFuturesClient binance.FuturesClient // For dynamic precision fetching
 )
+
+// SetPrecisionClient sets the futures client used for dynamic precision fetching
+// Call this after client swaps to ensure precision lookups use the correct client
+func SetPrecisionClient(client binance.FuturesClient) {
+	precisionCacheMu.Lock()
+	defer precisionCacheMu.Unlock()
+	precisionFuturesClient = client
+}
+
+// calculatePrecisionFromTickSize calculates the number of decimal places from a tick/step size string
+// e.g., "0.0001000" -> 4, "0.01" -> 2, "1" -> 0, "10" -> 0
+// This is MORE ACCURATE than using pricePrecision field which can be wrong
+func calculatePrecisionFromTickSize(tickSize string) int {
+	if tickSize == "" {
+		return 0
+	}
+
+	// Parse the tick size as float
+	val, err := strconv.ParseFloat(tickSize, 64)
+	if err != nil || val <= 0 {
+		return 0
+	}
+
+	// If val >= 1, no decimal places needed
+	if val >= 1 {
+		return 0
+	}
+
+	// Calculate precision: -log10(tickSize) gives us the number of decimals
+	precision := int(math.Round(-math.Log10(val)))
+	if precision < 0 {
+		precision = 0
+	}
+	return precision
+}
+
+// extractPrecisionFromFilters extracts price and quantity precision from symbol filters
+// Uses PRICE_FILTER.tickSize for price precision and LOT_SIZE.stepSize for quantity precision
+// This is the CORRECT way to determine precision - NOT using pricePrecision field!
+func extractPrecisionFromFilters(filters []binance.FuturesSymbolFilter, fallbackPricePrecision, fallbackQuantityPrecision int) (int, int) {
+	pricePrecision := fallbackPricePrecision
+	quantityPrecision := fallbackQuantityPrecision
+
+	for _, f := range filters {
+		switch f.FilterType {
+		case "PRICE_FILTER":
+			if f.TickSize != "" {
+				pricePrecision = calculatePrecisionFromTickSize(f.TickSize)
+			}
+		case "LOT_SIZE":
+			if f.StepSize != "" {
+				quantityPrecision = calculatePrecisionFromTickSize(f.StepSize)
+			}
+		}
+	}
+
+	return pricePrecision, quantityPrecision
+}
 
 // LoadSymbolPrecisions fetches precision data from Binance exchangeInfo API
 // This should be called once during initialization
+// IMPORTANT: Uses tickSize from PRICE_FILTER, NOT pricePrecision field!
 func LoadSymbolPrecisions(client binance.FuturesClient) error {
 	info, err := client.GetFuturesExchangeInfo()
 	if err != nil {
@@ -156,50 +218,148 @@ func LoadSymbolPrecisions(client binance.FuturesClient) error {
 	precisionCacheMu.Lock()
 	defer precisionCacheMu.Unlock()
 
+	// Store client for future dynamic lookups
+	precisionFuturesClient = client
+
 	count := 0
 	for _, sym := range info.Symbols {
 		if sym.Status == "TRADING" {
+			// Extract precision from filters (tickSize and stepSize) - this is the CORRECT way
+			pricePrecision, quantityPrecision := extractPrecisionFromFilters(
+				sym.Filters,
+				sym.PricePrecision,    // fallback
+				sym.QuantityPrecision, // fallback
+			)
+
 			symbolPrecisionCache[sym.Symbol] = SymbolPrecision{
-				Price:    sym.PricePrecision,
-				Quantity: sym.QuantityPrecision,
+				Price:    pricePrecision,
+				Quantity: quantityPrecision,
 			}
 			count++
 		}
 	}
 	precisionCacheLoaded = true
+	log.Printf("[PRECISION] Loaded %d symbols from Binance API (using tickSize from PRICE_FILTER)", count)
 	return nil
 }
 
-// getPricePrecision gets price precision from cache or falls back to hardcoded map
-func getPricePrecision(symbol string) int {
+// EnsureSymbolPrecision ensures the symbol precision is in cache
+// If not cached, fetches from Binance API dynamically
+// Returns (pricePrecision, quantityPrecision, error)
+func EnsureSymbolPrecision(symbol string) (int, int, error) {
+	// Check cache first
 	precisionCacheMu.RLock()
-	defer precisionCacheMu.RUnlock()
-
 	if prec, ok := symbolPrecisionCache[symbol]; ok {
+		precisionCacheMu.RUnlock()
+		return prec.Price, prec.Quantity, nil
+	}
+	client := precisionFuturesClient
+	precisionCacheMu.RUnlock()
+
+	// Not in cache - fetch from API if we have a client
+	if client == nil {
+		// No client available, check hardcoded fallback
+		if prec, ok := pricePrecision[symbol]; ok {
+			qPrec := 0
+			if qp, ok := quantityPrecision[symbol]; ok {
+				qPrec = qp
+			}
+			return prec, qPrec, nil
+		}
+		return 6, 0, fmt.Errorf("symbol %s not in cache and no client available for dynamic lookup", symbol)
+	}
+
+	// Fetch exchange info for this symbol
+	log.Printf("[PRECISION] %s: Not in cache, fetching from Binance API...", symbol)
+	info, err := client.GetFuturesExchangeInfo()
+	if err != nil {
+		log.Printf("[PRECISION] %s: Failed to fetch exchange info: %v", symbol, err)
+		return 6, 0, fmt.Errorf("failed to fetch precision for %s: %w", symbol, err)
+	}
+
+	// Find the symbol in the response and cache ALL symbols
+	// IMPORTANT: Use tickSize from PRICE_FILTER, NOT pricePrecision field!
+	precisionCacheMu.Lock()
+	defer precisionCacheMu.Unlock()
+
+	var foundPrec *SymbolPrecision
+	for _, sym := range info.Symbols {
+		if sym.Status == "TRADING" {
+			// Extract precision from filters - this is the CORRECT way
+			pricePrecision, quantityPrecision := extractPrecisionFromFilters(
+				sym.Filters,
+				sym.PricePrecision,    // fallback
+				sym.QuantityPrecision, // fallback
+			)
+
+			prec := SymbolPrecision{
+				Price:    pricePrecision,
+				Quantity: quantityPrecision,
+			}
+			symbolPrecisionCache[sym.Symbol] = prec
+			if sym.Symbol == symbol {
+				foundPrec = &prec
+			}
+		}
+	}
+
+	if foundPrec != nil {
+		log.Printf("[PRECISION] %s: Loaded from API via tickSize (price=%d decimals, qty=%d decimals)",
+			symbol, foundPrec.Price, foundPrec.Quantity)
+		return foundPrec.Price, foundPrec.Quantity, nil
+	}
+
+	log.Printf("[PRECISION] %s: Not found in Binance exchange info", symbol)
+	return 6, 0, fmt.Errorf("symbol %s not found in Binance exchange info", symbol)
+}
+
+// getPricePrecision gets price precision from cache, or dynamically fetches from Binance
+func getPricePrecision(symbol string) int {
+	// Try cache first (fast path)
+	precisionCacheMu.RLock()
+	if prec, ok := symbolPrecisionCache[symbol]; ok {
+		precisionCacheMu.RUnlock()
 		return prec.Price
 	}
-	// Fallback to hardcoded map
+	precisionCacheMu.RUnlock()
+
+	// Not in cache - try dynamic lookup
+	pPrec, _, err := EnsureSymbolPrecision(symbol)
+	if err == nil {
+		return pPrec
+	}
+
+	// Final fallback to hardcoded map
 	if prec, ok := pricePrecision[symbol]; ok {
 		return prec
 	}
-	// CRITICAL FIX: Default to 6 decimals (most common for low-priced coins)
-	// Previous value of 2 was truncating prices like 0.0106 to 0.01 causing order rejections
-	// 6 decimals handles coins down to $0.000001 tick size
-	return 6
+
+	// CRITICAL: Log when using default - this indicates a problem
+	log.Printf("[PRECISION-WARNING] %s: Using default precision 4 - not in cache or API", symbol)
+	return 4 // Default to 4 decimals (safer than 6 for most coins)
 }
 
-// getQuantityPrecision gets quantity precision from cache or falls back to hardcoded map
+// getQuantityPrecision gets quantity precision from cache, or dynamically fetches from Binance
 func getQuantityPrecision(symbol string) int {
+	// Try cache first (fast path)
 	precisionCacheMu.RLock()
-	defer precisionCacheMu.RUnlock()
-
 	if prec, ok := symbolPrecisionCache[symbol]; ok {
+		precisionCacheMu.RUnlock()
 		return prec.Quantity
 	}
-	// Fallback to hardcoded map
+	precisionCacheMu.RUnlock()
+
+	// Not in cache - try dynamic lookup
+	_, qPrec, err := EnsureSymbolPrecision(symbol)
+	if err == nil {
+		return qPrec
+	}
+
+	// Final fallback to hardcoded map
 	if prec, ok := quantityPrecision[symbol]; ok {
 		return prec
 	}
+
 	return 0 // Default fallback (whole numbers)
 }
 
@@ -238,6 +398,75 @@ func roundPriceForSL(symbol string, price float64, side string) float64 {
 	}
 	// For SHORT: round DOWN so SL triggers earlier (protects capital)
 	return math.Floor(price*multiplier) / multiplier
+}
+
+// ==================== ORDER VALIDATION ====================
+// Pre-order validation to ensure orders will be accepted by Binance
+
+// OrderValidationResult holds the result of order parameter validation
+type OrderValidationResult struct {
+	Valid        bool
+	OrigPrice    float64
+	RoundedPrice float64
+	OrigQty      float64
+	RoundedQty   float64
+	Errors       []string
+	Warnings     []string
+}
+
+// ValidateAndRoundOrderParams validates and rounds order parameters
+// This should be called BEFORE placing any order to ensure acceptance by Binance
+func ValidateAndRoundOrderParams(symbol string, price, quantity float64, side string) OrderValidationResult {
+	result := OrderValidationResult{
+		Valid:     true,
+		OrigPrice: price,
+		OrigQty:   quantity,
+		Errors:    []string{},
+		Warnings:  []string{},
+	}
+
+	// Ensure precision is loaded for this symbol (dynamic fetch if needed)
+	pricePrecision, qtyPrecision, err := EnsureSymbolPrecision(symbol)
+	if err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Could not fetch precision for %s: %v", symbol, err))
+		// Use safe defaults
+		pricePrecision = 4
+		qtyPrecision = 0
+	}
+
+	// Round price to tick size
+	priceMultiplier := math.Pow(10, float64(pricePrecision))
+	result.RoundedPrice = math.Round(price*priceMultiplier) / priceMultiplier
+
+	// Round quantity to step size (always floor to avoid over-ordering)
+	qtyMultiplier := math.Pow(10, float64(qtyPrecision))
+	result.RoundedQty = math.Floor(quantity*qtyMultiplier) / qtyMultiplier
+
+	// Check for significant price change after rounding
+	priceChangePct := math.Abs(result.RoundedPrice-price) / price * 100
+	if priceChangePct > 0.1 {
+		result.Warnings = append(result.Warnings,
+			fmt.Sprintf("Price changed %.4f%% after rounding (%.8f -> %.8f)", priceChangePct, price, result.RoundedPrice))
+	}
+
+	// Validate rounded values
+	if result.RoundedPrice <= 0 {
+		result.Valid = false
+		result.Errors = append(result.Errors, fmt.Sprintf("Invalid price after rounding: %.8f -> %.8f", price, result.RoundedPrice))
+	}
+
+	if result.RoundedQty <= 0 {
+		result.Valid = false
+		result.Errors = append(result.Errors, fmt.Sprintf("Invalid quantity after rounding: %.8f -> %.8f", quantity, result.RoundedQty))
+	}
+
+	// Log for debugging
+	if len(result.Warnings) > 0 || !result.Valid {
+		log.Printf("[ORDER-VALIDATION] %s: price=%.8f->%.8f (prec=%d), qty=%.8f->%.8f (prec=%d), side=%s, valid=%v, warnings=%v, errors=%v",
+			symbol, price, result.RoundedPrice, pricePrecision, quantity, result.RoundedQty, qtyPrecision, side, result.Valid, result.Warnings, result.Errors)
+	}
+
+	return result
 }
 
 // formatSignalBreakdown formats signal breakdown map into a readable string
@@ -626,16 +855,17 @@ func (fc *FuturesController) LoadSavedSettings() {
 			ginieConfig.DefaultLeverage = 10
 		}
 		// Set MinConfidenceToTrade based on RiskLevel
+		// LOWERED 2026-01-03: Previous thresholds blocked all trades - confidence typically 25-45%
 		switch ginieConfig.RiskLevel {
 		case "conservative":
-			ginieConfig.MinConfidenceToTrade = 60.0
+			ginieConfig.MinConfidenceToTrade = 45.0 // Was 60.0
 		case "moderate":
-			ginieConfig.MinConfidenceToTrade = 50.0
+			ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
 		case "aggressive":
-			ginieConfig.MinConfidenceToTrade = 40.0
+			ginieConfig.MinConfidenceToTrade = 25.0 // Was 40.0
 		default:
 			if ginieConfig.MinConfidenceToTrade == 0 {
-				ginieConfig.MinConfidenceToTrade = 50.0
+				ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
 			}
 		}
 		if ginieConfig.MaxPositions == 0 && settings.GinieMaxPositions > 0 {
@@ -2715,21 +2945,31 @@ func (fc *FuturesController) placeTPSLOrders(symbol string, decision *FuturesAut
 		tpSide = "BUY"
 	}
 
-	fc.logger.Info("Placing TP/SL orders",
+	// Use LIMIT orders to save on taker fees (maker rebate instead)
+	triggerPrice := roundPrice(symbol, decision.TakeProfit)
+	limitPrice := triggerPrice * 0.999 // 0.1% below trigger for LONG (SELL)
+	if tpSide == "BUY" {
+		limitPrice = triggerPrice * 1.001 // 0.1% above trigger for SHORT (BUY)
+	}
+	limitPrice = roundPrice(symbol, limitPrice)
+
+	fc.logger.Info("Placing TP/SL LIMIT orders",
 		"symbol", symbol,
 		"position_mode", fc.config.PositionMode,
 		"original_position_side", positionSide,
 		"effective_position_side", effectivePositionSide,
 		"close_side", tpSide,
-		"tp_price", decision.TakeProfit,
+		"tp_trigger", triggerPrice,
+		"tp_limit", limitPrice,
 		"sl_price", decision.StopLoss)
 
 	tpParams := binance.AlgoOrderParams{
 		Symbol:        symbol,
 		Side:          tpSide,
 		PositionSide:  effectivePositionSide,
-		Type:          binance.FuturesOrderTypeTakeProfitMarket,
-		TriggerPrice:  roundPrice(symbol, decision.TakeProfit),
+		Type:          binance.FuturesOrderTypeTakeProfit, // LIMIT order
+		TriggerPrice:  triggerPrice,
+		Price:         limitPrice, // Limit execution price
 		ClosePosition: true,
 		WorkingType:   binance.WorkingTypeMarkPrice,
 	}
@@ -2869,12 +3109,20 @@ func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *F
 			}
 		} else {
 			// Normal case - place algo order with retry logic
+			// Use LIMIT orders to save on taker fees (maker rebate instead)
+			limitPrice := roundedTP * 0.999 // 0.1% below trigger for LONG (SELL)
+			if closeSide == "BUY" {
+				limitPrice = roundedTP * 1.001 // 0.1% above trigger for SHORT (BUY)
+			}
+			limitPrice = roundPrice(symbol, limitPrice)
+
 			tpParams := binance.AlgoOrderParams{
 				Symbol:        symbol,
 				Side:          closeSide,
 				PositionSide:  effectivePositionSide,
-				Type:          binance.FuturesOrderTypeTakeProfitMarket,
+				Type:          binance.FuturesOrderTypeTakeProfit, // LIMIT order
 				TriggerPrice:  roundedTP,
+				Price:         limitPrice, // Limit execution price
 				ClosePosition: true,
 				WorkingType:   binance.WorkingTypeMarkPrice,
 			}

@@ -494,8 +494,17 @@ func main() {
 
 			if actualDryRun {
 				futuresAutopilotController.SetFuturesClient(futuresMockClient)
+			} else {
+				// LIVE mode: Reload precision cache from REAL Binance API
+				// The initial load used mock client which only has ~30 symbols
+				logger.Info("Reloading symbol precisions from Binance API (switching to LIVE mode)")
+				autopilot.SetPrecisionClient(activeFuturesClient)
+				if err := autopilot.LoadSymbolPrecisions(activeFuturesClient); err != nil {
+					logger.Warn("Failed to reload symbol precisions after client swap", "error", err)
+				} else {
+					logger.Info("Successfully reloaded symbol precisions from Binance API for LIVE trading")
+				}
 			}
-			// For live mode, real client is injected per-request from user API keys
 
 			// CRITICAL FIX: Update cfg to match the actual dry_run mode from saved settings
 			// This ensures GetDryRunMode() returns the correct persisted mode, not the config file default
@@ -508,6 +517,16 @@ func main() {
 			"risk_level", cfg.FuturesAutopilotConfig.RiskLevel,
 			"leverage", cfg.FuturesAutopilotConfig.DefaultLeverage,
 			"dry_run", actualDryRun)
+
+		// Ensure precision cache is loaded from real client for LIVE mode
+		// (even if no swap was needed, the initial load may have used mock client)
+		if !actualDryRun {
+			autopilot.SetPrecisionClient(activeFuturesClient)
+			// Re-load to ensure we have ALL symbols from Binance, not just mock's 30
+			if err := autopilot.LoadSymbolPrecisions(activeFuturesClient); err != nil {
+				logger.Warn("Failed to load symbol precisions from Binance", "error", err)
+			}
+		}
 	}
 
 	// Initialize screener
