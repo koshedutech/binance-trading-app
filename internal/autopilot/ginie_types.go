@@ -99,6 +99,8 @@ type VolatilityProfile struct {
 type TrendHealth struct {
 	Timeframe       string   `json:"timeframe"`        // 1h, 4h, 1d - the timeframe used for analysis
 	ADXValue        float64  `json:"adx_value"`
+	PlusDI          float64  `json:"plus_di"`          // +DI value from ADX calculation
+	MinusDI         float64  `json:"minus_di"`         // -DI value from ADX calculation
 	ADXStrength     string   `json:"adx_strength"` // weak, moderate, strong, very_strong
 	IsTrending      bool     `json:"is_trending"`  // ADX > 25
 	IsRanging       bool     `json:"is_ranging"`   // ADX < 20
@@ -640,25 +642,25 @@ func DefaultGinieConfig() *GinieConfig {
 		// Override
 		AutoOverrideEnabled: true,
 
-		// Counter-Trend Trading (DISABLED - was causing losses by fighting trends)
-		AllowCounterTrend:               false, // DISABLED - counter-trend trades were losing money
-		CounterTrendMinConfidence:       80.0,  // If re-enabled, require very high confidence
-		CounterTrendRequireReversal:     true,  // Require clear reversal pattern
-		CounterTrendRequireRSIExtreme:   true,  // Require RSI at extreme (oversold/overbought)
-		CounterTrendRequireADXWeakening: true,  // Require trend weakening before counter-trend
+		// Counter-Trend Trading - ENABLED 2026-01-03 (was blocking ALL trades)
+		AllowCounterTrend:               true,  // ENABLED - market often reverses
+		CounterTrendMinConfidence:       1.0,   // Was 80.0 - essentially disabled for now
+		CounterTrendRequireReversal:     false, // Was true - too strict
+		CounterTrendRequireRSIExtreme:   false, // Was true - too strict
+		CounterTrendRequireADXWeakening: false, // Was true - too strict
 
 		// Monitoring
 		ScalpMonitorInterval:    900,
 		SwingMonitorInterval:    14400,
 		PositionMonitorInterval: 86400,
 
-		// Extension Filter (Prevent Late Entries)
-		ExtensionFilterEnabled:  true,  // ENABLED by default - prevents entering extended moves
-		MaxEMA20ExtensionPct:    2.5,   // Don't enter if price > 2.5% from EMA20
-		MaxEMA50ExtensionPct:    4.0,   // Don't enter if price > 4% from EMA50
-		MaxConsecutiveCandles:   3,     // Don't enter after 3+ same-direction candles
-		RSIExhaustionLongMax:    65.0,  // Don't enter LONG if RSI > 65 (overbought territory)
-		RSIExhaustionShortMin:   35.0,  // Don't enter SHORT if RSI < 35 (oversold territory)
+		// Extension Filter (Prevent Late Entries) - RELAXED 2026-01-03
+		ExtensionFilterEnabled:  true,  // ENABLED - but relaxed settings below
+		MaxEMA20ExtensionPct:    5.0,   // Was 2.5% - relaxed to allow more entries
+		MaxEMA50ExtensionPct:    8.0,   // Was 4.0% - relaxed to allow more entries
+		MaxConsecutiveCandles:   8,     // Was 3 - relaxed significantly (was blocking many trades)
+		RSIExhaustionLongMax:    75.0,  // Was 65.0 - relaxed for bullish trends
+		RSIExhaustionShortMin:   25.0,  // Was 35.0 - relaxed for bearish trends
 
 		// Candlestick Pattern Detection
 		CandlestickEnabled:       true,  // ENABLED by default - improves entry timing
@@ -1044,30 +1046,36 @@ func DefaultCoinConfluenceConfig(symbol string) *CoinConfluenceConfig {
 		EMAFastPeriod:     20,
 		EMASlowPeriod:     50,
 		EMAEnabled:        true,
-		MinConfluence:     4,
-		ScalpMinConfluence: 3,
+		MinConfluence:     2,  // Lowered from 4 - was blocking ALL trades
+		ScalpMinConfluence: 2, // Lowered from 3
 	}
 
 	// Apply tier-specific defaults
 	switch tier {
 	case TierBlueChip:
-		config.ADXMultiplier = 0.75    // BTC/ETH trend at lower ADX
-		config.VolumeMultiplier = 1.0  // Massive volume, normal threshold
+		config.ADXMultiplier = 0.5     // BTC/ETH trend at much lower ADX (was 0.75)
+		config.VolumeMultiplier = 0.8  // Massive volume, lower threshold
+		config.MinConfluence = 2       // More lenient for liquid coins
+		config.ScalpMinConfluence = 2
 		config.Notes = "Blue chip - trends at lower ADX"
 	case TierMajorAlt:
-		config.ADXMultiplier = 1.0
-		config.VolumeMultiplier = 1.0
-		config.Notes = "Major alt - standard settings"
+		config.ADXMultiplier = 0.7     // Was 1.0
+		config.VolumeMultiplier = 0.9  // Was 1.0
+		config.MinConfluence = 2
+		config.ScalpMinConfluence = 2
+		config.Notes = "Major alt - relaxed settings"
 	case TierMidCap:
-		config.ADXMultiplier = 1.15
-		config.VolumeMultiplier = 1.2
-		config.Notes = "Mid cap - needs stronger confirmation"
+		config.ADXMultiplier = 0.8     // Was 1.15
+		config.VolumeMultiplier = 1.0  // Was 1.2
+		config.MinConfluence = 2       // Was 4
+		config.ScalpMinConfluence = 2  // Was 3
+		config.Notes = "Mid cap - moderate confirmation"
 	case TierSmallCap:
-		config.ADXMultiplier = 1.25
-		config.VolumeMultiplier = 1.5
-		config.MinConfluence = 5       // Require all filters for small caps
-		config.ScalpMinConfluence = 4
-		config.Notes = "Small cap - strictest settings"
+		config.ADXMultiplier = 0.9     // Was 1.25
+		config.VolumeMultiplier = 1.2  // Was 1.5
+		config.MinConfluence = 3       // Was 5 - require 3/5 instead of all
+		config.ScalpMinConfluence = 2  // Was 4
+		config.Notes = "Small cap - reasonable confirmation"
 	}
 
 	return config

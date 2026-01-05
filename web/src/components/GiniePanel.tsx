@@ -13,6 +13,7 @@ import {
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
 import ScalpReentryMonitor from './ScalpReentryMonitor';
+import HedgeModeMonitor from './HedgeModeMonitor';
 
 export default function GiniePanel() {
   const [status, setStatus] = useState<GinieStatus | null>(null);
@@ -143,7 +144,7 @@ export default function GiniePanel() {
   const [savingScalpReentry, setSavingScalpReentry] = useState(false);
   const [togglingScalpReentry, setTogglingScalpReentry] = useState(false);
   const [expandedScalpReentrySection, setExpandedScalpReentrySection] = useState<string | null>(null);
-  const [scalpReentryTab, setScalpReentryTab] = useState<'monitor' | 'config'>('monitor');
+  const [scalpReentryTab, setScalpReentryTab] = useState<'monitor' | 'config' | 'hedge'>('monitor');
 
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -2962,6 +2963,17 @@ export default function GiniePanel() {
                 <Settings className="w-3 h-3 inline mr-1" />
                 Config
               </button>
+              <button
+                onClick={() => setScalpReentryTab('hedge')}
+                className={`px-2 py-1 text-[10px] rounded-t transition-colors ${
+                  scalpReentryTab === 'hedge'
+                    ? 'bg-orange-900/50 text-orange-400 border border-orange-700 border-b-0'
+                    : 'text-gray-400 hover:text-gray-300 hover:bg-gray-700/30'
+                }`}
+              >
+                <TrendingUp className="w-3 h-3 inline mr-1" />
+                Hedge
+              </button>
             </div>
 
             {/* Monitor Tab */}
@@ -3298,6 +3310,11 @@ export default function GiniePanel() {
               </button>
             </div>
             </>
+            )}
+
+            {/* Hedge Tab */}
+            {scalpReentryTab === 'hedge' && (
+              <HedgeModeMonitor autoRefresh={true} refreshInterval={5000} />
             )}
 
             {/* Help Text */}

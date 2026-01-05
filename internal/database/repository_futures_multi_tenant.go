@@ -65,8 +65,10 @@ func (db *DB) UpdateFuturesTradeForUser(ctx context.Context, userID string, trad
 			status = $10,
 			exit_time = $11,
 			notes = $12,
-			updated_at = $13
-		WHERE id = $1 AND user_id = $14`
+			trading_mode = $13,
+			hedge_mode_active = $14,
+			updated_at = $15
+		WHERE id = $1 AND user_id = $16`
 
 	now := time.Now()
 	_, err := db.Pool.Exec(ctx, query,
@@ -82,6 +84,8 @@ func (db *DB) UpdateFuturesTradeForUser(ctx context.Context, userID string, trad
 		trade.Status,
 		trade.ExitTime,
 		trade.Notes,
+		trade.TradingMode,
+		trade.HedgeModeActive,
 		now,
 		userID,
 	)

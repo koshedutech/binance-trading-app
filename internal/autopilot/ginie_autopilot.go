@@ -5707,6 +5707,66 @@ func (ga *GinieAutopilot) checkTrailingStop(pos *GiniePosition, currentPrice flo
 	return pullback >= (pos.TrailingPercent - tolerance)
 }
 
+// persistTradeClosure updates the database record when a position is closed
+// This ensures trade history is persisted with exit price, PnL, and status
+func (ga *GinieAutopilot) persistTradeClosure(pos *GiniePosition, exitPrice float64, totalPnL float64, pnlPercent float64, reason string) {
+	// Skip if no database trade ID or repository not available
+	if pos.FuturesTradeID <= 0 {
+		ga.logger.Debug("Skipping trade closure persistence - no FuturesTradeID",
+			"symbol", pos.Symbol)
+		return
+	}
+
+	if ga.repo == nil {
+		ga.logger.Warn("Skipping trade closure persistence - no repository",
+			"symbol", pos.Symbol,
+			"trade_id", pos.FuturesTradeID)
+		return
+	}
+
+	// Determine if hedge mode was active for this trade
+	hedgeModeActive := false
+	if pos.ScalpReentry != nil && pos.ScalpReentry.HedgeMode != nil {
+		hedgeModeActive = pos.ScalpReentry.HedgeMode.Enabled && pos.ScalpReentry.HedgeMode.HedgeActive
+	}
+
+	// Convert mode to string pointer
+	modeStr := string(pos.Mode)
+
+	now := time.Now()
+	trade := &database.FuturesTrade{
+		ID:                 pos.FuturesTradeID,
+		ExitPrice:          &exitPrice,
+		RealizedPnL:        &totalPnL,
+		RealizedPnLPercent: &pnlPercent,
+		Status:             "CLOSED",
+		ExitTime:           &now,
+		Notes:              &reason,
+		TradingMode:        &modeStr,
+		HedgeModeActive:    hedgeModeActive,
+	}
+
+	ctx := context.Background()
+	err := ga.repo.GetDB().UpdateFuturesTradeForUser(ctx, ga.userID, trade)
+	if err != nil {
+		ga.logger.Error("Failed to persist trade closure to database",
+			"symbol", pos.Symbol,
+			"trade_id", pos.FuturesTradeID,
+			"error", err.Error())
+		return
+	}
+
+	ga.logger.Info("Trade closure persisted to database",
+		"symbol", pos.Symbol,
+		"trade_id", pos.FuturesTradeID,
+		"exit_price", exitPrice,
+		"total_pnl", totalPnL,
+		"pnl_percent", pnlPercent,
+		"mode", modeStr,
+		"hedge_mode_active", hedgeModeActive,
+		"reason", reason)
+}
+
 // closePosition closes the entire remaining position
 func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, currentPrice float64, reason string, tpLevel int) {
 	// CRITICAL: Prevent duplicate close calls using IsClosing flag
@@ -5902,6 +5962,9 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 
 	ga.recordTrade(tradeResult)
 
+	// Persist trade closure to database
+	ga.persistTradeClosure(pos, currentPrice, totalPnL, pnlPercent, reason)
+
 	// Remove position with lock to prevent race conditions
 	ga.mu.Lock()
 	delete(ga.positions, symbol)
@@ -6040,6 +6103,9 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 		Timestamp: time.Now(),
 	}
 	ga.recordTrade(tradeResult)
+
+	// Persist trade closure to database
+	ga.persistTradeClosure(pos, currentPrice, totalPnL, pnlPercent, reason)
 
 	// Remove position
 	ga.mu.Lock()
@@ -9742,6 +9808,11 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 	minConfidence := settings.EarlyWarningMinConfidence
 
 	for _, pos := range positionsToCheck {
+		// Skip scalp_reentry mode - let it manage its own exits via progressive TP
+		if pos.Mode == GinieModeScalpReentry {
+			continue
+		}
+
 		// Skip if position too new
 		if time.Since(pos.EntryTime) < startAfter {
 			continue

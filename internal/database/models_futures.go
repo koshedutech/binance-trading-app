@@ -35,6 +35,7 @@ type FuturesTrade struct {
 	StrategyID          *int64     `json:"strategy_id,omitempty"`
 	StrategyName        *string    `json:"strategy_name,omitempty"`
 	TradingMode         *string    `json:"trading_mode,omitempty"` // ultra_fast, scalp, swing, position
+	HedgeModeActive     bool       `json:"hedge_mode_active,omitempty"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }

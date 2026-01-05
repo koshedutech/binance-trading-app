@@ -1270,27 +1270,27 @@ func GetMTFConfigForMode(mode GinieTradingMode) *ModeMTFConfig {
 		return &ModeMTFConfig{
 			Enabled:             true,
 			PrimaryTimeframe:    "15m",
-			PrimaryWeight:       0.40,
+			PrimaryWeight:       0.50, // Increased - primary TF matters most for scalp
 			SecondaryTimeframe:  "5m",
-			SecondaryWeight:     0.35,
+			SecondaryWeight:     0.30,
 			TertiaryTimeframe:   "1m",
-			TertiaryWeight:      0.25,
-			MinConsensus:        2,
-			MinWeightedStrength: 60.0,
-			TrendStabilityCheck: true,
+			TertiaryWeight:      0.20,
+			MinConsensus:        1,    // Lowered - if primary TF aligns, that's enough for scalp
+			MinWeightedStrength: 40.0, // Lowered - allow entries with moderate strength
+			TrendStabilityCheck: false, // Disabled - too strict, blocks valid trades
 		}
 	case GinieModeSwing:
 		return &ModeMTFConfig{
 			Enabled:             true,
 			PrimaryTimeframe:    "4h",
-			PrimaryWeight:       0.45,
+			PrimaryWeight:       0.50, // Increased - primary TF matters most
 			SecondaryTimeframe:  "1h",
-			SecondaryWeight:     0.35,
+			SecondaryWeight:     0.30,
 			TertiaryTimeframe:   "15m",
 			TertiaryWeight:      0.20,
-			MinConsensus:        2,
-			MinWeightedStrength: 55.0,
-			TrendStabilityCheck: true,
+			MinConsensus:        1,    // Lowered - if primary TF aligns, that's enough
+			MinWeightedStrength: 45.0, // Lowered - allow entries with moderate strength
+			TrendStabilityCheck: false, // Disabled - too strict, blocks valid trades
 		}
 	case GinieModePosition:
 		return &ModeMTFConfig{
@@ -1513,20 +1513,34 @@ func (g *GinieAnalyzer) AnalyzeMTF(symbol string, mode GinieTradingMode) *MTFAna
 	minConsensus := mtfConfig.MinConsensus
 	minStrength := mtfConfig.MinWeightedStrength
 
-	if longScore > shortScore && longConsensus >= minConsensus && longScore >= minStrength {
+	// RELAXED: Use >= instead of > for score comparison, and allow equal scores to pass
+	if longScore >= shortScore && longConsensus >= minConsensus && longScore >= minStrength {
 		result.TrendBias = "LONG"
 		result.WeightedStrength = longScore
 		result.Consensus = longConsensus
 		result.TrendAligned = true
 		result.AlignmentReason = "MTF LONG consensus"
-	} else if shortScore > longScore && shortConsensus >= minConsensus && shortScore >= minStrength {
+	} else if shortScore >= longScore && shortConsensus >= minConsensus && shortScore >= minStrength {
 		result.TrendBias = "SHORT"
 		result.WeightedStrength = shortScore
 		result.Consensus = shortConsensus
 		result.TrendAligned = true
 		result.AlignmentReason = "MTF SHORT consensus"
+	} else if longScore >= minStrength || shortScore >= minStrength {
+		// Either direction has sufficient strength - allow trade (don't block on mixed signals)
+		if longScore >= shortScore {
+			result.TrendBias = "LONG"
+			result.WeightedStrength = longScore
+			result.Consensus = longConsensus
+		} else {
+			result.TrendBias = "SHORT"
+			result.WeightedStrength = shortScore
+			result.Consensus = shortConsensus
+		}
+		result.TrendAligned = true // ALLOW trade when strength is sufficient
+		result.AlignmentReason = "MTF mixed but sufficient strength"
 	} else {
-		// No clear consensus
+		// No clear consensus and insufficient strength
 		if longScore > shortScore {
 			result.TrendBias = "LONG"
 			result.WeightedStrength = longScore
@@ -1541,7 +1555,7 @@ func (g *GinieAnalyzer) AnalyzeMTF(symbol string, mode GinieTradingMode) *MTFAna
 			result.Consensus = 0
 		}
 		result.TrendAligned = false
-		result.AlignmentReason = "Weak consensus or insufficient strength"
+		result.AlignmentReason = "Weak consensus and insufficient strength"
 	}
 
 	// Trend stability check: ensure trend hasn't flipped in last 3 candles

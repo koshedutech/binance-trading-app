@@ -53,7 +53,7 @@ services:
       - DISCORD_ENABLED=false
       - DISCORD_WEBHOOK_URL=
       # Skip frontend build (use pre-built dist)
-      - SKIP_FRONTEND=0
+      - SKIP_FRONTEND=1
       # Logging
       - LOG_LEVEL=INFO
       - LOG_OUTPUT=stdout

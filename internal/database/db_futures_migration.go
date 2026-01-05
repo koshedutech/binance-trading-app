@@ -180,6 +180,9 @@ func (db *DB) RunFuturesMigrations(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_mode_performance_stats_mode ON mode_performance_stats(mode)`,
 		`CREATE INDEX IF NOT EXISTS idx_mode_performance_stats_updated_at ON mode_performance_stats(updated_at DESC)`,
+
+		// Add hedge mode tracking to futures trades
+		`ALTER TABLE futures_trades ADD COLUMN IF NOT EXISTS hedge_mode_active BOOLEAN DEFAULT FALSE`,
 	}
 
 	for i, migration := range migrations {
