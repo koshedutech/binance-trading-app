@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"binance-trading-bot/internal/auth"
+	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/vault"
 
@@ -452,15 +453,82 @@ func (s *Server) handleGetUserAPIStatus(c *gin.Context) {
 		}
 	}
 
-	if hasBinanceKey {
-		// User has Binance keys configured
-		if hasMainnetKey {
-			status["binance_spot"] = map[string]interface{}{"status": "ok", "message": "Mainnet key configured"}
-			status["binance_futures"] = map[string]interface{}{"status": "ok", "message": "Mainnet key configured"}
-		} else if hasTestnetKey {
-			status["binance_spot"] = map[string]interface{}{"status": "ok", "message": "Testnet key configured"}
-			status["binance_futures"] = map[string]interface{}{"status": "ok", "message": "Testnet key configured"}
+	if hasBinanceKey && s.apiKeyService != nil {
+		// User has Binance keys configured - now TEST the actual connection
+		// Get user's active key
+		keys, keyErr := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false) // Try mainnet
+		if keyErr != nil {
+			keys, keyErr = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true) // Try testnet
 		}
+
+		if keyErr != nil || keys == nil || keys.APIKey == "" {
+			// Can't get keys - mark as error
+			status["binance_spot"] = map[string]interface{}{"status": "error", "message": "Failed to retrieve API keys"}
+			status["binance_futures"] = map[string]interface{}{"status": "error", "message": "Failed to retrieve API keys"}
+			hasBinanceKey = false
+		} else {
+			// Create clients and test connection
+			keyType := "Mainnet"
+			if keys.IsTestnet {
+				keyType = "Testnet"
+			}
+
+			// Test Futures API (most important for trading)
+			futuresClient := binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
+			if futuresClient != nil {
+				_, futuresErr := futuresClient.GetFuturesAccountInfo()
+				if futuresErr != nil {
+					errMsg := futuresErr.Error()
+					// Check for common error patterns
+					if strings.Contains(errMsg, "-2015") || strings.Contains(errMsg, "Invalid API-key") || strings.Contains(errMsg, "IP") {
+						status["binance_futures"] = map[string]interface{}{"status": "error", "message": "IP not whitelisted or invalid API key"}
+					} else if strings.Contains(errMsg, "timeout") {
+						status["binance_futures"] = map[string]interface{}{"status": "error", "message": "Connection timeout"}
+					} else {
+						if len(errMsg) > 80 {
+							errMsg = errMsg[:80] + "..."
+						}
+						status["binance_futures"] = map[string]interface{}{"status": "error", "message": errMsg}
+					}
+					hasBinanceKey = false // Mark as unhealthy
+				} else {
+					status["binance_futures"] = map[string]interface{}{"status": "ok", "message": fmt.Sprintf("%s connected", keyType)}
+				}
+			}
+
+			// Test Spot API
+			spotBaseURL := "https://api.binance.com"
+			if keys.IsTestnet {
+				spotBaseURL = "https://testnet.binance.vision"
+			}
+			spotClient := binance.NewClient(keys.APIKey, keys.SecretKey, spotBaseURL)
+			if spotClient != nil {
+				_, spotErr := spotClient.GetAccountInfo()
+				if spotErr != nil {
+					errMsg := spotErr.Error()
+					if strings.Contains(errMsg, "-2015") || strings.Contains(errMsg, "Invalid API-key") || strings.Contains(errMsg, "IP") {
+						status["binance_spot"] = map[string]interface{}{"status": "error", "message": "IP not whitelisted or invalid API key"}
+					} else if strings.Contains(errMsg, "timeout") {
+						status["binance_spot"] = map[string]interface{}{"status": "error", "message": "Connection timeout"}
+					} else {
+						if len(errMsg) > 80 {
+							errMsg = errMsg[:80] + "..."
+						}
+						status["binance_spot"] = map[string]interface{}{"status": "error", "message": errMsg}
+					}
+				} else {
+					status["binance_spot"] = map[string]interface{}{"status": "ok", "message": fmt.Sprintf("%s connected", keyType)}
+				}
+			}
+		}
+	} else if hasBinanceKey {
+		// Keys configured but no apiKeyService - show as configured but untested
+		keyType := "Mainnet"
+		if hasTestnetKey && !hasMainnetKey {
+			keyType = "Testnet"
+		}
+		status["binance_spot"] = map[string]interface{}{"status": "ok", "message": fmt.Sprintf("%s key configured", keyType)}
+		status["binance_futures"] = map[string]interface{}{"status": "ok", "message": fmt.Sprintf("%s key configured", keyType)}
 	}
 
 	// Check user's AI keys

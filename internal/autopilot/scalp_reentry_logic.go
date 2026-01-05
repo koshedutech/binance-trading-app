@@ -1288,18 +1288,23 @@ func (g *GinieAutopilot) checkNegativeTPTrigger(pos *GiniePosition, currentPrice
 		lossPct = ((currentPrice - avgPrice) / avgPrice) * 100
 	}
 
-	// Only process if we're in loss (positive lossPct means losing money)
-	if lossPct <= 0 {
-		return
-	}
-
-	// Check negative TP levels
+	// Check negative TP levels - track regardless of profit/loss for visibility
 	nextNegLevel := hm.NegTPLevelTriggered + 1
 	if nextNegLevel > 3 {
 		return
 	}
-
 	negTPPct, addPct := config.GetNegTPConfig(nextNegLevel)
+
+	// Debug log every 30 seconds (using modulo on second to throttle)
+	if time.Now().Second()%30 == 0 {
+		log.Printf("[NEG-TP-DEBUG] %s: price=%.8f, avg=%.8f, lossPct=%.4f%%, nextLevel=%d, trigger=%.2f%%",
+			pos.Symbol, currentPrice, avgPrice, lossPct, nextNegLevel, negTPPct)
+	}
+
+	// Only process if we're in loss (positive lossPct means losing money)
+	if lossPct <= 0 {
+		return
+	}
 
 	if lossPct >= negTPPct {
 		// Check max position cap before DCA
