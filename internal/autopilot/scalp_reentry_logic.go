@@ -80,6 +80,20 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 		return g.updateDynamicSL(pos, currentPrice, config)
 	}
 
+	// Step 5: Monitor hedge mode (DCA + Hedge)
+	// This handles: negative TP triggers for DCA, combined ROI exit, profit protection
+	if config.HedgeModeEnabled {
+		// Check for loss triggers (negative TPs) - may trigger DCA or hedge
+		g.checkNegativeTPTrigger(pos, currentPrice)
+
+		// Monitor hedge mode conditions (combined exit, trailing SL, profit protection)
+		if reason, shouldClose := g.monitorHedgeMode(pos, currentPrice); shouldClose {
+			log.Printf("[HEDGE-MODE] %s: Closing position - %s", pos.Symbol, reason)
+			go g.closePositionAtMarket(pos, reason)
+			return nil
+		}
+	}
+
 	return nil
 }
 
@@ -243,6 +257,10 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 	sr.CurrentCycle = len(sr.Cycles)
 	sr.LastUpdate = time.Now()
 	go g.SavePositionState()
+
+	// HEDGE MODE: Check if this TP should trigger a hedge position
+	// This is called after exchange TP fill to potentially open opposite side
+	g.checkAndTriggerHedge(pos, tpLevel, sellQty, currentPrice)
 
 	return nil
 }
@@ -447,6 +465,10 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	// CRITICAL: Save position state after TP hit to survive restarts
 	// This ensures scalp_reentry doesn't reset to TP1 on refresh/restart
 	go g.SavePositionState()
+
+	// HEDGE MODE: Check if this TP should trigger a hedge position
+	// This is called after TP sell succeeds to potentially open opposite side
+	g.checkAndTriggerHedge(pos, tpLevel, sellQty, currentPrice)
 
 	return nil
 }
@@ -1156,4 +1178,909 @@ type FuturesOrder struct {
 	Quantity     float64
 	Price        float64
 	StopPrice    float64
+}
+
+// ============ HEDGE MODE FUNCTIONS ============
+
+// initHedgeReentryState initializes hedge mode state for a position
+func (g *GinieAutopilot) initHedgeReentryState(pos *GiniePosition) *HedgeReentryState {
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	sr := pos.ScalpReentry
+
+	state := NewHedgeReentryState(pos.OriginalQty, config)
+	state.OriginalTotalQty = sr.RemainingQuantity
+	state.AddDebugLog(fmt.Sprintf("Hedge mode initialized for %s %s", pos.Symbol, pos.Side))
+
+	return state
+}
+
+// checkAndTriggerHedge checks if hedge should be triggered after a TP hit
+func (g *GinieAutopilot) checkAndTriggerHedge(pos *GiniePosition, tpLevel int, sellQty float64, currentPrice float64) {
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	sr := pos.ScalpReentry
+
+	if !config.HedgeModeEnabled {
+		return
+	}
+
+	// Initialize hedge state if not exists
+	if sr.HedgeMode == nil {
+		sr.HedgeMode = g.initHedgeReentryState(pos)
+	}
+
+	hm := sr.HedgeMode
+	if !hm.Enabled {
+		return
+	}
+
+	// ============ CHAIN CONTROL ============
+	// Block new hedges if this position is from a hedge and chains are disabled
+	if hm.IsFromHedge && !config.AllowHedgeChains {
+		log.Printf("[HEDGE-CHAIN] %s: Blocking hedge - position is from hedge chain (level=%d), chains disabled",
+			pos.Symbol, hm.ChainLevel)
+		hm.AddDebugLog(fmt.Sprintf("CHAIN BLOCKED: No new hedge allowed (from chain level %d)", hm.ChainLevel))
+		sr.AddDebugLog("Chain hedge blocked by configuration")
+		return
+	}
+
+	// Check chain depth limit if chains are allowed
+	if hm.IsFromHedge && config.AllowHedgeChains && hm.ChainLevel >= config.MaxHedgeChainDepth {
+		log.Printf("[HEDGE-CHAIN] %s: Blocking hedge - max chain depth reached (level=%d, max=%d)",
+			pos.Symbol, hm.ChainLevel, config.MaxHedgeChainDepth)
+		hm.AddDebugLog(fmt.Sprintf("CHAIN DEPTH LIMIT: At level %d (max=%d)", hm.ChainLevel, config.MaxHedgeChainDepth))
+		sr.AddDebugLog(fmt.Sprintf("Max hedge chain depth %d reached", config.MaxHedgeChainDepth))
+		return
+	}
+
+	// Check if this is a profit trigger
+	if config.TriggerOnProfitTP {
+		if !hm.HedgeActive {
+			// First trigger - open hedge position
+			go g.openHedgePosition(pos, sellQty, currentPrice, fmt.Sprintf("profit_tp%d", tpLevel))
+		} else {
+			// Hedge already active - add to hedge
+			go g.addToHedge(pos, sellQty, currentPrice, fmt.Sprintf("profit_tp%d", tpLevel))
+		}
+	}
+}
+
+// checkNegativeTPTrigger monitors for loss triggers (negative TPs)
+func (g *GinieAutopilot) checkNegativeTPTrigger(pos *GiniePosition, currentPrice float64) {
+	sr := pos.ScalpReentry
+	if sr == nil {
+		return
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+
+	if !config.HedgeModeEnabled || !config.TriggerOnLossTP {
+		return
+	}
+
+	// Initialize hedge state if not exists
+	if sr.HedgeMode == nil {
+		sr.HedgeMode = g.initHedgeReentryState(pos)
+	}
+
+	hm := sr.HedgeMode
+	if !hm.Enabled {
+		return
+	}
+
+	// Chain control - block hedges from loss triggers if from hedge chain
+	if hm.IsFromHedge && !config.AllowHedgeChains && !hm.HedgeActive {
+		return
+	}
+	if hm.IsFromHedge && config.AllowHedgeChains && hm.ChainLevel >= config.MaxHedgeChainDepth && !hm.HedgeActive {
+		return
+	}
+
+	// Calculate loss percentage from AVERAGE price (breakeven)
+	avgPrice := sr.CurrentBreakeven
+	if avgPrice <= 0 {
+		avgPrice = pos.EntryPrice
+	}
+
+	var lossPct float64
+	if pos.Side == "LONG" {
+		lossPct = ((avgPrice - currentPrice) / avgPrice) * 100
+	} else {
+		lossPct = ((currentPrice - avgPrice) / avgPrice) * 100
+	}
+
+	// Only process if we're in loss (positive lossPct means losing money)
+	if lossPct <= 0 {
+		return
+	}
+
+	// Check negative TP levels
+	nextNegLevel := hm.NegTPLevelTriggered + 1
+	if nextNegLevel > 3 {
+		return
+	}
+
+	negTPPct, addPct := config.GetNegTPConfig(nextNegLevel)
+
+	if lossPct >= negTPPct {
+		// Check max position cap before DCA
+		currentMultiple := hm.OriginalTotalQty / hm.OriginalInitialQty
+		if currentMultiple >= config.MaxPositionMultiple {
+			hm.AddDebugLog(fmt.Sprintf("NEG-TP%d: Max position %.1fx reached, skipping DCA", nextNegLevel, currentMultiple))
+			return
+		}
+
+		dcaQty := hm.OriginalInitialQty * (addPct / 100.0)
+		dcaQty = g.roundQuantity(pos.Symbol, dcaQty)
+
+		sr.AddDebugLog(fmt.Sprintf("NEG-TP%d triggered at %.2f%% loss, adding %.4f qty", nextNegLevel, lossPct, dcaQty))
+
+		if config.DCAOnLoss {
+			go g.executeDCA(pos, dcaQty, currentPrice, nextNegLevel)
+		}
+
+		if !hm.HedgeActive {
+			go g.openHedgePosition(pos, dcaQty, currentPrice, fmt.Sprintf("loss_tp%d", nextNegLevel))
+		} else {
+			go g.addToHedge(pos, dcaQty, currentPrice, fmt.Sprintf("loss_tp%d", nextNegLevel))
+		}
+
+		hm.NegTPLevelTriggered = nextNegLevel
+		hm.LastUpdate = time.Now()
+	}
+}
+
+// executeDCA adds quantity to the losing side (Dollar Cost Averaging)
+func (g *GinieAutopilot) executeDCA(pos *GiniePosition, addQty float64, price float64, level int) error {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil {
+		return fmt.Errorf("hedge mode not initialized")
+	}
+
+	oldAvg := sr.CurrentBreakeven
+	oldQty := sr.RemainingQuantity
+
+	orderSide := GetSideForPositionSide(pos.Side)
+	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(pos.Side))
+
+	orderParams := binance.FuturesOrderParams{
+		Symbol:       pos.Symbol,
+		Side:         orderSide,
+		PositionSide: effectivePositionSide,
+		Type:         binance.FuturesOrderTypeMarket,
+		Quantity:     addQty,
+	}
+
+	log.Printf("[DCA] %s: Placing %s order for %.4f qty at ~%.8f", pos.Symbol, orderSide, addQty, price)
+
+	order, err := g.futuresClient.PlaceFuturesOrder(orderParams)
+	if err != nil {
+		hm.AddDebugLog(fmt.Sprintf("DCA failed at NEG-TP%d: %v", level, err))
+		return fmt.Errorf("DCA order failed: %w", err)
+	}
+
+	sr.RemainingQuantity += addQty
+	hm.OriginalTotalQty += addQty
+	pos.RemainingQty = sr.RemainingQuantity
+
+	newAvg := (oldAvg*oldQty + price*addQty) / (oldQty + addQty)
+	sr.CurrentBreakeven = newAvg
+
+	hm.DCAAdditions = append(hm.DCAAdditions, DCAAddition{
+		TriggerLevel:  -level,
+		AddedQty:      addQty,
+		AddedPrice:    price,
+		AddedAt:       time.Now(),
+		OldAvgPrice:   oldAvg,
+		NewAvgPrice:   newAvg,
+		TotalQtyAfter: sr.RemainingQuantity,
+	})
+
+	hm.AddDebugLog(fmt.Sprintf("DCA: Added %.4f @ %.8f on NEG-TP%d, avg: %.8f -> %.8f, orderId=%d",
+		addQty, price, level, oldAvg, newAvg, order.OrderId))
+	sr.AddDebugLog(fmt.Sprintf("DCA: +%.4f @ %.8f, new BE=%.8f", addQty, price, newAvg))
+
+	go g.updateHedgeWideSL(pos)
+	go g.SavePositionState()
+
+	return nil
+}
+
+// openHedgePosition opens a new hedge position on the opposite side
+func (g *GinieAutopilot) openHedgePosition(pos *GiniePosition, qty float64, price float64, source string) error {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil {
+		return fmt.Errorf("hedge mode not initialized")
+	}
+
+	hedgeSide := GetOppositeSide(pos.Side)
+	orderSide := GetSideForPositionSide(hedgeSide)
+
+	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hedgeSide))
+	roundedQty := g.roundQuantity(pos.Symbol, qty)
+
+	orderParams := binance.FuturesOrderParams{
+		Symbol:       pos.Symbol,
+		Side:         orderSide,
+		PositionSide: effectivePositionSide,
+		Type:         binance.FuturesOrderTypeMarket,
+		Quantity:     roundedQty,
+	}
+
+	log.Printf("[HEDGE] %s: Opening %s hedge position: %s %.4f @ ~%.8f from %s",
+		pos.Symbol, hedgeSide, orderSide, roundedQty, price, source)
+
+	order, err := g.futuresClient.PlaceFuturesOrder(orderParams)
+	if err != nil {
+		hm.AddDebugLog(fmt.Sprintf("Hedge open failed from %s: %v", source, err))
+		return fmt.Errorf("hedge order failed: %w", err)
+	}
+
+	hm.HedgeActive = true
+	hm.HedgeSide = hedgeSide
+	hm.HedgeEntryPrice = price
+	hm.HedgeOriginalQty = roundedQty
+	hm.HedgeRemainingQty = roundedQty
+	hm.HedgeCurrentBE = price
+
+	if len(source) > 0 && source[0] == 'p' {
+		hm.TriggerType = "profit"
+	} else {
+		hm.TriggerType = "loss"
+	}
+
+	hm.HedgeAdditions = append(hm.HedgeAdditions, HedgeAddition{
+		SourceEvent: source,
+		AddedQty:    roundedQty,
+		AddedPrice:  price,
+		AddedAt:     time.Now(),
+		OldBE:       0,
+		NewBE:       price,
+	})
+
+	hm.AddDebugLog(fmt.Sprintf("Hedge OPENED: %s %.4f @ %.8f from %s, orderId=%d",
+		hedgeSide, roundedQty, price, source, order.OrderId))
+	sr.AddDebugLog(fmt.Sprintf("HEDGE: Opened %s hedge %.4f @ %.8f", hedgeSide, roundedQty, price))
+
+	go g.SavePositionState()
+
+	return nil
+}
+
+// addToHedge adds quantity to an existing hedge position
+func (g *GinieAutopilot) addToHedge(pos *GiniePosition, addQty float64, price float64, source string) error {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.HedgeActive {
+		return fmt.Errorf("hedge not active")
+	}
+
+	oldBE := hm.HedgeCurrentBE
+	oldQty := hm.HedgeRemainingQty
+
+	orderSide := GetSideForPositionSide(hm.HedgeSide)
+	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hm.HedgeSide))
+	roundedQty := g.roundQuantity(pos.Symbol, addQty)
+
+	orderParams := binance.FuturesOrderParams{
+		Symbol:       pos.Symbol,
+		Side:         orderSide,
+		PositionSide: effectivePositionSide,
+		Type:         binance.FuturesOrderTypeMarket,
+		Quantity:     roundedQty,
+	}
+
+	log.Printf("[HEDGE] %s: Adding to %s hedge: %s %.4f @ ~%.8f from %s",
+		pos.Symbol, hm.HedgeSide, orderSide, roundedQty, price, source)
+
+	order, err := g.futuresClient.PlaceFuturesOrder(orderParams)
+	if err != nil {
+		hm.AddDebugLog(fmt.Sprintf("Hedge add failed from %s: %v", source, err))
+		return fmt.Errorf("hedge add order failed: %w", err)
+	}
+
+	hm.HedgeRemainingQty += roundedQty
+
+	if oldQty > 0 {
+		hm.HedgeCurrentBE = (oldBE*oldQty + price*roundedQty) / (oldQty + roundedQty)
+	} else {
+		hm.HedgeCurrentBE = price
+	}
+
+	hm.HedgeAdditions = append(hm.HedgeAdditions, HedgeAddition{
+		SourceEvent: source,
+		AddedQty:    roundedQty,
+		AddedPrice:  price,
+		AddedAt:     time.Now(),
+		OldBE:       oldBE,
+		NewBE:       hm.HedgeCurrentBE,
+	})
+
+	hm.AddDebugLog(fmt.Sprintf("Hedge ADDED: %.4f @ %.8f from %s, BE: %.8f -> %.8f, orderId=%d",
+		roundedQty, price, source, oldBE, hm.HedgeCurrentBE, order.OrderId))
+	sr.AddDebugLog(fmt.Sprintf("HEDGE: +%.4f @ %.8f, BE: %.8f", roundedQty, price, hm.HedgeCurrentBE))
+
+	go g.SavePositionState()
+
+	return nil
+}
+
+// calculateCombinedROI calculates the combined ROI across original and hedge positions
+func (g *GinieAutopilot) calculateCombinedROI(pos *GiniePosition, currentPrice float64) float64 {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.HedgeActive {
+		return 0
+	}
+
+	originalRealized := sr.AccumulatedProfit
+	var originalUnrealized float64
+	if pos.Side == "LONG" {
+		originalUnrealized = (currentPrice - sr.CurrentBreakeven) * sr.RemainingQuantity
+	} else {
+		originalUnrealized = (sr.CurrentBreakeven - currentPrice) * sr.RemainingQuantity
+	}
+
+	hedgeRealized := hm.HedgeAccumProfit
+	var hedgeUnrealized float64
+	if hm.HedgeSide == "LONG" {
+		hedgeUnrealized = (currentPrice - hm.HedgeCurrentBE) * hm.HedgeRemainingQty
+	} else {
+		hedgeUnrealized = (hm.HedgeCurrentBE - currentPrice) * hm.HedgeRemainingQty
+	}
+
+	totalValue := (pos.EntryPrice * pos.OriginalQty) + (hm.HedgeEntryPrice * hm.HedgeOriginalQty)
+
+	combinedPnL := originalRealized + originalUnrealized + hedgeRealized + hedgeUnrealized
+
+	if totalValue > 0 {
+		hm.CombinedROIPercent = (combinedPnL / totalValue) * 100
+		hm.CombinedRealizedPnL = originalRealized + hedgeRealized
+		hm.CombinedUnrealizedPnL = originalUnrealized + hedgeUnrealized
+	}
+
+	return hm.CombinedROIPercent
+}
+
+// checkCombinedExit checks if combined ROI exit threshold is reached
+func (g *GinieAutopilot) checkCombinedExit(pos *GiniePosition, currentPrice float64) (bool, string) {
+	sr := pos.ScalpReentry
+	if sr == nil || sr.HedgeMode == nil || !sr.HedgeMode.HedgeActive {
+		return false, ""
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	combinedROI := g.calculateCombinedROI(pos, currentPrice)
+
+	if combinedROI >= config.CombinedROIExitPct {
+		reason := fmt.Sprintf("combined_roi_%.2f_percent", combinedROI)
+		sr.AddDebugLog(fmt.Sprintf("COMBINED EXIT: ROI %.2f%% >= %.2f%% threshold",
+			combinedROI, config.CombinedROIExitPct))
+		return true, reason
+	}
+
+	return false, ""
+}
+
+// checkRallyExit checks for ADX + DI based rally exit condition
+func (g *GinieAutopilot) checkRallyExit(pos *GiniePosition, currentPrice float64) (bool, string) {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.HedgeActive {
+		return false, ""
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	if !config.RallyExitEnabled {
+		return false, ""
+	}
+
+	if time.Since(hm.LastADXCheck) < 30*time.Second {
+		return false, ""
+	}
+	hm.LastADXCheck = time.Now()
+
+	klines, err := g.futuresClient.GetFuturesKlines(pos.Symbol, "5m", 50)
+	if err != nil || len(klines) < 30 {
+		return false, ""
+	}
+
+	adx, plusDI, minusDI := g.analyzer.calculateADX(klines, 14)
+
+	if adx < config.RallyADXThreshold {
+		hm.SustainedMoveDir = ""
+		return false, ""
+	}
+
+	direction := "down"
+	if plusDI > minusDI {
+		direction = "up"
+	}
+
+	if hm.SustainedMoveDir != direction {
+		hm.SustainedMoveDir = direction
+		hm.SustainedMoveStart = time.Now()
+		hm.SustainedMovePrice = currentPrice
+		return false, ""
+	}
+
+	var movePct float64
+	if direction == "up" {
+		movePct = ((currentPrice - hm.SustainedMovePrice) / hm.SustainedMovePrice) * 100
+	} else {
+		movePct = ((hm.SustainedMovePrice - currentPrice) / hm.SustainedMovePrice) * 100
+	}
+
+	if movePct >= config.RallySustainedMovePct {
+		reason := fmt.Sprintf("rally_%s_%.2f_pct_adx_%.1f", direction, movePct, adx)
+		hm.AddDebugLog(fmt.Sprintf("RALLY EXIT: %s move %.2f%% with ADX %.1f", direction, movePct, adx))
+		return true, reason
+	}
+
+	return false, ""
+}
+
+// updateHedgeWideSL updates the wide stop loss based on ATR
+func (g *GinieAutopilot) updateHedgeWideSL(pos *GiniePosition) {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil {
+		return
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+
+	klines, err := g.futuresClient.GetFuturesKlines(pos.Symbol, "15m", 20)
+	if err != nil || len(klines) < 14 {
+		return
+	}
+
+	atr := g.analyzer.calculateATR(klines, 14)
+	avgPrice := sr.CurrentBreakeven
+	slDistance := atr * config.WideSLATRMultiplier
+
+	if pos.Side == "LONG" {
+		hm.WideSLPrice = avgPrice - slDistance
+	} else {
+		hm.WideSLPrice = avgPrice + slDistance
+	}
+
+	hm.WideSLATRMultiplier = config.WideSLATRMultiplier
+	hm.WideSLLastUpdate = time.Now()
+	hm.WideSLAveragePrice = avgPrice
+	hm.AICannotTriggerSL = config.DisableAISL
+
+	hm.AddDebugLog(fmt.Sprintf("Wide SL updated: ATR=%.8f, mult=%.1f, avgPrice=%.8f, SL=%.8f",
+		atr, config.WideSLATRMultiplier, avgPrice, hm.WideSLPrice))
+}
+
+// executeCombinedExit closes both original and hedge positions
+func (g *GinieAutopilot) executeCombinedExit(pos *GiniePosition, reason string) error {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	currentPrice := g.getCurrentPrice(pos.Symbol)
+	finalROI := g.calculateCombinedROI(pos, currentPrice)
+
+	sr.AddDebugLog(fmt.Sprintf("COMBINED EXIT executing: reason=%s, ROI=%.2f%%", reason, finalROI))
+	log.Printf("[HEDGE-EXIT] %s: Combined exit triggered - %s, ROI=%.2f%%", pos.Symbol, reason, finalROI)
+
+	if sr.RemainingQuantity > 0 {
+		err := g.executeScalpPartialClose(pos, sr.RemainingQuantity, "hedge_combined_exit_original")
+		if err != nil {
+			log.Printf("[HEDGE-EXIT] %s: Failed to close original: %v", pos.Symbol, err)
+		}
+	}
+
+	if hm != nil && hm.HedgeActive && hm.HedgeRemainingQty > 0 {
+		closeSide := GetCloseSideForPositionSide(hm.HedgeSide)
+		effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hm.HedgeSide))
+		roundedQty := g.roundQuantity(pos.Symbol, hm.HedgeRemainingQty)
+
+		orderParams := binance.FuturesOrderParams{
+			Symbol:       pos.Symbol,
+			Side:         closeSide,
+			PositionSide: effectivePositionSide,
+			Type:         binance.FuturesOrderTypeMarket,
+			Quantity:     roundedQty,
+		}
+
+		log.Printf("[HEDGE-EXIT] %s: Closing %s hedge position: %s %.4f",
+			pos.Symbol, hm.HedgeSide, closeSide, roundedQty)
+
+		_, err := g.futuresClient.PlaceFuturesOrder(orderParams)
+		if err != nil {
+			log.Printf("[HEDGE-EXIT] %s: Failed to close hedge: %v", pos.Symbol, err)
+		}
+
+		hm.HedgeActive = false
+		hm.HedgeRemainingQty = 0
+	}
+
+	pos.IsClosing = true
+	if hm != nil {
+		hm.Enabled = false
+	}
+
+	go g.SavePositionState()
+
+	return nil
+}
+
+// monitorHedgeMode monitors hedge mode conditions for a position
+func (g *GinieAutopilot) monitorHedgeMode(pos *GiniePosition, currentPrice float64) (string, bool) {
+	sr := pos.ScalpReentry
+	if sr == nil {
+		return "", false
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+
+	if sr.HedgeMode == nil && config.HedgeModeEnabled {
+		sr.HedgeMode = g.initHedgeReentryState(pos)
+		log.Printf("[HEDGE-MODE] %s: Initialized HedgeMode state", pos.Symbol)
+	}
+
+	g.checkNegativeTPTrigger(pos, currentPrice)
+
+	if sr.HedgeMode == nil || !sr.HedgeMode.Enabled {
+		return "", false
+	}
+
+	hm := sr.HedgeMode
+
+	if hm.HedgeActive {
+		if shouldExit, reason := g.checkCombinedExit(pos, currentPrice); shouldExit {
+			return reason, true
+		}
+
+		if shouldExit, reason := g.checkRallyExit(pos, currentPrice); shouldExit {
+			return reason, true
+		}
+
+		if time.Since(hm.WideSLLastUpdate) > 60*time.Second {
+			g.updateHedgeWideSL(pos)
+		}
+
+		if hm.HedgeRemainingQty > 0 {
+			g.monitorHedgeTPs(pos, currentPrice)
+		}
+
+		// Check profit protection SL
+		g.checkProfitProtectionSL(pos, currentPrice)
+	}
+
+	if config.DisableAISL && hm.WideSLPrice > 0 {
+		var slHit bool
+		if pos.Side == "LONG" {
+			slHit = currentPrice <= hm.WideSLPrice
+		} else {
+			slHit = currentPrice >= hm.WideSLPrice
+		}
+
+		if slHit {
+			sr.AddDebugLog(fmt.Sprintf("Wide SL hit at %.8f (SL=%.8f)", currentPrice, hm.WideSLPrice))
+			return fmt.Sprintf("wide_sl_hit_%.8f", hm.WideSLPrice), true
+		}
+	}
+
+	return "", false
+}
+
+// monitorHedgeTPs monitors and executes TPs on the hedge position
+func (g *GinieAutopilot) monitorHedgeTPs(pos *GiniePosition, currentPrice float64) {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.HedgeActive || hm.HedgeRemainingQty <= 0 {
+		return
+	}
+
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+
+	nextTPLevel := hm.HedgeTPLevel + 1
+	if nextTPLevel > 3 {
+		return
+	}
+
+	tpPercent, sellPercent := config.GetTPConfig(nextTPLevel)
+
+	var tpPrice float64
+	var tpHit bool
+
+	if hm.HedgeSide == "LONG" {
+		tpPrice = hm.HedgeCurrentBE * (1 + tpPercent/100)
+		tpHit = currentPrice >= tpPrice
+	} else {
+		tpPrice = hm.HedgeCurrentBE * (1 - tpPercent/100)
+		tpHit = currentPrice <= tpPrice
+	}
+
+	if tpHit {
+		g.executeHedgeTPSell(pos, nextTPLevel, currentPrice, sellPercent)
+	}
+}
+
+// executeHedgeTPSell executes a partial sell on the hedge position at a TP level
+func (g *GinieAutopilot) executeHedgeTPSell(pos *GiniePosition, tpLevel int, currentPrice float64, sellPercent float64) error {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.HedgeActive {
+		return fmt.Errorf("hedge not active")
+	}
+
+	sellQty := hm.HedgeRemainingQty * (sellPercent / 100.0)
+	sellQty = g.roundQuantity(pos.Symbol, sellQty)
+
+	minQty := g.getMinQuantity(pos.Symbol)
+	if sellQty < minQty {
+		sellQty = g.roundQuantity(pos.Symbol, hm.HedgeRemainingQty)
+	}
+
+	if sellQty <= 0 {
+		return nil
+	}
+
+	var pnl float64
+	if hm.HedgeSide == "LONG" {
+		pnl = (currentPrice - hm.HedgeCurrentBE) * sellQty
+	} else {
+		pnl = (hm.HedgeCurrentBE - currentPrice) * sellQty
+	}
+
+	closeSide := GetCloseSideForPositionSide(hm.HedgeSide)
+	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hm.HedgeSide))
+
+	orderParams := binance.FuturesOrderParams{
+		Symbol:       pos.Symbol,
+		Side:         closeSide,
+		PositionSide: effectivePositionSide,
+		Type:         binance.FuturesOrderTypeMarket,
+		Quantity:     sellQty,
+	}
+
+	log.Printf("[HEDGE-TP] %s: Hedge TP%d hit - selling %.4f @ %.8f, PnL=%.4f",
+		pos.Symbol, tpLevel, sellQty, currentPrice, pnl)
+
+	_, err := g.futuresClient.PlaceFuturesOrder(orderParams)
+	if err != nil {
+		hm.AddDebugLog(fmt.Sprintf("Hedge TP%d sell failed: %v", tpLevel, err))
+		return fmt.Errorf("hedge TP sell failed: %w", err)
+	}
+
+	hm.HedgeRemainingQty -= sellQty
+	hm.HedgeAccumProfit += pnl
+	hm.HedgeTPLevel = tpLevel
+
+	hm.AddDebugLog(fmt.Sprintf("Hedge TP%d: Sold %.4f @ %.8f, PnL=%.4f, remaining=%.4f",
+		tpLevel, sellQty, currentPrice, pnl, hm.HedgeRemainingQty))
+	sr.AddDebugLog(fmt.Sprintf("HEDGE TP%d: -%.4f @ %.8f, +$%.2f PnL", tpLevel, sellQty, currentPrice, pnl))
+
+	// If hedge fully closed, activate profit protection
+	if hm.HedgeRemainingQty <= 0 {
+		hm.HedgeActive = false
+		hm.HedgeSideClosedPnL = hm.HedgeAccumProfit
+		hm.AddDebugLog(fmt.Sprintf("Hedge position fully closed with PnL=$%.2f", hm.HedgeAccumProfit))
+
+		if hm.HedgeAccumProfit > 0 && sr.RemainingQuantity > 0 {
+			g.activateProfitProtection(pos, hm.HedgeAccumProfit, "hedge")
+		}
+	}
+
+	go g.SavePositionState()
+
+	return nil
+}
+
+// ============ PROFIT PROTECTION FUNCTIONS ============
+
+// activateProfitProtection activates profit protection when one side closes profitably
+func (g *GinieAutopilot) activateProfitProtection(pos *GiniePosition, earnedProfit float64, closedSide string) {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+
+	if !config.ProfitProtectionEnabled || hm == nil {
+		return
+	}
+
+	if earnedProfit <= 0 {
+		hm.AddDebugLog("Profit protection skipped: no profit to protect")
+		return
+	}
+
+	protectedPercent := config.ProfitProtectionPercent / 100.0
+	maxLossPercent := config.MaxLossOfEarnedProfit / 100.0
+
+	protectedMinProfit := earnedProfit * protectedPercent
+	maxAllowableLoss := earnedProfit * maxLossPercent
+
+	hm.EarnedProfitToProtect = earnedProfit
+	hm.ProtectedMinProfit = protectedMinProfit
+	hm.MaxAllowableLossFromProfit = maxAllowableLoss
+	hm.ProfitProtectionActive = true
+
+	if closedSide == "original" {
+		hm.OriginalSideClosed = true
+		hm.OriginalSideClosedPnL = earnedProfit
+	}
+
+	var remainingSide string
+	var remainingQty float64
+	var remainingBE float64
+
+	if closedSide == "hedge" {
+		remainingSide = pos.Side
+		remainingQty = sr.RemainingQuantity
+		remainingBE = sr.CurrentBreakeven
+	} else {
+		remainingSide = hm.HedgeSide
+		remainingQty = hm.HedgeRemainingQty
+		remainingBE = hm.HedgeCurrentBE
+	}
+
+	if remainingQty <= 0 {
+		hm.AddDebugLog("Profit protection: No remaining position to protect")
+		return
+	}
+
+	slDistance := maxAllowableLoss / remainingQty
+
+	var protectedSL float64
+	if remainingSide == "LONG" {
+		protectedSL = remainingBE - slDistance
+		if protectedSL < remainingBE && earnedProfit > slDistance*remainingQty {
+			protectedSL = remainingBE
+		}
+	} else {
+		protectedSL = remainingBE + slDistance
+		if protectedSL > remainingBE && earnedProfit > slDistance*remainingQty {
+			protectedSL = remainingBE
+		}
+	}
+
+	protectedSL = roundPriceForSL(pos.Symbol, protectedSL, remainingSide)
+	hm.ProtectedSLPrice = protectedSL
+
+	log.Printf("[PROFIT-PROTECT] %s: Activating protection - earned=$%.2f, protect=$%.2f, maxLoss=$%.2f, SL=%.8f",
+		pos.Symbol, earnedProfit, protectedMinProfit, maxAllowableLoss, protectedSL)
+	hm.AddDebugLog(fmt.Sprintf("PROTECTION ACTIVE: earned=$%.2f, protect %.0f%%=$%.2f, maxLoss=$%.2f, SL=%.8f",
+		earnedProfit, config.ProfitProtectionPercent, protectedMinProfit, maxAllowableLoss, protectedSL))
+	sr.AddDebugLog(fmt.Sprintf("PROFIT PROTECTION: Earned $%.2f, max loss $%.2f, SL @ %.8f",
+		earnedProfit, maxAllowableLoss, protectedSL))
+
+	if closedSide == "hedge" {
+		if err := g.updatePositionStopLoss(pos, protectedSL); err != nil {
+			log.Printf("[PROFIT-PROTECT] %s: Failed to update SL: %v", pos.Symbol, err)
+			hm.AddDebugLog(fmt.Sprintf("WARNING: Failed to update protected SL: %v", err))
+		} else {
+			pos.StopLoss = protectedSL
+			log.Printf("[PROFIT-PROTECT] %s: Protected SL placed at %.8f (protects $%.2f profit)",
+				pos.Symbol, protectedSL, protectedMinProfit)
+		}
+	} else {
+		go g.placeHedgeProtectedSL(pos, protectedSL)
+	}
+
+	go g.SavePositionState()
+}
+
+// placeHedgeProtectedSL places a protected SL for the hedge position
+func (g *GinieAutopilot) placeHedgeProtectedSL(pos *GiniePosition, slPrice float64) error {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.HedgeActive || hm.HedgeRemainingQty <= 0 {
+		return fmt.Errorf("hedge not active or no quantity remaining")
+	}
+
+	closeSide := GetCloseSideForPositionSide(hm.HedgeSide)
+	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hm.HedgeSide))
+	roundedQty := g.roundQuantity(pos.Symbol, hm.HedgeRemainingQty)
+	roundedSL := roundPriceForSL(pos.Symbol, slPrice, hm.HedgeSide)
+
+	slParams := binance.AlgoOrderParams{
+		Symbol:       pos.Symbol,
+		Side:         closeSide,
+		PositionSide: effectivePositionSide,
+		Type:         binance.FuturesOrderTypeStopMarket,
+		Quantity:     roundedQty,
+		TriggerPrice: roundedSL,
+		WorkingType:  binance.WorkingTypeMarkPrice,
+	}
+
+	log.Printf("[HEDGE-PROTECT-SL] %s: Placing protected SL for %s hedge at %.8f, qty=%.4f",
+		pos.Symbol, hm.HedgeSide, roundedSL, roundedQty)
+
+	slOrder, err := g.futuresClient.PlaceAlgoOrder(slParams)
+	if err != nil {
+		log.Printf("[HEDGE-PROTECT-SL] %s: Failed to place protected SL: %v", pos.Symbol, err)
+		return fmt.Errorf("failed to place hedge protected SL: %w", err)
+	}
+
+	hm.AddDebugLog(fmt.Sprintf("Protected SL placed for hedge: algoId=%d, trigger=%.8f", slOrder.AlgoId, roundedSL))
+	log.Printf("[HEDGE-PROTECT-SL] %s: Protected SL placed, algoId=%d", pos.Symbol, slOrder.AlgoId)
+
+	return nil
+}
+
+// checkProfitProtectionSL monitors if profit-protected SL needs adjustment
+func (g *GinieAutopilot) checkProfitProtectionSL(pos *GiniePosition, currentPrice float64) {
+	sr := pos.ScalpReentry
+	hm := sr.HedgeMode
+
+	if hm == nil || !hm.ProfitProtectionActive || hm.ProtectedSLPrice <= 0 {
+		return
+	}
+
+	var pnlNow float64
+	var remainingSide string
+	var remainingBE float64
+
+	if hm.OriginalSideClosed {
+		remainingSide = hm.HedgeSide
+		remainingBE = hm.HedgeCurrentBE
+		if remainingSide == "LONG" {
+			pnlNow = (currentPrice - remainingBE) * hm.HedgeRemainingQty
+		} else {
+			pnlNow = (remainingBE - currentPrice) * hm.HedgeRemainingQty
+		}
+	} else {
+		remainingSide = pos.Side
+		remainingBE = sr.CurrentBreakeven
+		if remainingSide == "LONG" {
+			pnlNow = (currentPrice - remainingBE) * sr.RemainingQuantity
+		} else {
+			pnlNow = (remainingBE - currentPrice) * sr.RemainingQuantity
+		}
+	}
+
+	if pnlNow > 0 {
+		totalProfit := hm.EarnedProfitToProtect + pnlNow
+		newProtected := totalProfit * 0.5
+
+		if newProtected > hm.ProtectedMinProfit {
+			hm.ProtectedMinProfit = newProtected
+			hm.AddDebugLog(fmt.Sprintf("Protection upgraded: total=$%.2f, now protecting=$%.2f",
+				totalProfit, newProtected))
+		}
+	}
+}
+
+// handleOriginalPositionClose handles profit protection when original position closes first
+func (g *GinieAutopilot) handleOriginalPositionClose(pos *GiniePosition, closePnL float64, reason string) {
+	sr := pos.ScalpReentry
+	if sr == nil || sr.HedgeMode == nil {
+		return
+	}
+
+	hm := sr.HedgeMode
+
+	if hm.HedgeActive && hm.HedgeRemainingQty > 0 {
+		log.Printf("[HEDGE-ORIGINAL-CLOSE] %s: Original %s position closing with PnL=$%.2f, hedge %s still active",
+			pos.Symbol, pos.Side, closePnL, hm.HedgeSide)
+
+		hm.OriginalSideClosed = true
+		hm.OriginalSideClosedPnL = closePnL
+		hm.IsFromHedge = true
+		hm.ChainLevel++
+		hm.AccumulatedChainPnL += closePnL
+		hm.ParentSymbol = pos.Symbol
+
+		if closePnL > 0 {
+			g.activateProfitProtection(pos, closePnL, "original")
+		}
+
+		hm.AddDebugLog(fmt.Sprintf("Original closed: PnL=$%.2f, reason=%s, hedge continues as standalone (chain level %d)",
+			closePnL, reason, hm.ChainLevel))
+		sr.AddDebugLog(fmt.Sprintf("Original closed ($%.2f), hedge %s continues standalone", closePnL, hm.HedgeSide))
+	}
 }

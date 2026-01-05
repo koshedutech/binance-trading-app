@@ -290,6 +290,26 @@ type HedgeReentryState struct {
 	// Negative TP Tracking (for loss triggers)
 	NegTPLevelTriggered int `json:"neg_tp_level"` // 0, 1, 2, 3 (negative TPs triggered)
 
+	// ============ PROFIT PROTECTION (when one side closes) ============
+	// When original or hedge side closes profitably, protect earned profit on remaining side
+
+	OriginalSideClosed       bool    `json:"original_side_closed"`        // True when original side closed first
+	OriginalSideClosedPnL    float64 `json:"original_side_closed_pnl"`    // PnL when original side closed
+	HedgeSideClosedPnL       float64 `json:"hedge_side_closed_pnl"`       // PnL when hedge side closed (if it closed first)
+	EarnedProfitToProtect    float64 `json:"earned_profit_to_protect"`    // Total earned profit from closed side
+	ProtectedMinProfit       float64 `json:"protected_min_profit"`        // Minimum profit to protect (e.g., 50% of earned)
+	ProtectedSLPrice         float64 `json:"protected_sl_price"`          // SL calculated to protect profit
+	MaxAllowableLossFromProfit float64 `json:"max_allowable_loss_from_profit"` // Max loss allowed from remaining side
+	ProfitProtectionActive   bool    `json:"profit_protection_active"`    // True when protection is active
+
+	// ============ CHAIN CONTROL (prevent infinite hedge chains) ============
+	// Track chain depth and limit cascading hedges
+
+	IsFromHedge         bool    `json:"is_from_hedge"`          // True if position originated from hedge close
+	ChainLevel          int     `json:"chain_level"`            // 0=original, 1=first hedge, 2=second, etc.
+	AccumulatedChainPnL float64 `json:"accumulated_chain_pnl"`  // Total PnL across the hedge chain
+	ParentSymbol        string  `json:"parent_symbol"`          // Symbol of parent position for tracking
+
 	// Timing
 	StartedAt  time.Time `json:"started_at"`
 	LastUpdate time.Time `json:"last_update"`
@@ -412,6 +432,19 @@ type ScalpReentryConfig struct {
 	NegTP2AddPercent float64 `json:"neg_tp2_add_percent"` // 50 = add 50% of original qty
 	NegTP3Percent    float64 `json:"neg_tp3_percent"`     // 1.0 = trigger at -1.0% loss
 	NegTP3AddPercent float64 `json:"neg_tp3_add_percent"` // 80 = add 80% of original qty
+
+	// ============ PROFIT PROTECTION CONFIG ============
+	// When one side of hedge closes profitably, protect earned profit on remaining side
+
+	ProfitProtectionEnabled  bool    `json:"profit_protection_enabled"`   // Enable profit protection (default true)
+	ProfitProtectionPercent  float64 `json:"profit_protection_percent"`   // % of earned profit to protect (default 50)
+	MaxLossOfEarnedProfit    float64 `json:"max_loss_of_earned_profit"`   // Max loss as % of earned profit (default 50)
+
+	// ============ CHAIN CONTROL CONFIG ============
+	// Control cascading hedge chains to prevent infinite hedging
+
+	AllowHedgeChains   bool `json:"allow_hedge_chains"`    // Allow positions from hedge close to open new hedges (default false)
+	MaxHedgeChainDepth int  `json:"max_hedge_chain_depth"` // Max chain depth if chains allowed (default 2)
 }
 
 // DefaultScalpReentryConfig returns default configuration
@@ -492,6 +525,15 @@ func DefaultScalpReentryConfig() ScalpReentryConfig {
 		NegTP2AddPercent: 50,  // Add 50% of original qty
 		NegTP3Percent:    1.0, // Trigger at -1.0% loss
 		NegTP3AddPercent: 80,  // Add 80% of original qty
+
+		// Profit protection defaults
+		ProfitProtectionEnabled: true, // Enable by default to prevent net losses
+		ProfitProtectionPercent: 50,   // Protect 50% of earned profit
+		MaxLossOfEarnedProfit:   50,   // Max loss = 50% of earned profit
+
+		// Chain control defaults
+		AllowHedgeChains:   false, // Disable chain hedging by default (safer)
+		MaxHedgeChainDepth: 2,     // If enabled, limit to 2 levels
 	}
 }
 
