@@ -453,7 +453,7 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 		// Get current LLM weight (default 0.3)
 		currentWeight := 0.3 // Default
 		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
+			settings := ai.settingsManager.GetDefaultSettings()
 			currentWeight = settings.LLMSLTPWeight // Using this as a proxy
 		}
 
@@ -486,7 +486,7 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 	if llmWinRate > 60 {
 		currentWeight := 0.3
 		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
+			settings := ai.settingsManager.GetDefaultSettings()
 			currentWeight = settings.LLMSLTPWeight
 		}
 
@@ -525,7 +525,7 @@ func (ai *AdaptiveAI) generateConfidenceRecommendation(mode GinieTradingMode, st
 		// Get current min confidence for mode
 		currentMinConf := 60.0 // Default
 		if ai.settingsManager != nil {
-			modeConfig, err := ai.settingsManager.GetModeConfig(string(mode))
+			modeConfig, err := ai.settingsManager.GetDefaultModeConfig(string(mode))
 			if err == nil && modeConfig != nil && modeConfig.Confidence != nil {
 				currentMinConf = modeConfig.Confidence.MinConfidence
 			}
@@ -631,7 +631,7 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	case "block_disagreement":
 		// Update block_on_divergence in all ModeConfigs
 		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
+			settings := ai.settingsManager.GetDefaultSettings()
 			// Update all mode configurations with block_on_divergence
 			for _, mc := range settings.ModeConfigs {
 				if mc != nil && mc.TrendDivergence != nil {
@@ -644,7 +644,7 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	case "llm_weight":
 		// Update LLM weight
 		if suggestedWeight, ok := rec.SuggestedValue.(float64); ok && ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
+			settings := ai.settingsManager.GetDefaultSettings()
 			settings.LLMSLTPWeight = suggestedWeight
 			err = ai.settingsManager.SaveSettings(settings)
 		}
@@ -652,7 +652,7 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	case "min_confidence":
 		// Update min confidence for the specific mode
 		if suggestedConf, ok := rec.SuggestedValue.(float64); ok && ai.settingsManager != nil {
-			modeConfig, getErr := ai.settingsManager.GetModeConfig(string(rec.Mode))
+			modeConfig, getErr := ai.settingsManager.GetDefaultModeConfig(string(rec.Mode))
 			if getErr == nil && modeConfig != nil && modeConfig.Confidence != nil {
 				modeConfig.Confidence.MinConfidence = suggestedConf
 				err = ai.settingsManager.UpdateModeConfig(string(rec.Mode), modeConfig)

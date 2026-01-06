@@ -232,10 +232,12 @@ func (om *OrderManager) updatePosition(pos *ManagedPosition) {
 	// Check if trailing should be activated
 	if om.config.TrailingStopEnabled && !pos.TrailingActive {
 		var profitPercent float64
-		if pos.Side == "BUY" {
-			profitPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
-		} else {
-			profitPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+		if pos.EntryPrice > 0 {
+			if pos.Side == "BUY" {
+				profitPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+			} else {
+				profitPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+			}
 		}
 
 		if profitPercent >= om.config.TrailingActivation {

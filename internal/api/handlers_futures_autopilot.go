@@ -714,7 +714,7 @@ func (s *Server) handleToggleFuturesCircuitBreaker(c *gin.Context) {
 	// Persist circuit breaker enabled state
 	go func() {
 		sm := autopilot.GetSettingsManager()
-		settings := sm.GetCurrentSettings()
+		settings := sm.GetDefaultSettings()
 		settings.CircuitBreakerEnabled = req.Enabled
 		if err := sm.SaveSettings(settings); err != nil {
 			fmt.Printf("Failed to persist circuit breaker enabled state: %v\n", err)

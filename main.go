@@ -175,6 +175,12 @@ func main() {
 			log.Printf("Warning: Scan source migrations failed: %v", err)
 		}
 		logger.Info("Scan source migrations completed")
+
+		// Run Global Circuit Breaker migrations (Story 5.3)
+		if err := db.RunGlobalCircuitBreakerMigration(ctx); err != nil {
+			log.Printf("Warning: Global Circuit Breaker migrations failed: %v", err)
+		}
+		logger.Info("Global Circuit Breaker migrations completed")
 	}
 
 	// Create repository early for API key service

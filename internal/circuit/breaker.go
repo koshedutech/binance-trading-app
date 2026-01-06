@@ -2,6 +2,7 @@ package circuit
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -156,6 +157,12 @@ func (cb *CircuitBreaker) RecordTrade(pnlPercent float64) {
 
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
+
+	// Validate PnL value to prevent NaN/Inf from breaking the circuit breaker
+	if math.IsNaN(pnlPercent) || math.IsInf(pnlPercent, 0) {
+		// Log warning but don't process invalid values
+		return
+	}
 
 	cb.resetCountersIfNeeded()
 

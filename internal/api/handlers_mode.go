@@ -222,7 +222,7 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 	}
 
 	// Keep existing position limits if not specified
-	currentSettings := autopilot.GetSettingsManager().GetCurrentSettings()
+	currentSettings := autopilot.GetSettingsManager().GetDefaultSettings()
 	if currentSettings != nil && currentSettings.ModeAllocation != nil {
 		allocation.MaxUltraFastPositions = currentSettings.ModeAllocation.MaxUltraFastPositions
 		allocation.MaxScalpPositions = currentSettings.ModeAllocation.MaxScalpPositions

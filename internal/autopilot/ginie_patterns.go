@@ -1241,7 +1241,7 @@ type MTFAnalysisResult struct {
 
 // GetMTFConfigForMode returns the MTF config for a given trading mode
 func GetMTFConfigForMode(mode GinieTradingMode) *ModeMTFConfig {
-	settings := GetSettingsManager().GetCurrentSettings()
+	settings := GetSettingsManager().GetDefaultSettings()
 
 	// Get mode config from ModeConfigs
 	modeStr := string(mode)
@@ -1312,7 +1312,7 @@ func GetMTFConfigForMode(mode GinieTradingMode) *ModeMTFConfig {
 
 // GetDynamicAIExitConfigForMode returns the Dynamic AI Exit config for a given trading mode
 func GetDynamicAIExitConfigForMode(mode GinieTradingMode) *ModeDynamicAIExitConfig {
-	settings := GetSettingsManager().GetCurrentSettings()
+	settings := GetSettingsManager().GetDefaultSettings()
 
 	// Get mode config from ModeConfigs
 	modeStr := string(mode)

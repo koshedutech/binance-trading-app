@@ -14,7 +14,7 @@ import (
 
 // initScalpReentry initializes scalp re-entry status for a position
 func (g *GinieAutopilot) initScalpReentry(pos *GiniePosition) *ScalpReentryStatus {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	status := NewScalpReentryStatus(pos.EntryPrice, pos.OriginalQty, config)
 	status.AddDebugLog(fmt.Sprintf("Initialized scalp_reentry for %s %s @ %.8f", pos.Symbol, pos.Side, pos.EntryPrice))
@@ -29,7 +29,7 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 	}
 
 	sr := pos.ScalpReentry
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 
 	// Log monitoring
@@ -121,7 +121,7 @@ func (g *GinieAutopilot) detectExchangeTPFill(pos *GiniePosition, currentPrice f
 		return false // All TPs already hit
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	_, sellPercent := config.GetTPConfig(nextTPLevel)
 	sellPercentExact := float64(int(sellPercent)) / 100.0
 	expectedSellQty := expectedQty * sellPercentExact
@@ -140,7 +140,7 @@ func (g *GinieAutopilot) detectExchangeTPFill(pos *GiniePosition, currentPrice f
 // processExchangeTPFill updates state after exchange LIMIT TP order fills
 // This is called instead of executeTPSell since exchange already executed the order
 func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, currentPrice float64) error {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	sr := pos.ScalpReentry
 
 	tpPercent, sellPercent := config.GetTPConfig(tpLevel)
@@ -267,7 +267,7 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 
 // checkScalpReentryTP checks if a TP level has been reached
 func (g *GinieAutopilot) checkScalpReentryTP(pos *GiniePosition, currentPrice float64, tpLevel int) (bool, float64) {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	tpPercent, _ := config.GetTPConfig(tpLevel)
 
 	if tpPercent == 0 {
@@ -291,7 +291,7 @@ func (g *GinieAutopilot) checkScalpReentryTP(pos *GiniePosition, currentPrice fl
 
 // executeTPSell executes a partial sell at a TP level
 func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	sr := pos.ScalpReentry
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 
@@ -476,7 +476,7 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 // checkAndExecuteReentry checks if re-entry conditions are met and executes
 func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice float64) error {
 	sr := pos.ScalpReentry
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	cycle := sr.GetCurrentCycle()
 
 	if cycle == nil || cycle.ReentryState != ReentryStateWaiting {
@@ -629,7 +629,7 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 // monitorFinalTrailing monitors the final 20% position with trailing stop
 func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice float64) error {
 	sr := pos.ScalpReentry
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	// Update peak price
 	if pos.Side == "LONG" {
@@ -815,7 +815,7 @@ func (g *GinieAutopilot) updateDynamicSL(pos *GiniePosition, currentPrice float6
 
 // getAIReentryDecision gets AI decision for re-entry
 func (g *GinieAutopilot) getAIReentryDecision(pos *GiniePosition, cycle *ReentryCycle) (bool, *ReentryAIDecision) {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 
 	// Default decision if AI is unavailable
@@ -1184,7 +1184,7 @@ type FuturesOrder struct {
 
 // initHedgeReentryState initializes hedge mode state for a position
 func (g *GinieAutopilot) initHedgeReentryState(pos *GiniePosition) *HedgeReentryState {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	sr := pos.ScalpReentry
 
 	state := NewHedgeReentryState(pos.OriginalQty, config)
@@ -1196,7 +1196,7 @@ func (g *GinieAutopilot) initHedgeReentryState(pos *GiniePosition) *HedgeReentry
 
 // checkAndTriggerHedge checks if hedge should be triggered after a TP hit
 func (g *GinieAutopilot) checkAndTriggerHedge(pos *GiniePosition, tpLevel int, sellQty float64, currentPrice float64) {
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	sr := pos.ScalpReentry
 
 	if !config.HedgeModeEnabled {
@@ -1236,6 +1236,10 @@ func (g *GinieAutopilot) checkAndTriggerHedge(pos *GiniePosition, tpLevel int, s
 	if config.TriggerOnProfitTP {
 		if !hm.HedgeActive {
 			// First trigger - open hedge position
+			// NOTE: For scalp_reentry hedge mode triggered by TP hit, we treat the TP trigger
+			// itself as implicit confidence validation (position is in profit = successful setup)
+			// MinConfidenceForHedge would apply to NEW hedge entries based on fresh signals,
+			// but TP-triggered hedges are reactionary risk management, not signal-based entries
 			go g.openHedgePosition(pos, sellQty, currentPrice, fmt.Sprintf("profit_tp%d", tpLevel))
 		} else {
 			// Hedge already active - add to hedge
@@ -1251,7 +1255,7 @@ func (g *GinieAutopilot) checkNegativeTPTrigger(pos *GiniePosition, currentPrice
 		return
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	if !config.HedgeModeEnabled || !config.TriggerOnLossTP {
 		return
@@ -1559,7 +1563,7 @@ func (g *GinieAutopilot) checkCombinedExit(pos *GiniePosition, currentPrice floa
 		return false, ""
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	combinedROI := g.calculateCombinedROI(pos, currentPrice)
 
 	if combinedROI >= config.CombinedROIExitPct {
@@ -1581,7 +1585,7 @@ func (g *GinieAutopilot) checkRallyExit(pos *GiniePosition, currentPrice float64
 		return false, ""
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 	if !config.RallyExitEnabled {
 		return false, ""
 	}
@@ -1640,7 +1644,7 @@ func (g *GinieAutopilot) updateHedgeWideSL(pos *GiniePosition) {
 		return
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	klines, err := g.futuresClient.GetFuturesKlines(pos.Symbol, "15m", 20)
 	if err != nil || len(klines) < 14 {
@@ -1726,7 +1730,7 @@ func (g *GinieAutopilot) monitorHedgeMode(pos *GiniePosition, currentPrice float
 		return "", false
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	if sr.HedgeMode == nil && config.HedgeModeEnabled {
 		sr.HedgeMode = g.initHedgeReentryState(pos)
@@ -1788,7 +1792,7 @@ func (g *GinieAutopilot) monitorHedgeTPs(pos *GiniePosition, currentPrice float6
 		return
 	}
 
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	nextTPLevel := hm.HedgeTPLevel + 1
 	if nextTPLevel > 3 {
@@ -1891,7 +1895,7 @@ func (g *GinieAutopilot) executeHedgeTPSell(pos *GiniePosition, tpLevel int, cur
 func (g *GinieAutopilot) activateProfitProtection(pos *GiniePosition, earnedProfit float64, closedSide string) {
 	sr := pos.ScalpReentry
 	hm := sr.HedgeMode
-	config := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+	config := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 
 	if !config.ProfitProtectionEnabled || hm == nil {
 		return

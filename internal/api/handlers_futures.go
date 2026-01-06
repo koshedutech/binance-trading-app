@@ -256,7 +256,7 @@ func (s *Server) handleGetFuturesPositions(c *gin.Context) {
 	// Then, get symbol-level custom ROI from Settings (for all symbols)
 	settingsManager := autopilot.GetSettingsManager()
 	if settingsManager != nil {
-		settings := settingsManager.GetCurrentSettings()
+		settings := settingsManager.GetDefaultSettings()
 		if settings != nil && settings.SymbolSettings != nil {
 			for symbol, symbolSettings := range settings.SymbolSettings {
 				// Only add symbol-level ROI if we don't already have position-level ROI

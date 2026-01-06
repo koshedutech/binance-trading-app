@@ -331,10 +331,12 @@ func (ade *AdaptiveDecisionEngine) analyzeExistingPosition(
 ) *AdaptiveDecision {
 	// Calculate current P&L percentage
 	pnlPercent := 0.0
-	if pos.Side == "LONG" {
-		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
-	} else {
-		pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+	if pos.EntryPrice > 0 {
+		if pos.Side == "LONG" {
+			pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		} else {
+			pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+		}
 	}
 
 	decision.ContextFactors = append(decision.ContextFactors,

@@ -15,6 +15,14 @@ import (
 	"time"
 )
 
+// sanitizeFloat returns 0 if the float is NaN or Inf, otherwise returns the original value
+func sanitizeFloat(f float64) float64 {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+	return f
+}
+
 // GinieAnalyzer implements the Adaptive Crypto Trading AI (Ginie)
 type GinieAnalyzer struct {
 	futuresClient binance.FuturesClient
@@ -70,7 +78,7 @@ func NewGinieAnalyzer(
 	}
 
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	g := &GinieAnalyzer{
 		futuresClient:    futuresClient,
@@ -119,7 +127,7 @@ func (g *GinieAnalyzer) SetLLMClient(client *llm.Client) {
 func (g *GinieAnalyzer) RefreshSettings() {
 	sm := GetSettingsManager()
 	g.scanLock.Lock()
-	g.settings = sm.GetCurrentSettings()
+	g.settings = sm.GetDefaultSettings()
 	g.scanLock.Unlock()
 }
 
@@ -841,9 +849,9 @@ func (g *GinieAnalyzer) GetStatus() *GinieStatus {
 		MaxPositions:     maxPos,
 		LastScanTime:     lastScanTime,
 		LastDecisionTime: time.Now(),
-		DailyPnL:         g.dailyPnL,
+		DailyPnL:         sanitizeFloat(g.dailyPnL),
 		DailyTrades:      g.dailyTrades,
-		WinRate:          winRate,
+		WinRate:          sanitizeFloat(winRate),
 		Config:           g.config,
 		RecentDecisions:  recentDecisions,
 		WatchedSymbols:   watchSymbols,
@@ -862,8 +870,9 @@ func (g *GinieAnalyzer) ScanCoin(symbol string) (*GinieCoinScan, error) {
 		Timestamp: time.Now(),
 	}
 
-	// Get klines for analysis
-	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
+	// Get klines for analysis - use swing mode trend timeframe as default for coin scanning
+	timeframe := g.getTrendTimeframe("swing") // 1h default for general market analysis
+	klines, err := g.futuresClient.GetFuturesKlines(symbol, timeframe, 200)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get klines: %w", err)
 	}
@@ -1454,7 +1463,10 @@ func (g *GinieAnalyzer) generateScalpSignals(ss *GinieSignalSet, klines []binanc
 			avgVol += klines[i].Volume
 		}
 		avgVol /= 5
-		volRatio := lastVol / avgVol
+		volRatio := 0.0
+		if avgVol > 0 {
+			volRatio = lastVol / avgVol
+		}
 		volSignal.Value = volRatio
 		if volRatio > 1.0 {
 			volSignal.Met = true
@@ -1714,17 +1726,22 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	// Initialize rejection tracker to capture all rejection reasons
 	rejectionTracker := NewRejectionTracker()
 
-	// Get klines for signal generation (always 1h)
-	klines, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 200)
-	if err != nil {
-		return nil, err
-	}
-
 	// Determine target trend timeframe based on mode using ModeConfigs
 	modeToConfigKey := map[string]string{
 		string(GinieModeScalp):    "scalp",
 		string(GinieModeSwing):    "swing",
 		string(GinieModePosition): "position",
+	}
+
+	// Get klines for signal generation using mode-specific trend timeframe
+	modeKey := modeToConfigKey[string(mode)]
+	if modeKey == "" {
+		modeKey = "swing" // fallback
+	}
+	timeframe := g.getTrendTimeframe(modeKey)
+	klines, err := g.futuresClient.GetFuturesKlines(symbol, timeframe, 200)
+	if err != nil {
+		return nil, err
 	}
 	modeDefaults := map[string]string{
 		"scalp":    "15m",
@@ -1732,6 +1749,8 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		"position": "4h",
 	}
 
+	// Extract modeConfig once for reuse throughout function
+	var modeConfig *ModeFullConfig
 	var targetTimeframe string
 	modeKey, ok := modeToConfigKey[string(mode)]
 	if !ok {
@@ -1739,7 +1758,8 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	} else {
 		targetTimeframe = modeDefaults[modeKey] // Mode-specific default
 		if g.settings != nil {
-			if modeConfig := g.settings.ModeConfigs[modeKey]; modeConfig != nil {
+			modeConfig = g.settings.ModeConfigs[modeKey]
+			if modeConfig != nil {
 				if modeConfig.Timeframe != nil && modeConfig.Timeframe.TrendTimeframe != "" {
 					targetTimeframe = modeConfig.Timeframe.TrendTimeframe
 				}
@@ -1776,12 +1796,8 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 			// Detect divergence - read from ModeConfigs
 			blockOnDivergence := false
-			if g.settings != nil && modeKey != "" {
-				if modeConfig := g.settings.ModeConfigs[modeKey]; modeConfig != nil {
-					if modeConfig.TrendDivergence != nil {
-						blockOnDivergence = modeConfig.TrendDivergence.BlockOnDivergence
-					}
-				}
+			if modeConfig != nil && modeConfig.TrendDivergence != nil {
+				blockOnDivergence = modeConfig.TrendDivergence.BlockOnDivergence
 			}
 			divergence = g.DetectTrendDivergence(scan.Trend, trendAnalysis, blockOnDivergence)
 
@@ -1941,7 +1957,13 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 					klines1h,
 				)
 
-				if err == nil && llmConfirm != nil && llmConfirm.IsReversal && llmConfirm.Confidence >= 0.65 {
+				// DB-first: Use modeConfig.Confidence.MinConfidence if available
+				llmThreshold := 0.65 // default
+				if modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+					llmThreshold = modeConfig.Confidence.MinConfidence / 100.0 // convert percent to decimal
+				}
+
+				if err == nil && llmConfirm != nil && llmConfirm.IsReversal && llmConfirm.Confidence >= llmThreshold {
 					// LLM confirmed reversal - use LIMIT entry
 					useReversalEntry = true
 					reversalDirection = mtfReversal.Direction
@@ -1953,6 +1975,13 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 							"direction", reversalDirection,
 							"entry_price", reversalEntryPrice,
 							"llm_confidence", llmConfirm.Confidence,
+							"llm_threshold", llmThreshold,
+							"threshold_source", func() string {
+								if modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+									return "database"
+								}
+								return "defaults"
+							}(),
 							"pattern", patternType,
 							"aligned_tfs", mtfReversal.AlignedCount)
 					}
@@ -2210,7 +2239,11 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			for _, tp := range report.TradeExecution.TakeProfits {
 				avgTP += tp.GainPct * tp.Percent / 100
 			}
-			report.TradeExecution.RiskReward = avgTP / report.TradeExecution.StopLossPct
+			if report.TradeExecution.StopLossPct > 0 {
+				report.TradeExecution.RiskReward = avgTP / report.TradeExecution.StopLossPct
+			} else {
+				report.TradeExecution.RiskReward = 0
+			}
 		}
 	} else {
 		report.TradeExecution.Action = "WAIT"
@@ -2251,19 +2284,27 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	// === ADAPTIVE ADX STRENGTH FILTER (HARD BLOCK) ===
 	// Check if trend is strong enough for the selected mode - NO TREND = NO TRADE
 	// Now also checks +DI/-DI as alternative (if either >= 25, allows trade even with low ADX)
-	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, trendAnalysis.PlusDI, trendAnalysis.MinusDI, mode)
+	// DB-first: Uses modeConfig.Risk.MinADX if available, otherwise falls back to defaults
+	adxPassed, adxPenalty := g.checkADXStrengthRequirement(trendAnalysis.ADXValue, trendAnalysis.PlusDI, trendAnalysis.MinusDI, mode, modeConfig)
 	if !adxPassed {
-		// Determine threshold based on mode (relaxed to match checkADXStrengthRequirement)
+		// Determine threshold based on mode - DB-first approach
 		var adxThreshold float64
-		switch mode {
-		case GinieModeScalp:
-			adxThreshold = 10 // Relaxed for scalp (was 20)
-		case GinieModeSwing:
-			adxThreshold = 12 // Relaxed for swing (was 25)
-		case GinieModePosition:
-			adxThreshold = 15 // Relaxed for position (was 30)
-		default:
-			adxThreshold = 10 // Default (was 20)
+		if modeConfig != nil && modeConfig.Risk != nil && modeConfig.Risk.MinADX > 0 {
+			adxThreshold = modeConfig.Risk.MinADX
+		} else {
+			// Fallback to mode-specific defaults
+			switch mode {
+			case GinieModeUltraFast:
+				adxThreshold = 15 // Ultra-fast catches momentum
+			case GinieModeScalp:
+				adxThreshold = 20 // Standard threshold for scalp
+			case GinieModeSwing:
+				adxThreshold = 25 // Swing needs moderate trend
+			case GinieModePosition:
+				adxThreshold = 30 // Position needs strong trends
+			default:
+				adxThreshold = 20
+			}
 		}
 
 		rejectionTracker.ADXStrength = &ADXStrengthRejection{
@@ -2596,6 +2637,24 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	}
 
 	// Store decision
+	// Sanitize all float fields to prevent NaN/Inf in JSON
+	report.ConfidenceScore = sanitizeFloat(report.ConfidenceScore)
+	report.TradeExecution.EntryLow = sanitizeFloat(report.TradeExecution.EntryLow)
+	report.TradeExecution.EntryHigh = sanitizeFloat(report.TradeExecution.EntryHigh)
+	report.TradeExecution.StopLoss = sanitizeFloat(report.TradeExecution.StopLoss)
+	report.TradeExecution.StopLossPct = sanitizeFloat(report.TradeExecution.StopLossPct)
+	report.TradeExecution.RiskReward = sanitizeFloat(report.TradeExecution.RiskReward)
+	report.TradeExecution.PositionPct = sanitizeFloat(report.TradeExecution.PositionPct)
+	report.TradeExecution.RiskUSD = sanitizeFloat(report.TradeExecution.RiskUSD)
+	report.TradeExecution.TrailingStop = sanitizeFloat(report.TradeExecution.TrailingStop)
+	report.TradeExecution.LimitEntryPrice = sanitizeFloat(report.TradeExecution.LimitEntryPrice)
+	report.TradeExecution.LLMSuggestedSizeUSD = sanitizeFloat(report.TradeExecution.LLMSuggestedSizeUSD)
+	for i := range report.TradeExecution.TakeProfits {
+		report.TradeExecution.TakeProfits[i].Price = sanitizeFloat(report.TradeExecution.TakeProfits[i].Price)
+		report.TradeExecution.TakeProfits[i].GainPct = sanitizeFloat(report.TradeExecution.TakeProfits[i].GainPct)
+		report.TradeExecution.TakeProfits[i].Percent = sanitizeFloat(report.TradeExecution.TakeProfits[i].Percent)
+	}
+
 	g.decisionLock.Lock()
 	g.decisions = append(g.decisions, *report)
 	if len(g.decisions) > g.maxDecisions {
@@ -3265,34 +3324,63 @@ func (g *GinieAnalyzer) PerformLLMAnalysis(symbol string, klines []binance.Kline
 	return parsed, ctx, nil
 }
 
-func (g *GinieAnalyzer) checkADXStrengthRequirement(adx, plusDI, minusDI float64, mode GinieTradingMode) (bool, float64) {
-	// RELAXED thresholds - crypto markets often have lower ADX readings
-	thresholds := map[GinieTradingMode]float64{
-		GinieModeUltraFast: 8.0,  // Ultra-fast catches momentum, minimal threshold
-		GinieModeScalp:     10.0, // Relaxed for scalp (was 20)
-		GinieModeSwing:     12.0, // Relaxed for swing (was 25)
-		GinieModePosition:  15.0, // Relaxed for position (was 30)
+func (g *GinieAnalyzer) checkADXStrengthRequirement(adx, plusDI, minusDI float64, mode GinieTradingMode, modeConfig *ModeFullConfig) (bool, float64) {
+	var threshold float64
+	var source string
+
+	// DB-first: Use config if provided and has MinADX
+	if modeConfig != nil && modeConfig.Risk != nil && modeConfig.Risk.MinADX > 0 {
+		threshold = modeConfig.Risk.MinADX
+		source = "database"
+	} else {
+		// Fallback to mode-specific defaults only if no DB config
+		thresholds := map[GinieTradingMode]float64{
+			GinieModeUltraFast: 15.0, // Ultra-fast catches momentum, lower threshold
+			GinieModeScalp:     20.0, // Standard threshold for scalp
+			GinieModeSwing:     25.0, // Swing needs moderate trend
+			GinieModePosition:  30.0, // Position needs strong trends
+		}
+		var exists bool
+		threshold, exists = thresholds[mode]
+		if !exists {
+			threshold = 20.0 // Default
+		}
+		source = "defaults"
 	}
 
-	threshold, exists := thresholds[mode]
-	if !exists {
-		threshold = 10.0 // Default (was 20)
+	// Log the source
+	if g.logger != nil {
+		g.logger.Debug("ADX threshold check", "threshold", threshold, "source", source, "adx", adx, "mode", mode)
 	}
 
 	// Primary check: ADX above threshold
 	if adx >= threshold {
+		if g.logger != nil {
+			g.logger.Debug("ADX passed primary check",
+				"adx", adx,
+				"threshold", threshold,
+				"source", source,
+				"mode", mode)
+		}
 		return true, 1.0
 	}
 
-	// Alternative check: Strong directional movement (+DI or -DI >= 18)
+	// Alternative check: Strong directional movement (+DI or -DI >= 25)
 	// This allows trades when there's clear directional movement even if ADX is building
-	diThreshold := 18.0 // Relaxed from 25
+	diThreshold := 25.0
 	if plusDI >= diThreshold || minusDI >= diThreshold {
-		// Directional strength is good - apply small 5% penalty since ADX is weak
-		return true, 0.95
+		if g.logger != nil {
+			g.logger.Debug("ADX below threshold but DI strong - allowing trade with penalty",
+				"adx", adx,
+				"threshold", threshold,
+				"plus_di", plusDI,
+				"minus_di", minusDI,
+				"di_threshold", diThreshold)
+		}
+		return true, 0.95 // Allow with 5% penalty
 	}
 
-	// Both ADX and DI checks failed - weak trend
+	// Both checks failed
 	return false, 0.90
 }
 
@@ -4299,7 +4387,10 @@ func (g *GinieAnalyzer) ClassifyVolatilityRegime(symbol string) (*VolatilityRegi
 	variance /= float64(len(closes))
 	stdDev := math.Sqrt(variance)
 
-	bbWidth := (stdDev * 2) / mean * 100 // Bollinger Band width as % of price
+	bbWidth := 0.0
+	if mean > 0 {
+		bbWidth = (stdDev * 2) / mean * 100 // Bollinger Band width as % of price
+	}
 
 	// Classify regime based on ATR ratio
 	regime := &VolatilityRegime{
@@ -4375,8 +4466,9 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 		GeneratedAt: time.Now(),
 	}
 
-	// Layer 1: Trend Filter from 1h candles
-	klines1h, err := g.futuresClient.GetFuturesKlines(symbol, "1h", 20)
+	// Layer 1: Trend Filter - use ultra_fast mode's trend timeframe
+	trendTimeframe := g.getTrendTimeframe("ultra_fast") // default "5m"
+	klines1h, err := g.futuresClient.GetFuturesKlines(symbol, trendTimeframe, 20)
 	if err != nil || len(klines1h) < 3 {
 		return nil, fmt.Errorf("failed to get 1h klines for %s: %w", symbol, err)
 	}
@@ -4420,7 +4512,7 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 	signal.ADXValue = adx
 
 	// Layer 1.5: Multi-timeframe Trend Alignment (5m/3m/1m weighted consensus)
-	settings := GetSettingsManager().GetCurrentSettings()
+	settings := GetSettingsManager().GetDefaultSettings()
 
 	// Use new MTF weighted consensus if enabled, otherwise fall back to legacy 5m alignment
 	if settings.UltraFastMTFEnabled {
@@ -4679,8 +4771,9 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 	}
 	signal.VolatilityRegime = regime
 
-	// Layer 3: Entry Trigger from 1m candles
-	klines1m, err := g.futuresClient.GetFuturesKlines(symbol, "1m", 10)
+	// Layer 3: Entry Trigger - use ultra_fast mode's entry timeframe
+	entryTimeframe := g.getEntryTimeframe("ultra_fast") // default "1m"
+	klines1m, err := g.futuresClient.GetFuturesKlines(symbol, entryTimeframe, 10)
 	if err != nil || len(klines1m) < 5 {
 		// Can't evaluate entry trigger, return with NEUTRAL bias
 		signal.EntryConfidence = 30
@@ -4762,7 +4855,7 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 
 // applyUltraFastQualityFilters applies volume, momentum, and candle body filters to the signal
 func (g *GinieAnalyzer) applyUltraFastQualityFilters(signal *UltraFastSignal, klines1m []binance.Kline) {
-	settings := GetSettingsManager().GetCurrentSettings()
+	settings := GetSettingsManager().GetDefaultSettings()
 	filtersApplied := []string{}
 	filtersFailed := []string{}
 
@@ -5453,4 +5546,56 @@ func (g *GinieAnalyzer) analyzePriceAction(klines []binance.Kline, currentPrice 
 	}
 
 	return analysis
+}
+
+// getTrendTimeframe returns the trend timeframe for a given mode from settings
+func (g *GinieAnalyzer) getTrendTimeframe(mode string) string {
+	sm := GetSettingsManager()
+	if sm != nil {
+		if modeConfig, err := sm.GetDefaultModeConfig(mode); err == nil && modeConfig != nil {
+			if modeConfig.Timeframe != nil && modeConfig.Timeframe.TrendTimeframe != "" {
+				return modeConfig.Timeframe.TrendTimeframe
+			}
+		}
+	}
+
+	// Fallback to defaults
+	switch mode {
+	case "ultra_fast":
+		return "5m"
+	case "scalp", "scalp_reentry":
+		return "15m"
+	case "swing":
+		return "1h"
+	case "position":
+		return "4h"
+	default:
+		return "15m"
+	}
+}
+
+// getEntryTimeframe returns the entry timeframe for a given mode from settings
+func (g *GinieAnalyzer) getEntryTimeframe(mode string) string {
+	sm := GetSettingsManager()
+	if sm != nil {
+		if modeConfig, err := sm.GetDefaultModeConfig(mode); err == nil && modeConfig != nil {
+			if modeConfig.Timeframe != nil && modeConfig.Timeframe.EntryTimeframe != "" {
+				return modeConfig.Timeframe.EntryTimeframe
+			}
+		}
+	}
+
+	// Fallback to defaults
+	switch mode {
+	case "ultra_fast":
+		return "1m"
+	case "scalp", "scalp_reentry":
+		return "5m"
+	case "swing":
+		return "15m"
+	case "position":
+		return "1h"
+	default:
+		return "5m"
+	}
 }

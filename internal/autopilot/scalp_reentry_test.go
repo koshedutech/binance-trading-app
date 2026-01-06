@@ -880,7 +880,7 @@ func initTestSettings() {
 	// Initialize settings manager with default config
 	sm := GetSettingsManager()
 	if sm != nil {
-		settings := sm.GetCurrentSettings()
+		settings := sm.GetDefaultSettings()
 		settings.ScalpReentryConfig = DefaultScalpReentryConfig()
 		settings.ScalpReentryConfig.Enabled = true
 	}

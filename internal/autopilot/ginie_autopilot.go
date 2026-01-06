@@ -939,7 +939,7 @@ func NewGinieAutopilot(
 ) *GinieAutopilot {
 	config := DefaultGinieAutopilotConfig()
 
-	// Create Ginie's own circuit breaker
+	// Create Ginie's own circuit breaker (Story 5.3: Load from database if available)
 	cbConfig := &circuit.CircuitBreakerConfig{
 		Enabled:              config.CircuitBreakerEnabled,
 		MaxLossPerHour:       config.CBMaxLossPerHour,
@@ -948,6 +948,25 @@ func NewGinieAutopilot(
 		CooldownMinutes:      config.CBCooldownMinutes,
 		MaxTradesPerMinute:   10,  // Allow 10 trades per minute
 		MaxDailyTrades:       100, // Allow 100 trades per day
+	}
+
+	// Story 5.3: Override with per-user global circuit breaker config from database
+	if repo != nil && userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if globalCBConfig, err := repo.GetUserGlobalCircuitBreaker(ctx, userID); err == nil && globalCBConfig != nil {
+			cbConfig.MaxLossPerHour = globalCBConfig.MaxLossPerHour
+			cbConfig.MaxDailyLoss = globalCBConfig.MaxDailyLoss
+			cbConfig.MaxConsecutiveLosses = globalCBConfig.MaxConsecutiveLosses
+			cbConfig.CooldownMinutes = globalCBConfig.CooldownMinutes
+			log.Printf("[GINIE-INIT] Loaded global circuit breaker config from database for user %s: MaxLossPerHour=$%.2f, MaxDailyLoss=$%.2f, MaxConsecutiveLosses=%d, CooldownMinutes=%d",
+				userID, globalCBConfig.MaxLossPerHour, globalCBConfig.MaxDailyLoss, globalCBConfig.MaxConsecutiveLosses, globalCBConfig.CooldownMinutes)
+		} else if err != nil {
+			log.Printf("[GINIE-INIT] Failed to load global circuit breaker config from database for user %s: %v (using defaults)", userID, err)
+		} else {
+			log.Printf("[GINIE-INIT] No global circuit breaker config found in database for user %s (using defaults)", userID)
+		}
 	}
 
 	ga := &GinieAutopilot{
@@ -989,7 +1008,7 @@ func NewGinieAutopilot(
 
 	// Initialize safety configs and states from settings
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings()
+	settings := settingsManager.GetDefaultSettings()
 
 	// Initialize AdaptiveAI for dynamic parameter optimization
 	ga.adaptiveAI = NewAdaptiveAI(settingsManager)
@@ -1006,15 +1025,23 @@ func NewGinieAutopilot(
 
 	// CRITICAL FIX: Load user mode enable/disable settings from ModeConfigs
 	// This ensures user's mode preferences are respected (fixes swing bypass bug)
-	if scalpConfig, err := settingsManager.GetModeConfig("scalp"); err == nil && scalpConfig != nil {
+	if ultraFastConfig, err := settingsManager.GetDefaultModeConfig("ultra_fast"); err == nil && ultraFastConfig != nil {
+		ga.config.EnableUltraFastMode = ultraFastConfig.Enabled
+		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from user settings: %v", ultraFastConfig.Enabled)
+	} else {
+		// Fallback to root-level UltraFastEnabled if mode config not found
+		ga.config.EnableUltraFastMode = settings.UltraFastEnabled
+		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from root settings (fallback): %v", settings.UltraFastEnabled)
+	}
+	if scalpConfig, err := settingsManager.GetDefaultModeConfig("scalp"); err == nil && scalpConfig != nil {
 		ga.config.EnableScalpMode = scalpConfig.Enabled
 		log.Printf("[GINIE-INIT] Scalp mode enabled from user settings: %v", scalpConfig.Enabled)
 	}
-	if swingConfig, err := settingsManager.GetModeConfig("swing"); err == nil && swingConfig != nil {
+	if swingConfig, err := settingsManager.GetDefaultModeConfig("swing"); err == nil && swingConfig != nil {
 		ga.config.EnableSwingMode = swingConfig.Enabled
 		log.Printf("[GINIE-INIT] Swing mode enabled from user settings: %v", swingConfig.Enabled)
 	}
-	if positionConfig, err := settingsManager.GetModeConfig("position"); err == nil && positionConfig != nil {
+	if positionConfig, err := settingsManager.GetDefaultModeConfig("position"); err == nil && positionConfig != nil {
 		ga.config.EnablePositionMode = positionConfig.Enabled
 		log.Printf("[GINIE-INIT] Position mode enabled from user settings: %v", positionConfig.Enabled)
 	}
@@ -1054,10 +1081,6 @@ func NewGinieAutopilot(
 // Priority: scalp > swing > position > ultra_fast (scalp is most common for active trading)
 func (ga *GinieAutopilot) selectEnabledModeForPosition() GinieTradingMode {
 	// Check modes in order of preference for position management
-	// Get current settings to check ultra_fast
-	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
-
 	// Check scalp first (most common for active trading)
 	if ga.config.EnableScalpMode {
 		return GinieModeScalp
@@ -1070,8 +1093,8 @@ func (ga *GinieAutopilot) selectEnabledModeForPosition() GinieTradingMode {
 	if ga.config.EnablePositionMode {
 		return GinieModePosition
 	}
-	// Finally ultra_fast
-	if settings.UltraFastEnabled {
+	// Finally ultra_fast (from config loaded on startup)
+	if ga.config.EnableUltraFastMode {
 		return GinieModeUltraFast
 	}
 	// Fallback: if no modes enabled, default to scalp (most common)
@@ -1092,13 +1115,11 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 	case GinieModeScalpReentry:
 		// Scalp re-entry mode is enabled via settings config
 		sm := GetSettingsManager()
-		settings := sm.GetCurrentSettings()
+		settings := sm.GetDefaultSettings()
 		return settings.ScalpReentryConfig.Enabled
 	case GinieModeUltraFast:
-		// UltraFast has its own config in settings, check there
-		sm := GetSettingsManager()
-		settings := sm.GetCurrentSettings()
-		return settings.UltraFastEnabled
+		// Check config.EnableUltraFastMode (loaded from database on startup)
+		return ga.config.EnableUltraFastMode
 	default:
 		return false
 	}
@@ -1221,7 +1242,7 @@ func (ga *GinieAutopilot) SetFuturesClient(client binance.FuturesClient) {
 			// 2. Auto-start Ginie if enabled in settings and not already running
 			if !wasRunning {
 				settingsManager := GetSettingsManager()
-				settings := settingsManager.GetCurrentSettings()
+				settings := settingsManager.GetDefaultSettings()
 				if settings.GinieAutoStart {
 					ga.logger.Info("Auto-starting Ginie autopilot (ginie_auto_start=true)")
 					if err := ga.Start(); err != nil {
@@ -1594,7 +1615,7 @@ func (ga *GinieAutopilot) Start() error {
 	}
 
 	// Start early warning monitor (multi-timeframe LLM analysis for early loss detection)
-	settingsForEW := GetSettingsManager().GetCurrentSettings()
+	settingsForEW := GetSettingsManager().GetDefaultSettings()
 	if settingsForEW.EarlyWarningEnabled && ga.llmAnalyzer != nil {
 		ga.wg.Add(1)
 		go ga.runEarlyWarningMonitor()
@@ -1602,9 +1623,8 @@ func (ga *GinieAutopilot) Start() error {
 	}
 
 	// Start ultra-fast scalping monitor (500ms polling for rapid exits)
-	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings()
-	if currentSettings.UltraFastEnabled {
+	// Check config.EnableUltraFastMode (loaded from database on startup)
+	if ga.config.EnableUltraFastMode {
 		ga.wg.Add(1)
 		go ga.monitorUltraFastPositions()
 		ga.logger.Info("Ultra-fast scalping monitor started - 500ms polling enabled")
@@ -1751,6 +1771,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 	lastPositionScan := time.Now()
 	lastStrategyScan := time.Now()
 	lastUltraFastScan := time.Now() // Ultra-fast mode: 5-second scan interval
+	lastScalpReentryScan := time.Now() // Scalp re-entry mode
 	lastWatchlistRefresh := time.Now() // Periodic watchlist refresh
 
 	// Set phase to idle after initialization (Issue 2B)
@@ -1780,25 +1801,41 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			ga.logger.Info("Ginie canTrade passed, proceeding with scans")
 
-			// Mode Integration Status (Story 2.5 verification)
+			// Mode Integration Status - DB-FIRST approach (Story 4.11)
+			// Read enabled modes from database user_mode_configs table
 			modesEnabled := 0
 			var enabledModes []string
-			if ga.config.EnableScalpMode {
-				modesEnabled++
-				enabledModes = append(enabledModes, "SCALP")
+			ctx := context.Background()
+			settingsManager := GetSettingsManager()
+
+			// Build enabled modes map from database - checked EVERY scan cycle for immediate effect
+			enabledModesMap := make(map[string]bool)
+			modeChecks := []struct {
+				modeName    string
+				displayName string
+			}{
+				{"scalp", "SCALP"},
+				{"swing", "SWING"},
+				{"position", "POSITION"},
+				{"ultra_fast", "ULTRA-FAST"},
+				{"scalp_reentry", "SCALP-REENTRY"},
 			}
-			if ga.config.EnableSwingMode {
-				modesEnabled++
-				enabledModes = append(enabledModes, "SWING")
-			}
-			if ga.config.EnablePositionMode {
-				modesEnabled++
-				enabledModes = append(enabledModes, "POSITION")
-			}
-			currentSettings := GetSettingsManager().GetCurrentSettings()
-			if currentSettings.UltraFastEnabled {
-				modesEnabled++
-				enabledModes = append(enabledModes, "ULTRA-FAST")
+
+			for _, mc := range modeChecks {
+				modeConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, mc.modeName)
+				if err != nil {
+					// Config not found or error - mode is disabled
+					log.Printf("[MODE-ORCHESTRATION] %s: disabled (no DB config)", mc.displayName)
+					continue
+				}
+				if modeConfig.Enabled {
+					modesEnabled++
+					enabledModes = append(enabledModes, mc.displayName)
+					enabledModesMap[mc.modeName] = true
+					log.Printf("[MODE-ORCHESTRATION] %s: enabled (from DB)", mc.displayName)
+				} else {
+					log.Printf("[MODE-ORCHESTRATION] %s: disabled (from DB)", mc.displayName)
+				}
 			}
 			if modesEnabled > 1 {
 				log.Printf("[MODE-ORCHESTRATION] Multi-mode trading active: %d modes enabled [%s]", modesEnabled, strings.Join(enabledModes, ", "))
@@ -1819,22 +1856,22 @@ func (ga *GinieAutopilot) runMainLoop() {
 			ga.mu.Unlock()
 
 			// Scan based on mode intervals
-			if ga.config.EnableScalpMode && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
-				log.Printf("[MODE-SCAN] Scanning SCALP mode (interval: %ds)", ga.config.ScalpScanInterval)
+			if enabledModesMap["scalp"] && now.Sub(lastScalpScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning SCALP mode (DB-enabled, interval: %ds)", ga.config.ScalpScanInterval)
 				ga.scanForMode(GinieModeScalp)
 				lastScalpScan = now
 				scansPerformed++
 			}
 
-			if ga.config.EnableSwingMode && now.Sub(lastSwingScan) >= time.Duration(ga.config.SwingScanInterval)*time.Second {
-				log.Printf("[MODE-SCAN] Scanning SWING mode (interval: %ds)", ga.config.SwingScanInterval)
+			if enabledModesMap["swing"] && now.Sub(lastSwingScan) >= time.Duration(ga.config.SwingScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning SWING mode (DB-enabled, interval: %ds)", ga.config.SwingScanInterval)
 				ga.scanForMode(GinieModeSwing)
 				lastSwingScan = now
 				scansPerformed++
 			}
 
-			if ga.config.EnablePositionMode && now.Sub(lastPositionScan) >= time.Duration(ga.config.PositionScanInterval)*time.Second {
-				log.Printf("[MODE-SCAN] Scanning POSITION mode (interval: %ds)", ga.config.PositionScanInterval)
+			if enabledModesMap["position"] && now.Sub(lastPositionScan) >= time.Duration(ga.config.PositionScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning POSITION mode (DB-enabled, interval: %ds)", ga.config.PositionScanInterval)
 				ga.scanForMode(GinieModePosition)
 				lastPositionScan = now
 				scansPerformed++
@@ -1842,15 +1879,24 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			// Ultra-fast mode: 5-second scan for rapid scalping opportunities
 			// Uses milliseconds for interval, converts to duration
-			// Note: currentSettings already fetched above for mode counting
-			if currentSettings.UltraFastEnabled {
+			// Read settings for interval configuration
+			if enabledModesMap["ultra_fast"] {
+				currentSettings := GetSettingsManager().GetDefaultSettings()
 				ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
 				if now.Sub(lastUltraFastScan) >= ultraFastInterval {
-					log.Printf("[ULTRA-FAST-SCAN] Starting ultra-fast scan cycle at %s", now.Format("15:04:05.000"))
+					log.Printf("[ULTRA-FAST-SCAN] Starting ultra-fast scan cycle at %s (DB-enabled)", now.Format("15:04:05.000"))
 					ga.scanForUltraFast()
 					lastUltraFastScan = now
 					scansPerformed++
 				}
+			}
+
+			// Scalp re-entry mode: uses same scan interval as scalp mode
+			if enabledModesMap["scalp_reentry"] && now.Sub(lastScalpReentryScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
+				log.Printf("[MODE-SCAN] Scanning SCALP-REENTRY mode (DB-enabled, interval: %ds)", ga.config.ScalpScanInterval)
+				ga.scanForMode(GinieModeScalpReentry)
+				lastScalpReentryScan = now
+				scansPerformed++
 			}
 
 			// Scan saved strategies (every 60 seconds)
@@ -1885,7 +1931,8 @@ func (ga *GinieAutopilot) runMainLoop() {
 				ga.scanDuration = time.Since(scanCycleStart)
 				// Calculate next scan time based on shortest enabled interval
 				shortestInterval := time.Duration(ga.config.ScalpScanInterval) * time.Second
-				if currentSettings.UltraFastEnabled {
+				if enabledModesMap["ultra_fast"] {
+					currentSettings := GetSettingsManager().GetDefaultSettings()
 					ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
 					if ultraFastInterval < shortestInterval {
 						shortestInterval = ultraFastInterval
@@ -2068,7 +2115,7 @@ func (ga *GinieAutopilot) canTrade() bool {
 func (ga *GinieAutopilot) scanForUltraFast() {
 	symbols := ga.analyzer.watchSymbols
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings()
+	currentSettings := settingsManager.GetDefaultSettings()
 
 	// Check if circuit breaker is tripped - skip entire scan
 	if currentSettings.UltraFastCircuitBreakerTripped {
@@ -2326,7 +2373,7 @@ func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availa
 
 		// Get min confidence from settings (default 60%)
 		settingsManager := GetSettingsManager()
-		currentSettings := settingsManager.GetCurrentSettings()
+		currentSettings := settingsManager.GetDefaultSettings()
 		minConfidence := currentSettings.UltraFastMinConfidence
 		if minConfidence <= 0 {
 			minConfidence = 60.0 // Default 60%
@@ -2562,7 +2609,7 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			// This allows scalp_reentry to share entry logic with scalp but use different position management
 			if mode == GinieModeScalp {
 				sm := GetSettingsManager()
-				settings := sm.GetCurrentSettings()
+				settings := sm.GetDefaultSettings()
 				if settings.ScalpReentryConfig.Enabled {
 					// Override to scalp_reentry mode for progressive TP and re-entry at breakeven
 					decision.SelectedMode = GinieModeScalpReentry
@@ -2989,10 +3036,21 @@ func (ga *GinieAutopilot) getAvailableBalance() (float64, error) {
 // 4. Risk level setting
 // 5. Safety margin to avoid over-allocation
 // 6. Per-symbol performance category (size multiplier)
-// 7. Mode-specific configuration overrides
+// 7. Mode-specific configuration overrides (from DATABASE)
 // 8. AI/LLM suggested size when auto_size_enabled is true
+//
+// DATABASE INTEGRATION: This function reads position size settings from mode_configs table:
+// - modeConfig.Size.BaseSizeUSD: Base position size in USD
+// - modeConfig.Size.MaxSizeUSD: Maximum position size cap
+// - modeConfig.Size.MinPositionSizeUSD: Minimum position size enforced
+// - modeConfig.Size.SafetyMargin: Balance utilization safety margin
+// - modeConfig.Size.MaxPositions: Max positions for this mode
+// - modeConfig.Size.RiskMultiplier* (Conservative/Moderate/Aggressive): Risk scaling
+// - modeConfig.Size.ConfidenceMultiplier* (Base/Scale): Confidence-based sizing
+// - modeConfig.Size.AutoSizeEnabled: Use AI/LLM suggested size
+// - modeConfig.Size.Leverage: Leverage setting for this mode
 func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidence float64, currentPositionCount int, mode GinieTradingMode, llmSuggestedSize float64) (positionUSD float64, canTrade bool, reason string) {
-	// Get mode configuration for mode-specific sizing parameters
+	// Get mode configuration for mode-specific sizing parameters (from database)
 	modeConfig := ga.getModeConfig(mode)
 
 	// Get actual available balance from Binance
@@ -3274,7 +3332,7 @@ func parseHoldDuration(durationStr string) time.Duration {
 // Returns (shouldClose bool, holdDuration time.Duration, maxHoldDuration time.Duration)
 func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, time.Duration, time.Duration) {
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Get mode-specific config
 	modeKey := map[GinieTradingMode]string{
@@ -3759,9 +3817,58 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		return
 	}
 
-	// Double-check we don't already have a position
-	if _, exists := ga.positions[symbol]; exists {
-		return
+	// Check if we already have a position - if so, evaluate hedge opportunity
+	if existingPos, exists := ga.positions[symbol]; exists {
+		// Check if we should open a hedge position (opposite direction)
+		existingSide := existingPos.Side
+		newSide := decision.TradeExecution.Action // "LONG" or "SHORT"
+
+		// Only consider hedge if signal is opposite to existing position
+		if (existingSide == "LONG" && newSide == "SHORT") || (existingSide == "SHORT" && newSide == "LONG") {
+			// Get mode config to check hedge settings
+			modeConfig := ga.getModeConfig(selectedMode)
+			if modeConfig != nil && modeConfig.Hedge != nil && modeConfig.Hedge.AllowHedge {
+				// Check MinConfidenceForHedge threshold
+				if decision.ConfidenceScore >= modeConfig.Hedge.MinConfidenceForHedge {
+					// Check if existing position is profitable enough
+					currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+					if err == nil {
+						var profitPct float64
+						if existingPos.Side == "LONG" {
+							profitPct = (currentPrice - existingPos.EntryPrice) / existingPos.EntryPrice * 100
+						} else {
+							profitPct = (existingPos.EntryPrice - currentPrice) / existingPos.EntryPrice * 100
+						}
+
+						if profitPct >= modeConfig.Hedge.ExistingMustBeInProfit {
+							ga.logger.Info("Signal-based hedge opportunity detected",
+								"symbol", symbol,
+								"existing_side", existingSide,
+								"new_signal", newSide,
+								"confidence", decision.ConfidenceScore,
+								"min_required", modeConfig.Hedge.MinConfidenceForHedge,
+								"existing_profit_pct", profitPct,
+								"min_profit_required", modeConfig.Hedge.ExistingMustBeInProfit,
+								"note", "Hedge logic not yet fully implemented - would open opposite position here")
+							// TODO: Implement signal-based hedge opening logic
+							// This would open a new position in opposite direction up to MaxHedgeSizePercent
+							// For now, we log and return (existing behavior)
+						} else {
+							ga.logger.Debug("Hedge rejected - existing position not profitable enough",
+								"symbol", symbol,
+								"existing_profit_pct", profitPct,
+								"min_required", modeConfig.Hedge.ExistingMustBeInProfit)
+						}
+					}
+				} else {
+					ga.logger.Debug("Hedge rejected - confidence too low",
+						"symbol", symbol,
+						"confidence", decision.ConfidenceScore,
+						"min_required", modeConfig.Hedge.MinConfidenceForHedge)
+				}
+			}
+		}
+		return // Still skip opening new position if one exists
 	}
 
 	// Capture MODE-SPECIFIC position count while holding lock for adaptive sizing
@@ -4456,7 +4563,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		// This ensures the 3x multiplier at entry time is the only path to scalp_reentry
 		if pos.Mode == GinieModeScalp && pos.ScalpReentry == nil {
 			sm := GetSettingsManager()
-			settings := sm.GetCurrentSettings()
+			settings := sm.GetDefaultSettings()
 			if settings.ScalpReentryConfig.Enabled {
 				// Upgrade the position mode
 				oldMode := pos.Mode
@@ -4488,7 +4595,10 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 		// Calculate current PnL
 		var pnlPercent float64
-		if pos.Side == "LONG" {
+		if pos.EntryPrice <= 0 {
+			pnlPercent = 0
+			pos.UnrealizedPnL = 0
+		} else if pos.Side == "LONG" {
 			pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 			pos.UnrealizedPnL = (currentPrice - pos.EntryPrice) * pos.RemainingQty
 		} else {
@@ -4558,7 +4668,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		// Ultra-fast and Scalp modes: NO trailing (disabled in settings)
 		if !pos.TrailingActive {
 			settingsManager := GetSettingsManager()
-			settings := settingsManager.GetCurrentSettings()
+			settings := settingsManager.GetDefaultSettings()
 
 			// Check if trailing is enabled for this mode (read from ModeConfigs)
 			modeToConfigKey := map[string]string{
@@ -4656,7 +4766,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			var trailingOldSL float64
 			var trailingImprovement float64
 
-			if pos.Side == "LONG" && newTrailingSL > pos.StopLoss {
+			if pos.Side == "LONG" && newTrailingSL > pos.StopLoss && pos.EntryPrice > 0 {
 				slImprovement := (newTrailingSL - pos.StopLoss) / pos.EntryPrice * 100
 				if slImprovement >= ga.config.TrailingSLUpdateThreshold {
 					trailingOldSL = pos.StopLoss
@@ -4670,7 +4780,7 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 						"highest_price", pos.HighestPrice,
 						"improvement_pct", slImprovement)
 				}
-			} else if pos.Side == "SHORT" && newTrailingSL < pos.StopLoss {
+			} else if pos.Side == "SHORT" && newTrailingSL < pos.StopLoss && pos.EntryPrice > 0 {
 				slImprovement := (pos.StopLoss - newTrailingSL) / pos.EntryPrice * 100
 				if slImprovement >= ga.config.TrailingSLUpdateThreshold {
 					trailingOldSL = pos.StopLoss
@@ -4881,7 +4991,7 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 
 			// 3. Fallback to mode-based threshold from ModeConfigs (not hardcoded)
 			// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
-			settings := settingsManager.GetCurrentSettings()
+			settings := settingsManager.GetDefaultSettings()
 			modeToConfigKey := map[string]string{
 				string(GinieModeUltraFast):    "ultra_fast",
 				string(GinieModeScalp):        "scalp",
@@ -5114,7 +5224,14 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 	// Calculate PnL for this portion (both USD and percentage for circuit breaker)
 	var grossPnl float64
 	var pnlPercent float64
-	if pos.Side == "LONG" {
+
+	// Defensive check: prevent division by zero
+	if pos.EntryPrice <= 0 {
+		pnlPercent = 0
+		ga.logger.Warn("Position has invalid entry price, using 0 PnL",
+			"symbol", pos.Symbol,
+			"entry_price", pos.EntryPrice)
+	} else if pos.Side == "LONG" {
 		grossPnl = (currentPrice - pos.EntryPrice) * closeQty
 		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 	} else {
@@ -5795,7 +5912,10 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	// Calculate PnL
 	var grossPnl float64
 	var pnlPercent float64
-	if pos.Side == "LONG" {
+	if pos.EntryPrice <= 0 {
+		pnlPercent = 0
+		grossPnl = 0
+	} else if pos.Side == "LONG" {
 		grossPnl = (currentPrice - pos.EntryPrice) * pos.RemainingQty
 		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 	} else {
@@ -6011,7 +6131,10 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	// Calculate PnL
 	var grossPnl float64
 	var pnlPercent float64
-	if pos.Side == "LONG" {
+	if pos.EntryPrice <= 0 {
+		pnlPercent = 0
+		grossPnl = 0
+	} else if pos.Side == "LONG" {
 		grossPnl = (currentPrice - pos.EntryPrice) * pos.RemainingQty
 		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 	} else {
@@ -6333,16 +6456,34 @@ func (ga *GinieAutopilot) getTPPercent(level int) float64 {
 	}
 }
 
-// getModeConfig retrieves the mode configuration from SettingsManager with fallback to nil
+// getModeConfig retrieves the mode configuration from SettingsManager with database-first approach
 // This is a helper method that provides a unified way to get mode-specific configuration
+// Priority: 1) User-specific DB config, 2) Global defaults (for new users only)
 func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 	sm := GetSettingsManager()
-	if sm != nil {
-		modeStr := string(mode)
-		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil {
+	if sm == nil {
+		return nil
+	}
+
+	modeStr := string(mode)
+
+	// DATABASE-FIRST: Try to load user-specific config from database
+	if ga.repo != nil && ga.userID != "" {
+		ctx := context.Background()
+		if modeConfig, err := sm.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, modeStr); err == nil && modeConfig != nil {
+			log.Printf("[MODE-CONFIG] Loaded from DATABASE for user %s mode %s: BaseSizeUSD=%.2f",
+				ga.userID, modeStr, modeConfig.Size.BaseSizeUSD)
 			return modeConfig
 		}
 	}
+
+	// FALLBACK: Only use global config if no database config exists
+	// This should only happen for brand new users who haven't customized settings
+	if modeConfig, err := sm.GetDefaultModeConfig(modeStr); err == nil && modeConfig != nil {
+		log.Printf("[MODE-CONFIG] Loaded from DEFAULTS for mode %s (user has no DB config)", modeStr)
+		return modeConfig
+	}
+
 	return nil
 }
 
@@ -6368,6 +6509,31 @@ func (ga *GinieAutopilot) getEntryTimeframe(mode GinieTradingMode) string {
 		return "1h"
 	default:
 		return "5m"
+	}
+}
+
+// getTrendTimeframe returns the trend timeframe for a given mode
+// This is used for higher timeframe trend analysis
+func (ga *GinieAutopilot) getTrendTimeframe(mode GinieTradingMode) string {
+	// Try to read from Mode Config first
+	if modeConfig := ga.getModeConfig(mode); modeConfig != nil && modeConfig.Timeframe != nil {
+		if modeConfig.Timeframe.TrendTimeframe != "" {
+			return modeConfig.Timeframe.TrendTimeframe
+		}
+	}
+
+	// Fallback to defaults
+	switch mode {
+	case GinieModeUltraFast:
+		return "5m"
+	case GinieModeScalp:
+		return "15m"
+	case GinieModeSwing:
+		return "1h"
+	case GinieModePosition:
+		return "4h"
+	default:
+		return "15m"
 	}
 }
 
@@ -6697,7 +6863,7 @@ func (ga *GinieAutopilot) getTrailingPercent(mode GinieTradingMode) float64 {
 	sm := GetSettingsManager()
 	if sm != nil {
 		modeStr := string(mode)
-		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+		if modeConfig, err := sm.GetDefaultModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 			if modeConfig.SLTP.TrailingStopPercent > 0 {
 				return modeConfig.SLTP.TrailingStopPercent
 			}
@@ -6724,7 +6890,7 @@ func (ga *GinieAutopilot) getTrailingActivation(mode GinieTradingMode) float64 {
 	sm := GetSettingsManager()
 	if sm != nil {
 		modeStr := string(mode)
-		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+		if modeConfig, err := sm.GetDefaultModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 			// Return the configured activation (even if 0, that's valid = disabled)
 			return modeConfig.SLTP.TrailingStopActivation
 		}
@@ -6749,7 +6915,7 @@ func (ga *GinieAutopilot) isTrailingEnabled(mode GinieTradingMode) bool {
 	sm := GetSettingsManager()
 	if sm != nil {
 		modeStr := string(mode)
-		if modeConfig, err := sm.GetModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+		if modeConfig, err := sm.GetDefaultModeConfig(modeStr); err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 			return modeConfig.SLTP.TrailingStopEnabled
 		}
 	}
@@ -6780,7 +6946,7 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 	// SCALP_REENTRY SPECIAL CASE: Use ScalpReentryConfig for TP levels
 	// This mode has its own progressive TP config (0.4%, 0.7%, 1.0% with specific sell %)
 	if mode == GinieModeScalpReentry {
-		scalpReentryConfig := GetSettingsManager().GetCurrentSettings().ScalpReentryConfig
+		scalpReentryConfig := GetSettingsManager().GetDefaultSettings().ScalpReentryConfig
 		// TP1: tp1_percent% gain, sell tp1_sell_percent%
 		// TP2: tp2_percent% gain, sell tp2_sell_percent%
 		// TP3: tp3_percent% gain, sell tp3_sell_percent%
@@ -7128,7 +7294,7 @@ func (ga *GinieAutopilot) morningAutoBlockWorstPerformers() {
 
 	for {
 		// Get current settings to check if enabled and get scheduled time
-		settings := sm.GetCurrentSettings()
+		settings := sm.GetDefaultSettings()
 		if !settings.MorningAutoBlockEnabled {
 			ga.logger.Info("Morning auto-block is disabled, checking again in 1 hour")
 			select {
@@ -7173,7 +7339,7 @@ func (ga *GinieAutopilot) morningAutoBlockWorstPerformers() {
 		}
 
 		// Re-check if still enabled (settings might have changed)
-		settings = sm.GetCurrentSettings()
+		settings = sm.GetDefaultSettings()
 		if !settings.MorningAutoBlockEnabled {
 			ga.logger.Info("Morning auto-block was disabled before execution, skipping")
 			continue
@@ -7685,7 +7851,10 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 				} else if existingTrade != nil {
 					// CRITICAL FIX: Validate entry prices match before reusing trade ID
 					// If prices differ significantly (>1%), this is a NEW position and old trade should be closed
-					priceDiff := math.Abs(existingTrade.EntryPrice-pos.EntryPrice) / pos.EntryPrice * 100
+					var priceDiff float64
+					if pos.EntryPrice > 0 {
+						priceDiff = math.Abs(existingTrade.EntryPrice-pos.EntryPrice) / pos.EntryPrice * 100
+					}
 					if priceDiff < 1.0 {
 						// Entry prices match - reuse existing trade ID
 						tradeID = existingTrade.ID
@@ -7870,7 +8039,7 @@ func (ga *GinieAutopilot) SyncPnLFromBinance() error {
 
 	// Update settings with synced values
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings()
+	settings := settingsManager.GetDefaultSettings()
 
 	oldDaily := settings.UltraFastDailyPnL
 	oldTotal := settings.UltraFastTotalPnL
@@ -9744,7 +9913,7 @@ func (ga *GinieAutopilot) runEarlyWarningMonitor() {
 
 	// Get settings
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if !settings.EarlyWarningEnabled {
 		ga.logger.Info("Early warning monitor disabled by settings")
@@ -9783,7 +9952,7 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 
 	// Get fresh settings
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if !settings.EarlyWarningEnabled {
 		return
@@ -10506,8 +10675,9 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 	updated := 0
 
 	for symbol, pos := range ga.positions {
-		// Get klines for ATR calculation
-		klines, err := ga.futuresClient.GetFuturesKlines(symbol, "1m", 50)
+		// Get klines for ATR calculation - use position's mode entry timeframe
+		timeframe := ga.getEntryTimeframe(pos.Mode) // default based on mode
+		klines, err := ga.futuresClient.GetFuturesKlines(symbol, timeframe, 50)
 		if err != nil {
 			ga.logger.Error("Failed to get klines for SL/TP recalc", "symbol", symbol, "error", err)
 			continue
@@ -10563,7 +10733,7 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 
 		// Check for manual SL/TP override from ModeConfigs
 		sm := GetSettingsManager()
-		settings := sm.GetCurrentSettings()
+		settings := sm.GetDefaultSettings()
 		var manualSLPct, manualTPPct float64
 
 		modeToConfigKey := map[string]string{
@@ -11166,24 +11336,25 @@ func (ga *GinieAutopilot) processAsyncSLTPRecalculation(jobID string, positions 
 func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) error {
 	symbol := pos.Symbol
 
-	// Get klines
-	klines, err := ga.futuresClient.GetFuturesKlines(symbol, "1h", 200)
+	// Get settings
+	sm := GetSettingsManager()
+	settings := sm.GetDefaultSettings()
+
+	// Determine mode for this position
+	mode := pos.Mode
+	if mode == "" {
+		mode = ga.selectEnabledModeForPosition() // Use user's enabled mode preference
+	}
+
+	// Get klines using position's mode trend timeframe
+	timeframe := ga.getTrendTimeframe(mode) // default based on mode
+	klines, err := ga.futuresClient.GetFuturesKlines(symbol, timeframe, 200)
 	if err != nil {
 		return fmt.Errorf("failed to fetch klines: %w", err)
 	}
 
 	if len(klines) < 50 {
 		return fmt.Errorf("insufficient klines for analysis")
-	}
-
-	// Get settings
-	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
-
-	// Determine mode for this position
-	mode := pos.Mode
-	if mode == "" {
-		mode = ga.selectEnabledModeForPosition() // Use user's enabled mode preference
 	}
 
 	// Get manual SL/TP override if set from ModeConfigs
@@ -11829,7 +12000,10 @@ func (ga *GinieAutopilot) CloseAllPositions() (int, float64, error) {
 		// Calculate PnL (both USD and percentage for circuit breaker)
 		var pnl float64
 		var pnlPercent float64
-		if pos.Side == "LONG" {
+		if pos.EntryPrice <= 0 {
+			pnl = 0
+			pnlPercent = 0
+		} else if pos.Side == "LONG" {
 			pnl = (currentPrice - pos.EntryPrice) * pos.RemainingQty
 			pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 		} else {
@@ -12835,7 +13009,7 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 	// Get leverage for mode to calculate margin requirement
 	// With leverage, a $500 notional position only needs $50 margin (10x leverage)
 	leverage := 10 // default
-	modeConfig, err := settings.GetModeConfig(string(mode))
+	modeConfig, err := settings.GetDefaultModeConfig(string(mode))
 	if err == nil && modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
 		leverage = modeConfig.Size.Leverage
 	}
@@ -13261,7 +13435,7 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 	}()
 
 	// Get configurable interval from settings (default 2000ms)
-	settings := GetSettingsManager().GetCurrentSettings()
+	settings := GetSettingsManager().GetDefaultSettings()
 	monitorInterval := settings.UltraFastMonitorInterval
 	if monitorInterval <= 0 {
 		monitorInterval = 2000 // Default to 2 seconds
@@ -13278,12 +13452,11 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 			ga.logger.Info("Ultra-fast position monitor stopping")
 			return
 		case <-ticker.C:
-			// FIX: Re-check if ultra-fast mode is still enabled
-			// If disabled at runtime, stop the monitor goroutine
-			currentSettings := GetSettingsManager().GetCurrentSettings()
-			if !currentSettings.UltraFastEnabled {
+			// Check if ultra-fast mode is still enabled (loaded from database on startup)
+			// If mode was disabled, stop the monitor goroutine
+			if !ga.config.EnableUltraFastMode {
 				ga.logger.Info("Ultra-fast mode disabled - stopping position monitor")
-				log.Printf("[ULTRA-FAST] Mode disabled at runtime - stopping monitor goroutine")
+				log.Printf("[ULTRA-FAST] Mode disabled - stopping monitor goroutine")
 				return
 			}
 
@@ -13312,7 +13485,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 	defer ga.mu.Unlock()
 
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings()
+	settings := settingsManager.GetDefaultSettings()
 
 	// Check if circuit breaker is tripped
 	if settings.UltraFastCircuitBreakerTripped {
@@ -13396,7 +13569,10 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 		var pnlPercent, pnlUSD float64
 		closeQty := pos.RemainingQty
 
-		if pos.Side == "LONG" {
+		if pos.EntryPrice <= 0 {
+			pnlPercent = 0
+			pnlUSD = 0
+		} else if pos.Side == "LONG" {
 			pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
 			exitFeeUSD := currentPrice * closeQty * 0.0004 // 0.04% taker fee
 			pnlUSD = pnlBeforeFees - exitFeeUSD
@@ -13455,7 +13631,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 
 			// Update win tracking for partial close
 			settingsManager := GetSettingsManager()
-			s := settingsManager.GetCurrentSettings()
+			s := settingsManager.GetDefaultSettings()
 			s.UltraFastDailyPnL += partialPnL
 			s.UltraFastTotalPnL += partialPnL
 			settingsManager.SaveSettings(s)
@@ -13473,7 +13649,7 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 
 			// Update tracking
 			settingsManager := GetSettingsManager()
-			s := settingsManager.GetCurrentSettings()
+			s := settingsManager.GetDefaultSettings()
 			s.UltraFastDailyPnL += partialPnL
 			s.UltraFastTotalPnL += partialPnL
 			settingsManager.SaveSettings(s)
@@ -13597,12 +13773,22 @@ func (ga *GinieAutopilot) updateUltraFastTrailingStop(pos *GiniePosition, curren
 // executeUltraFastExitWithTracking wraps executeUltraFastExit with win/loss tracking and circuit breaker checks
 // This is the primary exit method for ultra-fast positions that updates statistics
 func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, currentPrice float64, reason string, pnlUSD float64) {
+	// Calculate PnL percentage for adaptive AI tracking
+	var pnlPercent float64
+	if pos.EntryPrice <= 0 {
+		pnlPercent = 0
+	} else if pos.Side == "LONG" {
+		pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
+	} else {
+		pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
+	}
+
 	// Execute the actual exit
 	ga.executeUltraFastExit(pos, currentPrice, reason)
 
 	// Update ultra-fast specific statistics
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings()
+	settings := settingsManager.GetDefaultSettings()
 
 	// Check if we need to reset daily stats (new day)
 	today := time.Now().Format("2006-01-02")
@@ -13683,7 +13869,7 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 			Direction:  pos.Side,
 			EntryPrice: pos.EntryPrice,
 			ExitPrice:  currentPrice,
-			PnLPercent: ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100,
+			PnLPercent: pnlPercent, // Use already calculated pnlPercent with defensive check
 			PnLUSD:     pnlUSD,
 			Outcome:    outcomeStr,
 			MarketSnapshot: marketSnapshot,
@@ -13754,7 +13940,7 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 
 	// Get settings for circuit breaker thresholds
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings()
+	settings := settingsManager.GetDefaultSettings()
 
 	// Check ADX - for ultra-fast, lower threshold since we're catching momentum not trends
 	minADX := settings.UltraFastMinADX
@@ -13951,7 +14137,10 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 	var pnlUSD, pnlPercent float64
 	var exitFeeUSD float64
 
-	if pos.Side == "LONG" {
+	if pos.EntryPrice <= 0 {
+		pnlPercent = 0
+		pnlUSD = 0
+	} else if pos.Side == "LONG" {
 		pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
 		// Only count exit fee (entry fee already deducted at position open)
 		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
@@ -14294,7 +14483,7 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 	}
 
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings()
+	currentSettings := settingsManager.GetDefaultSettings()
 	maxUltraFastPositions := currentSettings.UltraFastMaxPositions
 	if currentUltraFastCount >= maxUltraFastPositions {
 		return fmt.Errorf("ultra-fast position limit reached: %d/%d", currentUltraFastCount, maxUltraFastPositions)
@@ -14579,7 +14768,7 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	}
 
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings()
+	currentSettings := settingsManager.GetDefaultSettings()
 	maxUltraFastPositions := currentSettings.UltraFastMaxPositions
 	if currentUltraFastCount >= maxUltraFastPositions {
 		return fmt.Errorf("ultra-fast position limit reached: %d/%d", currentUltraFastCount, maxUltraFastPositions)
@@ -15836,6 +16025,68 @@ func (ga *GinieAutopilot) checkPendingLimitOrders() {
 			ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
 			toRemove = append(toRemove, symbol)
 			continue
+		} else if orderStatus.Status == "PARTIALLY_FILLED" {
+			// Handle partial fills - prevent zombie orders
+			filledRatio := orderStatus.ExecutedQty / pending.Quantity
+
+			// If more than 80% filled, treat as filled and create position
+			if filledRatio >= 0.8 {
+				ga.logger.Info("LIMIT order sufficiently filled (>=80%) - creating position",
+					"symbol", symbol,
+					"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
+					"filled_qty", orderStatus.ExecutedQty,
+					"requested_qty", pending.Quantity,
+					"order_id", pending.OrderID)
+
+				// Cancel remaining unfilled portion
+				ga.mu.Unlock()
+				_ = ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
+				ga.mu.Lock()
+
+				// Create position with filled quantity
+				ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
+				toRemove = append(toRemove, symbol)
+				continue
+			}
+
+			// If timed out with partial fill, create position with what we have
+			if now.After(pending.TimeoutAt) {
+				if orderStatus.ExecutedQty > 0 {
+					ga.logger.Warn("LIMIT order timed out with partial fill - creating position with filled qty",
+						"symbol", symbol,
+						"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
+						"filled_qty", orderStatus.ExecutedQty,
+						"requested_qty", pending.Quantity,
+						"order_id", pending.OrderID)
+
+					// Cancel remaining
+					ga.mu.Unlock()
+					_ = ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
+					ga.mu.Lock()
+
+					// Create position with partial fill
+					ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
+				} else {
+					ga.logger.Warn("LIMIT order timed out with zero fill - cancelling",
+						"symbol", symbol,
+						"order_id", pending.OrderID)
+					ga.mu.Unlock()
+					_ = ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
+					ga.mu.Lock()
+				}
+				toRemove = append(toRemove, symbol)
+				continue
+			}
+
+			// Still waiting for more fill - log periodically
+			ga.logger.Debug("LIMIT order partially filled - waiting",
+				"symbol", symbol,
+				"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
+				"filled_qty", orderStatus.ExecutedQty,
+				"requested_qty", pending.Quantity,
+				"time_remaining", pending.TimeoutAt.Sub(now).Round(time.Second),
+				"order_id", pending.OrderID)
+			continue
 		} else if orderStatus.Status == "CANCELED" || orderStatus.Status == "EXPIRED" || orderStatus.Status == "REJECTED" {
 			// Order was cancelled/expired/rejected externally
 			ga.logger.Warn("Reversal LIMIT order was cancelled/expired/rejected externally",
@@ -15844,13 +16095,41 @@ func (ga *GinieAutopilot) checkPendingLimitOrders() {
 				"status", orderStatus.Status)
 			toRemove = append(toRemove, symbol)
 			continue
+		} else if orderStatus.Status == "NEW" {
+			// Order still pending - check timeout
+			if now.After(pending.TimeoutAt) {
+				ga.logger.Warn("LIMIT order timed out in NEW status - never filled, cancelling",
+					"symbol", symbol,
+					"order_id", pending.OrderID,
+					"waited", now.Sub(pending.PlacedAt).Round(time.Second))
+
+				ga.mu.Unlock()
+				err := ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
+				ga.mu.Lock()
+
+				if err != nil {
+					ga.logger.Error("Failed to cancel timed-out LIMIT order",
+						"symbol", symbol,
+						"order_id", pending.OrderID,
+						"error", err.Error())
+				} else {
+					ga.logger.Info("Timed-out LIMIT order cancelled successfully",
+						"symbol", symbol,
+						"order_id", pending.OrderID)
+				}
+
+				toRemove = append(toRemove, symbol)
+			}
+			// Not timed out yet, keep waiting
+			continue
 		}
 
-		// Check timeout (120 seconds)
+		// Fallback timeout check for any other status
 		if now.After(pending.TimeoutAt) {
-			ga.logger.Warn("Reversal LIMIT order TIMEOUT - cancelling",
+			ga.logger.Warn("Reversal LIMIT order TIMEOUT - unexpected status, cancelling",
 				"symbol", symbol,
 				"order_id", pending.OrderID,
+				"status", orderStatus.Status,
 				"placed_at", pending.PlacedAt.Format(time.RFC3339),
 				"timeout_at", pending.TimeoutAt.Format(time.RFC3339))
 

@@ -529,10 +529,12 @@ func (a *TPTimingAgent) Analyze(ctx context.Context, pos *GiniePosition, data *S
 
 	// Calculate current profit percentage
 	var currentProfitPct float64
-	if pos.Side == "LONG" {
-		currentProfitPct = (data.CurrentPrice - pos.EntryPrice) / pos.EntryPrice * 100
-	} else {
-		currentProfitPct = (pos.EntryPrice - data.CurrentPrice) / pos.EntryPrice * 100
+	if pos.EntryPrice > 0 {
+		if pos.Side == "LONG" {
+			currentProfitPct = (data.CurrentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		} else {
+			currentProfitPct = (pos.EntryPrice - data.CurrentPrice) / pos.EntryPrice * 100
+		}
 	}
 
 	distanceToTP := tpPercent - currentProfitPct

@@ -129,7 +129,7 @@ func NewSpotController(client binance.BinanceClient, logger *logging.Logger) *Sp
 
 	// Load settings from SettingsManager
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	config.Enabled = settings.SpotAutopilotEnabled
 	config.DryRun = settings.SpotDryRunMode
@@ -582,7 +582,11 @@ func (sc *SpotController) monitorPositions() {
 		// Calculate PnL
 		pnl := (currentPrice - pos.EntryPrice) * pos.Quantity
 		pos.UnrealizedPnL = pnl
-		pos.UnrealizedPnLPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		if pos.EntryPrice > 0 {
+			pos.UnrealizedPnLPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		} else {
+			pos.UnrealizedPnLPercent = 0
+		}
 
 		// Check take profit
 		if currentPrice >= pos.TakeProfit {
@@ -601,7 +605,10 @@ func (sc *SpotController) monitorPositions() {
 // closePosition closes a position
 func (sc *SpotController) closePosition(symbol string, pos *SpotPosition, currentPrice float64, reason string) {
 	pnl := (currentPrice - pos.EntryPrice) * pos.Quantity
-	pnlPercent := (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+	pnlPercent := 0.0
+	if pos.EntryPrice > 0 {
+		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+	}
 
 	sc.logger.Info("Spot closing position",
 		"symbol", symbol,
@@ -817,7 +824,7 @@ type SpotCoinPreferences struct {
 // GetCoinPreferences returns coin preferences
 func (sc *SpotController) GetCoinPreferences() *SpotCoinPreferences {
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	return &SpotCoinPreferences{
 		Blacklist:    settings.SpotCoinBlacklist,
@@ -832,7 +839,7 @@ func (sc *SpotController) SetCoinPreferences(blacklist, whitelist []string, useW
 	defer sc.mu.Unlock()
 
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.SpotCoinBlacklist = blacklist
 	settings.SpotCoinWhitelist = whitelist

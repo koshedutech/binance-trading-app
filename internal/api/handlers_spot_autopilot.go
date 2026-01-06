@@ -532,7 +532,7 @@ func (s *Server) handleToggleSpotCircuitBreaker(c *gin.Context) {
 	// Persist circuit breaker enabled state
 	go func() {
 		sm := autopilot.GetSettingsManager()
-		settings := sm.GetCurrentSettings()
+		settings := sm.GetDefaultSettings()
 		settings.SpotCircuitBreakerEnabled = req.Enabled
 		if err := sm.SaveSettings(settings); err != nil {
 			fmt.Printf("Failed to persist spot circuit breaker enabled state: %v\n", err)

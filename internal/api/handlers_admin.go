@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
 
+	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/license"
 
@@ -425,5 +427,80 @@ func getLicenseFeatures(licenseType license.LicenseType) ([]string, int) {
 		}, 999
 	default:
 		return []string{"spot_trading", "basic_signals"}, 3
+	}
+}
+
+// ====== ADMIN SETTINGS SYNC HANDLERS ======
+// Story 4.15: Admin Settings Sync
+// When admin modifies settings, sync to default-settings.json
+
+// handleAdminSyncDefaults manually syncs all admin settings to default-settings.json
+// POST /api/admin/sync-defaults
+func (s *Server) handleAdminSyncDefaults(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	syncService := autopilot.GetAdminSyncService()
+	if err := syncService.SyncAllAdminDefaults(ctx); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to sync defaults: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Admin settings synced to default-settings.json successfully",
+		"synced_at": time.Now().Format(time.RFC3339),
+	})
+}
+
+// handleAdminSyncStatus returns the last sync status
+// GET /api/admin/sync-status
+func (s *Server) handleAdminSyncStatus(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	syncService := autopilot.GetAdminSyncService()
+	status, err := syncService.GetSyncStatus(ctx)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to get sync status: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"status":  status,
+	})
+}
+
+// handleAdminRestoreBackup restores default-settings.json from backup
+// POST /api/admin/restore-backup
+func (s *Server) handleAdminRestoreBackup(c *gin.Context) {
+	syncService := autopilot.GetAdminSyncService()
+	if err := syncService.RestoreFromBackup(); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to restore backup: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Successfully restored default-settings.json from backup",
+		"restored_at": time.Now().Format(time.RFC3339),
+	})
+}
+
+// SyncAdminModeConfigIfAdmin checks if user is admin and syncs mode config to defaults
+// This is called from handleUpdateModeConfig to auto-sync admin changes
+func SyncAdminModeConfigIfAdmin(ctx context.Context, userEmail string, modeName string, config *autopilot.ModeFullConfig) {
+	// Only sync if user is admin
+	if !autopilot.IsAdminUser(userEmail) {
+		return
+	}
+
+	syncService := autopilot.GetAdminSyncService()
+	if err := syncService.SyncAdminModeConfig(ctx, modeName, config); err != nil {
+		// Log error but don't fail the original request
+		// Admin's settings are still saved to database even if sync fails
+		// This prevents a sync issue from blocking admin from saving settings
+		// The admin can retry manual sync via /api/admin/sync-defaults
+		// Story 4.15: Admin sync is best-effort, not critical path
+		_ = err // Suppress unused variable warning
 	}
 }

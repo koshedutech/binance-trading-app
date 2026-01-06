@@ -7,6 +7,7 @@ import (
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -161,7 +162,7 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 		}
 
 		// Get dry_run mode from settings
-		currentSettings := sm.GetCurrentSettings()
+		currentSettings := sm.GetDefaultSettings()
 		dryRun = currentSettings.GinieDryRunMode
 
 		// Broadcast autopilot status change to the SPECIFIC user via WebSocket (multi-user safe)
@@ -934,6 +935,70 @@ func (s *Server) handleUpdateGinieCircuitBreakerConfig(c *gin.Context) {
 	})
 }
 
+// ==================== Global Circuit Breaker Handlers (Story 5.3) ====================
+
+// handleGetGlobalCircuitBreaker returns user's global circuit breaker config
+// GET /api/user/global-circuit-breaker
+func (s *Server) handleGetGlobalCircuitBreaker(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	config, err := s.repo.GetUserGlobalCircuitBreaker(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to get config for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get global circuit breaker config")
+		return
+	}
+
+	// If no config exists, return defaults
+	if config == nil {
+		config = database.DefaultGlobalCircuitBreakerConfig()
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"config":  config,
+	})
+}
+
+// handleUpdateGlobalCircuitBreaker updates user's global circuit breaker config
+// PUT /api/user/global-circuit-breaker
+func (s *Server) handleUpdateGlobalCircuitBreaker(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	var config database.GlobalCircuitBreakerConfig
+	if err := c.ShouldBindJSON(&config); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// Validate config
+	if err := config.Validate(); err != nil {
+		errorResponse(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Save to database
+	if err := s.repo.SaveUserGlobalCircuitBreaker(c.Request.Context(), userID, &config); err != nil {
+		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save config for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save global circuit breaker config")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Global circuit breaker config updated successfully",
+		"config":  config,
+	})
+}
+
 // ==================== Ginie Panic Button Handler ====================
 
 // handleSyncGiniePositions syncs Ginie positions with exchange
@@ -1646,36 +1711,114 @@ func parseIntParam(s string) (int, error) {
 
 // handleGetModeConfigs returns all 4 mode configurations (ultrafast, scalp, swing, position)
 // GET /api/futures/ginie/mode-configs
+// DATABASE ONLY: Reads from database for authenticated user. No JSON fallback for existing users.
 func (s *Server) handleGetModeConfigs(c *gin.Context) {
-	log.Println("[MODE-CONFIG] Getting all mode configurations")
+	log.Println("[MODE-CONFIG] Getting all mode configurations (DATABASE ONLY)")
 
+	// Get userID from context (JWT auth)
+	userID, exists := c.Get("user_id")
+	if !exists {
+		// No auth - return error (user must be authenticated)
+		errorResponse(c, http.StatusUnauthorized, "Authentication required to access mode configs")
+		return
+	}
+	userIDStr := userID.(string)
+
+	// DATABASE ONLY: Get configs from database for this user - NO JSON FALLBACK
 	sm := autopilot.GetSettingsManager()
-	configs := sm.GetAllModeConfigs()
+	ctx := context.Background()
+	dbConfigs, err := sm.GetAllUserModeConfigsFromDB(ctx, s.repo, userIDStr)
+	if err != nil {
+		log.Printf("[MODE-CONFIG] ERROR: Failed to get DB configs for user %s: %v", userIDStr, err)
+		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode configs from database: %v", err))
+		return
+	}
+
+	// Ensure all modes are present - if user is missing a mode, log warning
+	// This should NOT happen for properly initialized users
+	defaultConfigs := autopilot.DefaultModeConfigs()
+	mergedConfigs := make(map[string]*autopilot.ModeFullConfig)
+	for mode, defaultCfg := range defaultConfigs {
+		if dbCfg, ok := dbConfigs[mode]; ok {
+			mergedConfigs[mode] = dbCfg
+			log.Printf("[MODE-CONFIG] %s: loaded from DB (enabled=%v)", mode, dbCfg.Enabled)
+		} else {
+			// This should only happen for new users or incomplete DB setup
+			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s in DB - using default (this may indicate incomplete initialization)", userIDStr, mode)
+			mergedConfigs[mode] = defaultCfg
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":      true,
-		"mode_configs": configs,
+		"mode_configs": mergedConfigs,
 		"valid_modes":  []string{"ultra_fast", "scalp", "swing", "position"},
+		"source":       "database",
 	})
 }
 
 // handleGetModeConfig returns configuration for a specific mode
 // GET /api/futures/ginie/mode-config/:mode
+// DATABASE ONLY: Reads from database for authenticated user. No JSON fallback for existing users.
 func (s *Server) handleGetModeConfig(c *gin.Context) {
 	mode := c.Param("mode")
-	log.Printf("[MODE-CONFIG] Getting configuration for mode: %s", mode)
+	log.Printf("[MODE-CONFIG] Getting configuration for mode: %s (DATABASE ONLY)", mode)
 
-	sm := autopilot.GetSettingsManager()
-	config, err := sm.GetModeConfig(mode)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, err.Error())
+	// Validate mode name
+	validModes := map[string]bool{
+		"ultra_fast": true, "scalp": true, "swing": true,
+		"position": true, "scalp_reentry": true,
+	}
+	if !validModes[mode] {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid mode: %s", mode))
 		return
 	}
 
+	// Get userID from context (JWT auth)
+	userID, exists := c.Get("user_id")
+	if !exists {
+		// No auth - return error (user must be authenticated)
+		errorResponse(c, http.StatusUnauthorized, "Authentication required to access mode config")
+		return
+	}
+	userIDStr := userID.(string)
+
+	// DATABASE ONLY: Get config from database for this user - NO JSON FALLBACK
+	sm := autopilot.GetSettingsManager()
+	ctx := context.Background()
+	config, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, mode)
+	if err != nil {
+		log.Printf("[MODE-CONFIG] ERROR: Failed to get DB config for user %s mode %s: %v", userIDStr, mode, err)
+
+		// Check if this is a missing mode (user not initialized) vs database error
+		if err.Error() == "mode config not found" {
+			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - incomplete initialization, using default", userIDStr, mode)
+			// Only in this specific case, use default to fill the gap
+			defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
+			if defaultErr != nil {
+				errorResponse(c, http.StatusBadRequest, defaultErr.Error())
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"mode":    mode,
+				"config":  defaultConfig,
+				"source":  "default_fallback_initialization_incomplete",
+			})
+			return
+		}
+
+		// For other errors, return error response
+		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode config from database: %v", err))
+		return
+	}
+
+	log.Printf("[MODE-CONFIG] Loaded %s from DB for user %s (enabled=%v)", mode, userIDStr, config.Enabled)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"mode":    mode,
 		"config":  config,
+		"source":  "database",
 	})
 }
 
@@ -1683,37 +1826,120 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 // PUT /api/futures/ginie/mode-config/:mode
 func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 	mode := c.Param("mode")
-	log.Printf("[MODE-CONFIG] Updating configuration for mode: %s", mode)
 
-	// Validate mode parameter
-	if !autopilot.ValidModes[mode] {
-		errorResponse(c, http.StatusBadRequest,
-			fmt.Sprintf("Invalid mode '%s': must be ultra_fast, scalp, swing, or position", mode))
+	// Validate mode name
+	validModes := map[string]bool{
+		"ultra_fast": true, "scalp": true, "swing": true,
+		"position": true, "scalp_reentry": true,
+	}
+	if !validModes[mode] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid mode: %s", mode)})
 		return
 	}
 
 	var config autopilot.ModeFullConfig
 	if err := c.ShouldBindJSON(&config); err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Ensure mode name matches URL parameter
 	config.ModeName = mode
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateModeConfig(mode, &config); err != nil {
-		errorResponse(c, http.StatusBadRequest, "Failed to update mode config: "+err.Error())
+	// Get userID from context (JWT auth)
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	userIDStr := userID.(string)
+
+	// Marshal config to JSON for database storage
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to marshal config"})
 		return
 	}
 
-	log.Printf("[MODE-CONFIG] Successfully updated configuration for mode: %s", mode)
+	// CRITICAL: Save to DATABASE (not just JSON file)
+	ctx := context.Background()
+	err = s.repo.SaveUserModeConfig(ctx, userIDStr, mode, config.Enabled, configJSON)
+	if err != nil {
+		log.Printf("[MODE-CONFIG] Failed to save %s config to database for user %s: %v", mode, userIDStr, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save mode config to database"})
+		return
+	}
+
+	log.Printf("[MODE-CONFIG] Saved %s config to database for user %s (enabled=%v)", mode, userIDStr, config.Enabled)
+
+	// Also update in-memory settings for backwards compatibility
+	sm := autopilot.GetSettingsManager()
+	if err := sm.UpdateModeConfig(mode, &config); err != nil {
+		log.Printf("[MODE-CONFIG] Warning: failed to update in-memory config: %v", err)
+		// Don't fail - database is the source of truth now
+	}
+
+	// Story 4.15: Auto-sync to default-settings.json if admin user
+	// Get user email to check if admin
+	user, err := s.repo.GetUserByID(ctx, userIDStr)
+	if err == nil && user != nil {
+		SyncAdminModeConfigIfAdmin(ctx, user.Email, mode, &config)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": fmt.Sprintf("Mode configuration updated for %s", mode),
 		"mode":    mode,
-		"config":  config,
+		"enabled": config.Enabled,
+		"message": "Mode config saved to database",
+	})
+}
+
+// handleToggleModeEnabled toggles mode enabled status (quick toggle without full config)
+// POST /api/futures/ginie/mode-config/:mode/toggle
+func (s *Server) handleToggleModeEnabled(c *gin.Context) {
+	mode := c.Param("mode")
+
+	// Validate mode name
+	validModes := map[string]bool{
+		"ultra_fast": true, "scalp": true, "swing": true,
+		"position": true, "scalp_reentry": true,
+	}
+	if !validModes[mode] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid mode: %s", mode)})
+		return
+	}
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get userID from context
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user not authenticated"})
+		return
+	}
+	userIDStr := userID.(string)
+
+	// Update enabled status in database
+	ctx := context.Background()
+	err := s.repo.UpdateUserModeEnabled(ctx, userIDStr, mode, req.Enabled)
+	if err != nil {
+		log.Printf("[MODE-TOGGLE] Failed to toggle %s for user %s: %v", mode, userIDStr, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to toggle mode"})
+		return
+	}
+
+	log.Printf("[MODE-TOGGLE] %s mode %s for user %s (immediate effect)", mode,
+		map[bool]string{true: "ENABLED", false: "DISABLED"}[req.Enabled], userIDStr)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"mode":    mode,
+		"enabled": req.Enabled,
+		"message": "Mode toggled - takes effect on next scan cycle",
 	})
 }
 
@@ -1728,7 +1954,7 @@ func (s *Server) handleResetModeConfigs(c *gin.Context) {
 		return
 	}
 
-	configs := sm.GetAllModeConfigs()
+	configs := sm.GetDefaultModeConfigs()
 
 	log.Println("[MODE-CONFIG] Successfully reset all mode configurations to defaults")
 
@@ -2074,7 +2300,7 @@ func (s *Server) handleGetLLMConfig(c *gin.Context) {
 	log.Println("[LLM-CONFIG] Getting LLM configuration")
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Get the nested LLMConfig from settings
 	llmCfg := settings.LLMConfig
@@ -2182,7 +2408,7 @@ func (s *Server) handleUpdateLLMConfig(c *gin.Context) {
 	}
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Update the nested LLMConfig struct
 	if req.Provider != "" {
@@ -2267,7 +2493,7 @@ func (s *Server) handleUpdateModeLLMSettings(c *gin.Context) {
 	}
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Initialize the map if nil
 	if settings.ModeLLMSettings == nil {
@@ -3091,7 +3317,7 @@ func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
 // GET /api/futures/autopilot/morning-auto-block/config
 func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Calculate next scheduled time
 	hour := settings.MorningAutoBlockHourUTC
@@ -3134,7 +3360,7 @@ func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 	}
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Update only provided fields
 	if req.Enabled != nil {
@@ -3189,7 +3415,7 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 	log.Println("[SLTP-CONFIG] Getting SL/TP configuration for all modes")
 
 	sm := autopilot.GetSettingsManager()
-	configs := sm.GetAllModeConfigs()
+	configs := sm.GetDefaultModeConfigs()
 
 	// Extract just the SLTP config from each mode
 	sltpConfigs := make(map[string]interface{})
@@ -3228,7 +3454,7 @@ func (s *Server) handleUpdateGinieSLTPConfig(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
 
 	// Get current config and update SLTP section
-	config, err := sm.GetModeConfig(mode)
+	config, err := sm.GetDefaultModeConfig(mode)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to get mode config: "+err.Error())
 		return
@@ -3259,7 +3485,7 @@ func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
 	log.Println("[TREND-TF] Getting trend timeframe configuration for all modes")
 
 	sm := autopilot.GetSettingsManager()
-	configs := sm.GetAllModeConfigs()
+	configs := sm.GetDefaultModeConfigs()
 
 	// Extract timeframe config from each mode
 	timeframeConfigs := make(map[string]interface{})
@@ -3303,7 +3529,7 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 			return
 		}
 
-		config, err := sm.GetModeConfig(req.Mode)
+		config, err := sm.GetDefaultModeConfig(req.Mode)
 		if err != nil {
 			errorResponse(c, http.StatusInternalServerError, "Failed to get mode config: "+err.Error())
 			return
@@ -3340,7 +3566,7 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	}
 
 	// No mode specified - return current configs
-	configs := sm.GetAllModeConfigs()
+	configs := sm.GetDefaultModeConfigs()
 	timeframeConfigs := make(map[string]interface{})
 	for modeName, config := range configs {
 		if config.Timeframe != nil {
@@ -3359,22 +3585,34 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 
 // handleGetUltraFastConfig returns ultra-fast mode configuration
 // GET /api/futures/ultrafast/config
+// DB-FIRST: Reads enabled status from database, not from Ginie config
 func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
-	log.Println("[ULTRAFAST] Getting ultra-fast mode configuration")
+	log.Println("[ULTRAFAST] Getting ultra-fast mode configuration (DB-first)")
 
-	sm := autopilot.GetSettingsManager()
-	modeConfig, err := sm.GetModeConfig("ultra_fast")
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to get ultra-fast config: "+err.Error())
+	// Get user ID from JWT
+	userID, exists := c.Get("user_id")
+	if !exists {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
 		return
 	}
+	userIDStr := userID.(string)
 
-	// Get the global enable flag from Ginie config
-	giniePilot := s.getGinieAutopilotForUser(c)
+	sm := autopilot.GetSettingsManager()
+	ctx := context.Background()
+
+	// DB-FIRST: Read from database first
+	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, "ultra_fast")
+	source := "database"
+	if err != nil || modeConfig == nil {
+		// Fallback to defaults
+		modeConfig, _ = sm.GetDefaultModeConfig("ultra_fast")
+		source = "defaults"
+	}
+
+	// Enabled comes from database config, not from Ginie in-memory state
 	enabled := false
-	if giniePilot != nil {
-		ginieConfig := giniePilot.GetConfig()
-		enabled = ginieConfig.EnableUltraFastMode
+	if modeConfig != nil {
+		enabled = modeConfig.Enabled
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -3382,13 +3620,15 @@ func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
 		"mode":    "ultra_fast",
 		"enabled": enabled,
 		"config":  modeConfig,
+		"source":  source,
 	})
 }
 
 // handleUpdateUltraFastConfig updates ultra-fast mode configuration
 // POST /api/futures/ultrafast/config
+// DB-FIRST: Saves all changes to database AND updates in-memory for instant effect
 func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
-	log.Println("[ULTRAFAST] Updating ultra-fast mode configuration")
+	log.Println("[ULTRAFAST] Updating ultra-fast mode configuration (DB-first)")
 
 	var req struct {
 		Enabled *bool                     `json:"enabled"` // Enable/disable ultra-fast mode globally
@@ -3400,51 +3640,81 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
+	// Get user ID from JWT
+	userID, exists := c.Get("user_id")
+	if !exists {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+	userIDStr := userID.(string)
 
-	// Update enabled flag if provided via Ginie config
-	if req.Enabled != nil {
-		giniePilot := s.getGinieAutopilotForUser(c)
-		if giniePilot == nil {
-			errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
-			return
-		}
-		ginieConfig := giniePilot.GetConfig()
-		ginieConfig.EnableUltraFastMode = *req.Enabled
-		giniePilot.SetConfig(ginieConfig)
-		log.Printf("[ULTRAFAST] Ultra-fast mode enabled: %v", *req.Enabled)
+	sm := autopilot.GetSettingsManager()
+	ctx := context.Background()
+
+	// Get current config from database (or defaults)
+	currentConfig, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, "ultra_fast")
+	if err != nil || currentConfig == nil {
+		currentConfig, _ = sm.GetDefaultModeConfig("ultra_fast")
 	}
 
-	// Update full config if provided
+	// Update enabled flag if provided
+	if req.Enabled != nil {
+		currentConfig.Enabled = *req.Enabled
+		log.Printf("[ULTRAFAST] Setting enabled=%v", *req.Enabled)
+	}
+
+	// Merge full config if provided
 	if req.Config != nil {
 		req.Config.ModeName = "ultra_fast"
-		if err := sm.UpdateModeConfig("ultra_fast", req.Config); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to update ultra-fast config: "+err.Error())
-			return
+		// Preserve enabled status from explicit flag or current state
+		if req.Enabled != nil {
+			req.Config.Enabled = *req.Enabled
+		} else {
+			req.Config.Enabled = currentConfig.Enabled
 		}
-		log.Println("[ULTRAFAST] Ultra-fast mode configuration updated")
+		currentConfig = req.Config
+		log.Println("[ULTRAFAST] Merged full config update")
 	}
 
-	// Return current state
-	modeConfig, _ := sm.GetModeConfig("ultra_fast")
-	enabled := false
-	if giniePilot := s.getGinieAutopilotForUser(c); giniePilot != nil {
-		enabled = giniePilot.GetConfig().EnableUltraFastMode
+	// Save to database (source of truth)
+	configJSON, err := json.Marshal(currentConfig)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
+		return
 	}
+	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "ultra_fast", currentConfig.Enabled, configJSON)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
+		return
+	}
+	log.Printf("[ULTRAFAST] Saved ultra_fast config to database for user %s", userIDStr)
+
+	// Update in-memory Ginie config for instant effect
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		ginieConfig := giniePilot.GetConfig()
+		ginieConfig.EnableUltraFastMode = currentConfig.Enabled
+		giniePilot.SetConfig(ginieConfig)
+	}
+
+	// Also update SettingsManager in-memory
+	sm.UpdateModeConfig("ultra_fast", currentConfig)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "Ultra-fast configuration updated",
+		"message": "Ultra-fast configuration updated - takes effect immediately",
 		"mode":    "ultra_fast",
-		"enabled": enabled,
-		"config":  modeConfig,
+		"enabled": currentConfig.Enabled,
+		"config":  currentConfig,
+		"source":  "database",
 	})
 }
 
 // handleToggleUltraFast toggles ultra-fast mode on/off
 // POST /api/futures/ultrafast/toggle
+// DB-FIRST: Saves enabled status to database AND updates in-memory for instant effect
 func (s *Server) handleToggleUltraFast(c *gin.Context) {
-	log.Println("[ULTRAFAST] Toggling ultra-fast mode")
+	log.Println("[ULTRAFAST] Toggling ultra-fast mode (DB-first)")
 
 	var req struct {
 		Enabled bool `json:"enabled"`
@@ -3455,22 +3725,58 @@ func (s *Server) handleToggleUltraFast(c *gin.Context) {
 		return
 	}
 
-	giniePilot := s.getGinieAutopilotForUser(c)
-	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
+	// Get user ID from JWT
+	userID, exists := c.Get("user_id")
+	if !exists {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
 		return
 	}
+	userIDStr := userID.(string)
 
-	ginieConfig := giniePilot.GetConfig()
-	ginieConfig.EnableUltraFastMode = req.Enabled
-	giniePilot.SetConfig(ginieConfig)
+	// 1. Get current config from database (or defaults)
+	sm := autopilot.GetSettingsManager()
+	ctx := context.Background()
+	config, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, "ultra_fast")
+	if err != nil || config == nil {
+		// No DB config, use defaults
+		config, _ = sm.GetDefaultModeConfig("ultra_fast")
+	}
 
-	log.Printf("[ULTRAFAST] Ultra-fast mode toggled to: %v", req.Enabled)
+	// 2. Update the enabled status
+	config.Enabled = req.Enabled
+
+	// 3. Save to database (source of truth)
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
+		return
+	}
+	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "ultra_fast", req.Enabled, configJSON)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
+		return
+	}
+	log.Printf("[ULTRAFAST] Saved ultra_fast enabled=%v to database for user %s", req.Enabled, userIDStr)
+
+	// 4. Update in-memory Ginie config for instant effect (no restart needed)
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		ginieConfig := giniePilot.GetConfig()
+		ginieConfig.EnableUltraFastMode = req.Enabled
+		giniePilot.SetConfig(ginieConfig)
+		log.Printf("[ULTRAFAST] Updated in-memory Ginie config for instant effect")
+	}
+
+	// 5. Also update SettingsManager in-memory for consistency
+	sm.UpdateModeConfig("ultra_fast", config)
+
+	log.Printf("[ULTRAFAST] Ultra-fast mode toggled to: %v (DB + in-memory)", req.Enabled)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"enabled": req.Enabled,
-		"message": fmt.Sprintf("Ultra-fast mode %s", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
+		"source":  "database",
+		"message": fmt.Sprintf("Ultra-fast mode %s - takes effect immediately", map[bool]string{true: "enabled", false: "disabled"}[req.Enabled]),
 	})
 }
 
@@ -3479,25 +3785,29 @@ func (s *Server) handleToggleUltraFast(c *gin.Context) {
 // handleGetScalpReentryConfig returns the current scalp re-entry mode configuration
 // GET /api/futures/ginie/scalp-reentry-config
 func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
-	log.Println("[SCALP-REENTRY] Getting scalp re-entry configuration")
+	userID := s.getUserID(c)
+	log.Printf("[SCALP-REENTRY] Getting scalp re-entry configuration for user %s", userID)
 
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	// Try to get user's config from database
+	configJSON, err := s.repo.GetUserScalpReentryConfig(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[SCALP-REENTRY] Database error: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to retrieve configuration")
+		return
+	}
 
-	config := settings.ScalpReentryConfig
+	var config autopilot.ScalpReentryConfig
 
-	// Apply defaults if config has zero values (not yet initialized)
-	if config.TP1Percent == 0 && config.TP2Percent == 0 && config.TP3Percent == 0 {
-		log.Println("[SCALP-REENTRY] Config has zero values, applying defaults")
-		defaults := autopilot.DefaultScalpReentryConfig()
-		// Preserve enabled state but apply all other defaults
-		defaults.Enabled = config.Enabled
-		config = defaults
-
-		// Save the defaults to settings
-		settings.ScalpReentryConfig = config
-		if err := sm.SaveSettings(settings); err != nil {
-			log.Printf("[SCALP-REENTRY] Warning: Failed to save default config: %v", err)
+	if configJSON == nil {
+		// No config in database - use defaults
+		log.Println("[SCALP-REENTRY] No config in database, using defaults")
+		config = autopilot.DefaultScalpReentryConfig()
+	} else {
+		// Parse the config from database
+		if err := json.Unmarshal(configJSON, &config); err != nil {
+			log.Printf("[SCALP-REENTRY] Failed to parse config from database: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to parse configuration")
+			return
 		}
 	}
 
@@ -3510,7 +3820,8 @@ func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
 // handleUpdateScalpReentryConfig updates the scalp re-entry mode configuration
 // POST /api/futures/ginie/scalp-reentry-config
 func (s *Server) handleUpdateScalpReentryConfig(c *gin.Context) {
-	log.Println("[SCALP-REENTRY] Updating scalp re-entry configuration")
+	userID := s.getUserID(c)
+	log.Printf("[SCALP-REENTRY] Updating scalp re-entry configuration for user %s", userID)
 
 	var req autopilot.ScalpReentryConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -3562,13 +3873,17 @@ func (s *Server) handleUpdateScalpReentryConfig(c *gin.Context) {
 		return
 	}
 
-	// Update settings
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
-	settings.ScalpReentryConfig = req
+	// Marshal config to JSON
+	configJSON, err := json.Marshal(req)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to serialize configuration")
+		return
+	}
 
-	if err := sm.SaveSettings(settings); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+	// Save to database
+	if err := s.repo.SaveUserScalpReentryConfig(c.Request.Context(), userID, configJSON); err != nil {
+		log.Printf("[SCALP-REENTRY] Failed to save config to database: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save configuration")
 		return
 	}
 
@@ -3597,7 +3912,7 @@ func (s *Server) handleToggleScalpReentry(c *gin.Context) {
 	}
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.ScalpReentryConfig.Enabled = req.Enabled
 
 	if err := sm.SaveSettings(settings); err != nil {
@@ -3647,7 +3962,7 @@ func (s *Server) handleGetHedgeModeConfig(c *gin.Context) {
 	log.Println("[HEDGE-MODE] Getting hedge mode configuration")
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	config := settings.ScalpReentryConfig
 
 	c.JSON(http.StatusOK, gin.H{
@@ -3688,7 +4003,7 @@ func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
 
 	// Get existing settings
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	cfg := &settings.ScalpReentryConfig
 
 	// Helper to check if field was provided
@@ -3824,7 +4139,7 @@ func (s *Server) handleToggleHedgeMode(c *gin.Context) {
 	}
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.ScalpReentryConfig.HedgeModeEnabled = req.Enabled
 
 	if err := sm.SaveSettings(settings); err != nil {
@@ -4030,7 +4345,7 @@ func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 
 	// Get scalp reentry config for TP level info
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	config := settings.ScalpReentryConfig
 
 	// Filter and enhance positions with scalp_reentry mode or ScalpReentry status
@@ -4216,7 +4531,7 @@ func (s *Server) handleGetScalpReentryPositionStatus(c *gin.Context) {
 
 	sr := targetPos.ScalpReentry
 	sm := autopilot.GetSettingsManager()
-	config := sm.GetCurrentSettings().ScalpReentryConfig
+	config := sm.GetDefaultSettings().ScalpReentryConfig
 	currentPrice := giniePilot.GetCurrentPrice(symbol)
 
 	// Build detailed response

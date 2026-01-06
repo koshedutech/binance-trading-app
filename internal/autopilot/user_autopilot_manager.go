@@ -232,7 +232,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// Apply global settings (RiskLevel, etc.) from SettingsManager
 	settingsManager := GetSettingsManager()
 	if settingsManager != nil {
-		settings := settingsManager.GetCurrentSettings()
+		settings := settingsManager.GetDefaultSettings()
 		if settings.RiskLevel != "" {
 			if err := autopilot.SetRiskLevel(settings.RiskLevel); err != nil {
 				m.logger.Warn("Failed to apply risk level to user autopilot", "error", err, "user_id", userID)

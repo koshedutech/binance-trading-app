@@ -1,6 +1,7 @@
 package autopilot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"binance-trading-bot/internal/database"
 )
 
 // SymbolPerformanceCategory represents a symbol's performance tier
@@ -26,10 +29,11 @@ const (
 // ModeAllocationConfig holds capital allocation settings per trading mode
 type ModeAllocationConfig struct {
 	// Capital allocation (must sum to 100%)
-	UltraFastScalpPercent float64 `json:"ultra_fast_scalp_percent"` // e.g., 15%
-	ScalpPercent          float64 `json:"scalp_percent"`            // e.g., 25%
-	ScalpReentryPercent   float64 `json:"scalp_reentry_percent"`    // e.g., 15% - progressive TP with re-entry
-	SwingPercent          float64 `json:"swing_percent"`            // e.g., 30%
+	// NOTE: Only 4 trading modes for capital allocation
+	// scalp_reentry is a Position Optimization method, NOT a trading mode
+	UltraFastScalpPercent float64 `json:"ultra_fast_scalp_percent"` // e.g., 20%
+	ScalpPercent          float64 `json:"scalp_percent"`            // e.g., 30%
+	SwingPercent          float64 `json:"swing_percent"`            // e.g., 35%
 	PositionPercent       float64 `json:"position_percent"`         // e.g., 15%
 
 	// Position limits per mode
@@ -127,7 +131,7 @@ type SafetyTradeResult struct {
 // All defaults are from Story 2.7 and can be customized by users
 
 // ModeTimeframeConfig holds timeframe settings for a mode
-type ModeTimeframeConfig struct {
+type ModeTimeframeConfig struct{
 	TrendTimeframe    string `json:"trend_timeframe"`    // Higher TF for trend (e.g., "5m", "15m", "1h", "4h")
 	EntryTimeframe    string `json:"entry_timeframe"`    // Signal timing TF (e.g., "1m", "5m", "15m", "1h")
 	AnalysisTimeframe string `json:"analysis_timeframe"` // Pattern detection TF (e.g., "1m", "15m", "4h", "1d")
@@ -291,6 +295,7 @@ type ModeRiskConfig struct {
 	RiskMultiplierAggressive   float64 `json:"risk_multiplier_aggressive"`   // 1.0
 	MaxDrawdownPercent         float64 `json:"max_drawdown_percent"`         // Max allowed drawdown
 	MaxDailyLossPercent        float64 `json:"max_daily_loss_percent"`       // Max daily loss limit
+	MinADX                     float64 `json:"min_adx"`                      // Minimum ADX for trend strength (database-first approach)
 }
 
 // ModeTrendDivergenceConfig holds trend divergence detection settings
@@ -480,7 +485,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 	return map[string]*ModeFullConfig{
 		"ultra_fast": {
 			ModeName: "ultra_fast",
-			Enabled:  true,
+			Enabled:  false, // DISABLED by default - high risk mode requires explicit enable
 			Timeframe: &ModeTimeframeConfig{
 				TrendTimeframe:    "5m",
 				EntryTimeframe:    "1m",
@@ -1699,12 +1704,12 @@ func DefaultSettings() *AutopilotSettings {
 		},
 
 		// Per-mode capital allocation defaults (conservative)
+		// NOTE: Only 4 trading modes - scalp_reentry uses scalp mode capital
 		ModeAllocation: &ModeAllocationConfig{
 			// Capital allocation: must sum to 100%
-			UltraFastScalpPercent: 15.0, // 15% to ultra-fast scalping
-			ScalpPercent:          25.0, // 25% to scalping
-			ScalpReentryPercent:   15.0, // 15% to scalp re-entry (progressive TP)
-			SwingPercent:          30.0, // 30% to swing trading
+			UltraFastScalpPercent: 20.0, // 20% to ultra-fast scalping
+			ScalpPercent:          30.0, // 30% to scalping (includes scalp_reentry)
+			SwingPercent:          35.0, // 35% to swing trading
 			PositionPercent:       15.0, // 15% to position trading
 
 			// Position limits per mode
@@ -1845,8 +1850,9 @@ func migrateSettings(settings *AutopilotSettings) bool {
 
 	// Already migrated to v2 or higher - no full migration needed
 	if settings.SettingsVersion >= SettingsVersionConsolidated {
-		// Always sync mode_configs to root settings (mode_configs is source of truth)
-		syncModeConfigsToRootSettings(settings)
+		// REMOVED: Do NOT sync mode configs from JSON - they are database-driven
+		// OLD CODE: syncModeConfigsToRootSettings(settings)
+		log.Printf("[SETTINGS] Mode configs are database-driven (not synced from JSON)")
 		return patchMigrated
 	}
 
@@ -1856,12 +1862,14 @@ func migrateSettings(settings *AutopilotSettings) bool {
 	}
 
 	// Initialize mode configs with defaults if they don't exist
+	// ALL modes default to DISABLED - user must explicitly enable via database
 	modes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
 	for _, mode := range modes {
 		if settings.ModeConfigs[mode] == nil {
+			// Default all modes to DISABLED - database is source of truth for enabled status
 			settings.ModeConfigs[mode] = &ModeFullConfig{
 				ModeName: mode,
-				Enabled:  true,
+				Enabled:  false, // Database-driven, not JSON-driven
 			}
 		}
 		// Ensure sub-configs exist
@@ -1871,8 +1879,9 @@ func migrateSettings(settings *AutopilotSettings) bool {
 	// Apply sensible defaults for each mode
 	applyModeDefaults(settings)
 
-	// Sync mode_configs to root-level settings (mode_configs is now source of truth)
-	syncModeConfigsToRootSettings(settings)
+	// REMOVED: Do NOT sync mode configs from JSON - they are database-driven
+	// OLD CODE: syncModeConfigsToRootSettings(settings)
+	log.Printf("[SETTINGS] Mode configs are database-driven (not synced from JSON during migration)")
 
 	// Bump version to v2 after successful migration
 	settings.SettingsVersion = SettingsVersionConsolidated
@@ -2182,11 +2191,16 @@ func (sm *SettingsManager) SaveSettings(settings *AutopilotSettings) error {
 	return nil
 }
 
-// GetCurrentSettings gets current settings (loading from file if needed)
-func (sm *SettingsManager) GetCurrentSettings() *AutopilotSettings {
+// GetDefaultSettings loads default settings from JSON file
+// DEPRECATED: This method is for admin sync, new user initialization, and reset-to-defaults ONLY.
+// DO NOT use this for runtime trading decisions - use database-first methods instead.
+// WARNING: Any call to this method during trading will log a warning.
+func (sm *SettingsManager) GetDefaultSettings() *AutopilotSettings {
+	log.Printf("[SETTINGS] WARNING: GetDefaultSettings() called - this should ONLY be used for defaults, not runtime trading")
 	settings, _ := sm.LoadSettings()
 	return settings
 }
+
 
 // UpdateDynamicSLTP updates dynamic SL/TP settings and saves to file
 func (sm *SettingsManager) UpdateDynamicSLTP(
@@ -2200,7 +2214,7 @@ func (sm *SettingsManager) UpdateDynamicSLTP(
 	minTP float64,
 	maxTP float64,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.DynamicSLTPEnabled = enabled
 	if atrPeriod > 0 {
@@ -2239,7 +2253,7 @@ func (sm *SettingsManager) UpdateScalping(
 	reentryDelaySec int,
 	maxTradesPerDay int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.ScalpingModeEnabled = enabled
 	if minProfit > 0 {
@@ -2266,7 +2280,7 @@ func (sm *SettingsManager) UpdateCircuitBreaker(
 	maxTradesPerMinute int,
 	maxDailyTrades int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.CircuitBreakerEnabled = enabled
 	if maxLossPerHour > 0 {
@@ -2299,7 +2313,7 @@ func (sm *SettingsManager) UpdateAutopilotMode(
 	profitReinvestPercent float64,
 	profitReinvestRiskLevel string,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if riskLevel != "" {
 		settings.RiskLevel = riskLevel
@@ -2320,28 +2334,28 @@ func (sm *SettingsManager) UpdateAutopilotMode(
 
 // UpdateRiskLevel updates just the risk level setting
 func (sm *SettingsManager) UpdateRiskLevel(riskLevel string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.RiskLevel = riskLevel
 	return sm.SaveSettings(settings)
 }
 
 // UpdateDryRunMode updates just the dry run mode setting
 func (sm *SettingsManager) UpdateDryRunMode(dryRun bool) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.GinieDryRunMode = dryRun
 	return sm.SaveSettings(settings)
 }
 
 // UpdateMaxAllocation updates just the max USD allocation setting
 func (sm *SettingsManager) UpdateMaxAllocation(maxAllocation float64) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.MaxUSDAllocation = maxAllocation
 	return sm.SaveSettings(settings)
 }
 
 // UpdateProfitReinvest updates profit reinvestment settings
 func (sm *SettingsManager) UpdateProfitReinvest(percent float64, riskLevel string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.ProfitReinvestPercent = percent
 	settings.ProfitReinvestRiskLevel = riskLevel
 	return sm.SaveSettings(settings)
@@ -2350,7 +2364,7 @@ func (sm *SettingsManager) UpdateProfitReinvest(percent float64, riskLevel strin
 // UpdateGinieRiskLevel updates the risk level across all mode configs
 // This function updates ModeConfigs (primary) and legacy fields (backwards compat).
 func (sm *SettingsManager) UpdateGinieRiskLevel(riskLevel string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Update risk level in all ModeConfigs
 	for _, modeKey := range []string{"ultra_fast", "scalp", "swing", "position"} {
@@ -2417,14 +2431,14 @@ func (sm *SettingsManager) UpdateGinieSettings(
 	minConfidence float64,
 	maxPositions int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Update risk level via ModeConfigs
 	if riskLevel != "" {
 		if err := sm.UpdateGinieRiskLevel(riskLevel); err != nil {
 			return err
 		}
-		settings = sm.GetCurrentSettings() // Refresh after update
+		settings = sm.GetDefaultSettings() // Refresh after update
 	}
 
 	// Global settings that don't belong to ModeConfigs
@@ -2456,7 +2470,7 @@ func (sm *SettingsManager) UpdateGinieSettings(
 
 // UpdateGinieAutoStart updates the Ginie auto-start setting with the user ID
 func (sm *SettingsManager) UpdateGinieAutoStart(autoStart bool, userID string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.GinieAutoStart = autoStart
 	if autoStart && userID != "" {
 		settings.GinieAutoStartUserID = userID
@@ -2468,13 +2482,13 @@ func (sm *SettingsManager) UpdateGinieAutoStart(autoStart bool, userID string) e
 
 // GetGinieAutoStart returns whether Ginie should auto-start
 func (sm *SettingsManager) GetGinieAutoStart() bool {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	return settings.GinieAutoStart
 }
 
 // GetGinieAutoStartUserID returns the user ID to auto-start Ginie for
 func (sm *SettingsManager) GetGinieAutoStartUserID() string {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	return settings.GinieAutoStartUserID
 }
 
@@ -2524,7 +2538,7 @@ func (sm *SettingsManager) UpdateGinieTrendTimeframes(
 		}
 	}
 
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Build map of mode -> timeframe
 	modeTimeframes := map[string]string{
@@ -2619,7 +2633,7 @@ func (sm *SettingsManager) UpdateGinieSLTPSettings(
 		return fmt.Errorf("invalid mode: %s (must be ultra_fast, scalp, swing, position, or scalp_reentry)", mode)
 	}
 
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Update ModeConfigs
 	if mc := settings.ModeConfigs[mode]; mc != nil {
@@ -2657,7 +2671,7 @@ func (sm *SettingsManager) UpdateGinieTPMode(
 		}
 	}
 
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Update ModeConfigs - TP mode applies to all modes
 	for _, modeKey := range []string{"ultra_fast", "scalp", "swing", "position"} {
@@ -2687,7 +2701,7 @@ func (sm *SettingsManager) UpdateGiniePnLStats(
 	winningTrades int,
 	dailyTrades int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.GinieTotalPnL = totalPnL
 	settings.GinieDailyPnL = dailyPnL
@@ -2701,7 +2715,7 @@ func (sm *SettingsManager) UpdateGiniePnLStats(
 
 // GetGiniePnLStats returns Ginie PnL statistics, resetting daily values if date changed
 func (sm *SettingsManager) GetGiniePnLStats() (totalPnL, dailyPnL float64, totalTrades, winningTrades, dailyTrades int) {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	today := time.Now().Format("2006-01-02")
 	if settings.GiniePnLLastUpdate != today {
@@ -2722,14 +2736,14 @@ func (sm *SettingsManager) GetGiniePnLStats() (totalPnL, dailyPnL float64, total
 
 // UpdateSpotDryRunMode updates the spot dry run mode setting
 func (sm *SettingsManager) UpdateSpotDryRunMode(dryRun bool) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.SpotDryRunMode = dryRun
 	return sm.SaveSettings(settings)
 }
 
 // UpdateSpotRiskLevel updates the spot risk level setting
 func (sm *SettingsManager) UpdateSpotRiskLevel(riskLevel string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.SpotRiskLevel = riskLevel
 
 	// Adjust related settings based on risk level
@@ -2756,7 +2770,7 @@ func (sm *SettingsManager) UpdateSpotRiskLevel(riskLevel string) error {
 
 // UpdateSpotMaxAllocation updates the spot max USD per position setting
 func (sm *SettingsManager) UpdateSpotMaxAllocation(maxUSD float64) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.SpotMaxUSDPerPosition = maxUSD
 	return sm.SaveSettings(settings)
 }
@@ -2772,7 +2786,7 @@ func (sm *SettingsManager) UpdateSpotSettings(
 	stopLossPercent float64,
 	minConfidence float64,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.SpotAutopilotEnabled = enabled
 	settings.SpotDryRunMode = dryRun
@@ -2808,7 +2822,7 @@ func (sm *SettingsManager) UpdateSpotCircuitBreaker(
 	maxTradesPerMinute int,
 	maxDailyTrades int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.SpotCircuitBreakerEnabled = enabled
 	if maxLossPerHour > 0 {
@@ -2835,7 +2849,7 @@ func (sm *SettingsManager) UpdateSpotCircuitBreaker(
 
 // UpdateSpotCoinPreferences updates spot coin preference lists
 func (sm *SettingsManager) UpdateSpotCoinPreferences(blacklist, whitelist []string, useWhitelist bool) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.SpotCoinBlacklist = blacklist
 	settings.SpotCoinWhitelist = whitelist
@@ -2852,7 +2866,7 @@ func (sm *SettingsManager) UpdateSpotPnLStats(
 	winningTrades int,
 	dailyTrades int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.SpotTotalPnL = totalPnL
 	settings.SpotDailyPnL = dailyPnL
@@ -2866,7 +2880,7 @@ func (sm *SettingsManager) UpdateSpotPnLStats(
 
 // GetSpotPnLStats returns Spot PnL statistics, resetting daily values if date changed
 func (sm *SettingsManager) GetSpotPnLStats() (totalPnL, dailyPnL float64, totalTrades, winningTrades, dailyTrades int) {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	today := time.Now().Format("2006-01-02")
 	if settings.SpotPnLLastUpdate != today {
@@ -2883,7 +2897,7 @@ func (sm *SettingsManager) GetSpotPnLStats() (totalPnL, dailyPnL float64, totalT
 
 // GetSpotSettings returns all spot settings
 func (sm *SettingsManager) GetSpotSettings() map[string]interface{} {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	return map[string]interface{}{
 		"enabled":              settings.SpotAutopilotEnabled,
@@ -2917,7 +2931,7 @@ func (sm *SettingsManager) GetSpotSettings() map[string]interface{} {
 
 // UpdateAutoModeEnabled toggles auto mode on/off
 func (sm *SettingsManager) UpdateAutoModeEnabled(enabled bool) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.AutoModeEnabled = enabled
 	return sm.SaveSettings(settings)
 }
@@ -2935,7 +2949,7 @@ func (sm *SettingsManager) UpdateAutoModeSettings(
 	quickProfitMode bool,
 	minProfitForExit float64,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.AutoModeEnabled = enabled
 	if maxPositions > 0 {
@@ -2967,7 +2981,7 @@ func (sm *SettingsManager) UpdateAutoModeSettings(
 
 // GetAutoModeSettings returns all auto mode settings
 func (sm *SettingsManager) GetAutoModeSettings() map[string]interface{} {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	return map[string]interface{}{
 		"enabled":            settings.AutoModeEnabled,
@@ -2989,7 +3003,7 @@ func (sm *SettingsManager) GetAutoModeSettings() map[string]interface{} {
 
 // GetSymbolSettings returns settings for a specific symbol
 func (sm *SettingsManager) GetSymbolSettings(symbol string) *SymbolSettings {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3013,7 +3027,7 @@ func (sm *SettingsManager) GetSymbolSettings(symbol string) *SymbolSettings {
 // UpdateSymbolROITarget updates the custom ROI% for a symbol
 // If roiPercent is 0, removes the custom ROI (reverts to mode defaults)
 func (sm *SettingsManager) UpdateSymbolROITarget(symbol string, roiPercent float64) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3038,7 +3052,7 @@ func (sm *SettingsManager) UpdateSymbolROITarget(symbol string, roiPercent float
 // taking into account global settings and per-symbol overrides
 func (sm *SettingsManager) GetEffectiveConfidence(symbol string, globalMinConfidence float64) float64 {
 	symbolSettings := sm.GetSymbolSettings(symbol)
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// If symbol has explicit override, use it
 	if symbolSettings.MinConfidence > 0 {
@@ -3059,7 +3073,7 @@ func (sm *SettingsManager) GetEffectiveConfidence(symbol string, globalMinConfid
 // GetEffectivePositionSize returns the effective max position size for a symbol
 func (sm *SettingsManager) GetEffectivePositionSize(symbol string, globalMaxUSD float64) float64 {
 	symbolSettings := sm.GetSymbolSettings(symbol)
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// If symbol has explicit override, use it
 	if symbolSettings.MaxPositionUSD > 0 {
@@ -3126,7 +3140,7 @@ func (sm *SettingsManager) GetBlockedReason(symbol string) (string, time.Time, b
 
 // BlockSymbolUntil blocks a symbol until the specified time
 func (sm *SettingsManager) BlockSymbolUntil(symbol string, until time.Time, reason string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3158,7 +3172,7 @@ func (sm *SettingsManager) BlockSymbolForDay(symbol string, reason string) error
 
 // UnblockSymbol removes the block from a symbol
 func (sm *SettingsManager) UnblockSymbol(symbol string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		return nil
@@ -3177,7 +3191,7 @@ func (sm *SettingsManager) UnblockSymbol(symbol string) error {
 
 // AutoBlockWorstPerformers automatically blocks all "worst" category symbols for the day
 func (sm *SettingsManager) AutoBlockWorstPerformers() ([]string, error) {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	blockedSymbols := []string{}
 
 	if settings.SymbolSettings == nil {
@@ -3210,7 +3224,7 @@ func (sm *SettingsManager) GetAllBlockedSymbols() map[string]struct {
 	Until  time.Time
 	Reason string
 } {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	blocked := make(map[string]struct {
 		Until  time.Time
 		Reason string
@@ -3234,7 +3248,7 @@ func (sm *SettingsManager) GetAllBlockedSymbols() map[string]struct {
 
 // ClearExpiredBlocks removes expired blocks from all symbols
 func (sm *SettingsManager) ClearExpiredBlocks() int {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	cleared := 0
 
 	if settings.SymbolSettings == nil {
@@ -3263,7 +3277,7 @@ func (sm *SettingsManager) ClearExpiredBlocks() int {
 
 // UpdateSymbolSettings updates settings for a specific symbol
 func (sm *SettingsManager) UpdateSymbolSettings(symbol string, update *SymbolSettings) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3278,7 +3292,7 @@ func (sm *SettingsManager) UpdateSymbolSettings(symbol string, update *SymbolSet
 
 // UpdateSymbolCategory updates just the category for a symbol
 func (sm *SettingsManager) UpdateSymbolCategory(symbol string, category SymbolPerformanceCategory) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3301,7 +3315,7 @@ func (sm *SettingsManager) UpdateSymbolCategory(symbol string, category SymbolPe
 
 // UpdateSymbolPerformance updates performance metrics for a symbol
 func (sm *SettingsManager) UpdateSymbolPerformance(symbol string, totalTrades, winningTrades int, totalPnL float64) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3374,7 +3388,7 @@ func categorizePerformance(totalTrades int, winRate, totalPnL, avgPnL float64) S
 
 // GetAllSymbolSettings returns all symbol settings
 func (sm *SettingsManager) GetAllSymbolSettings() map[string]*SymbolSettings {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	if settings.SymbolSettings == nil {
 		return make(map[string]*SymbolSettings)
 	}
@@ -3383,7 +3397,7 @@ func (sm *SettingsManager) GetAllSymbolSettings() map[string]*SymbolSettings {
 
 // GetSymbolsByCategory returns all symbols in a given category
 func (sm *SettingsManager) GetSymbolsByCategory(category SymbolPerformanceCategory) []string {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	var symbols []string
 
 	if settings.SymbolSettings == nil {
@@ -3401,7 +3415,7 @@ func (sm *SettingsManager) GetSymbolsByCategory(category SymbolPerformanceCatego
 
 // GetSymbolPerformanceReport generates a performance report for all symbols
 func (sm *SettingsManager) GetSymbolPerformanceReport() []SymbolPerformanceReport {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	var reports []SymbolPerformanceReport
 
 	if settings.SymbolSettings == nil {
@@ -3432,7 +3446,7 @@ func (sm *SettingsManager) GetSymbolPerformanceReport() []SymbolPerformanceRepor
 // RecalculateSymbolPerformance refreshes all symbol performance metrics from database
 // and updates the categories based on performance thresholds
 func (sm *SettingsManager) RecalculateSymbolPerformance(dbStats map[string]interface{}) (int, error) {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3549,7 +3563,7 @@ func (sm *SettingsManager) calculatePerformanceCategory(totalPnL, winRate float6
 
 // BlacklistSymbol adds a symbol to the blacklist
 func (sm *SettingsManager) BlacklistSymbol(symbol string, reason string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil {
 		settings.SymbolSettings = make(map[string]*SymbolSettings)
@@ -3572,7 +3586,7 @@ func (sm *SettingsManager) BlacklistSymbol(symbol string, reason string) error {
 
 // UnblacklistSymbol removes a symbol from the blacklist
 func (sm *SettingsManager) UnblacklistSymbol(symbol string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.SymbolSettings == nil || settings.SymbolSettings[symbol] == nil {
 		return nil
@@ -3587,7 +3601,7 @@ func (sm *SettingsManager) UnblacklistSymbol(symbol string) error {
 
 // GetCategorySettings returns the confidence boost and size multiplier for each category
 func (sm *SettingsManager) GetCategorySettings() map[string]map[string]float64 {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	return map[string]map[string]float64{
 		"confidence_boost": settings.CategoryConfidenceBoost,
@@ -3597,7 +3611,7 @@ func (sm *SettingsManager) GetCategorySettings() map[string]map[string]float64 {
 
 // UpdateCategorySettings updates the default adjustments for categories
 func (sm *SettingsManager) UpdateCategorySettings(confidenceBoost, sizeMultiplier map[string]float64) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if confidenceBoost != nil {
 		settings.CategoryConfidenceBoost = confidenceBoost
@@ -3623,7 +3637,7 @@ func (sm *SettingsManager) UpdateUltraFastSettings(
 	minConfidence float64,
 	maxDailyTrades int,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.UltraFastEnabled = enabled
 	if scanInterval > 0 {
@@ -3650,7 +3664,7 @@ func (sm *SettingsManager) UpdateUltraFastSettings(
 
 // GetUltraFastSettings returns all ultra-fast settings as a map
 func (sm *SettingsManager) GetUltraFastSettings() map[string]interface{} {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	return map[string]interface{}{
 		"enabled":          settings.UltraFastEnabled,
@@ -3674,7 +3688,7 @@ func (sm *SettingsManager) UpdateUltraFastStats(
 	dailyTrades int,
 	winRate float64,
 ) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	settings.UltraFastDailyPnL = dailyPnL
 	settings.UltraFastTotalPnL = totalPnL
@@ -3687,7 +3701,7 @@ func (sm *SettingsManager) UpdateUltraFastStats(
 
 // ResetUltraFastDaily resets daily statistics (called at start of day)
 func (sm *SettingsManager) ResetUltraFastDaily() error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	today := time.Now().Format("2006-01-02")
 	if settings.UltraFastLastUpdate != today {
@@ -3703,7 +3717,7 @@ func (sm *SettingsManager) ResetUltraFastDaily() error {
 
 // IncrementUltraFastTrade increments the today's trade count
 func (sm *SettingsManager) IncrementUltraFastTrade() error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	today := time.Now().Format("2006-01-02")
 	if settings.UltraFastLastUpdate != today {
@@ -3720,7 +3734,7 @@ func (sm *SettingsManager) IncrementUltraFastTrade() error {
 
 // GetModeAllocation returns the current mode allocation configuration
 func (sm *SettingsManager) GetModeAllocation() *ModeAllocationConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	if settings.ModeAllocation == nil {
 		// Return default if not set
 		return DefaultSettings().ModeAllocation
@@ -3730,12 +3744,13 @@ func (sm *SettingsManager) GetModeAllocation() *ModeAllocationConfig {
 
 // UpdateModeAllocation updates the mode allocation configuration
 func (sm *SettingsManager) UpdateModeAllocation(config *ModeAllocationConfig) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Validate that allocation percentages sum to 100%
-	total := config.UltraFastScalpPercent + config.ScalpPercent + config.ScalpReentryPercent + config.SwingPercent + config.PositionPercent
+	// NOTE: Only 4 modes - scalp_reentry is a Position Optimization method
+	total := config.UltraFastScalpPercent + config.ScalpPercent + config.SwingPercent + config.PositionPercent
 	if total < 99.0 || total > 101.0 { // Allow 1% rounding error
-		return fmt.Errorf("mode allocation percentages must sum to 100%%, got %.1f%%", total)
+		return fmt.Errorf("mode allocation percentages must sum to 100%% (4 modes: ultra_fast, scalp, swing, position), got %.1f%%", total)
 	}
 
 	settings.ModeAllocation = config
@@ -3749,6 +3764,7 @@ func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital floa
 	var allocatedPercent, maxPositions float64
 
 	// Get mode-specific allocation
+	// NOTE: scalp_reentry shares capital allocation with scalp mode
 	switch mode {
 	case "ultra_fast":
 		allocatedPercent = config.UltraFastScalpPercent
@@ -3757,7 +3773,8 @@ func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital floa
 		allocatedPercent = config.ScalpPercent
 		maxPositions = float64(config.MaxScalpPositions)
 	case "scalp_reentry":
-		allocatedPercent = config.ScalpReentryPercent
+		// scalp_reentry is a Position Optimization method, uses scalp mode allocation
+		allocatedPercent = config.ScalpPercent
 		maxPositions = float64(config.MaxScalpReentryPositions)
 	case "swing":
 		allocatedPercent = config.SwingPercent
@@ -3914,15 +3931,19 @@ func ValidateModeConfig(config *ModeFullConfig) error {
 	return nil
 }
 
-// GetAllModeConfigs returns all 4 mode configurations
-func (sm *SettingsManager) GetAllModeConfigs() map[string]*ModeFullConfig {
-	settings := sm.GetCurrentSettings()
+// GetDefaultModeConfigs returns default mode configurations from JSON file
+// ONLY for: new user initialization, reset-to-defaults, admin sync
+// DO NOT use for runtime trading - use GetAllUserModeConfigsFromDB instead
+func (sm *SettingsManager) GetDefaultModeConfigs() map[string]*ModeFullConfig {
+	log.Printf("[SETTINGS] WARNING: GetDefaultModeConfigs() called - should only be used for defaults, not runtime trading")
+	settings := sm.GetDefaultSettings()
 	if settings.ModeConfigs == nil || len(settings.ModeConfigs) == 0 {
 		return DefaultModeConfigs()
 	}
 	// Merge with defaults to ensure new fields have proper values
 	return mergeWithDefaultConfigs(settings.ModeConfigs)
 }
+
 
 // mergeWithDefaultConfigs ensures saved configs have new fields populated from defaults
 func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeFullConfig {
@@ -3999,13 +4020,17 @@ func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeF
 	return result
 }
 
-// GetModeConfig returns the configuration for a specific mode
-func (sm *SettingsManager) GetModeConfig(mode string) (*ModeFullConfig, error) {
+// GetDefaultModeConfig returns default configuration for a specific mode from JSON
+// ONLY for: new user initialization, reset-to-defaults, admin sync
+// DO NOT use for runtime trading - use GetUserModeConfigFromDB instead
+func (sm *SettingsManager) GetDefaultModeConfig(mode string) (*ModeFullConfig, error) {
+	log.Printf("[SETTINGS] WARNING: GetDefaultModeConfig(%s) called - should only be used for defaults, not runtime trading", mode)
+
 	if !ValidModes[mode] {
 		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", mode)
 	}
 
-	configs := sm.GetAllModeConfigs()
+	configs := sm.GetDefaultModeConfigs()
 	if config, exists := configs[mode]; exists {
 		return config, nil
 	}
@@ -4018,6 +4043,7 @@ func (sm *SettingsManager) GetModeConfig(mode string) (*ModeFullConfig, error) {
 
 	return nil, fmt.Errorf("mode config not found for '%s'", mode)
 }
+
 
 // UpdateModeConfig updates the configuration for a specific mode
 func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig) error {
@@ -4033,7 +4059,7 @@ func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig)
 		return fmt.Errorf("validation failed: %w", err)
 	}
 
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	if settings.ModeConfigs == nil {
 		settings.ModeConfigs = DefaultModeConfigs()
 	}
@@ -4062,9 +4088,72 @@ func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig)
 	return sm.SaveSettings(settings)
 }
 
+// GetUserModeConfigFromDB retrieves mode configuration from database for a specific user.
+// This is the DB-first approach - NO fallback to JSON file or defaults.
+// IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
+// This ensures the dedicated column is the single source of truth (Story 4.11).
+// Returns error if config not found - caller must handle missing configs explicitly.
+func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *database.Repository, userID, modeName string) (*ModeFullConfig, error) {
+	if !ValidModes[modeName] {
+		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", modeName)
+	}
+
+	// Get both enabled column AND config JSON from database
+	// The enabled column is the SOURCE OF TRUTH for mode enabled/disabled status
+	enabledFromColumn, configJSON, err := db.GetUserModeConfigWithEnabled(ctx, userID, modeName)
+	if err != nil {
+		return nil, fmt.Errorf("database error getting mode config for user %s mode %s: %w", userID, modeName, err)
+	}
+	if configJSON == nil {
+		return nil, fmt.Errorf("no mode config found in database for user %s mode %s", userID, modeName)
+	}
+
+	// Unmarshal into ModeFullConfig
+	var config ModeFullConfig
+	if err := json.Unmarshal(configJSON, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal mode config JSON for user %s mode %s: %w", userID, modeName, err)
+	}
+
+	// CRITICAL: Override the JSON's enabled field with the dedicated column value
+	// The enabled column is authoritative; JSON may have stale/incorrect value
+	config.Enabled = enabledFromColumn
+
+	return &config, nil
+}
+
+// GetAllUserModeConfigsFromDB retrieves all mode configurations from database for a user.
+// IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
+// Returns map[modeName]*ModeFullConfig
+func (sm *SettingsManager) GetAllUserModeConfigsFromDB(ctx context.Context, db *database.Repository, userID string) (map[string]*ModeFullConfig, error) {
+	configs := make(map[string]*ModeFullConfig)
+
+	for modeName := range ValidModes {
+		// Get both enabled column AND config JSON
+		enabledFromColumn, configJSON, err := db.GetUserModeConfigWithEnabled(ctx, userID, modeName)
+		if err != nil {
+			log.Printf("[MODE-CONFIG] Warning: Failed to get %s config for user %s: %v", modeName, userID, err)
+			continue
+		}
+		if configJSON == nil {
+			continue
+		}
+
+		var config ModeFullConfig
+		if err := json.Unmarshal(configJSON, &config); err != nil {
+			log.Printf("[MODE-CONFIG] Warning: Failed to unmarshal %s config for user %s: %v", modeName, userID, err)
+			continue
+		}
+		// Override JSON's enabled with the dedicated column value
+		config.Enabled = enabledFromColumn
+		configs[modeName] = &config
+	}
+
+	return configs, nil
+}
+
 // ResetModeConfigs resets all mode configurations to defaults
 func (sm *SettingsManager) ResetModeConfigs() error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.ModeConfigs = DefaultModeConfigs()
 	return sm.SaveSettings(settings)
 }
@@ -4072,7 +4161,7 @@ func (sm *SettingsManager) ResetModeConfigs() error {
 // GetModeCircuitBreakerStatus returns circuit breaker status for all modes
 // This is a read-only status view, not runtime state
 func (sm *SettingsManager) GetModeCircuitBreakerConfigs() map[string]*ModeCircuitBreakerConfig {
-	configs := sm.GetAllModeConfigs()
+	configs := sm.GetDefaultModeConfigs()
 	result := make(map[string]*ModeCircuitBreakerConfig)
 
 	for mode, config := range configs {
@@ -4496,7 +4585,7 @@ func (sm *SettingsManager) UpdateGinieModeConfig(mode GinieTradingMode, config G
 	config.Mode = mode
 
 	// Get current settings and update the mode config
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Initialize ModeConfigs if nil
 	if settings.ModeConfigs == nil {
@@ -4568,7 +4657,7 @@ func (sm *SettingsManager) UpdateGinieModeConfig(mode GinieTradingMode, config G
 // GetGinieModeConfig retrieves the current GinieModeConfig for a specific GinieTradingMode.
 // If no custom config exists, returns the default configuration.
 func (sm *SettingsManager) GetGinieModeConfig(mode GinieTradingMode) GinieModeConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	modeStr := string(mode)
 	if settings.ModeConfigs != nil && settings.ModeConfigs[modeStr] != nil {
@@ -4638,7 +4727,7 @@ func convertModeFullConfigToGinieModeConfig(mode GinieTradingMode, fc *ModeFullC
 // GetLLMConfig returns the current LLM configuration.
 // If no custom config exists, returns the default configuration.
 func (sm *SettingsManager) GetLLMConfig() LLMConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Check if config is empty (zero value)
 	if settings.LLMConfig.Provider == "" {
@@ -4664,7 +4753,7 @@ func (sm *SettingsManager) UpdateLLMConfig(config LLMConfig) error {
 // GetModeLLMSettings returns the LLM settings for a specific trading mode.
 // If no custom settings exist, returns the default settings for that mode.
 func (sm *SettingsManager) GetModeLLMSettings(mode GinieTradingMode) ModeLLMSettings {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.ModeLLMSettings != nil {
 		if modeSettings, ok := settings.ModeLLMSettings[mode]; ok {
@@ -4715,7 +4804,7 @@ func (sm *SettingsManager) UpdateModeLLMSettings(mode GinieTradingMode, modeSett
 // GetAdaptiveAIConfig returns the current adaptive AI configuration.
 // If no custom config exists, returns the default configuration.
 func (sm *SettingsManager) GetAdaptiveAIConfig() AdaptiveAIConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Check if config is empty (zero value) by checking a required field
 	if settings.AdaptiveAIConfig.LearningWindowTrades == 0 &&
@@ -4742,7 +4831,7 @@ func (sm *SettingsManager) UpdateAdaptiveAIConfig(config AdaptiveAIConfig) error
 
 // GetAllModeLLMSettings returns the LLM settings for all trading modes.
 func (sm *SettingsManager) GetAllModeLLMSettings() map[GinieTradingMode]ModeLLMSettings {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.ModeLLMSettings != nil && len(settings.ModeLLMSettings) > 0 {
 		return settings.ModeLLMSettings
@@ -4756,7 +4845,7 @@ func (sm *SettingsManager) GetAllModeLLMSettings() map[GinieTradingMode]ModeLLMS
 // GetCoinConfluenceConfig returns the confluence config for a specific coin.
 // If no custom config exists, returns tier-based defaults.
 func (sm *SettingsManager) GetCoinConfluenceConfig(symbol string) *CoinConfluenceConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Check for custom config first
 	if settings.CoinConfluenceConfigs != nil {
@@ -4771,7 +4860,7 @@ func (sm *SettingsManager) GetCoinConfluenceConfig(symbol string) *CoinConfluenc
 
 // UpdateCoinConfluenceConfig updates or creates a confluence config for a specific coin.
 func (sm *SettingsManager) UpdateCoinConfluenceConfig(symbol string, config *CoinConfluenceConfig) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	// Initialize map if nil
 	if settings.CoinConfluenceConfigs == nil {
@@ -4794,7 +4883,7 @@ func (sm *SettingsManager) UpdateCoinConfluenceConfig(symbol string, config *Coi
 
 // DeleteCoinConfluenceConfig removes a custom confluence config for a coin (reverts to tier defaults).
 func (sm *SettingsManager) DeleteCoinConfluenceConfig(symbol string) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.CoinConfluenceConfigs != nil {
 		delete(settings.CoinConfluenceConfigs, symbol)
@@ -4806,7 +4895,7 @@ func (sm *SettingsManager) DeleteCoinConfluenceConfig(symbol string) error {
 
 // GetAllCoinConfluenceConfigs returns all custom coin confluence configs.
 func (sm *SettingsManager) GetAllCoinConfluenceConfigs() map[string]*CoinConfluenceConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.CoinConfluenceConfigs != nil {
 		return settings.CoinConfluenceConfigs
@@ -4817,7 +4906,7 @@ func (sm *SettingsManager) GetAllCoinConfluenceConfigs() map[string]*CoinConflue
 
 // GetCoinConfluenceConfigWithDefaults returns all coins with their configs (custom + tier defaults for common coins).
 func (sm *SettingsManager) GetCoinConfluenceConfigWithDefaults() map[string]*CoinConfluenceConfig {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	result := make(map[string]*CoinConfluenceConfig)
 
@@ -4847,7 +4936,7 @@ func (sm *SettingsManager) GetCoinConfluenceConfigWithDefaults() map[string]*Coi
 
 // SaveModeCircuitBreakerStats saves the current circuit breaker stats for a specific mode
 func (sm *SettingsManager) SaveModeCircuitBreakerStats(mode string, stats *ModeCircuitBreakerStats) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.ModeCircuitBreakerStats == nil {
 		settings.ModeCircuitBreakerStats = make(map[string]*ModeCircuitBreakerStats)
@@ -4859,14 +4948,14 @@ func (sm *SettingsManager) SaveModeCircuitBreakerStats(mode string, stats *ModeC
 
 // SaveAllModeCircuitBreakerStats saves stats for all modes at once
 func (sm *SettingsManager) SaveAllModeCircuitBreakerStats(allStats map[string]*ModeCircuitBreakerStats) error {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 	settings.ModeCircuitBreakerStats = allStats
 	return sm.SaveSettings(settings)
 }
 
 // GetModeCircuitBreakerStats retrieves persisted stats for a specific mode
 func (sm *SettingsManager) GetModeCircuitBreakerStats(mode string) *ModeCircuitBreakerStats {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.ModeCircuitBreakerStats == nil {
 		return nil
@@ -4877,7 +4966,7 @@ func (sm *SettingsManager) GetModeCircuitBreakerStats(mode string) *ModeCircuitB
 
 // GetAllModeCircuitBreakerStats retrieves persisted stats for all modes
 func (sm *SettingsManager) GetAllModeCircuitBreakerStats() map[string]*ModeCircuitBreakerStats {
-	settings := sm.GetCurrentSettings()
+	settings := sm.GetDefaultSettings()
 
 	if settings.ModeCircuitBreakerStats == nil {
 		return make(map[string]*ModeCircuitBreakerStats)

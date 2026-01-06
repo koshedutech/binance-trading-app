@@ -383,6 +383,9 @@ func (s *Server) setupRoutes() {
 			settings.GET("/paper-balance", s.handleGetPaperBalance)
 			settings.PUT("/paper-balance", s.handleUpdatePaperBalance)
 			settings.POST("/sync-paper-balance", s.handleSyncPaperBalance)
+			// Load defaults endpoints (Story 4.14)
+			settings.GET("/diff/modes/:mode", s.handleGetModeDiff)
+			settings.POST("/load-defaults", s.handleLoadAllDefaults)
 		}
 
 		// User profile and API keys endpoints (requires auth)
@@ -404,6 +407,14 @@ func (s *Server) setupRoutes() {
 			// User utilities
 			user.GET("/ip-address", s.handleGetUserIPAddress)
 			user.GET("/api-status", s.handleGetUserAPIStatus)
+
+			// Settings comparison and reset (Story 4.16)
+			user.GET("/settings/comparison", s.handleGetSettingsComparison)
+			user.POST("/settings/reset", s.handleResetSingleSetting)
+
+			// Global Circuit Breaker endpoints (Story 5.3)
+			user.GET("/global-circuit-breaker", s.handleGetGlobalCircuitBreaker)
+			user.PUT("/global-circuit-breaker", s.handleUpdateGlobalCircuitBreaker)
 		}
 
 		// Billing endpoints (requires auth)
@@ -693,9 +704,20 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/mode-configs", s.handleGetModeConfigs)
 			futures.GET("/ginie/mode-config/:mode", s.handleGetModeConfig)
 			futures.PUT("/ginie/mode-config/:mode", s.handleUpdateModeConfig)
+			futures.POST("/ginie/mode-config/:mode/toggle", s.handleToggleModeEnabled)
 			futures.POST("/ginie/mode-config/reset", s.handleResetModeConfigs)
 			futures.GET("/ginie/mode-circuit-breaker-status", s.handleGetModeCircuitBreakerStatus)
 			futures.POST("/ginie/mode-circuit-breaker/:mode/reset", s.handleResetModeCircuitBreaker)
+
+			// Load Defaults endpoints (Story 4.14)
+			futures.POST("/ginie/modes/:mode/load-defaults", s.handleLoadModeDefaults)
+			futures.POST("/ginie/modes/load-defaults", s.handleLoadAllModeDefaults)
+
+			// Config Reset endpoints (Story 4.17)
+			futures.POST("/ginie/circuit-breaker/load-defaults", s.handleLoadCircuitBreakerDefaults)
+			futures.POST("/ginie/llm-config/load-defaults", s.handleLoadLLMConfigDefaults)
+			futures.POST("/ginie/capital-allocation/load-defaults", s.handleLoadCapitalAllocationDefaults)
+			futures.POST("/ginie/hedge-mode/load-defaults", s.handleLoadHedgeDefaults)
 
 			// Mode Allocation endpoints (per-mode capital management)
 			futures.GET("/modes/allocations", s.handleGetModeAllocations)
@@ -812,6 +834,11 @@ func (s *Server) setupRoutes() {
 		admin.GET("/settings/:key", s.handleAdminGetSetting)
 		admin.PUT("/settings/:key", s.handleAdminUpdateSetting)
 		admin.DELETE("/settings/:key", s.handleAdminDeleteSetting)
+
+		// Admin settings sync (Story 4.15)
+		admin.POST("/sync-defaults", s.handleAdminSyncDefaults)
+		admin.GET("/sync-status", s.handleAdminSyncStatus)
+		admin.POST("/restore-backup", s.handleAdminRestoreBackup)
 	}
 
 	// WebSocket endpoints

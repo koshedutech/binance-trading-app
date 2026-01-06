@@ -856,19 +856,23 @@ func (fc *FuturesController) LoadSavedSettings() {
 		if ginieConfig.DefaultLeverage == 0 {
 			ginieConfig.DefaultLeverage = 10
 		}
-		// Set MinConfidenceToTrade based on RiskLevel
-		// LOWERED 2026-01-03: Previous thresholds blocked all trades - confidence typically 25-45%
-		switch ginieConfig.RiskLevel {
-		case "conservative":
-			ginieConfig.MinConfidenceToTrade = 45.0 // Was 60.0
-		case "moderate":
-			ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
-		case "aggressive":
-			ginieConfig.MinConfidenceToTrade = 25.0 // Was 40.0
-		default:
-			if ginieConfig.MinConfidenceToTrade == 0 {
+		// NOTE: MinConfidenceToTrade is now set from database mode configs (lines 843-845)
+		// The database config takes precedence. These hardcoded values are DEPRECATED.
+		// Fallback only applies if database config is not available.
+		if ginieConfig.MinConfidenceToTrade == 0 {
+			// Set MinConfidenceToTrade based on RiskLevel - FALLBACK ONLY
+			// LOWERED 2026-01-03: Previous thresholds blocked all trades - confidence typically 25-45%
+			switch ginieConfig.RiskLevel {
+			case "conservative":
+				ginieConfig.MinConfidenceToTrade = 45.0 // Was 60.0
+			case "moderate":
+				ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
+			case "aggressive":
+				ginieConfig.MinConfidenceToTrade = 25.0 // Was 40.0
+			default:
 				ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
 			}
+			log.Printf("[SetRiskLevel] Using fallback MinConfidenceToTrade: %.1f (DB config not available)", ginieConfig.MinConfidenceToTrade)
 		}
 		if ginieConfig.MaxPositions == 0 && settings.GinieMaxPositions > 0 {
 			ginieConfig.MaxPositions = settings.GinieMaxPositions
@@ -1378,33 +1382,64 @@ func (fc *FuturesController) SetRiskLevel(level string) error {
 	oldLevel := fc.currentRiskLevel
 	fc.currentRiskLevel = level
 
+	// Get mode config from database - DB-first approach
+	ctx := context.Background()
+	sm := GetSettingsManager()
+	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, level)
+
 	// Adjust parameters based on risk level
+	// NOTE: MinConfidence is now sourced from database mode configs (see GetUserModeConfigFromDB)
+	// These are fallback values only - primary source is database
 	switch level {
 	case "conservative":
-		fc.config.MinConfidence = 0.8
+		// fc.config.MinConfidence = 0.8 // DEPRECATED: Use database config
 		fc.config.RequireConfluence = 3
 		fc.config.DefaultLeverage = 3
 		fc.config.TakeProfitPercent = 1.5
 		fc.config.StopLossPercent = 0.5
 	case "moderate":
-		fc.config.MinConfidence = 0.65
+		// fc.config.MinConfidence = 0.65 // DEPRECATED: Use database config
 		fc.config.RequireConfluence = 2
 		fc.config.DefaultLeverage = 5
 		fc.config.TakeProfitPercent = 2.0
 		fc.config.StopLossPercent = 1.0
 	case "aggressive":
-		fc.config.MinConfidence = 0.35 // Lower threshold to allow more trades
+		// fc.config.MinConfidence = 0.35 // DEPRECATED: Use database config
 		fc.config.RequireConfluence = 1
 		fc.config.DefaultLeverage = 10
 		fc.config.TakeProfitPercent = 3.0
 		fc.config.StopLossPercent = 1.5
 	}
 
-	fc.logger.Info("Risk level changed",
-		"from", oldLevel,
-		"to", level,
-		"leverage", fc.config.DefaultLeverage,
-		"min_confidence", fc.config.MinConfidence)
+	// Apply database config if available
+	if err == nil && modeConfig != nil && modeConfig.Confidence != nil {
+		fc.config.MinConfidence = modeConfig.Confidence.MinConfidence / 100.0 // Convert percent to decimal
+		fc.logger.Info("Risk level changed (DB-first mode)",
+			"from", oldLevel,
+			"to", level,
+			"leverage", fc.config.DefaultLeverage,
+			"min_confidence", fc.config.MinConfidence,
+			"source", "database")
+	} else {
+		// Use conservative fallback for backwards compatibility
+		fallbackConfidence := 0.65
+		switch level {
+		case "conservative":
+			fallbackConfidence = 0.8
+		case "moderate":
+			fallbackConfidence = 0.65
+		case "aggressive":
+			fallbackConfidence = 0.35
+		}
+		fc.config.MinConfidence = fallbackConfidence
+		fc.logger.Warn("Using fallback confidence (DB config unavailable)",
+			"error", err,
+			"from", oldLevel,
+			"to", level,
+			"leverage", fc.config.DefaultLeverage,
+			"min_confidence", fc.config.MinConfidence,
+			"source", "fallback")
+	}
 
 	return nil
 }
@@ -2011,7 +2046,9 @@ func (fc *FuturesController) syncWithActualPositions() {
 				currentPrice, err := fc.futuresClient.GetFuturesCurrentPrice(symbol)
 				if err == nil && currentPrice > 0 {
 					var pnlPercent float64
-					if pos.Side == "LONG" {
+					if pos.EntryPrice <= 0 {
+						pnlPercent = 0
+					} else if pos.Side == "LONG" {
 						pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 					} else {
 						pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
@@ -2221,8 +2258,9 @@ func (fc *FuturesController) evaluateSymbol(symbol string) {
 		return
 	}
 
-	// Get klines for AI analysis
-	klines, err := fc.futuresClient.GetFuturesKlines(symbol, "1m", 100)
+	// Get klines for AI analysis - use configured timeframe from settings
+	timeframe := fc.getDefaultAnalysisTimeframe()
+	klines, err := fc.futuresClient.GetFuturesKlines(symbol, timeframe, 100)
 	if err != nil {
 		fc.logger.Error("Failed to get klines", "symbol", symbol, "error", err.Error())
 		return
@@ -2561,12 +2599,46 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 				"tp_price", decision.TakeProfit,
 				"sl_price", decision.StopLoss)
 		} else {
+			// Get SLTP settings from database mode config
+			ctx := context.Background()
+			sm := GetSettingsManager()
+			currentMode := fc.currentRiskLevel
+			if currentMode == "" {
+				currentMode = "moderate"
+			}
+
+			// Default fallback values
+			tpROEPercent := fc.config.TakeProfitPercent
+			slROEPercent := fc.config.StopLossPercent
+
+			modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+				if modeConfig.SLTP.TakeProfitPercent > 0 {
+					tpROEPercent = modeConfig.SLTP.TakeProfitPercent
+				}
+				if modeConfig.SLTP.StopLossPercent > 0 {
+					slROEPercent = modeConfig.SLTP.StopLossPercent
+				}
+				fc.logger.Debug("Using database SLTP settings",
+					"symbol", symbol,
+					"mode", currentMode,
+					"db_tp_percent", modeConfig.SLTP.TakeProfitPercent,
+					"db_sl_percent", modeConfig.SLTP.StopLossPercent,
+					"trailing_stop_enabled", modeConfig.SLTP.TrailingStopEnabled,
+					"trailing_stop_percent", modeConfig.SLTP.TrailingStopPercent)
+			} else {
+				fc.logger.Debug("Using fallback SLTP settings",
+					"symbol", symbol,
+					"mode", currentMode,
+					"error", err)
+			}
+
 			// Use fixed percentage based on ROE (Return on Equity)
 			// ROE = (Price Change %) * Leverage
 			// So Price Change % = ROE % / Leverage
 			// With 5x leverage: 10% ROE target = 2% price move
-			tpPricePercent := fc.config.TakeProfitPercent / leverage // Convert ROE% to price%
-			slPricePercent := fc.config.StopLossPercent / leverage   // Convert ROE% to price%
+			tpPricePercent := tpROEPercent / leverage // Convert ROE% to price%
+			slPricePercent := slROEPercent / leverage // Convert ROE% to price%
 
 			decision.TakeProfit = currentPrice * (1 + tpPricePercent/100)
 			decision.StopLoss = currentPrice * (1 - slPricePercent/100)
@@ -2576,11 +2648,11 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 				decision.StopLoss = currentPrice * (1 + slPricePercent/100)
 			}
 
-			fc.logger.Debug("TP/SL calculated using fixed ROE",
+			fc.logger.Debug("TP/SL calculated using ROE",
 				"symbol", symbol,
 				"leverage", leverage,
-				"roe_tp_percent", fc.config.TakeProfitPercent,
-				"roe_sl_percent", fc.config.StopLossPercent,
+				"roe_tp_percent", tpROEPercent,
+				"roe_sl_percent", slROEPercent,
 				"price_tp_percent", tpPricePercent,
 				"price_sl_percent", slPricePercent,
 				"tp_price", decision.TakeProfit,
@@ -2739,16 +2811,40 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		fc.mu.Lock()
 		tradeSide := map[string]string{"open_long": "LONG", "open_short": "SHORT"}[decision.Action]
 
+		// Get SLTP settings from database mode config
+		ctx := context.Background()
+		sm := GetSettingsManager()
+		currentMode := fc.currentRiskLevel
+		if currentMode == "" {
+			currentMode = "moderate"
+		}
+
+		// Default fallback values
+		tpPercent1 := fc.config.TakeProfitPercent1
+		tpPercent2 := fc.config.TakeProfitPercent2
+		slPercent := fc.config.StopLossPercent
+
+		modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+		if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+			if modeConfig.SLTP.TakeProfitPercent > 0 {
+				tpPercent1 = modeConfig.SLTP.TakeProfitPercent
+				tpPercent2 = modeConfig.SLTP.TakeProfitPercent
+			}
+			if modeConfig.SLTP.StopLossPercent > 0 {
+				slPercent = modeConfig.SLTP.StopLossPercent
+			}
+		}
+
 		// Calculate TP1, TP2, and SL based on configuration
 		var tp1, tp2, sl float64
 		if tradeSide == "LONG" {
-			tp1 = currentPrice * (1 + fc.config.TakeProfitPercent1/100)
-			tp2 = currentPrice * (1 + fc.config.TakeProfitPercent2/100)
-			sl = currentPrice * (1 - fc.config.StopLossPercent/100)
+			tp1 = currentPrice * (1 + tpPercent1/100)
+			tp2 = currentPrice * (1 + tpPercent2/100)
+			sl = currentPrice * (1 - slPercent/100)
 		} else {
-			tp1 = currentPrice * (1 - fc.config.TakeProfitPercent1/100)
-			tp2 = currentPrice * (1 - fc.config.TakeProfitPercent2/100)
-			sl = currentPrice * (1 + fc.config.StopLossPercent/100)
+			tp1 = currentPrice * (1 - tpPercent1/100)
+			tp2 = currentPrice * (1 - tpPercent2/100)
+			sl = currentPrice * (1 + slPercent/100)
 		}
 
 		fc.activePositions[symbol] = &FuturesAutopilotPosition{
@@ -2865,16 +2961,41 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		tradeSide = "SHORT"
 	}
 
+
+	// Get SLTP settings from database mode config
+	ctx := context.Background()
+	sm := GetSettingsManager()
+	currentMode := fc.currentRiskLevel
+	if currentMode == "" {
+		currentMode = "moderate"
+	}
+
+	// Default fallback values
+	tpPercent1 := fc.config.TakeProfitPercent1
+	tpPercent2 := fc.config.TakeProfitPercent2
+	slPercent := fc.config.StopLossPercent
+
+	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+	if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+		if modeConfig.SLTP.TakeProfitPercent > 0 {
+			tpPercent1 = modeConfig.SLTP.TakeProfitPercent
+			tpPercent2 = modeConfig.SLTP.TakeProfitPercent
+		}
+		if modeConfig.SLTP.StopLossPercent > 0 {
+			slPercent = modeConfig.SLTP.StopLossPercent
+		}
+	}
+
 	// Calculate TP1, TP2, and SL based on configuration
 	var tp1, tp2, sl float64
 	if tradeSide == "LONG" {
-		tp1 = currentPrice * (1 + fc.config.TakeProfitPercent1/100)
-		tp2 = currentPrice * (1 + fc.config.TakeProfitPercent2/100)
-		sl = currentPrice * (1 - fc.config.StopLossPercent/100)
+		tp1 = currentPrice * (1 + tpPercent1/100)
+		tp2 = currentPrice * (1 + tpPercent2/100)
+		sl = currentPrice * (1 - slPercent/100)
 	} else {
-		tp1 = currentPrice * (1 - fc.config.TakeProfitPercent1/100)
-		tp2 = currentPrice * (1 - fc.config.TakeProfitPercent2/100)
-		sl = currentPrice * (1 + fc.config.StopLossPercent/100)
+		tp1 = currentPrice * (1 - tpPercent1/100)
+		tp2 = currentPrice * (1 - tpPercent2/100)
+		sl = currentPrice * (1 + slPercent/100)
 	}
 
 	fc.activePositions[symbol] = &FuturesAutopilotPosition{
@@ -3226,7 +3347,9 @@ func (fc *FuturesController) monitorPositions() {
 		// Check TP1 SL move and trailing stop logic
 		if fc.config.TrailingStopEnabled {
 			var profitPercent float64
-			if pos.Side == "LONG" {
+			if pos.EntryPrice <= 0 {
+				profitPercent = 0
+			} else if pos.Side == "LONG" {
 				profitPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 			} else {
 				profitPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
@@ -3280,7 +3403,9 @@ func (fc *FuturesController) monitorPositions() {
 		// Check scalping mode - take quick profits before regular TP
 		if fc.config.ScalpingModeEnabled {
 			var profitPercent float64
-			if pos.Side == "LONG" {
+			if pos.EntryPrice <= 0 {
+				profitPercent = 0
+			} else if pos.Side == "LONG" {
 				profitPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 			} else {
 				profitPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
@@ -3367,7 +3492,10 @@ func (fc *FuturesController) closePosition(symbol string, pos *FuturesAutopilotP
 
 	var pnl float64
 	var pnlPercent float64
-	if pos.Side == "LONG" {
+	if pos.EntryPrice <= 0 {
+		pnl = 0
+		pnlPercent = 0
+	} else if pos.Side == "LONG" {
 		pnl = (currentPrice - pos.EntryPrice) * pos.Quantity
 		pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
 	} else {
@@ -4053,7 +4181,23 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 			bigcandleDir = v.Direction
 			bigcandleConf = v.Confidence
 		}
-		if v.Confidence > 0.5 {
+		// Use mode config for confluence threshold
+		// Default threshold is 0.5 (50%) - conservative fallback
+		confluenceThreshold := 0.5
+		if fc.ownerUserID != "" && fc.repo != nil {
+			ctx := context.Background()
+			sm := GetSettingsManager()
+			// Use current risk level to get mode config
+			currentMode := fc.currentRiskLevel
+			if currentMode == "" {
+				currentMode = "moderate"
+			}
+			modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			if err == nil && modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+				confluenceThreshold = modeConfig.Confidence.MinConfidence / 100.0 // Convert percent to decimal
+			}
+		}
+		if v.Confidence > confluenceThreshold {
 			confluenceCount++
 		}
 	}
@@ -4066,10 +4210,31 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 	currentPrice, _ := fc.futuresClient.GetFuturesCurrentPrice(decision.Symbol)
 
 	// Determine risk level based on confidence
+	// Use mode config thresholds if available
+	conservativeThreshold := 0.8
+	aggressiveThreshold := 0.6
+
+	if fc.ownerUserID != "" && fc.repo != nil {
+		ctx := context.Background()
+		sm := GetSettingsManager()
+
+		// Get conservative mode threshold
+		conservativeCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "conservative")
+		if err == nil && conservativeCfg != nil && conservativeCfg.Confidence != nil && conservativeCfg.Confidence.MinConfidence > 0 {
+			conservativeThreshold = conservativeCfg.Confidence.MinConfidence / 100.0
+		}
+
+		// Get aggressive mode threshold
+		aggressiveCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "aggressive")
+		if err == nil && aggressiveCfg != nil && aggressiveCfg.Confidence != nil && aggressiveCfg.Confidence.MinConfidence > 0 {
+			aggressiveThreshold = aggressiveCfg.Confidence.MinConfidence / 100.0
+		}
+	}
+
 	riskLevel := "moderate"
-	if decision.Confidence >= 0.8 {
+	if decision.Confidence >= conservativeThreshold {
 		riskLevel = "conservative"
-	} else if decision.Confidence <= 0.6 {
+	} else if decision.Confidence <= aggressiveThreshold {
 		riskLevel = "aggressive"
 	}
 
@@ -4214,8 +4379,9 @@ func (fc *FuturesController) evaluateAveraging(symbol string, pos *FuturesAutopi
 		return
 	}
 
-	// Get klines for AI analysis
-	klines, err := fc.futuresClient.GetFuturesKlines(symbol, "1m", 100)
+	// Get klines for AI analysis - use configured timeframe from settings
+	timeframe := fc.getDefaultAnalysisTimeframe()
+	klines, err := fc.futuresClient.GetFuturesKlines(symbol, timeframe, 100)
 	if err != nil {
 		fc.logger.Error("Failed to get klines for averaging", "symbol", symbol, "error", err.Error())
 		return
@@ -4253,6 +4419,46 @@ func (fc *FuturesController) isPriceImproved(pos *FuturesAutopilotPosition, curr
 	return currentPrice > pos.EntryPrice*(1+minImprove)
 }
 
+// getAveragingConfidenceThreshold gets the minimum confidence threshold for averaging from database mode config
+func (fc *FuturesController) getAveragingConfidenceThreshold() float64 {
+	// Default threshold: 0.5 (50%) - conservative fallback
+	defaultThreshold := 0.5
+
+	if fc.ownerUserID == "" || fc.repo == nil {
+		return defaultThreshold
+	}
+
+	ctx := context.Background()
+	sm := GetSettingsManager()
+
+	// Use current risk level to get mode config
+	currentMode := fc.currentRiskLevel
+	if currentMode == "" {
+		currentMode = "moderate"
+	}
+
+	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+	if err != nil || modeConfig == nil || modeConfig.Averaging == nil {
+		// Fallback to confidence threshold if averaging config not available
+		if err == nil && modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+			return modeConfig.Confidence.MinConfidence / 100.0
+		}
+		return defaultThreshold
+	}
+
+	// Use averaging-specific threshold if available
+	if modeConfig.Averaging.MinConfidenceForAverage > 0 {
+		return modeConfig.Averaging.MinConfidenceForAverage / 100.0
+	}
+
+	// Otherwise use general confidence threshold
+	if modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+		return modeConfig.Confidence.MinConfidence / 100.0
+	}
+
+	return defaultThreshold
+}
+
 // collectAveragingSignals collects AI signals with news sentiment for averaging decision
 func (fc *FuturesController) collectAveragingSignals(
 	symbol string,
@@ -4274,6 +4480,9 @@ func (fc *FuturesController) collectAveragingSignals(
 	signalCount := 0
 	newsScore := 0.0
 
+	// Get confidence threshold from database mode config
+	confidenceThreshold := fc.getAveragingConfidenceThreshold()
+
 	// ML Predictor Signal
 	if fc.mlPredictor != nil && len(klines) >= 30 {
 		wg.Add(1)
@@ -4288,10 +4497,11 @@ func (fc *FuturesController) collectAveragingSignals(
 
 			direction := "neutral"
 			// Check if prediction agrees with position direction
-			if pos.Side == "LONG" && prediction.Direction == "up" && prediction.Confidence > 0.5 {
+			// Use database-configured threshold instead of hardcoded 0.5
+			if pos.Side == "LONG" && prediction.Direction == "up" && prediction.Confidence > confidenceThreshold {
 				direction = "long"
 				agreementCount++
-			} else if pos.Side == "SHORT" && prediction.Direction == "down" && prediction.Confidence > 0.5 {
+			} else if pos.Side == "SHORT" && prediction.Direction == "down" && prediction.Confidence > confidenceThreshold {
 				direction = "short"
 				agreementCount++
 			}
@@ -4320,10 +4530,11 @@ func (fc *FuturesController) collectAveragingSignals(
 
 			direction := "neutral"
 			// Check if analysis agrees with position direction
-			if pos.Side == "LONG" && analysis.Direction == "long" && analysis.Confidence >= 0.5 {
+			// Use database-configured threshold instead of hardcoded 0.5
+			if pos.Side == "LONG" && analysis.Direction == "long" && analysis.Confidence >= confidenceThreshold {
 				direction = "long"
 				agreementCount++
-			} else if pos.Side == "SHORT" && analysis.Direction == "short" && analysis.Confidence >= 0.5 {
+			} else if pos.Side == "SHORT" && analysis.Direction == "short" && analysis.Confidence >= confidenceThreshold {
 				direction = "short"
 				agreementCount++
 			}
@@ -4354,18 +4565,21 @@ func (fc *FuturesController) collectAveragingSignals(
 
 			// Check news alignment with position direction
 			direction := "neutral"
-			confidence := 0.5
+			// Use database-configured threshold as base confidence
+			confidence := confidenceThreshold
 
 			if pos.Side == "LONG" {
 				if score.Overall > 0.2 { // Bullish sentiment
 					direction = "long"
-					confidence = math.Min(1.0, 0.5+score.Overall)
+					// Use threshold as base instead of hardcoded 0.5
+					confidence = math.Min(1.0, confidenceThreshold+score.Overall)
 					agreementCount++
 				}
 			} else { // SHORT
 				if score.Overall < -0.2 { // Bearish sentiment
 					direction = "short"
-					confidence = math.Min(1.0, 0.5-score.Overall)
+					// Use threshold as base instead of hardcoded 0.5
+					confidence = math.Min(1.0, confidenceThreshold-score.Overall)
 					agreementCount++
 				}
 			}
@@ -4607,8 +4821,9 @@ func (fc *FuturesController) recalculateTPSL(pos *FuturesAutopilotPosition, newA
 
 	// Check if dynamic SL/TP is enabled
 	if fc.config.DynamicSLTPEnabled && fc.futuresClient != nil {
-		// Fetch fresh klines for dynamic calculation
-		klines, err := fc.futuresClient.GetFuturesKlines(pos.Symbol, "1m", 100)
+		// Fetch fresh klines for dynamic calculation - use configured timeframe from settings
+		timeframe := fc.getDefaultAnalysisTimeframe()
+		klines, err := fc.futuresClient.GetFuturesKlines(pos.Symbol, timeframe, 100)
 		if err == nil && len(klines) >= 20 {
 			dynamicConfig := &DynamicSLTPConfig{
 				Enabled:         true,
@@ -4736,6 +4951,23 @@ func (fc *FuturesController) SetAveragingConfig(
 		"enabled", enabled,
 		"max_entries", fc.config.MaxEntriesPerPosition,
 		"min_confidence", fc.config.AveragingMinConfidence)
+}
+
+// getDefaultAnalysisTimeframe returns a sensible default timeframe for initial analysis
+// when the trading mode hasn't been determined yet. Uses scalp mode timeframe as default
+// since it's a good middle-ground for initial signal collection
+func (fc *FuturesController) getDefaultAnalysisTimeframe() string {
+	sm := GetSettingsManager()
+	if sm != nil {
+		// Try to get scalp mode entry timeframe as default (5m is a good balance)
+		if modeConfig, err := sm.GetDefaultModeConfig("scalp"); err == nil && modeConfig != nil {
+			if modeConfig.Timeframe != nil && modeConfig.Timeframe.EntryTimeframe != "" {
+				return modeConfig.Timeframe.EntryTimeframe
+			}
+		}
+	}
+	// Fallback to 5m as sensible default for initial analysis
+	return "5m"
 }
 
 // GetSentimentScore returns the current sentiment score
