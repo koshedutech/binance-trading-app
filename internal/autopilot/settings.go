@@ -4255,12 +4255,13 @@ func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *data
 
 	// CRITICAL: Detect old format data (all nested pointers are nil)
 	// Old format has flat fields like "dca_on_loss", "tp1_percent" which don't map to new nested structure
-	if config.MTF == nil && config.Size == nil && config.SLTP == nil &&
+	// NOTE: scalp_reentry uses ScalpReentryConfig which CORRECTLY has these fields - skip detection for it
+	if modeName != "scalp_reentry" && config.MTF == nil && config.Size == nil && config.SLTP == nil &&
 	   config.Timeframe == nil && config.Confidence == nil {
 		// Check if this is actually old format by looking at raw JSON
 		var rawMap map[string]interface{}
 		if err := json.Unmarshal(configJSON, &rawMap); err == nil {
-			// Check for old format fields
+			// Check for old format fields (only for modes that should use ModeFullConfig)
 			if _, hasOldField := rawMap["dca_on_loss"]; hasOldField {
 				log.Printf("[MODE-CONFIG] WARNING: User %s mode %s has OLD FORMAT config - migration needed", userID, modeName)
 				return nil, fmt.Errorf("OLD_FORMAT_DETECTED: This mode configuration uses an outdated format. Please reset to defaults via the UI to update to the new format")
