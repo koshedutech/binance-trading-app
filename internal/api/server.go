@@ -662,6 +662,12 @@ func (s *Server) setupRoutes() {
 			// Ginie Diagnostics endpoint
 			futures.GET("/ginie/diagnostics", s.handleGetGinieDiagnostics)
 
+			// Ginie Pending Orders endpoint - shows unfilled limit orders
+			futures.GET("/ginie/pending-orders", s.handleGetPendingOrders)
+
+			// Ginie Trade Conditions endpoint - shows all pre-trade condition checks
+			futures.GET("/ginie/trade-conditions", s.handleGetTradeConditions)
+
 			// Ginie Rate Limiter status endpoint
 			futures.GET("/ginie/rate-limiter/status", s.handleGetRateLimiterStatus)
 

@@ -1,21 +1,157 @@
-import { useEffect, useState } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig, StuckPositionAlert } from '../services/futuresApi';
+import { useEffect, useState, useRef } from 'react';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig, StuckPositionAlert, loadModeDefaults, loadCircuitBreakerDefaults, loadLLMConfigDefaults, loadCapitalAllocationDefaults, SettingDiff, ConfigResetPreview, TradeConditionsResponse, TradeCondition, PendingOrdersResponse, PendingOrderInfo } from '../services/futuresApi';
 import { apiService } from '../services/api';
-import { useFuturesStore } from '../store/futuresStore';
+import { useFuturesStore, selectActivePositions } from '../store/futuresStore';
+import type { FuturesPosition } from '../types/futures';
 import {
   Sparkles, Power, PowerOff, RefreshCw, Shield, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
   ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge, Coins, Star, Layers, Box,
-  Triangle, Flag, Repeat
+  Triangle, Flag, Repeat, RotateCcw, Pause, Pin
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
 import ScalpReentryMonitor from './ScalpReentryMonitor';
 import HedgeModeMonitor from './HedgeModeMonitor';
+import ResetConfirmDialog from './ResetConfirmDialog';
+
+// Error classification helper
+interface ErrorClassification {
+  type: 'session_expired' | 'service_unavailable' | 'network_error' | 'timeout' | 'generic';
+  userMessage: string;
+  technicalMessage: string;
+  icon: string;
+  actionType: 'login' | 'retry' | 'retry_with_delay';
+  retryDelay?: number;
+}
+
+function classifyError(err: any, context: string): ErrorClassification {
+  const status = err?.response?.status;
+  const message = err?.response?.data?.message || err?.message || '';
+
+  // Session expired (401/403)
+  if (status === 401 || status === 403) {
+    return {
+      type: 'session_expired',
+      userMessage: 'Session expired - Please log in again',
+      technicalMessage: `${context}: ${message}`,
+      icon: '🔒',
+      actionType: 'login',
+    };
+  }
+
+  // Service unavailable (503/502/504)
+  if (status === 503 || status === 502 || status === 504) {
+    return {
+      type: 'service_unavailable',
+      userMessage: 'Service temporarily unavailable. This is usually due to maintenance or high load.',
+      technicalMessage: `${context}: Backend returned ${status}`,
+      icon: '⚠️',
+      actionType: 'retry_with_delay',
+      retryDelay: 30,
+    };
+  }
+
+  // Network timeout
+  if (err?.code === 'ECONNABORTED' || message.includes('timeout')) {
+    return {
+      type: 'timeout',
+      userMessage: 'Request timed out. The server is taking too long to respond.',
+      technicalMessage: `${context}: ${message}`,
+      icon: '⏳',
+      actionType: 'retry',
+    };
+  }
+
+  // Network error (no response)
+  if (!err?.response) {
+    return {
+      type: 'network_error',
+      userMessage: 'Network Error - Check your internet connection',
+      technicalMessage: `${context}: ${message}`,
+      icon: '🌐',
+      actionType: 'retry',
+    };
+  }
+
+  // Generic error
+  return {
+    type: 'generic',
+    userMessage: `Failed to load ${context}`,
+    technicalMessage: `${context}: ${message}`,
+    icon: '❌',
+    actionType: 'retry',
+  };
+}
+
+// Reusable error display component
+interface ErrorDisplayProps {
+  error: string;
+  onRetry: () => void;
+  onLogin?: () => void;
+  isRetrying?: boolean;
+  section: string;
+}
+
+function ErrorDisplay({ error, onRetry, onLogin, isRetrying, section }: ErrorDisplayProps) {
+  const isSessionExpired = error.includes('Session expired');
+  const isServiceUnavailable = error.includes('Service temporarily unavailable');
+
+  return (
+    <div className="bg-red-900/20 border border-red-800 rounded-lg p-4">
+      <div className="flex items-start gap-3">
+        <div className="text-2xl mt-0.5">
+          {isSessionExpired ? '🔒' : isServiceUnavailable ? '⚠️' : '❌'}
+        </div>
+        <div className="flex-1">
+          <h4 className="text-red-400 font-semibold mb-1">
+            {isSessionExpired ? 'Session Expired' :
+             isServiceUnavailable ? 'Service Unavailable' :
+             `Error Loading ${section}`}
+          </h4>
+          <p className="text-red-300 text-sm mb-3">{error}</p>
+
+          <div className="flex gap-2">
+            {isSessionExpired && onLogin ? (
+              <button
+                onClick={onLogin}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-white text-sm font-medium"
+              >
+                Log In Again
+              </button>
+            ) : (
+              <button
+                onClick={onRetry}
+                disabled={isRetrying}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded text-white text-sm font-medium"
+              >
+                {isRetrying ? (
+                  <span className="flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    Retrying...
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-2">
+                    <RefreshCw className="w-4 h-4" />
+                    Retry
+                  </span>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function GiniePanel() {
+  // Fetch real-time Binance positions for accurate price data
+  const { fetchPositions } = useFuturesStore();
+  const binancePositions = useFuturesStore(selectActivePositions);
+
   const [status, setStatus] = useState<GinieStatus | null>(null);
   const [autopilotStatus, setAutopilotStatus] = useState<GinieAutopilotStatus | null>(null);
   const [circuitBreaker, setCircuitBreaker] = useState<GinieCircuitBreakerStatus | null>(null);
@@ -46,6 +182,14 @@ export default function GiniePanel() {
   const [signalFilter, setSignalFilter] = useState<'all' | 'executed' | 'rejected'>('all');
   const [expandedSignal, setExpandedSignal] = useState<string | null>(null);
   const [confidenceThreshold, setConfidenceThreshold] = useState<number>(65);
+  // Signal hold/pin feature - prevents auto-refresh when held
+  const [signalHold, setSignalHold] = useState(false);
+  // useRef to track current filter without causing useEffect restarts
+  const signalFilterRef = useRef<'all' | 'executed' | 'rejected'>('all');
+  // Trade conditions checklist state
+  const [tradeConditions, setTradeConditions] = useState<TradeConditionsResponse | null>(null);
+  // Pending limit orders state
+  const [pendingOrders, setPendingOrders] = useState<PendingOrdersResponse | null>(null);
   // LLM Kill Switch state
   const [showLLMKillSwitch, setShowLLMKillSwitch] = useState(false);
   const [resettingKillSwitch, setResettingKillSwitch] = useState<string | null>(null);
@@ -114,7 +258,6 @@ export default function GiniePanel() {
   const [selectedModeConfig, setSelectedModeConfig] = useState<'ultra_fast' | 'scalp' | 'swing' | 'position'>('ultra_fast');
   const [expandedModeSection, setExpandedModeSection] = useState<string | null>(null);
   const [savingModeConfig, setSavingModeConfig] = useState(false);
-  const [resettingModes, setResettingModes] = useState(false);
   const [modeConfigErrors, setModeConfigErrors] = useState<Record<string, string>>({});
 
   // LLM & Adaptive AI state (Story 2.8)
@@ -138,13 +281,45 @@ export default function GiniePanel() {
   const [loadingScanPreview, setLoadingScanPreview] = useState(false);
   const [savedCoinsInput, setSavedCoinsInput] = useState('');
 
-  // Scalp Re-entry Mode Configuration state
-  const [scalpReentryConfig, setScalpReentryConfig] = useState<ScalpReentryConfig | null>(null);
+  // Scalp Re-entry Mode Configuration state (using ModeFullConfig from mode-config endpoint)
+  const [scalpReentryConfig, setScalpReentryConfig] = useState<ModeFullConfig | null>(null);
+  const [scalpReentrySpecificConfig, setScalpReentrySpecificConfig] = useState<ScalpReentryConfig | null>(null);
   const [showScalpReentry, setShowScalpReentry] = useState(false);
   const [savingScalpReentry, setSavingScalpReentry] = useState(false);
   const [togglingScalpReentry, setTogglingScalpReentry] = useState(false);
   const [expandedScalpReentrySection, setExpandedScalpReentrySection] = useState<string | null>(null);
   const [scalpReentryTab, setScalpReentryTab] = useState<'monitor' | 'config' | 'hedge'>('monitor');
+  const [loadingScalpReentry, setLoadingScalpReentry] = useState(false);
+  const [scalpReentryError, setScalpReentryError] = useState<string | null>(null);
+  // Error states for API calls
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [autopilotError, setAutopilotError] = useState<string | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
+
+  // Reset Dialog state
+  const [resetDialog, setResetDialog] = useState<{
+    open: boolean;
+    title: string;
+    configType: string;
+    loading: boolean;
+    allMatch: boolean;
+    differences: SettingDiff[];
+    totalChanges: number;
+    onConfirm: () => void;
+  }>({
+    open: false,
+    title: '',
+    configType: '',
+    loading: false,
+    allMatch: false,
+    differences: [],
+    totalChanges: 0,
+    onConfirm: () => {},
+  });
+
+  // Loading timeout tracking
+  const [loadingWarning, setLoadingWarning] = useState(false);
+  const [loadingTimeout, setLoadingTimeout] = useState(false);
 
   const validTimeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
   const timeframeOptions = ['1m', '5m', '15m', '1h', '4h', '1d'];
@@ -158,13 +333,16 @@ export default function GiniePanel() {
     try {
       const data = await futuresApi.getGinieStatus();
       setStatus(data);
+      setStatusError(null); // Clear error on success
       setError(null);
     } catch (err: any) {
-      // Don't log or show error for auth errors (expected when not logged in)
-      if (err?.response?.status === 401 || err?.response?.status === 403) return;
-      console.error('Failed to fetch Ginie status:', err);
-      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch Ginie status';
-      setError(errorMsg);
+      const classified = classifyError(err, 'Ginie status');
+      console.error(`[GINIE-STATUS] ${classified.technicalMessage}`, err);
+
+      // CRITICAL FIX: Always set error state, even for 401/403
+      setStatusError(classified.userMessage);
+
+      // Keep last known good data visible (don't clear status)
     }
   };
 
@@ -172,6 +350,7 @@ export default function GiniePanel() {
     try {
       const data = await futuresApi.getGinieAutopilotStatus();
       setAutopilotStatus(data);
+      setAutopilotError(null); // Clear error on success
 
       // Only initialize settings from API on first load
       if (initSettings && !settingsInitialized && data.config) {
@@ -184,11 +363,13 @@ export default function GiniePanel() {
         setSettingsInitialized(true);
       }
     } catch (err: any) {
-      // Don't log or show error for auth errors (expected when not logged in)
-      if (err?.response?.status === 401 || err?.response?.status === 403) return;
-      console.error('Failed to fetch Ginie autopilot status:', err);
-      const errorMsg = err instanceof Error ? err.message : 'Failed to fetch autopilot status';
-      setError(errorMsg);
+      const classified = classifyError(err, 'autopilot status');
+      console.error(`[AUTOPILOT-STATUS] ${classified.technicalMessage}`, err);
+
+      // CRITICAL FIX: Always set error state, even for 401/403
+      setAutopilotError(classified.userMessage);
+
+      // Keep last known good data (don't clear autopilotStatus)
     }
   };
 
@@ -206,9 +387,10 @@ export default function GiniePanel() {
         });
       }
     } catch (err: any) {
-      // Don't log auth errors (expected when not logged in)
-      if (err?.response?.status === 401 || err?.response?.status === 403) return;
-      console.error('Failed to fetch Ginie circuit breaker status:', err);
+      const classified = classifyError(err, 'circuit breaker status');
+      console.error(`[CIRCUIT-BREAKER] ${classified.technicalMessage}`, err);
+      // Note: No dedicated error state for circuit breaker currently
+      // Consider adding one if this section becomes critical
     }
   };
 
@@ -218,8 +400,9 @@ export default function GiniePanel() {
       const data = await futuresApi.getModeCircuitBreakerStatus();
       setModeCBStatus(data);
     } catch (err: any) {
-      if (err?.response?.status === 401 || err?.response?.status === 403) return;
-      console.error('Failed to fetch mode circuit breaker status:', err);
+      const classified = classifyError(err, 'mode circuit breaker status');
+      console.error(`[MODE-CB-STATUS] ${classified.technicalMessage}`, err);
+      // Note: No dedicated error state for mode circuit breaker currently
     }
   };
 
@@ -238,14 +421,62 @@ export default function GiniePanel() {
     }
   };
 
+  // Helper function to open reset dialog with preview
+  const openResetDialog = async (
+    title: string,
+    configType: string,
+    previewFn: () => Promise<ConfigResetPreview>,
+    applyFn: () => Promise<any>
+  ) => {
+    setResetDialog({
+      open: true,
+      title,
+      configType,
+      loading: true,
+      allMatch: false,
+      differences: [],
+      totalChanges: 0,
+      onConfirm: async () => {
+        try {
+          await applyFn();
+          setResetDialog(prev => ({ ...prev, open: false }));
+          setSuccessMsg(`${configType} reset to defaults`);
+          setTimeout(() => setSuccessMsg(null), 3000);
+          // Refresh data after reset
+          await fetchModeConfigs();
+          await fetchCircuitBreaker();
+          await fetchLLMConfig();
+        } catch (err: any) {
+          setError(err?.response?.data?.error || `Failed to reset ${configType}`);
+          setResetDialog(prev => ({ ...prev, open: false }));
+        }
+      },
+    });
+
+    try {
+      const preview = await previewFn();
+      setResetDialog(prev => ({
+        ...prev,
+        loading: false,
+        allMatch: preview.all_match,
+        differences: preview.differences || [],
+        totalChanges: preview.total_changes || 0,
+      }));
+    } catch (error) {
+      console.error('Failed to load preview:', error);
+      setError('Failed to load reset preview');
+      setResetDialog(prev => ({ ...prev, open: false }));
+    }
+  };
+
   const fetchMarketMovers = async () => {
     try {
       const data = await futuresApi.getMarketMovers(15);
       setMarketMovers(data);
     } catch (err: any) {
-      // Don't log auth errors (expected when not logged in)
-      if (err?.response?.status === 401 || err?.response?.status === 403) return;
-      console.error('Failed to fetch market movers:', err);
+      const classified = classifyError(err, 'market movers');
+      console.error(`[MARKET-MOVERS] ${classified.technicalMessage}`, err);
+      // Note: No dedicated error state for market movers currently
     }
   };
 
@@ -253,14 +484,23 @@ export default function GiniePanel() {
     try {
       const data = await futuresApi.getGinieDiagnostics();
       setDiagnostics(data);
-    } catch (err) {
-      console.error('Failed to fetch diagnostics:', err);
+      setDiagnosticsError(null); // Clear error on success
+    } catch (err: any) {
+      const classified = classifyError(err, 'diagnostics');
+      console.error(`[DIAGNOSTICS] ${classified.technicalMessage}`, err);
+
+      // Set error state with user-friendly message
+      setDiagnosticsError(classified.userMessage);
+
+      // Keep last known diagnostics data (don't clear)
     }
   };
 
-  const fetchSignalLogs = async () => {
+  const fetchSignalLogs = async (filterOverride?: 'all' | 'executed' | 'rejected') => {
     try {
-      const statusFilter = signalFilter === 'all' ? undefined : signalFilter;
+      // Use override if provided (for filter changes), otherwise use ref for interval fetches
+      const currentFilter = filterOverride ?? signalFilterRef.current;
+      const statusFilter = currentFilter === 'all' ? undefined : currentFilter;
       const { signals } = await futuresApi.getGinieSignalLogs(50, statusFilter);
       setSignalLogs(signals || []);
       // Fetch stats separately
@@ -268,6 +508,26 @@ export default function GiniePanel() {
       setSignalStats(stats);
     } catch (err) {
       console.error('Failed to fetch signal logs:', err);
+    }
+  };
+
+  // Fetch trade conditions checklist
+  const fetchTradeConditions = async () => {
+    try {
+      const conditions = await futuresApi.getGinieTradeConditions();
+      setTradeConditions(conditions);
+    } catch (err) {
+      console.error('Failed to fetch trade conditions:', err);
+    }
+  };
+
+  // Fetch pending limit orders
+  const fetchPendingOrders = async () => {
+    try {
+      const orders = await futuresApi.getGiniePendingOrders();
+      setPendingOrders(orders);
+    } catch (err) {
+      console.error('Failed to fetch pending orders:', err);
     }
   };
 
@@ -279,6 +539,32 @@ export default function GiniePanel() {
       console.error('Failed to sync positions on load:', err);
     }
   };
+
+  // Detect loading timeouts
+  useEffect(() => {
+    if (!status && !statusError) {
+      // Show warning after 10 seconds
+      const warningTimer = setTimeout(() => {
+        setLoadingWarning(true);
+      }, 10000);
+
+      // Set error after 30 seconds
+      const errorTimer = setTimeout(() => {
+        if (!status && !statusError) {
+          setStatusError('Request timed out after 30 seconds. The server may be slow or unreachable.');
+          setLoadingTimeout(true);
+        }
+      }, 30000);
+
+      return () => {
+        clearTimeout(warningTimer);
+        clearTimeout(errorTimer);
+      };
+    } else {
+      setLoadingWarning(false);
+      setLoadingTimeout(false);
+    }
+  }, [status, statusError]);
 
   // Fetch scan source configuration
   const fetchScanSourceConfig = async () => {
@@ -295,21 +581,33 @@ export default function GiniePanel() {
 
   // Fetch scalp re-entry configuration
   const fetchScalpReentryConfig = async () => {
+    setLoadingScalpReentry(true);
+    setScalpReentryError(null);
     try {
-      const config = await futuresApi.getScalpReentryConfig();
-      setScalpReentryConfig(config);
-    } catch (err) {
+      // Fetch mode config (has size, leverage, max_positions, stop_loss_percent, etc.)
+      const modeResponse = await futuresApi.getModeConfig('scalp_reentry');
+      setScalpReentryConfig(modeResponse.config);
+
+      // Also fetch scalp-reentry specific config for TP levels and re-entry settings
+      const specificConfig = await futuresApi.getScalpReentryConfig();
+      setScalpReentrySpecificConfig(specificConfig);
+      setScalpReentryError(null);
+    } catch (err: any) {
+      const errorMsg = err?.response?.data?.error || err?.message || 'Failed to fetch scalp re-entry config';
       console.error('Failed to fetch scalp re-entry config:', err);
+      setScalpReentryError(errorMsg);
+    } finally {
+      setLoadingScalpReentry(false);
     }
   };
 
   // Toggle scalp re-entry mode
   const handleToggleScalpReentry = async () => {
-    if (!scalpReentryConfig) return;
+    if (!scalpReentrySpecificConfig) return;
     setTogglingScalpReentry(true);
     try {
-      const result = await futuresApi.toggleScalpReentry(!scalpReentryConfig.enabled);
-      setScalpReentryConfig({ ...scalpReentryConfig, enabled: result.enabled });
+      const result = await futuresApi.toggleScalpReentry(!scalpReentrySpecificConfig.enabled);
+      setScalpReentrySpecificConfig({ ...scalpReentrySpecificConfig, enabled: result.enabled });
       setSuccessMsg(result.message);
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (err: any) {
@@ -319,21 +617,26 @@ export default function GiniePanel() {
     }
   };
 
-  // Update scalp re-entry configuration
-  const updateScalpReentryConfig = async (field: string, value: any) => {
-    if (!scalpReentryConfig) return;
-    const updated = { ...scalpReentryConfig, [field]: value };
-    setScalpReentryConfig(updated);
+  // Update scalp re-entry specific configuration (TP levels, re-entry settings, etc.)
+  const updateScalpReentrySpecificConfig = async (field: string, value: any) => {
+    if (!scalpReentrySpecificConfig) return;
+    const updated = { ...scalpReentrySpecificConfig, [field]: value };
+    setScalpReentrySpecificConfig(updated);
   };
 
-  // Save scalp re-entry configuration
-  const saveScalpReentryConfig = async () => {
-    if (!scalpReentryConfig) return;
+  // Save both mode config and specific config
+  const saveScalpReentrySpecificConfig = async () => {
+    if (!scalpReentryConfig || !scalpReentrySpecificConfig) return;
     setSavingScalpReentry(true);
     try {
-      const result = await futuresApi.updateScalpReentryConfig(scalpReentryConfig);
-      setScalpReentryConfig(result.config);
-      setSuccessMsg('Scalp re-entry configuration saved');
+      // Save mode config (size, sltp, etc.)
+      await futuresApi.updateModeConfig('scalp_reentry', scalpReentryConfig);
+
+      // Save scalp re-entry specific config (TP levels, re-entry settings, etc.)
+      const result = await futuresApi.updateScalpReentryConfig(scalpReentrySpecificConfig);
+      setScalpReentrySpecificConfig(result.config);
+
+      setSuccessMsg('All scalp re-entry configurations saved');
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (err: any) {
       setError(err?.response?.data?.error || 'Failed to save scalp re-entry config');
@@ -405,6 +708,8 @@ export default function GiniePanel() {
     fetchMarketMovers();
     fetchDiagnostics();
     fetchSignalLogs();
+    fetchTradeConditions(); // Fetch trade conditions checklist
+    fetchPendingOrders(); // Fetch pending limit orders
     fetchTradeHistory(); // Fetch trade history
     fetchPerformanceMetrics(); // Fetch performance metrics
     fetchLLMSwitches(); // Fetch LLM diagnostics
@@ -412,14 +717,21 @@ export default function GiniePanel() {
     fetchScanSourceConfig(); // Fetch scan source configuration
     fetchScalpReentryConfig(); // Fetch scalp re-entry configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
+    fetchPositions(); // Fetch real-time Binance positions for accurate pricing
     const interval = setInterval(() => {
       fetchStatus();
       fetchAutopilotStatus(false); // Don't overwrite user input on subsequent fetches
       fetchCircuitBreaker();
       fetchModeCBStatus(); // Fetch per-mode circuit breaker status
+      fetchPositions(); // Fetch real-time Binance positions
       if (activeTab === 'diagnostics') {
         fetchDiagnostics();
-        fetchSignalLogs();
+        // Only auto-refresh signals if not held
+        if (!signalHold) {
+          fetchSignalLogs();
+        }
+        fetchTradeConditions(); // Auto-refresh trade conditions
+        fetchPendingOrders(); // Auto-refresh pending orders
       }
       if (activeTab === 'performance' || activeTab === 'history') {
         fetchPerformanceMetrics();
@@ -430,11 +742,17 @@ export default function GiniePanel() {
       }
     }, 10000);
     return () => clearInterval(interval);
-  }, [activeTab]);
+  }, [activeTab, fetchPositions, signalHold]);
 
-  // Refetch signals when filter changes
+  // Update ref when filter changes and trigger a single fetch
+  // This separates filter changes from interval restarts to prevent race conditions
   useEffect(() => {
-    fetchSignalLogs();
+    signalFilterRef.current = signalFilter;
+    // Only fetch if not held - pass the filter directly to avoid stale ref
+    if (!signalHold) {
+      fetchSignalLogs(signalFilter);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signalFilter]);
 
   const handleToggle = async () => {
@@ -840,22 +1158,6 @@ export default function GiniePanel() {
     }
   };
 
-  const handleResetModeConfigs = async () => {
-    if (!window.confirm('Reset all mode configurations to defaults? This cannot be undone.')) return;
-    setResettingModes(true);
-    try {
-      const result = await futuresApi.resetModeConfigs();
-      if (result.success && result.mode_configs) {
-        setModeConfigs(result.mode_configs);
-      }
-      setSuccessMsg('All mode configurations reset to defaults');
-      setTimeout(() => setSuccessMsg(null), 3000);
-    } catch (err) {
-      setError('Failed to reset mode configurations');
-    } finally {
-      setResettingModes(false);
-    }
-  };
 
   const updateModeConfig = (mode: string, path: string, value: any) => {
     setModeConfigs(prev => {
@@ -986,17 +1288,6 @@ export default function GiniePanel() {
     }
   };
 
-  const handleResetLLMCallDiagnostics = async () => {
-    if (!window.confirm('Reset LLM diagnostics?')) return;
-    try {
-      await futuresApi.resetLLMCallDiagnostics();
-      setSuccessMsg('LLM diagnostics reset');
-      setTimeout(() => setSuccessMsg(null), 3000);
-      await fetchLLMCallDiagnostics();
-    } catch (err) {
-      setError('Failed to reset LLM diagnostics');
-    }
-  };
 
   const getModeColor = (mode: string) => {
     switch (mode) {
@@ -1046,7 +1337,39 @@ export default function GiniePanel() {
           <Sparkles className="w-5 h-5 text-purple-400" />
           <h3 className="text-lg font-semibold text-white">Ginie AI</h3>
         </div>
-        <div className="text-gray-400 text-sm">Loading...</div>
+        {statusError ? (
+          <ErrorDisplay
+            error={statusError}
+            onRetry={fetchStatus}
+            onLogin={() => window.location.href = '/login'}
+            isRetrying={loading}
+            section="Ginie Status"
+          />
+        ) : (
+          <div className="text-gray-400 text-sm">
+            <div className="flex items-center gap-2 mb-2">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>Loading Ginie status...</span>
+            </div>
+
+            {loadingWarning && (
+              <div className="mt-2 p-2 bg-yellow-900/20 border border-yellow-800 rounded">
+                <p className="text-yellow-400 text-xs">
+                  ⏳ Taking longer than usual... The server might be slow or unreachable.
+                </p>
+                <button
+                  onClick={() => {
+                    setStatusError('Loading cancelled by user');
+                    setLoadingWarning(false);
+                  }}
+                  className="mt-2 text-xs text-purple-400 hover:text-purple-300 underline"
+                >
+                  Cancel & Retry
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -1280,7 +1603,21 @@ export default function GiniePanel() {
               >
                 <Settings className="w-3 h-3" />
               </button>
-              {/* Reset Button */}
+              {/* Reset to Defaults Button */}
+              <button
+                onClick={() => openResetDialog(
+                  'Reset Circuit Breaker to Defaults?',
+                  'Circuit Breaker',
+                  () => loadCircuitBreakerDefaults(true),
+                  () => loadCircuitBreakerDefaults(false)
+                )}
+                className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
+                title="Reset Circuit Breaker to defaults"
+              >
+                <RotateCcw size={12} />
+                Reset
+              </button>
+              {/* Reset State Button */}
               {(circuitBreaker.state === 'open' || !circuitBreaker.can_trade) && (
                 <button
                   onClick={handleResetCircuitBreaker}
@@ -1397,7 +1734,9 @@ export default function GiniePanel() {
       {modeCBStatus && modeCBStatus.mode_status && (
         <div className="mb-3">
           <div
-            className="flex items-center justify-between px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+            className={`flex items-center justify-between px-2 py-1.5 bg-gray-700/30 rounded cursor-pointer hover:bg-gray-700/50 transition-colors ${
+              showModeCB ? 'border-2 border-yellow-500' : 'border border-gray-600'
+            }`}
             onClick={() => setShowModeCB(!showModeCB)}
           >
             <div className="flex items-center gap-2">
@@ -1496,25 +1835,19 @@ export default function GiniePanel() {
       {/* Mode Configuration Section (Story 2.7 Task 2.7.9) */}
       <div className="space-y-2 mb-3">
         <div
-          className="flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+          className={`flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded cursor-pointer hover:bg-gray-700/50 transition-colors ${
+            showModeConfig ? 'border-2 border-blue-500' : 'border border-gray-600'
+          }`}
           onClick={() => setShowModeConfig(!showModeConfig)}
         >
           <div className="flex items-center gap-2">
             <Settings className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" />
             <span className="text-xs text-gray-300 font-medium">Mode Configuration</span>
             <span className="text-[10px] text-gray-500">
-              ({Object.values(modeConfigs).filter(c => c.enabled).length}/4 enabled)
+              ({['ultra_fast', 'scalp', 'swing', 'position'].filter(mode => modeConfigs[mode]?.enabled).length}/4 enabled)
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={(e) => { e.stopPropagation(); handleResetModeConfigs(); }}
-              disabled={resettingModes}
-              className="px-1.5 py-0.5 bg-orange-900/50 hover:bg-orange-900/70 text-orange-400 rounded text-[10px] transition-colors disabled:opacity-50"
-              title="Reset All Modes to Defaults"
-            >
-              {resettingModes ? '...' : 'Reset All'}
-            </button>
             {showModeConfig ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
           </div>
         </div>
@@ -1559,21 +1892,36 @@ export default function GiniePanel() {
                 {/* Enable/Disable Toggle */}
                 <div className="flex items-center justify-between">
                   <label className="text-xs text-gray-300 font-medium" title="Enable or disable this trading mode. When disabled, no new positions will be opened using this mode's parameters.">Enable {selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode</label>
-                  <button
-                    onClick={() => updateModeConfig(selectedModeConfig, 'enabled', !modeConfigs[selectedModeConfig]?.enabled)}
-                    className={`px-2 py-1 rounded text-[10px] transition-colors ${
-                      modeConfigs[selectedModeConfig]?.enabled
-                        ? 'bg-green-900/50 text-green-400 border border-green-700'
-                        : 'bg-gray-700/50 text-gray-400 border border-gray-600'
-                    }`}
-                  >
-                    {modeConfigs[selectedModeConfig]?.enabled ? 'Enabled' : 'Disabled'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => updateModeConfig(selectedModeConfig, 'enabled', !modeConfigs[selectedModeConfig]?.enabled)}
+                      className={`px-2 py-1 rounded text-[10px] transition-colors ${
+                        modeConfigs[selectedModeConfig]?.enabled
+                          ? 'bg-green-900/50 text-green-400 border border-green-700'
+                          : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+                      }`}
+                    >
+                      {modeConfigs[selectedModeConfig]?.enabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                    <button
+                      onClick={() => openResetDialog(
+                        `Reset ${selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode to Defaults?`,
+                        selectedModeConfig,
+                        () => loadModeDefaults(selectedModeConfig, true),
+                        () => loadModeDefaults(selectedModeConfig, false)
+                      )}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
+                      title={`Reset ${selectedModeConfig} to defaults`}
+                    >
+                      <RotateCcw size={12} />
+                      Reset
+                    </button>
+                  </div>
                 </div>
 
                 {/* Collapsible Sections */}
                 {/* Timeframe Settings */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'timeframe' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'timeframe' ? null : 'timeframe')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -1618,7 +1966,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Confidence Thresholds */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'confidence' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'confidence' ? null : 'confidence')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -1678,7 +2026,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Position Sizing */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'size' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'size' ? null : 'size')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -1874,7 +2222,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* SL/TP Settings */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'sltp' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'sltp' ? null : 'sltp')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -2365,7 +2713,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Risk Configuration */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'risk' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'risk' ? null : 'risk')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -2475,7 +2823,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Trend Divergence Configuration */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'trend_divergence' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'trend_divergence' ? null : 'trend_divergence')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -2588,7 +2936,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Circuit Breaker Preview */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'circuit' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'circuit' ? null : 'circuit')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -2620,7 +2968,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Funding Rate Configuration */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'funding' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'funding' ? null : 'funding')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -2764,7 +3112,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Position Averaging */}
-                <div className="border border-gray-700 rounded">
+                <div className={`rounded ${expandedModeSection === 'averaging' ? 'border-2 border-blue-400' : 'border border-gray-700'}`}>
                   <button
                     onClick={() => setExpandedModeSection(expandedModeSection === 'averaging' ? null : 'averaging')}
                     className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -2904,7 +3252,9 @@ export default function GiniePanel() {
       {/* Scalp Re-entry Mode Section */}
       <div className="space-y-2 mb-3">
         <div
-          className="flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+          className={`flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded cursor-pointer hover:bg-gray-700/50 transition-colors ${
+            showScalpReentry ? 'border-2 border-green-500' : 'border border-gray-600'
+          }`}
           onClick={() => {
             setShowScalpReentry(!showScalpReentry);
             if (!showScalpReentry) fetchScalpReentryConfig();
@@ -2913,7 +3263,7 @@ export default function GiniePanel() {
           <div className="flex items-center gap-2">
             <Repeat className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
             <span className="text-xs text-gray-300 font-medium">Scalp Re-entry Mode</span>
-            {scalpReentryConfig?.enabled && (
+            {scalpReentrySpecificConfig?.enabled && (
               <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px]">ON</span>
             )}
           </div>
@@ -2922,22 +3272,41 @@ export default function GiniePanel() {
               onClick={(e) => { e.stopPropagation(); handleToggleScalpReentry(); }}
               disabled={togglingScalpReentry}
               className={`px-1.5 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 ${
-                scalpReentryConfig?.enabled
+                scalpReentrySpecificConfig?.enabled
                   ? 'bg-green-900/50 text-green-400 border border-green-700'
                   : 'bg-gray-700/50 text-gray-400 border border-gray-600'
               }`}
             >
-              {togglingScalpReentry ? '...' : scalpReentryConfig?.enabled ? 'Enabled' : 'Disabled'}
+              {togglingScalpReentry ? '...' : scalpReentrySpecificConfig?.enabled ? 'Enabled' : 'Disabled'}
             </button>
             {showScalpReentry ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
           </div>
         </div>
 
-        {showScalpReentry && scalpReentryConfig && (
+        {showScalpReentry && (
           <div className="px-2 py-2 bg-gray-800/50 border border-gray-600 rounded space-y-3">
-            <p className="text-[10px] text-gray-500">
-              Progressive TP with re-entry: Takes partial profits at increasing levels, buys back at breakeven for more upside.
-            </p>
+            {loadingScalpReentry ? (
+              <div className="flex items-center justify-center py-4">
+                <div className="text-[10px] text-gray-400">Loading scalp re-entry configuration...</div>
+              </div>
+            ) : scalpReentryError ? (
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 text-[10px] text-red-400">
+                  <AlertTriangle className="w-3 h-3" />
+                  <span>{scalpReentryError}</span>
+                </div>
+                <button
+                  onClick={fetchScalpReentryConfig}
+                  className="text-[10px] px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded transition-colors"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : scalpReentrySpecificConfig ? (
+              <>
+                <p className="text-[10px] text-gray-500">
+                  Progressive TP with re-entry: Takes partial profits at increasing levels, buys back at breakeven for more upside.
+                </p>
 
             {/* Tab Navigation */}
             <div className="flex gap-1 border-b border-gray-700 pb-1">
@@ -2984,8 +3353,13 @@ export default function GiniePanel() {
             {/* Config Tab */}
             {scalpReentryTab === 'config' && (
             <>
+            {/* Note: Scalp Re-entry uses Size/SLTP settings from the parent Scalp mode */}
+            <p className="text-[9px] text-gray-500 mb-2 italic">
+              Size, leverage, and SL/TP settings are inherited from Scalp mode. Configure TP levels and re-entry settings below.
+            </p>
+
             {/* TP Levels Section */}
-            <div className="border border-gray-700 rounded">
+            <div className={`rounded ${expandedScalpReentrySection === 'tp_levels' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
               <button
                 onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'tp_levels' ? null : 'tp_levels')}
                 className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -3003,8 +3377,8 @@ export default function GiniePanel() {
                         min="0.1"
                         max="5"
                         step="0.1"
-                        value={scalpReentryConfig.tp1_percent}
-                        onChange={(e) => updateScalpReentryConfig('tp1_percent', Number(e.target.value))}
+                        value={scalpReentrySpecificConfig.tp1_percent}
+                        onChange={(e) => updateScalpReentrySpecificConfig('tp1_percent', Number(e.target.value))}
                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                       />
                     </div>
@@ -3015,8 +3389,8 @@ export default function GiniePanel() {
                         min="0.2"
                         max="5"
                         step="0.1"
-                        value={scalpReentryConfig.tp2_percent}
-                        onChange={(e) => updateScalpReentryConfig('tp2_percent', Number(e.target.value))}
+                        value={scalpReentrySpecificConfig.tp2_percent}
+                        onChange={(e) => updateScalpReentrySpecificConfig('tp2_percent', Number(e.target.value))}
                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                       />
                     </div>
@@ -3027,8 +3401,8 @@ export default function GiniePanel() {
                         min="0.3"
                         max="10"
                         step="0.1"
-                        value={scalpReentryConfig.tp3_percent}
-                        onChange={(e) => updateScalpReentryConfig('tp3_percent', Number(e.target.value))}
+                        value={scalpReentrySpecificConfig.tp3_percent}
+                        onChange={(e) => updateScalpReentrySpecificConfig('tp3_percent', Number(e.target.value))}
                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                       />
                     </div>
@@ -3041,8 +3415,8 @@ export default function GiniePanel() {
                         min="10"
                         max="50"
                         step="5"
-                        value={scalpReentryConfig.tp1_sell_percent}
-                        onChange={(e) => updateScalpReentryConfig('tp1_sell_percent', Number(e.target.value))}
+                        value={scalpReentrySpecificConfig.tp1_sell_percent}
+                        onChange={(e) => updateScalpReentrySpecificConfig('tp1_sell_percent', Number(e.target.value))}
                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                       />
                     </div>
@@ -3053,8 +3427,8 @@ export default function GiniePanel() {
                         min="20"
                         max="80"
                         step="5"
-                        value={scalpReentryConfig.tp2_sell_percent}
-                        onChange={(e) => updateScalpReentryConfig('tp2_sell_percent', Number(e.target.value))}
+                        value={scalpReentrySpecificConfig.tp2_sell_percent}
+                        onChange={(e) => updateScalpReentrySpecificConfig('tp2_sell_percent', Number(e.target.value))}
                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                       />
                     </div>
@@ -3065,8 +3439,8 @@ export default function GiniePanel() {
                         min="50"
                         max="100"
                         step="5"
-                        value={scalpReentryConfig.tp3_sell_percent}
-                        onChange={(e) => updateScalpReentryConfig('tp3_sell_percent', Number(e.target.value))}
+                        value={scalpReentrySpecificConfig.tp3_sell_percent}
+                        onChange={(e) => updateScalpReentrySpecificConfig('tp3_sell_percent', Number(e.target.value))}
                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                       />
                     </div>
@@ -3079,7 +3453,7 @@ export default function GiniePanel() {
             </div>
 
             {/* Re-entry Settings */}
-            <div className="border border-gray-700 rounded">
+            <div className={`rounded ${expandedScalpReentrySection === 'reentry' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
               <button
                 onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'reentry' ? null : 'reentry')}
                 className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -3096,8 +3470,8 @@ export default function GiniePanel() {
                       min="50"
                       max="100"
                       step="5"
-                      value={scalpReentryConfig.reentry_percent}
-                      onChange={(e) => updateScalpReentryConfig('reentry_percent', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.reentry_percent}
+                      onChange={(e) => updateScalpReentrySpecificConfig('reentry_percent', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3108,8 +3482,8 @@ export default function GiniePanel() {
                       min="0"
                       max="1"
                       step="0.01"
-                      value={scalpReentryConfig.reentry_price_buffer}
-                      onChange={(e) => updateScalpReentryConfig('reentry_price_buffer', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.reentry_price_buffer}
+                      onChange={(e) => updateScalpReentrySpecificConfig('reentry_price_buffer', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3119,8 +3493,8 @@ export default function GiniePanel() {
                       type="number"
                       min="1"
                       max="10"
-                      value={scalpReentryConfig.max_reentry_attempts}
-                      onChange={(e) => updateScalpReentryConfig('max_reentry_attempts', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.max_reentry_attempts}
+                      onChange={(e) => updateScalpReentrySpecificConfig('max_reentry_attempts', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3131,8 +3505,8 @@ export default function GiniePanel() {
                       min="60"
                       max="900"
                       step="30"
-                      value={scalpReentryConfig.reentry_timeout_sec}
-                      onChange={(e) => updateScalpReentryConfig('reentry_timeout_sec', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.reentry_timeout_sec}
+                      onChange={(e) => updateScalpReentrySpecificConfig('reentry_timeout_sec', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3141,7 +3515,7 @@ export default function GiniePanel() {
             </div>
 
             {/* Final Trailing & Dynamic SL */}
-            <div className="border border-gray-700 rounded">
+            <div className={`rounded ${expandedScalpReentrySection === 'final' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
               <button
                 onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'final' ? null : 'final')}
                 className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -3158,8 +3532,8 @@ export default function GiniePanel() {
                       min="1"
                       max="15"
                       step="0.5"
-                      value={scalpReentryConfig.final_trailing_percent}
-                      onChange={(e) => updateScalpReentryConfig('final_trailing_percent', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.final_trailing_percent}
+                      onChange={(e) => updateScalpReentrySpecificConfig('final_trailing_percent', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3170,8 +3544,8 @@ export default function GiniePanel() {
                       min="10"
                       max="30"
                       step="5"
-                      value={scalpReentryConfig.final_hold_min_percent}
-                      onChange={(e) => updateScalpReentryConfig('final_hold_min_percent', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.final_hold_min_percent}
+                      onChange={(e) => updateScalpReentrySpecificConfig('final_hold_min_percent', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3182,8 +3556,8 @@ export default function GiniePanel() {
                       min="20"
                       max="60"
                       step="5"
-                      value={scalpReentryConfig.dynamic_sl_max_loss_pct}
-                      onChange={(e) => updateScalpReentryConfig('dynamic_sl_max_loss_pct', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.dynamic_sl_max_loss_pct}
+                      onChange={(e) => updateScalpReentrySpecificConfig('dynamic_sl_max_loss_pct', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3194,8 +3568,8 @@ export default function GiniePanel() {
                       min="40"
                       max="80"
                       step="5"
-                      value={scalpReentryConfig.dynamic_sl_protect_pct}
-                      onChange={(e) => updateScalpReentryConfig('dynamic_sl_protect_pct', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.dynamic_sl_protect_pct}
+                      onChange={(e) => updateScalpReentrySpecificConfig('dynamic_sl_protect_pct', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3204,7 +3578,7 @@ export default function GiniePanel() {
             </div>
 
             {/* AI Configuration */}
-            <div className="border border-gray-700 rounded">
+            <div className={`rounded ${expandedScalpReentrySection === 'ai' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
               <button
                 onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'ai' ? null : 'ai')}
                 className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
@@ -3218,8 +3592,8 @@ export default function GiniePanel() {
                     <label className="flex items-center gap-2 text-[10px] text-gray-300">
                       <input
                         type="checkbox"
-                        checked={scalpReentryConfig.use_ai_decisions}
-                        onChange={(e) => updateScalpReentryConfig('use_ai_decisions', e.target.checked)}
+                        checked={scalpReentrySpecificConfig.use_ai_decisions}
+                        onChange={(e) => updateScalpReentrySpecificConfig('use_ai_decisions', e.target.checked)}
                         className="w-3 h-3"
                       />
                       Use AI Decisions
@@ -3227,8 +3601,8 @@ export default function GiniePanel() {
                     <label className="flex items-center gap-2 text-[10px] text-gray-300">
                       <input
                         type="checkbox"
-                        checked={scalpReentryConfig.ai_tp_optimization}
-                        onChange={(e) => updateScalpReentryConfig('ai_tp_optimization', e.target.checked)}
+                        checked={scalpReentrySpecificConfig.ai_tp_optimization}
+                        onChange={(e) => updateScalpReentrySpecificConfig('ai_tp_optimization', e.target.checked)}
                         className="w-3 h-3"
                       />
                       AI TP Optimization
@@ -3236,8 +3610,8 @@ export default function GiniePanel() {
                     <label className="flex items-center gap-2 text-[10px] text-gray-300">
                       <input
                         type="checkbox"
-                        checked={scalpReentryConfig.ai_dynamic_sl}
-                        onChange={(e) => updateScalpReentryConfig('ai_dynamic_sl', e.target.checked)}
+                        checked={scalpReentrySpecificConfig.ai_dynamic_sl}
+                        onChange={(e) => updateScalpReentrySpecificConfig('ai_dynamic_sl', e.target.checked)}
                         className="w-3 h-3"
                       />
                       AI Dynamic SL
@@ -3246,7 +3620,7 @@ export default function GiniePanel() {
                       <input
                         type="checkbox"
                         checked={scalpReentryConfig.use_multi_agent}
-                        onChange={(e) => updateScalpReentryConfig('use_multi_agent', e.target.checked)}
+                        onChange={(e) => updateScalpReentrySpecificConfig('use_multi_agent', e.target.checked)}
                         className="w-3 h-3"
                       />
                       Multi-Agent System
@@ -3259,8 +3633,8 @@ export default function GiniePanel() {
                       min="0.3"
                       max="0.95"
                       step="0.05"
-                      value={scalpReentryConfig.ai_min_confidence}
-                      onChange={(e) => updateScalpReentryConfig('ai_min_confidence', Number(e.target.value))}
+                      value={scalpReentrySpecificConfig.ai_min_confidence}
+                      onChange={(e) => updateScalpReentrySpecificConfig('ai_min_confidence', Number(e.target.value))}
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -3269,8 +3643,8 @@ export default function GiniePanel() {
                       <label className="flex items-center gap-1 text-[10px] text-gray-300">
                         <input
                           type="checkbox"
-                          checked={scalpReentryConfig.enable_sentiment_agent}
-                          onChange={(e) => updateScalpReentryConfig('enable_sentiment_agent', e.target.checked)}
+                          checked={scalpReentrySpecificConfig.enable_sentiment_agent}
+                          onChange={(e) => updateScalpReentrySpecificConfig('enable_sentiment_agent', e.target.checked)}
                           className="w-3 h-3"
                         />
                         Sentiment
@@ -3278,8 +3652,8 @@ export default function GiniePanel() {
                       <label className="flex items-center gap-1 text-[10px] text-gray-300">
                         <input
                           type="checkbox"
-                          checked={scalpReentryConfig.enable_risk_agent}
-                          onChange={(e) => updateScalpReentryConfig('enable_risk_agent', e.target.checked)}
+                          checked={scalpReentrySpecificConfig.enable_risk_agent}
+                          onChange={(e) => updateScalpReentrySpecificConfig('enable_risk_agent', e.target.checked)}
                           className="w-3 h-3"
                         />
                         Risk
@@ -3287,8 +3661,8 @@ export default function GiniePanel() {
                       <label className="flex items-center gap-1 text-[10px] text-gray-300">
                         <input
                           type="checkbox"
-                          checked={scalpReentryConfig.enable_tp_agent}
-                          onChange={(e) => updateScalpReentryConfig('enable_tp_agent', e.target.checked)}
+                          checked={scalpReentrySpecificConfig.enable_tp_agent}
+                          onChange={(e) => updateScalpReentrySpecificConfig('enable_tp_agent', e.target.checked)}
                           className="w-3 h-3"
                         />
                         TP Agent
@@ -3302,7 +3676,7 @@ export default function GiniePanel() {
             {/* Save Button */}
             <div className="flex justify-end pt-1">
               <button
-                onClick={saveScalpReentryConfig}
+                onClick={saveScalpReentrySpecificConfig}
                 disabled={savingScalpReentry}
                 className="px-3 py-1 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded text-xs transition-colors disabled:opacity-50"
               >
@@ -3321,6 +3695,8 @@ export default function GiniePanel() {
             <div className="px-2 py-1.5 bg-green-900/20 border border-green-700/30 rounded text-[10px] text-green-400">
               Upgrades scalp mode entries to use progressive TP with re-entry. Shares entry rules with scalp mode but has independent position management.
             </div>
+            </>
+            ) : null}
           </div>
         )}
       </div>
@@ -3328,7 +3704,9 @@ export default function GiniePanel() {
       {/* LLM & Adaptive AI Section (Story 2.8) */}
       <div className="space-y-2 mb-3">
         <div
-          className="flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded border border-gray-600 cursor-pointer hover:bg-gray-700/50 transition-colors"
+          className={`flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded cursor-pointer hover:bg-gray-700/50 transition-colors ${
+            showLLMSettings ? 'border-2 border-purple-500' : 'border border-gray-600'
+          }`}
           onClick={() => {
             setShowLLMSettings(!showLLMSettings);
             if (!showLLMSettings) {
@@ -3367,17 +3745,32 @@ export default function GiniePanel() {
                   <Gauge className="w-3.5 h-3.5 text-cyan-400" />
                   <span className="text-xs text-gray-300 font-medium">LLM Provider</span>
                 </div>
-                <button
-                  onClick={() => handleUpdateLLMConfig({ enabled: !llmConfig?.enabled })}
-                  disabled={savingLLMConfig}
-                  className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
-                    llmConfig?.enabled
-                      ? 'bg-cyan-900/50 text-cyan-400 border border-cyan-700'
-                      : 'bg-gray-700/50 text-gray-400 border border-gray-600'
-                  }`}
-                >
-                  {llmConfig?.enabled ? 'Enabled' : 'Disabled'}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleUpdateLLMConfig({ enabled: !llmConfig?.enabled })}
+                    disabled={savingLLMConfig}
+                    className={`px-2 py-0.5 rounded text-[10px] transition-colors ${
+                      llmConfig?.enabled
+                        ? 'bg-cyan-900/50 text-cyan-400 border border-cyan-700'
+                        : 'bg-gray-700/50 text-gray-400 border border-gray-600'
+                    }`}
+                  >
+                    {llmConfig?.enabled ? 'Enabled' : 'Disabled'}
+                  </button>
+                  <button
+                    onClick={() => openResetDialog(
+                      'Reset LLM Config to Defaults?',
+                      'LLM Config',
+                      () => loadLLMConfigDefaults(true),
+                      () => loadLLMConfigDefaults(false)
+                    )}
+                    className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
+                    title="Reset LLM Config to defaults"
+                  >
+                    <RotateCcw size={12} />
+                    Reset
+                  </button>
+                </div>
               </div>
 
               {llmConfig?.enabled && (
@@ -3651,17 +4044,9 @@ export default function GiniePanel() {
 
             {/* LLM Diagnostics */}
             <div className="border border-gray-700 rounded p-2 space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Stethoscope className="w-3.5 h-3.5 text-blue-400" />
-                  <span className="text-xs text-gray-300 font-medium">LLM Diagnostics</span>
-                </div>
-                <button
-                  onClick={handleResetLLMCallDiagnostics}
-                  className="px-1.5 py-0.5 bg-orange-900/50 hover:bg-orange-900/70 text-orange-400 rounded text-[10px]"
-                >
-                  Reset
-                </button>
+              <div className="flex items-center gap-2">
+                <Stethoscope className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-xs text-gray-300 font-medium">LLM Diagnostics</span>
               </div>
 
               {llmCallDiagnostics && (
@@ -3728,8 +4113,22 @@ export default function GiniePanel() {
         </div>
       )}
 
+      {/* Autopilot Error Display */}
+      {autopilotError && (
+        <div className="mb-4">
+          <ErrorDisplay
+            error={autopilotError}
+            onRetry={() => fetchAutopilotStatus(false)}
+            onLogin={() => window.location.href = '/login'}
+            isRetrying={togglingAutopilot}
+            section="Autopilot Status"
+          />
+        </div>
+      )}
+
       {/* Stats Grid */}
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      {!autopilotError && autopilotStatus && (
+        <div className="grid grid-cols-4 gap-3 mb-4">
         <div className="bg-gray-700/50 rounded p-2 text-center">
           <div className="text-xs text-gray-400">Positions</div>
           <div className="text-lg font-bold text-white">
@@ -3761,6 +4160,7 @@ export default function GiniePanel() {
           </div>
         </div>
       </div>
+      )}
 
       {/* Coin Sources Configuration */}
       <div className="bg-gray-800/50 rounded-lg border border-gray-700 mb-3">
@@ -4120,14 +4520,19 @@ export default function GiniePanel() {
             ) : (
               autopilotStatus.positions
                 .filter(pos => sourceFilter === 'all' || pos.source === sourceFilter)
-                .map((pos) => (
-                  <PositionCard
-                    key={pos.symbol}
-                    position={pos}
-                    expanded={expandedPosition === pos.symbol}
-                    onToggle={() => setExpandedPosition(expandedPosition === pos.symbol ? null : pos.symbol)}
-                  />
-                ))
+                .map((pos) => {
+                  // Find matching Binance position for real-time price
+                  const binancePos = binancePositions.find(bp => bp.symbol === pos.symbol);
+                  return (
+                    <PositionCard
+                      key={pos.symbol}
+                      position={pos}
+                      expanded={expandedPosition === pos.symbol}
+                      onToggle={() => setExpandedPosition(expandedPosition === pos.symbol ? null : pos.symbol)}
+                      realTimePrice={binancePos?.markPrice}
+                    />
+                  );
+                })
             )}
           </div>
         </div>
@@ -5058,6 +5463,21 @@ export default function GiniePanel() {
       {/* Diagnostics Tab */}
       {activeTab === 'diagnostics' && (
         <div className="space-y-2 max-h-60 overflow-y-auto">
+          {diagnosticsError ? (
+            <ErrorDisplay
+              error={diagnosticsError}
+              onRetry={fetchDiagnostics}
+              onLogin={() => window.location.href = '/login'}
+              isRetrying={false}
+              section="Diagnostics"
+            />
+          ) : !diagnostics ? (
+            <div className="flex items-center gap-2 text-gray-400 text-sm p-4">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>Loading diagnostics...</span>
+            </div>
+          ) : (
+            <>
           {/* Quick Status Cards */}
           <div className="grid grid-cols-4 gap-2">
             <div className={`p-2 rounded text-center ${diagnostics?.can_trade ? 'bg-green-900/30 border border-green-800' : 'bg-red-900/30 border border-red-800'}`}>
@@ -5221,8 +5641,33 @@ export default function GiniePanel() {
             <div className="flex items-center justify-between mb-2">
               <div className="text-xs text-gray-400 flex items-center gap-1">
                 <Activity className="w-3.5 h-3.5" /> Signal Logs
+                {signalHold && <span className="text-yellow-400 text-[9px] ml-1">(HELD)</span>}
               </div>
-              <div className="flex gap-1">
+              <div className="flex gap-1 items-center">
+                {/* Hold/Pin button */}
+                <button
+                  onClick={() => setSignalHold(!signalHold)}
+                  className={`px-1.5 py-0.5 text-[10px] rounded transition-colors flex items-center gap-0.5 ${
+                    signalHold
+                      ? 'bg-yellow-900/50 text-yellow-400'
+                      : 'bg-gray-700 text-gray-400 hover:text-white'
+                  }`}
+                  title={signalHold ? 'Resume auto-refresh' : 'Hold/pause auto-refresh'}
+                >
+                  {signalHold ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                  {signalHold ? 'Resume' : 'Hold'}
+                </button>
+                {/* Manual refresh button - only shown when held */}
+                {signalHold && (
+                  <button
+                    onClick={() => fetchSignalLogs(signalFilter)}
+                    className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
+                    title="Manual refresh"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                  </button>
+                )}
+                {/* Filter buttons */}
                 {(['all', 'executed', 'rejected'] as const).map((filter) => (
                   <button
                     key={filter}
@@ -5309,18 +5754,138 @@ export default function GiniePanel() {
             </div>
           </div>
 
+          {/* Trading Conditions Checklist */}
+          <div className="mt-4 pt-4 border-t border-gray-700">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-gray-400 flex items-center gap-1">
+                <ListChecks className="w-3.5 h-3.5" /> Trading Conditions
+              </div>
+              <button
+                onClick={fetchTradeConditions}
+                className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
+                title="Refresh conditions"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
+
+            {tradeConditions ? (
+              <div className="space-y-1">
+                {/* Summary indicator */}
+                <div className={`p-2 rounded text-xs flex items-center gap-2 ${
+                  tradeConditions.all_passed
+                    ? 'bg-green-900/20 border border-green-800/50'
+                    : 'bg-red-900/20 border border-red-800/50'
+                }`}>
+                  {tradeConditions.all_passed ? (
+                    <>
+                      <CheckCircle className="w-4 h-4 text-green-400" />
+                      <span className="text-green-400">All conditions passed - Ready to trade</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-4 h-4 text-red-400" />
+                      <span className="text-red-400">{tradeConditions.blocking_count} condition(s) blocking trades</span>
+                    </>
+                  )}
+                </div>
+
+                {/* Individual conditions */}
+                <div className="space-y-0.5 max-h-32 overflow-y-auto">
+                  {tradeConditions.conditions.map((condition, idx) => (
+                    <div
+                      key={idx}
+                      className={`p-1.5 rounded text-[10px] flex items-start gap-1.5 ${
+                        condition.passed ? 'bg-gray-700/30' : 'bg-red-900/20'
+                      }`}
+                    >
+                      {condition.passed ? (
+                        <CheckCircle className="w-3.5 h-3.5 text-green-400 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5 text-red-400 flex-shrink-0 mt-0.5" />
+                      )}
+                      <div className="flex-1">
+                        <span className={condition.passed ? 'text-gray-300' : 'text-red-400'}>
+                          {condition.name}
+                        </span>
+                        {condition.detail && (
+                          <span className="text-gray-500 ml-1">- {condition.detail}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="text-center text-gray-500 py-2 text-xs">Loading conditions...</p>
+            )}
+          </div>
+
+          {/* Pending Limit Orders */}
+          <div className="mt-4 pt-4 border-t border-gray-700">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-gray-400 flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5" /> Pending Limit Orders
+              </div>
+              <button
+                onClick={fetchPendingOrders}
+                className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
+                title="Refresh pending orders"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
+
+            {pendingOrders && pendingOrders.count > 0 ? (
+              <div className="space-y-1">
+                {/* Info notice */}
+                <div className="p-2 bg-blue-900/20 border border-blue-800/50 rounded text-[10px] text-blue-400 flex items-start gap-1.5">
+                  <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                  <span>Executed signals may not appear in positions until LIMIT orders fill at target price.</span>
+                </div>
+
+                {/* Pending orders list */}
+                <div className="space-y-1 max-h-32 overflow-y-auto">
+                  {pendingOrders.pending_orders.map((order, idx) => (
+                    <div key={order.order_id || idx} className="bg-gray-700/30 rounded p-1.5 text-[10px]">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-white font-medium">{order.symbol?.replace('USDT', '')}</span>
+                          <span className={`px-1 py-0.5 rounded text-[9px] ${
+                            order.direction === 'LONG' ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
+                          }`}>
+                            {order.direction}
+                          </span>
+                          <span className="text-gray-400 text-[9px]">{order.mode}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-yellow-400" />
+                          <span className={`${order.seconds_left < 60 ? 'text-red-400' : 'text-yellow-400'}`}>
+                            {order.seconds_left > 60
+                              ? `${Math.floor(order.seconds_left / 60)}m ${order.seconds_left % 60}s`
+                              : `${order.seconds_left}s`}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between mt-1 text-gray-400">
+                        <span>Entry: <span className="text-white">${order.entry_price?.toFixed(4)}</span></span>
+                        <span>Qty: <span className="text-white">{order.quantity?.toFixed(4)}</span></span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <p className="text-center text-gray-500 py-2 text-xs">No pending limit orders</p>
+            )}
+          </div>
+
           {/* LLM Switches Tracking */}
           <div className="mt-4 pt-4 border-t border-gray-700">
             <div className="flex items-center justify-between mb-2">
               <div className="text-xs text-gray-400 flex items-center gap-1">
                 <Sparkles className="w-3.5 h-3.5" /> LLM Switches
               </div>
-              <button
-                onClick={handleResetLLMDiagnostics}
-                className="px-2 py-0.5 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] transition-colors"
-              >
-                Reset
-              </button>
             </div>
 
             {llmSwitches.length === 0 ? (
@@ -5346,6 +5911,8 @@ export default function GiniePanel() {
               </div>
             )}
           </div>
+            </>
+          )}
         </div>
       )}
 
@@ -5451,14 +6018,39 @@ export default function GiniePanel() {
           <ProtectionHealthPanel refreshInterval={5000} compact={false} />
         </div>
       )}
+
+      {/* Reset Confirm Dialog */}
+      <ResetConfirmDialog
+        open={resetDialog.open}
+        onClose={() => setResetDialog(prev => ({ ...prev, open: false }))}
+        onConfirm={resetDialog.onConfirm}
+        title={resetDialog.title}
+        configType={resetDialog.configType}
+        loading={resetDialog.loading}
+        allMatch={resetDialog.allMatch}
+        differences={resetDialog.differences}
+        totalChanges={resetDialog.totalChanges}
+      />
     </div>
   );
 }
 
 // Position Card Component
-function PositionCard({ position, expanded, onToggle }: { position: GiniePosition; expanded: boolean; onToggle: () => void }) {
-  const pnlTotal = position.realized_pnl + position.unrealized_pnl;
-  const pnlPercent = ((position.remaining_qty > 0 ? position.unrealized_pnl : 0) / (position.entry_price * position.original_qty)) * 100;
+function PositionCard({ position, expanded, onToggle, realTimePrice }: { position: GiniePosition; expanded: boolean; onToggle: () => void; realTimePrice?: number }) {
+  // Use real-time price from Binance if available, otherwise fall back to Ginie's calculated value
+  let unrealizedPnl = position.unrealized_pnl;
+
+  if (realTimePrice && position.entry_price > 0 && position.remaining_qty > 0) {
+    // Recalculate unrealized PnL using real-time Binance mark price
+    if (position.side === 'LONG') {
+      unrealizedPnl = (realTimePrice - position.entry_price) * position.remaining_qty;
+    } else {
+      unrealizedPnl = (position.entry_price - realTimePrice) * position.remaining_qty;
+    }
+  }
+
+  const pnlTotal = position.realized_pnl + unrealizedPnl;
+  const pnlPercent = ((position.remaining_qty > 0 ? unrealizedPnl : 0) / (position.entry_price * position.original_qty)) * 100;
 
   // Calculate expected max profit (at first pending TP) and expected max loss (at SL)
   const isLong = position.side === 'LONG';
@@ -5556,10 +6148,14 @@ function PositionCard({ position, expanded, onToggle }: { position: GiniePositio
 
       {expanded && (
         <div className="mt-3 pt-3 border-t border-gray-600 space-y-2 text-xs">
-          <div className="grid grid-cols-5 gap-2">
+          <div className="grid grid-cols-6 gap-2">
             <div className="bg-gray-700/50 p-1.5 rounded">
               <div className="text-gray-500">Entry</div>
               <div className="text-white">${Number(position.entry_price || 0).toFixed(2)}</div>
+            </div>
+            <div className="bg-gray-700/50 p-1.5 rounded">
+              <div className="text-gray-500">Current</div>
+              <div className="text-yellow-400 font-mono">${Number(realTimePrice || 0).toFixed(2)}</div>
             </div>
             <div className="bg-gray-700/50 p-1.5 rounded">
               <div className="text-gray-500">Qty</div>

@@ -175,8 +175,8 @@ Admin panel: Navigate to `/admin` when logged in as admin.
 **IMPORTANT**: Do NOT use the admin account for trading or API testing. The admin account is for administrative tasks only.
 
 For testing trading features, API endpoints, or Ginie autopilot:
-1. **Development** (port 8094): Use `jejeram@gmail.com` with password `password123`
-2. **Production** (port 8095): Same credentials
+1. **Development** (port 8094): Use your registered test account credentials
+2. **Production** (port 8095): Use your registered test account credentials
 
 **Why separate?** Dev and Prod use **different PostgreSQL databases**:
 - Dev: `binance-bot-postgres` (port 5433)

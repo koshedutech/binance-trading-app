@@ -1173,7 +1173,8 @@ var (
 	binancePnLCacheTTL = 2 * time.Minute // More frequent updates for PnL
 )
 
-// handleGetFuturesMetrics returns futures trading metrics calculated from Binance API
+// handleGetFuturesMetrics returns futures trading metrics from Binance Income History API
+// Daily PnL and Total PnL come from Binance /fapi/v1/income endpoint with incomeType=REALIZED_PNL
 // Results are cached for 5 minutes to avoid rate limiting
 func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 	// Return cached metrics if still valid
@@ -1188,77 +1189,82 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		return
 	}
 
-	// Get account trades from Binance for common symbols (reduced list to avoid rate limits)
-	symbols := []string{
-		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+	// Calculate time boundaries for daily PnL
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	startOfDayMs := startOfDay.UnixMilli()
+
+	// For total PnL, fetch last 7 days (matches Binance UI default view)
+	sevenDaysAgo := now.AddDate(0, 0, -7)
+	startTimeMs := sevenDaysAgo.UnixMilli()
+
+	// Fetch income history from Binance API (REALIZED_PNL only)
+	log.Printf("[METRICS] Fetching income history from Binance: startTime=%d, endTime=now", startTimeMs)
+	allIncomeRecords, err := futuresClient.GetIncomeHistory("REALIZED_PNL", startTimeMs, 0, 1000)
+	if err != nil {
+		log.Printf("[METRICS] Error fetching income history: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch income history: " + err.Error()})
+		return
 	}
 
-	var allTrades []binance.FuturesTrade
-	for _, sym := range symbols {
-		trades, err := futuresClient.GetTradeHistory(sym, 100)
-		if err == nil {
-			allTrades = append(allTrades, trades...)
-		}
-		time.Sleep(100 * time.Millisecond) // Rate limit between calls
-	}
-
-	// Get funding fee history (only for main symbols)
+	// Get funding fee history
 	var allFundingFees []binance.FundingFeeRecord
-	for _, sym := range symbols[:3] { // Only BTC, ETH, BNB
-		fees, err := futuresClient.GetFundingFeeHistory(sym, 50)
-		if err == nil {
-			allFundingFees = append(allFundingFees, fees...)
+	fundingRecords, err := futuresClient.GetIncomeHistory("FUNDING_FEE", startTimeMs, 0, 1000)
+	if err == nil {
+		for _, record := range fundingRecords {
+			allFundingFees = append(allFundingFees, binance.FundingFeeRecord{
+				Symbol:    record.Symbol,
+				Income:    record.Income,
+				Asset:     record.Asset,
+				Time:      record.Time,
+				Timestamp: record.Timestamp,
+			})
 		}
-		time.Sleep(100 * time.Millisecond) // Rate limit between calls
 	}
 
-	// Calculate metrics from actual trades
+	// Calculate PnL metrics from income records
 	var totalRealizedPnl float64
+	var dailyRealizedPnl float64
 	var totalFundingFees float64
 	var winningTrades, losingTrades int
+	var dailyWins, dailyLosses, dailyTrades int
 	var largestWin, largestLoss float64
 	var totalWin, totalLoss float64
-
-	// Daily stats
-	var dailyRealizedPnl float64
-	var dailyTrades, dailyWins, dailyLosses int
-	now := time.Now()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UnixMilli()
 	var lastTradeTime int64
 
-	// Track closed positions by counting trades where realizedPnl != 0
-	for _, trade := range allTrades {
-		if trade.RealizedPnl != 0 {
-			totalRealizedPnl += trade.RealizedPnl
-			if trade.RealizedPnl > 0 {
-				winningTrades++
-				totalWin += trade.RealizedPnl
-				if trade.RealizedPnl > largestWin {
-					largestWin = trade.RealizedPnl
-				}
-			} else {
-				losingTrades++
-				totalLoss += trade.RealizedPnl
-				if trade.RealizedPnl < largestLoss {
-					largestLoss = trade.RealizedPnl
-				}
-			}
+	// Process income records
+	for _, record := range allIncomeRecords {
+		totalRealizedPnl += record.Income
 
-			// Track daily stats
-			if trade.Time >= startOfDay {
-				dailyRealizedPnl += trade.RealizedPnl
-				dailyTrades++
-				if trade.RealizedPnl > 0 {
-					dailyWins++
-				} else {
-					dailyLosses++
-				}
+		// Track winning/losing trades
+		if record.Income > 0 {
+			winningTrades++
+			totalWin += record.Income
+			if record.Income > largestWin {
+				largestWin = record.Income
 			}
+		} else if record.Income < 0 {
+			losingTrades++
+			totalLoss += record.Income
+			if record.Income < largestLoss {
+				largestLoss = record.Income
+			}
+		}
 
-			// Track last trade time
-			if trade.Time > lastTradeTime {
-				lastTradeTime = trade.Time
+		// Daily stats
+		if record.Time >= startOfDayMs {
+			dailyRealizedPnl += record.Income
+			dailyTrades++
+			if record.Income > 0 {
+				dailyWins++
+			} else if record.Income < 0 {
+				dailyLosses++
 			}
+		}
+
+		// Track last trade time
+		if record.Time > lastTradeTime {
+			lastTradeTime = record.Time
 		}
 	}
 
@@ -1267,8 +1273,9 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		totalFundingFees += fee.Income
 	}
 
+	// Calculate derived metrics
 	totalTrades := winningTrades + losingTrades
-	var winRate, averagePnl, averageWin, averageLoss, profitFactor float64
+	var winRate, averagePnl, averageWin, averageLoss, profitFactor, dailyWinRate float64
 
 	if totalTrades > 0 {
 		winRate = float64(winningTrades) / float64(totalTrades) * 100
@@ -1282,6 +1289,9 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 	}
 	if totalLoss != 0 {
 		profitFactor = totalWin / (-totalLoss)
+	}
+	if dailyTrades > 0 {
+		dailyWinRate = float64(dailyWins) / float64(dailyTrades) * 100
 	}
 
 	// Get positions and orders count (single API call each)
@@ -1310,12 +1320,6 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		totalUnrealizedPnl = accountInfo.TotalUnrealizedProfit
 	}
 
-	// Calculate daily win rate
-	var dailyWinRate float64
-	if dailyTrades > 0 {
-		dailyWinRate = float64(dailyWins) / float64(dailyTrades) * 100
-	}
-
 	// Format last trade time
 	var lastTradeTimeStr string
 	if lastTradeTime > 0 {
@@ -1327,7 +1331,7 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		"winningTrades":      winningTrades,
 		"losingTrades":       losingTrades,
 		"winRate":            winRate,
-		"totalRealizedPnl":   totalRealizedPnl,
+		"totalRealizedPnl":   totalRealizedPnl,    // From Binance Income API (last 7 days)
 		"totalUnrealizedPnl": totalUnrealizedPnl,
 		"totalFundingFees":   totalFundingFees,
 		"averagePnl":         averagePnl,
@@ -1340,7 +1344,7 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		"openPositions":      openPositions,
 		"openOrders":         openOrderCount,
 		// Daily stats
-		"dailyRealizedPnl": dailyRealizedPnl,
+		"dailyRealizedPnl": dailyRealizedPnl,     // From Binance Income API (today only)
 		"dailyTrades":      dailyTrades,
 		"dailyWins":        dailyWins,
 		"dailyLosses":      dailyLosses,
@@ -1351,6 +1355,9 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 	// Cache the metrics
 	metricsCache = metrics
 	metricsCacheTime = time.Now()
+
+	log.Printf("[METRICS] Calculated from Binance Income API: daily=$%.2f, total(7d)=$%.2f, trades=%d, records=%d",
+		dailyRealizedPnl, totalRealizedPnl, totalTrades, len(allIncomeRecords))
 
 	c.JSON(http.StatusOK, metrics)
 }

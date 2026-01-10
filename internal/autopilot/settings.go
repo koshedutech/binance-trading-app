@@ -39,14 +39,12 @@ type ModeAllocationConfig struct {
 	// Position limits per mode
 	MaxUltraFastPositions    int `json:"max_ultra_fast_positions"`    // e.g., 3
 	MaxScalpPositions        int `json:"max_scalp_positions"`         // e.g., 4
-	MaxScalpReentryPositions int `json:"max_scalp_reentry_positions"` // e.g., 3
 	MaxSwingPositions        int `json:"max_swing_positions"`         // e.g., 3
 	MaxPositionPositions     int `json:"max_position_positions"`      // e.g., 2
 
 	// Max USD per position per mode
 	MaxUltraFastUSDPerPosition    float64 `json:"max_ultra_fast_usd_per_position"`    // e.g., $200
 	MaxScalpUSDPerPosition        float64 `json:"max_scalp_usd_per_position"`         // e.g., $300
-	MaxScalpReentryUSDPerPosition float64 `json:"max_scalp_reentry_usd_per_position"` // e.g., $400
 	MaxSwingUSDPerPosition        float64 `json:"max_swing_usd_per_position"`         // e.g., $500
 	MaxPositionUSDPerPosition     float64 `json:"max_position_usd_per_position"`      // e.g., $750
 
@@ -497,14 +495,22 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 85.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:         100.0,
-				MaxSizeUSD:          200.0,
-				MaxPositions:        5,
-				Leverage:            10,
-				SizeMultiplierLo:    1.0,
-				SizeMultiplierHi:    1.5,
-				AutoSizeEnabled:     false, // Manual sizing by default
-				AutoSizeMinCoverFee: 15.0,  // Min $15 to cover 0.08% round-trip fees
+				BaseSizeUSD:               0.0, // MUST be configured by user - no default
+				MaxSizeUSD:                0.0, // MUST be configured by user - no default
+				MaxPositions:              5,
+				Leverage:                  10,
+				SizeMultiplierLo:          1.0,
+				SizeMultiplierHi:          1.5,
+				AutoSizeEnabled:           false, // Manual sizing by default
+				AutoSizeMinCoverFee:       15.0,  // Min $15 to cover 0.08% round-trip fees
+				SafetyMargin:              0.90,  // Reserve 10% of balance for safety
+				MinBalanceUSD:             25.0,  // Minimum balance required to trade
+				MinPositionSizeUSD:        10.0,  // Minimum position size
+				RiskMultiplierConservative: 0.6,  // Conservative risk scaling
+				RiskMultiplierModerate:    0.8,   // Moderate risk scaling
+				RiskMultiplierAggressive:  1.0,   // Aggressive risk scaling
+				ConfidenceMultiplierBase:  0.5,   // Base multiplier for confidence scaling
+				ConfidenceMultiplierScale: 0.7,   // Additional multiplier per confidence level
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       20.0,
@@ -615,14 +621,22 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 88.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:         200.0,
-				MaxSizeUSD:          400.0,
-				MaxPositions:        4,
-				Leverage:            8,
-				SizeMultiplierLo:    1.0,
-				SizeMultiplierHi:    1.8,
-				AutoSizeEnabled:     false,
-				AutoSizeMinCoverFee: 15.0,
+				BaseSizeUSD:               0.0, // MUST be configured by user - no default
+				MaxSizeUSD:                0.0, // MUST be configured by user - no default
+				MaxPositions:              4,
+				Leverage:                  8,
+				SizeMultiplierLo:          1.0,
+				SizeMultiplierHi:          1.8,
+				AutoSizeEnabled:           false,
+				AutoSizeMinCoverFee:       15.0,
+				SafetyMargin:              0.90,  // Reserve 10% of balance for safety
+				MinBalanceUSD:             25.0,  // Minimum balance required to trade
+				MinPositionSizeUSD:        10.0,  // Minimum position size
+				RiskMultiplierConservative: 0.6,  // Conservative risk scaling
+				RiskMultiplierModerate:    0.8,   // Moderate risk scaling
+				RiskMultiplierAggressive:  1.0,   // Aggressive risk scaling
+				ConfidenceMultiplierBase:  0.5,   // Base multiplier for confidence scaling
+				ConfidenceMultiplierScale: 0.7,   // Additional multiplier per confidence level
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       40.0,
@@ -743,14 +757,22 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 88.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:         300.0,  // 3x position size for re-entry cycles
-				MaxSizeUSD:          600.0,  // 3x max size
-				MaxPositions:        4,      // More positions with re-entry
-				Leverage:            10,     // 10x leverage per user request
-				SizeMultiplierLo:    1.0,
-				SizeMultiplierHi:    1.5,
-				AutoSizeEnabled:     false,
-				AutoSizeMinCoverFee: 15.0,
+				BaseSizeUSD:               0.0, // MUST be configured by user - no default
+				MaxSizeUSD:                0.0, // MUST be configured by user - no default
+				MaxPositions:              4,      // More positions with re-entry
+				Leverage:                  10,     // 10x leverage per user request
+				SizeMultiplierLo:          1.0,
+				SizeMultiplierHi:          1.5,
+				AutoSizeEnabled:           false,
+				AutoSizeMinCoverFee:       15.0,
+				SafetyMargin:              0.90,  // Reserve 10% of balance for safety
+				MinBalanceUSD:             25.0,  // Minimum balance required to trade
+				MinPositionSizeUSD:        10.0,  // Minimum position size
+				RiskMultiplierConservative: 0.6,  // Conservative risk scaling
+				RiskMultiplierModerate:    0.8,   // Moderate risk scaling
+				RiskMultiplierAggressive:  1.0,   // Aggressive risk scaling
+				ConfidenceMultiplierBase:  0.5,   // Base multiplier for confidence scaling
+				ConfidenceMultiplierScale: 0.7,   // Additional multiplier per confidence level
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       50.0,  // Higher due to re-entry complexity
@@ -867,14 +889,22 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 90.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:         400.0,
-				MaxSizeUSD:          750.0,
-				MaxPositions:        3,
-				Leverage:            5,
-				SizeMultiplierLo:    1.0,
-				SizeMultiplierHi:    2.0,
-				AutoSizeEnabled:     false,
-				AutoSizeMinCoverFee: 20.0, // Higher min for swing trades
+				BaseSizeUSD:               0.0, // MUST be configured by user - no default
+				MaxSizeUSD:                0.0, // MUST be configured by user - no default
+				MaxPositions:              3,
+				Leverage:                  5,
+				SizeMultiplierLo:          1.0,
+				SizeMultiplierHi:          2.0,
+				AutoSizeEnabled:           false,
+				AutoSizeMinCoverFee:       20.0, // Higher min for swing trades
+				SafetyMargin:              0.90,  // Reserve 10% of balance for safety
+				MinBalanceUSD:             50.0,  // Minimum balance required to trade (higher for swing)
+				MinPositionSizeUSD:        15.0,  // Minimum position size
+				RiskMultiplierConservative: 0.5,  // Conservative risk scaling (lower for swing)
+				RiskMultiplierModerate:    0.7,   // Moderate risk scaling
+				RiskMultiplierAggressive:  0.9,   // Aggressive risk scaling (lower for swing)
+				ConfidenceMultiplierBase:  0.5,   // Base multiplier for confidence scaling
+				ConfidenceMultiplierScale: 0.7,   // Additional multiplier per confidence level
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       80.0,
@@ -985,14 +1015,22 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 				UltraConfidence: 92.0,
 			},
 			Size: &ModeSizeConfig{
-				BaseSizeUSD:         600.0,
-				MaxSizeUSD:          1000.0,
-				MaxPositions:        2,
-				Leverage:            3,
-				SizeMultiplierLo:    1.0,
-				SizeMultiplierHi:    2.5,
-				AutoSizeEnabled:     false,
-				AutoSizeMinCoverFee: 25.0, // Higher min for position trades
+				BaseSizeUSD:               0.0, // MUST be configured by user - no default
+				MaxSizeUSD:                0.0, // MUST be configured by user - no default
+				MaxPositions:              2,
+				Leverage:                  3,
+				SizeMultiplierLo:          1.0,
+				SizeMultiplierHi:          2.5,
+				AutoSizeEnabled:           false,
+				AutoSizeMinCoverFee:       25.0, // Higher min for position trades
+				SafetyMargin:              0.85,  // Reserve 15% of balance for safety (higher for position)
+				MinBalanceUSD:             100.0, // Minimum balance required to trade (higher for position)
+				MinPositionSizeUSD:        25.0,  // Minimum position size (higher for position)
+				RiskMultiplierConservative: 0.4,  // Conservative risk scaling (lowest for position)
+				RiskMultiplierModerate:    0.6,   // Moderate risk scaling
+				RiskMultiplierAggressive:  0.8,   // Aggressive risk scaling (lower for position)
+				ConfidenceMultiplierBase:  0.5,   // Base multiplier for confidence scaling
+				ConfidenceMultiplierScale: 0.7,   // Additional multiplier per confidence level
 			},
 			CircuitBreaker: &ModeCircuitBreakerConfig{
 				MaxLossPerHour:       150.0,
@@ -1715,14 +1753,12 @@ func DefaultSettings() *AutopilotSettings {
 			// Position limits per mode
 			MaxUltraFastPositions:    3, // Max 3 concurrent ultra-fast positions
 			MaxScalpPositions:        4, // Max 4 concurrent scalp positions
-			MaxScalpReentryPositions: 3, // Max 3 concurrent scalp re-entry positions
 			MaxSwingPositions:        3, // Max 3 concurrent swing positions
 			MaxPositionPositions:     2, // Max 2 concurrent position trades
 
 			// Max USD per position per mode
 			MaxUltraFastUSDPerPosition:    200, // $200 per ultra-fast position
-			MaxScalpUSDPerPosition:        300, // $300 per scalp position
-			MaxScalpReentryUSDPerPosition: 400, // $400 per scalp re-entry position
+			MaxScalpUSDPerPosition:        500, // $500 per scalp position (matches max_size_usd)
 			MaxSwingUSDPerPosition:        500, // $500 per swing position
 			MaxPositionUSDPerPosition:     750, // $750 per position trade
 
@@ -2403,18 +2439,9 @@ func (sm *SettingsManager) UpdateGinieRiskLevel(riskLevel string) error {
 				mc.Confidence.MinConfidence = 45.0
 			}
 
-			// Adjust size based on risk level
-			if mc.Size == nil {
-				mc.Size = &ModeSizeConfig{}
-			}
-			switch riskLevel {
-			case "conservative":
-				mc.Size.MaxSizeUSD = 300
-			case "moderate":
-				mc.Size.MaxSizeUSD = 500
-			case "aggressive":
-				mc.Size.MaxSizeUSD = 800
-			}
+			// Adjust size based on risk level - REMOVED hardcoded defaults
+			// Users MUST configure BaseSizeUSD and MaxSizeUSD explicitly
+			// No automatic fallback values to prevent accidental trades with wrong size
 		}
 	}
 
@@ -3732,7 +3759,8 @@ func (sm *SettingsManager) IncrementUltraFastTrade() error {
 
 // === PER-MODE CAPITAL ALLOCATION METHODS ===
 
-// GetModeAllocation returns the current mode allocation configuration
+// GetModeAllocation returns the current mode allocation configuration (FILE-BASED - DEPRECATED)
+// DEPRECATED: Use GetUserModeAllocation with userID and database instead
 func (sm *SettingsManager) GetModeAllocation() *ModeAllocationConfig {
 	settings := sm.GetDefaultSettings()
 	if settings.ModeAllocation == nil {
@@ -3740,6 +3768,45 @@ func (sm *SettingsManager) GetModeAllocation() *ModeAllocationConfig {
 		return DefaultSettings().ModeAllocation
 	}
 	return settings.ModeAllocation
+}
+
+// GetUserModeAllocation loads mode allocation from database for a specific user
+// Returns database allocation if exists, otherwise returns defaults
+func (sm *SettingsManager) GetUserModeAllocation(ctx context.Context, repo *database.Repository, userID string) (*ModeAllocationConfig, error) {
+	// Load from database
+	dbAllocation, err := repo.GetUserCapitalAllocation(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load user capital allocation: %w", err)
+	}
+
+	// If no database record, return defaults
+	if dbAllocation == nil {
+		log.Printf("[ALLOCATION] No database record for user %s, using defaults", userID)
+		return sm.dbAllocationToConfig(database.DefaultUserCapitalAllocation()), nil
+	}
+
+	log.Printf("[ALLOCATION] Loaded allocation from database for user %s", userID)
+	return sm.dbAllocationToConfig(dbAllocation), nil
+}
+
+// dbAllocationToConfig converts database UserCapitalAllocation to ModeAllocationConfig
+func (sm *SettingsManager) dbAllocationToConfig(dbAlloc *database.UserCapitalAllocation) *ModeAllocationConfig {
+	return &ModeAllocationConfig{
+		UltraFastScalpPercent:       dbAlloc.UltraFastPercent,
+		ScalpPercent:                dbAlloc.ScalpPercent,
+		SwingPercent:                dbAlloc.SwingPercent,
+		PositionPercent:             dbAlloc.PositionPercent,
+		MaxUltraFastPositions:       dbAlloc.MaxUltraFastPositions,
+		MaxScalpPositions:           dbAlloc.MaxScalpPositions,
+		MaxSwingPositions:           dbAlloc.MaxSwingPositions,
+		MaxPositionPositions:        dbAlloc.MaxPositionPositions,
+		MaxUltraFastUSDPerPosition:  dbAlloc.MaxUltraFastUSDPerPosition,
+		MaxScalpUSDPerPosition:      dbAlloc.MaxScalpUSDPerPosition,
+		MaxSwingUSDPerPosition:      dbAlloc.MaxSwingUSDPerPosition,
+		MaxPositionUSDPerPosition:   dbAlloc.MaxPositionUSDPerPosition,
+		AllowDynamicRebalance:       dbAlloc.AllowDynamicRebalance,
+		RebalanceThresholdPct:       dbAlloc.RebalanceThresholdPct,
+	}
 }
 
 // UpdateModeAllocation updates the mode allocation configuration
@@ -3757,7 +3824,8 @@ func (sm *SettingsManager) UpdateModeAllocation(config *ModeAllocationConfig) er
 	return sm.SaveSettings(settings)
 }
 
-// GetModeAllocationState calculates the current allocation state for a mode
+// GetModeAllocationState calculates the current allocation state for a mode (FILE-BASED - DEPRECATED)
+// DEPRECATED: Use GetUserModeAllocationState with userID and database instead
 func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital float64, currentPositions map[string]int, currentUsedUSD map[string]float64) *ModeAllocationState {
 	config := sm.GetModeAllocation()
 
@@ -3775,7 +3843,78 @@ func (sm *SettingsManager) GetModeAllocationState(mode string, totalCapital floa
 	case "scalp_reentry":
 		// scalp_reentry is a Position Optimization method, uses scalp mode allocation
 		allocatedPercent = config.ScalpPercent
-		maxPositions = float64(config.MaxScalpReentryPositions)
+		maxPositions = float64(config.MaxScalpPositions) // Uses scalp allocation
+	case "swing":
+		allocatedPercent = config.SwingPercent
+		maxPositions = float64(config.MaxSwingPositions)
+	case "position":
+		allocatedPercent = config.PositionPercent
+		maxPositions = float64(config.MaxPositionPositions)
+	default:
+		allocatedPercent = 0
+	}
+
+	// Calculate allocation
+	allocatedUSD := totalCapital * (allocatedPercent / 100.0)
+	usedUSD := 0.0
+	if val, exists := currentUsedUSD[mode]; exists {
+		usedUSD = val
+	}
+	availableUSD := allocatedUSD - usedUSD
+
+	// Get current position count
+	posCount := 0
+	if val, exists := currentPositions[mode]; exists {
+		posCount = val
+	}
+
+	// Calculate utilization percentages
+	var capitalUtil, posUtil float64
+	if allocatedUSD > 0 {
+		capitalUtil = (usedUSD / allocatedUSD) * 100.0
+	}
+	if maxPositions > 0 {
+		posUtil = (float64(posCount) / maxPositions) * 100.0
+	}
+
+	return &ModeAllocationState{
+		Mode:                mode,
+		AllocatedPercent:    allocatedPercent,
+		AllocatedUSD:        allocatedUSD,
+		UsedUSD:             usedUSD,
+		AvailableUSD:        availableUSD,
+		CurrentPositions:    posCount,
+		MaxPositions:        int(maxPositions),
+		CapitalUtilization:  capitalUtil,
+		PositionUtilization: posUtil,
+		LastAllocation:      time.Now(),
+	}
+}
+
+// GetUserModeAllocationState calculates allocation state using database-loaded config
+func (sm *SettingsManager) GetUserModeAllocationState(ctx context.Context, repo *database.Repository, userID string, mode string, totalCapital float64, currentPositions map[string]int, currentUsedUSD map[string]float64) *ModeAllocationState {
+	// Load config from database
+	config, err := sm.GetUserModeAllocation(ctx, repo, userID)
+	if err != nil {
+		log.Printf("[ALLOCATION] Error loading user allocation for state calculation: %v, using defaults", err)
+		config = sm.dbAllocationToConfig(database.DefaultUserCapitalAllocation())
+	}
+
+	var allocatedPercent, maxPositions float64
+
+	// Get mode-specific allocation
+	// NOTE: scalp_reentry shares capital allocation with scalp mode
+	switch mode {
+	case "ultra_fast":
+		allocatedPercent = config.UltraFastScalpPercent
+		maxPositions = float64(config.MaxUltraFastPositions)
+	case "scalp":
+		allocatedPercent = config.ScalpPercent
+		maxPositions = float64(config.MaxScalpPositions)
+	case "scalp_reentry":
+		// scalp_reentry is a Position Optimization method, uses scalp mode allocation
+		allocatedPercent = config.ScalpPercent
+		maxPositions = float64(config.MaxScalpPositions) // Uses scalp allocation
 	case "swing":
 		allocatedPercent = config.SwingPercent
 		maxPositions = float64(config.MaxSwingPositions)
@@ -4114,6 +4253,25 @@ func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *data
 		return nil, fmt.Errorf("failed to unmarshal mode config JSON for user %s mode %s: %w", userID, modeName, err)
 	}
 
+	// CRITICAL: Detect old format data (all nested pointers are nil)
+	// Old format has flat fields like "dca_on_loss", "tp1_percent" which don't map to new nested structure
+	if config.MTF == nil && config.Size == nil && config.SLTP == nil &&
+	   config.Timeframe == nil && config.Confidence == nil {
+		// Check if this is actually old format by looking at raw JSON
+		var rawMap map[string]interface{}
+		if err := json.Unmarshal(configJSON, &rawMap); err == nil {
+			// Check for old format fields
+			if _, hasOldField := rawMap["dca_on_loss"]; hasOldField {
+				log.Printf("[MODE-CONFIG] WARNING: User %s mode %s has OLD FORMAT config - migration needed", userID, modeName)
+				return nil, fmt.Errorf("OLD_FORMAT_DETECTED: This mode configuration uses an outdated format. Please reset to defaults via the UI to update to the new format")
+			}
+			if _, hasOldField := rawMap["tp1_percent"]; hasOldField {
+				log.Printf("[MODE-CONFIG] WARNING: User %s mode %s has OLD FORMAT config - migration needed", userID, modeName)
+				return nil, fmt.Errorf("OLD_FORMAT_DETECTED: This mode configuration uses an outdated format. Please reset to defaults via the UI to update to the new format")
+			}
+		}
+	}
+
 	// CRITICAL: Override the JSON's enabled field with the dedicated column value
 	// The enabled column is authoritative; JSON may have stale/incorrect value
 	config.Enabled = enabledFromColumn
@@ -4149,6 +4307,38 @@ func (sm *SettingsManager) GetAllUserModeConfigsFromDB(ctx context.Context, db *
 	}
 
 	return configs, nil
+}
+
+// LoadUserSettings loads user-specific settings from database tables.
+// This is the database-first approach for runtime operations.
+// Returns error if loading fails - caller should handle errors appropriately.
+// NOTE: This method loads from database, NOT from JSON file.
+func (sm *SettingsManager) LoadUserSettings(ctx context.Context, repo *database.Repository, userID string) error {
+	log.Printf("[SETTINGS] LoadUserSettings called for user %s - loading from database", userID)
+
+	// Load mode configurations from database
+	modeConfigs, err := sm.GetAllUserModeConfigsFromDB(ctx, repo, userID)
+	if err != nil {
+		return fmt.Errorf("failed to load user mode configs: %w", err)
+	}
+
+	// Load capital allocation from database
+	_, err = sm.GetUserModeAllocation(ctx, repo, userID)
+	if err != nil {
+		return fmt.Errorf("failed to load user capital allocation: %w", err)
+	}
+
+	// Log successful load
+	log.Printf("[SETTINGS] Successfully loaded settings from database for user %s: %d mode configs, allocation loaded",
+		userID, len(modeConfigs))
+
+	// Note: In-memory settings are intentionally NOT updated here.
+	// Database is the source of truth for runtime operations.
+	// Each operation should query the database directly using:
+	// - GetUserModeConfigFromDB() for mode configs
+	// - GetUserModeAllocation() for capital allocation
+
+	return nil
 }
 
 // ResetModeConfigs resets all mode configurations to defaults
@@ -4198,9 +4388,9 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			HighConfidence:  70,
 			UltraConfidence: 85,
 
-			// Position Sizing - small, leveraged positions
-			BaseSizeUSD:    100,
-			MaxSizeUSD:     200,
+			// Position Sizing - MUST be configured by user - no defaults
+			BaseSizeUSD:    0, // MUST be configured by user - no default
+			MaxSizeUSD:     0, // MUST be configured by user - no default
 			MaxPositions:   5,
 			Leverage:       10,
 			SizeMultiplier: 1.5,
@@ -4253,9 +4443,9 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			HighConfidence:  75,
 			UltraConfidence: 88,
 
-			// Position Sizing - moderate positions
-			BaseSizeUSD:    200,
-			MaxSizeUSD:     400,
+			// Position Sizing - MUST be configured by user - no defaults
+			BaseSizeUSD:    0, // MUST be configured by user - no default
+			MaxSizeUSD:     0, // MUST be configured by user - no default
 			MaxPositions:   4,
 			Leverage:       8,
 			SizeMultiplier: 1.8,
@@ -4308,9 +4498,9 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			HighConfidence:  80,
 			UltraConfidence: 90,
 
-			// Position Sizing - larger positions, lower leverage
-			BaseSizeUSD:    400,
-			MaxSizeUSD:     750,
+			// Position Sizing - MUST be configured by user - no defaults
+			BaseSizeUSD:    0, // MUST be configured by user - no default
+			MaxSizeUSD:     0, // MUST be configured by user - no default
 			MaxPositions:   3,
 			Leverage:       5,
 			SizeMultiplier: 2.0,
@@ -4363,9 +4553,9 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			HighConfidence:  85,
 			UltraConfidence: 92,
 
-			// Position Sizing - largest positions, lowest leverage
-			BaseSizeUSD:    600,
-			MaxSizeUSD:     1000,
+			// Position Sizing - MUST be configured by user - no defaults
+			BaseSizeUSD:    0, // MUST be configured by user - no default
+			MaxSizeUSD:     0, // MUST be configured by user - no default
 			MaxPositions:   2,
 			Leverage:       3,
 			SizeMultiplier: 2.5,
@@ -4418,9 +4608,9 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			HighConfidence:  72,
 			UltraConfidence: 85,
 
-			// Position Sizing - 3x size with 10x leverage for scalp_reentry
-			BaseSizeUSD:    300,  // 3x position size (scalp is 100)
-			MaxSizeUSD:     600,  // 3x max size
+			// Position Sizing - MUST be configured by user - no defaults
+			BaseSizeUSD:    0, // MUST be configured by user - no default
+			MaxSizeUSD:     0, // MUST be configured by user - no default
 			MaxPositions:   4,
 			Leverage:       10,   // 10x leverage per user request
 			SizeMultiplier: 2.0,

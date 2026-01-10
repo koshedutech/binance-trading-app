@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Shield, Layers, ArrowLeftRight, DollarSign, AlertTriangle, Activity, Target, Settings, Save } from 'lucide-react';
-import { futuresApi, HedgeModePositionData, HedgeModeConfig } from '../services/futuresApi';
+import { RefreshCw, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Shield, Layers, ArrowLeftRight, DollarSign, AlertTriangle, Activity, Target, Settings, Save, RotateCcw } from 'lucide-react';
+import { futuresApi, HedgeModePositionData, HedgeModeConfig, ConfigResetPreview } from '../services/futuresApi';
+import ResetConfirmDialog from './ResetConfirmDialog';
 
 interface HedgeModeMonitorProps {
   autoRefresh?: boolean;
@@ -19,6 +20,9 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
   const [showConfig, setShowConfig] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editConfig, setEditConfig] = useState<Partial<HedgeModeConfig>>({});
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetPreview, setResetPreview] = useState<ConfigResetPreview | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -80,6 +84,39 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
 
   const getConfigValue = (key: keyof HedgeModeConfig) => {
     return editConfig[key] !== undefined ? editConfig[key] : config?.[key];
+  };
+
+  const handleResetClick = async () => {
+    setResetDialogOpen(true);
+    setResetLoading(true);
+    try {
+      const preview = await futuresApi.loadHedgeDefaults(true);
+      setResetPreview(preview as ConfigResetPreview);
+    } catch (error) {
+      console.error('Failed to load reset preview:', error);
+      setError('Failed to load reset preview');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleResetConfirm = async () => {
+    try {
+      await futuresApi.loadHedgeDefaults(false);
+      // Refresh the component data after reset
+      await fetchData();
+    } catch (error) {
+      console.error('Failed to reset to defaults:', error);
+      setError('Failed to reset to defaults');
+    } finally {
+      setResetDialogOpen(false);
+      setResetPreview(null);
+    }
+  };
+
+  const handleResetClose = () => {
+    setResetDialogOpen(false);
+    setResetPreview(null);
   };
 
   const formatPrice = (price: number) => {
@@ -203,18 +240,28 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
         <div className="p-3 bg-gray-800/50 rounded border border-orange-700/50 space-y-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-orange-400">Hedge Mode Configuration</span>
-            <button
-              onClick={handleSaveConfig}
-              disabled={saving || Object.keys(editConfig).length === 0}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-colors ${
-                Object.keys(editConfig).length > 0
-                  ? 'bg-green-900/50 text-green-400 border border-green-700 hover:bg-green-900/70'
-                  : 'bg-gray-700/50 text-gray-500 border border-gray-600 cursor-not-allowed'
-              }`}
-            >
-              <Save className="w-3 h-3" />
-              {saving ? 'Saving...' : 'Save Changes'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleResetClick}
+                className="flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-colors bg-blue-900/50 text-blue-400 border border-blue-700 hover:bg-blue-900/70"
+                title="Reset to defaults"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Reset
+              </button>
+              <button
+                onClick={handleSaveConfig}
+                disabled={saving || Object.keys(editConfig).length === 0}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-colors ${
+                  Object.keys(editConfig).length > 0
+                    ? 'bg-green-900/50 text-green-400 border border-green-700 hover:bg-green-900/70'
+                    : 'bg-gray-700/50 text-gray-500 border border-gray-600 cursor-not-allowed'
+                }`}
+              >
+                <Save className="w-3 h-3" />
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
           </div>
 
           {/* Trigger Settings */}
@@ -725,6 +772,19 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
           ))}
         </div>
       )}
+
+      {/* Reset Confirmation Dialog */}
+      <ResetConfirmDialog
+        open={resetDialogOpen}
+        onClose={handleResetClose}
+        onConfirm={handleResetConfirm}
+        title="Reset Hedge Mode Settings"
+        configType="hedge mode"
+        loading={resetLoading}
+        allMatch={resetPreview?.all_match ?? false}
+        differences={resetPreview?.differences ?? []}
+        totalChanges={resetPreview?.total_changes ?? 0}
+      />
     </div>
   );
 };

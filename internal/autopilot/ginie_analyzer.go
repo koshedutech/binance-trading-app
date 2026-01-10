@@ -3,7 +3,9 @@ package autopilot
 import (
 	"binance-trading-bot/internal/ai/llm"
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/logging"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -29,6 +31,10 @@ type GinieAnalyzer struct {
 	logger        *logging.Logger
 	config        *GinieConfig
 	settings      *AutopilotSettings // Settings for trend timeframes and divergence detection
+
+	// Database-first architecture
+	repo   *database.Repository // Database repository for user settings
+	userID string               // User ID for multi-tenant configuration
 
 	// LLM client for AI-based coin selection
 	llmClient *llm.Client
@@ -71,6 +77,8 @@ func NewGinieAnalyzer(
 	futuresClient binance.FuturesClient,
 	signalAggregator *SignalAggregator,
 	logger *logging.Logger,
+	repo *database.Repository,
+	userID string,
 ) *GinieAnalyzer {
 	// Core coins to always include (essential for the market)
 	coreSymbols := []string{
@@ -84,6 +92,8 @@ func NewGinieAnalyzer(
 		futuresClient:    futuresClient,
 		signalAggregator: signalAggregator,
 		logger:           logger,
+		repo:             repo,
+		userID:           userID,
 		config:           DefaultGinieConfig(),
 		settings:         settings,
 		coinScans:        make(map[string]*GinieCoinScan),
@@ -121,6 +131,16 @@ func (g *GinieAnalyzer) SetLLMClient(client *llm.Client) {
 	}
 	// Trigger coin selection when LLM is set
 	go g.LoadLLMSelectedCoins()
+}
+
+// SetUserID updates the user ID for database-first configuration loading
+func (g *GinieAnalyzer) SetUserID(userID string) {
+	g.scanLock.Lock()
+	g.userID = userID
+	g.scanLock.Unlock()
+	if g.logger != nil {
+		g.logger.Info("Ginie analyzer user ID updated", "user_id", userID)
+	}
 }
 
 // RefreshSettings reloads settings from SettingsManager
@@ -1749,20 +1769,55 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		"position": "4h",
 	}
 
-	// Extract modeConfig once for reuse throughout function
+	// DATABASE-FIRST: Load user-specific mode config from database
+	// This will be used throughout the function for all mode-specific parameters
 	var modeConfig *ModeFullConfig
+	ctx := context.Background()
+	sm := GetSettingsManager()
+
+	// Try to load from database first
+	if g.repo != nil && g.userID != "" {
+		dbModeConfig, err := sm.GetUserModeConfigFromDB(ctx, g.repo, g.userID, modeKey)
+		if err == nil && dbModeConfig != nil {
+			modeConfig = dbModeConfig
+			if g.logger != nil {
+				g.logger.Debug("Loaded mode config from database",
+					"symbol", symbol,
+					"mode", modeKey,
+					"source", "database")
+			}
+		} else {
+			// Log database load failure but continue with defaults
+			if g.logger != nil {
+				g.logger.Debug("Mode config not found in database, using defaults",
+					"symbol", symbol,
+					"mode", modeKey,
+					"error", err)
+			}
+		}
+	}
+
+	// Fallback to settings if database load failed
+	if modeConfig == nil && g.settings != nil {
+		modeConfig = g.settings.ModeConfigs[modeKey]
+		if g.logger != nil && modeConfig != nil {
+			g.logger.Debug("Using mode config from settings file",
+				"symbol", symbol,
+				"mode", modeKey,
+				"source", "settings")
+		}
+	}
+
+	// Extract modeConfig once for reuse throughout function
 	var targetTimeframe string
 	modeKey, ok := modeToConfigKey[string(mode)]
 	if !ok {
 		targetTimeframe = "1h" // Default fallback
 	} else {
 		targetTimeframe = modeDefaults[modeKey] // Mode-specific default
-		if g.settings != nil {
-			modeConfig = g.settings.ModeConfigs[modeKey]
-			if modeConfig != nil {
-				if modeConfig.Timeframe != nil && modeConfig.Timeframe.TrendTimeframe != "" {
-					targetTimeframe = modeConfig.Timeframe.TrendTimeframe
-				}
+		if modeConfig != nil {
+			if modeConfig.Timeframe != nil && modeConfig.Timeframe.TrendTimeframe != "" {
+				targetTimeframe = modeConfig.Timeframe.TrendTimeframe
 			}
 		}
 	}
@@ -2128,11 +2183,13 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			}
 		}
 
-		// Mode-specific base multipliers and limits
+		// DATABASE-FIRST: Load mode-specific parameters from user config
+		// Default values if database config not available
 		var baseSLMultiplier, baseTPMultiplier float64
 		var minSL, maxSL, minTP, maxTP float64
 		var positionPct, leverage int
 
+		// Set defaults based on mode
 		switch mode {
 		case GinieModeScalp:
 			positionPct = 5
@@ -2155,6 +2212,42 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			baseTPMultiplier = 5.0  // 5x ATR
 			minSL, maxSL = 3.0, 15.0
 			minTP, maxTP = 5.0, 50.0
+		}
+
+		// Override with database values if available
+		if modeConfig != nil {
+			// Load leverage from database
+			if modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
+				leverage = modeConfig.Size.Leverage
+				if g.logger != nil {
+					g.logger.Debug("Using leverage from mode config",
+						"symbol", symbol,
+						"mode", modeKey,
+						"leverage", leverage,
+						"source", "database")
+				}
+			}
+
+			// Position sizing from database is handled via BaseSizeUSD in mode config
+			// positionPct is calculated based on other factors
+
+			// Load SL/TP multipliers from database if configured
+			if modeConfig.SLTP != nil {
+				if modeConfig.SLTP.ATRSLMultiplier > 0 {
+					baseSLMultiplier = modeConfig.SLTP.ATRSLMultiplier
+				}
+				if modeConfig.SLTP.ATRTPMultiplier > 0 {
+					baseTPMultiplier = modeConfig.SLTP.ATRTPMultiplier
+				}
+				if g.logger != nil {
+					g.logger.Debug("Using SL/TP multipliers from mode config",
+						"symbol", symbol,
+						"mode", modeKey,
+						"sl_multiplier", baseSLMultiplier,
+						"tp_multiplier", baseTPMultiplier,
+						"source", "database")
+				}
+			}
 		}
 
 		report.TradeExecution.PositionPct = float64(positionPct)
@@ -2604,12 +2697,38 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		}
 	}
 
+	// DATABASE-FIRST: Load confidence thresholds from user mode config
+	// Default thresholds if database config not available
+	executeThreshold := 30.0 // Default: Execute if >= 30%
+	waitThreshold := 20.0    // Default: Wait if >= 20%
+
+	if modeConfig != nil && modeConfig.Confidence != nil {
+		if modeConfig.Confidence.MinConfidence > 0 {
+			executeThreshold = modeConfig.Confidence.MinConfidence
+		}
+		if modeConfig.Confidence.HighConfidence > 0 {
+			waitThreshold = modeConfig.Confidence.HighConfidence
+		}
+		if g.logger != nil {
+			g.logger.Debug("Using confidence thresholds from mode config",
+				"symbol", symbol,
+				"mode", modeKey,
+				"execute_threshold", executeThreshold,
+				"wait_threshold", waitThreshold,
+				"source", func() string {
+					if g.repo != nil && g.userID != "" {
+						return "database"
+					}
+					return "defaults"
+				}())
+		}
+	}
+
 	// Final recommendation (ConfidenceScore is 0-100, thresholds are 0-100)
-	// Execute if >= 30%, Wait if >= 20%, otherwise Skip
-	if report.ConfidenceScore >= 30.0 {
+	if report.ConfidenceScore >= executeThreshold {
 		report.Recommendation = RecommendationExecute
 		report.RecommendationNote = "Strong signals with good market conditions"
-	} else if report.ConfidenceScore >= 20.0 {
+	} else if report.ConfidenceScore >= waitThreshold {
 		report.Recommendation = RecommendationWait
 		report.RecommendationNote = "Signals present but consider waiting for better entry"
 
@@ -2617,9 +2736,9 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		rejectionTracker.Confidence = &ConfidenceRejection{
 			Blocked:          false,
 			ConfidenceScore:  report.ConfidenceScore,
-			ExecuteThreshold: 30.0,
-			WaitThreshold:    20.0,
-			Reason:           fmt.Sprintf("Confidence %.1f%% below execute threshold (30%%)", report.ConfidenceScore),
+			ExecuteThreshold: executeThreshold,
+			WaitThreshold:    waitThreshold,
+			Reason:           fmt.Sprintf("Confidence %.1f%% below execute threshold (%.0f%%)", report.ConfidenceScore, executeThreshold),
 		}
 	} else {
 		report.Recommendation = RecommendationSkip
@@ -2629,11 +2748,11 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		rejectionTracker.Confidence = &ConfidenceRejection{
 			Blocked:          true,
 			ConfidenceScore:  report.ConfidenceScore,
-			ExecuteThreshold: 30.0,
-			WaitThreshold:    20.0,
-			Reason:           fmt.Sprintf("Low confidence: %.1f%% (need 20%% for WAIT, 30%% for EXECUTE)", report.ConfidenceScore),
+			ExecuteThreshold: executeThreshold,
+			WaitThreshold:    waitThreshold,
+			Reason:           fmt.Sprintf("Low confidence: %.1f%% (need %.0f%% for WAIT, %.0f%% for EXECUTE)", report.ConfidenceScore, waitThreshold, executeThreshold),
 		}
-		rejectionTracker.AddRejection(fmt.Sprintf("Confidence: %.1f%% (need 30%% to execute)", report.ConfidenceScore))
+		rejectionTracker.AddRejection(fmt.Sprintf("Confidence: %.1f%% (need %.0f%% to execute)", report.ConfidenceScore, executeThreshold))
 	}
 
 	// Store decision
@@ -4421,21 +4540,25 @@ func (g *GinieAnalyzer) ClassifyVolatilityRegime(symbol string) (*VolatilityRegi
 }
 
 // CalculateFeeAwareTP calculates minimum profit target accounting for trading fees and volatility
-// Formula: MinProfitTarget% = (EntryFee + ExitFee) / PositionUSD × 100 + (0.5 × ATR%)
+// Formula: MinProfitTarget% = (EntryFee + ExitFee) / Margin × 100 + (0.5 × ATR%)
+// NOTE: positionUSD is NOTIONAL VALUE, fees are calculated on notional, profit % is relative to margin
 func (g *GinieAnalyzer) CalculateFeeAwareTP(symbol string, positionUSD float64, leverage int, atrPercent float64) float64 {
 	// Binance taker fee: 0.04% per order
 	const binanceTakerFee = 0.0004
 
-	// Calculate notional value
-	notionalValue := positionUSD * float64(leverage)
+	// positionUSD is NOTIONAL VALUE (e.g., $500 with 10x leverage = $50 margin)
+	notionalValue := positionUSD
 
-	// Calculate fees (entry + exit)
+	// Calculate fees (entry + exit) - fees are based on notional value
 	entryFee := notionalValue * binanceTakerFee
 	exitFee := notionalValue * binanceTakerFee
 	totalFee := entryFee + exitFee
 
-	// Fee as % of position
-	feePercent := (totalFee / positionUSD) * 100
+	// Calculate margin (required capital)
+	margin := positionUSD / float64(leverage)
+
+	// Fee as % of margin (this is the real cost to the trader)
+	feePercent := (totalFee / margin) * 100
 
 	// ATR buffer (0.5x of ATR volatility)
 	atrBuffer := 0.5 * atrPercent

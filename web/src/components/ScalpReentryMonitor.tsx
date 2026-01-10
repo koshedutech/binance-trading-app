@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, AlertCircle, ChevronDown, ChevronUp, Target, ArrowRight } from 'lucide-react';
-import { futuresApi, ScalpReentryPositionStatus, ScalpReentryCycleInfo, ScalpReentryPositionsSummary } from '../services/futuresApi';
+import { RefreshCw, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, AlertCircle, ChevronDown, ChevronUp, Target, ArrowRight, RotateCcw } from 'lucide-react';
+import { futuresApi, ScalpReentryPositionStatus, ScalpReentryCycleInfo, ScalpReentryPositionsSummary, ConfigResetPreview } from '../services/futuresApi';
+import ResetConfirmDialog from './ResetConfirmDialog';
 
 interface ScalpReentryMonitorProps {
   autoRefresh?: boolean;
@@ -14,6 +15,9 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
   const [error, setError] = useState<string | null>(null);
   const [expandedPosition, setExpandedPosition] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetPreview, setResetPreview] = useState<ConfigResetPreview | null>(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -36,6 +40,39 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
       return () => clearInterval(interval);
     }
   }, [fetchData, autoRefresh, refreshInterval]);
+
+  const handleResetClick = async () => {
+    setResetDialogOpen(true);
+    setResetLoading(true);
+    try {
+      const preview = await futuresApi.loadScalpReentryDefaults(true);
+      setResetPreview(preview as ConfigResetPreview);
+    } catch (error) {
+      console.error('Failed to load reset preview:', error);
+      setError('Failed to load reset preview');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const handleResetConfirm = async () => {
+    try {
+      await futuresApi.loadScalpReentryDefaults(false);
+      // Refresh the component data after reset
+      await fetchData();
+    } catch (error) {
+      console.error('Failed to reset to defaults:', error);
+      setError('Failed to reset to defaults');
+    } finally {
+      setResetDialogOpen(false);
+      setResetPreview(null);
+    }
+  };
+
+  const handleResetClose = () => {
+    setResetDialogOpen(false);
+    setResetPreview(null);
+  };
 
   const getStateIcon = (state: string) => {
     switch (state) {
@@ -223,6 +260,14 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
               </span>
             )}
             <button
+              onClick={handleResetClick}
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
+              title="Reset to defaults"
+            >
+              <RotateCcw size={12} />
+              Reset
+            </button>
+            <button
               onClick={fetchData}
               className="p-1 hover:bg-gray-700 rounded transition-colors"
               title="Refresh"
@@ -358,6 +403,19 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
           ))}
         </div>
       )}
+
+      {/* Reset Confirm Dialog */}
+      <ResetConfirmDialog
+        open={resetDialogOpen}
+        onClose={handleResetClose}
+        onConfirm={handleResetConfirm}
+        title="Reset Scalp Reentry Settings"
+        configType="scalp reentry"
+        loading={resetLoading}
+        allMatch={resetPreview?.all_match ?? false}
+        differences={resetPreview?.differences ?? []}
+        totalChanges={resetPreview?.total_changes ?? 0}
+      />
     </div>
   );
 };

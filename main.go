@@ -181,6 +181,18 @@ func main() {
 			log.Printf("Warning: Global Circuit Breaker migrations failed: %v", err)
 		}
 		logger.Info("Global Circuit Breaker migrations completed")
+
+		// Run User Mode Config migrations (Epic 4 - per-user trading mode configurations)
+		if err := db.MigrateUserModeConfigs(ctx); err != nil {
+			log.Printf("Warning: User Mode Config migrations failed: %v", err)
+		}
+		logger.Info("User Mode Config migrations completed")
+
+		// Run User Settings migrations (013-019: LLM config, capital allocation, circuit breaker, etc.)
+		if err := db.RunUserSettingsMigrations(ctx); err != nil {
+			log.Printf("Warning: User Settings migrations failed: %v", err)
+		}
+		logger.Info("User Settings migrations completed")
 	}
 
 	// Create repository early for API key service

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain } from 'lucide-react';
+import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain, RefreshCw } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { useAuth, TIER_INFO } from '../contexts/AuthContext';
@@ -220,6 +220,15 @@ export default function Header() {
                     >
                       <Brain className="w-4 h-4" />
                       AI Keys
+                    </Link>
+
+                    <Link
+                      to="/reset-settings"
+                      onClick={() => setDropdownOpen(false)}
+                      className="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-dark-600 hover:text-white transition-colors"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                      Reset Defaults
                     </Link>
 
                     {/* Only show Billing menu when subscription is enabled */}

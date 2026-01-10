@@ -692,7 +692,9 @@ func NewFuturesController(
 	adaptiveEng.SetStyleConfig(styleConfig)
 
 	// Initialize Ginie analyzer (advanced multi-mode AI trader)
-	ginieAn := NewGinieAnalyzer(futuresClient, signalAgg, logger)
+	// Empty userID = legacy shared mode (uses settings file defaults)
+	// userID will be set via SetOwnerUserID when user starts autopilot
+	ginieAn := NewGinieAnalyzer(futuresClient, signalAgg, logger, repo, "")
 
 	// Initialize Ginie autopilot (autonomous multi-mode trading)
 	// Empty userID = legacy shared mode (uses settings file for PnL)
@@ -846,15 +848,18 @@ func (fc *FuturesController) LoadSavedSettings() {
 				ginieConfig.MinConfidenceToTrade = modeConfig.Confidence.MinConfidence
 			}
 		}
-		// Apply defaults if not set from ModeConfigs
+		// Apply defaults if not set from ModeConfigs (database-first with fallback)
 		if ginieConfig.RiskLevel == "" {
 			ginieConfig.RiskLevel = "moderate"
+			log.Printf("[SetRiskLevel] Using fallback RiskLevel: %s (DB config not available)", ginieConfig.RiskLevel)
 		}
 		if ginieConfig.MaxUSDPerPosition == 0 {
 			ginieConfig.MaxUSDPerPosition = 500
+			log.Printf("[SetRiskLevel] Using fallback MaxUSDPerPosition: %.2f (DB config not available)", ginieConfig.MaxUSDPerPosition)
 		}
 		if ginieConfig.DefaultLeverage == 0 {
 			ginieConfig.DefaultLeverage = 10
+			log.Printf("[SetRiskLevel] Using fallback DefaultLeverage: %d (DB config not available)", ginieConfig.DefaultLeverage)
 		}
 		// NOTE: MinConfidenceToTrade is now set from database mode configs (lines 843-845)
 		// The database config takes precedence. These hardcoded values are DEPRECATED.
@@ -893,9 +898,10 @@ func (fc *FuturesController) LoadSavedSettings() {
 			ginieConfig.CBCooldownMinutes = settings.CooldownMinutes
 		}
 
-		// Apply Ginie TP percentages from ModeConfigs (use swing as reference)
+		// Apply Ginie TP percentages from ModeConfigs (database-first with fallback)
 		useSingleTP := false
-		tp1, tp2, tp3, tp4 := 25.0, 25.0, 25.0, 25.0
+		tp1, tp2, tp3, tp4 := 25.0, 25.0, 25.0, 25.0 // Fallback defaults
+		loadedTPFromDB := false
 		if mc := settings.ModeConfigs["swing"]; mc != nil && mc.SLTP != nil {
 			useSingleTP = mc.SLTP.UseSingleTP
 			if len(mc.SLTP.TPAllocation) >= 4 {
@@ -903,6 +909,7 @@ func (fc *FuturesController) LoadSavedSettings() {
 				tp2 = mc.SLTP.TPAllocation[1]
 				tp3 = mc.SLTP.TPAllocation[2]
 				tp4 = mc.SLTP.TPAllocation[3]
+				loadedTPFromDB = true
 			}
 		}
 		if useSingleTP {
@@ -910,11 +917,21 @@ func (fc *FuturesController) LoadSavedSettings() {
 			ginieConfig.TP2Percent = 0
 			ginieConfig.TP3Percent = 0
 			ginieConfig.TP4Percent = 0
+			if loadedTPFromDB {
+				log.Printf("[SetRiskLevel] Using single TP mode from DB config")
+			} else {
+				log.Printf("[SetRiskLevel] Using single TP mode (fallback)")
+			}
 		} else {
 			ginieConfig.TP1Percent = tp1
 			ginieConfig.TP2Percent = tp2
 			ginieConfig.TP3Percent = tp3
 			ginieConfig.TP4Percent = tp4
+			if loadedTPFromDB {
+				log.Printf("[SetRiskLevel] Using multi-level TP from DB config: [%.1f, %.1f, %.1f, %.1f]", tp1, tp2, tp3, tp4)
+			} else {
+				log.Printf("[SetRiskLevel] Using fallback multi-level TP: [%.1f, %.1f, %.1f, %.1f]", tp1, tp2, tp3, tp4)
+			}
 		}
 
 		fc.ginieAutopilot.SetConfig(ginieConfig)
@@ -1145,6 +1162,15 @@ func (fc *FuturesController) SetOwnerUserID(userID string) {
 	defer fc.mu.Unlock()
 	fc.ownerUserID = userID
 	fc.logger.Info("Autopilot owner set", "user_id", userID)
+
+	// Propagate user ID to Ginie components for database-first configuration
+	if fc.ginieAnalyzer != nil {
+		fc.ginieAnalyzer.SetUserID(userID)
+	}
+	// GinieAutopilot is initialized with userID in constructor, no setter needed
+	// if fc.ginieAutopilot != nil {
+	// 	fc.ginieAutopilot.SetUserID(userID)
+	// }
 }
 
 // SetDryRun sets dry run mode and propagates to Ginie
@@ -1387,41 +1413,54 @@ func (fc *FuturesController) SetRiskLevel(level string) error {
 	sm := GetSettingsManager()
 	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, level)
 
-	// Adjust parameters based on risk level
-	// NOTE: MinConfidence is now sourced from database mode configs (see GetUserModeConfigFromDB)
-	// These are fallback values only - primary source is database
-	switch level {
-	case "conservative":
-		// fc.config.MinConfidence = 0.8 // DEPRECATED: Use database config
-		fc.config.RequireConfluence = 3
-		fc.config.DefaultLeverage = 3
-		fc.config.TakeProfitPercent = 1.5
-		fc.config.StopLossPercent = 0.5
-	case "moderate":
-		// fc.config.MinConfidence = 0.65 // DEPRECATED: Use database config
-		fc.config.RequireConfluence = 2
-		fc.config.DefaultLeverage = 5
-		fc.config.TakeProfitPercent = 2.0
-		fc.config.StopLossPercent = 1.0
-	case "aggressive":
-		// fc.config.MinConfidence = 0.35 // DEPRECATED: Use database config
-		fc.config.RequireConfluence = 1
-		fc.config.DefaultLeverage = 10
-		fc.config.TakeProfitPercent = 3.0
-		fc.config.StopLossPercent = 1.5
+	// Database-first approach: Load all parameters from mode config
+	// Apply database config if available
+	if err == nil && modeConfig != nil {
+		loadedFromDB := false
+		logFields := map[string]interface{}{
+			"from":   oldLevel,
+			"to":     level,
+			"source": "database",
+		}
+
+		// Load MinConfidence from database
+		if modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
+			fc.config.MinConfidence = modeConfig.Confidence.MinConfidence / 100.0 // Convert percent to decimal
+			logFields["min_confidence"] = fc.config.MinConfidence
+			loadedFromDB = true
+		}
+
+		// Load DefaultLeverage from database
+		if modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
+			fc.config.DefaultLeverage = modeConfig.Size.Leverage
+			logFields["leverage"] = fc.config.DefaultLeverage
+			loadedFromDB = true
+		}
+
+		// Load TakeProfitPercent from database
+		if modeConfig.SLTP != nil && modeConfig.SLTP.TakeProfitPercent > 0 {
+			fc.config.TakeProfitPercent = modeConfig.SLTP.TakeProfitPercent
+			logFields["take_profit_percent"] = fc.config.TakeProfitPercent
+			loadedFromDB = true
+		}
+
+		// Load StopLossPercent from database
+		if modeConfig.SLTP != nil && modeConfig.SLTP.StopLossPercent > 0 {
+			fc.config.StopLossPercent = modeConfig.SLTP.StopLossPercent
+			logFields["stop_loss_percent"] = fc.config.StopLossPercent
+			loadedFromDB = true
+		}
+
+		if loadedFromDB {
+			fc.logger.Info("Risk level changed (DB-first mode)", logFields)
+		} else {
+			fc.logger.Warn("Database config available but empty, using fallbacks", logFields)
+		}
 	}
 
-	// Apply database config if available
-	if err == nil && modeConfig != nil && modeConfig.Confidence != nil {
-		fc.config.MinConfidence = modeConfig.Confidence.MinConfidence / 100.0 // Convert percent to decimal
-		fc.logger.Info("Risk level changed (DB-first mode)",
-			"from", oldLevel,
-			"to", level,
-			"leverage", fc.config.DefaultLeverage,
-			"min_confidence", fc.config.MinConfidence,
-			"source", "database")
-	} else {
-		// Use conservative fallback for backwards compatibility
+	// Fallback values if database config not available or incomplete
+	// Set defaults based on risk level for backward compatibility
+	if fc.config.MinConfidence == 0 {
 		fallbackConfidence := 0.65
 		switch level {
 		case "conservative":
@@ -1432,12 +1471,77 @@ func (fc *FuturesController) SetRiskLevel(level string) error {
 			fallbackConfidence = 0.35
 		}
 		fc.config.MinConfidence = fallbackConfidence
-		fc.logger.Warn("Using fallback confidence (DB config unavailable)",
-			"error", err,
-			"from", oldLevel,
-			"to", level,
-			"leverage", fc.config.DefaultLeverage,
+		fc.logger.Warn("Using fallback MinConfidence",
+			"level", level,
 			"min_confidence", fc.config.MinConfidence,
+			"source", "fallback")
+	}
+
+	if fc.config.RequireConfluence == 0 {
+		fallbackConfluence := 2
+		switch level {
+		case "conservative":
+			fallbackConfluence = 3
+		case "moderate":
+			fallbackConfluence = 2
+		case "aggressive":
+			fallbackConfluence = 1
+		}
+		fc.config.RequireConfluence = fallbackConfluence
+		fc.logger.Warn("Using fallback RequireConfluence",
+			"level", level,
+			"require_confluence", fc.config.RequireConfluence,
+			"source", "fallback")
+	}
+
+	if fc.config.DefaultLeverage == 0 {
+		fallbackLeverage := 5
+		switch level {
+		case "conservative":
+			fallbackLeverage = 3
+		case "moderate":
+			fallbackLeverage = 5
+		case "aggressive":
+			fallbackLeverage = 10
+		}
+		fc.config.DefaultLeverage = fallbackLeverage
+		fc.logger.Warn("Using fallback DefaultLeverage",
+			"level", level,
+			"leverage", fc.config.DefaultLeverage,
+			"source", "fallback")
+	}
+
+	if fc.config.TakeProfitPercent == 0 {
+		fallbackTP := 2.0
+		switch level {
+		case "conservative":
+			fallbackTP = 1.5
+		case "moderate":
+			fallbackTP = 2.0
+		case "aggressive":
+			fallbackTP = 3.0
+		}
+		fc.config.TakeProfitPercent = fallbackTP
+		fc.logger.Warn("Using fallback TakeProfitPercent",
+			"level", level,
+			"take_profit_percent", fc.config.TakeProfitPercent,
+			"source", "fallback")
+	}
+
+	if fc.config.StopLossPercent == 0 {
+		fallbackSL := 1.0
+		switch level {
+		case "conservative":
+			fallbackSL = 0.5
+		case "moderate":
+			fallbackSL = 1.0
+		case "aggressive":
+			fallbackSL = 1.5
+		}
+		fc.config.StopLossPercent = fallbackSL
+		fc.logger.Warn("Using fallback StopLossPercent",
+			"level", level,
+			"stop_loss_percent", fc.config.StopLossPercent,
 			"source", "fallback")
 	}
 

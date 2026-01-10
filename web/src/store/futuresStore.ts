@@ -360,6 +360,14 @@ export const useFuturesStore = create<FuturesState>((set, get) => ({
   setTradingMode: (mode: TradingModeState) => {
     set({ tradingMode: mode });
     console.log('FuturesStore: Trading mode updated via WebSocket:', mode);
+
+    // CRITICAL: Immediately refresh positions and account info when mode changes
+    // This ensures PnL values update instantly when switching paper/live
+    console.log('FuturesStore: Refreshing data after trading mode change...');
+    setTimeout(() => {
+      get().fetchPositions();
+      get().fetchAccountInfo();
+    }, 100); // Small delay to ensure backend has switched modes
   },
 
   // ==================== TRADING ====================

@@ -31,9 +31,10 @@ interface RiskMetrics {
 
 interface PnLDashboardProps {
   wsConnected?: boolean;
+  initialBalance?: number;
 }
 
-const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
+const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initialBalance }) => {
   const [equityCurve, setEquityCurve] = useState<PnLData[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [riskMetrics, setRiskMetrics] = useState<RiskMetrics | null>(null);
@@ -86,7 +87,9 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
   };
 
   const buildEquityCurve = (trades: any[]): PnLData[] => {
-    let equity = 10000; // Starting balance
+    // Use initialBalance prop, or first trade's balance, or 0
+    const startingBalance = initialBalance ?? trades[0]?.cumulativeBalance ?? 0;
+    let equity = startingBalance;
     return trades.map((trade) => {
       const pnl = trade.pnl || 0;
       equity += pnl;
@@ -94,7 +97,7 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
         timestamp: new Date(trade.exit_time || trade.entry_time).toLocaleTimeString(),
         equity,
         dailyPnL: pnl,
-        totalPnL: equity - 10000,
+        totalPnL: equity - startingBalance,
       };
     });
   };
@@ -106,14 +109,15 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false }) => {
     setWinRate((wins / trades.length) * 100);
 
     // Calculate max drawdown
-    let peak = 10000;
+    const startingBalance = initialBalance ?? trades[0]?.cumulativeBalance ?? 0;
+    let peak = startingBalance;
     let maxDD = 0;
-    let equity = 10000;
+    let equity = startingBalance;
 
     trades.forEach(trade => {
       equity += trade.pnl || 0;
       if (equity > peak) peak = equity;
-      const dd = ((peak - equity) / peak) * 100;
+      const dd = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
       if (dd > maxDD) maxDD = dd;
     });
 

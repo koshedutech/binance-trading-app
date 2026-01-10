@@ -628,6 +628,12 @@ func (s *Server) handleResetFuturesCircuitBreaker(c *gin.Context) {
 
 // handleUpdateFuturesCircuitBreakerConfig updates the futures circuit breaker config
 func (s *Server) handleUpdateFuturesCircuitBreakerConfig(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
 	var req struct {
 		MaxLossPerHour       float64 `json:"max_loss_per_hour"`
 		MaxDailyLoss         float64 `json:"max_daily_loss"`
@@ -642,50 +648,56 @@ func (s *Server) handleUpdateFuturesCircuitBreakerConfig(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+
+	// 1. Load current circuit breaker config from database (or use defaults)
+	currentConfig, err := s.repo.GetUserGlobalCircuitBreaker(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load circuit breaker config: "+err.Error())
+		return
+	}
+
+	// Use defaults if not found
+	if currentConfig == nil {
+		currentConfig = database.DefaultUserGlobalCircuitBreaker()
+		currentConfig.UserID = userID
+	}
+
+	// 2. Update config fields
+	currentConfig.MaxLossPerHour = req.MaxLossPerHour
+	currentConfig.MaxDailyLoss = req.MaxDailyLoss
+	currentConfig.MaxConsecutiveLosses = req.MaxConsecutiveLosses
+	currentConfig.CooldownMinutes = req.CooldownMinutes
+	currentConfig.MaxTradesPerMinute = req.MaxTradesPerMinute
+	currentConfig.MaxDailyTrades = req.MaxDailyTrades
+
+	// 3. Save to DATABASE first
+	if err := s.repo.SaveUserGlobalCircuitBreaker(ctx, currentConfig); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save circuit breaker config: "+err.Error())
+		return
+	}
+
+	// 4. Update in-memory controller for immediate effect (optional - for backward compatibility)
 	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures autopilot not configured")
-		return
-	}
-
-	config := &circuit.CircuitBreakerConfig{
-		MaxLossPerHour:       req.MaxLossPerHour,
-		MaxDailyLoss:         req.MaxDailyLoss,
-		MaxConsecutiveLosses: req.MaxConsecutiveLosses,
-		CooldownMinutes:      req.CooldownMinutes,
-		MaxTradesPerMinute:   req.MaxTradesPerMinute,
-		MaxDailyTrades:       req.MaxDailyTrades,
-	}
-
-	if err := controller.UpdateCircuitBreakerConfig(config); err != nil {
-		errorResponse(c, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// Persist circuit breaker settings to file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		// Get current enabled state from controller status
-		status := controller.GetCircuitBreakerStatus()
-		enabled, _ := status["enabled"].(bool)
-		if err := sm.UpdateCircuitBreaker(
-			enabled,
-			req.MaxLossPerHour,
-			req.MaxDailyLoss,
-			req.MaxConsecutiveLosses,
-			req.CooldownMinutes,
-			req.MaxTradesPerMinute,
-			req.MaxDailyTrades,
-		); err != nil {
-			// Log error but don't fail the request
-			fmt.Printf("Failed to persist circuit breaker settings: %v\n", err)
+	if controller != nil {
+		circuitConfig := &circuit.CircuitBreakerConfig{
+			MaxLossPerHour:       currentConfig.MaxLossPerHour,
+			MaxDailyLoss:         currentConfig.MaxDailyLoss,
+			MaxConsecutiveLosses: currentConfig.MaxConsecutiveLosses,
+			CooldownMinutes:      currentConfig.CooldownMinutes,
+			MaxTradesPerMinute:   currentConfig.MaxTradesPerMinute,
+			MaxDailyTrades:       currentConfig.MaxDailyTrades,
 		}
-	}()
+		if err := controller.UpdateCircuitBreakerConfig(circuitConfig); err != nil {
+			// Log but don't fail - database is source of truth
+			log.Printf("[CIRCUIT-BREAKER] Warning: Failed to update in-memory config: %v", err)
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Futures circuit breaker config updated",
-		"status":  controller.GetCircuitBreakerStatus(),
+		"config":  currentConfig,
 	})
 }
 
@@ -1449,13 +1461,52 @@ func (s *Server) handleGetAdaptiveEngineStatus(c *gin.Context) {
 
 // handleGetAutoModeConfig returns auto mode configuration
 func (s *Server) handleGetAutoModeConfig(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-	config := sm.GetAutoModeSettings()
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Load per-user settings from database
+	userSettings, err := s.repo.GetUserGinieSettings(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings: "+err.Error())
+		return
+	}
+
+	// Use defaults if user settings not found
+	if userSettings == nil {
+		userSettings = database.DefaultUserGinieSettings()
+		userSettings.UserID = userID
+	}
+
+	// Build response from user settings
+	config := map[string]interface{}{
+		"enabled":            userSettings.AutoModeEnabled,
+		"max_positions":      userSettings.AutoModeMaxPositions,
+		"max_leverage":       userSettings.AutoModeMaxLeverage,
+		"max_position_size":  userSettings.AutoModeMaxPositionSize,
+		"max_total_usd":      userSettings.AutoModeMaxTotalUSD,
+		"allow_averaging":    userSettings.AutoModeAllowAveraging,
+		"max_averages":       userSettings.AutoModeMaxAverages,
+		"min_hold_minutes":   userSettings.AutoModeMinHoldMinutes,
+		"quick_profit_mode":  userSettings.AutoModeQuickProfitMode,
+		"min_profit_for_exit": userSettings.AutoModeMinProfitExit,
+	}
+
 	c.JSON(http.StatusOK, config)
 }
 
 // handleSetAutoModeConfig updates auto mode configuration
 func (s *Server) handleSetAutoModeConfig(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
 	var req struct {
 		Enabled           bool    `json:"enabled"`
 		MaxPositions      int     `json:"max_positions"`
@@ -1474,32 +1525,68 @@ func (s *Server) handleSetAutoModeConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateAutoModeSettings(
-		req.Enabled,
-		req.MaxPositions,
-		req.MaxLeverage,
-		req.MaxPositionSize,
-		req.MaxTotalUSD,
-		req.AllowAveraging,
-		req.MaxAverages,
-		req.MinHoldMinutes,
-		req.QuickProfitMode,
-		req.MinProfitForExit,
-	); err != nil {
+	ctx := c.Request.Context()
+
+	// Load current user settings from database
+	userSettings, err := s.repo.GetUserGinieSettings(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings: "+err.Error())
+		return
+	}
+
+	// Use defaults if not found
+	if userSettings == nil {
+		userSettings = database.DefaultUserGinieSettings()
+		userSettings.UserID = userID
+	}
+
+	// Update auto mode fields
+	userSettings.AutoModeEnabled = req.Enabled
+	userSettings.AutoModeMaxPositions = req.MaxPositions
+	userSettings.AutoModeMaxLeverage = req.MaxLeverage
+	userSettings.AutoModeMaxPositionSize = req.MaxPositionSize
+	userSettings.AutoModeMaxTotalUSD = req.MaxTotalUSD
+	userSettings.AutoModeAllowAveraging = req.AllowAveraging
+	userSettings.AutoModeMaxAverages = req.MaxAverages
+	userSettings.AutoModeMinHoldMinutes = req.MinHoldMinutes
+	userSettings.AutoModeQuickProfitMode = req.QuickProfitMode
+	userSettings.AutoModeMinProfitExit = req.MinProfitForExit
+
+	// Save to database
+	if err := s.repo.SaveUserGinieSettings(ctx, userSettings); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save auto mode settings: "+err.Error())
 		return
+	}
+
+	// Build response config
+	config := map[string]interface{}{
+		"enabled":            userSettings.AutoModeEnabled,
+		"max_positions":      userSettings.AutoModeMaxPositions,
+		"max_leverage":       userSettings.AutoModeMaxLeverage,
+		"max_position_size":  userSettings.AutoModeMaxPositionSize,
+		"max_total_usd":      userSettings.AutoModeMaxTotalUSD,
+		"allow_averaging":    userSettings.AutoModeAllowAveraging,
+		"max_averages":       userSettings.AutoModeMaxAverages,
+		"min_hold_minutes":   userSettings.AutoModeMinHoldMinutes,
+		"quick_profit_mode":  userSettings.AutoModeQuickProfitMode,
+		"min_profit_for_exit": userSettings.AutoModeMinProfitExit,
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Auto mode settings updated",
-		"config":  sm.GetAutoModeSettings(),
+		"config":  config,
 	})
 }
 
 // handleToggleAutoMode toggles auto mode on/off
 func (s *Server) handleToggleAutoMode(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -1509,8 +1596,26 @@ func (s *Server) handleToggleAutoMode(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateAutoModeEnabled(req.Enabled); err != nil {
+	ctx := c.Request.Context()
+
+	// Load current user settings from database
+	userSettings, err := s.repo.GetUserGinieSettings(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings: "+err.Error())
+		return
+	}
+
+	// Use defaults if not found
+	if userSettings == nil {
+		userSettings = database.DefaultUserGinieSettings()
+		userSettings.UserID = userID
+	}
+
+	// Update auto mode enabled flag
+	userSettings.AutoModeEnabled = req.Enabled
+
+	// Save to database
+	if err := s.repo.SaveUserGinieSettings(ctx, userSettings); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to toggle auto mode: "+err.Error())
 		return
 	}

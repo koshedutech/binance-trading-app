@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { DollarSign, Zap, TrendingUp, Shield, Clock, Edit2, Save, X, AlertCircle, RefreshCw } from 'lucide-react';
-import { futuresApi, formatUSD } from '../services/futuresApi';
+import { DollarSign, Zap, TrendingUp, Shield, Clock, Edit2, Save, X, AlertCircle, RefreshCw, RotateCcw } from 'lucide-react';
+import { futuresApi, formatUSD, loadCapitalAllocationDefaults, ConfigResetPreview, SettingDiff } from '../services/futuresApi';
+import ResetConfirmDialog from './ResetConfirmDialog';
 
 interface ModeAllocation {
   mode: string;
@@ -58,6 +59,27 @@ export default function ModeAllocationPanel() {
     position_percent: 15,
   });
 
+  // Reset Dialog state
+  const [resetDialog, setResetDialog] = useState<{
+    open: boolean;
+    title: string;
+    configType: string;
+    loading: boolean;
+    allMatch: boolean;
+    differences: SettingDiff[];
+    totalChanges: number;
+    onConfirm: () => Promise<void>;
+  }>({
+    open: false,
+    title: '',
+    configType: '',
+    loading: false,
+    allMatch: false,
+    differences: [],
+    totalChanges: 0,
+    onConfirm: async () => {},
+  });
+
   const modeNames: { [key: string]: string } = {
     ultra_fast: 'Ultra-Fast Scalping',
     scalp: 'Scalp',
@@ -84,6 +106,23 @@ export default function ModeAllocationPanel() {
     try {
       const data: ModeAllocations = await futuresApi.getModeAllocations();
       setAllocations(data.allocations || []);
+
+      // Update config state with current values from API
+      const ultraFast = data.allocations.find(a => a.mode === 'ultra_fast');
+      const scalp = data.allocations.find(a => a.mode === 'scalp');
+      const swing = data.allocations.find(a => a.mode === 'swing');
+      const position = data.allocations.find(a => a.mode === 'position');
+
+      if (ultraFast && scalp && swing && position) {
+        const currentConfig = {
+          ultra_fast_percent: ultraFast.allocated_percent,
+          scalp_percent: scalp.allocated_percent,
+          swing_percent: swing.allocated_percent,
+          position_percent: position.allocated_percent,
+        };
+        setConfig(currentConfig);
+      }
+
       setError(null);
       setLastUpdate(new Date());
     } catch (err) {
@@ -99,6 +138,49 @@ export default function ModeAllocationPanel() {
     const interval = setInterval(fetchAllocations, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  const handleResetCapitalAllocation = async () => {
+    try {
+      // Open dialog with loading state
+      setResetDialog({
+        open: true,
+        title: 'Reset Capital Allocation to Defaults?',
+        configType: 'capital_allocation',
+        loading: true,
+        allMatch: false,
+        differences: [],
+        totalChanges: 0,
+        onConfirm: async () => {
+          try {
+            // Apply the reset
+            await loadCapitalAllocationDefaults(false);
+            setResetDialog(prev => ({ ...prev, open: false }));
+            // Refresh allocations after reset
+            await fetchAllocations();
+            setError(null);
+          } catch (err) {
+            setError('Failed to reset capital allocation');
+            console.error(err);
+          }
+        },
+      });
+
+      // Fetch preview
+      const preview = await loadCapitalAllocationDefaults(true) as ConfigResetPreview;
+
+      setResetDialog(prev => ({
+        ...prev,
+        loading: false,
+        allMatch: preview.all_match || false,
+        differences: preview.differences || [],
+        totalChanges: preview.total_changes || 0,
+      }));
+    } catch (err) {
+      setError('Failed to load capital allocation defaults preview');
+      console.error(err);
+      setResetDialog(prev => ({ ...prev, open: false }));
+    }
+  };
 
   const handleInputChange = (field: keyof AllocationConfig, value: string) => {
     const numValue = parseFloat(value) || 0;
@@ -263,9 +345,20 @@ export default function ModeAllocationPanel() {
           >
             <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
           </button>
+          <button
+            onClick={handleResetCapitalAllocation}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-blue-400 rounded transition"
+            title="Reset Capital Allocation to defaults"
+          >
+            <RotateCcw className="w-4 h-4" />
+            Reset
+          </button>
           {!showEdit ? (
             <button
-              onClick={() => setShowEdit(true)}
+              onClick={() => {
+                setInputs(config); // Copy current config to inputs before editing
+                setShowEdit(true);
+              }}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition"
             >
               <Edit2 className="w-4 h-4" />
@@ -352,6 +445,19 @@ export default function ModeAllocationPanel() {
           Last updated: {lastUpdate.toLocaleTimeString()}
         </p>
       )}
+
+      {/* Reset Confirm Dialog */}
+      <ResetConfirmDialog
+        open={resetDialog.open}
+        onClose={() => setResetDialog(prev => ({ ...prev, open: false }))}
+        onConfirm={resetDialog.onConfirm}
+        title={resetDialog.title}
+        configType={resetDialog.configType}
+        loading={resetDialog.loading}
+        allMatch={resetDialog.allMatch}
+        differences={resetDialog.differences}
+        totalChanges={resetDialog.totalChanges}
+      />
     </div>
   );
 }

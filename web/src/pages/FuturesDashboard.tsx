@@ -61,6 +61,11 @@ export default function FuturesDashboard() {
   // Handle trading mode changes from TradingModeToggle component
   const handleTradingModeChange = (mode: { mode: 'paper' | 'live'; mode_label: string }) => {
     setTradingMode(mode);
+    // CRITICAL: Immediately refresh all data when mode changes
+    console.log('Trading mode changed, refreshing all data...');
+    fetchAccountInfo();
+    fetchPositions();
+    fetchMetrics();
   };
 
   // Initial data fetch
@@ -111,6 +116,9 @@ export default function FuturesDashboard() {
   };
 
   const walletBalance = safeNum(accountInfo?.total_wallet_balance);
+  // CRITICAL: Calculate margin balance from wallet + unrealized PnL (from positions table)
+  // This ensures consistency with the positions table which is the source of truth
+  const marginBalance = walletBalance + totalUnrealizedPnl;
   const currentPrice = safeNum(markPrice?.markPrice);
   const priceChange24h = 0; // Would come from ticker data
   const currentFundingRate = safeNum(fundingRate?.fundingRate);
@@ -264,6 +272,18 @@ export default function FuturesDashboard() {
               </div>
             </div>
             <div>
+              <div className="text-xs text-gray-500">Margin Balance</div>
+              <div className={`font-semibold ${
+                marginBalance > walletBalance
+                  ? 'text-green-500'
+                  : marginBalance < walletBalance
+                  ? 'text-red-500'
+                  : 'text-white'
+              }`}>
+                {formatUSD(marginBalance)}
+              </div>
+            </div>
+            <div>
               <div className="text-xs text-gray-500">Available</div>
               <div className="font-semibold text-green-500">{formatUSD(availableBalance)}</div>
             </div>
@@ -302,12 +322,7 @@ export default function FuturesDashboard() {
         <GiniePanel />
       </div>
 
-      {/* Trade Source Performance Stats - Below Ginie */}
-      <div className="mb-4">
-        <TradeSourceStatsPanel />
-      </div>
-
-      {/* Positions Table - Below Trade Source */}
+      {/* Positions Table */}
       <div className="mb-4">
         <FuturesPositionsTable
           onSymbolClick={(symbol) => {
@@ -317,9 +332,14 @@ export default function FuturesDashboard() {
         />
       </div>
 
-      {/* Open Orders & Trade History - Below Positions */}
+      {/* Open Orders & Trade History */}
       <div className="mb-4">
         <FuturesOrdersHistory />
+      </div>
+
+      {/* Trade Source Performance Stats - Below Orders */}
+      <div className="mb-4">
+        <TradeSourceStatsPanel />
       </div>
 
       {/* Mode Capital Allocation & Safety Control */}
@@ -385,13 +405,13 @@ export default function FuturesDashboard() {
               valueColor={metrics?.winRate && metrics.winRate >= 50 ? 'text-green-500' : 'text-red-500'}
             />
             <StatCard
-              title="Total PnL"
+              title="Realized PnL (7d)"
               value={formatUSD(metrics?.totalRealizedPnl || 0)}
               icon={Wallet}
               valueColor={getPositionColor(metrics?.totalRealizedPnl || 0)}
             />
             <StatCard
-              title="Today's PnL"
+              title="Today's Realized"
               value={formatUSD(metrics?.dailyRealizedPnl || 0)}
               icon={TrendingUp}
               valueColor={getPositionColor(metrics?.dailyRealizedPnl || 0)}

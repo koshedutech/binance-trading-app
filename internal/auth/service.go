@@ -157,6 +157,11 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*database.
 		log.Printf("Warning: failed to create trading config for user %s: %v", user.ID, err)
 	}
 
+	// Initialize all default settings from default-settings.json (Story 4.14)
+	if err := s.initializeNewUserDefaults(ctx, user.ID); err != nil {
+		log.Printf("Warning: failed to initialize default settings for user %s: %v", user.ID, err)
+	}
+
 	// Send verification email if required
 	if requiresVerification {
 		code, err := s.GenerateVerificationCode(ctx, user.ID)
@@ -569,4 +574,13 @@ func (s *Service) ResendVerificationCode(ctx context.Context, userID string) err
 	}
 
 	return nil
+}
+
+// initializeNewUserDefaults copies ALL default settings from default-settings.json to the database for a new user
+// This ensures new users have all 5 mode configs initialized in user_mode_configs table
+// Called automatically during user registration (Story 4.14)
+func (s *Service) initializeNewUserDefaults(ctx context.Context, userID string) error {
+	// Use the repository helper to initialize all default settings
+	// This loads default-settings.json and saves all 5 mode configs to user_mode_configs table
+	return s.repo.InitializeUserDefaultSettings(ctx, userID)
 }

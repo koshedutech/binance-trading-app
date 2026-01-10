@@ -955,7 +955,8 @@ func (s *Server) handleGetGlobalCircuitBreaker(c *gin.Context) {
 
 	// If no config exists, return defaults
 	if config == nil {
-		config = database.DefaultGlobalCircuitBreakerConfig()
+		config = database.DefaultUserGlobalCircuitBreaker()
+		config.UserID = userID
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -973,20 +974,34 @@ func (s *Server) handleUpdateGlobalCircuitBreaker(c *gin.Context) {
 		return
 	}
 
-	var config database.GlobalCircuitBreakerConfig
-	if err := c.ShouldBindJSON(&config); err != nil {
+	var req struct {
+		Enabled              bool    `json:"enabled"`
+		MaxLossPerHour       float64 `json:"max_loss_per_hour"`
+		MaxDailyLoss         float64 `json:"max_daily_loss"`
+		MaxConsecutiveLosses int     `json:"max_consecutive_losses"`
+		CooldownMinutes      int     `json:"cooldown_minutes"`
+		MaxTradesPerMinute   int     `json:"max_trades_per_minute"`
+		MaxDailyTrades       int     `json:"max_daily_trades"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
 	}
 
-	// Validate config
-	if err := config.Validate(); err != nil {
-		errorResponse(c, http.StatusBadRequest, err.Error())
-		return
+	// Create UserGlobalCircuitBreaker from request
+	config := &database.UserGlobalCircuitBreaker{
+		UserID:               userID,
+		Enabled:              req.Enabled,
+		MaxLossPerHour:       req.MaxLossPerHour,
+		MaxDailyLoss:         req.MaxDailyLoss,
+		MaxConsecutiveLosses: req.MaxConsecutiveLosses,
+		CooldownMinutes:      req.CooldownMinutes,
+		MaxTradesPerMinute:   req.MaxTradesPerMinute,
+		MaxDailyTrades:       req.MaxDailyTrades,
 	}
 
 	// Save to database
-	if err := s.repo.SaveUserGlobalCircuitBreaker(c.Request.Context(), userID, &config); err != nil {
+	if err := s.repo.SaveUserGlobalCircuitBreaker(c.Request.Context(), config); err != nil {
 		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save config for user %s: %v", userID, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to save global circuit breaker config")
 		return
@@ -1790,8 +1805,14 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 	if err != nil {
 		log.Printf("[MODE-CONFIG] ERROR: Failed to get DB config for user %s mode %s: %v", userIDStr, mode, err)
 
+		// Check if this is old format data that needs migration
+		if strings.Contains(err.Error(), "OLD_FORMAT_DETECTED") {
+			errorResponse(c, http.StatusUpgradeRequired, "Your mode configuration uses an outdated format. Please reset this mode to defaults via the UI to update to the new format.")
+			return
+		}
+
 		// Check if this is a missing mode (user not initialized) vs database error
-		if err.Error() == "mode config not found" {
+		if strings.Contains(err.Error(), "no mode config found") || err.Error() == "mode config not found" {
 			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - incomplete initialization, using default", userIDStr, mode)
 			// Only in this specific case, use default to fill the gap
 			defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
@@ -1943,25 +1964,26 @@ func (s *Server) handleToggleModeEnabled(c *gin.Context) {
 	})
 }
 
-// handleResetModeConfigs resets all modes to default configurations
+// handleResetModeConfigs resets all modes to default configurations for the current user
 // POST /api/futures/ginie/mode-config/reset
+// SIMPLE RULE: Copy EVERYTHING from default-settings.json to database
 func (s *Server) handleResetModeConfigs(c *gin.Context) {
-	log.Println("[MODE-CONFIG] Resetting all mode configurations to defaults")
+	userID := s.getUserID(c)
+	log.Printf("[MODE-CONFIG] Resetting all mode configurations to defaults for user %s", userID)
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.ResetModeConfigs(); err != nil {
+	// Use the new per-user restore function
+	if err := s.repo.RestoreUserDefaultSettings(c.Request.Context(), userID); err != nil {
+		log.Printf("[MODE-CONFIG] Failed to restore defaults for user %s: %v", userID, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to reset mode configs: "+err.Error())
 		return
 	}
 
-	configs := sm.GetDefaultModeConfigs()
-
-	log.Println("[MODE-CONFIG] Successfully reset all mode configurations to defaults")
+	log.Printf("[MODE-CONFIG] Successfully reset all mode configurations to defaults for user %s", userID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":      true,
-		"message":      "All mode configurations reset to defaults",
-		"mode_configs": configs,
+		"success": true,
+		"message": "All mode configurations reset to defaults from default-settings.json",
+		"user_id": userID,
 	})
 }
 
@@ -3788,8 +3810,8 @@ func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
 	userID := s.getUserID(c)
 	log.Printf("[SCALP-REENTRY] Getting scalp re-entry configuration for user %s", userID)
 
-	// Try to get user's config from database
-	configJSON, err := s.repo.GetUserScalpReentryConfig(c.Request.Context(), userID)
+	// Get enabled state and config JSON from database
+	enabledFromDB, configJSON, err := s.repo.GetUserModeConfigWithEnabled(c.Request.Context(), userID, "scalp_reentry")
 	if err != nil {
 		log.Printf("[SCALP-REENTRY] Database error: %v", err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to retrieve configuration")
@@ -3798,17 +3820,34 @@ func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
 
 	var config autopilot.ScalpReentryConfig
 
+	// SIMPLE RULE: Just return what's in the database
+	// No complex fallback logic, no overriding with defaults
 	if configJSON == nil {
-		// No config in database - use defaults
-		log.Println("[SCALP-REENTRY] No config in database, using defaults")
+		log.Printf("[SCALP-REENTRY] No config in database - using defaults (user should run restore defaults)")
 		config = autopilot.DefaultScalpReentryConfig()
+		config.Enabled = enabledFromDB
 	} else {
-		// Parse the config from database
-		if err := json.Unmarshal(configJSON, &config); err != nil {
-			log.Printf("[SCALP-REENTRY] Failed to parse config from database: %v", err)
+		// Parse as ModeFullConfig (standard format in database)
+		var modeConfig autopilot.ModeFullConfig
+		if err := json.Unmarshal(configJSON, &modeConfig); err != nil {
+			log.Printf("[SCALP-REENTRY] ERROR: Failed to parse config: %v", err)
 			errorResponse(c, http.StatusInternalServerError, "Failed to parse configuration")
 			return
 		}
+
+		// Extract values from ModeFullConfig to ScalpReentryConfig
+		config = autopilot.DefaultScalpReentryConfig() // Start with structure
+		config.Enabled = enabledFromDB                 // Use enabled from database column (source of truth)
+
+		// Map fields from ModeFullConfig
+		if modeConfig.Size != nil {
+			config.MinPositionSizeUSD = modeConfig.Size.MinPositionSizeUSD
+		}
+		if modeConfig.SLTP != nil {
+			config.StopLossPercent = modeConfig.SLTP.StopLossPercent
+		}
+
+		log.Printf("[SCALP-REENTRY] Loaded config from database (Enabled: %v)", config.Enabled)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -3899,8 +3938,9 @@ func (s *Server) handleUpdateScalpReentryConfig(c *gin.Context) {
 
 // handleToggleScalpReentry toggles the scalp re-entry mode on/off
 // POST /api/futures/ginie/scalp-reentry/toggle
+// DB-FIRST: Saves enabled status to database AND updates in-memory for instant effect
 func (s *Server) handleToggleScalpReentry(c *gin.Context) {
-	log.Println("[SCALP-REENTRY] Toggling scalp re-entry mode")
+	log.Println("[SCALP-REENTRY] Toggling scalp re-entry mode (DB-first)")
 
 	var req struct {
 		Enabled bool `json:"enabled"`
@@ -3911,25 +3951,66 @@ func (s *Server) handleToggleScalpReentry(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
-	settings.ScalpReentryConfig.Enabled = req.Enabled
-
-	if err := sm.SaveSettings(settings); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+	// Get user ID from JWT
+	userID, exists := c.Get("user_id")
+	if !exists {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
 		return
 	}
+	userIDStr := userID.(string)
+
+	// 1. Get current config from database (or defaults)
+	ctx := context.Background()
+	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr)
+
+	var config autopilot.ScalpReentryConfig
+	if configJSON == nil || err != nil {
+		// No DB config, use defaults
+		config = autopilot.DefaultScalpReentryConfig()
+	} else {
+		// Parse existing config
+		if err := json.Unmarshal(configJSON, &config); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to parse config: "+err.Error())
+			return
+		}
+	}
+
+	// 2. Update the enabled status
+	config.Enabled = req.Enabled
+
+	// 3. Save to database (source of truth)
+	newConfigJSON, err := json.Marshal(config)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
+		return
+	}
+	err = s.repo.SaveUserScalpReentryConfig(ctx, userIDStr, newConfigJSON)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
+		return
+	}
+	log.Printf("[SCALP-REENTRY] Saved scalp_reentry enabled=%v to database for user %s", req.Enabled, userIDStr)
+
+	// 4. Update SettingsManager in-memory for consistency (optional fallback)
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetDefaultSettings()
+	settings.ScalpReentryConfig = config
+	sm.SaveSettings(settings) // Update in-memory copy
+
+	// Note: Ginie autopilot will reload config from database on next scan cycle
+	log.Printf("[SCALP-REENTRY] Config will take effect on next scan cycle (no restart needed)")
 
 	status := "disabled"
 	if req.Enabled {
 		status = "enabled"
 	}
-	log.Printf("[SCALP-REENTRY] Mode toggled to: %s", status)
+	log.Printf("[SCALP-REENTRY] Mode toggled to: %s (DB + in-memory)", status)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"enabled": req.Enabled,
-		"message": fmt.Sprintf("Scalp re-entry mode %s", status),
+		"source":  "database",
+		"message": fmt.Sprintf("Scalp re-entry mode %s - takes effect immediately", status),
 	})
 }
 
@@ -3958,12 +4039,28 @@ type HedgeModeConfigRequest struct {
 
 // handleGetHedgeModeConfig returns the current hedge mode configuration
 // GET /api/futures/ginie/hedge-config
+// DB-FIRST: Returns config from database (or defaults if not found)
 func (s *Server) handleGetHedgeModeConfig(c *gin.Context) {
-	log.Println("[HEDGE-MODE] Getting hedge mode configuration")
+	userID := s.getUserID(c)
+	log.Printf("[HEDGE-MODE] Getting hedge mode configuration for user %s", userID)
 
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
-	config := settings.ScalpReentryConfig
+	// Try to get user's config from database
+	ctx := c.Request.Context()
+	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userID)
+
+	var config autopilot.ScalpReentryConfig
+	if configJSON == nil || err != nil {
+		// No config in database - use defaults
+		log.Println("[HEDGE-MODE] No config in database, using defaults")
+		config = autopilot.DefaultScalpReentryConfig()
+	} else {
+		// Parse the config from database
+		if err := json.Unmarshal(configJSON, &config); err != nil {
+			log.Printf("[HEDGE-MODE] Failed to parse config from database: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to parse configuration")
+			return
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -4127,8 +4224,9 @@ func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
 
 // handleToggleHedgeMode toggles the hedge mode on/off
 // POST /api/futures/ginie/hedge-mode/toggle
+// DB-FIRST: Saves enabled status to database AND updates in-memory for instant effect
 func (s *Server) handleToggleHedgeMode(c *gin.Context) {
-	log.Println("[HEDGE-MODE] Toggling hedge mode")
+	log.Println("[HEDGE-MODE] Toggling hedge mode (DB-first)")
 
 	var req struct {
 		Enabled bool `json:"enabled"`
@@ -4138,26 +4236,67 @@ func (s *Server) handleToggleHedgeMode(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
-	settings.ScalpReentryConfig.HedgeModeEnabled = req.Enabled
-
-	if err := sm.SaveSettings(settings); err != nil {
-		log.Printf("[HEDGE-MODE] Failed to toggle hedge mode: %v", err)
-		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+	// Get user ID from JWT
+	userID, exists := c.Get("user_id")
+	if !exists {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
 		return
 	}
+	userIDStr := userID.(string)
+
+	// 1. Get current config from database (or defaults)
+	ctx := context.Background()
+	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr)
+
+	var config autopilot.ScalpReentryConfig
+	if configJSON == nil || err != nil {
+		// No DB config, use defaults
+		config = autopilot.DefaultScalpReentryConfig()
+	} else {
+		// Parse existing config
+		if err := json.Unmarshal(configJSON, &config); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to parse config: "+err.Error())
+			return
+		}
+	}
+
+	// 2. Update the hedge mode enabled status
+	config.HedgeModeEnabled = req.Enabled
+
+	// 3. Save to database (source of truth)
+	newConfigJSON, err := json.Marshal(config)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
+		return
+	}
+	err = s.repo.SaveUserScalpReentryConfig(ctx, userIDStr, newConfigJSON)
+	if err != nil {
+		log.Printf("[HEDGE-MODE] Failed to toggle hedge mode: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
+		return
+	}
+	log.Printf("[HEDGE-MODE] Saved hedge_mode enabled=%v to database for user %s", req.Enabled, userIDStr)
+
+	// 4. Update SettingsManager in-memory for consistency (optional fallback)
+	sm := autopilot.GetSettingsManager()
+	settings := sm.GetDefaultSettings()
+	settings.ScalpReentryConfig = config
+	sm.SaveSettings(settings) // Update in-memory copy
+
+	// Note: Ginie autopilot will reload config from database on next scan cycle
+	log.Printf("[HEDGE-MODE] Config will take effect on next scan cycle (no restart needed)")
 
 	status := "disabled"
 	if req.Enabled {
 		status = "enabled"
 	}
-	log.Printf("[HEDGE-MODE] Mode toggled to: %s", status)
+	log.Printf("[HEDGE-MODE] Mode toggled to: %s (DB + in-memory)", status)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"enabled": req.Enabled,
-		"message": fmt.Sprintf("Hedge mode %s", status),
+		"source":  "database",
+		"message": fmt.Sprintf("Hedge mode %s - takes effect immediately", status),
 	})
 }
 
@@ -4864,4 +5003,39 @@ func (s *Server) handleGetCoinTier(c *gin.Context) {
 			autopilot.TierSmallCap: "Small cap - Strictest settings, all filters required",
 		}[tier],
 	})
+}
+
+// ==================== PENDING LIMIT ORDERS ====================
+
+// handleGetPendingOrders returns all pending limit orders waiting to be filled
+// GET /api/futures/ginie/pending-orders
+func (s *Server) handleGetPendingOrders(c *gin.Context) {
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
+	}
+
+	orders := giniePilot.GetPendingLimitOrders()
+
+	c.JSON(http.StatusOK, gin.H{
+		"pending_orders": orders,
+		"count":          len(orders),
+	})
+}
+
+// ==================== TRADE CONDITIONS ====================
+
+// handleGetTradeConditions returns detailed status of all pre-trade conditions
+// GET /api/futures/ginie/trade-conditions
+func (s *Server) handleGetTradeConditions(c *gin.Context) {
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		return
+	}
+
+	conditions := giniePilot.GetTradeConditions()
+
+	c.JSON(http.StatusOK, conditions)
 }

@@ -2,6 +2,7 @@ package api
 
 import (
 	"binance-trading-bot/internal/autopilot"
+	"binance-trading-bot/internal/database"
 	"context"
 	"log"
 	"net/http"
@@ -214,29 +215,51 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 		return
 	}
 
-	allocation := &autopilot.ModeAllocationConfig{
-		UltraFastScalpPercent: req.UltraFastPercent,
-		ScalpPercent:          req.ScalpPercent,
-		SwingPercent:          req.SwingPercent,
-		PositionPercent:       req.PositionPercent,
-	}
+	ctx := c.Request.Context()
 
-	// Keep existing position limits if not specified
-	currentSettings := autopilot.GetSettingsManager().GetDefaultSettings()
-	if currentSettings != nil && currentSettings.ModeAllocation != nil {
-		allocation.MaxUltraFastPositions = currentSettings.ModeAllocation.MaxUltraFastPositions
-		allocation.MaxScalpPositions = currentSettings.ModeAllocation.MaxScalpPositions
-		allocation.MaxSwingPositions = currentSettings.ModeAllocation.MaxSwingPositions
-		allocation.MaxPositionPositions = currentSettings.ModeAllocation.MaxPositionPositions
-		allocation.MaxUltraFastUSDPerPosition = currentSettings.ModeAllocation.MaxUltraFastUSDPerPosition
-		allocation.MaxScalpUSDPerPosition = currentSettings.ModeAllocation.MaxScalpUSDPerPosition
-		allocation.MaxSwingUSDPerPosition = currentSettings.ModeAllocation.MaxSwingUSDPerPosition
-		allocation.MaxPositionUSDPerPosition = currentSettings.ModeAllocation.MaxPositionUSDPerPosition
-	}
-
-	if err := autopilot.GetSettingsManager().UpdateModeAllocation(allocation); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to update allocation: "+err.Error())
+	// 1. Load current allocation from database (or use defaults)
+	currentAllocation, err := s.repo.GetUserCapitalAllocation(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load current allocation: "+err.Error())
 		return
+	}
+
+	// Use defaults if not found
+	if currentAllocation == nil {
+		currentAllocation = database.DefaultUserCapitalAllocation()
+		currentAllocation.UserID = userID
+	}
+
+	// 2. Update only the percentage fields (keep position limits)
+	currentAllocation.UltraFastPercent = req.UltraFastPercent
+	currentAllocation.ScalpPercent = req.ScalpPercent
+	currentAllocation.SwingPercent = req.SwingPercent
+	currentAllocation.PositionPercent = req.PositionPercent
+
+	// 3. Save to DATABASE first
+	if err := s.repo.SaveUserCapitalAllocation(ctx, currentAllocation); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save allocation: "+err.Error())
+		return
+	}
+
+	// 4. Update in-memory settings for immediate use (optional - for backward compatibility)
+	allocation := &autopilot.ModeAllocationConfig{
+		UltraFastScalpPercent:        currentAllocation.UltraFastPercent,
+		ScalpPercent:                 currentAllocation.ScalpPercent,
+		SwingPercent:                 currentAllocation.SwingPercent,
+		PositionPercent:              currentAllocation.PositionPercent,
+		MaxUltraFastPositions:        currentAllocation.MaxUltraFastPositions,
+		MaxScalpPositions:            currentAllocation.MaxScalpPositions,
+		MaxSwingPositions:            currentAllocation.MaxSwingPositions,
+		MaxPositionPositions:         currentAllocation.MaxPositionPositions,
+		MaxUltraFastUSDPerPosition:   currentAllocation.MaxUltraFastUSDPerPosition,
+		MaxScalpUSDPerPosition:       currentAllocation.MaxScalpUSDPerPosition,
+		MaxSwingUSDPerPosition:       currentAllocation.MaxSwingUSDPerPosition,
+		MaxPositionUSDPerPosition:    currentAllocation.MaxPositionUSDPerPosition,
+	}
+	if err := autopilot.GetSettingsManager().UpdateModeAllocation(allocation); err != nil {
+		// Log but don't fail - database is source of truth
+		log.Printf("[MODE-ALLOCATION] Warning: Failed to update in-memory settings: %v", err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

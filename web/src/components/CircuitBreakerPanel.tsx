@@ -2,15 +2,6 @@ import { useState, useEffect } from 'react';
 import { futuresApi } from '../services/futuresApi';
 import { Shield, Settings, AlertTriangle, RefreshCw, TrendingDown, Activity, Clock, Target, Check, Save, X, RotateCcw } from 'lucide-react';
 
-// Default circuit breaker configuration
-const defaultCBConfig = {
-  max_loss_per_hour: 100,
-  max_daily_loss: 500,
-  max_consecutive_losses: 5,
-  cooldown_minutes: 30,
-  max_daily_trades: 100,
-};
-
 interface CircuitBreakerStatus {
   available: boolean;
   enabled: boolean;
@@ -44,11 +35,11 @@ export default function CircuitBreakerPanel() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   // String inputs for proper text field behavior (allows clearing and typing)
   const [configInputs, setConfigInputs] = useState({
-    max_loss_per_hour: '100',
-    max_daily_loss: '500',
-    max_consecutive_losses: '5',
-    cooldown_minutes: '30',
-    max_daily_trades: '100',
+    max_loss_per_hour: '',
+    max_daily_loss: '',
+    max_consecutive_losses: '',
+    cooldown_minutes: '',
+    max_daily_trades: '',
   });
 
   const fetchStatus = async () => {
@@ -96,13 +87,13 @@ export default function CircuitBreakerPanel() {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      // Parse string inputs to numbers
+      // Parse string inputs to numbers - use current config as fallback
       const configToSave = {
-        max_loss_per_hour: parseFloat(configInputs.max_loss_per_hour) || defaultCBConfig.max_loss_per_hour,
-        max_daily_loss: parseFloat(configInputs.max_daily_loss) || defaultCBConfig.max_daily_loss,
-        max_consecutive_losses: parseInt(configInputs.max_consecutive_losses) || defaultCBConfig.max_consecutive_losses,
-        cooldown_minutes: parseInt(configInputs.cooldown_minutes) || defaultCBConfig.cooldown_minutes,
-        max_daily_trades: parseInt(configInputs.max_daily_trades) || defaultCBConfig.max_daily_trades,
+        max_loss_per_hour: parseFloat(configInputs.max_loss_per_hour) || circuitStatus?.config.max_loss_per_hour || 100,
+        max_daily_loss: parseFloat(configInputs.max_daily_loss) || circuitStatus?.config.max_daily_loss || 500,
+        max_consecutive_losses: parseInt(configInputs.max_consecutive_losses) || circuitStatus?.config.max_consecutive_losses || 5,
+        cooldown_minutes: parseInt(configInputs.cooldown_minutes) || circuitStatus?.config.cooldown_minutes || 30,
+        max_daily_trades: parseInt(configInputs.max_daily_trades) || circuitStatus?.config.max_daily_trades || 100,
       };
       const result = await futuresApi.updateCircuitBreakerConfig(configToSave);
       if (result.success) {
@@ -122,15 +113,22 @@ export default function CircuitBreakerPanel() {
   const handleResetDefaults = async () => {
     setIsSaving(true);
     try {
-      // Reset to defaults
+      // Reset to defaults - use reasonable defaults
+      const defaults = {
+        max_loss_per_hour: 100,
+        max_daily_loss: 500,
+        max_consecutive_losses: 5,
+        cooldown_minutes: 30,
+        max_daily_trades: 100,
+      };
       setConfigInputs({
-        max_loss_per_hour: defaultCBConfig.max_loss_per_hour.toString(),
-        max_daily_loss: defaultCBConfig.max_daily_loss.toString(),
-        max_consecutive_losses: defaultCBConfig.max_consecutive_losses.toString(),
-        cooldown_minutes: defaultCBConfig.cooldown_minutes.toString(),
-        max_daily_trades: defaultCBConfig.max_daily_trades.toString(),
+        max_loss_per_hour: defaults.max_loss_per_hour.toString(),
+        max_daily_loss: defaults.max_daily_loss.toString(),
+        max_consecutive_losses: defaults.max_consecutive_losses.toString(),
+        cooldown_minutes: defaults.cooldown_minutes.toString(),
+        max_daily_trades: defaults.max_daily_trades.toString(),
       });
-      const result = await futuresApi.updateCircuitBreakerConfig(defaultCBConfig);
+      const result = await futuresApi.updateCircuitBreakerConfig(defaults);
       if (result.success) {
         setSuccessMsg('Circuit breaker reset to defaults');
         setTimeout(() => setSuccessMsg(null), 3000);

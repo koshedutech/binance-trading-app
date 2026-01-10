@@ -681,6 +681,27 @@ class APIService {
     return data;
   }
 
+  // ==================== Global Circuit Breaker Endpoints (Story 5.3) ====================
+
+  async getGlobalCircuitBreaker(): Promise<{
+    max_loss_per_hour: number;
+    max_daily_loss: number;
+    max_consecutive_losses: number;
+    cooldown_minutes: number;
+  }> {
+    const { data } = await this.client.get<APIResponse<any>>('/user/global-circuit-breaker');
+    return data.config;
+  }
+
+  async updateGlobalCircuitBreaker(config: {
+    max_loss_per_hour: number;
+    max_daily_loss: number;
+    max_consecutive_losses: number;
+    cooldown_minutes: number;
+  }): Promise<void> {
+    await this.client.put('/user/global-circuit-breaker', config);
+  }
+
   // ==================== Billing Endpoints ====================
 
   async getProfitHistory(): Promise<Array<{

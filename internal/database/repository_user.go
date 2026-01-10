@@ -1451,48 +1451,8 @@ func (r *Repository) DeleteUserSymbolSettings(ctx context.Context, userID, symbo
 // ========================================
 // Global Circuit Breaker Repository Methods (Story 5.3)
 // ========================================
-
-// GetUserGlobalCircuitBreaker retrieves global circuit breaker config for a user
-func (r *Repository) GetUserGlobalCircuitBreaker(ctx context.Context, userID string) (*GlobalCircuitBreakerConfig, error) {
-	query := `
-		SELECT max_loss_per_hour, max_daily_loss, max_consecutive_losses, cooldown_minutes
-		FROM user_global_circuit_breaker
-		WHERE user_id = $1
-	`
-	var config GlobalCircuitBreakerConfig
-	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(
-		&config.MaxLossPerHour,
-		&config.MaxDailyLoss,
-		&config.MaxConsecutiveLosses,
-		&config.CooldownMinutes,
-	)
-	if err == pgx.ErrNoRows {
-		return nil, nil // Return nil to indicate use defaults
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to get global circuit breaker config: %w", err)
-	}
-	return &config, nil
-}
-
-// SaveUserGlobalCircuitBreaker saves or updates global circuit breaker config for a user
-func (r *Repository) SaveUserGlobalCircuitBreaker(ctx context.Context, userID string, config *GlobalCircuitBreakerConfig) error {
-	query := `
-		INSERT INTO user_global_circuit_breaker (user_id, max_loss_per_hour, max_daily_loss, max_consecutive_losses, cooldown_minutes, updated_at)
-		VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-		ON CONFLICT (user_id) DO UPDATE SET
-			max_loss_per_hour = EXCLUDED.max_loss_per_hour,
-			max_daily_loss = EXCLUDED.max_daily_loss,
-			max_consecutive_losses = EXCLUDED.max_consecutive_losses,
-			cooldown_minutes = EXCLUDED.cooldown_minutes,
-			updated_at = CURRENT_TIMESTAMP
-	`
-	_, err := r.db.Pool.Exec(ctx, query, userID, config.MaxLossPerHour, config.MaxDailyLoss, config.MaxConsecutiveLosses, config.CooldownMinutes)
-	if err != nil {
-		return fmt.Errorf("failed to save global circuit breaker config: %w", err)
-	}
-	return nil
-}
+// NOTE: GetUserGlobalCircuitBreaker and SaveUserGlobalCircuitBreaker are defined in
+// repository_user_circuit_breaker.go with full state support (is_tripped, etc.)
 
 // ========================================
 // Scan Source Settings Repository Methods

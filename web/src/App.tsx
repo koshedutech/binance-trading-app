@@ -22,6 +22,7 @@ import APIKeys from './pages/APIKeys';
 import AIKeys from './pages/AIKeys';
 import Billing from './pages/Billing';
 import AdminSettings from './pages/AdminSettings';
+import ResetSettings from './pages/ResetSettings';
 import Header from './components/Header';
 import ConnectionIndicator from './components/ConnectionIndicator';
 
@@ -332,6 +333,11 @@ function AppContent() {
           <Route path="/admin" element={
             <ProtectedRoute requireAdmin>
               <AdminSettings />
+            </ProtectedRoute>
+          } />
+          <Route path="/reset-settings" element={
+            <ProtectedRoute>
+              <ResetSettings />
             </ProtectedRoute>
           } />
 

@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import {
   futuresApi,
   GinieDiagnostics,
   GinieSignalLog,
   GinieSignalStats,
   DiagnosticIssue,
+  TradeConditionsResponse,
+  PendingOrdersResponse,
 } from '../services/futuresApi';
 import {
   Activity,
@@ -23,18 +25,43 @@ import {
   Info,
   AlertOctagon,
   Radio,
+  Lock,
+  Unlock,
+  Clock,
+  Check,
+  X,
 } from 'lucide-react';
 
 export default function GinieDiagnosticsPanel() {
   const [diagnostics, setDiagnostics] = useState<GinieDiagnostics | null>(null);
   const [signals, setSignals] = useState<GinieSignalLog[]>([]);
   const [signalStats, setSignalStats] = useState<GinieSignalStats | null>(null);
+  const [tradeConditions, setTradeConditions] = useState<TradeConditionsResponse | null>(null);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrdersResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'signals' | 'issues'>('overview');
   const [expandedSignal, setExpandedSignal] = useState<string | null>(null);
   const [signalFilter, setSignalFilter] = useState<'all' | 'executed' | 'rejected'>('all');
   const [showKillSwitchDetails, setShowKillSwitchDetails] = useState(false);
   const [resettingSymbol, setResettingSymbol] = useState<string | null>(null);
+  const [holdSignals, setHoldSignals] = useState(false);
+  const [showConditionsDetail, setShowConditionsDetail] = useState(false);
+
+  // Expandable section states - all collapsed by default
+  const [showTradeConditions, setShowTradeConditions] = useState(false);
+  const [showPendingOrders, setShowPendingOrders] = useState(false);
+  const [showScanningActivity, setShowScanningActivity] = useState(false);
+  const [showLLMStatus, setShowLLMStatus] = useState(false);
+  const [showProfitBooking, setShowProfitBooking] = useState(false);
+  const [showCircuitBreaker, setShowCircuitBreaker] = useState(false);
+
+  // Ref to track current filter for interval callback
+  const signalFilterRef = useRef(signalFilter);
+  signalFilterRef.current = signalFilter;
+
+  // Ref to track hold state for interval callback
+  const holdSignalsRef = useRef(holdSignals);
+  holdSignalsRef.current = holdSignals;
 
   const fetchDiagnostics = async () => {
     try {
@@ -45,23 +72,50 @@ export default function GinieDiagnosticsPanel() {
     }
   };
 
-  const fetchSignals = async () => {
+  const fetchTradeConditions = async () => {
     try {
-      const statusFilter = signalFilter === 'all' ? undefined : signalFilter;
-      const { signals: signalData } = await futuresApi.getGinieSignalLogs(100, statusFilter);
+      const data = await futuresApi.getGinieTradeConditions();
+      setTradeConditions(data);
+    } catch (err) {
+      console.error('Failed to fetch trade conditions:', err);
+    }
+  };
+
+  const fetchPendingOrders = async () => {
+    try {
+      const data = await futuresApi.getGiniePendingOrders();
+      setPendingOrders(data);
+    } catch (err) {
+      console.error('Failed to fetch pending orders:', err);
+    }
+  };
+
+  const fetchSignals = useCallback(async (forceRefresh = false) => {
+    // Don't refresh signals if hold is active (unless forced)
+    if (holdSignalsRef.current && !forceRefresh) {
+      return;
+    }
+    try {
+      const statusFilter = signalFilterRef.current === 'all' ? undefined : signalFilterRef.current;
+      const { signals: signalData } = await futuresApi.getGinieSignalLogs(200, statusFilter);
       setSignals(signalData || []);
       const stats = await futuresApi.getGinieSignalStats();
       setSignalStats(stats);
     } catch (err) {
       console.error('Failed to fetch signals:', err);
     }
-  };
+  }, []);
 
-  const refreshAll = async () => {
+  const refreshAll = useCallback(async (forceRefresh = false) => {
     setLoading(true);
-    await Promise.all([fetchDiagnostics(), fetchSignals()]);
+    await Promise.all([
+      fetchDiagnostics(),
+      fetchSignals(forceRefresh),
+      fetchTradeConditions(),
+      fetchPendingOrders(),
+    ]);
     setLoading(false);
-  };
+  }, [fetchSignals]);
 
   const resetLLMKillSwitch = async (symbol: string) => {
     try {
@@ -90,11 +144,18 @@ export default function GinieDiagnosticsPanel() {
     }
   };
 
+  // Initial fetch and interval setup (independent of filter changes)
   useEffect(() => {
-    refreshAll();
-    const interval = setInterval(refreshAll, 10000); // Refresh every 10s
+    refreshAll(true);
+    const interval = setInterval(() => refreshAll(false), 10000); // Refresh every 10s
     return () => clearInterval(interval);
-  }, [signalFilter]);
+  }, []); // Empty dependency array - only runs once on mount
+
+  // Fetch signals when filter changes (separate from interval)
+  useEffect(() => {
+    // Force refresh when filter changes
+    fetchSignals(true);
+  }, [signalFilter, fetchSignals]);
 
   const formatTime = (timestamp: string) => {
     if (!timestamp || timestamp === '0001-01-01T00:00:00Z') return 'Never';
@@ -102,9 +163,28 @@ export default function GinieDiagnosticsPanel() {
     return date.toLocaleTimeString();
   };
 
+  const formatTimeAgo = (timestamp: string) => {
+    if (!timestamp || timestamp === '0001-01-01T00:00:00Z') return 'Unknown';
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSecs = Math.floor(diffMs / 1000);
+    const diffMins = Math.floor(diffSecs / 60);
+    const diffHours = Math.floor(diffMins / 60);
+
+    if (diffSecs < 60) return `${diffSecs}s ago`;
+    if (diffMins < 60) return `${diffMins}m ago`;
+    return `${diffHours}h ${diffMins % 60}m ago`;
+  };
+
   const criticalIssues = diagnostics?.issues?.filter(i => i.severity === 'critical') || [];
   const warningIssues = diagnostics?.issues?.filter(i => i.severity === 'warning') || [];
   const infoIssues = diagnostics?.issues?.filter(i => i.severity === 'info') || [];
+
+  // Calculate conditions summary
+  const conditionsMet = tradeConditions?.conditions?.filter(c => c.passed).length || 0;
+  const totalConditions = tradeConditions?.conditions?.length || 0;
+  const blockingConditions = tradeConditions?.conditions?.filter(c => !c.passed) || [];
 
   return (
     <div className="bg-gray-800 rounded-lg p-4 space-y-4">
@@ -126,13 +206,64 @@ export default function GinieDiagnosticsPanel() {
           )}
         </div>
         <button
-          onClick={refreshAll}
+          onClick={() => refreshAll(true)}
           disabled={loading}
           className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg transition-colors"
         >
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
+
+      {/* Circuit Status Summary - New clickable summary bar */}
+      {tradeConditions && (
+        <div
+          onClick={() => setShowConditionsDetail(!showConditionsDetail)}
+          className={`p-2 rounded-lg cursor-pointer transition-colors ${
+            tradeConditions.all_passed
+              ? 'bg-green-500/10 hover:bg-green-500/20 border border-green-500/30'
+              : 'bg-red-500/10 hover:bg-red-500/20 border border-red-500/30'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              {tradeConditions.all_passed ? (
+                <CheckCircle className="w-4 h-4 text-green-400" />
+              ) : (
+                <XCircle className="w-4 h-4 text-red-400" />
+              )}
+              <span className={`text-sm font-medium ${
+                tradeConditions.all_passed ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {tradeConditions.all_passed
+                  ? `All ${totalConditions} conditions met - Ready to trade`
+                  : `${tradeConditions.blocking_count} condition${tradeConditions.blocking_count !== 1 ? 's' : ''} blocking - Cannot trade`
+                }
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <span className="text-xs text-gray-400">{conditionsMet}/{totalConditions}</span>
+              {showConditionsDetail ? (
+                <ChevronUp className="w-4 h-4 text-gray-400" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-gray-400" />
+              )}
+            </div>
+          </div>
+
+          {/* Expandable blocking conditions detail */}
+          {showConditionsDetail && blockingConditions.length > 0 && (
+            <div className="mt-2 pt-2 border-t border-red-500/20 space-y-1">
+              {blockingConditions.map((condition, idx) => (
+                <div key={idx} className="flex items-center space-x-2 text-xs">
+                  <X className="w-3 h-3 text-red-400 flex-shrink-0" />
+                  <span className="text-red-300">{condition.name}:</span>
+                  <span className="text-gray-400">{condition.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Quick Status Cards */}
       {diagnostics && (
@@ -227,163 +358,362 @@ export default function GinieDiagnosticsPanel() {
         {/* Overview Tab */}
         {activeTab === 'overview' && diagnostics && (
           <div className="space-y-4">
-            {/* Scanning Status */}
-            <div className="bg-gray-700/30 rounded-lg p-3">
-              <h3 className="text-sm font-medium text-gray-300 mb-2 flex items-center">
-                <Eye className="w-4 h-4 mr-2" />
-                Scanning Activity
-              </h3>
-              <div className="grid grid-cols-3 gap-4 text-sm">
-                <div>
-                  <p className="text-gray-400">Last Scan</p>
-                  <p className="text-white">{formatTime(diagnostics.scanning?.last_scan_time ?? '')}</p>
-                </div>
-                <div>
-                  <p className="text-gray-400">Symbols</p>
-                  <p className="text-white">{diagnostics.scanning?.symbols_in_watchlist ?? 0}</p>
-                </div>
-                <div>
-                  <p className="text-gray-400">Modes</p>
-                  <div className="flex space-x-1">
-                    {diagnostics.scanning?.scalp_enabled && <span className="text-xs bg-blue-500/20 text-blue-400 px-1 rounded">S</span>}
-                    {diagnostics.scanning?.swing_enabled && <span className="text-xs bg-green-500/20 text-green-400 px-1 rounded">W</span>}
-                    {diagnostics.scanning?.position_enabled && <span className="text-xs bg-purple-500/20 text-purple-400 px-1 rounded">P</span>}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* LLM Status */}
-            <div className="bg-gray-700/30 rounded-lg p-3">
-              <h3 className="text-sm font-medium text-gray-300 mb-2 flex items-center">
-                <Radio className="w-4 h-4 mr-2" />
-                LLM Status
-              </h3>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  {diagnostics.llm_status?.connected ? (
-                    <CheckCircle className="w-4 h-4 text-green-400" />
-                  ) : (
-                    <XCircle className="w-4 h-4 text-red-400" />
+            {/* Trading Conditions Checklist - Collapsible Section */}
+            <div className="bg-gray-700/30 rounded-lg overflow-hidden">
+              <div
+                onClick={() => setShowTradeConditions(!showTradeConditions)}
+                className="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-700/50 transition-colors"
+              >
+                <h3 className="text-sm font-medium text-gray-300 flex items-center">
+                  <Check className="w-4 h-4 mr-2" />
+                  Trading Conditions Checklist
+                  {tradeConditions && (
+                    <span className="ml-2 text-xs text-gray-400">
+                      ({conditionsMet}/{totalConditions} passed)
+                    </span>
                   )}
-                  <span className="text-sm text-white">
-                    {diagnostics.llm_status?.connected ? diagnostics.llm_status?.provider : 'Not Connected'}
-                  </span>
-                </div>
-                {(diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
-                  <button
-                    onClick={() => setShowKillSwitchDetails(!showKillSwitchDetails)}
-                    className="flex items-center space-x-1 text-xs text-red-400 hover:text-red-300 transition-colors"
-                  >
-                    <AlertOctagon className="w-3 h-3" />
-                    <span>{diagnostics.llm_status?.disabled_symbols?.length ?? 0} kill switches active</span>
-                    {showKillSwitchDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                  </button>
+                </h3>
+                {showTradeConditions ? (
+                  <ChevronUp className="w-4 h-4 text-gray-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-400" />
                 )}
               </div>
-
-              {/* Expandable Kill Switch Details */}
-              {showKillSwitchDetails && (diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
-                <div className="mt-3 pt-3 border-t border-gray-600">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs text-gray-400">Symbols with LLM SL updates disabled:</span>
-                    <button
-                      onClick={resetAllLLMKillSwitches}
-                      disabled={resettingSymbol === 'all'}
-                      className="text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 px-2 py-1 rounded flex items-center space-x-1 disabled:opacity-50"
-                    >
-                      <RefreshCw className={`w-3 h-3 ${resettingSymbol === 'all' ? 'animate-spin' : ''}`} />
-                      <span>Reset All</span>
-                    </button>
-                  </div>
-                  <div className="space-y-1">
-                    {diagnostics.llm_status?.disabled_symbols?.map((symbol) => (
-                      <div key={symbol} className="flex items-center justify-between bg-gray-800/50 px-2 py-1 rounded">
-                        <span className="text-sm text-white font-mono">{symbol}</span>
-                        <button
-                          onClick={() => resetLLMKillSwitch(symbol)}
-                          disabled={resettingSymbol === symbol}
-                          className="text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 px-2 py-0.5 rounded flex items-center space-x-1 disabled:opacity-50"
+              {showTradeConditions && (
+                <div className="px-3 pb-3">
+                  {tradeConditions ? (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {tradeConditions.conditions.map((condition, idx) => (
+                        <div
+                          key={idx}
+                          className={`flex items-center space-x-2 p-2 rounded ${
+                            condition.passed ? 'bg-green-500/10' : 'bg-red-500/10'
+                          }`}
                         >
-                          <RefreshCw className={`w-3 h-3 ${resettingSymbol === symbol ? 'animate-spin' : ''}`} />
-                          <span>Reset</span>
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-xs text-gray-500 mt-2">
-                    Kill switch activates after 3 consecutive bad LLM SL calls. Manual reset required.
-                  </p>
+                          {condition.passed ? (
+                            <Check className="w-4 h-4 text-green-400 flex-shrink-0" />
+                          ) : (
+                            <X className="w-4 h-4 text-red-400 flex-shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <p className={`text-xs font-medium truncate ${
+                              condition.passed ? 'text-green-400' : 'text-red-400'
+                            }`}>
+                              {condition.name}
+                            </p>
+                            <p className="text-xs text-gray-400 truncate" title={condition.detail}>
+                              {condition.detail}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-gray-400">Loading conditions...</p>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* Profit Booking */}
-            <div className="bg-gray-700/30 rounded-lg p-3">
-              <h3 className="text-sm font-medium text-gray-300 mb-2 flex items-center">
-                <TrendingUp className="w-4 h-4 mr-2" />
-                Profit Booking (1h)
-              </h3>
-              <div className="grid grid-cols-4 gap-4 text-sm">
-                <div>
-                  <p className="text-gray-400">Pending TPs</p>
-                  <p className="text-white">{diagnostics.profit_booking?.positions_with_pending_tp ?? 0}</p>
+            {/* Pending Limit Orders - Collapsible Section */}
+            {pendingOrders && pendingOrders.count > 0 && (
+              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg overflow-hidden">
+                <div
+                  onClick={() => setShowPendingOrders(!showPendingOrders)}
+                  className="flex items-center justify-between p-3 cursor-pointer hover:bg-yellow-500/20 transition-colors"
+                >
+                  <h3 className="text-sm font-medium text-yellow-400 flex items-center">
+                    <Clock className="w-4 h-4 mr-2" />
+                    Pending Limit Orders ({pendingOrders.count})
+                  </h3>
+                  {showPendingOrders ? (
+                    <ChevronUp className="w-4 h-4 text-yellow-400" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4 text-yellow-400" />
+                  )}
                 </div>
-                <div>
-                  <p className="text-gray-400">TP Hits</p>
-                  <p className="text-green-400">{diagnostics.profit_booking?.tp_hits_last_hour ?? 0}</p>
-                </div>
-                <div>
-                  <p className="text-gray-400">Partials</p>
-                  <p className="text-blue-400">{diagnostics.profit_booking?.partial_closes_last_hour ?? 0}</p>
-                </div>
-                <div>
-                  <p className="text-gray-400">Failed</p>
-                  <p className={(diagnostics.profit_booking?.failed_closes_last_hour ?? 0) > 0 ? 'text-red-400' : 'text-gray-400'}>
-                    {diagnostics.profit_booking?.failed_closes_last_hour ?? 0}
-                  </p>
-                </div>
+                {showPendingOrders && (
+                  <div className="px-3 pb-3">
+                    <p className="text-xs text-gray-400 mb-2">
+                      These signals were executed but are waiting for LIMIT orders to fill. They will appear in positions once filled.
+                    </p>
+                    <div className="space-y-2">
+                      {pendingOrders.pending_orders.map((order, idx) => (
+                        <div key={idx} className="flex items-center justify-between bg-gray-800/50 p-2 rounded">
+                          <div className="flex items-center space-x-3">
+                            <span className="text-white font-medium">{order.symbol}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded ${
+                              order.direction === 'LONG'
+                                ? 'bg-green-500/20 text-green-400'
+                                : 'bg-red-500/20 text-red-400'
+                            }`}>
+                              {order.direction}
+                            </span>
+                            <span className="text-xs text-gray-400">{order.mode}</span>
+                          </div>
+                          <div className="flex items-center space-x-4 text-xs">
+                            <div>
+                              <span className="text-gray-400">Entry: </span>
+                              <span className="text-white">${order.entry_price.toFixed(4)}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-400">Waiting: </span>
+                              <span className="text-yellow-400">{formatTimeAgo(order.placed_at)}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-400">Timeout: </span>
+                              <span className={order.seconds_left < 60 ? 'text-red-400' : 'text-gray-300'}>
+                                {order.seconds_left}s
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
+            )}
+
+            {/* Scanning Activity - Collapsible Section */}
+            <div className="bg-gray-700/30 rounded-lg overflow-hidden">
+              <div
+                onClick={() => setShowScanningActivity(!showScanningActivity)}
+                className="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-700/50 transition-colors"
+              >
+                <h3 className="text-sm font-medium text-gray-300 flex items-center">
+                  <Eye className="w-4 h-4 mr-2" />
+                  Scanning Activity
+                  <span className="ml-2 text-xs text-gray-400">
+                    ({diagnostics.scanning?.symbols_in_watchlist ?? 0} symbols)
+                  </span>
+                </h3>
+                {showScanningActivity ? (
+                  <ChevronUp className="w-4 h-4 text-gray-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-400" />
+                )}
+              </div>
+              {showScanningActivity && (
+                <div className="px-3 pb-3">
+                  <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div>
+                      <p className="text-gray-400">Last Scan</p>
+                      <p className="text-white">{formatTime(diagnostics.scanning?.last_scan_time ?? '')}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Symbols</p>
+                      <p className="text-white">{diagnostics.scanning?.symbols_in_watchlist ?? 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Modes</p>
+                      <div className="flex space-x-1">
+                        {diagnostics.scanning?.scalp_enabled && <span className="text-xs bg-blue-500/20 text-blue-400 px-1 rounded">S</span>}
+                        {diagnostics.scanning?.swing_enabled && <span className="text-xs bg-green-500/20 text-green-400 px-1 rounded">W</span>}
+                        {diagnostics.scanning?.position_enabled && <span className="text-xs bg-purple-500/20 text-purple-400 px-1 rounded">P</span>}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* Circuit Breaker Details */}
-            <div className="bg-gray-700/30 rounded-lg p-3">
-              <h3 className="text-sm font-medium text-gray-300 mb-2 flex items-center">
-                <Shield className="w-4 h-4 mr-2" />
-                Circuit Breaker Details
-              </h3>
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-gray-400">Hourly Loss</p>
-                  <p className="text-white">
-                    ${diagnostics.circuit_breaker.hourly_loss.toFixed(2)} / ${diagnostics.circuit_breaker.hourly_loss_limit}
-                  </p>
-                  <div className="w-full bg-gray-600 rounded-full h-1 mt-1">
-                    <div
-                      className={`h-1 rounded-full ${
-                        diagnostics.circuit_breaker.hourly_loss / diagnostics.circuit_breaker.hourly_loss_limit > 0.8
-                          ? 'bg-red-500' : 'bg-green-500'
-                      }`}
-                      style={{ width: `${Math.min((diagnostics.circuit_breaker.hourly_loss / diagnostics.circuit_breaker.hourly_loss_limit) * 100, 100)}%` }}
-                    />
-                  </div>
-                </div>
-                <div>
-                  <p className="text-gray-400">Daily Loss</p>
-                  <p className="text-white">
-                    ${diagnostics.circuit_breaker.daily_loss.toFixed(2)} / ${diagnostics.circuit_breaker.daily_loss_limit}
-                  </p>
-                  <div className="w-full bg-gray-600 rounded-full h-1 mt-1">
-                    <div
-                      className={`h-1 rounded-full ${
-                        diagnostics.circuit_breaker.daily_loss / diagnostics.circuit_breaker.daily_loss_limit > 0.8
-                          ? 'bg-red-500' : 'bg-green-500'
-                      }`}
-                      style={{ width: `${Math.min((diagnostics.circuit_breaker.daily_loss / diagnostics.circuit_breaker.daily_loss_limit) * 100, 100)}%` }}
-                    />
-                  </div>
-                </div>
+            {/* LLM Status - Collapsible Section */}
+            <div className="bg-gray-700/30 rounded-lg overflow-hidden">
+              <div
+                onClick={() => setShowLLMStatus(!showLLMStatus)}
+                className="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-700/50 transition-colors"
+              >
+                <h3 className="text-sm font-medium text-gray-300 flex items-center">
+                  <Radio className="w-4 h-4 mr-2" />
+                  LLM Status
+                  <span className="ml-2 text-xs">
+                    {diagnostics.llm_status?.connected ? (
+                      <span className="text-green-400">({diagnostics.llm_status?.provider})</span>
+                    ) : (
+                      <span className="text-red-400">(Not Connected)</span>
+                    )}
+                  </span>
+                  {(diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
+                    <span className="ml-2 text-xs text-red-400">
+                      ({diagnostics.llm_status?.disabled_symbols?.length} kill switches)
+                    </span>
+                  )}
+                </h3>
+                {showLLMStatus ? (
+                  <ChevronUp className="w-4 h-4 text-gray-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-400" />
+                )}
               </div>
+              {showLLMStatus && (
+                <div className="px-3 pb-3">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center space-x-2">
+                      {diagnostics.llm_status?.connected ? (
+                        <CheckCircle className="w-4 h-4 text-green-400" />
+                      ) : (
+                        <XCircle className="w-4 h-4 text-red-400" />
+                      )}
+                      <span className="text-sm text-white">
+                        {diagnostics.llm_status?.connected ? diagnostics.llm_status?.provider : 'Not Connected'}
+                      </span>
+                    </div>
+                    {(diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowKillSwitchDetails(!showKillSwitchDetails);
+                        }}
+                        className="flex items-center space-x-1 text-xs text-red-400 hover:text-red-300 transition-colors"
+                      >
+                        <AlertOctagon className="w-3 h-3" />
+                        <span>{diagnostics.llm_status?.disabled_symbols?.length ?? 0} kill switches active</span>
+                        {showKillSwitchDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Expandable Kill Switch Details */}
+                  {showKillSwitchDetails && (diagnostics.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
+                    <div className="mt-3 pt-3 border-t border-gray-600">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-gray-400">Symbols with LLM SL updates disabled:</span>
+                        <button
+                          onClick={resetAllLLMKillSwitches}
+                          disabled={resettingSymbol === 'all'}
+                          className="text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 px-2 py-1 rounded flex items-center space-x-1 disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${resettingSymbol === 'all' ? 'animate-spin' : ''}`} />
+                          <span>Reset All</span>
+                        </button>
+                      </div>
+                      <div className="space-y-1">
+                        {diagnostics.llm_status?.disabled_symbols?.map((symbol) => (
+                          <div key={symbol} className="flex items-center justify-between bg-gray-800/50 px-2 py-1 rounded">
+                            <span className="text-sm text-white font-mono">{symbol}</span>
+                            <button
+                              onClick={() => resetLLMKillSwitch(symbol)}
+                              disabled={resettingSymbol === symbol}
+                              className="text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 px-2 py-0.5 rounded flex items-center space-x-1 disabled:opacity-50"
+                            >
+                              <RefreshCw className={`w-3 h-3 ${resettingSymbol === symbol ? 'animate-spin' : ''}`} />
+                              <span>Reset</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Kill switch activates after 3 consecutive bad LLM SL calls. Manual reset required.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Profit Booking - Collapsible Section */}
+            <div className="bg-gray-700/30 rounded-lg overflow-hidden">
+              <div
+                onClick={() => setShowProfitBooking(!showProfitBooking)}
+                className="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-700/50 transition-colors"
+              >
+                <h3 className="text-sm font-medium text-gray-300 flex items-center">
+                  <TrendingUp className="w-4 h-4 mr-2" />
+                  Profit Booking (1h)
+                  <span className="ml-2 text-xs text-gray-400">
+                    ({diagnostics.profit_booking?.tp_hits_last_hour ?? 0} TPs hit)
+                  </span>
+                </h3>
+                {showProfitBooking ? (
+                  <ChevronUp className="w-4 h-4 text-gray-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-400" />
+                )}
+              </div>
+              {showProfitBooking && (
+                <div className="px-3 pb-3">
+                  <div className="grid grid-cols-4 gap-4 text-sm">
+                    <div>
+                      <p className="text-gray-400">Pending TPs</p>
+                      <p className="text-white">{diagnostics.profit_booking?.positions_with_pending_tp ?? 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">TP Hits</p>
+                      <p className="text-green-400">{diagnostics.profit_booking?.tp_hits_last_hour ?? 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Partials</p>
+                      <p className="text-blue-400">{diagnostics.profit_booking?.partial_closes_last_hour ?? 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Failed</p>
+                      <p className={(diagnostics.profit_booking?.failed_closes_last_hour ?? 0) > 0 ? 'text-red-400' : 'text-gray-400'}>
+                        {diagnostics.profit_booking?.failed_closes_last_hour ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Circuit Breaker Details - Collapsible Section */}
+            <div className="bg-gray-700/30 rounded-lg overflow-hidden">
+              <div
+                onClick={() => setShowCircuitBreaker(!showCircuitBreaker)}
+                className="flex items-center justify-between p-3 cursor-pointer hover:bg-gray-700/50 transition-colors"
+              >
+                <h3 className="text-sm font-medium text-gray-300 flex items-center">
+                  <Shield className="w-4 h-4 mr-2" />
+                  Circuit Breaker Details
+                  <span className={`ml-2 text-xs ${
+                    diagnostics.circuit_breaker.state === 'open' ? 'text-red-400' : 'text-green-400'
+                  }`}>
+                    ({diagnostics.circuit_breaker.state.toUpperCase()})
+                  </span>
+                </h3>
+                {showCircuitBreaker ? (
+                  <ChevronUp className="w-4 h-4 text-gray-400" />
+                ) : (
+                  <ChevronDown className="w-4 h-4 text-gray-400" />
+                )}
+              </div>
+              {showCircuitBreaker && (
+                <div className="px-3 pb-3">
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-gray-400">Hourly Loss</p>
+                      <p className="text-white">
+                        ${diagnostics.circuit_breaker.hourly_loss.toFixed(2)} / ${diagnostics.circuit_breaker.hourly_loss_limit}
+                      </p>
+                      <div className="w-full bg-gray-600 rounded-full h-1 mt-1">
+                        <div
+                          className={`h-1 rounded-full ${
+                            diagnostics.circuit_breaker.hourly_loss / diagnostics.circuit_breaker.hourly_loss_limit > 0.8
+                              ? 'bg-red-500' : 'bg-green-500'
+                          }`}
+                          style={{ width: `${Math.min((diagnostics.circuit_breaker.hourly_loss / diagnostics.circuit_breaker.hourly_loss_limit) * 100, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-gray-400">Daily Loss</p>
+                      <p className="text-white">
+                        ${diagnostics.circuit_breaker.daily_loss.toFixed(2)} / ${diagnostics.circuit_breaker.daily_loss_limit}
+                      </p>
+                      <div className="w-full bg-gray-600 rounded-full h-1 mt-1">
+                        <div
+                          className={`h-1 rounded-full ${
+                            diagnostics.circuit_breaker.daily_loss / diagnostics.circuit_breaker.daily_loss_limit > 0.8
+                              ? 'bg-red-500' : 'bg-green-500'
+                          }`}
+                          style={{ width: `${Math.min((diagnostics.circuit_breaker.daily_loss / diagnostics.circuit_breaker.daily_loss_limit) * 100, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -391,26 +721,65 @@ export default function GinieDiagnosticsPanel() {
         {/* Signals Tab */}
         {activeTab === 'signals' && (
           <div className="space-y-3">
-            {/* Signal Filter */}
-            <div className="flex space-x-2">
-              {(['all', 'executed', 'rejected'] as const).map((filter) => (
+            {/* Signal Filter with Hold Toggle */}
+            <div className="flex items-center justify-between">
+              <div className="flex space-x-2">
+                {(['all', 'executed', 'rejected'] as const).map((filter) => (
+                  <button
+                    key={filter}
+                    onClick={() => setSignalFilter(filter)}
+                    className={`px-3 py-1 text-xs rounded-full transition-colors ${
+                      signalFilter === filter
+                        ? filter === 'executed' ? 'bg-green-500/20 text-green-400'
+                          : filter === 'rejected' ? 'bg-red-500/20 text-red-400'
+                          : 'bg-purple-500/20 text-purple-400'
+                        : 'bg-gray-700 text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                    {signalStats && filter === 'all' && ` (${signalStats.total})`}
+                    {signalStats && filter === 'executed' && ` (${signalStats.executed})`}
+                    {signalStats && filter === 'rejected' && ` (${signalStats.rejected})`}
+                  </button>
+                ))}
+              </div>
+
+              {/* Hold/Pin Toggle */}
+              <div className="flex items-center space-x-2">
+                <span className="text-xs text-gray-400">
+                  {signals.length} signal{signals.length !== 1 ? 's' : ''} visible
+                </span>
                 <button
-                  key={filter}
-                  onClick={() => setSignalFilter(filter)}
-                  className={`px-3 py-1 text-xs rounded-full transition-colors ${
-                    signalFilter === filter
-                      ? filter === 'executed' ? 'bg-green-500/20 text-green-400'
-                        : filter === 'rejected' ? 'bg-red-500/20 text-red-400'
-                        : 'bg-purple-500/20 text-purple-400'
+                  onClick={() => setHoldSignals(!holdSignals)}
+                  className={`flex items-center space-x-1 px-2 py-1 text-xs rounded transition-colors ${
+                    holdSignals
+                      ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
                       : 'bg-gray-700 text-gray-400 hover:text-white'
                   }`}
+                  title={holdSignals ? 'Auto-refresh paused - click to resume' : 'Click to hold signals and pause auto-refresh'}
                 >
-                  {filter.charAt(0).toUpperCase() + filter.slice(1)}
-                  {signalStats && filter === 'all' && ` (${signalStats.total})`}
-                  {signalStats && filter === 'executed' && ` (${signalStats.executed})`}
-                  {signalStats && filter === 'rejected' && ` (${signalStats.rejected})`}
+                  {holdSignals ? (
+                    <>
+                      <Lock className="w-3 h-3" />
+                      <span>Held</span>
+                    </>
+                  ) : (
+                    <>
+                      <Unlock className="w-3 h-3" />
+                      <span>Hold</span>
+                    </>
+                  )}
                 </button>
-              ))}
+                {holdSignals && (
+                  <button
+                    onClick={() => fetchSignals(true)}
+                    className="p-1 text-gray-400 hover:text-white transition-colors"
+                    title="Manual refresh"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Signal Stats Bar */}
@@ -430,7 +799,7 @@ export default function GinieDiagnosticsPanel() {
             )}
 
             {/* Signal List */}
-            <div className="space-y-2 max-h-[400px] overflow-y-auto">
+            <div className="space-y-2 max-h-[600px] overflow-y-auto">
               {signals.length === 0 ? (
                 <p className="text-center text-gray-400 py-8">No signals generated yet</p>
               ) : (

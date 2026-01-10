@@ -1325,6 +1325,28 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== GINIE PENDING ORDERS ====================
+
+  /**
+   * Get pending limit orders that are waiting to be filled
+   * Returns unfilled LIMIT orders with timeout information
+   */
+  async getGiniePendingOrders(): Promise<PendingOrdersResponse> {
+    const { data } = await this.client.get('/ginie/pending-orders');
+    return data;
+  }
+
+  // ==================== GINIE TRADE CONDITIONS ====================
+
+  /**
+   * Get detailed status of all pre-trade conditions
+   * Returns a checklist of conditions that must pass before trading
+   */
+  async getGinieTradeConditions(): Promise<TradeConditionsResponse> {
+    const { data } = await this.client.get('/ginie/trade-conditions');
+    return data;
+  }
+
   // ==================== GINIE SIGNAL LOGS ====================
 
   async getGinieSignalLogs(limit = 100, status?: string, symbol?: string): Promise<{
@@ -1965,6 +1987,72 @@ class FuturesAPIService {
     const { data } = await this.client.get('/ginie/hedge-mode/positions');
     return data;
   }
+
+  // ==================== RESET TO DEFAULTS APIs (Story 4.17) ====================
+
+  /**
+   * Load default configuration for a specific mode (preview or apply)
+   */
+  async loadModeDefaults(mode: string, preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/modes/${mode}/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Load default configuration for circuit breaker (preview or apply)
+   */
+  async loadCircuitBreakerDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/circuit-breaker/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Load default configuration for LLM config (preview or apply)
+   */
+  async loadLLMConfigDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/llm-config/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Load default configuration for capital allocation (preview or apply)
+   */
+  async loadCapitalAllocationDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/capital-allocation/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Load default configuration for all modes (preview or apply)
+   */
+  async loadAllModesDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/modes/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Get differences between current mode config and defaults
+   */
+  async getModeDiff(mode: string): Promise<ConfigResetPreview> {
+    const { data } = await this.client.get(`/settings/diff/modes/${mode}`);
+    return data;
+  }
+
+  /**
+   * Load default configuration for hedge mode (preview or apply)
+   */
+  async loadHedgeDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/hedge-mode/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Load default configuration for scalp reentry mode (preview or apply)
+   */
+  async loadScalpReentryDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/modes/scalp_reentry/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
 }
 
 // ==================== HEDGE MODE TYPES ====================
@@ -2036,6 +2124,32 @@ export interface HedgeModePositionsResponse {
   success: boolean;
   count: number;
   positions: HedgeModePositionData[];
+}
+
+// ==================== RESET TO DEFAULTS TYPES (Story 4.17) ====================
+
+export interface SettingDiff {
+  path: string;
+  current: any;
+  default: any;
+  risk_level: 'high' | 'medium' | 'low';
+  impact?: string;
+  recommendation?: string;
+}
+
+export interface ConfigResetPreview {
+  preview: boolean;
+  config_type: string;
+  all_match: boolean;
+  total_changes: number;
+  differences: SettingDiff[];
+}
+
+export interface ConfigResetResult {
+  success: boolean;
+  config_type: string;
+  changes_applied: number;
+  message: string;
 }
 
 // ==================== SCAN SOURCE CONFIG TYPES ====================
@@ -3280,6 +3394,43 @@ export interface DiagnosticIssue {
   suggestion: string;
 }
 
+// ==================== PENDING LIMIT ORDERS TYPES ====================
+
+export interface PendingOrderInfo {
+  order_id: number;
+  symbol: string;
+  direction: string;  // "LONG" or "SHORT"
+  side: string;       // "BUY" or "SELL"
+  entry_price: number;
+  quantity: number;
+  placed_at: string;
+  timeout_at: string;
+  seconds_left: number;
+  source: string;
+  mode: string;
+  status: string;     // "pending" or "expired"
+}
+
+export interface PendingOrdersResponse {
+  pending_orders: PendingOrderInfo[];
+  count: number;
+}
+
+// ==================== TRADE CONDITIONS TYPES ====================
+
+export interface TradeCondition {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface TradeConditionsResponse {
+  conditions: TradeCondition[];
+  all_passed: boolean;
+  blocking_count: number;
+  timestamp: string;
+}
+
 // ==================== GINIE SIGNAL LOG TYPES ====================
 
 export interface GinieSignalLog {
@@ -3953,4 +4104,76 @@ export interface ProtectionStatusResponse {
 // Get protection status for all positions
 export async function getProtectionStatus(): Promise<ProtectionStatusResponse> {
   return futuresApi.getProtectionStatus();
+}
+
+// ==================== RESET DEFAULTS WRAPPER FUNCTIONS ====================
+
+/**
+ * Load default configuration for a specific mode (preview or apply)
+ */
+export async function loadModeDefaults(mode: string, preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadModeDefaults(mode, preview);
+}
+
+/**
+ * Load default configuration for circuit breaker (preview or apply)
+ */
+export async function loadCircuitBreakerDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadCircuitBreakerDefaults(preview);
+}
+
+/**
+ * Load default configuration for LLM config (preview or apply)
+ */
+export async function loadLLMConfigDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadLLMConfigDefaults(preview);
+}
+
+/**
+ * Load default configuration for capital allocation (preview or apply)
+ */
+export async function loadCapitalAllocationDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadCapitalAllocationDefaults(preview);
+}
+
+/**
+ * Load default configuration for all modes (preview or apply)
+ */
+export async function loadAllModesDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadAllModesDefaults(preview);
+}
+
+/**
+ * Get differences between current mode config and defaults
+ */
+export async function getModeDiff(mode: string): Promise<ConfigResetPreview> {
+  return futuresApi.getModeDiff(mode);
+}
+
+/**
+ * Load default configuration for hedge mode (preview or apply)
+ */
+export async function loadHedgeDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadHedgeDefaults(preview);
+}
+
+/**
+ * Load default configuration for scalp reentry mode (preview or apply)
+ */
+export async function loadScalpReentryDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadScalpReentryDefaults(preview);
+}
+
+/**
+ * Get pending limit orders that are waiting to be filled
+ */
+export async function getGiniePendingOrders(): Promise<PendingOrdersResponse> {
+  return futuresApi.getGiniePendingOrders();
+}
+
+/**
+ * Get detailed status of all pre-trade conditions
+ */
+export async function getGinieTradeConditions(): Promise<TradeConditionsResponse> {
+  return futuresApi.getGinieTradeConditions();
 }

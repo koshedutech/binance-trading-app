@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react';
 import { apiService } from '../services/api';
 import { Wallet, RefreshCw, AlertCircle, TrendingUp, Lock } from 'lucide-react';
-import { useFuturesStore } from '../store/futuresStore';
+import { useFuturesStore, selectTotalUnrealizedPnl } from '../store/futuresStore';
 
 interface WalletBalance {
   total_balance: number;
   available_balance: number;
   locked_balance: number;
+  total_margin_balance: number;
+  total_unrealized_pnl: number;
   currency: string;
   is_simulated: boolean;
   assets: Array<{ asset: string; free: number; locked: number }>;
@@ -19,6 +21,9 @@ export default function WalletBalanceCard() {
 
   // Get trading mode from futures store to trigger refresh when it changes
   const tradingMode = useFuturesStore((state) => state.tradingMode);
+
+  // CRITICAL: Get unrealized PnL from positions (source of truth)
+  const totalUnrealizedPnl = useFuturesStore(selectTotalUnrealizedPnl);
 
   useEffect(() => {
     fetchBalance();
@@ -92,11 +97,31 @@ export default function WalletBalanceCard() {
 
       {/* Balance Display */}
       <div className="p-4">
-        {/* Total Balance */}
-        <div className="mb-4">
-          <span className="text-xs text-gray-500 uppercase tracking-wide">Total Balance</span>
-          <div className="text-3xl font-bold text-white">
-            {formatUSD(balance?.total_balance || 0)}
+        {/* Wallet Balance & Margin Balance */}
+        <div className="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <span className="text-xs text-gray-500 uppercase tracking-wide">Wallet Balance</span>
+            <div className="text-2xl font-bold text-white">
+              {formatUSD(balance?.total_balance || 0)}
+            </div>
+          </div>
+          <div>
+            <span className="text-xs text-gray-500 uppercase tracking-wide">Margin Balance</span>
+            <div className={`text-2xl font-bold ${
+              totalUnrealizedPnl > 0
+                ? 'text-green-500'
+                : totalUnrealizedPnl < 0
+                ? 'text-red-500'
+                : 'text-white'
+            }`}>
+              {/* CRITICAL: Calculate from wallet + positions unrealized PnL (source of truth) */}
+              {formatUSD((balance?.total_balance || 0) + totalUnrealizedPnl)}
+            </div>
+            {totalUnrealizedPnl !== 0 && (
+              <div className={`text-xs ${totalUnrealizedPnl > 0 ? 'text-green-500' : 'text-red-500'}`}>
+                {totalUnrealizedPnl > 0 ? '+' : ''}{formatUSD(totalUnrealizedPnl)}
+              </div>
+            )}
           </div>
         </div>
 

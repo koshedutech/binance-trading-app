@@ -219,13 +219,13 @@ func calculateROIAfterFees(entryPrice, currentPrice, quantity float64, side stri
 
 // GinieAutopilotConfig holds configuration for Ginie autonomous trading
 type GinieAutopilotConfig struct {
-	Enabled            bool    `json:"enabled"`
-	MaxPositions       int     `json:"max_positions"`        // Max concurrent positions
-	MaxUSDPerPosition  float64 `json:"max_usd_per_position"` // Max USD per position
-	TotalMaxUSD        float64 `json:"total_max_usd"`        // Total max USD allocation
-	DefaultLeverage    int     `json:"default_leverage"`     // Default leverage
-	DryRun             bool    `json:"dry_run"`              // Paper trading mode
-	RiskLevel          string  `json:"risk_level"`           // conservative, moderate, aggressive
+	Enabled           bool    `json:"enabled"`
+	MaxPositions      int     `json:"max_positions"`        // Max concurrent positions
+	MaxUSDPerPosition float64 `json:"max_usd_per_position"` // Max USD per position
+	TotalMaxUSD       float64 `json:"total_max_usd"`        // Total max USD allocation
+	DefaultLeverage   int     `json:"default_leverage"`     // Default leverage
+	DryRun            bool    `json:"dry_run"`              // Paper trading mode
+	RiskLevel         string  `json:"risk_level"`           // conservative, moderate, aggressive
 
 	// Mode-specific settings
 	EnableScalpMode     bool `json:"enable_scalp_mode"`
@@ -244,10 +244,10 @@ type GinieAutopilotConfig struct {
 	BreakevenBuffer         float64 `json:"breakeven_buffer"` // Add small buffer above entry
 
 	// Proactive profit protection (NEW - fixes trailing stop issue)
-	ProactiveBreakevenPercent  float64 `json:"proactive_breakeven_percent"`   // Move to breakeven when profit >= this % (before TP1)
-	TrailingActivationPercent  float64 `json:"trailing_activation_percent"`   // Activate trailing when profit >= this %
-	TrailingStepPercent        float64 `json:"trailing_step_percent"`         // Trail by this % from highest price
-	TrailingSLUpdateThreshold  float64 `json:"trailing_sl_update_threshold"`  // Min improvement % before updating Binance order
+	ProactiveBreakevenPercent float64 `json:"proactive_breakeven_percent"`  // Move to breakeven when profit >= this % (before TP1)
+	TrailingActivationPercent float64 `json:"trailing_activation_percent"`  // Activate trailing when profit >= this %
+	TrailingStepPercent       float64 `json:"trailing_step_percent"`        // Trail by this % from highest price
+	TrailingSLUpdateThreshold float64 `json:"trailing_sl_update_threshold"` // Min improvement % before updating Binance order
 
 	// Scan intervals (seconds)
 	ScalpScanInterval    int `json:"scalp_scan_interval"`
@@ -255,10 +255,10 @@ type GinieAutopilotConfig struct {
 	PositionScanInterval int `json:"position_scan_interval"`
 
 	// Adaptive SL/TP LLM Update Intervals (seconds)
-	AdaptiveSLTPEnabled       bool `json:"adaptive_sltp_enabled"`
-	ScalpSLTPUpdateInterval   int  `json:"scalp_sltp_update_interval"`   // 1 min for scalp
-	SwingSLTPUpdateInterval   int  `json:"swing_sltp_update_interval"`   // 5 min for swing
-	PositionSLTPUpdateInterval int `json:"position_sltp_update_interval"` // 15 min for position
+	AdaptiveSLTPEnabled        bool `json:"adaptive_sltp_enabled"`
+	ScalpSLTPUpdateInterval    int  `json:"scalp_sltp_update_interval"`    // 1 min for scalp
+	SwingSLTPUpdateInterval    int  `json:"swing_sltp_update_interval"`    // 5 min for swing
+	PositionSLTPUpdateInterval int  `json:"position_sltp_update_interval"` // 15 min for position
 
 	// Confidence thresholds
 	MinConfidenceToTrade float64 `json:"min_confidence_to_trade"`
@@ -268,31 +268,32 @@ type GinieAutopilotConfig struct {
 	MaxDailyLoss   float64 `json:"max_daily_loss"`
 
 	// Circuit breaker settings (separate from FuturesController)
-	CircuitBreakerEnabled bool    `json:"circuit_breaker_enabled"`
-	CBMaxLossPerHour      float64 `json:"cb_max_loss_per_hour"`
-	CBMaxDailyLoss        float64 `json:"cb_max_daily_loss"`
-	CBMaxConsecutiveLosses int    `json:"cb_max_consecutive_losses"`
-	CBCooldownMinutes     int     `json:"cb_cooldown_minutes"`
+	CircuitBreakerEnabled  bool    `json:"circuit_breaker_enabled"`
+	CBMaxLossPerHour       float64 `json:"cb_max_loss_per_hour"`
+	CBMaxDailyLoss         float64 `json:"cb_max_daily_loss"`
+	CBMaxConsecutiveLosses int     `json:"cb_max_consecutive_losses"`
+	CBCooldownMinutes      int     `json:"cb_cooldown_minutes"`
+	CBMaxTradesPerMinute   int     `json:"cb_max_trades_per_minute"`
 
 	// === EARLY PROFIT BOOKING (ROI-BASED) ===
 	// Book profits early based on ROI after trading fees to lock in gains
-	EarlyProfitBookingEnabled    bool    `json:"early_profit_booking_enabled"`   // Enable early profit booking
-	UltraFastScalpROIThreshold   float64 `json:"ultra_fast_scalp_roi_threshold"` // Book at 3%+ ROI (after fees)
-	ScalpROIThreshold            float64 `json:"scalp_roi_threshold"`             // Book at 5%+ ROI (after fees)
-	SwingROIThreshold            float64 `json:"swing_roi_threshold"`             // Book at 8%+ ROI (after fees)
-	PositionROIThreshold         float64 `json:"position_roi_threshold"`          // Book at 10%+ ROI (after fees)
+	EarlyProfitBookingEnabled  bool    `json:"early_profit_booking_enabled"`   // Enable early profit booking
+	UltraFastScalpROIThreshold float64 `json:"ultra_fast_scalp_roi_threshold"` // Book at 3%+ ROI (after fees)
+	ScalpROIThreshold          float64 `json:"scalp_roi_threshold"`            // Book at 5%+ ROI (after fees)
+	SwingROIThreshold          float64 `json:"swing_roi_threshold"`            // Book at 8%+ ROI (after fees)
+	PositionROIThreshold       float64 `json:"position_roi_threshold"`         // Book at 10%+ ROI (after fees)
 }
 
 // DefaultGinieAutopilotConfig returns default configuration
 func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 	return &GinieAutopilotConfig{
-		Enabled:            false,
-		MaxPositions:       10,
-		MaxUSDPerPosition:  500,
-		TotalMaxUSD:        5000,
-		DefaultLeverage:    10,
-		DryRun:             false, // Default to LIVE mode, not PAPER mode
-		RiskLevel:          "moderate",
+		Enabled:           false,
+		MaxPositions:      10,
+		MaxUSDPerPosition: 500,
+		TotalMaxUSD:       5000,
+		DefaultLeverage:   10,
+		DryRun:            false, // Default to LIVE mode, not PAPER mode
+		RiskLevel:         "moderate",
 
 		EnableScalpMode:    true,
 		EnableSwingMode:    true,
@@ -308,21 +309,21 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 		BreakevenBuffer:         0.1, // 0.1% above entry
 
 		// Proactive profit protection (DISABLED - let trades run to TP1 naturally)
-		ProactiveBreakevenPercent:  0,    // 0 = disabled. Was 0.5% but caused early exits before TP1
-		TrailingActivationPercent:  0,    // DEPRECATED: Trailing now activates after TP1+breakeven (from settings)
-		TrailingStepPercent:        1.5,  // Default trailing step % (overridden by per-mode settings)
-		TrailingSLUpdateThreshold:  0.2,  // Update Binance order when SL improves by >= 0.2%
+		ProactiveBreakevenPercent: 0,   // 0 = disabled. Was 0.5% but caused early exits before TP1
+		TrailingActivationPercent: 0,   // DEPRECATED: Trailing now activates after TP1+breakeven (from settings)
+		TrailingStepPercent:       1.5, // Default trailing step % (overridden by per-mode settings)
+		TrailingSLUpdateThreshold: 0.2, // Update Binance order when SL improves by >= 0.2%
 
 		// Scan intervals based on mode (reduced for testing)
-		ScalpScanInterval:    60,   // 1 minute
-		SwingScanInterval:    120,  // 2 minutes (testing)
-		PositionScanInterval: 120,  // 2 minutes (testing)
+		ScalpScanInterval:    60,  // 1 minute
+		SwingScanInterval:    120, // 2 minutes (testing)
+		PositionScanInterval: 120, // 2 minutes (testing)
 
 		// Adaptive SL/TP LLM Update Intervals
 		AdaptiveSLTPEnabled:        true,
-		ScalpSLTPUpdateInterval:    60,   // 1 minute for scalp
-		SwingSLTPUpdateInterval:    300,  // 5 minutes for swing
-		PositionSLTPUpdateInterval: 900,  // 15 minutes for position
+		ScalpSLTPUpdateInterval:    60,  // 1 minute for scalp
+		SwingSLTPUpdateInterval:    300, // 5 minutes for swing
+		PositionSLTPUpdateInterval: 900, // 15 minutes for position
 
 		MinConfidenceToTrade: 35.0, // LOWERED 2026-01-03: From 50% to 35% - typical confidence is 25-45%
 		MaxDailyTrades:       1000,
@@ -330,10 +331,11 @@ func DefaultGinieAutopilotConfig() *GinieAutopilotConfig {
 
 		// Circuit breaker defaults
 		CircuitBreakerEnabled:  true,
-		CBMaxLossPerHour:       100,  // $100 max loss per hour
-		CBMaxDailyLoss:         300,  // $300 max daily loss
-		CBMaxConsecutiveLosses: 3,    // 3 consecutive losses triggers cooldown
-		CBCooldownMinutes:      30,   // 30 minute cooldown
+		CBMaxLossPerHour:       100, // $100 max loss per hour
+		CBMaxDailyLoss:         300, // $300 max daily loss
+		CBMaxConsecutiveLosses: 3,   // 3 consecutive losses triggers cooldown
+		CBCooldownMinutes:      30,  // 30 minute cooldown
+		CBMaxTradesPerMinute:   10,  // Max 10 trades per minute
 
 		// Early profit booking - ENABLED, but thresholds come from mode-specific settings
 		// (GinieTPPercentUltrafast, GinieTPPercentScalp, etc. in autopilot_settings.json)
@@ -418,55 +420,55 @@ func (ps *ProtectionStatus) NeedsHealing() bool {
 
 // GiniePosition represents a Ginie-managed position with multi-level TPs
 type GiniePosition struct {
-	Symbol          string           `json:"symbol"`
-	Side            string           `json:"side"` // "LONG" or "SHORT"
-	Mode            GinieTradingMode `json:"mode"` // scalp, swing, position
-	EntryPrice      float64          `json:"entry_price"`
-	OriginalQty     float64          `json:"original_qty"`     // Original position size
-	RemainingQty    float64          `json:"remaining_qty"`    // Remaining after partial closes
-	Leverage        int              `json:"leverage"`
-	EntryTime       time.Time        `json:"entry_time"`
+	Symbol       string           `json:"symbol"`
+	Side         string           `json:"side"` // "LONG" or "SHORT"
+	Mode         GinieTradingMode `json:"mode"` // scalp, swing, position
+	EntryPrice   float64          `json:"entry_price"`
+	OriginalQty  float64          `json:"original_qty"`  // Original position size
+	RemainingQty float64          `json:"remaining_qty"` // Remaining after partial closes
+	Leverage     int              `json:"leverage"`
+	EntryTime    time.Time        `json:"entry_time"`
 
 	// Take Profit Levels
-	TakeProfits     []GinieTakeProfitLevel `json:"take_profits"`
-	CurrentTPLevel  int                    `json:"current_tp_level"` // 0 = none hit, 1-4 = levels hit
+	TakeProfits    []GinieTakeProfitLevel `json:"take_profits"`
+	CurrentTPLevel int                    `json:"current_tp_level"` // 0 = none hit, 1-4 = levels hit
 
 	// Stop Loss
 	StopLoss         float64 `json:"stop_loss"`
-	OriginalSL       float64 `json:"original_sl"`       // Original SL before breakeven move
+	OriginalSL       float64 `json:"original_sl"` // Original SL before breakeven move
 	MovedToBreakeven bool    `json:"moved_to_breakeven"`
-	IsClosing        bool    `json:"is_closing"`        // Prevents duplicate close calls
+	IsClosing        bool    `json:"is_closing"` // Prevents duplicate close calls
 
 	// Trailing
-	TrailingActive      bool    `json:"trailing_active"`
-	HighestPrice        float64 `json:"highest_price"`
-	LowestPrice         float64 `json:"lowest_price"`
-	TrailingPercent     float64 `json:"trailing_percent"`       // Dynamic trailing %
+	TrailingActive        bool    `json:"trailing_active"`
+	HighestPrice          float64 `json:"highest_price"`
+	LowestPrice           float64 `json:"lowest_price"`
+	TrailingPercent       float64 `json:"trailing_percent"`        // Dynamic trailing %
 	TrailingActivationPct float64 `json:"trailing_activation_pct"` // % profit needed to activate trailing
 
 	// Algo Order IDs (for Binance SL/TP orders)
-	StopLossAlgoID   int64   `json:"stop_loss_algo_id,omitempty"`   // Binance algo order ID for SL
-	TakeProfitAlgoIDs []int64 `json:"take_profit_algo_ids,omitempty"` // Binance algo order IDs for TPs
-	LastLLMUpdate    time.Time `json:"last_llm_update,omitempty"`   // Last LLM SL/TP update time
+	StopLossAlgoID    int64     `json:"stop_loss_algo_id,omitempty"`    // Binance algo order ID for SL
+	TakeProfitAlgoIDs []int64   `json:"take_profit_algo_ids,omitempty"` // Binance algo order IDs for TPs
+	LastLLMUpdate     time.Time `json:"last_llm_update,omitempty"`      // Last LLM SL/TP update time
 
 	// Protection State Machine (bulletproof SL/TP tracking)
 	Protection *ProtectionStatus `json:"protection,omitempty"` // SL/TP protection state
 
 	// Tracking
-	RealizedPnL      float64 `json:"realized_pnl"`     // From partial closes
-	UnrealizedPnL    float64 `json:"unrealized_pnl"`
-	DecisionReport   *GinieDecisionReport `json:"decision_report,omitempty"`
-	FuturesTradeID   int64   `json:"futures_trade_id,omitempty"` // Database trade ID for lifecycle events
+	RealizedPnL    float64              `json:"realized_pnl"` // From partial closes
+	UnrealizedPnL  float64              `json:"unrealized_pnl"`
+	DecisionReport *GinieDecisionReport `json:"decision_report,omitempty"`
+	FuturesTradeID int64                `json:"futures_trade_id,omitempty"` // Database trade ID for lifecycle events
 
 	// Trade Source Tracking
-	Source       string  `json:"source"`                   // "ai" or "strategy"
-	StrategyID   *int64  `json:"strategy_id,omitempty"`    // Strategy ID if source is "strategy"
-	StrategyName *string `json:"strategy_name,omitempty"`  // Strategy name for display
+	Source       string  `json:"source"`                  // "ai" or "strategy"
+	StrategyID   *int64  `json:"strategy_id,omitempty"`   // Strategy ID if source is "strategy"
+	StrategyName *string `json:"strategy_name,omitempty"` // Strategy name for display
 
 	// Ultra-Fast Scalping Mode
-	UltraFastSignal       *UltraFastSignal `json:"ultra_fast_signal,omitempty"`       // Signal that triggered entry
-	UltraFastTargetPercent float64         `json:"ultra_fast_target_percent,omitempty"` // Fee-aware profit target %
-	MaxHoldTime           time.Duration    `json:"max_hold_time,omitempty"`            // 3s for ultra-fast
+	UltraFastSignal        *UltraFastSignal `json:"ultra_fast_signal,omitempty"`         // Signal that triggered entry
+	UltraFastTargetPercent float64          `json:"ultra_fast_target_percent,omitempty"` // Fee-aware profit target %
+	MaxHoldTime            time.Duration    `json:"max_hold_time,omitempty"`             // 3s for ultra-fast
 
 	// Adaptive Learning Fields (for tracking and learning)
 	Confidence    float64   `json:"confidence,omitempty"`     // Entry confidence score
@@ -475,16 +477,16 @@ type GiniePosition struct {
 	OpenedAt      time.Time `json:"opened_at,omitempty"`      // Position open time for hold tracking
 
 	// Ultra-Fast Tiered Take Profit Tracking
-	UltraFastTP1Hit       bool    `json:"ultra_fast_tp1_hit"`        // TP1 (0.5%) hit - closed 40%
-	UltraFastTP2Hit       bool    `json:"ultra_fast_tp2_hit"`        // TP2 (1.0%) hit - closed 30%
-	UltraFastTP3Hit       bool    `json:"ultra_fast_tp3_hit"`        // TP3 (2.0%) hit - closed 30%
-	UltraFastTotalClosed  float64 `json:"ultra_fast_total_closed"`   // Total % of position closed
-	UltraFastHighestPnL   float64 `json:"ultra_fast_highest_pnl"`    // Highest PnL % reached (for trailing)
-	UltraFastTrailingActive bool  `json:"ultra_fast_trailing_active"` // Trailing stop activated
-	UltraFastLastAICheck    time.Time `json:"ultra_fast_last_ai_check"` // Last AI exit decision check
+	UltraFastTP1Hit         bool      `json:"ultra_fast_tp1_hit"`         // TP1 (0.5%) hit - closed 40%
+	UltraFastTP2Hit         bool      `json:"ultra_fast_tp2_hit"`         // TP2 (1.0%) hit - closed 30%
+	UltraFastTP3Hit         bool      `json:"ultra_fast_tp3_hit"`         // TP3 (2.0%) hit - closed 30%
+	UltraFastTotalClosed    float64   `json:"ultra_fast_total_closed"`    // Total % of position closed
+	UltraFastHighestPnL     float64   `json:"ultra_fast_highest_pnl"`     // Highest PnL % reached (for trailing)
+	UltraFastTrailingActive bool      `json:"ultra_fast_trailing_active"` // Trailing stop activated
+	UltraFastLastAICheck    time.Time `json:"ultra_fast_last_ai_check"`   // Last AI exit decision check
 
 	// Dynamic AI Exit (for scalp/swing/position modes)
-	LastAICheck    time.Time `json:"last_ai_check,omitempty"` // Last AI exit decision check for non-ultrafast modes
+	LastAICheck time.Time `json:"last_ai_check,omitempty"` // Last AI exit decision check for non-ultrafast modes
 
 	// Early Profit Booking (per-position custom ROI target)
 	CustomROIPercent *float64 `json:"custom_roi_percent,omitempty"` // Custom ROI% for this position (nil = use mode defaults)
@@ -494,50 +496,50 @@ type GiniePosition struct {
 
 	// === 3-LEVEL STAGED ENTRY TRACKING ===
 	// Tracks progress of intelligent 3-level averaging for better entry prices
-	StagedEntryActive     bool      `json:"staged_entry_active,omitempty"`      // Whether this position uses staged entry
-	StagedEntryLevel      int       `json:"staged_entry_level,omitempty"`       // Current entry level (1-3)
-	StagedEntryMaxLevels  int       `json:"staged_entry_max_levels,omitempty"`  // Total levels to fill (default: 3)
-	StagedEntryTargetQty  float64   `json:"staged_entry_target_qty,omitempty"`  // Total target quantity across all levels
-	StagedEntryFilledQty  float64   `json:"staged_entry_filled_qty,omitempty"`  // Quantity filled so far
-	StagedEntryLastFill   time.Time `json:"staged_entry_last_fill,omitempty"`   // Time of last staged entry fill
-	StagedEntryNextPrice  float64   `json:"staged_entry_next_price,omitempty"`  // Price target for next level
-	StagedEntryStartTime  time.Time `json:"staged_entry_start_time,omitempty"`  // When staged entry started (for max wait)
+	StagedEntryActive    bool      `json:"staged_entry_active,omitempty"`     // Whether this position uses staged entry
+	StagedEntryLevel     int       `json:"staged_entry_level,omitempty"`      // Current entry level (1-3)
+	StagedEntryMaxLevels int       `json:"staged_entry_max_levels,omitempty"` // Total levels to fill (default: 3)
+	StagedEntryTargetQty float64   `json:"staged_entry_target_qty,omitempty"` // Total target quantity across all levels
+	StagedEntryFilledQty float64   `json:"staged_entry_filled_qty,omitempty"` // Quantity filled so far
+	StagedEntryLastFill  time.Time `json:"staged_entry_last_fill,omitempty"`  // Time of last staged entry fill
+	StagedEntryNextPrice float64   `json:"staged_entry_next_price,omitempty"` // Price target for next level
+	StagedEntryStartTime time.Time `json:"staged_entry_start_time,omitempty"` // When staged entry started (for max wait)
 }
 
 // GinieTradeResult tracks the result of a trade action with full signal info for study
 type GinieTradeResult struct {
-	Symbol      string    `json:"symbol"`
-	Action      string    `json:"action"` // "open", "partial_close", "full_close"
-	Side        string    `json:"side"`
-	Quantity    float64   `json:"quantity"`
-	Price       float64   `json:"price"`
-	PnL         float64   `json:"pnl"`
-	PnLPercent  float64   `json:"pnl_percent"`
-	Reason      string    `json:"reason"`
-	TPLevel     int       `json:"tp_level,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
+	Symbol     string    `json:"symbol"`
+	Action     string    `json:"action"` // "open", "partial_close", "full_close"
+	Side       string    `json:"side"`
+	Quantity   float64   `json:"quantity"`
+	Price      float64   `json:"price"`
+	PnL        float64   `json:"pnl"`
+	PnLPercent float64   `json:"pnl_percent"`
+	Reason     string    `json:"reason"`
+	TPLevel    int       `json:"tp_level,omitempty"`
+	Timestamp  time.Time `json:"timestamp"`
 
 	// Full decision info for study purposes
-	Mode            GinieTradingMode     `json:"mode,omitempty"`
-	Confidence      float64              `json:"confidence,omitempty"`
+	Mode             GinieTradingMode     `json:"mode,omitempty"`
+	Confidence       float64              `json:"confidence,omitempty"`
 	MarketConditions *GinieMarketSnapshot `json:"market_conditions,omitempty"`
-	SignalSummary   *GinieSignalSummary  `json:"signal_summary,omitempty"`
-	EntryParams     *GinieEntryParams    `json:"entry_params,omitempty"`
+	SignalSummary    *GinieSignalSummary  `json:"signal_summary,omitempty"`
+	EntryParams      *GinieEntryParams    `json:"entry_params,omitempty"`
 
 	// Trade Source Tracking
-	Source       string  `json:"source"`                   // "ai" or "strategy"
-	StrategyID   *int64  `json:"strategy_id,omitempty"`    // Strategy ID if source is "strategy"
-	StrategyName *string `json:"strategy_name,omitempty"`  // Strategy name for display
+	Source       string  `json:"source"`                  // "ai" or "strategy"
+	StrategyID   *int64  `json:"strategy_id,omitempty"`   // Strategy ID if source is "strategy"
+	StrategyName *string `json:"strategy_name,omitempty"` // Strategy name for display
 }
 
 // GinieMarketSnapshot captures market state at trade time
 type GinieMarketSnapshot struct {
-	Trend        string  `json:"trend"`
-	ADX          float64 `json:"adx"`
-	Volatility   string  `json:"volatility"`
-	ATRPercent   float64 `json:"atr_percent"`
-	Volume       string  `json:"volume"`
-	BTCCorr      float64 `json:"btc_correlation"`
+	Trend      string  `json:"trend"`
+	ADX        float64 `json:"adx"`
+	Volatility string  `json:"volatility"`
+	ATRPercent float64 `json:"atr_percent"`
+	Volume     string  `json:"volume"`
+	BTCCorr    float64 `json:"btc_correlation"`
 }
 
 // GinieSignalSummary summarizes signals that triggered the trade
@@ -552,53 +554,53 @@ type GinieSignalSummary struct {
 
 // GinieEntryParams captures trade entry parameters
 type GinieEntryParams struct {
-	EntryPrice   float64   `json:"entry_price"`
-	StopLoss     float64   `json:"stop_loss"`
-	StopLossPct  float64   `json:"stop_loss_pct"`
-	TakeProfits  []float64 `json:"take_profits"`
-	Leverage     int       `json:"leverage"`
-	RiskReward   float64   `json:"risk_reward"`
+	EntryPrice  float64   `json:"entry_price"`
+	StopLoss    float64   `json:"stop_loss"`
+	StopLossPct float64   `json:"stop_loss_pct"`
+	TakeProfits []float64 `json:"take_profits"`
+	Leverage    int       `json:"leverage"`
+	RiskReward  float64   `json:"risk_reward"`
 }
 
 // LLMSwitchEvent tracks when LLM enables or disables a coin
 type LLMSwitchEvent struct {
 	Timestamp time.Time `json:"timestamp"`
 	Symbol    string    `json:"symbol"`
-	Action    string    `json:"action"`    // "enable" or "disable"
-	Reason    string    `json:"reason"`    // Explanation for the switch
+	Action    string    `json:"action"` // "enable" or "disable"
+	Reason    string    `json:"reason"` // Explanation for the switch
 }
 
 // GinieSignalLog tracks all signals generated with executed/rejected status
 type GinieSignalLog struct {
-	ID            string    `json:"id"`
-	Symbol        string    `json:"symbol"`
-	Timestamp     time.Time `json:"timestamp"`
-	Direction     string    `json:"direction"`      // "LONG" or "SHORT"
-	Mode          string    `json:"mode"`           // scalp, swing, position
-	Confidence    float64   `json:"confidence"`
-	Status        string    `json:"status"`         // "executed", "rejected", "pending"
-	RejectionReason string  `json:"rejection_reason,omitempty"`
+	ID              string    `json:"id"`
+	Symbol          string    `json:"symbol"`
+	Timestamp       time.Time `json:"timestamp"`
+	Direction       string    `json:"direction"` // "LONG" or "SHORT"
+	Mode            string    `json:"mode"`      // scalp, swing, position
+	Confidence      float64   `json:"confidence"`
+	Status          string    `json:"status"` // "executed", "rejected", "pending"
+	RejectionReason string    `json:"rejection_reason,omitempty"`
 
 	// Detailed rejection tracking (shows WHY a good signal wasn't traded)
 	RejectionDetails *SignalRejectionDetails `json:"rejection_details,omitempty"`
 
 	// Signal details
-	EntryPrice    float64   `json:"entry_price"`
-	StopLoss      float64   `json:"stop_loss"`
-	TakeProfit1   float64   `json:"take_profit_1"`
-	Leverage      int       `json:"leverage"`
-	RiskReward    float64   `json:"risk_reward"`
+	EntryPrice  float64 `json:"entry_price"`
+	StopLoss    float64 `json:"stop_loss"`
+	TakeProfit1 float64 `json:"take_profit_1"`
+	Leverage    int     `json:"leverage"`
+	RiskReward  float64 `json:"risk_reward"`
 
 	// Market context at signal time
-	CurrentPrice  float64   `json:"current_price"`
-	ATRPercent    float64   `json:"atr_percent"`
-	Trend         string    `json:"trend"`
-	Volatility    string    `json:"volatility"`
+	CurrentPrice float64 `json:"current_price"`
+	ATRPercent   float64 `json:"atr_percent"`
+	Trend        string  `json:"trend"`
+	Volatility   string  `json:"volatility"`
 
 	// Signals that contributed
-	SignalNames   []string  `json:"signal_names"`
-	PrimaryMet    int       `json:"primary_met"`
-	PrimaryRequired int     `json:"primary_required"`
+	SignalNames     []string `json:"signal_names"`
+	PrimaryMet      int      `json:"primary_met"`
+	PrimaryRequired int      `json:"primary_required"`
 }
 
 // SignalRejectionDetails provides detailed rejection breakdown for signals
@@ -608,12 +610,12 @@ type SignalRejectionDetails struct {
 	AllReasons []string `json:"all_reasons"`
 
 	// Category-specific rejection details
-	PositionLimit    *PositionLimitInfo    `json:"position_limit,omitempty"`
+	PositionLimit     *PositionLimitInfo     `json:"position_limit,omitempty"`
 	InsufficientFunds *InsufficientFundsInfo `json:"insufficient_funds,omitempty"`
-	CircuitBreaker   *CircuitBreakerInfo   `json:"circuit_breaker,omitempty"`
-	TrendDivergence  *TrendDivergenceInfo  `json:"trend_divergence,omitempty"`
-	SignalQuality    *SignalQualityInfo    `json:"signal_quality,omitempty"`
-	CounterTrend     *CounterTrendInfo     `json:"counter_trend,omitempty"`
+	CircuitBreaker    *CircuitBreakerInfo    `json:"circuit_breaker,omitempty"`
+	TrendDivergence   *TrendDivergenceInfo   `json:"trend_divergence,omitempty"`
+	SignalQuality     *SignalQualityInfo     `json:"signal_quality,omitempty"`
+	CounterTrend      *CounterTrendInfo      `json:"counter_trend,omitempty"`
 }
 
 // PositionLimitInfo shows position limit blocking details
@@ -626,10 +628,10 @@ type PositionLimitInfo struct {
 
 // InsufficientFundsInfo shows funding blocking details
 type InsufficientFundsInfo struct {
-	RequiredUSD   float64 `json:"required_usd"`
-	AvailableUSD  float64 `json:"available_usd"`
-	PositionSize  float64 `json:"position_size"`
-	Leverage      int     `json:"leverage"`
+	RequiredUSD  float64 `json:"required_usd"`
+	AvailableUSD float64 `json:"available_usd"`
+	PositionSize float64 `json:"position_size"`
+	Leverage     int     `json:"leverage"`
 }
 
 // CircuitBreakerInfo shows circuit breaker blocking details
@@ -672,9 +674,9 @@ type SLUpdateRecord struct {
 	OldSL         float64   `json:"old_sl"`
 	NewSL         float64   `json:"new_sl"`
 	CurrentPrice  float64   `json:"current_price"`
-	Status        string    `json:"status"`        // "applied", "rejected"
+	Status        string    `json:"status"`                   // "applied", "rejected"
 	RejectionRule string    `json:"rejection_rule,omitempty"` // Which rule rejected it
-	Source        string    `json:"source"`        // "llm", "breakeven", "trailing"
+	Source        string    `json:"source"`                   // "llm", "breakeven", "trailing"
 	LLMConfidence float64   `json:"llm_confidence,omitempty"`
 }
 
@@ -689,15 +691,15 @@ type SLUpdateHistory struct {
 
 // CoinBlockInfo tracks why a coin is blocked and when it can be unblocked
 type CoinBlockInfo struct {
-	Symbol        string    `json:"symbol"`
-	BlockReason   string    `json:"block_reason"`
-	BlockTime     time.Time `json:"block_time"`
-	LossAmount    float64   `json:"loss_amount"`      // Actual loss that triggered block
-	LossROI       float64   `json:"loss_roi"`         // ROI % at time of block
-	ConsecLosses  int       `json:"consec_losses"`    // Consecutive losses for this coin
-	AutoUnblock   time.Time `json:"auto_unblock"`     // When coin will auto-unblock (zero if manual required)
-	BlockCount    int       `json:"block_count"`      // How many times this coin was blocked
-	ManualOnly    bool      `json:"manual_only"`      // If true, requires manual unblock
+	Symbol       string    `json:"symbol"`
+	BlockReason  string    `json:"block_reason"`
+	BlockTime    time.Time `json:"block_time"`
+	LossAmount   float64   `json:"loss_amount"`   // Actual loss that triggered block
+	LossROI      float64   `json:"loss_roi"`      // ROI % at time of block
+	ConsecLosses int       `json:"consec_losses"` // Consecutive losses for this coin
+	AutoUnblock  time.Time `json:"auto_unblock"`  // When coin will auto-unblock (zero if manual required)
+	BlockCount   int       `json:"block_count"`   // How many times this coin was blocked
+	ManualOnly   bool      `json:"manual_only"`   // If true, requires manual unblock
 }
 
 // ==================== Diagnostic Types ====================
@@ -750,22 +752,22 @@ type ScanDiagnostics struct {
 	SwingEnabled         bool      `json:"swing_enabled"`
 	PositionEnabled      bool      `json:"position_enabled"`
 	// New fields for scan status tracking (Issue 2B)
-	ScanningActive       bool      `json:"scanning_active"`
-	CurrentPhase         string    `json:"current_phase"`
-	TimeUntilNextScan    int64     `json:"time_until_next_scan"`
-	ScannedThisCycle     int       `json:"scanned_this_cycle"`
-	TotalSymbols         int       `json:"total_symbols"`
-	LastScanDuration     int64     `json:"last_scan_duration_ms"`
-	NextScanTime         time.Time `json:"next_scan_time"`
+	ScanningActive    bool      `json:"scanning_active"`
+	CurrentPhase      string    `json:"current_phase"`
+	TimeUntilNextScan int64     `json:"time_until_next_scan"`
+	ScannedThisCycle  int       `json:"scanned_this_cycle"`
+	TotalSymbols      int       `json:"total_symbols"`
+	LastScanDuration  int64     `json:"last_scan_duration_ms"`
+	NextScanTime      time.Time `json:"next_scan_time"`
 }
 
 // SignalDiagnostics shows signal generation stats
 type SignalDiagnostics struct {
 	// Last 1 hour window (existing behavior)
-	TotalGenerated      int            `json:"total_generated_1h"`
-	Executed            int            `json:"executed_1h"`
-	Rejected            int            `json:"rejected_1h"`
-	ExecutionRate       float64        `json:"execution_rate_pct_1h"`
+	TotalGenerated int     `json:"total_generated_1h"`
+	Executed       int     `json:"executed_1h"`
+	Rejected       int     `json:"rejected_1h"`
+	ExecutionRate  float64 `json:"execution_rate_pct_1h"`
 
 	// All-time/session counters (NEW)
 	TotalGeneratedAllTime int     `json:"total_generated"`
@@ -797,8 +799,8 @@ type LLMDiagnostics struct {
 
 // DiagnosticIssue represents a problem with suggested fix
 type DiagnosticIssue struct {
-	Severity   string `json:"severity"`   // critical, warning, info
-	Category   string `json:"category"`   // scanning, trading, profit, config
+	Severity   string `json:"severity"` // critical, warning, info
+	Category   string `json:"category"` // scanning, trading, profit, config
 	Message    string `json:"message"`
 	Suggestion string `json:"suggestion"`
 }
@@ -807,7 +809,7 @@ type DiagnosticIssue struct {
 type GinieAutopilot struct {
 	config        *GinieAutopilotConfig
 	analyzer      *GinieAnalyzer
-	llmAnalyzer   *llm.Analyzer  // LLM for adaptive SL/TP
+	llmAnalyzer   *llm.Analyzer // LLM for adaptive SL/TP
 	futuresClient binance.FuturesClient
 	logger        *logging.Logger
 	repo          *database.Repository // Database for trade persistence
@@ -821,52 +823,53 @@ type GinieAutopilot struct {
 	currentRiskLevel string
 
 	// State
-	running       bool
-	stopChan      chan struct{}
-	wg            sync.WaitGroup
-	mu            sync.RWMutex
+	running          bool
+	stopChan         chan struct{}
+	configReloadChan chan struct{} // Trigger immediate config reload
+	wg               sync.WaitGroup
+	mu               sync.RWMutex
 
 	// Position tracking
-	positions     map[string]*GiniePosition
+	positions map[string]*GiniePosition
 
 	// Per-coin blocking for big losses
-	blockedCoins       map[string]*CoinBlockInfo  // Coins blocked due to big losses
-	coinConsecLosses   map[string]int             // Track consecutive losses per coin
-	coinBlockHistory   map[string]int             // Historical count of times each coin was blocked
+	blockedCoins     map[string]*CoinBlockInfo // Coins blocked due to big losses
+	coinConsecLosses map[string]int            // Track consecutive losses per coin
+	coinBlockHistory map[string]int            // Historical count of times each coin was blocked
 
 	// LLM SL validation tracking (kill switch after 3 bad calls)
-	badLLMCallCount    map[string]int   // symbol -> consecutive bad LLM SL calls
-	llmSLDisabled      map[string]bool  // symbol -> LLM SL updates disabled (kill switch active)
+	badLLMCallCount map[string]int  // symbol -> consecutive bad LLM SL calls
+	llmSLDisabled   map[string]bool // symbol -> LLM SL updates disabled (kill switch active)
 
 	// Signal logging (all signals with executed/rejected status)
-	signalLogs         []GinieSignalLog           // All generated signals
-	maxSignalLogs      int                         // Max signals to keep
+	signalLogs    []GinieSignalLog // All generated signals
+	maxSignalLogs int              // Max signals to keep
 
 	// SL update history per position
-	slUpdateHistory    map[string]*SLUpdateHistory // symbol -> SL update history
+	slUpdateHistory map[string]*SLUpdateHistory // symbol -> SL update history
 
 	// Trade history
-	tradeHistory  []GinieTradeResult
-	maxHistory    int
+	tradeHistory []GinieTradeResult
+	maxHistory   int
 
 	// LLM switch tracking
-	llmSwitches   []LLMSwitchEvent
+	llmSwitches    []LLMSwitchEvent
 	maxLLMSwitches int
 
 	// Daily tracking
-	dailyTrades   int
-	dailyPnL      float64
-	dayStart      time.Time
+	dailyTrades int
+	dailyPnL    float64
+	dayStart    time.Time
 
 	// Mode-specific tracking
-	scalpTicker    *time.Ticker
-	swingTicker    *time.Ticker
-	positionTicker *time.Ticker
+	scalpTicker     *time.Ticker
+	swingTicker     *time.Ticker
+	positionTicker  *time.Ticker
 	ultraFastTicker *time.Ticker
 
 	// Ultra-Fast monitoring
 	volatilityRegimes map[string]*VolatilityRegime // Cached volatility regimes per symbol
-	lastRegimeUpdate  map[string]time.Time          // When each symbol's regime was last updated
+	lastRegimeUpdate  map[string]time.Time         // When each symbol's regime was last updated
 
 	// Per-mode capital allocation tracking
 	modeAllocationStates map[string]*ModeAllocationState // Current allocation state per mode
@@ -876,7 +879,7 @@ type GinieAutopilot struct {
 	// Per-mode safety controls tracking
 	modeSafetyStates  map[string]*ModeSafetyState  // Runtime safety state per mode
 	modeSafetyConfigs map[string]*ModeSafetyConfig // Safety config per mode
-	lastDayReset      time.Time                     // When daily counters were last reset
+	lastDayReset      time.Time                    // When daily counters were last reset
 
 	// Per-mode circuit breaker tracking (Story 2.7 Task 2.7.4)
 	modeCircuitBreakers map[GinieTradingMode]*ModeCircuitBreaker // Mode-specific circuit breaker state
@@ -895,10 +898,10 @@ type GinieAutopilot struct {
 	lastPositionScan        time.Time
 	lastUltraFastScan       time.Time // Ultra-fast mode: 5-second scan tracking
 	symbolsScannedLastCycle int
-	failedOrdersLastHour   int
-	tpHitsLastHour         int
-	partialClosesLastHour  int
-	lastLLMCallTime        time.Time
+	failedOrdersLastHour    int
+	tpHitsLastHour          int
+	partialClosesLastHour   int
+	lastLLMCallTime         time.Time
 
 	// Scan status tracking (Issue 2B)
 	lastScanTime     time.Time     // When last scan completed
@@ -940,14 +943,15 @@ func NewGinieAutopilot(
 	config := DefaultGinieAutopilotConfig()
 
 	// Create Ginie's own circuit breaker (Story 5.3: Load from database if available)
+	// Default values (fallback if database is unavailable)
 	cbConfig := &circuit.CircuitBreakerConfig{
 		Enabled:              config.CircuitBreakerEnabled,
 		MaxLossPerHour:       config.CBMaxLossPerHour,
 		MaxDailyLoss:         config.CBMaxDailyLoss,
 		MaxConsecutiveLosses: config.CBMaxConsecutiveLosses,
 		CooldownMinutes:      config.CBCooldownMinutes,
-		MaxTradesPerMinute:   10,  // Allow 10 trades per minute
-		MaxDailyTrades:       100, // Allow 100 trades per day
+		MaxTradesPerMinute:   10,  // Default fallback
+		MaxDailyTrades:       100, // Default fallback
 	}
 
 	// Story 5.3: Override with per-user global circuit breaker config from database
@@ -960,8 +964,10 @@ func NewGinieAutopilot(
 			cbConfig.MaxDailyLoss = globalCBConfig.MaxDailyLoss
 			cbConfig.MaxConsecutiveLosses = globalCBConfig.MaxConsecutiveLosses
 			cbConfig.CooldownMinutes = globalCBConfig.CooldownMinutes
-			log.Printf("[GINIE-INIT] Loaded global circuit breaker config from database for user %s: MaxLossPerHour=$%.2f, MaxDailyLoss=$%.2f, MaxConsecutiveLosses=%d, CooldownMinutes=%d",
-				userID, globalCBConfig.MaxLossPerHour, globalCBConfig.MaxDailyLoss, globalCBConfig.MaxConsecutiveLosses, globalCBConfig.CooldownMinutes)
+			cbConfig.MaxTradesPerMinute = globalCBConfig.MaxTradesPerMinute
+			cbConfig.MaxDailyTrades = globalCBConfig.MaxDailyTrades
+			log.Printf("[GINIE-INIT] Loaded global circuit breaker config from database for user %s: MaxLossPerHour=$%.2f, MaxDailyLoss=$%.2f, MaxConsecutiveLosses=%d, CooldownMinutes=%d, MaxTradesPerMinute=%d, MaxDailyTrades=%d",
+				userID, globalCBConfig.MaxLossPerHour, globalCBConfig.MaxDailyLoss, globalCBConfig.MaxConsecutiveLosses, globalCBConfig.CooldownMinutes, globalCBConfig.MaxTradesPerMinute, globalCBConfig.MaxDailyTrades)
 		} else if err != nil {
 			log.Printf("[GINIE-INIT] Failed to load global circuit breaker config from database for user %s: %v (using defaults)", userID, err)
 		} else {
@@ -970,29 +976,30 @@ func NewGinieAutopilot(
 	}
 
 	ga := &GinieAutopilot{
-		config:            config,
-		analyzer:          analyzer,
-		futuresClient:     futuresClient,
-		logger:            logger,
-		repo:              repo,
-		eventLogger:       NewTradeEventLogger(repo.GetDB()),
-		userID:            userID,
-		circuitBreaker:    circuit.NewCircuitBreaker(cbConfig),
-		currentRiskLevel:  config.RiskLevel,
-		stopChan:          make(chan struct{}),
-		positions:         make(map[string]*GiniePosition),
-		blockedCoins:      make(map[string]*CoinBlockInfo),
-		coinConsecLosses:  make(map[string]int),
-		coinBlockHistory:  make(map[string]int),
-		badLLMCallCount:   make(map[string]int),
-		llmSLDisabled:     make(map[string]bool),
-		signalLogs:        make([]GinieSignalLog, 0, 500),
-		maxSignalLogs:     500,
-		slUpdateHistory:   make(map[string]*SLUpdateHistory),
-		tradeHistory:      make([]GinieTradeResult, 0, 1000),
-		maxHistory:        1000, // Increased for study purposes
-		llmSwitches:       make([]LLMSwitchEvent, 0, 500),
-		maxLLMSwitches:    500, // Keep last 500 LLM switch events
+		config:               config,
+		analyzer:             analyzer,
+		futuresClient:        futuresClient,
+		logger:               logger,
+		repo:                 repo,
+		eventLogger:          NewTradeEventLogger(repo.GetDB()),
+		userID:               userID,
+		circuitBreaker:       circuit.NewCircuitBreaker(cbConfig),
+		currentRiskLevel:     config.RiskLevel,
+		stopChan:             make(chan struct{}),
+		configReloadChan:     make(chan struct{}, 1), // Buffered channel for non-blocking sends
+		positions:            make(map[string]*GiniePosition),
+		blockedCoins:         make(map[string]*CoinBlockInfo),
+		coinConsecLosses:     make(map[string]int),
+		coinBlockHistory:     make(map[string]int),
+		badLLMCallCount:      make(map[string]int),
+		llmSLDisabled:        make(map[string]bool),
+		signalLogs:           make([]GinieSignalLog, 0, 500),
+		maxSignalLogs:        500,
+		slUpdateHistory:      make(map[string]*SLUpdateHistory),
+		tradeHistory:         make([]GinieTradeResult, 0, 1000),
+		maxHistory:           1000, // Increased for study purposes
+		llmSwitches:          make([]LLMSwitchEvent, 0, 500),
+		maxLLMSwitches:       500, // Keep last 500 LLM switch events
 		dayStart:             time.Now().Truncate(24 * time.Hour),
 		volatilityRegimes:    make(map[string]*VolatilityRegime),
 		lastRegimeUpdate:     make(map[string]time.Time),
@@ -1023,42 +1030,51 @@ func NewGinieAutopilot(
 	ga.modeSafetyConfigs["swing"] = settings.SafetySwing
 	ga.modeSafetyConfigs["position"] = settings.SafetyPosition
 
-	// CRITICAL FIX: Load user mode enable/disable settings from ModeConfigs
-	// This ensures user's mode preferences are respected (fixes swing bypass bug)
-	if ultraFastConfig, err := settingsManager.GetDefaultModeConfig("ultra_fast"); err == nil && ultraFastConfig != nil {
+	// CRITICAL FIX: Load user mode enable/disable settings from DATABASE
+	// This ensures user's mode preferences from DB are respected (Story 4.11)
+	ctx := context.Background()
+
+	if ultraFastConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "ultra_fast"); err == nil && ultraFastConfig != nil {
 		ga.config.EnableUltraFastMode = ultraFastConfig.Enabled
-		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from user settings: %v", ultraFastConfig.Enabled)
+		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from DATABASE: %v", ultraFastConfig.Enabled)
 	} else {
-		// Fallback to root-level UltraFastEnabled if mode config not found
-		ga.config.EnableUltraFastMode = settings.UltraFastEnabled
-		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from root settings (fallback): %v", settings.UltraFastEnabled)
+		log.Printf("[GINIE-INIT] Ultra-fast mode config not found in DB, using default: %v", ga.config.EnableUltraFastMode)
 	}
-	if scalpConfig, err := settingsManager.GetDefaultModeConfig("scalp"); err == nil && scalpConfig != nil {
+
+	if scalpConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "scalp"); err == nil && scalpConfig != nil {
 		ga.config.EnableScalpMode = scalpConfig.Enabled
-		log.Printf("[GINIE-INIT] Scalp mode enabled from user settings: %v", scalpConfig.Enabled)
+		log.Printf("[GINIE-INIT] Scalp mode enabled from DATABASE: %v", scalpConfig.Enabled)
+	} else {
+		log.Printf("[GINIE-INIT] Scalp mode config not found in DB, using default: %v", ga.config.EnableScalpMode)
 	}
-	if swingConfig, err := settingsManager.GetDefaultModeConfig("swing"); err == nil && swingConfig != nil {
+
+	if swingConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "swing"); err == nil && swingConfig != nil {
 		ga.config.EnableSwingMode = swingConfig.Enabled
-		log.Printf("[GINIE-INIT] Swing mode enabled from user settings: %v", swingConfig.Enabled)
+		log.Printf("[GINIE-INIT] Swing mode enabled from DATABASE: %v", swingConfig.Enabled)
+	} else {
+		log.Printf("[GINIE-INIT] Swing mode config not found in DB, using default: %v", ga.config.EnableSwingMode)
 	}
-	if positionConfig, err := settingsManager.GetDefaultModeConfig("position"); err == nil && positionConfig != nil {
+
+	if positionConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "position"); err == nil && positionConfig != nil {
 		ga.config.EnablePositionMode = positionConfig.Enabled
-		log.Printf("[GINIE-INIT] Position mode enabled from user settings: %v", positionConfig.Enabled)
+		log.Printf("[GINIE-INIT] Position mode enabled from DATABASE: %v", positionConfig.Enabled)
+	} else {
+		log.Printf("[GINIE-INIT] Position mode config not found in DB, using default: %v", ga.config.EnablePositionMode)
 	}
 
 	// Initialize safety states
 	for _, mode := range []string{"ultra_fast", "scalp", "swing", "position"} {
 		ga.modeSafetyStates[mode] = &ModeSafetyState{
-			Mode:              mode,
-			TradesLastMinute:  make([]time.Time, 0),
-			TradesLastHour:    make([]time.Time, 0),
-			TradesToday:       0,
-			ProfitWindow:      make([]SafetyTradeResult, 0),
-			WindowProfitPct:   0,
-			RecentTrades:      make([]SafetyTradeResult, 0),
-			CurrentWinRate:    0,
-			IsPaused:          false,
-			LastUpdate:        time.Now(),
+			Mode:             mode,
+			TradesLastMinute: make([]time.Time, 0),
+			TradesLastHour:   make([]time.Time, 0),
+			TradesToday:      0,
+			ProfitWindow:     make([]SafetyTradeResult, 0),
+			WindowProfitPct:  0,
+			RecentTrades:     make([]SafetyTradeResult, 0),
+			CurrentWinRate:   0,
+			IsPaused:         false,
+			LastUpdate:       time.Now(),
 		}
 	}
 
@@ -1282,6 +1298,16 @@ func (ga *GinieAutopilot) HasLLMAnalyzer() bool {
 	return ga.llmAnalyzer != nil && ga.llmAnalyzer.IsEnabled()
 }
 
+// SetUserID updates the user ID for multi-tenant PnL isolation and database-first configuration
+func (ga *GinieAutopilot) SetUserID(userID string) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.userID = userID
+	if ga.logger != nil {
+		ga.logger.Info("Ginie autopilot user ID updated", "user_id", userID)
+	}
+}
+
 // getEffectivePositionSide determines the correct position side based on Binance account's position mode
 // Returns PositionSideBoth for ONE_WAY mode, or the provided positionSide for HEDGE mode
 func (ga *GinieAutopilot) getEffectivePositionSide(positionSide binance.PositionSide) binance.PositionSide {
@@ -1325,25 +1351,56 @@ func (ga *GinieAutopilot) SetRiskLevel(level string) error {
 	ga.config.RiskLevel = level
 
 	// Adjust parameters based on risk level
+	// Try to load from user_capital_allocation table first, fall back to defaults if not available
+	ctx := context.Background()
+	var minConfidence, maxUSD float64
+	var defaultLeverage int
+
+	// Default fallback values (used if database unavailable)
 	// LOWERED 2026-01-03: Previous thresholds (60/50/40) blocked all trades - confidence scores typically 25-45%
 	switch level {
 	case "conservative":
-		ga.config.MinConfidenceToTrade = 45.0 // Was 60.0
-		ga.config.MaxUSDPerPosition = 300
-		ga.config.DefaultLeverage = 3
+		minConfidence = 45.0 // Was 60.0
+		maxUSD = 300
+		defaultLeverage = 3
 	case "moderate":
-		ga.config.MinConfidenceToTrade = 35.0 // Was 50.0 - typical confidence is 30-45%
-		ga.config.MaxUSDPerPosition = 500
-		ga.config.DefaultLeverage = 5
+		minConfidence = 35.0 // Was 50.0 - typical confidence is 30-45%
+		maxUSD = 500
+		defaultLeverage = 5
 	case "aggressive":
-		ga.config.MinConfidenceToTrade = 25.0 // Was 40.0 - allows more trades
-		ga.config.MaxUSDPerPosition = 800
-		ga.config.DefaultLeverage = 10
+		minConfidence = 25.0 // Was 40.0 - allows more trades
+		maxUSD = 800
+		defaultLeverage = 10
 	}
+
+	// Try to load from database - user_capital_allocation table has mode-specific max USD values
+	// For risk level, we use the mode-specific max USD values as a proxy
+	// NOTE: MinConfidenceToTrade should come from user_mode_configs, but for backward compatibility
+	// we keep the risk-level-based confidence thresholds
+	if ga.repo != nil && ga.userID != "" {
+		if allocationConfig, err := ga.repo.GetUserCapitalAllocation(ctx, ga.userID); err == nil && allocationConfig != nil {
+			// Use mode-specific max USD from database (pick the largest as representative for this risk level)
+			maxFromDB := allocationConfig.MaxScalpUSDPerPosition // Use scalp as baseline
+			if maxFromDB > 0 {
+				maxUSD = maxFromDB
+				log.Printf("[GINIE-RISK] Loaded MaxUSDPerPosition from database for user %s: $%.2f", ga.userID, maxUSD)
+			}
+		} else if err != nil {
+			log.Printf("[GINIE-RISK] Failed to load capital allocation from database for user %s: %v (using defaults)", ga.userID, err)
+		}
+	}
+
+	// Apply the values
+	ga.config.MinConfidenceToTrade = minConfidence
+	ga.config.MaxUSDPerPosition = maxUSD
+	ga.config.DefaultLeverage = defaultLeverage
 
 	ga.logger.Info("Ginie risk level changed", map[string]interface{}{
 		"from": oldLevel,
 		"to":   level,
+		"min_confidence": minConfidence,
+		"max_usd": maxUSD,
+		"leverage": defaultLeverage,
 	})
 
 	return nil
@@ -1377,12 +1434,12 @@ func (ga *GinieAutopilot) GetPositions() []*GiniePosition {
 
 // StuckPositionAlert represents a position that needs manual intervention
 type StuckPositionAlert struct {
-	Symbol    string  `json:"symbol"`
-	Side      string  `json:"side"`
-	Mode      string  `json:"mode"`
-	Reason    string  `json:"reason"`
-	AlertedAt string  `json:"alerted_at"`
-	Quantity  float64 `json:"remaining_quantity"`
+	Symbol     string  `json:"symbol"`
+	Side       string  `json:"side"`
+	Mode       string  `json:"mode"`
+	Reason     string  `json:"reason"`
+	AlertedAt  string  `json:"alerted_at"`
+	Quantity   float64 `json:"remaining_quantity"`
 	EntryPrice float64 `json:"entry_price"`
 }
 
@@ -1740,6 +1797,17 @@ func (ga *GinieAutopilot) Stop() error {
 	return nil
 }
 
+// TriggerConfigReload triggers an immediate config reload from database
+// This allows settings changes to take effect without waiting for next scan interval
+func (ga *GinieAutopilot) TriggerConfigReload() {
+	select {
+	case ga.configReloadChan <- struct{}{}:
+		log.Println("[GINIE] Config reload signal sent successfully")
+	default:
+		log.Println("[GINIE] Config reload already pending, skipping duplicate signal")
+	}
+}
+
 // runMainLoop is the main trading loop that scans for opportunities
 func (ga *GinieAutopilot) runMainLoop() {
 	defer ga.wg.Done()
@@ -1771,7 +1839,9 @@ func (ga *GinieAutopilot) runMainLoop() {
 	lastPositionScan := time.Now()
 	lastStrategyScan := time.Now()
 	lastUltraFastScan := time.Now() // Ultra-fast mode: 5-second scan interval
-	lastScalpReentryScan := time.Now() // Scalp re-entry mode
+	// NOTE: scalp_reentry is NOT a separate scanning mode - it's an optimization feature
+	// that upgrades scalp positions to use progressive TP management. See scanForMode()
+	// where scalp entries are upgraded to scalp_reentry if ScalpReentryConfig.Enabled is true.
 	lastWatchlistRefresh := time.Now() // Periodic watchlist refresh
 
 	// Set phase to idle after initialization (Issue 2B)
@@ -1784,6 +1854,15 @@ func (ga *GinieAutopilot) runMainLoop() {
 		case <-ga.stopChan:
 			ga.logger.Info("Ginie main loop stopping")
 			return
+		case <-ga.configReloadChan:
+			log.Println("[GINIE] Config reload triggered - reloading from database")
+			// Force immediate scan on next iteration by resetting last scan times
+			lastScalpScan = time.Time{}
+			lastSwingScan = time.Time{}
+			lastPositionScan = time.Time{}
+			lastUltraFastScan = time.Time{}
+			// NOTE: scalp_reentry doesn't need separate scan reset - it uses scalp mode scanning
+			log.Println("[GINIE] Config reload complete - next scan will use fresh settings")
 		case <-baseTicker.C:
 			now := time.Now()
 
@@ -1810,6 +1889,10 @@ func (ga *GinieAutopilot) runMainLoop() {
 
 			// Build enabled modes map from database - checked EVERY scan cycle for immediate effect
 			enabledModesMap := make(map[string]bool)
+			// NOTE: Only 4 trading modes generate signals. scalp_reentry is NOT a trading mode -
+			// it's a position optimization feature that upgrades scalp positions to use progressive TP.
+			// When scalp mode is enabled AND ScalpReentryConfig.Enabled is true, scalp entries
+			// automatically get upgraded to scalp_reentry mode during scanning (see scanForMode).
 			modeChecks := []struct {
 				modeName    string
 				displayName string
@@ -1818,7 +1901,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 				{"swing", "SWING"},
 				{"position", "POSITION"},
 				{"ultra_fast", "ULTRA-FAST"},
-				{"scalp_reentry", "SCALP-REENTRY"},
+				// scalp_reentry removed - it's not a signal-generating mode, just position management
 			}
 
 			for _, mc := range modeChecks {
@@ -1891,13 +1974,10 @@ func (ga *GinieAutopilot) runMainLoop() {
 				}
 			}
 
-			// Scalp re-entry mode: uses same scan interval as scalp mode
-			if enabledModesMap["scalp_reentry"] && now.Sub(lastScalpReentryScan) >= time.Duration(ga.config.ScalpScanInterval)*time.Second {
-				log.Printf("[MODE-SCAN] Scanning SCALP-REENTRY mode (DB-enabled, interval: %ds)", ga.config.ScalpScanInterval)
-				ga.scanForMode(GinieModeScalpReentry)
-				lastScalpReentryScan = now
-				scansPerformed++
-			}
+			// NOTE: scalp_reentry is NOT scanned separately - it's a position optimization feature.
+			// When scalp mode is enabled AND ScalpReentryConfig.Enabled is true, scalp signals
+			// are automatically upgraded to scalp_reentry mode inside scanForMode() for
+			// progressive TP management (TP1/TP2/TP3 + re-entry at breakeven).
 
 			// Scan saved strategies (every 60 seconds)
 			if ga.strategyEvaluator != nil && now.Sub(lastStrategyScan) >= 60*time.Second {
@@ -2160,24 +2240,26 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 
 	// === SMART MARGIN ALLOCATION ===
 	// Get available balance for margin-aware prioritization
-	availableBalance := 0.0
 	accountInfo, err := ga.futuresClient.GetFuturesAccountInfo()
 	if err != nil {
-		log.Printf("[ULTRA-FAST-SCAN] Failed to get account balance: %v, using fallback", err)
-		availableBalance = 100 // Fallback
-	} else {
-		availableBalance = accountInfo.AvailableBalance
+		log.Printf("[ULTRA-FAST-SCAN] ERROR: Failed to get account balance: %v - skipping scan", err)
+		return
 	}
+	availableBalance := accountInfo.AvailableBalance
 
 	leverage := ga.config.DefaultLeverage
 	if leverage <= 0 {
 		leverage = 10
 	}
 
-	maxPositionUSD := float64(currentSettings.UltraFastMaxUSDPerPos)
-	if maxPositionUSD <= 0 {
-		maxPositionUSD = 50
+	// Get mode-specific position size from user settings
+	modeConfig := ga.getModeConfig(GinieModeUltraFast)
+	if modeConfig == nil || modeConfig.Size == nil || modeConfig.Size.MaxSizeUSD <= 0 {
+		log.Printf("[ULTRA-FAST-SCAN] ERROR: MaxSizeUSD not configured for ultra_fast mode - skipping scan")
+		return
 	}
+	maxPositionUSD := modeConfig.Size.MaxSizeUSD
+	log.Printf("[ULTRA-FAST-SCAN] Using mode-specific MaxSizeUSD: $%.2f (from user settings)", maxPositionUSD)
 
 	log.Printf("[ULTRA-FAST-SCAN] Available balance: $%.2f, max per position: $%.2f, leverage: %dx",
 		availableBalance, maxPositionUSD, leverage)
@@ -2316,13 +2398,13 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 
 // MarginRankedSymbol holds a symbol with its margin requirements and signal strength
 type MarginRankedSymbol struct {
-	Symbol           string
-	Price            float64
-	MinQty           float64
-	MinMarginUSD     float64  // Minimum margin needed for 1 position (price * minQty / leverage)
-	Signal           *UltraFastSignal
-	EfficiencyScore  float64  // Higher = better (confidence * volatility / margin)
-	PositionSizeUSD  float64  // Actual position size we'll use
+	Symbol          string
+	Price           float64
+	MinQty          float64
+	MinMarginUSD    float64 // Minimum margin needed for 1 position (price * minQty / leverage)
+	Signal          *UltraFastSignal
+	EfficiencyScore float64 // Higher = better (confidence * volatility / margin)
+	PositionSizeUSD float64 // Actual position size we'll use
 }
 
 // rankSymbolsByMarginEfficiency ranks symbols by their profit potential per unit margin
@@ -2441,7 +2523,7 @@ func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availa
 
 		// Determine actual position size: min(maxPositionUSD, availableBalance, what we can afford)
 		positionSizeUSD := maxPositionUSD
-		if positionSizeUSD > availableBalance * 0.9 { // 90% safety margin
+		if positionSizeUSD > availableBalance*0.9 { // 90% safety margin
 			positionSizeUSD = availableBalance * 0.9
 		}
 
@@ -2513,7 +2595,8 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 	// CRITICAL FIX: Check mode-specific position limit BEFORE scanning any symbols
 	// This prevents the scan from wasting resources when the limit is already reached
-	modeConfig := ga.getModeConfig(mode)
+	// Use getModeConfigForSizing to handle scalp_reentry -> scalp fallback for sizing config
+	modeConfig := ga.getModeConfigForSizing(mode)
 	maxPositions := ga.config.MaxPositions // Default to global config
 	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
 		maxPositions = modeConfig.Size.MaxPositions
@@ -2654,17 +2737,17 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				entryPrice = decision.TradeExecution.EntryHigh
 			}
 			signalLog := &GinieSignalLog{
-				Symbol:      symbol,
-				Direction:   decision.TradeExecution.Action,
-				Mode:        string(decision.SelectedMode),
-				Confidence:  decision.ConfidenceScore,
-				EntryPrice:  entryPrice,
-				StopLoss:    decision.TradeExecution.StopLoss,
-				Leverage:    decision.TradeExecution.Leverage,
-				RiskReward:  decision.TradeExecution.RiskReward,
-				Trend:       decision.MarketConditions.Trend,
-				Volatility:  decision.MarketConditions.Volatility,
-				ATRPercent:  decision.MarketConditions.ATR,
+				Symbol:     symbol,
+				Direction:  decision.TradeExecution.Action,
+				Mode:       string(decision.SelectedMode),
+				Confidence: decision.ConfidenceScore,
+				EntryPrice: entryPrice,
+				StopLoss:   decision.TradeExecution.StopLoss,
+				Leverage:   decision.TradeExecution.Leverage,
+				RiskReward: decision.TradeExecution.RiskReward,
+				Trend:      decision.MarketConditions.Trend,
+				Volatility: decision.MarketConditions.Volatility,
+				ATRPercent: decision.MarketConditions.ATR,
 			}
 			if len(decision.TradeExecution.TakeProfits) > 0 {
 				signalLog.TakeProfit1 = decision.TradeExecution.TakeProfits[0].Price
@@ -2855,7 +2938,6 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				continue
 			}
 
-
 			// CRITICAL: Skip if action is WAIT or CLOSE - these are not entry signals
 			tradeAction := decision.TradeExecution.Action
 			if tradeAction != "LONG" && tradeAction != "SHORT" {
@@ -2936,7 +3018,7 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			if mode != GinieModeUltraFast { // Ultra-fast has its own specialized MTF logic
 				mtfResult := ga.analyzer.AnalyzeMTF(symbol, mode)
 				if mtfResult.Enabled && !mtfResult.TrendAligned {
-					// MTF analysis blocked this trade
+					// MTF analysis indicates weak consensus/strength, but check direction match
 					modePrefix := ""
 					switch mode {
 					case GinieModeScalp:
@@ -2946,21 +3028,35 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 					case GinieModePosition:
 						modePrefix = "[POSITION-SCAN]"
 					}
-					log.Printf("%s %s: MTF MISALIGNED - Bias=%s Strength=%.0f Consensus=%d/3 Stable=%v, SKIP",
-						modePrefix, symbol, mtfResult.TrendBias, mtfResult.WeightedStrength,
-						mtfResult.Consensus, mtfResult.TrendStable)
-					log.Printf("%s %s: MTF Details - Primary=%s(%.0f) Secondary=%s(%.0f) Tertiary=%s(%.0f)",
-						modePrefix, symbol,
-						mtfResult.PrimaryTrend, mtfResult.PrimaryStrength,
-						mtfResult.SecondaryTrend, mtfResult.SecondaryStrength,
-						mtfResult.TertiaryTrend, mtfResult.TertiaryStrength)
 
-					signalLog.Status = "rejected"
-					signalLog.RejectionReason = fmt.Sprintf("mtf_misaligned: %s", mtfResult.AlignmentReason)
-					// Update the stored decision so UI shows correct rejected status
-					ga.analyzer.UpdateDecisionRecommendation(symbol, RecommendationSkip, mtfResult.AlignmentReason)
-					ga.LogSignal(signalLog)
-					continue
+					// FIX: Allow trade if signal direction matches MTF bias (even with weak metrics)
+					// This prevents blocking LONG signals when MTF also says LONG
+					directionMatches := mtfResult.TrendBias != "" &&
+						strings.EqualFold(mtfResult.TrendBias, tradeAction)
+
+					if directionMatches {
+						// Direction matches - allow trade despite weak consensus/strength
+						log.Printf("%s %s: MTF DIRECTION MATCH - Signal=%s Bias=%s (allowing despite weak metrics: Strength=%.0f Consensus=%d/3)",
+							modePrefix, symbol, tradeAction, mtfResult.TrendBias,
+							mtfResult.WeightedStrength, mtfResult.Consensus)
+					} else {
+						// Direction mismatches or no clear bias - block the trade
+						log.Printf("%s %s: MTF MISALIGNED - Bias=%s vs Signal=%s Strength=%.0f Consensus=%d/3 Stable=%v, SKIP",
+							modePrefix, symbol, mtfResult.TrendBias, tradeAction, mtfResult.WeightedStrength,
+							mtfResult.Consensus, mtfResult.TrendStable)
+						log.Printf("%s %s: MTF Details - Primary=%s(%.0f) Secondary=%s(%.0f) Tertiary=%s(%.0f)",
+							modePrefix, symbol,
+							mtfResult.PrimaryTrend, mtfResult.PrimaryStrength,
+							mtfResult.SecondaryTrend, mtfResult.SecondaryStrength,
+							mtfResult.TertiaryTrend, mtfResult.TertiaryStrength)
+
+						signalLog.Status = "rejected"
+						signalLog.RejectionReason = fmt.Sprintf("mtf_misaligned: %s", mtfResult.AlignmentReason)
+						// Update the stored decision so UI shows correct rejected status
+						ga.analyzer.UpdateDecisionRecommendation(symbol, RecommendationSkip, mtfResult.AlignmentReason)
+						ga.LogSignal(signalLog)
+						continue
+					}
 				}
 
 				// Log successful MTF alignment
@@ -2979,26 +3075,39 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				}
 			}
 
-			// Log as executed (will be attempted)
-			signalLog.Status = "executed"
-			ga.LogSignal(signalLog)
+			// Execute the trade and get result
+			tradeSuccess, tradeReason := ga.executeTradeWithResult(decision)
 
-			// Execute the trade
-			ga.executeTrade(decision)
+			// Log signal status based on ACTUAL trade result (not before)
+			if tradeSuccess {
+				signalLog.Status = "executed"
+				ga.LogSignal(signalLog)
 
-			// Scalp mode: Log trade execution (AC-2.2.2)
-			if isScalpMode {
-				log.Printf("[SCALP-SCAN] %s: Trade execution initiated", symbol)
-			}
+				// Mode-specific success logging
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Trade execution successful: %s", symbol, tradeReason)
+				}
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: ✓ Trade execution successful: %s", symbol, tradeReason)
+				}
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Trade execution successful: %s", symbol, tradeReason)
+				}
+			} else {
+				signalLog.Status = "rejected"
+				signalLog.RejectionReason = tradeReason
+				ga.LogSignal(signalLog)
 
-			// Swing mode: Log trade execution (AC-2.3.2)
-			if mode == GinieModeSwing {
-				log.Printf("[SWING-SCAN] %s: ✓ Trade execution initiated", symbol)
-			}
-
-			// Position mode: Log trade execution (AC-2.4.1)
-			if mode == GinieModePosition {
-				log.Printf("[POSITION-SCAN] %s: Trade execution initiated", symbol)
+				// Mode-specific failure logging
+				if isScalpMode {
+					log.Printf("[SCALP-SCAN] %s: Trade execution REJECTED: %s", symbol, tradeReason)
+				}
+				if mode == GinieModeSwing {
+					log.Printf("[SWING-SCAN] %s: Trade execution REJECTED: %s", symbol, tradeReason)
+				}
+				if mode == GinieModePosition {
+					log.Printf("[POSITION-SCAN] %s: Trade execution REJECTED: %s", symbol, tradeReason)
+				}
 			}
 		}
 	}
@@ -3051,7 +3160,8 @@ func (ga *GinieAutopilot) getAvailableBalance() (float64, error) {
 // - modeConfig.Size.Leverage: Leverage setting for this mode
 func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidence float64, currentPositionCount int, mode GinieTradingMode, llmSuggestedSize float64) (positionUSD float64, canTrade bool, reason string) {
 	// Get mode configuration for mode-specific sizing parameters (from database)
-	modeConfig := ga.getModeConfig(mode)
+	// Use getModeConfigForSizing to handle scalp_reentry -> scalp fallback for sizing config
+	modeConfig := ga.getModeConfigForSizing(mode)
 
 	// Get actual available balance from Binance
 	availableBalance, err := ga.getAvailableBalance()
@@ -3060,18 +3170,35 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		return 0, false, "cannot fetch balance"
 	}
 
-	// Safety margin: use mode config or fallback to 0.90 (only use 90% of available balance)
-	safetyMargin := 0.90
-	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.SafetyMargin > 0 {
-		safetyMargin = modeConfig.Size.SafetyMargin
+	// Safety margin: STRICT REQUIREMENT - MUST be configured - NO FALLBACK
+	if modeConfig == nil || modeConfig.Size == nil || modeConfig.Size.SafetyMargin <= 0 {
+		ga.logger.Error("Safety margin not configured - cannot trade",
+			"mode", mode,
+			"reason", "safety_margin not set in user settings")
+		return 0, false, fmt.Sprintf("mode %s safety_margin not configured - skipping trade", mode)
 	}
+	safetyMargin := modeConfig.Size.SafetyMargin
 	usableBalance := availableBalance * safetyMargin
 
-	// Check minimum balance threshold: use mode config or fallback to $25
-	minBalanceRequired := 25.0
-	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinBalanceUSD > 0 {
-		minBalanceRequired = modeConfig.Size.MinBalanceUSD
+	// Get leverage for position sizing calculations
+	leverage := ga.config.DefaultLeverage
+	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
+		leverage = modeConfig.Size.Leverage
 	}
+	if leverage <= 0 {
+		leverage = 10 // Fallback to 10x if not configured
+	}
+	// Calculate available notional value considering leverage
+	availableNotional := usableBalance * float64(leverage)
+
+	// Check minimum balance threshold: STRICT REQUIREMENT - MUST be configured - NO FALLBACK
+	if modeConfig.Size.MinBalanceUSD <= 0 {
+		ga.logger.Error("Minimum balance threshold not configured - cannot trade",
+			"mode", mode,
+			"reason", "min_balance_usd not set in user settings")
+		return 0, false, fmt.Sprintf("mode %s min_balance_usd not configured - skipping trade", mode)
+	}
+	minBalanceRequired := modeConfig.Size.MinBalanceUSD
 	if usableBalance < minBalanceRequired {
 		return 0, false, fmt.Sprintf("insufficient balance: $%.2f (need $%.2f)", usableBalance, minBalanceRequired)
 	}
@@ -3089,31 +3216,32 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 	}
 
 	// Calculate allocation per potential new position
-	// Use base_size_usd from mode config if set, otherwise divide usable balance across slots
-	baseAllocationPerPosition := usableBalance / float64(availableSlots)
-	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.BaseSizeUSD > 0 {
-		// Use configured base size instead of balance-based calculation
-		baseAllocationPerPosition = modeConfig.Size.BaseSizeUSD
-		ga.logger.Debug("Using configured base_size_usd",
+	// STRICT REQUIREMENT: Use base_size_usd from mode config - NO FALLBACK
+	if modeConfig == nil || modeConfig.Size == nil || modeConfig.Size.BaseSizeUSD <= 0 {
+		ga.logger.Error("Position size not configured - cannot trade",
 			"mode", mode,
-			"base_size_usd", modeConfig.Size.BaseSizeUSD,
-			"balance_based_would_be", usableBalance/float64(availableSlots))
+			"reason", "base_size_usd not set in user settings")
+		return 0, false, fmt.Sprintf("mode %s base_size_usd not configured - skipping trade", mode)
 	}
+	baseAllocationPerPosition := modeConfig.Size.BaseSizeUSD
+	ga.logger.Debug("Using configured base_size_usd",
+		"mode", mode,
+		"base_size_usd", modeConfig.Size.BaseSizeUSD)
 
-	// Get risk multipliers from mode config with fallbacks
-	riskMultiplierConservative := 0.6
-	riskMultiplierModerate := 0.8
-	riskMultiplierAggressive := 1.0
-	if modeConfig != nil && modeConfig.Size != nil {
-		if modeConfig.Size.RiskMultiplierConservative > 0 {
-			riskMultiplierConservative = modeConfig.Size.RiskMultiplierConservative
-		}
-		if modeConfig.Size.RiskMultiplierModerate > 0 {
-			riskMultiplierModerate = modeConfig.Size.RiskMultiplierModerate
-		}
-		if modeConfig.Size.RiskMultiplierAggressive > 0 {
-			riskMultiplierAggressive = modeConfig.Size.RiskMultiplierAggressive
-		}
+	// Get risk multipliers from mode config - use sensible defaults if not configured
+	riskMultiplierConservative := modeConfig.Size.RiskMultiplierConservative
+	riskMultiplierModerate := modeConfig.Size.RiskMultiplierModerate
+	riskMultiplierAggressive := modeConfig.Size.RiskMultiplierAggressive
+
+	// Apply sensible defaults if not configured
+	if riskMultiplierConservative <= 0 {
+		riskMultiplierConservative = 0.6
+	}
+	if riskMultiplierModerate <= 0 {
+		riskMultiplierModerate = 0.8
+	}
+	if riskMultiplierAggressive <= 0 {
+		riskMultiplierAggressive = 1.0
 	}
 
 	// Adjust based on risk level using mode-specific multipliers
@@ -3127,16 +3255,16 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		riskMultiplier = riskMultiplierAggressive
 	}
 
-	// Get confidence multipliers from mode config with fallbacks
-	confidenceBase := 0.5
-	confidenceScale := 0.7
-	if modeConfig != nil && modeConfig.Size != nil {
-		if modeConfig.Size.ConfidenceMultiplierBase > 0 {
-			confidenceBase = modeConfig.Size.ConfidenceMultiplierBase
-		}
-		if modeConfig.Size.ConfidenceMultiplierScale > 0 {
-			confidenceScale = modeConfig.Size.ConfidenceMultiplierScale
-		}
+	// Get confidence multipliers from mode config - use sensible defaults if not configured
+	confidenceBase := modeConfig.Size.ConfidenceMultiplierBase
+	confidenceScale := modeConfig.Size.ConfidenceMultiplierScale
+
+	// Apply sensible defaults if not configured
+	if confidenceBase <= 0 {
+		confidenceBase = 0.5
+	}
+	if confidenceScale <= 0 {
+		confidenceScale = 0.7
 	}
 
 	// Adjust based on confidence (higher confidence = more allocation)
@@ -3193,16 +3321,21 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 
 	// Minimum position size enforcement: ENFORCE minimum instead of rejecting
 	// This ensures we always use at least the minimum notional size for visible profits
-	minPositionSize := 100.0 // Default minimum notional: $100 = $20 margin at 5x (lowered for smaller accounts)
-	if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MinPositionSizeUSD > 0 {
-		minPositionSize = modeConfig.Size.MinPositionSizeUSD
+	// STRICT REQUIREMENT: min_position_size_usd MUST be configured - NO FALLBACK
+	if modeConfig == nil || modeConfig.Size == nil || modeConfig.Size.MinPositionSizeUSD <= 0 {
+		ga.logger.Error("Minimum position size not configured - cannot trade",
+			"mode", mode,
+			"reason", "min_position_size_usd not set in user settings")
+		return 0, false, fmt.Sprintf("mode %s min_position_size_usd not configured - skipping trade", mode)
 	}
+	minPositionSize := modeConfig.Size.MinPositionSizeUSD
 
 	// If calculated position is below minimum, enforce the minimum
 	if positionUSD < minPositionSize {
-		// Check if we can afford the minimum position
-		if minPositionSize > usableBalance*0.9 {
-			return 0, false, fmt.Sprintf("insufficient balance for minimum position: need $%.2f, have $%.2f usable", minPositionSize, usableBalance*0.9)
+		// Check if we can afford the minimum position (considering leverage)
+		if minPositionSize > availableNotional*0.9 {
+			return 0, false, fmt.Sprintf("insufficient balance for minimum position: need $%.2f notional, have $%.2f available (margin: $%.2f x leverage: %dx)",
+				minPositionSize, availableNotional*0.9, usableBalance, leverage)
 		}
 		// Also check against max size cap
 		if minPositionSize > maxSizeUSD {
@@ -3227,6 +3360,8 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		"sizing_method", sizingMethod,
 		"available_balance", fmt.Sprintf("$%.2f", availableBalance),
 		"usable_balance", fmt.Sprintf("$%.2f", usableBalance),
+		"leverage", fmt.Sprintf("%dx", leverage),
+		"available_notional", fmt.Sprintf("$%.2f", availableNotional),
 		"safety_margin", fmt.Sprintf("%.0f%%", safetyMargin*100),
 		"current_positions", currentPositionCount,
 		"available_slots", availableSlots,
@@ -3255,8 +3390,8 @@ func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool, mode Gini
 	}
 
 	// Get mode-specific funding rate config with fallback defaults
-	var maxRate float64 = 0.001       // 0.1% threshold (fallback)
-	var blockTimeMinutes int = 30      // Block within 30 minutes of funding (fallback)
+	var maxRate float64 = 0.001   // 0.1% threshold (fallback)
+	var blockTimeMinutes int = 30 // Block within 30 minutes of funding (fallback)
 
 	modeConfig := ga.getModeConfig(mode)
 	if modeConfig != nil && modeConfig.FundingRate != nil {
@@ -3781,7 +3916,11 @@ func (ga *GinieAutopilot) executeStagedEntryOrder(pos *GiniePosition, quantity f
 // ==================== END STAGED ENTRY HELPERS ====================
 
 // executeTrade executes a trade based on Ginie decision
-func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
+// executeTradeWithResult executes a trade and returns whether it was successful
+// Returns (success bool, reason string) where:
+// - success=true: order was placed (may be MARKET fill or pending LIMIT)
+// - success=false: trade was rejected with reason
+func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) (bool, string) {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -3792,7 +3931,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		ga.logger.Warn("Ginie skipping trade - coin is blocked",
 			"symbol", symbol,
 			"reason", reason)
-		return
+		return false, fmt.Sprintf("coin_blocked: %s", reason)
 	}
 
 	// CRITICAL: Skip trades where action is WAIT or CLOSE - these are not entry signals
@@ -3802,7 +3941,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			"symbol", symbol,
 			"action", action,
 			"confidence", decision.ConfidenceScore)
-		return
+		return false, fmt.Sprintf("invalid_action: %s", action)
 	}
 
 	// Check funding rate before entry - avoid high fees near funding time
@@ -3814,7 +3953,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			"mode", selectedMode,
 			"reason", reason,
 			"side", decision.TradeExecution.Action)
-		return
+		return false, fmt.Sprintf("funding_rate: %s", reason)
 	}
 
 	// Check if we already have a position - if so, evaluate hedge opportunity
@@ -3868,7 +4007,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 				}
 			}
 		}
-		return // Still skip opening new position if one exists
+		return false, "position_exists" // Still skip opening new position if one exists
 	}
 
 	// Capture MODE-SPECIFIC position count while holding lock for adaptive sizing
@@ -3904,7 +4043,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	if _, exists := ga.positions[symbol]; exists {
 		ga.logger.Warn("Ginie race condition avoided - position created while sizing",
 			"symbol", symbol)
-		return
+		return false, "race_condition_position_created"
 	}
 
 	if !canTrade {
@@ -3912,7 +4051,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			"symbol", symbol,
 			"reason", reason,
 			"confidence_score", decision.ConfidenceScore)
-		return
+		return false, fmt.Sprintf("sizing_rejected: %s", reason)
 	}
 
 	// Check mode-specific capital allocation limit
@@ -3922,7 +4061,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			"mode", selectedMode,
 			"reason", allocReason,
 			"requested_usd", positionUSD)
-		return
+		return false, fmt.Sprintf("allocation_limit: %s", allocReason)
 	}
 
 	// Adjust position size based on funding rate (reduce if funding costs us money)
@@ -3932,7 +4071,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	price, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
 	if err != nil {
 		ga.logger.Error("Failed to get price for trade", "symbol", symbol, "error", err)
-		return
+		return false, fmt.Sprintf("price_fetch_failed: %v", err)
 	}
 
 	// Use leverage from decision or default
@@ -3941,25 +4080,27 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		leverage = ga.config.DefaultLeverage
 	}
 
-	// SCALP_REENTRY POSITION SIZING: Use minimum 10x leverage for adequate notional size
-	// With $50 margin and 10x leverage = $500 notional position
+	// SCALP_REENTRY POSITION SIZING: Use minimum 10x leverage for adequate buying power
+	// positionUSD is the NOTIONAL VALUE (e.g., $500 notional with 10x leverage requires $50 margin)
 	if decision.SelectedMode == GinieModeScalpReentry {
 		// Minimum 10x leverage for scalp_reentry
 		if leverage < 10 {
 			log.Printf("[SCALP-REENTRY] %s: Upgrading leverage from %dx to 10x (minimum for scalp_reentry)", symbol, leverage)
 			leverage = 10
 		}
-		log.Printf("[SCALP-REENTRY] %s: Position margin: $%.2f, leverage: %dx, notional: $%.2f",
-			symbol, positionUSD, leverage, positionUSD*float64(leverage))
+		log.Printf("[SCALP-REENTRY] %s: Position notional: $%.2f, leverage: %dx, required margin: $%.2f",
+			symbol, positionUSD, leverage, positionUSD/float64(leverage))
 	}
 
 	// Calculate quantity based on adaptive position size
-	quantity := (positionUSD * float64(leverage)) / price
+	// CRITICAL: positionUSD is NOTIONAL VALUE, not margin
+	// Formula: quantity = notional / price (leverage is already applied via exchange)
+	quantity := positionUSD / price
 	quantity = roundQuantity(symbol, quantity)
 
 	if quantity <= 0 {
 		ga.logger.Warn("Ginie calculated zero quantity", "symbol", symbol, "usd", positionUSD)
-		return
+		return false, "zero_quantity"
 	}
 
 	// === 3-LEVEL STAGED ENTRY: Reduce initial quantity if enabled ===
@@ -4046,7 +4187,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 		_, err = ga.futuresClient.SetLeverage(symbol, leverage)
 		if err != nil {
 			ga.logger.Error("Failed to set leverage", "symbol", symbol, "error", err.Error())
-			return
+			return false, fmt.Sprintf("leverage_failed: %v", err)
 		}
 
 		// === REVERSAL LIMIT ORDER HANDLING ===
@@ -4055,7 +4196,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			limitPrice := decision.TradeExecution.LimitEntryPrice
 			if limitPrice <= 0 {
 				ga.logger.Error("Invalid LIMIT price for reversal entry", "symbol", symbol, "price", limitPrice)
-				return
+				return false, "invalid_reversal_limit_price"
 			}
 
 			// Round limit price to symbol precision
@@ -4075,7 +4216,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			limitOrder, err := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
 			if err != nil {
 				ga.logger.Error("Reversal LIMIT order failed", "symbol", symbol, "error", err.Error())
-				return
+				return false, fmt.Sprintf("reversal_limit_order_failed: %v", err)
 			}
 
 			// Track pending LIMIT order with 120-second timeout
@@ -4102,7 +4243,8 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 				"timeout_at", timeoutAt.Format(time.RFC3339))
 
 			// Return early - position will be created when order fills (handled by monitorPendingLimitOrders)
-			return
+			// This is considered successful as the order was placed (pending fill)
+			return true, "limit_order_pending"
 		}
 
 		// === LIMIT ORDER ENTRY AT PREVIOUS CANDLE EXTREME ===
@@ -4128,7 +4270,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
 			if err != nil {
 				ga.logger.Error("Ginie MARKET trade execution failed", "symbol", symbol, "error", err.Error())
-				return
+				return false, fmt.Sprintf("market_order_failed: %v", err)
 			}
 
 			// Verify order fill
@@ -4138,7 +4280,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 					"symbol", symbol,
 					"order_id", order.OrderId,
 					"error", fillErr.Error())
-				return
+				return false, fmt.Sprintf("order_fill_verification_failed: %v", fillErr)
 			}
 
 			actualPrice = fillPrice
@@ -4178,7 +4320,7 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 					"symbol", symbol,
 					"limit_price", limitEntryPrice,
 					"error", err.Error())
-				return
+				return false, fmt.Sprintf("limit_order_failed: %v", err)
 			} else {
 				// Track pending LIMIT order with timeout
 				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
@@ -4209,7 +4351,8 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 					"timeout_sec", limitTimeoutSec)
 
 				// Return early - position will be created when order fills (handled by monitorPendingLimitOrders)
-				return
+				// This is considered successful as the order was placed (pending fill)
+				return true, "limit_order_pending"
 			}
 		}
 	}
@@ -4225,27 +4368,27 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 	}
 
 	position := &GiniePosition{
-		Symbol:               symbol,
-		Side:                 decision.TradeExecution.Action,
-		Mode:                 decision.SelectedMode,
-		EntryPrice:           actualPrice,
-		OriginalQty:          actualQty,
-		RemainingQty:         actualQty,
-		Leverage:             leverage,
-		EntryTime:            time.Now(),
-		TakeProfits:          takeProfits,
-		CurrentTPLevel:       0,
-		StopLoss:             decision.TradeExecution.StopLoss,
-		OriginalSL:           decision.TradeExecution.StopLoss,
-		MovedToBreakeven:     false,
-		TrailingActive:       false,
-		HighestPrice:         actualPrice,
-		LowestPrice:          actualPrice,
-		TrailingPercent:      trailingPercent,
+		Symbol:                symbol,
+		Side:                  decision.TradeExecution.Action,
+		Mode:                  decision.SelectedMode,
+		EntryPrice:            actualPrice,
+		OriginalQty:           actualQty,
+		RemainingQty:          actualQty,
+		Leverage:              leverage,
+		EntryTime:             time.Now(),
+		TakeProfits:           takeProfits,
+		CurrentTPLevel:        0,
+		StopLoss:              decision.TradeExecution.StopLoss,
+		OriginalSL:            decision.TradeExecution.StopLoss,
+		MovedToBreakeven:      false,
+		TrailingActive:        false,
+		HighestPrice:          actualPrice,
+		LowestPrice:           actualPrice,
+		TrailingPercent:       trailingPercent,
 		TrailingActivationPct: trailingActivation, // Now properly initialized from Mode Config
-		DecisionReport:       decision,
-		Source:               "ai", // AI-based trade
-		Protection:           NewProtectionStatus(), // Initialize bulletproof protection tracking
+		DecisionReport:        decision,
+		Source:                "ai",                  // AI-based trade
+		Protection:            NewProtectionStatus(), // Initialize bulletproof protection tracking
 		// === 3-LEVEL STAGED ENTRY TRACKING ===
 		StagedEntryActive:    stagedEntryActive,
 		StagedEntryLevel:     1, // First level
@@ -4442,6 +4585,15 @@ func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
 			RiskReward:  decision.TradeExecution.RiskReward,
 		},
 	})
+
+	// Trade execution was successful
+	return true, "executed"
+}
+
+// executeTrade is a wrapper for backward compatibility - calls executeTradeWithResult
+// and ignores the return values. New code should use executeTradeWithResult directly.
+func (ga *GinieAutopilot) executeTrade(decision *GinieDecisionReport) {
+	ga.executeTradeWithResult(decision)
 }
 
 // runPositionMonitor monitors all positions for TP/SL hits and trailing
@@ -4989,60 +5141,60 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 						pos.Symbol, symbolSettings.CustomROIPercent)
 				}
 
-			// 3. Fallback to mode-based threshold from ModeConfigs (not hardcoded)
-			// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
-			settings := settingsManager.GetDefaultSettings()
-			modeToConfigKey := map[string]string{
-				string(GinieModeUltraFast):    "ultra_fast",
-				string(GinieModeScalp):        "scalp",
-				string(GinieModeSwing):        "swing",
-				string(GinieModePosition):     "position",
-				string(GinieModeScalpReentry): "scalp_reentry",
-			}
-			modeDefaults := map[string]float64{
-				"ultra_fast":    2.0,
-				"scalp":         3.0,
-				"swing":         5.0,
-				"position":      8.0,
-				"scalp_reentry": 1.0, // Progressive TP for scalp_reentry
-			}
+				// 3. Fallback to mode-based threshold from ModeConfigs (not hardcoded)
+				// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
+				settings := settingsManager.GetDefaultSettings()
+				modeToConfigKey := map[string]string{
+					string(GinieModeUltraFast):    "ultra_fast",
+					string(GinieModeScalp):        "scalp",
+					string(GinieModeSwing):        "swing",
+					string(GinieModePosition):     "position",
+					string(GinieModeScalpReentry): "scalp_reentry",
+				}
+				modeDefaults := map[string]float64{
+					"ultra_fast":    2.0,
+					"scalp":         3.0,
+					"swing":         5.0,
+					"position":      8.0,
+					"scalp_reentry": 1.0, // Progressive TP for scalp_reentry
+				}
 
-			var tpPercent float64
-			modeKey, ok := modeToConfigKey[string(pos.Mode)]
-			if !ok {
-				tpPercent = 5.0
-				source = "default"
-			} else {
-				tpPercent = modeDefaults[modeKey]
-				source = modeKey + "_settings"
-				if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
-					if modeConfig.SLTP != nil && modeConfig.SLTP.TakeProfitPercent > 0 {
-						tpPercent = modeConfig.SLTP.TakeProfitPercent
+				var tpPercent float64
+				modeKey, ok := modeToConfigKey[string(pos.Mode)]
+				if !ok {
+					tpPercent = 5.0
+					source = "default"
+				} else {
+					tpPercent = modeDefaults[modeKey]
+					source = modeKey + "_settings"
+					if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
+						if modeConfig.SLTP != nil && modeConfig.SLTP.TakeProfitPercent > 0 {
+							tpPercent = modeConfig.SLTP.TakeProfitPercent
+						}
 					}
 				}
-			}
 
-			// Convert TP% to ROI threshold, but use a FRACTION for early booking
-			// Early profit should trigger BEFORE reaching full TP (e.g., at 50% of target)
-			// Also cap maximum threshold to prevent unreasonably high values
-			fullTPROI := tpPercent * float64(pos.Leverage)
+				// Convert TP% to ROI threshold, but use a FRACTION for early booking
+				// Early profit should trigger BEFORE reaching full TP (e.g., at 50% of target)
+				// Also cap maximum threshold to prevent unreasonably high values
+				fullTPROI := tpPercent * float64(pos.Leverage)
 
-			// Use 40% of full TP ROI for early booking, with min 3% and max 15% cap
-			earlyBookingFraction := 0.4
-			threshold = fullTPROI * earlyBookingFraction
+				// Use 40% of full TP ROI for early booking, with min 3% and max 15% cap
+				earlyBookingFraction := 0.4
+				threshold = fullTPROI * earlyBookingFraction
 
-			// Enforce reasonable bounds
-			const minEarlyThreshold = 3.0  // At least 3% ROI to book
-			const maxEarlyThreshold = 15.0 // Cap at 15% ROI max
+				// Enforce reasonable bounds
+				const minEarlyThreshold = 3.0  // At least 3% ROI to book
+				const maxEarlyThreshold = 15.0 // Cap at 15% ROI max
 
-			if threshold < minEarlyThreshold {
-				threshold = minEarlyThreshold
-			} else if threshold > maxEarlyThreshold {
-				threshold = maxEarlyThreshold
-			}
+				if threshold < minEarlyThreshold {
+					threshold = minEarlyThreshold
+				} else if threshold > maxEarlyThreshold {
+					threshold = maxEarlyThreshold
+				}
 
-			fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × lev=%d = fullROI=%.2f%%, early threshold=%.2f%% (40%% of full, capped 3-15%%)\n",
-				pos.Symbol, source, tpPercent, pos.Leverage, fullTPROI, threshold)
+				fmt.Printf("[EARLY-PROFIT-DEBUG] %s: Using %s TP=%.2f%% × lev=%d = fullROI=%.2f%%, early threshold=%.2f%% (40%% of full, capped 3-15%%)\n",
+					pos.Symbol, source, tpPercent, pos.Leverage, fullTPROI, threshold)
 			}
 		}
 	}
@@ -5351,9 +5503,9 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 	if pos.DecisionReport != nil {
 		tradeResult.Confidence = pos.DecisionReport.ConfidenceScore
 		tradeResult.EntryParams = &GinieEntryParams{
-			EntryPrice:  pos.EntryPrice,
-			StopLoss:    pos.OriginalSL,
-			Leverage:    pos.Leverage,
+			EntryPrice: pos.EntryPrice,
+			StopLoss:   pos.OriginalSL,
+			Leverage:   pos.Leverage,
 		}
 	}
 
@@ -5985,7 +6137,7 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 		// CRITICAL FIX: Round quantity and price to match Binance's precision requirements
 		// Without this, orders are rejected with precision errors
 		roundedQty := roundQuantity(symbol, pos.RemainingQty)
-		roundedPrice := roundPriceForTP(symbol, closePrice, pos.Side)  // Ensure tick-size alignment
+		roundedPrice := roundPriceForTP(symbol, closePrice, pos.Side) // Ensure tick-size alignment
 
 		ga.logger.Info("Placing close order",
 			"symbol", symbol,
@@ -6073,10 +6225,10 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 			BTCCorr:    pos.DecisionReport.MarketConditions.BTCCorr,
 		}
 		tradeResult.EntryParams = &GinieEntryParams{
-			EntryPrice:  pos.EntryPrice,
-			StopLoss:    pos.OriginalSL,
-			Leverage:    pos.Leverage,
-			RiskReward:  pos.DecisionReport.TradeExecution.RiskReward,
+			EntryPrice: pos.EntryPrice,
+			StopLoss:   pos.OriginalSL,
+			Leverage:   pos.Leverage,
+			RiskReward: pos.DecisionReport.TradeExecution.RiskReward,
 		}
 	}
 
@@ -6214,16 +6366,16 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 
 	// Create trade result
 	tradeResult := GinieTradeResult{
-		Symbol:    symbol,
-		Mode:      pos.Mode,
-		Side:      pos.Side,
-		Action:    "close_market",
-		Price:     currentPrice,
-		Quantity:  pos.OriginalQty,
-		PnL:       totalPnL,
+		Symbol:     symbol,
+		Mode:       pos.Mode,
+		Side:       pos.Side,
+		Action:     "close_market",
+		Price:      currentPrice,
+		Quantity:   pos.OriginalQty,
+		PnL:        totalPnL,
 		PnLPercent: pnlPercent,
-		Reason:    reason,
-		Timestamp: time.Now(),
+		Reason:     reason,
+		Timestamp:  time.Now(),
 	}
 	ga.recordTrade(tradeResult)
 
@@ -6456,6 +6608,19 @@ func (ga *GinieAutopilot) getTPPercent(level int) float64 {
 	}
 }
 
+// getModeConfigForSizing retrieves the mode configuration for sizing-related parameters.
+// scalp_reentry is an enhancement of scalp mode and doesn't have its own sizing config,
+// so it falls back to scalp mode's sizing configuration.
+// Use this method when you need sizing-related settings (base_size_usd, safety_margin, min_balance_usd, etc.)
+func (ga *GinieAutopilot) getModeConfigForSizing(mode GinieTradingMode) *ModeFullConfig {
+	// scalp_reentry uses scalp mode's sizing configuration
+	configMode := mode
+	if mode == GinieModeScalpReentry {
+		configMode = GinieModeScalp
+	}
+	return ga.getModeConfig(configMode)
+}
+
 // getModeConfig retrieves the mode configuration from SettingsManager with database-first approach
 // This is a helper method that provides a unified way to get mode-specific configuration
 // Priority: 1) User-specific DB config, 2) Global defaults (for new users only)
@@ -6471,8 +6636,13 @@ func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 	if ga.repo != nil && ga.userID != "" {
 		ctx := context.Background()
 		if modeConfig, err := sm.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, modeStr); err == nil && modeConfig != nil {
+			// Safe logging with nil check for Size field
+			baseSizeUSD := 0.0
+			if modeConfig.Size != nil {
+				baseSizeUSD = modeConfig.Size.BaseSizeUSD
+			}
 			log.Printf("[MODE-CONFIG] Loaded from DATABASE for user %s mode %s: BaseSizeUSD=%.2f",
-				ga.userID, modeStr, modeConfig.Size.BaseSizeUSD)
+				ga.userID, modeStr, baseSizeUSD)
 			return modeConfig
 		}
 	}
@@ -6979,8 +7149,15 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 				Status:  "pending",
 			})
 		}
-		log.Printf("[GINIE] %s: Generated scalp_reentry TPs from ScalpReentryConfig: TP1=%.4f (%.1f%%), TP2=%.4f (%.1f%%), TP3=%.4f (%.1f%%)",
-			symbol, tps[0].Price, tps[0].GainPct, tps[1].Price, tps[1].GainPct, tps[2].Price, tps[2].GainPct)
+		// Log TP levels only if we have generated at least 3 TPs
+		if len(tps) >= 3 {
+			log.Printf("[GINIE] %s: Generated scalp_reentry TPs from ScalpReentryConfig: TP1=%.4f (%.1f%%), TP2=%.4f (%.1f%%), TP3=%.4f (%.1f%%)",
+				symbol, tps[0].Price, tps[0].GainPct, tps[1].Price, tps[1].GainPct, tps[2].Price, tps[2].GainPct)
+		} else if len(tps) > 0 {
+			log.Printf("[GINIE] %s: Generated %d scalp_reentry TP level(s) from ScalpReentryConfig", symbol, len(tps))
+		} else {
+			log.Printf("[GINIE] %s: Warning - No scalp_reentry TPs generated (all allocations <= 0)", symbol)
+		}
 		return tps
 	}
 
@@ -7087,7 +7264,11 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 func (ga *GinieAutopilot) calculateCurrentAllocation() float64 {
 	var total float64
 	for _, pos := range ga.positions {
-		total += pos.EntryPrice * pos.RemainingQty / float64(pos.Leverage)
+		leverage := pos.Leverage
+		if leverage <= 0 {
+			leverage = 10 // Default leverage to prevent division by zero
+		}
+		total += pos.EntryPrice * pos.RemainingQty / float64(leverage)
 	}
 	return total
 }
@@ -7417,21 +7598,21 @@ func (ga *GinieAutopilot) GetCircuitBreakerStatus() map[string]interface{} {
 	canTrade, reason := ga.circuitBreaker.CanTrade()
 
 	return map[string]interface{}{
-		"enabled":             ga.config.CircuitBreakerEnabled,
-		"can_trade":           canTrade,
-		"block_reason":        reason,
-		"state":               stats["state"],
-		"hourly_loss":         stats["hourly_loss"],
-		"daily_loss":          stats["daily_loss"],
-		"consecutive_losses":  stats["consecutive_losses"],
-		"trades_last_minute":  stats["trades_last_minute"],
-		"daily_trades":        stats["daily_trades"],
-		"trip_reason":         stats["trip_reason"],
-		"last_trip_time":      stats["last_trip_time"],
-		"max_loss_per_hour":   ga.config.CBMaxLossPerHour,
-		"max_daily_loss":      ga.config.CBMaxDailyLoss,
-		"max_consecutive":     ga.config.CBMaxConsecutiveLosses,
-		"cooldown_minutes":    ga.config.CBCooldownMinutes,
+		"enabled":            ga.config.CircuitBreakerEnabled,
+		"can_trade":          canTrade,
+		"block_reason":       reason,
+		"state":              stats["state"],
+		"hourly_loss":        stats["hourly_loss"],
+		"daily_loss":         stats["daily_loss"],
+		"consecutive_losses": stats["consecutive_losses"],
+		"trades_last_minute": stats["trades_last_minute"],
+		"daily_trades":       stats["daily_trades"],
+		"trip_reason":        stats["trip_reason"],
+		"last_trip_time":     stats["last_trip_time"],
+		"max_loss_per_hour":  ga.config.CBMaxLossPerHour,
+		"max_daily_loss":     ga.config.CBMaxDailyLoss,
+		"max_consecutive":    ga.config.CBMaxConsecutiveLosses,
+		"cooldown_minutes":   ga.config.CBCooldownMinutes,
 	}
 }
 
@@ -8154,19 +8335,27 @@ func (ga *GinieAutopilot) validateAndFixSLTPPrices(pos *GiniePosition) *GiniePos
 
 		// Recalculate TPs if needed
 		if tpNeedsRecalc {
-			// Generate new TPs using safe gains
+			// Try to load from database first, fallback to safe defaults
 			var gains []float64
-			switch pos.Mode {
-			case GinieModeUltraFast:
-				gains = []float64{0.15, 0.3, 0.5, 0.8}
-			case GinieModeScalp:
-				gains = []float64{0.3, 0.6, 1.0, 1.5}
-			case GinieModeSwing:
-				gains = []float64{1.0, 2.0, 3.0, 4.0}
-			case GinieModePosition:
-				gains = []float64{2.0, 4.0, 6.0, 8.0}
-			default:
-				gains = []float64{1.0, 2.0, 3.0, 4.0}
+			modeConfig := ga.getModeConfig(pos.Mode)
+			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
+				gains = modeConfig.SLTP.TPGainLevels[:4]
+				log.Printf("[GINIE-SLTP-FIX] %s: Using TP gains from database for mode %s: %v", pos.Symbol, pos.Mode, gains)
+			} else {
+				// Fallback to safe defaults if database unavailable
+				switch pos.Mode {
+				case GinieModeUltraFast:
+					gains = []float64{0.15, 0.3, 0.5, 0.8}
+				case GinieModeScalp:
+					gains = []float64{0.3, 0.6, 1.0, 1.5}
+				case GinieModeSwing:
+					gains = []float64{1.0, 2.0, 3.0, 4.0}
+				case GinieModePosition:
+					gains = []float64{2.0, 4.0, 6.0, 8.0}
+				default:
+					gains = []float64{1.0, 2.0, 3.0, 4.0}
+				}
+				log.Printf("[GINIE-SLTP-FIX] %s: Using hardcoded TP gains fallback for mode %s: %v", pos.Symbol, pos.Mode, gains)
 			}
 
 			// Ensure we have same number of TPs
@@ -9325,6 +9514,15 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			internalPos.UnrealizedPnL = exchangePos.UnrealizedProfit
 		}
 
+		// Update leverage from exchange if present
+		if exchangePos.Leverage > 0 && internalPos.Leverage != exchangePos.Leverage {
+			ga.logger.Debug("Position reconciliation: updating leverage",
+				"symbol", symbol,
+				"internal_leverage", internalPos.Leverage,
+				"exchange_leverage", exchangePos.Leverage)
+			internalPos.Leverage = exchangePos.Leverage
+		}
+
 		// CHECK FOR MISSING SLTP ORDERS - FIX: recreate if deleted manually
 		// This runs during reconciliation to ensure positions always have protection
 		// NOTE: We copy the position to avoid race conditions - the original may be modified
@@ -9458,7 +9656,8 @@ func (ga *GinieAutopilot) reconcilePositions() {
 			}
 
 			// BUG FIX: Check mode-specific position limit before adding
-			modeConfig := ga.getModeConfig(externalMode)
+			// Use getModeConfigForSizing to handle scalp_reentry -> scalp fallback for sizing config
+			modeConfig := ga.getModeConfigForSizing(externalMode)
 			maxPositions := ga.config.MaxPositions
 			if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
 				maxPositions = modeConfig.Size.MaxPositions
@@ -9492,7 +9691,7 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				EntryPrice:   exchangePos.EntryPrice,
 				OriginalQty:  qty,
 				RemainingQty: qty,
-				EntryTime:    time.Now(), // Approximate
+				EntryTime:    time.Now(),   // Approximate
 				Mode:         externalMode, // Use user's enabled mode preference
 				HighestPrice: exchangePos.MarkPrice,
 				LowestPrice:  exchangePos.MarkPrice,
@@ -9516,10 +9715,8 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				UnrealizedPnL: exchangePos.UnrealizedProfit,
 			}
 
-			ga.positions[exchangePos.Symbol] = newPos
-			addedPerMode[externalMode]++
-
-			// CRITICAL: Restore saved state if available (scalp_reentry TPs, CurrentTPLevel)
+			// CRITICAL FIX: Restore saved state BEFORE adding position to map
+			// This prevents race condition where UI reads position before state is restored
 			if savedState, found := savedStates[exchangePos.Symbol]; found {
 				ga.RestorePositionState(newPos, savedState)
 			}
@@ -9531,6 +9728,10 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				ga.logger.Info("ScalpReentry status initialized for reconciled position",
 					"symbol", exchangePos.Symbol)
 			}
+
+			// Add position to map AFTER state is fully restored
+			ga.positions[exchangePos.Symbol] = newPos
+			addedPerMode[externalMode]++
 
 			ga.logger.Info("Position reconciliation: added untracked position to Ginie",
 				"symbol", exchangePos.Symbol,
@@ -9547,6 +9748,10 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				"skipped_count", skippedDueToLimit,
 				"added_count", len(positionsToAdd)-skippedDueToLimit)
 		}
+
+		// CRITICAL: Save position state immediately after reconciliation
+		// This ensures ScalpReentry TPLevelUnlocked and other state is persisted
+		go ga.SavePositionState()
 
 		// Place SL/TP orders for newly added positions (in background to avoid lock issues)
 		ga.logger.Info("Position reconciliation: placing SL/TP for newly discovered positions",
@@ -11257,10 +11462,10 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			"tp_pct", fmt.Sprintf("%.2f%%", finalTPPct),
 			"llm_used", llmUsed)
 
-	// Log individual TP levels dynamically to support both single TP and multi-TP modes
-	for i, tp := range pos.TakeProfits {
-		ga.logger.Debug("TP level configured", "symbol", symbol, "level", i+1, "price", fmt.Sprintf("%.2f", tp.Price), "percent", fmt.Sprintf("%.0f%%", tp.Percent))
-	}
+		// Log individual TP levels dynamically to support both single TP and multi-TP modes
+		for i, tp := range pos.TakeProfits {
+			ga.logger.Debug("TP level configured", "symbol", symbol, "level", i+1, "price", fmt.Sprintf("%.2f", tp.Price), "percent", fmt.Sprintf("%.0f%%", tp.Percent))
+		}
 	}
 
 	ga.logger.Info("Adaptive SL/TP recalculation completed", "updated", updated, "total_positions", len(ga.positions))
@@ -12287,13 +12492,13 @@ func (ga *GinieAutopilot) GetScanStatus() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"scanning_active":             ga.scanningActive,
-		"current_phase":               ga.currentPhase,
+		"scanning_active":              ga.scanningActive,
+		"current_phase":                ga.currentPhase,
 		"time_until_next_scan_seconds": timeUntilNext,
-		"progress":                    fmt.Sprintf("%d/%d", ga.scannedThisCycle, ga.totalSymbols),
-		"last_scan_duration_ms":       ga.scanDuration.Milliseconds(),
-		"last_scan_time":              ga.lastScanTime,
-		"next_scan_time":              ga.nextScanTime,
+		"progress":                     fmt.Sprintf("%d/%d", ga.scannedThisCycle, ga.totalSymbols),
+		"last_scan_duration_ms":        ga.scanDuration.Milliseconds(),
+		"last_scan_time":               ga.lastScanTime,
+		"next_scan_time":               ga.nextScanTime,
 	}
 }
 
@@ -12640,7 +12845,8 @@ func (ga *GinieAutopilot) scanStrategies() {
 		// Check if we have room for more positions (MODE-SPECIFIC count)
 		// BUG FIX: Previously used total position count, but strategies use mode-specific limits
 		strategyMode := ga.selectEnabledModeForPosition()
-		modeConfig := ga.getModeConfig(strategyMode)
+		// Use getModeConfigForSizing to handle scalp_reentry -> scalp fallback for sizing config
+		modeConfig := ga.getModeConfigForSizing(strategyMode)
 		maxPositions := ga.config.MaxPositions
 		if modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.MaxPositions > 0 {
 			maxPositions = modeConfig.Size.MaxPositions
@@ -12786,7 +12992,9 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 	}
 
 	// Calculate quantity
-	quantity := (positionUSD * float64(leverage)) / price
+	// CRITICAL: positionUSD is NOTIONAL VALUE, not margin
+	// Formula: quantity = notional / price (leverage is already applied via exchange)
+	quantity := positionUSD / price
 	quantity = roundQuantity(symbol, quantity)
 
 	if quantity <= 0 {
@@ -12972,7 +13180,16 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 // Returns (canTrade, reason)
 func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD float64) (bool, string) {
 	settings := GetSettingsManager()
-	allocationConfig := settings.GetModeAllocation()
+	ctx := context.Background()
+
+	// Load user allocation from database
+	allocationConfig, err := settings.GetUserModeAllocation(ctx, ga.repo, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to load user allocation from database, using defaults",
+			"user_id", ga.userID,
+			"error", err)
+		allocationConfig = settings.dbAllocationToConfig(database.DefaultUserCapitalAllocation())
+	}
 
 	// Get balance
 	balance, err := ga.getAvailableBalance()
@@ -12984,6 +13201,13 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 		return false, "insufficient balance"
 	}
 
+	// scalp_reentry shares allocation with scalp mode
+	// Map scalp_reentry to scalp for allocation checks
+	allocationMode := mode
+	if mode == GinieModeScalpReentry {
+		allocationMode = GinieModeScalp
+	}
+
 	// Get current positions and capital usage per mode
 	currentPositions := make(map[string]int)
 	currentUsedUSD := make(map[string]float64)
@@ -12991,15 +13215,30 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 	ga.mu.RLock()
 	for _, pos := range ga.positions {
 		// Calculate position USD cost (margin = notional / leverage)
-		posUSD := pos.EntryPrice * pos.RemainingQty / float64(pos.Leverage)
+		// Guard against division by zero - use default leverage of 10 if leverage is 0
+		leverage := pos.Leverage
+		if leverage <= 0 {
+			ga.logger.Warn("Position has invalid leverage, using default",
+				"symbol", pos.Symbol,
+				"mode", pos.Mode,
+				"leverage", pos.Leverage)
+			leverage = 10 // Default leverage
+		}
+		posUSD := pos.EntryPrice * pos.RemainingQty / float64(leverage)
 		modeStr := string(pos.Mode)
+
+		// Map scalp_reentry positions to scalp for allocation tracking
+		if pos.Mode == GinieModeScalpReentry {
+			modeStr = string(GinieModeScalp)
+		}
+
 		currentUsedUSD[modeStr] += posUSD
 		currentPositions[modeStr]++
 	}
 	ga.mu.RUnlock()
 
-	// Get allocation state
-	allocationState := settings.GetModeAllocationState(string(mode), balance, currentPositions, currentUsedUSD)
+	// Get allocation state using the mapped mode (now from database)
+	allocationState := settings.GetUserModeAllocationState(ctx, ga.repo, ga.userID, string(allocationMode), balance, currentPositions, currentUsedUSD)
 
 	// Check 1: Position limit
 	if allocationState.CurrentPositions >= allocationState.MaxPositions {
@@ -13008,8 +13247,9 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 
 	// Get leverage for mode to calculate margin requirement
 	// With leverage, a $500 notional position only needs $50 margin (10x leverage)
+	// Use allocationMode (mapped mode) to get the correct config
 	leverage := 10 // default
-	modeConfig, err := settings.GetDefaultModeConfig(string(mode))
+	modeConfig, err := settings.GetDefaultModeConfig(string(allocationMode))
 	if err == nil && modeConfig != nil && modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
 		leverage = modeConfig.Size.Leverage
 	}
@@ -13024,14 +13264,13 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 	}
 
 	// Check 3: Per-position max
+	// Use allocationMode (mapped mode) for per-position limits
 	maxPerPosition := 0.0
-	switch mode {
+	switch allocationMode {
 	case GinieModeUltraFast:
 		maxPerPosition = allocationConfig.MaxUltraFastUSDPerPosition
 	case GinieModeScalp:
 		maxPerPosition = allocationConfig.MaxScalpUSDPerPosition
-	case GinieModeScalpReentry:
-		maxPerPosition = allocationConfig.MaxScalpReentryUSDPerPosition
 	case GinieModeSwing:
 		maxPerPosition = allocationConfig.MaxSwingUSDPerPosition
 	case GinieModePosition:
@@ -13047,7 +13286,12 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 
 // allocateCapital allocates capital for a position
 func (ga *GinieAutopilot) allocateCapital(mode GinieTradingMode, positionUSD float64) {
-	modeStr := string(mode)
+	// scalp_reentry shares allocation tracking with scalp mode
+	trackingMode := mode
+	if mode == GinieModeScalpReentry {
+		trackingMode = GinieModeScalp
+	}
+	modeStr := string(trackingMode)
 
 	ga.mu.Lock()
 	ga.modeUsedUSD[modeStr] += positionUSD
@@ -13056,6 +13300,7 @@ func (ga *GinieAutopilot) allocateCapital(mode GinieTradingMode, positionUSD flo
 
 	ga.logger.Info("Capital allocated",
 		"mode", mode,
+		"tracking_as", trackingMode,
 		"position_usd", positionUSD,
 		"total_used", ga.modeUsedUSD[modeStr],
 		"position_count", ga.modePositionCounts[modeStr])
@@ -13063,7 +13308,12 @@ func (ga *GinieAutopilot) allocateCapital(mode GinieTradingMode, positionUSD flo
 
 // releaseCapital releases capital from a closed position
 func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD float64) {
-	modeStr := string(mode)
+	// scalp_reentry shares allocation tracking with scalp mode
+	trackingMode := mode
+	if mode == GinieModeScalpReentry {
+		trackingMode = GinieModeScalp
+	}
+	modeStr := string(trackingMode)
 
 	ga.mu.Lock()
 	ga.modeUsedUSD[modeStr] -= positionUSD
@@ -13078,6 +13328,7 @@ func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD floa
 
 	ga.logger.Info("Capital released",
 		"mode", mode,
+		"tracking_as", trackingMode,
 		"position_usd", positionUSD,
 		"total_used", ga.modeUsedUSD[modeStr],
 		"position_count", ga.modePositionCounts[modeStr])
@@ -13086,6 +13337,7 @@ func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD floa
 // GetModeAllocationStatus returns the current allocation status for all modes
 func (ga *GinieAutopilot) GetModeAllocationStatus() map[string]interface{} {
 	settings := GetSettingsManager()
+	ctx := context.Background()
 	balance, _ := ga.getAvailableBalance()
 
 	ga.mu.RLock()
@@ -13094,7 +13346,8 @@ func (ga *GinieAutopilot) GetModeAllocationStatus() map[string]interface{} {
 	allocations := make(map[string]interface{})
 
 	for _, mode := range []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition} {
-		state := settings.GetModeAllocationState(string(mode), balance, ga.modePositionCounts, ga.modeUsedUSD)
+		// Load state from database
+		state := settings.GetUserModeAllocationState(ctx, ga.repo, ga.userID, string(mode), balance, ga.modePositionCounts, ga.modeUsedUSD)
 
 		allocations[string(mode)] = map[string]interface{}{
 			"allocated_percent":    state.AllocatedPercent,
@@ -13116,6 +13369,7 @@ func (ga *GinieAutopilot) GetModeAllocationStatus() map[string]interface{} {
 // This is used when the API needs to show allocations based on a user's real Binance balance.
 func (ga *GinieAutopilot) GetModeAllocationStatusWithBalance(balance float64) map[string]interface{} {
 	settings := GetSettingsManager()
+	ctx := context.Background()
 
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
@@ -13123,7 +13377,8 @@ func (ga *GinieAutopilot) GetModeAllocationStatusWithBalance(balance float64) ma
 	allocations := make(map[string]interface{})
 
 	for _, mode := range []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition} {
-		state := settings.GetModeAllocationState(string(mode), balance, ga.modePositionCounts, ga.modeUsedUSD)
+		// Load state from database
+		state := settings.GetUserModeAllocationState(ctx, ga.repo, ga.userID, string(mode), balance, ga.modePositionCounts, ga.modeUsedUSD)
 
 		allocations[string(mode)] = map[string]interface{}{
 			"allocated_percent":    state.AllocatedPercent,
@@ -13396,12 +13651,12 @@ func (ga *GinieAutopilot) recordModeTradeClosure(mode GinieTradingMode, symbol s
 	}
 
 	tradeResult := SafetyTradeResult{
-		Symbol:      symbol,
-		PnLUSD:      pnlUSD,
-		PnLPercent:  pnlPercent,
-		IsWinning:   pnlUSD > 0,
-		Timestamp:   time.Now(),
-		Mode:        modeStr,
+		Symbol:     symbol,
+		PnLUSD:     pnlUSD,
+		PnLPercent: pnlPercent,
+		IsWinning:  pnlUSD > 0,
+		Timestamp:  time.Now(),
+		Mode:       modeStr,
 	}
 
 	// Add to profit window
@@ -13861,17 +14116,17 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 		marketSnapshot["hold_time_ms"] = time.Since(pos.EntryTime).Milliseconds()
 
 		outcome := TradeOutcome{
-			TradeID:    fmt.Sprintf("%s_%d", pos.Symbol, pos.EntryTime.UnixNano()),
-			Symbol:     pos.Symbol,
-			Mode:       GinieModeUltraFast,
-			EntryTime:  pos.EntryTime,
-			ExitTime:   time.Now(),
-			Direction:  pos.Side,
-			EntryPrice: pos.EntryPrice,
-			ExitPrice:  currentPrice,
-			PnLPercent: pnlPercent, // Use already calculated pnlPercent with defensive check
-			PnLUSD:     pnlUSD,
-			Outcome:    outcomeStr,
+			TradeID:        fmt.Sprintf("%s_%d", pos.Symbol, pos.EntryTime.UnixNano()),
+			Symbol:         pos.Symbol,
+			Mode:           GinieModeUltraFast,
+			EntryTime:      pos.EntryTime,
+			ExitTime:       time.Now(),
+			Direction:      pos.Side,
+			EntryPrice:     pos.EntryPrice,
+			ExitPrice:      currentPrice,
+			PnLPercent:     pnlPercent, // Use already calculated pnlPercent with defensive check
+			PnLUSD:         pnlUSD,
+			Outcome:        outcomeStr,
 			MarketSnapshot: marketSnapshot,
 		}
 		ga.adaptiveAI.RecordTradeOutcome(outcome)
@@ -14275,7 +14530,6 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 		Confidence: pos.UltraFastSignal.EntryConfidence,
 	})
 
-
 	// Log position closed to trade lifecycle
 	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
 		go ga.eventLogger.LogPositionClosed(
@@ -14496,8 +14750,20 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 	}
 
 	// Calculate position size (ultra-fast conservative sizing)
-	maxUSDPerPos := currentSettings.UltraFastMaxUSDPerPos
-	positionUSD := maxUSDPerPos // Fixed for ultra-fast (not adaptive like scalp)
+	// Get mode-specific base size from user settings
+	modeConfig := ga.getModeConfig(GinieModeUltraFast)
+	if modeConfig == nil || modeConfig.Size == nil || modeConfig.Size.BaseSizeUSD <= 0 {
+		ga.logger.Error("Position size not configured for ultra-fast mode - cannot trade",
+			"symbol", symbol,
+			"mode", "ultra_fast",
+			"reason", "base_size_usd not set in user settings")
+		return fmt.Errorf("ultra_fast base_size_usd not configured - skipping trade")
+	}
+	positionUSD := modeConfig.Size.BaseSizeUSD
+	ga.logger.Debug("Using mode-specific BaseSizeUSD for ultra-fast entry",
+		"symbol", symbol,
+		"base_size_usd", positionUSD,
+		"source", "user_settings")
 
 	// CAPITAL ALLOCATION CHECK: Ensure ultra-fast mode has capital available
 	// This check prevents ultra-fast from using more than its allocated capital percentage
@@ -14519,7 +14785,9 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 	leverage := styleConfig.DefaultLeverage
 
 	// Calculate quantity
-	quantity := (positionUSD * float64(leverage)) / price
+	// CRITICAL: positionUSD is NOTIONAL VALUE, not margin
+	// Formula: quantity = notional / price (leverage is already applied via exchange)
+	quantity := positionUSD / price
 	quantity = roundQuantity(symbol, quantity)
 
 	if quantity <= 0 {
@@ -14784,7 +15052,22 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	if positionUSD < 5 {
 		positionUSD = 5 // Minimum $5
 	}
-	maxUSD := float64(currentSettings.UltraFastMaxUSDPerPos)
+
+	// Get mode-specific max size from user settings
+	modeConfig := ga.getModeConfig(GinieModeUltraFast)
+	if modeConfig == nil || modeConfig.Size == nil || modeConfig.Size.MaxSizeUSD <= 0 {
+		ga.logger.Error("Position size not configured for ultra-fast smart margin - cannot trade",
+			"symbol", symbol,
+			"mode", "ultra_fast",
+			"reason", "max_size_usd not set in user settings")
+		return fmt.Errorf("ultra_fast max_size_usd not configured - skipping trade")
+	}
+	maxUSD := modeConfig.Size.MaxSizeUSD
+	ga.logger.Debug("Using mode-specific MaxSizeUSD for ultra-fast smart margin",
+		"symbol", symbol,
+		"max_size_usd", maxUSD,
+		"source", "user_settings")
+
 	if positionUSD > maxUSD {
 		positionUSD = maxUSD // Cap at max
 	}
@@ -14809,7 +15092,9 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	leverage := styleConfig.DefaultLeverage
 
 	// Calculate quantity using dynamic position size
-	quantity := (positionUSD * float64(leverage)) / price
+	// CRITICAL: positionUSD is NOTIONAL VALUE, not margin
+	// Formula: quantity = notional / price (leverage is already applied via exchange)
+	quantity := positionUSD / price
 	quantity = roundQuantity(symbol, quantity)
 
 	if quantity <= 0 {
@@ -15086,6 +15371,9 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 // ========== Mode-Specific Circuit Breaker Methods (Story 2.7 Task 2.7.4) ==========
 
 // initModeCircuitBreakers initializes mode circuit breakers from default configs
+// NOTE: scalp_reentry is included here because positions CAN exist in scalp_reentry mode
+// (upgraded from scalp signals when ScalpReentryConfig.Enabled is true). The circuit breaker
+// tracks wins/losses for those positions - this is position management, NOT signal generation.
 func (ga *GinieAutopilot) initModeCircuitBreakers() {
 	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeScalpReentry, GinieModeSwing, GinieModePosition}
 
@@ -15540,15 +15828,15 @@ func (ga *GinieAutopilot) GetModeCircuitBreakerStatus(mode GinieTradingMode) map
 			"cooldown_minutes":      cb.CooldownMinutes,
 		},
 		"current_state": map[string]interface{}{
-			"trades_this_minute":  cb.TradesThisMinute,
-			"trades_this_hour":    cb.TradesThisHour,
-			"trades_this_day":     cb.TradesThisDay,
-			"current_hour_loss":   cb.CurrentHourLoss,
-			"current_day_loss":    cb.CurrentDayLoss,
-			"consecutive_losses":  cb.ConsecutiveLosses,
-			"total_wins":          cb.TotalWins,
-			"total_trades":        cb.TotalTrades,
-			"current_win_rate":    winRate,
+			"trades_this_minute": cb.TradesThisMinute,
+			"trades_this_hour":   cb.TradesThisHour,
+			"trades_this_day":    cb.TradesThisDay,
+			"current_hour_loss":  cb.CurrentHourLoss,
+			"current_day_loss":   cb.CurrentDayLoss,
+			"consecutive_losses": cb.ConsecutiveLosses,
+			"total_wins":         cb.TotalWins,
+			"total_trades":       cb.TotalTrades,
+			"current_win_rate":   winRate,
 		},
 	}
 }
@@ -15607,7 +15895,7 @@ func (ga *GinieAutopilot) GetAllModeCircuitBreakerStatus() map[string]interface{
 
 // AdaptiveAIData holds adaptive AI recommendations and statistics
 type AdaptiveAIData struct {
-	Recommendations []AdaptiveRecommendationData `json:"recommendations"`
+	Recommendations []AdaptiveRecommendationData  `json:"recommendations"`
 	Statistics      map[string]ModeStatisticsData `json:"statistics"`
 	LastAnalysis    time.Time                     `json:"last_analysis"`
 	TotalOutcomes   int                           `json:"total_outcomes"`
@@ -15642,16 +15930,16 @@ type ModeStatisticsData struct {
 
 // LLMDiagnosticsData holds LLM call statistics
 type LLMDiagnosticsData struct {
-	TotalCalls      int64              `json:"total_calls"`
-	CacheHits       int64              `json:"cache_hits"`
-	CacheMisses     int64              `json:"cache_misses"`
-	CacheHitRate    float64            `json:"cache_hit_rate"`
-	AvgLatencyMs    float64            `json:"avg_latency_ms"`
-	ErrorCount      int64              `json:"error_count"`
-	ErrorRate       float64            `json:"error_rate"`
-	CallsByProvider map[string]int64   `json:"calls_by_provider"`
-	RecentErrors    []LLMErrorData     `json:"recent_errors"`
-	LastResetAt     time.Time          `json:"last_reset_at"`
+	TotalCalls      int64            `json:"total_calls"`
+	CacheHits       int64            `json:"cache_hits"`
+	CacheMisses     int64            `json:"cache_misses"`
+	CacheHitRate    float64          `json:"cache_hit_rate"`
+	AvgLatencyMs    float64          `json:"avg_latency_ms"`
+	ErrorCount      int64            `json:"error_count"`
+	ErrorRate       float64          `json:"error_rate"`
+	CallsByProvider map[string]int64 `json:"calls_by_provider"`
+	RecentErrors    []LLMErrorData   `json:"recent_errors"`
+	LastResetAt     time.Time        `json:"last_reset_at"`
 }
 
 // LLMErrorData represents a recent LLM error
@@ -16192,23 +16480,23 @@ func (ga *GinieAutopilot) createPositionFromLimitFill(pending *PendingLimitOrder
 		Symbol:                pending.Symbol,
 		Side:                  side,
 		Mode:                  pending.Mode,
-		EntryPrice:           fillPrice,
-		OriginalQty:          fillQty,
-		RemainingQty:         fillQty,
-		Leverage:             10, // Default leverage for scalp reversal
-		EntryTime:            time.Now(),
-		TakeProfits:          takeProfits,
-		CurrentTPLevel:       0,
-		StopLoss:             stopLoss,
-		OriginalSL:           stopLoss,
-		MovedToBreakeven:     false,
-		TrailingActive:       false,
-		HighestPrice:         fillPrice,
-		LowestPrice:          fillPrice,
-		TrailingPercent:      trailingPercent,
+		EntryPrice:            fillPrice,
+		OriginalQty:           fillQty,
+		RemainingQty:          fillQty,
+		Leverage:              10, // Default leverage for scalp reversal
+		EntryTime:             time.Now(),
+		TakeProfits:           takeProfits,
+		CurrentTPLevel:        0,
+		StopLoss:              stopLoss,
+		OriginalSL:            stopLoss,
+		MovedToBreakeven:      false,
+		TrailingActive:        false,
+		HighestPrice:          fillPrice,
+		LowestPrice:           fillPrice,
+		TrailingPercent:       trailingPercent,
 		TrailingActivationPct: trailingActivation,
-		Source:               "reversal", // Mark as reversal entry
-		Protection:           NewProtectionStatus(),
+		Source:                "reversal", // Mark as reversal entry
+		Protection:            NewProtectionStatus(),
 	}
 
 	ga.positions[pending.Symbol] = position
@@ -16459,4 +16747,313 @@ func (ga *GinieAutopilot) GetPositionMode(symbol string) (GinieTradingMode, erro
 		return "", fmt.Errorf("no active position found for %s", symbol)
 	}
 	return pos.Mode, nil
+}
+
+// ==================== PENDING LIMIT ORDERS API ====================
+
+// PendingOrderInfo provides detailed info about a pending limit order for API responses
+type PendingOrderInfo struct {
+	OrderID     int64            `json:"order_id"`
+	Symbol      string           `json:"symbol"`
+	Direction   string           `json:"direction"` // "LONG" or "SHORT"
+	Side        string           `json:"side"`      // "BUY" or "SELL"
+	EntryPrice  float64          `json:"entry_price"`
+	Quantity    float64          `json:"quantity"`
+	PlacedAt    time.Time        `json:"placed_at"`
+	TimeoutAt   time.Time        `json:"timeout_at"`
+	SecondsLeft int              `json:"seconds_left"`
+	Source      string           `json:"source"`
+	Mode        GinieTradingMode `json:"mode"`
+	Status      string           `json:"status"` // "pending", "expired"
+}
+
+// GetPendingLimitOrders returns all pending limit orders with detailed info
+func (ga *GinieAutopilot) GetPendingLimitOrders() []PendingOrderInfo {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	orders := make([]PendingOrderInfo, 0, len(ga.pendingLimitOrders))
+	now := time.Now()
+
+	for _, pending := range ga.pendingLimitOrders {
+		secondsLeft := int(pending.TimeoutAt.Sub(now).Seconds())
+		status := "pending"
+		if secondsLeft <= 0 {
+			secondsLeft = 0
+			status = "expired"
+		}
+
+		orders = append(orders, PendingOrderInfo{
+			OrderID:     pending.OrderID,
+			Symbol:      pending.Symbol,
+			Direction:   pending.PositionSide,
+			Side:        pending.Side,
+			EntryPrice:  pending.Price,
+			Quantity:    pending.Quantity,
+			PlacedAt:    pending.PlacedAt,
+			TimeoutAt:   pending.TimeoutAt,
+			SecondsLeft: secondsLeft,
+			Source:      pending.Source,
+			Mode:        pending.Mode,
+			Status:      status,
+		})
+	}
+
+	return orders
+}
+
+// ==================== TRADE CONDITIONS API ====================
+
+// TradeCondition represents a single pre-trade condition check
+type TradeCondition struct {
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+	Detail string `json:"detail"`
+}
+
+// TradeConditionsResponse contains all trade condition checks
+type TradeConditionsResponse struct {
+	Conditions    []TradeCondition `json:"conditions"`
+	AllPassed     bool             `json:"all_passed"`
+	BlockingCount int              `json:"blocking_count"`
+	Timestamp     time.Time        `json:"timestamp"`
+}
+
+// GetTradeConditions returns detailed status of all pre-trade conditions
+func (ga *GinieAutopilot) GetTradeConditions() TradeConditionsResponse {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	conditions := make([]TradeCondition, 0, 10)
+	blockingCount := 0
+
+	// 1. Autopilot running check
+	autopilotRunning := ga.running
+	conditions = append(conditions, TradeCondition{
+		Name:   "autopilot_running",
+		Passed: autopilotRunning,
+		Detail: func() string {
+			if autopilotRunning {
+				return "Autopilot is active"
+			}
+			return "Autopilot is stopped"
+		}(),
+	})
+	if !autopilotRunning {
+		blockingCount++
+	}
+
+	// 2. Circuit breaker state check
+	cbEnabled := ga.config.CircuitBreakerEnabled
+	cbClosed := true
+	cbDetail := "Circuit breaker disabled"
+	if cbEnabled && ga.circuitBreaker != nil {
+		canTrade, reason := ga.circuitBreaker.CanTrade()
+		cbClosed = canTrade
+		if canTrade {
+			cbDetail = fmt.Sprintf("Circuit state: %s", ga.circuitBreaker.GetState())
+		} else {
+			cbDetail = reason
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "circuit_breaker_closed",
+		Passed: cbClosed,
+		Detail: cbDetail,
+	})
+	if !cbClosed {
+		blockingCount++
+	}
+
+	// 3. Hourly loss check
+	hourlyLossOK := true
+	hourlyDetail := "No hourly limit configured"
+	if cbEnabled && ga.circuitBreaker != nil {
+		stats := ga.circuitBreaker.GetStats()
+		if stats != nil {
+			hourlyLoss, _ := stats["hourly_loss"].(float64)
+			hourlyLimit := ga.config.CBMaxLossPerHour
+			hourlyLossOK = hourlyLoss < hourlyLimit
+			hourlyDetail = fmt.Sprintf("%.2f%% / %.2f%% limit", hourlyLoss, hourlyLimit)
+			if !hourlyLossOK {
+				hourlyDetail += " (EXCEEDED)"
+			}
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "hourly_loss_ok",
+		Passed: hourlyLossOK,
+		Detail: hourlyDetail,
+	})
+	if !hourlyLossOK {
+		blockingCount++
+	}
+
+	// 4. Daily loss check
+	dailyLossOK := true
+	dailyDetail := "No daily limit configured"
+	if cbEnabled && ga.circuitBreaker != nil {
+		stats := ga.circuitBreaker.GetStats()
+		if stats != nil {
+			dailyLoss, _ := stats["daily_loss"].(float64)
+			dailyLimit := ga.config.CBMaxDailyLoss
+			dailyLossOK = dailyLoss < dailyLimit
+			dailyDetail = fmt.Sprintf("%.2f%% / %.2f%% limit", dailyLoss, dailyLimit)
+			if !dailyLossOK {
+				dailyDetail += " (EXCEEDED)"
+			}
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "daily_loss_ok",
+		Passed: dailyLossOK,
+		Detail: dailyDetail,
+	})
+	if !dailyLossOK {
+		blockingCount++
+	}
+
+	// 5. Consecutive losses check
+	consecLossOK := true
+	consecDetail := "No consecutive loss limit"
+	if cbEnabled && ga.circuitBreaker != nil {
+		stats := ga.circuitBreaker.GetStats()
+		if stats != nil {
+			consecLosses, _ := stats["consecutive_losses"].(int)
+			maxConsec := ga.config.CBMaxConsecutiveLosses
+			consecLossOK = consecLosses < maxConsec
+			consecDetail = fmt.Sprintf("%d / %d consecutive losses", consecLosses, maxConsec)
+			if !consecLossOK {
+				consecDetail += " (LIMIT REACHED)"
+			}
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "consecutive_losses_ok",
+		Passed: consecLossOK,
+		Detail: consecDetail,
+	})
+	if !consecLossOK {
+		blockingCount++
+	}
+
+	// 6. Position slots available
+	currentPositions := len(ga.positions)
+	maxPositions := ga.config.MaxPositions
+	positionSlotsOK := currentPositions < maxPositions
+	positionDetail := fmt.Sprintf("%d / %d positions", currentPositions, maxPositions)
+	if !positionSlotsOK {
+		positionDetail += " (MAX REACHED)"
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "position_slots_available",
+		Passed: positionSlotsOK,
+		Detail: positionDetail,
+	})
+	if !positionSlotsOK {
+		blockingCount++
+	}
+
+	// 7. Daily trade limit check
+	dailyTradesOK := true
+	dailyTradesDetail := "No daily trade limit"
+	if ga.config.MaxDailyTrades > 0 {
+		dailyTradesOK = ga.dailyTrades < ga.config.MaxDailyTrades
+		dailyTradesDetail = fmt.Sprintf("%d / %d trades today", ga.dailyTrades, ga.config.MaxDailyTrades)
+		if !dailyTradesOK {
+			dailyTradesDetail += " (LIMIT REACHED)"
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "daily_trades_ok",
+		Passed: dailyTradesOK,
+		Detail: dailyTradesDetail,
+	})
+	if !dailyTradesOK {
+		blockingCount++
+	}
+
+	// 8. Trading modes enabled check
+	modesEnabled := ga.config.EnableScalpMode || ga.config.EnableSwingMode || ga.config.EnablePositionMode
+	modesList := []string{}
+	if ga.config.EnableScalpMode {
+		modesList = append(modesList, "scalp")
+	}
+	if ga.config.EnableSwingMode {
+		modesList = append(modesList, "swing")
+	}
+	if ga.config.EnablePositionMode {
+		modesList = append(modesList, "position")
+	}
+	modesDetail := "No modes enabled"
+	if modesEnabled {
+		modesDetail = fmt.Sprintf("Enabled: %v", modesList)
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "trading_modes_enabled",
+		Passed: modesEnabled,
+		Detail: modesDetail,
+	})
+	if !modesEnabled {
+		blockingCount++
+	}
+
+	// 9. Rate limit check (trades per minute)
+	rateLimitOK := true
+	rateLimitDetail := "No rate limit configured"
+	if cbEnabled && ga.circuitBreaker != nil {
+		stats := ga.circuitBreaker.GetStats()
+		if stats != nil {
+			tradesPerMinute, _ := stats["trades_last_minute"].(int)
+			maxTradesPerMinute := ga.config.CBMaxTradesPerMinute
+			if maxTradesPerMinute > 0 {
+				rateLimitOK = tradesPerMinute < maxTradesPerMinute
+				rateLimitDetail = fmt.Sprintf("%d / %d trades/minute", tradesPerMinute, maxTradesPerMinute)
+				if !rateLimitOK {
+					rateLimitDetail += " (RATE LIMITED)"
+				}
+			}
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "rate_limit_ok",
+		Passed: rateLimitOK,
+		Detail: rateLimitDetail,
+	})
+	if !rateLimitOK {
+		blockingCount++
+	}
+
+	// 10. Balance check (sufficient margin)
+	balanceOK := true
+	balanceDetail := "Balance check skipped"
+	if ga.futuresClient != nil {
+		accountInfo, err := ga.futuresClient.GetFuturesAccountInfo()
+		if err == nil {
+			availableBalance := accountInfo.AvailableBalance
+			minRequired := 10.0 // Minimum $10 to trade
+			balanceOK = availableBalance >= minRequired
+			balanceDetail = fmt.Sprintf("$%.2f available", availableBalance)
+			if !balanceOK {
+				balanceDetail += fmt.Sprintf(" (need $%.2f minimum)", minRequired)
+			}
+		} else {
+			balanceDetail = "Failed to check balance"
+		}
+	}
+	conditions = append(conditions, TradeCondition{
+		Name:   "sufficient_balance",
+		Passed: balanceOK,
+		Detail: balanceDetail,
+	})
+	if !balanceOK {
+		blockingCount++
+	}
+
+	return TradeConditionsResponse{
+		Conditions:    conditions,
+		AllPassed:     blockingCount == 0,
+		BlockingCount: blockingCount,
+		Timestamp:     time.Now(),
+	}
 }
