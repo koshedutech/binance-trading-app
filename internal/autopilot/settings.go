@@ -341,6 +341,7 @@ type ModeReversalConfig struct {
 	ConsecutiveCandles int     `json:"reversal_consecutive_candles"` // Number of consecutive LL/HH candles (default: 3)
 	LimitTimeoutSec    int     `json:"reversal_limit_timeout_sec"`   // LIMIT order timeout in seconds (default: 120)
 	RequireAllTFs      bool    `json:"reversal_require_all_tfs"`     // Require 3/3 TFs (false = 2/3 ok)
+	UseMarketEntry     bool    `json:"use_market_entry"`             // Skip LIMIT orders, use MARKET for immediate fill
 }
 
 // ModeFullConfig holds ALL settings for a single trading mode
@@ -2233,6 +2234,13 @@ func (sm *SettingsManager) SaveSettings(settings *AutopilotSettings) error {
 // WARNING: Any call to this method during trading will log a warning.
 func (sm *SettingsManager) GetDefaultSettings() *AutopilotSettings {
 	log.Printf("[SETTINGS] WARNING: GetDefaultSettings() called - this should ONLY be used for defaults, not runtime trading")
+	settings, _ := sm.LoadSettings()
+	return settings
+}
+
+// GetCurrentSettings loads current settings from JSON file for runtime use
+// This is the preferred method for GET handlers that return current configuration to the UI.
+func (sm *SettingsManager) GetCurrentSettings() *AutopilotSettings {
 	settings, _ := sm.LoadSettings()
 	return settings
 }

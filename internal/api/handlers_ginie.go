@@ -162,7 +162,7 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 		}
 
 		// Get dry_run mode from settings
-		currentSettings := sm.GetDefaultSettings()
+		currentSettings := sm.GetCurrentSettings()
 		dryRun = currentSettings.GinieDryRunMode
 
 		// Broadcast autopilot status change to the SPECIFIC user via WebSocket (multi-user safe)
@@ -2322,7 +2322,7 @@ func (s *Server) handleGetLLMConfig(c *gin.Context) {
 	log.Println("[LLM-CONFIG] Getting LLM configuration")
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings := sm.GetCurrentSettings()
 
 	// Get the nested LLMConfig from settings
 	llmCfg := settings.LLMConfig
@@ -3339,7 +3339,7 @@ func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
 // GET /api/futures/autopilot/morning-auto-block/config
 func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings := sm.GetCurrentSettings()
 
 	// Calculate next scheduled time
 	hour := settings.MorningAutoBlockHourUTC
@@ -3820,34 +3820,72 @@ func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
 
 	var config autopilot.ScalpReentryConfig
 
-	// SIMPLE RULE: Just return what's in the database
-	// No complex fallback logic, no overriding with defaults
 	if configJSON == nil {
-		log.Printf("[SCALP-REENTRY] No config in database - using defaults (user should run restore defaults)")
+		log.Printf("[SCALP-REENTRY] No config in database - using defaults")
 		config = autopilot.DefaultScalpReentryConfig()
 		config.Enabled = enabledFromDB
 	} else {
-		// Parse as ModeFullConfig (standard format in database)
-		var modeConfig autopilot.ModeFullConfig
-		if err := json.Unmarshal(configJSON, &modeConfig); err != nil {
+		// Try to parse as ScalpReentryConfig directly first (correct format)
+		if err := json.Unmarshal(configJSON, &config); err != nil {
 			log.Printf("[SCALP-REENTRY] ERROR: Failed to parse config: %v", err)
 			errorResponse(c, http.StatusInternalServerError, "Failed to parse configuration")
 			return
 		}
 
-		// Extract values from ModeFullConfig to ScalpReentryConfig
-		config = autopilot.DefaultScalpReentryConfig() // Start with structure
-		config.Enabled = enabledFromDB                 // Use enabled from database column (source of truth)
+		// Override enabled from database column (source of truth)
+		config.Enabled = enabledFromDB
 
-		// Map fields from ModeFullConfig
-		if modeConfig.Size != nil {
-			config.MinPositionSizeUSD = modeConfig.Size.MinPositionSizeUSD
-		}
-		if modeConfig.SLTP != nil {
-			config.StopLossPercent = modeConfig.SLTP.StopLossPercent
+		// Check if config has valid TP levels (detect if it was stored in wrong format)
+		if config.TP1Percent <= 0 || config.TP2Percent <= 0 || config.TP3Percent <= 0 {
+			log.Printf("[SCALP-REENTRY] Config has invalid TP levels (possibly wrong format) - merging with defaults")
+			defaults := autopilot.DefaultScalpReentryConfig()
+			// Use defaults for TP levels if they are zero
+			if config.TP1Percent <= 0 {
+				config.TP1Percent = defaults.TP1Percent
+			}
+			if config.TP2Percent <= 0 {
+				config.TP2Percent = defaults.TP2Percent
+			}
+			if config.TP3Percent <= 0 {
+				config.TP3Percent = defaults.TP3Percent
+			}
+			if config.TP1SellPercent <= 0 {
+				config.TP1SellPercent = defaults.TP1SellPercent
+			}
+			if config.TP2SellPercent <= 0 {
+				config.TP2SellPercent = defaults.TP2SellPercent
+			}
+			if config.TP3SellPercent <= 0 {
+				config.TP3SellPercent = defaults.TP3SellPercent
+			}
+			if config.ReentryPercent <= 0 {
+				config.ReentryPercent = defaults.ReentryPercent
+			}
+			if config.MaxReentryAttempts <= 0 {
+				config.MaxReentryAttempts = defaults.MaxReentryAttempts
+			}
+			if config.ReentryTimeoutSec <= 0 {
+				config.ReentryTimeoutSec = defaults.ReentryTimeoutSec
+			}
+			if config.FinalTrailingPercent <= 0 {
+				config.FinalTrailingPercent = defaults.FinalTrailingPercent
+			}
+			if config.FinalHoldMinPercent <= 0 {
+				config.FinalHoldMinPercent = defaults.FinalHoldMinPercent
+			}
+			if config.DynamicSLMaxLossPct <= 0 {
+				config.DynamicSLMaxLossPct = defaults.DynamicSLMaxLossPct
+			}
+			if config.DynamicSLProtectPct <= 0 {
+				config.DynamicSLProtectPct = defaults.DynamicSLProtectPct
+			}
+			if config.AIMinConfidence <= 0 {
+				config.AIMinConfidence = defaults.AIMinConfidence
+			}
 		}
 
-		log.Printf("[SCALP-REENTRY] Loaded config from database (Enabled: %v)", config.Enabled)
+		log.Printf("[SCALP-REENTRY] Loaded config from database (Enabled: %v, TP1: %.2f%%, TP2: %.2f%%, TP3: %.2f%%)",
+			config.Enabled, config.TP1Percent, config.TP2Percent, config.TP3Percent)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -3979,12 +4017,14 @@ func (s *Server) handleToggleScalpReentry(c *gin.Context) {
 	config.Enabled = req.Enabled
 
 	// 3. Save to database (source of truth)
+	// CRITICAL: Use SaveUserModeConfig directly to update BOTH the enabled column AND config JSON
+	// SaveUserScalpReentryConfig was ignoring the enabled value in the JSON and preserving old status
 	newConfigJSON, err := json.Marshal(config)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
 		return
 	}
-	err = s.repo.SaveUserScalpReentryConfig(ctx, userIDStr, newConfigJSON)
+	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "scalp_reentry", req.Enabled, newConfigJSON)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
 		return
@@ -4482,10 +4522,41 @@ func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 	// Get all positions
 	allPositions := giniePilot.GetPositions()
 
-	// Get scalp reentry config for TP level info
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
-	config := settings.ScalpReentryConfig
+	// Get scalp reentry config for TP level info from user's database config
+	// FIXED: Detects both OLD format (ModeFullConfig) and NEW format (ScalpReentryConfig)
+	config := autopilot.DefaultScalpReentryConfig() // Start with safe defaults
+	userID, exists := c.Get("user_id")
+	if exists && userID != nil {
+		userIDStr := userID.(string)
+		ctx := context.Background()
+		if configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr); err == nil && configJSON != nil {
+			// Try NEW format first (ScalpReentryConfig)
+			var scalpConfig autopilot.ScalpReentryConfig
+			if err := json.Unmarshal(configJSON, &scalpConfig); err == nil && scalpConfig.TP1Percent > 0 {
+				config = scalpConfig
+				log.Printf("[SCALP-REENTRY-MONITOR] Loaded NEW format from DB for user %s: TP1=%.2f%% (sell %.0f%%)",
+					userIDStr, config.TP1Percent, config.TP1SellPercent)
+			} else {
+				// Try OLD format (ModeFullConfig with sltp.tp_allocation)
+				var modeConfig autopilot.ModeFullConfig
+				if err := json.Unmarshal(configJSON, &modeConfig); err == nil && modeConfig.SLTP != nil {
+					config.Enabled = modeConfig.Enabled
+					if len(modeConfig.SLTP.TPAllocation) >= 3 {
+						config.TP1SellPercent = modeConfig.SLTP.TPAllocation[0]
+						config.TP2SellPercent = modeConfig.SLTP.TPAllocation[1]
+						config.TP3SellPercent = modeConfig.SLTP.TPAllocation[2]
+					}
+					if len(modeConfig.SLTP.TPGainLevels) >= 3 {
+						config.TP1Percent = modeConfig.SLTP.TPGainLevels[0]
+						config.TP2Percent = modeConfig.SLTP.TPGainLevels[1]
+						config.TP3Percent = modeConfig.SLTP.TPGainLevels[2]
+					}
+					log.Printf("[SCALP-REENTRY-MONITOR] Converted OLD format from DB for user %s: TP1=%.2f%% (sell %.0f%%)",
+						userIDStr, config.TP1Percent, config.TP1SellPercent)
+				}
+			}
+		}
+	}
 
 	// Filter and enhance positions with scalp_reentry mode or ScalpReentry status
 	var scalpPositions []ScalpReentryPositionStatus
@@ -4669,9 +4740,39 @@ func (s *Server) handleGetScalpReentryPositionStatus(c *gin.Context) {
 	}
 
 	sr := targetPos.ScalpReentry
-	sm := autopilot.GetSettingsManager()
-	config := sm.GetDefaultSettings().ScalpReentryConfig
 	currentPrice := giniePilot.GetCurrentPrice(symbol)
+
+	// Get scalp reentry config from user's database config
+	// FIXED: Detects both OLD format (ModeFullConfig) and NEW format (ScalpReentryConfig)
+	config := autopilot.DefaultScalpReentryConfig() // Start with safe defaults
+	userID, exists := c.Get("user_id")
+	if exists && userID != nil {
+		userIDStr := userID.(string)
+		ctx := context.Background()
+		if configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr); err == nil && configJSON != nil {
+			// Try NEW format first
+			var scalpConfig autopilot.ScalpReentryConfig
+			if err := json.Unmarshal(configJSON, &scalpConfig); err == nil && scalpConfig.TP1Percent > 0 {
+				config = scalpConfig
+			} else {
+				// Try OLD format (ModeFullConfig)
+				var modeConfig autopilot.ModeFullConfig
+				if err := json.Unmarshal(configJSON, &modeConfig); err == nil && modeConfig.SLTP != nil {
+					config.Enabled = modeConfig.Enabled
+					if len(modeConfig.SLTP.TPAllocation) >= 3 {
+						config.TP1SellPercent = modeConfig.SLTP.TPAllocation[0]
+						config.TP2SellPercent = modeConfig.SLTP.TPAllocation[1]
+						config.TP3SellPercent = modeConfig.SLTP.TPAllocation[2]
+					}
+					if len(modeConfig.SLTP.TPGainLevels) >= 3 {
+						config.TP1Percent = modeConfig.SLTP.TPGainLevels[0]
+						config.TP2Percent = modeConfig.SLTP.TPGainLevels[1]
+						config.TP3Percent = modeConfig.SLTP.TPGainLevels[2]
+					}
+				}
+			}
+		}
+	}
 
 	// Build detailed response
 	var unrealizedPnL, unrealizedPnLPct float64

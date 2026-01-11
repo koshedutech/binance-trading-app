@@ -86,7 +86,11 @@ func NewGinieAnalyzer(
 	}
 
 	sm := GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		logger.Error("Failed to load settings, using defaults", "error", err)
+		settings = DefaultSettings()
+	}
 
 	g := &GinieAnalyzer{
 		futuresClient:    futuresClient,
@@ -147,7 +151,12 @@ func (g *GinieAnalyzer) SetUserID(userID string) {
 func (g *GinieAnalyzer) RefreshSettings() {
 	sm := GetSettingsManager()
 	g.scanLock.Lock()
-	g.settings = sm.GetDefaultSettings()
+	settings, err := sm.LoadSettings()
+	if err != nil {
+		g.logger.Error("Failed to refresh settings, keeping current settings", "error", err)
+	} else {
+		g.settings = settings
+	}
 	g.scanLock.Unlock()
 }
 
@@ -1405,21 +1414,24 @@ func (g *GinieAnalyzer) generateScalpSignals(ss *GinieSignalSet, klines []binanc
 	ema21 := g.calculateEMA(klines, 21)
 
 	// RSI Signal
+	// LOOSENED: Previous <30/>70 thresholds were extreme - waiting for
+	// RSI below 30 or above 70 means waiting for rare oversold/overbought
+	// conditions. Changed to <40/>60 to capture momentum earlier
 	rsiSignal := GinieSignal{
 		Name:      "RSI(7) Crossover",
 		Weight:    0.3,
 		Value:     rsi7,
-		Threshold: 30,
+		Threshold: 40, // Loosened from 30
 	}
-	if rsi7 < 30 {
+	if rsi7 < 40 { // Loosened from 30
 		rsiSignal.Met = true
 		rsiSignal.Status = "met"
-		rsiSignal.Description = "RSI oversold - potential long"
+		rsiSignal.Description = "RSI showing weakness - potential long"
 		rsiSignal.Value = 1
-	} else if rsi7 > 70 {
+	} else if rsi7 > 60 { // Loosened from 70
 		rsiSignal.Met = true
 		rsiSignal.Status = "met"
-		rsiSignal.Description = "RSI overbought - potential short"
+		rsiSignal.Description = "RSI showing strength - potential short"
 		rsiSignal.Value = -1
 	} else {
 		rsiSignal.Status = "not_met"
@@ -1428,21 +1440,23 @@ func (g *GinieAnalyzer) generateScalpSignals(ss *GinieSignalSet, klines []binanc
 	ss.PrimarySignals = append(ss.PrimarySignals, rsiSignal)
 
 	// Stochastic RSI Signal
+	// LOOSENED: Previous <20/>80 thresholds required extreme conditions
+	// Changed to <35/>65 to capture momentum earlier while still having meaning
 	stochSignal := GinieSignal{
 		Name:      "Stochastic RSI Cross",
 		Weight:    0.25,
 		Value:     stochRSI,
-		Threshold: 20,
+		Threshold: 35, // Loosened from 20
 	}
-	if stochRSI < 20 {
+	if stochRSI < 35 { // Loosened from 20
 		stochSignal.Met = true
 		stochSignal.Status = "met"
-		stochSignal.Description = "StochRSI oversold zone"
+		stochSignal.Description = "StochRSI in lower zone"
 		stochSignal.Value = 1
-	} else if stochRSI > 80 {
+	} else if stochRSI > 65 { // Loosened from 80
 		stochSignal.Met = true
 		stochSignal.Status = "met"
-		stochSignal.Description = "StochRSI overbought zone"
+		stochSignal.Description = "StochRSI in upper zone"
 		stochSignal.Value = -1
 	} else {
 		stochSignal.Status = "not_met"
@@ -2078,14 +2092,14 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			rejectionTracker.EntryConfluence = &EntryConfluenceRejection{
 				Blocked:         true,
 				ConfluenceScore: confluenceResult.ConfluenceScore,
-				RequiredScore:   3,
+				RequiredScore:   2, // Lowered from 3 to allow more trades
 				ADXValid:        confluenceResult.ADXValid,
 				VWAPValid:       confluenceResult.VWAPValid,
 				VolumeValid:     confluenceResult.VolumeSpikeValid,
 				PivotValid:      confluenceResult.PivotValid,
 				EMAValid:        confluenceResult.EMAValid,
 				Details:         confluenceResult.Details,
-				Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 3)", confluenceResult.ConfluenceScore),
+				Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 2)", confluenceResult.ConfluenceScore),
 			}
 			rejectionTracker.AddRejection(fmt.Sprintf("Entry Confluence: %d/5 (ADX:%v VWAP:%v Vol:%v Pivot:%v EMA:%v)",
 				confluenceResult.ConfluenceScore,
@@ -2699,8 +2713,10 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 	// DATABASE-FIRST: Load confidence thresholds from user mode config
 	// Default thresholds if database config not available
-	executeThreshold := 30.0 // Default: Execute if >= 30%
-	waitThreshold := 20.0    // Default: Wait if >= 20%
+	// LOWERED: Previous 30% was too high when confidence fusion reduces scores
+	// With weighted tech/LLM blend, 20% is a reasonable threshold for execution
+	executeThreshold := 20.0 // Default: Execute if >= 20% (was 30%)
+	waitThreshold := 10.0    // Default: Wait if >= 10% (was 20%)
 
 	if modeConfig != nil && modeConfig.Confidence != nil {
 		if modeConfig.Confidence.MinConfidence > 0 {
@@ -3203,14 +3219,20 @@ func (g *GinieAnalyzer) FuseConfidence(technicalConfidence int, technicalDirecti
 	}
 
 	// === WEIGHTED CONFIDENCE BLEND ===
-	// When LLM says HOLD/neutral, it contributes 0 directional confidence instead of vetoing
+	// When LLM says HOLD/neutral, use 50% of its confidence rather than 0
+	// This prevents HOLD from completely zeroing out the LLM contribution
+	// while still reducing its impact compared to a directional call
 	llmDirectionalConfidence := float64(llmConfidence)
 	if llmDirection == "neutral" {
-		llmDirectionalConfidence = 0 // HOLD = no directional conviction
+		// CHANGED: Use 50% of LLM confidence when neutral instead of 0
+		// This prevents tech confidence from completely dominating (causing 10-14% final scores)
+		// "Uncertain" is different from "against" - LLM still analyzed the market
+		llmDirectionalConfidence = float64(llmConfidence) * 0.5
 		if g.logger != nil {
-			g.logger.Debug("[LLM] LLM recommends HOLD - contributing 0 directional confidence",
+			g.logger.Debug("[LLM] LLM recommends HOLD - using 50% confidence contribution",
 				"llm_recommendation", llmResponse.Recommendation,
-				"llm_confidence", llmConfidence)
+				"llm_confidence", llmConfidence,
+				"llm_directional_contribution", llmDirectionalConfidence)
 		}
 	}
 
@@ -4202,13 +4224,14 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 		result.EMA50Distance = ema50Dist
 
 		// Check if price is over-extended from EMAs
+		// LOOSENED: Previous 2.5%/4% was too strict for volatile crypto markets
 		maxEMA20Ext := g.config.MaxEMA20ExtensionPct
 		maxEMA50Ext := g.config.MaxEMA50ExtensionPct
 		if maxEMA20Ext == 0 {
-			maxEMA20Ext = 2.5 // Default 2.5%
+			maxEMA20Ext = 5.0 // Default 5% (was 2.5% - too strict)
 		}
 		if maxEMA50Ext == 0 {
-			maxEMA50Ext = 4.0 // Default 4%
+			maxEMA50Ext = 8.0 // Default 8% (was 4% - too strict)
 		}
 
 		if ema20Dist > maxEMA20Ext {
@@ -4224,9 +4247,10 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 
 		// === 7. CONSECUTIVE CANDLES CHECK ===
 		// Don't enter after too many same-direction candles (trend exhaustion)
+		// LOOSENED: 3 candles was too strict - crypto often trends 5-7 candles
 		maxConsec := g.config.MaxConsecutiveCandles
 		if maxConsec == 0 {
-			maxConsec = 3 // Default 3 candles
+			maxConsec = 5 // Default 5 candles (was 3 - too strict)
 		}
 		consecCount := g.countConsecutiveDirectionalCandles(klines, direction)
 		result.ConsecutiveCandles = consecCount
@@ -4242,16 +4266,17 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 
 		// === 8. RSI EXHAUSTION CHECK ===
 		// Don't enter LONG if RSI is too high (overbought), SHORT if too low (oversold)
+		// LOOSENED: 35-65 range was too narrow - crypto often runs to extreme RSI
 		rsi14 := g.calculateRSI(klines, 14)
 		result.RSI14Value = rsi14
 
 		rsiLongMax := g.config.RSIExhaustionLongMax
 		rsiShortMin := g.config.RSIExhaustionShortMin
 		if rsiLongMax == 0 {
-			rsiLongMax = 65.0 // Default
+			rsiLongMax = 75.0 // Default (was 65 - too strict)
 		}
 		if rsiShortMin == 0 {
-			rsiShortMin = 35.0 // Default
+			rsiShortMin = 25.0 // Default (was 35 - too strict)
 		}
 
 		if direction == "long" && rsi14 > rsiLongMax {
@@ -4278,15 +4303,19 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 	result.ConfluenceScore = confluenceCount
 
 	// Require minimum filters to pass (use per-coin config if available)
+	// LOWERED: Previous value of 3 was blocking 99%+ of trades
+	// With 5 checks (ADX, VWAP, Volume, Pivot, EMA), requiring 3 is too strict
+	// for most market conditions. Requiring 2 allows trades when at least
+	// 2 significant factors align (e.g., VWAP + Volume, or ADX + EMA)
 	minRequired := coinConfig.MinConfluence
 	if minRequired <= 0 {
-		minRequired = 3 // Default 3 out of 5 (lowered from 4 for more trades)
+		minRequired = 2 // Default 2 out of 5 - allows reasonable confluence
 	}
 	if mode == GinieModeScalp {
 		if coinConfig.ScalpMinConfluence > 0 {
 			minRequired = coinConfig.ScalpMinConfluence
 		} else {
-			minRequired = 3 // Slightly more lenient for scalp
+			minRequired = 2 // Scalp mode: 2 filters sufficient for quick entries
 		}
 	}
 
@@ -4635,7 +4664,11 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 	signal.ADXValue = adx
 
 	// Layer 1.5: Multi-timeframe Trend Alignment (5m/3m/1m weighted consensus)
-	settings := GetSettingsManager().GetDefaultSettings()
+	settings, err := GetSettingsManager().LoadSettings()
+	if err != nil {
+		g.logger.Error("Failed to load settings for MTF check, using defaults", "error", err)
+		settings = DefaultSettings()
+	}
 
 	// Use new MTF weighted consensus if enabled, otherwise fall back to legacy 5m alignment
 	if settings.UltraFastMTFEnabled {
@@ -4978,7 +5011,11 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 
 // applyUltraFastQualityFilters applies volume, momentum, and candle body filters to the signal
 func (g *GinieAnalyzer) applyUltraFastQualityFilters(signal *UltraFastSignal, klines1m []binance.Kline) {
-	settings := GetSettingsManager().GetDefaultSettings()
+	settings, err := GetSettingsManager().LoadSettings()
+	if err != nil {
+		g.logger.Error("Failed to load settings for quality filters, using defaults", "error", err)
+		settings = DefaultSettings()
+	}
 	filtersApplied := []string{}
 	filtersFailed := []string{}
 

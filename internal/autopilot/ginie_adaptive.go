@@ -453,7 +453,7 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 		// Get current LLM weight (default 0.3)
 		currentWeight := 0.3 // Default
 		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetDefaultSettings()
+			settings := ai.settingsManager.GetCurrentSettings()
 			currentWeight = settings.LLMSLTPWeight // Using this as a proxy
 		}
 
@@ -486,7 +486,7 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 	if llmWinRate > 60 {
 		currentWeight := 0.3
 		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetDefaultSettings()
+			settings := ai.settingsManager.GetCurrentSettings()
 			currentWeight = settings.LLMSLTPWeight
 		}
 
@@ -631,7 +631,7 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	case "block_disagreement":
 		// Update block_on_divergence in all ModeConfigs
 		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetDefaultSettings()
+			settings := ai.settingsManager.GetCurrentSettings()
 			// Update all mode configurations with block_on_divergence
 			for _, mc := range settings.ModeConfigs {
 				if mc != nil && mc.TrendDivergence != nil {
@@ -644,7 +644,7 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	case "llm_weight":
 		// Update LLM weight
 		if suggestedWeight, ok := rec.SuggestedValue.(float64); ok && ai.settingsManager != nil {
-			settings := ai.settingsManager.GetDefaultSettings()
+			settings := ai.settingsManager.GetCurrentSettings()
 			settings.LLMSLTPWeight = suggestedWeight
 			err = ai.settingsManager.SaveSettings(settings)
 		}
