@@ -1,4 +1,20 @@
 services:
+  # Redis Cache (Epic 6 - Settings Cache Infrastructure)
+  redis:
+    image: redis:7-alpine
+    container_name: binance-bot-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
@@ -28,6 +44,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       # Binance API - All API keys are per-user, stored in database via Settings UI
       # No global/environment API keys supported
@@ -53,7 +71,7 @@ services:
       - DISCORD_ENABLED=false
       - DISCORD_WEBHOOK_URL=
       # Skip frontend build (use pre-built dist)
-      - SKIP_FRONTEND=1
+      - SKIP_FRONTEND=0
       # Logging
       - LOG_LEVEL=INFO
       - LOG_OUTPUT=stdout
@@ -123,6 +141,13 @@ services:
       - ENCRYPTION_KEY=dev-encryption-key-32-chars-1234567890ab
       # Subscription Configuration
       - SUBSCRIPTION_ENABLED=false
+      # Redis Cache Configuration (Epic 6)
+      - REDIS_ENABLED=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - REDIS_DB=0
+      - REDIS_POOL_SIZE=10
     volumes:
       # Mount source code for development (builds inside container)
       - .:/app
@@ -150,5 +175,6 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
   go-mod-cache:
   go-build-cache:

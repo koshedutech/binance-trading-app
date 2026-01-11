@@ -1,0 +1,158 @@
+# Sprint Status: Epic 5 - Ginie Autopilot Database Wiring & UI Stability
+# Created: 2026-01-06
+# Sprint: Sprint 5.1 (Implementation Sprint)
+
+epic:
+  id: epic-5
+  name: "Ginie Autopilot Database Wiring & UI Stability"
+  priority: CRITICAL
+  status: ready_for_development
+
+sm_review:
+  reviewer: "Bob (Scrum Master)"
+  review_date: "2026-01-06"
+  overall_assessment: APPROVED
+  notes: |
+    All three stories are comprehensive, implementation-ready, and properly prioritized.
+    Story 5.1 is CRITICAL and must be completed first as it blocks user experience.
+    Stories 5.2 and 5.3 can be worked in parallel after 5.1 is complete.
+
+  story_reviews:
+    - story_id: "5.1"
+      title: "Fix Ginie Panel Loading & Error Handling"
+      priority: P0-CRITICAL
+      estimated_effort: "8 hours"
+      assessment: APPROVED
+      blockers: none
+      risks:
+        - "Frontend-only change - low risk"
+        - "Must test all error scenarios thoroughly"
+      notes: |
+        Story is well-structured with 10 implementation tasks.
+        Error classification helper is a good reusable pattern.
+        7 comprehensive test scenarios cover all edge cases.
+        MUST be completed first - blocks user experience.
+
+    - story_id: "5.2"
+      title: "Wire Scalp Reentry Config to Database"
+      priority: P0-HIGH
+      estimated_effort: "8 hours"
+      assessment: APPROVED
+      blockers: none
+      dependencies:
+        - "Story 4.1, 4.2 (already complete)"
+      risks:
+        - "Large config (36+ fields) - needs careful testing"
+        - "Cache invalidation must work correctly"
+      notes: |
+        Comprehensive coverage of all 36+ scalp reentry settings.
+        Good caching strategy with 5-minute TTL.
+        Validation logic is thorough.
+        API endpoints follow established patterns.
+
+    - story_id: "5.3"
+      title: "Wire Global Circuit Breaker to Database"
+      priority: P1-HIGH
+      estimated_effort: "8 hours"
+      assessment: APPROVED
+      blockers: none
+      dependencies:
+        - "Story 4.1, 4.2, 4.4 (already complete)"
+      risks:
+        - "Safety-critical - minimum values enforced"
+        - "Must not break existing circuit breaker behavior"
+      notes: |
+        Clear separation from Mode CB (per-mode).
+        Good safety validation with minimums.
+        Frontend panel is well-designed.
+        Database migration is straightforward.
+
+sprint_plan:
+  sprint_name: "Sprint 5.1 - Ginie Panel Stability"
+  start_date: "2026-01-06"
+  sprint_goal: |
+    Fix critical Ginie Panel loading issues (Story 5.1) and complete
+    database wiring for remaining configurations (Stories 5.2, 5.3).
+
+  execution_order:
+    - phase: 1
+      title: "Critical Fix First"
+      stories:
+        - id: "5.1"
+          priority: P0-CRITICAL
+          assignee: TBD
+          reason: "Blocks user experience - must complete first"
+
+    - phase: 2
+      title: "Database Wiring (Parallel)"
+      stories:
+        - id: "5.2"
+          priority: P0-HIGH
+          assignee: TBD
+          reason: "Enables per-user scalp reentry customization"
+          can_parallel_with: "5.3"
+
+        - id: "5.3"
+          priority: P1-HIGH
+          assignee: TBD
+          reason: "Removes hardcoded safety limits"
+          can_parallel_with: "5.2"
+
+  definition_of_done:
+    - "All acceptance criteria met"
+    - "All test scenarios pass"
+    - "No infinite loading states in UI"
+    - "Error messages display correctly"
+    - "Per-user config isolation verified"
+    - "Config persists across sessions"
+    - "Code review approved"
+
+story_status:
+  "5.1":
+    status: ready_for_development
+    tasks_total: 10
+    tasks_completed: 0
+    blockers: []
+
+  "5.2":
+    status: ready_for_development
+    tasks_total: 5
+    tasks_completed: 0
+    blockers: []
+    depends_on: []
+
+  "5.3":
+    status: ready_for_development
+    tasks_total: 8
+    tasks_completed: 0
+    blockers: []
+    depends_on: []
+
+risks_and_mitigations:
+  - risk: "Frontend error handling complexity"
+    probability: LOW
+    impact: MEDIUM
+    mitigation: "ErrorDisplay component provides reusable pattern"
+
+  - risk: "Scalp reentry config has 36+ fields"
+    probability: MEDIUM
+    impact: LOW
+    mitigation: "Partial updates supported, validation comprehensive"
+
+  - risk: "Circuit breaker safety impact"
+    probability: LOW
+    impact: HIGH
+    mitigation: "Minimum values enforced, defaults are safe"
+
+success_metrics:
+  - metric: "Infinite loading states"
+    before: "~15% of page loads"
+    after: "0%"
+
+  - metric: "Error recovery success rate"
+    before: "0% (must refresh page)"
+    after: "100% (retry button works)"
+
+  - metric: "Per-user config isolation"
+    before: "Not supported"
+    after: "100% isolated"

@@ -642,12 +642,14 @@ func DefaultGinieConfig() *GinieConfig {
 		// Override
 		AutoOverrideEnabled: true,
 
-		// Counter-Trend Trading - ENABLED 2026-01-03 (was blocking ALL trades)
-		AllowCounterTrend:               true,  // ENABLED - market often reverses
-		CounterTrendMinConfidence:       1.0,   // Was 80.0 - essentially disabled for now
-		CounterTrendRequireReversal:     false, // Was true - too strict
-		CounterTrendRequireRSIExtreme:   false, // Was true - too strict
-		CounterTrendRequireADXWeakening: false, // Was true - too strict
+		// Counter-Trend Trading - DISABLED 2026-01-10 (causing losses in trending markets)
+		// Previous settings were too permissive (1% confidence, no validation)
+		// This caused trades to go AGAINST the trend, resulting in consistent losses
+		AllowCounterTrend:               false, // DISABLED - only trade WITH the trend
+		CounterTrendMinConfidence:       70.0,  // Require high confidence if re-enabled
+		CounterTrendRequireReversal:     true,  // Require reversal pattern if re-enabled
+		CounterTrendRequireRSIExtreme:   true,  // Require RSI extreme zone if re-enabled
+		CounterTrendRequireADXWeakening: false, // ADX weakening is optional
 
 		// Monitoring
 		ScalpMonitorInterval:    900,

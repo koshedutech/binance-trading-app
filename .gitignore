@@ -17,13 +17,13 @@ coverage.html
 # Go workspace file
 go.work
 
-# Environment files
-.env
-.env.local
-.env.production
+# Environment files - REMOVED for private repo transfer
+# .env
+# .env.local
+# .env.production
 
-# Configuration files (contain sensitive data)
-config.json
+# Configuration files - REMOVED for private repo transfer
+# config.json
 
 # IDE specific files
 .vscode/
@@ -44,12 +44,12 @@ logs/
 tmp/
 temp/
 
-# Debug/status JSON files (auto-generated)
-*_status.json
-ginie_*.json
-current_status.json
-final_status.json
-full_status.json
+# Debug/status JSON files - REMOVED for private repo transfer
+# *_status.json
+# ginie_*.json
+# current_status.json
+# final_status.json
+# full_status.json
 
 # Invalid Windows path files (accidentally created)
 D:*

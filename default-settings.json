@@ -1,0 +1,898 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "schema_version": 1,
+    "last_updated": "2026-01-08T08:33:22Z",
+    "updated_by": "admin",
+    "description": "Master default settings for Binance Trading Bot - Single source of truth for all user defaults"
+  },
+  "global_trading": {
+    "risk_level": "moderate",
+    "max_usd_allocation": 2500,
+    "profit_reinvest_percent": 50,
+    "profit_reinvest_risk_level": "aggressive",
+    "_risk_info": {
+      "max_usd_allocation": {
+        "impact": "high",
+        "recommendation": "Start lower until familiar with system"
+      },
+      "risk_level": {
+        "impact": "high",
+        "recommendation": "Use 'moderate' for beginners"
+      }
+    }
+  },
+  "mode_configs": {
+    "position": {
+      "mode_name": "position",
+      "enabled": false,
+      "timeframe": {
+        "trend_timeframe": "4h",
+        "entry_timeframe": "1h",
+        "analysis_timeframe": "1d"
+      },
+      "confidence": {
+        "min_confidence": 40,
+        "high_confidence": 85,
+        "ultra_confidence": 92
+      },
+      "size": {
+        "base_size_usd": 400,
+        "max_size_usd": 600,
+        "max_positions": 2,
+        "leverage": 3,
+        "size_multiplier_lo": 0,
+        "size_multiplier_hi": 0,
+        "safety_margin": 0.9,
+        "min_balance_usd": 0,
+        "min_position_size_usd": 200,
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "confidence_multiplier_base": 0,
+        "confidence_multiplier_scale": 0,
+        "auto_size_enabled": false,
+        "auto_size_min_cover_fee": 0
+      },
+      "circuit_breaker": {
+        "max_loss_per_hour": 150,
+        "max_loss_per_day": 0,
+        "max_consecutive_losses": 3,
+        "cooldown_minutes": 120,
+        "max_trades_per_minute": 0,
+        "max_trades_per_hour": 0,
+        "max_trades_per_day": 0,
+        "win_rate_check_after": 0,
+        "min_win_rate": 0
+      },
+      "sltp": {
+        "stop_loss_percent": 3.5,
+        "take_profit_percent": 8,
+        "trailing_stop_enabled": false,
+        "trailing_stop_percent": 0,
+        "trailing_stop_activation": 0,
+        "trailing_activation_price": 0,
+        "max_hold_duration": "",
+        "use_single_tp": false,
+        "single_tp_percent": 0,
+        "tp_gain_levels": null,
+        "tp_allocation": null,
+        "trailing_activation_mode": "",
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": 0,
+        "roi_take_profit_percent": 0,
+        "margin_type": "",
+        "isolated_margin_percent": 0,
+        "atr_sl_multiplier": 0,
+        "atr_tp_multiplier": 0,
+        "atr_sl_min": 0,
+        "atr_sl_max": 0,
+        "atr_tp_min": 0,
+        "atr_tp_max": 0,
+        "llm_weight": 0,
+        "atr_weight": 0,
+        "auto_sltp_enabled": false,
+        "auto_trailing_enabled": false,
+        "min_profit_to_trail_pct": 0,
+        "min_sl_distance_from_zero": 0
+      },
+      "hedge": {
+        "allow_hedge": true,
+        "min_confidence_for_hedge": 85,
+        "existing_must_be_in_profit": 2,
+        "max_hedge_size_percent": 50,
+        "allow_same_mode_hedge": false,
+        "max_total_exposure_multiplier": 2
+      },
+      "averaging": {
+        "allow_averaging": true,
+        "average_up_profit_percent": 2,
+        "average_down_loss_percent": -2,
+        "add_size_percent": 30,
+        "max_averages": 2,
+        "min_confidence_for_average": 80,
+        "use_llm_for_averaging": true,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": [],
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
+      },
+      "stale_release": {
+        "enabled": true,
+        "max_hold_duration": "21d",
+        "min_profit_to_keep": 2,
+        "max_loss_to_force_close": -2,
+        "stale_zone_lo": -1.5,
+        "stale_zone_hi": 1.5,
+        "stale_zone_close_action": "close"
+      },
+      "assignment": {
+        "volatility_min": "low",
+        "volatility_max": "low",
+        "expected_hold_min": "3d",
+        "expected_hold_max": "30d",
+        "confidence_min": 75,
+        "confidence_max": 100,
+        "risk_score_max": 30,
+        "profit_potential_min": 5,
+        "profit_potential_max": 15,
+        "requires_trend_align": true,
+        "priority_weight": 1.5
+      },
+      "funding_rate": {},
+      "risk": {
+        "risk_level": "",
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "max_drawdown_percent": 0,
+        "max_daily_loss_percent": 0,
+        "min_adx": 30
+      },
+      "trend_divergence": {},
+      "mtf": {
+        "mtf_enabled": true,
+        "primary_timeframe": "1d",
+        "primary_weight": 0.5,
+        "secondary_timeframe": "4h",
+        "secondary_weight": 0.3,
+        "tertiary_timeframe": "1h",
+        "tertiary_weight": 0.2,
+        "min_consensus": 2,
+        "min_weighted_strength": 50,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 300000,
+        "ai_check_interval_ms": 1800000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 1209600000
+      },
+      "reversal": {}
+    },
+    "scalp": {
+      "mode_name": "scalp",
+      "enabled": true,
+      "timeframe": {
+        "trend_timeframe": "15m",
+        "entry_timeframe": "5m",
+        "analysis_timeframe": "15m"
+      },
+      "confidence": {
+        "min_confidence": 40,
+        "high_confidence": 75,
+        "ultra_confidence": 85
+      },
+      "size": {
+        "base_size_usd": 200,
+        "max_size_usd": 600,
+        "max_positions": 10,
+        "leverage": 10,
+        "size_multiplier_lo": 0,
+        "size_multiplier_hi": 0,
+        "safety_margin": 0.9,
+        "min_balance_usd": 0,
+        "min_position_size_usd": 100,
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "confidence_multiplier_base": 0,
+        "confidence_multiplier_scale": 0,
+        "auto_size_enabled": false,
+        "auto_size_min_cover_fee": 0
+      },
+      "circuit_breaker": {
+        "max_loss_per_hour": 75,
+        "max_loss_per_day": 0,
+        "max_consecutive_losses": 5,
+        "cooldown_minutes": 30,
+        "max_trades_per_minute": 0,
+        "max_trades_per_hour": 0,
+        "max_trades_per_day": 0,
+        "win_rate_check_after": 0,
+        "min_win_rate": 0
+      },
+      "sltp": {
+        "stop_loss_percent": 2,
+        "take_profit_percent": 1.5,
+        "trailing_stop_enabled": false,
+        "trailing_stop_percent": 0,
+        "trailing_stop_activation": 0,
+        "trailing_activation_price": 0,
+        "max_hold_duration": "",
+        "use_single_tp": false,
+        "single_tp_percent": 0,
+        "tp_gain_levels": null,
+        "tp_allocation": null,
+        "trailing_activation_mode": "",
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": 0,
+        "roi_take_profit_percent": 0,
+        "margin_type": "",
+        "isolated_margin_percent": 0,
+        "atr_sl_multiplier": 0,
+        "atr_tp_multiplier": 0,
+        "atr_sl_min": 0,
+        "atr_sl_max": 0,
+        "atr_tp_min": 0,
+        "atr_tp_max": 0,
+        "llm_weight": 0,
+        "atr_weight": 0,
+        "auto_sltp_enabled": false,
+        "auto_trailing_enabled": false,
+        "min_profit_to_trail_pct": 0,
+        "min_sl_distance_from_zero": 0
+      },
+      "hedge": {
+        "allow_hedge": true,
+        "min_confidence_for_hedge": 75,
+        "existing_must_be_in_profit": 0,
+        "max_hedge_size_percent": 75,
+        "allow_same_mode_hedge": false,
+        "max_total_exposure_multiplier": 2
+      },
+      "averaging": {
+        "allow_averaging": true,
+        "average_up_profit_percent": 0.5,
+        "average_down_loss_percent": -1,
+        "add_size_percent": 50,
+        "max_averages": 2,
+        "min_confidence_for_average": 65,
+        "use_llm_for_averaging": true,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": [],
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
+      },
+      "stale_release": {
+        "enabled": true,
+        "max_hold_duration": "6h",
+        "min_profit_to_keep": 0.5,
+        "max_loss_to_force_close": -1,
+        "stale_zone_lo": -0.5,
+        "stale_zone_hi": 0.5,
+        "stale_zone_close_action": "close"
+      },
+      "assignment": {
+        "volatility_min": "medium",
+        "volatility_max": "high",
+        "expected_hold_min": "15m",
+        "expected_hold_max": "4h",
+        "confidence_min": 60,
+        "confidence_max": 75,
+        "risk_score_max": 45,
+        "profit_potential_min": 1,
+        "profit_potential_max": 3,
+        "requires_trend_align": false,
+        "priority_weight": 1
+      },
+      "funding_rate": {},
+      "risk": {
+        "risk_level": "",
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "max_drawdown_percent": 0,
+        "max_daily_loss_percent": 0,
+        "min_adx": 20
+      },
+      "trend_divergence": {},
+      "mtf": {
+        "mtf_enabled": true,
+        "primary_timeframe": "15m",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "5m",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "1m",
+        "tertiary_weight": 0.25,
+        "min_consensus": 2,
+        "min_weighted_strength": 60,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 10000,
+        "ai_check_interval_ms": 30000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 14400000
+      },
+      "reversal": {
+        "reversal_enabled": true,
+        "reversal_min_llm_confidence": 0.65,
+        "reversal_consecutive_candles": 3,
+        "reversal_limit_timeout_sec": 120,
+        "reversal_require_all_tfs": false
+      }
+    },
+    "scalp_reentry": {
+      "mode_name": "scalp_reentry",
+      "enabled": true,
+      "timeframe": {
+        "trend_timeframe": "15m",
+        "entry_timeframe": "5m",
+        "analysis_timeframe": "15m"
+      },
+      "confidence": {
+        "min_confidence": 60,
+        "high_confidence": 75,
+        "ultra_confidence": 88
+      },
+      "size": {
+        "base_size_usd": 100,
+        "max_size_usd": 100,
+        "max_positions": 5,
+        "leverage": 10,
+        "size_multiplier_lo": 1,
+        "size_multiplier_hi": 1.5,
+        "safety_margin": 0.9,
+        "min_balance_usd": 0,
+        "min_position_size_usd": 0,
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "confidence_multiplier_base": 0,
+        "confidence_multiplier_scale": 0,
+        "auto_size_enabled": false,
+        "auto_size_min_cover_fee": 15
+      },
+      "circuit_breaker": {
+        "max_loss_per_hour": 50,
+        "max_loss_per_day": 120,
+        "max_consecutive_losses": 4,
+        "cooldown_minutes": 30,
+        "max_trades_per_minute": 4,
+        "max_trades_per_hour": 25,
+        "max_trades_per_day": 60,
+        "win_rate_check_after": 15,
+        "min_win_rate": 50
+      },
+      "sltp": {
+        "stop_loss_percent": 2,
+        "take_profit_percent": 1,
+        "trailing_stop_enabled": true,
+        "trailing_stop_percent": 5,
+        "trailing_stop_activation": 1,
+        "trailing_activation_price": 0,
+        "max_hold_duration": "6h",
+        "use_single_tp": false,
+        "single_tp_percent": 1,
+        "tp_gain_levels": null,
+        "tp_allocation": [
+          30,
+          35,
+          35,
+          0
+        ],
+        "trailing_activation_mode": "after_tp3",
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": -10,
+        "roi_take_profit_percent": 10,
+        "margin_type": "CROSS",
+        "isolated_margin_percent": 30,
+        "atr_sl_multiplier": 0,
+        "atr_tp_multiplier": 0,
+        "atr_sl_min": 0,
+        "atr_sl_max": 0,
+        "atr_tp_min": 0,
+        "atr_tp_max": 0,
+        "llm_weight": 0,
+        "atr_weight": 0,
+        "auto_sltp_enabled": false,
+        "auto_trailing_enabled": false,
+        "min_profit_to_trail_pct": 1,
+        "min_sl_distance_from_zero": 0.2
+      },
+      "hedge": {
+        "allow_hedge": false,
+        "min_confidence_for_hedge": 80,
+        "existing_must_be_in_profit": 0,
+        "max_hedge_size_percent": 50,
+        "allow_same_mode_hedge": false,
+        "max_total_exposure_multiplier": 1.5
+      },
+      "averaging": {
+        "allow_averaging": true,
+        "average_up_profit_percent": 0.5,
+        "average_down_loss_percent": -1,
+        "add_size_percent": 50,
+        "max_averages": 2,
+        "min_confidence_for_average": 70,
+        "use_llm_for_averaging": true,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 3,
+        "staged_entry_percent": [
+          40,
+          30,
+          30
+        ],
+        "staged_entry_price_improve": 0.3,
+        "staged_entry_cooldown_sec": 30,
+        "staged_entry_max_wait_sec": 300
+      },
+      "stale_release": {
+        "enabled": true,
+        "max_hold_duration": "8h",
+        "min_profit_to_keep": 0.3,
+        "max_loss_to_force_close": -1.5,
+        "stale_zone_lo": -0.5,
+        "stale_zone_hi": 0.3,
+        "stale_zone_close_action": "close"
+      },
+      "assignment": {
+        "volatility_min": "medium",
+        "volatility_max": "high",
+        "expected_hold_min": "30m",
+        "expected_hold_max": "6h",
+        "confidence_min": 60,
+        "confidence_max": 75,
+        "risk_score_max": 40,
+        "profit_potential_min": 0.5,
+        "profit_potential_max": 2,
+        "requires_trend_align": true,
+        "priority_weight": 0.9
+      },
+      "funding_rate": null,
+      "risk": null,
+      "trend_divergence": null,
+      "mtf": {
+        "mtf_enabled": true,
+        "primary_timeframe": "15m",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "5m",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "1m",
+        "tertiary_weight": 0.25,
+        "min_consensus": 1,
+        "min_weighted_strength": 35,
+        "trend_stability_check": false
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 15000,
+        "ai_check_interval_ms": 20000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 21600000
+      },
+      "reversal": {
+        "reversal_enabled": true,
+        "reversal_min_llm_confidence": 0.7,
+        "reversal_consecutive_candles": 3,
+        "reversal_limit_timeout_sec": 90,
+        "reversal_require_all_tfs": false
+      }
+    },
+    "swing": {
+      "mode_name": "swing",
+      "enabled": true,
+      "timeframe": {
+        "trend_timeframe": "1h",
+        "entry_timeframe": "15m",
+        "analysis_timeframe": "4h"
+      },
+      "confidence": {
+        "min_confidence": 40,
+        "high_confidence": 80,
+        "ultra_confidence": 90
+      },
+      "size": {
+        "base_size_usd": 300,
+        "max_size_usd": 500,
+        "max_positions": 5,
+        "leverage": 9,
+        "size_multiplier_lo": 0,
+        "size_multiplier_hi": 0,
+        "safety_margin": 0.9,
+        "min_balance_usd": 0,
+        "min_position_size_usd": 100,
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "confidence_multiplier_base": 0,
+        "confidence_multiplier_scale": 0,
+        "auto_size_enabled": false,
+        "auto_size_min_cover_fee": 0
+      },
+      "circuit_breaker": {
+        "max_loss_per_hour": 100,
+        "max_loss_per_day": 0,
+        "max_consecutive_losses": 4,
+        "cooldown_minutes": 60,
+        "max_trades_per_minute": 0,
+        "max_trades_per_hour": 0,
+        "max_trades_per_day": 0,
+        "win_rate_check_after": 0,
+        "min_win_rate": 0
+      },
+      "sltp": {
+        "stop_loss_percent": 2,
+        "take_profit_percent": 3,
+        "trailing_stop_enabled": false,
+        "trailing_stop_percent": 0,
+        "trailing_stop_activation": 0,
+        "trailing_activation_price": 0,
+        "max_hold_duration": "",
+        "use_single_tp": false,
+        "single_tp_percent": 0,
+        "tp_gain_levels": null,
+        "tp_allocation": null,
+        "trailing_activation_mode": "",
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": 0,
+        "roi_take_profit_percent": 0,
+        "margin_type": "",
+        "isolated_margin_percent": 0,
+        "atr_sl_multiplier": 0,
+        "atr_tp_multiplier": 0,
+        "atr_sl_min": 0,
+        "atr_sl_max": 0,
+        "atr_tp_min": 0,
+        "atr_tp_max": 0,
+        "llm_weight": 0,
+        "atr_weight": 0,
+        "auto_sltp_enabled": false,
+        "auto_trailing_enabled": false,
+        "min_profit_to_trail_pct": 0,
+        "min_sl_distance_from_zero": 0
+      },
+      "hedge": {
+        "allow_hedge": true,
+        "min_confidence_for_hedge": 80,
+        "existing_must_be_in_profit": 1,
+        "max_hedge_size_percent": 50,
+        "allow_same_mode_hedge": false,
+        "max_total_exposure_multiplier": 2
+      },
+      "averaging": {
+        "allow_averaging": true,
+        "average_up_profit_percent": 1,
+        "average_down_loss_percent": -1.5,
+        "add_size_percent": 50,
+        "max_averages": 3,
+        "min_confidence_for_average": 70,
+        "use_llm_for_averaging": true,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": [],
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
+      },
+      "stale_release": {
+        "enabled": true,
+        "max_hold_duration": "5d",
+        "min_profit_to_keep": 1,
+        "max_loss_to_force_close": -1.5,
+        "stale_zone_lo": -1,
+        "stale_zone_hi": 1,
+        "stale_zone_close_action": "close"
+      },
+      "assignment": {
+        "volatility_min": "low",
+        "volatility_max": "medium",
+        "expected_hold_min": "4h",
+        "expected_hold_max": "3d",
+        "confidence_min": 65,
+        "confidence_max": 85,
+        "risk_score_max": 40,
+        "profit_potential_min": 3,
+        "profit_potential_max": 8,
+        "requires_trend_align": true,
+        "priority_weight": 1.2
+      },
+      "funding_rate": {},
+      "risk": {
+        "risk_level": "",
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "max_drawdown_percent": 0,
+        "max_daily_loss_percent": 0,
+        "min_adx": 25
+      },
+      "trend_divergence": {},
+      "mtf": {
+        "mtf_enabled": true,
+        "primary_timeframe": "4h",
+        "primary_weight": 0.45,
+        "secondary_timeframe": "1h",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "15m",
+        "tertiary_weight": 0.2,
+        "min_consensus": 2,
+        "min_weighted_strength": 55,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 60000,
+        "ai_check_interval_ms": 300000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 259200000
+      },
+      "reversal": {}
+    },
+    "ultra_fast": {
+      "mode_name": "ultra_fast",
+      "enabled": false,
+      "timeframe": {
+        "trend_timeframe": "5m",
+        "entry_timeframe": "1m",
+        "analysis_timeframe": "5m"
+      },
+      "confidence": {
+        "min_confidence": 40,
+        "high_confidence": 80,
+        "ultra_confidence": 90
+      },
+      "size": {
+        "base_size_usd": 50,
+        "max_size_usd": 200,
+        "max_positions": 1,
+        "leverage": 10,
+        "size_multiplier_lo": 0,
+        "size_multiplier_hi": 0,
+        "safety_margin": 0.9,
+        "min_balance_usd": 0,
+        "min_position_size_usd": 50,
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "confidence_multiplier_base": 0,
+        "confidence_multiplier_scale": 0,
+        "auto_size_enabled": false,
+        "auto_size_min_cover_fee": 0
+      },
+      "circuit_breaker": {
+        "max_loss_per_hour": 10,
+        "max_loss_per_day": 0,
+        "max_consecutive_losses": 10,
+        "cooldown_minutes": 30,
+        "max_trades_per_minute": 0,
+        "max_trades_per_hour": 0,
+        "max_trades_per_day": 0,
+        "win_rate_check_after": 0,
+        "min_win_rate": 0
+      },
+      "sltp": {
+        "stop_loss_percent": 0.5,
+        "take_profit_percent": 0.8,
+        "trailing_stop_enabled": false,
+        "trailing_stop_percent": 0,
+        "trailing_stop_activation": 0,
+        "trailing_activation_price": 0,
+        "max_hold_duration": "",
+        "use_single_tp": false,
+        "single_tp_percent": 0,
+        "tp_gain_levels": null,
+        "tp_allocation": null,
+        "trailing_activation_mode": "",
+        "use_roi_based_sltp": false,
+        "roi_stop_loss_percent": 0,
+        "roi_take_profit_percent": 0,
+        "margin_type": "",
+        "isolated_margin_percent": 0,
+        "atr_sl_multiplier": 0,
+        "atr_tp_multiplier": 0,
+        "atr_sl_min": 0,
+        "atr_sl_max": 0,
+        "atr_tp_min": 0,
+        "atr_tp_max": 0,
+        "llm_weight": 0,
+        "atr_weight": 0,
+        "auto_sltp_enabled": false,
+        "auto_trailing_enabled": false,
+        "min_profit_to_trail_pct": 0,
+        "min_sl_distance_from_zero": 0
+      },
+      "hedge": {
+        "allow_hedge": true,
+        "min_confidence_for_hedge": 70,
+        "existing_must_be_in_profit": 0,
+        "max_hedge_size_percent": 100,
+        "allow_same_mode_hedge": false,
+        "max_total_exposure_multiplier": 2
+      },
+      "averaging": {
+        "allow_averaging": false,
+        "average_up_profit_percent": 0,
+        "average_down_loss_percent": 0,
+        "add_size_percent": 0,
+        "max_averages": 0,
+        "min_confidence_for_average": 0,
+        "use_llm_for_averaging": false,
+        "staged_entry_enabled": false,
+        "staged_entry_levels": 0,
+        "staged_entry_percent": [],
+        "staged_entry_price_improve": 0,
+        "staged_entry_cooldown_sec": 0,
+        "staged_entry_max_wait_sec": 0
+      },
+      "stale_release": {
+        "enabled": true,
+        "max_hold_duration": "10s",
+        "min_profit_to_keep": 0.3,
+        "max_loss_to_force_close": -0.5,
+        "stale_zone_lo": -0.3,
+        "stale_zone_hi": 0.3,
+        "stale_zone_close_action": "close"
+      },
+      "assignment": {
+        "volatility_min": "high",
+        "volatility_max": "extreme",
+        "expected_hold_min": "0",
+        "expected_hold_max": "5m",
+        "confidence_min": 50,
+        "confidence_max": 70,
+        "risk_score_max": 50,
+        "profit_potential_min": 0.5,
+        "profit_potential_max": 2,
+        "requires_trend_align": false,
+        "priority_weight": 0.8
+      },
+      "funding_rate": {},
+      "risk": {
+        "risk_level": "",
+        "risk_multiplier_conservative": 0,
+        "risk_multiplier_moderate": 0,
+        "risk_multiplier_aggressive": 0,
+        "max_drawdown_percent": 0,
+        "max_daily_loss_percent": 0,
+        "min_adx": 15
+      },
+      "trend_divergence": {},
+      "mtf": {
+        "mtf_enabled": true,
+        "primary_timeframe": "5m",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "3m",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "1m",
+        "tertiary_weight": 0.25,
+        "min_consensus": 2,
+        "min_weighted_strength": 50,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 3000,
+        "ai_check_interval_ms": 5000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": false,
+        "max_hold_time_ms": 0
+      },
+      "reversal": {}
+    }
+  },
+  "position_optimization": {
+    "averaging": {
+      "enabled": true,
+      "max_entries": 3,
+      "entry_spacing_percent": 1.5,
+      "size_multiplier_per_level": 1,
+      "staged_entry_enabled": false,
+      "staged_entry_levels": 3,
+      "staged_entry_percent": [
+        40,
+        30,
+        30
+      ],
+      "staged_entry_cooldown_sec": 30
+    },
+    "hedging": {
+      "enabled": false,
+      "min_confidence_for_hedge": 75,
+      "existing_must_be_in_profit": 1.0,
+      "max_hedge_size_percent": 50,
+      "allow_same_mode_hedge": false,
+      "hedge_price_drop_trigger_pct": 3.0,
+      "hedge_unrealized_loss_trigger": 50.0,
+      "hedge_ai_enabled": true,
+      "hedge_ai_confidence_min": 75,
+      "hedge_default_percent": 50.0,
+      "hedge_partial_steps": [25, 50, 75, 100],
+      "hedge_profit_take_pct": 2.0,
+      "hedge_close_on_recovery_pct": -1.5,
+      "hedge_max_simultaneous": 3
+    },
+    "_risk_info": {
+      "hedging.enabled": {
+        "impact": "high",
+        "recommendation": "Keep disabled - hedging is complex and can amplify losses"
+      }
+    }
+  },
+  "circuit_breaker": {
+    "global": {
+      "enabled": true,
+      "max_loss_per_hour": 100,
+      "max_daily_loss": 500,
+      "max_consecutive_losses": 15,
+      "cooldown_minutes": 30,
+      "max_trades_per_minute": 10,
+      "max_daily_trades": 1000
+    },
+    "_risk_info": {
+      "enabled": {
+        "impact": "high",
+        "recommendation": "NEVER disable - protects against unlimited losses"
+      }
+    }
+  },
+  "llm_config": {
+    "global": {
+      "enabled": true,
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "timeout_ms": 5000,
+      "retry_count": 0,
+      "cache_duration_sec": 300
+    },
+    "_risk_info": {
+      "enabled": {
+        "impact": "medium",
+        "recommendation": "Keep enabled for AI-assisted decision making"
+      }
+    }
+  },
+  "early_warning": {
+    "enabled": true,
+    "start_after_minutes": 1,
+    "check_interval_secs": 30,
+    "only_underwater": true,
+    "min_loss_percent": 0.3,
+    "close_on_reversal": true
+  },
+  "capital_allocation": {
+    "ultra_fast_percent": 20,
+    "scalp_percent": 30,
+    "swing_percent": 35,
+    "position_percent": 15
+  },
+  "_settings_risk_index": {
+    "high_risk_settings": [
+      "mode_configs.ultra_fast.enabled",
+      "mode_configs.scalp_reentry.enabled",
+      "position_optimization.hedging.enabled",
+      "circuit_breaker.global.enabled=false"
+    ],
+    "medium_risk_settings": [
+      "mode_configs.*.size.leverage\u003e10",
+      "mode_configs.*.confidence.min_confidence\u003c40",
+      "llm_config.global.enabled=false"
+    ],
+    "low_risk_settings": [
+      "mode_configs.*.timeframe.*",
+      "early_warning.enabled",
+      "capital_allocation.*"
+    ]
+  }
+}

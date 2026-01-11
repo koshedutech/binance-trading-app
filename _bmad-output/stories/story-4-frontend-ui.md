@@ -537,7 +537,7 @@ describe('PaperBalanceSection', () => {
 ```javascript
 describe('Paper Balance Settings', () => {
   beforeEach(() => {
-    cy.login('jejeram@gmail.com', 'password123');
+    cy.login('test@example.com', 'xxxxxxxx');
     cy.visit('/settings');
   });
 

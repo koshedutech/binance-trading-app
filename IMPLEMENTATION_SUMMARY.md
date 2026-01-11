@@ -1,152 +1,48 @@
-# Ultra-Fast Scalping + Per-Mode Capital Allocation - COMPLETE
+# User Initialization Implementation - Story 4.14
 
-**Status**: ✅ **ALL 9 PHASES COMPLETE - READY FOR PAPER TRADING**
+## Summary
 
----
+Successfully implemented automatic initialization of ALL default settings when a new user registers. Previously, only basic UserTradingConfig was created. Now all 5 trading mode configurations are copied from `default-settings.json` to the `user_mode_configs` table.
 
-## Implementation Summary
+## Changes Made
 
-Successfully implemented ultra-fast scalping mode (1-3 second holds) with per-mode capital allocation and multi-layered safety controls.
+### 1. Created New Database Helper
+**File**: `/mnt/c/KOSH/binance-trading-bot/internal/database/user_initialization.go`
 
-### Phases Completed
+- Added `InitializeUserDefaultSettings(ctx, userID)` function
+- Loads `default-settings.json` from project root
+- Parses and extracts all 5 mode configurations
+- Saves each mode to `user_mode_configs` table with proper enabled flag
+- Handles JSON marshaling and database persistence
 
-| Phase | Component | Status |
-|-------|-----------|--------|
-| 1 | Ultra-Fast Mode Foundation | ✅ |
-| 2 | Multi-Layer Signals (4-layer system) | ✅ |
-| 3 | Entry/Exit Logic & Fee-Aware Profits | ✅ |
-| 4 | Per-Mode Capital Allocation | ✅ |
-| 5 | Multi-Layered Safety Controls | ✅ |
-| 6 | Database Schema (3 new tables) | ✅ |
-| 7 | API Endpoints (10 endpoints) | ✅ |
-| 8 | React UI Components | ✅ |
-| 9 | Testing Guide & Validation | ✅ |
+### 2. Updated Auth Service
+**File**: `/mnt/c/KOSH/binance-trading-bot/internal/auth/service.go`
 
-### Key Features Implemented
+- Modified `Register()` function to call initialization after user creation
+- Added `initializeNewUserDefaults(ctx, userID)` method
+- Calls repository helper to initialize all settings
+- Logs warnings if initialization fails (non-blocking)
 
-**Trading Engine**
-- Ultra-fast mode with 1-3 second position holds
-- Fee-aware profit calculation: `(EntryFee + ExitFee) / PositionUSD + (0.5 × ATR%)`
-- 500ms real-time position monitoring
-- Entry latency: < 6s | Exit latency: < 1s
+## How It Works
 
-**Capital Allocation**
-- Independent budgets for 4 modes (Ultra-Fast, Scalp, Swing, Position)
-- Per-mode position limits
-- Per-mode USD per position caps
-- Real-time utilization tracking
+### Registration Flow
 
-**Safety Controls (3 Layers)**
-1. **Rate Limiter**: Trades per minute/hour/day
-2. **Profit Monitor**: Cumulative loss in rolling window
-3. **Win-Rate Monitor**: Minimum win rate threshold
+1. User registers via `/api/auth/register` endpoint
+2. Basic user record created in `users` table
+3. Basic UserTradingConfig created in `user_trading_configs` table
+4. **NEW**: `InitializeUserDefaultSettings()` is called
+5. Loads `default-settings.json` file
+6. For each mode (ultra_fast, scalp, scalp_reentry, swing, position):
+   - Extracts mode config JSON
+   - Parses enabled flag
+   - Saves to `user_mode_configs` table using `SaveUserModeConfig()`
+7. Email verification sent (if configured)
 
-**Database**
-- `mode_safety_history` - Safety events
-- `mode_allocation_history` - Allocation snapshots
-- `mode_performance_stats` - Per-mode metrics
+## Testing Results
 
-**API Endpoints** (under `/api/futures/`)
-- GET/POST `/modes/allocations` - Capital management
-- GET `/modes/allocations/history` - Allocation history
-- GET/POST `/modes/safety*` - Safety status & control
-- GET `/modes/performance*` - Performance metrics
+All tests passed successfully. New users now have all 5 mode configs initialized automatically.
 
-**UI Components**
-- ModeAllocationPanel - Real-time capital utilization
-- ModeSafetyPanel - Safety status & controls
-- Integrated into FuturesDashboard
+## Files Modified
 
-### Performance Metrics
-
-| Metric | Target | Status |
-|--------|--------|--------|
-| Entry Latency | < 6s | ✅ |
-| Exit Latency | < 1s | ✅ |
-| Hold Time | 1-3s | ✅ |
-| API Calls | < 400/min | ✅ |
-| Memory Overhead | < 100KB | ✅ |
-| Database | Optimized | ✅ |
-
-### Code Changes
-
-**Backend**: ~1,915 lines across 10 files
-- 1 NEW file (handlers_mode.go)
-- 9 modified files
-
-**Frontend**: ~740 lines
-- 2 NEW components (ModeAllocationPanel, ModeSafetyPanel)
-- 2 modified files
-
-### Build Status
-
-✅ **Go Build**: No errors
-✅ **Web Build**: No errors (vite build successful)
-✅ **Tests Ready**: Comprehensive testing guide created
-
-### Next Steps
-
-1. **Immediate**: Run pre-trading checklist (see TESTING_GUIDE.md)
-2. **Paper Trading**: Validate for 7 days
-3. **Success Criteria**:
-   - Ultra-fast win rate > 45%
-   - Avg profit/trade > 0.5%
-   - No API rate limit violations
-   - All safety controls working
-
-4. **Production**: Deploy after successful validation
-
-### Documentation
-
-- `TESTING_GUIDE.md` - Comprehensive testing checklist (unit tests, API tests, UI tests, paper trading validation)
-- `TESTING_GUIDE.md` - Troubleshooting guide & monitoring commands
-- This file - Implementation summary
-
-### Key Files
-
-**Backend Logic**
-- `internal/autopilot/ginie_autopilot.go` - Core implementation
-- `internal/api/handlers_mode.go` - API endpoints
-- `internal/database/db_futures_migration.go` - Schema
-
-**Frontend**
-- `web/src/components/ModeAllocationPanel.tsx` - Allocation UI
-- `web/src/components/ModeSafetyPanel.tsx` - Safety UI
-- `web/src/pages/FuturesDashboard.tsx` - Integration
-
----
-
-## Quick Start
-
-```bash
-# Build backend
-cd /d/Apps/binance-trading-bot
-go build -o binance-trading-bot.exe .
-
-# Build frontend
-cd web
-npm run build
-
-# Start application
-./binance-trading-bot.exe
-
-# Verify
-curl -s http://localhost:8092/api/health
-curl -s http://localhost:8092/api/futures/modes/allocations
-```
-
-## Testing Checklist
-
-See `TESTING_GUIDE.md` for:
-- Unit tests
-- API endpoint tests
-- UI integration tests
-- Paper trading validation (7 days)
-- Success criteria metrics
-- Troubleshooting guide
-
----
-
-**Status**: Ready for production paper trading validation
-
-Estimated time to production: 7 days (after successful paper trading)
+1. `/mnt/c/KOSH/binance-trading-bot/internal/auth/service.go` - Modified Register() function
+2. `/mnt/c/KOSH/binance-trading-bot/internal/database/user_initialization.go` - New file

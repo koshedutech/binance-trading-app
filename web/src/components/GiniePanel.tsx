@@ -3270,14 +3270,14 @@ export default function GiniePanel() {
           <div className="flex items-center gap-2">
             <button
               onClick={(e) => { e.stopPropagation(); handleToggleScalpReentry(); }}
-              disabled={togglingScalpReentry}
-              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 ${
+              disabled={togglingScalpReentry || loadingScalpReentry || !scalpReentrySpecificConfig}
+              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                 scalpReentrySpecificConfig?.enabled
                   ? 'bg-green-900/50 text-green-400 border border-green-700'
                   : 'bg-gray-700/50 text-gray-400 border border-gray-600'
               }`}
             >
-              {togglingScalpReentry ? '...' : scalpReentrySpecificConfig?.enabled ? 'Enabled' : 'Disabled'}
+              {togglingScalpReentry ? '...' : loadingScalpReentry ? 'Loading...' : scalpReentrySpecificConfig?.enabled ? 'Enabled' : 'Disabled'}
             </button>
             {showScalpReentry ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
           </div>

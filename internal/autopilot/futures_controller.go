@@ -3307,12 +3307,15 @@ func (fc *FuturesController) placeTPSLOrdersSelective(symbol string, decision *F
 				"side", closeSide)
 
 			// Use Quantity for MARKET orders (not ClosePosition)
+			// CRITICAL: Must set ReduceOnly=true to close position
+			// Without this, Binance returns -2022 "ReduceOnly Order is rejected"
 			orderParams := binance.FuturesOrderParams{
 				Symbol:       symbol,
 				Side:         closeSide,
 				PositionSide: effectivePositionSide,
 				Type:         binance.FuturesOrderTypeMarket,
 				Quantity:     roundedQty,
+				ReduceOnly:   true,
 			}
 
 			for attempt := 1; attempt <= maxRetries; attempt++ {

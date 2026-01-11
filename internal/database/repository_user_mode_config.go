@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -247,12 +248,15 @@ func (r *Repository) GetUserScalpReentryConfig(ctx context.Context, userID strin
 
 // SaveUserScalpReentryConfig saves/updates the scalp_reentry mode configuration (UPSERT)
 // The configJSON parameter is the raw JSON bytes of the ScalpReentryConfig
+// IMPORTANT: This now extracts the 'enabled' value from the config JSON itself
 func (r *Repository) SaveUserScalpReentryConfig(ctx context.Context, userID string, configJSON []byte) error {
-	// Get current enabled status or default to false if config doesn't exist
-	enabled, _, err := r.GetUserModeConfigWithEnabled(ctx, userID, "scalp_reentry")
-	if err != nil {
-		// If config doesn't exist, default to false
-		enabled = false
+	// Extract enabled status from the config JSON (source of truth is what caller provided)
+	var config struct {
+		Enabled bool `json:"enabled"`
+	}
+	enabled := false
+	if err := json.Unmarshal(configJSON, &config); err == nil {
+		enabled = config.Enabled
 	}
 
 	return r.SaveUserModeConfig(ctx, userID, "scalp_reentry", enabled, configJSON)

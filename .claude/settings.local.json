@@ -564,7 +564,19 @@
       "Bash(__NEW_LINE__ echo \"=== GET /api/futures/trade-events/recent?limit=10 ===\")",
       "Bash(__NEW_LINE__ curl -s \"http://localhost:8094/api/futures/trade-events/recent?limit=10\" -H \"$AUTH\")",
       "Bash(__NEW_LINE__ echo \"=== GET /api/futures/trades/1/events ===\")",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(web/src/App.tsx )",
+      "Bash(web/src/components/GinieDiagnosticsPanel.tsx )",
+      "Bash(web/src/components/GiniePanel.tsx )",
+      "Bash(web/src/components/Header.tsx )",
+      "Bash(web/src/components/HedgeModeMonitor.tsx )",
+      "Bash(web/src/components/ModeAllocationPanel.tsx )",
+      "Bash(web/src/components/ScalpReentryMonitor.tsx )",
+      "Bash(web/src/components/WalletBalanceCard.tsx )",
+      "Bash(web/src/pages/FuturesDashboard.tsx )",
+      "Bash(web/src/services/api.ts )",
+      "Bash(web/src/services/futuresApi.ts )",
+      "Bash(web/src/store/futuresStore.ts)"
     ]
   }
 }
