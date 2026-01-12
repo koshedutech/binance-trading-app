@@ -200,6 +200,18 @@ func main() {
 			log.Printf("Warning: User Settings migrations failed: %v", err)
 		}
 		logger.Info("User Settings migrations completed")
+
+		// Run Early Warning extended fields migration (Story 9.4 Phase 4)
+		if err := db.MigrateEarlyWarningExtendedFields(ctx); err != nil {
+			log.Printf("Warning: Early Warning extended fields migration failed: %v", err)
+		}
+		logger.Info("Early Warning extended fields migration completed")
+
+		// Run Mode Config early_warning column migration (Story 9.4 Phase 4)
+		if err := db.MigrateModeConfigEarlyWarning(ctx); err != nil {
+			log.Printf("Warning: Mode Config early_warning migration failed: %v", err)
+		}
+		logger.Info("Mode Config early_warning migration completed")
 	}
 
 	// Create repository early for API key service

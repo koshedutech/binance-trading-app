@@ -193,6 +193,12 @@
         "reversal_limit_timeout_sec": 0,
         "reversal_require_all_tfs": false,
         "use_market_entry": false
+      },
+      "early_warning": {
+        "enabled": true,
+        "start_after_minutes": 30,
+        "min_loss_percent": 3.0,
+        "check_interval_secs": 120
       }
     },
     "scalp": {
@@ -365,6 +371,12 @@
         "reversal_limit_timeout_sec": 120,
         "reversal_require_all_tfs": false,
         "use_market_entry": false
+      },
+      "early_warning": {
+        "enabled": true,
+        "start_after_minutes": 10,
+        "min_loss_percent": 1.0,
+        "check_interval_secs": 30
       }
     },
     "swing": {
@@ -537,6 +549,12 @@
         "reversal_limit_timeout_sec": 0,
         "reversal_require_all_tfs": false,
         "use_market_entry": false
+      },
+      "early_warning": {
+        "enabled": true,
+        "start_after_minutes": 15,
+        "min_loss_percent": 2.0,
+        "check_interval_secs": 60
       }
     },
     "ultra_fast": {
@@ -709,6 +727,12 @@
         "reversal_limit_timeout_sec": 0,
         "reversal_require_all_tfs": false,
         "use_market_entry": false
+      },
+      "early_warning": {
+        "enabled": true,
+        "start_after_minutes": 2,
+        "min_loss_percent": 0.5,
+        "check_interval_secs": 15
       }
     }
   },

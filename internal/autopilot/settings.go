@@ -344,6 +344,15 @@ type ModeReversalConfig struct {
 	UseMarketEntry     bool    `json:"use_market_entry"`             // Skip LIMIT orders, use MARKET for immediate fill
 }
 
+// ModeEarlyWarningConfig holds mode-specific early warning settings (Story 9.4 Phase 4)
+// These settings override global early_warning when defined per mode
+type ModeEarlyWarningConfig struct {
+	Enabled           bool    `json:"enabled"`             // Enable early warning for this mode
+	StartAfterMinutes int     `json:"start_after_minutes"` // Start monitoring after N minutes
+	MinLossPercent    float64 `json:"min_loss_percent"`    // Minimum loss % to trigger warning
+	CheckIntervalSecs int     `json:"check_interval_secs"` // Check interval in seconds
+}
+
 // ModeFullConfig holds ALL settings for a single trading mode
 type ModeFullConfig struct {
 	ModeName       string `json:"mode_name"` // "ultra_fast", "scalp", "swing", "position"
@@ -367,6 +376,9 @@ type ModeFullConfig struct {
 	MTF           *ModeMTFConfig           `json:"mtf"`             // Multi-timeframe weighted consensus
 	DynamicAIExit *ModeDynamicAIExitConfig `json:"dynamic_ai_exit"` // AI-driven adaptive exit logic
 	Reversal      *ModeReversalConfig      `json:"reversal"`        // Reversal entry via LIMIT orders
+
+	// ====== NEW: Mode-specific Early Warning (Story 9.4 Phase 4) ======
+	EarlyWarning *ModeEarlyWarningConfig `json:"early_warning,omitempty"` // Mode-specific early warning settings
 }
 
 // ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
@@ -2229,11 +2241,10 @@ func (sm *SettingsManager) SaveSettings(settings *AutopilotSettings) error {
 }
 
 // GetDefaultSettings loads default settings from JSON file
-// DEPRECATED: This method is for admin sync, new user initialization, and reset-to-defaults ONLY.
-// DO NOT use this for runtime trading decisions - use database-first methods instead.
-// WARNING: Any call to this method during trading will log a warning.
+// This method is for initialization, reset-to-defaults, and helper functions.
+// For user-specific runtime trading, prefer database lookups when user context is available.
 func (sm *SettingsManager) GetDefaultSettings() *AutopilotSettings {
-	log.Printf("[SETTINGS] WARNING: GetDefaultSettings() called - this should ONLY be used for defaults, not runtime trading")
+	// NOTE: Fallback to defaults is expected for helper functions without user context
 	settings, _ := sm.LoadSettings()
 	return settings
 }
@@ -4079,10 +4090,8 @@ func ValidateModeConfig(config *ModeFullConfig) error {
 }
 
 // GetDefaultModeConfigs returns default mode configurations from JSON file
-// ONLY for: new user initialization, reset-to-defaults, admin sync
-// DO NOT use for runtime trading - use GetAllUserModeConfigsFromDB instead
+// For user-specific runtime trading, prefer GetAllUserModeConfigsFromDB when user context is available.
 func (sm *SettingsManager) GetDefaultModeConfigs() map[string]*ModeFullConfig {
-	log.Printf("[SETTINGS] WARNING: GetDefaultModeConfigs() called - should only be used for defaults, not runtime trading")
 	settings := sm.GetDefaultSettings()
 	if settings.ModeConfigs == nil || len(settings.ModeConfigs) == 0 {
 		return DefaultModeConfigs()
@@ -4168,11 +4177,8 @@ func mergeWithDefaultConfigs(saved map[string]*ModeFullConfig) map[string]*ModeF
 }
 
 // GetDefaultModeConfig returns default configuration for a specific mode from JSON
-// ONLY for: new user initialization, reset-to-defaults, admin sync
-// DO NOT use for runtime trading - use GetUserModeConfigFromDB instead
+// For user-specific runtime trading, prefer GetUserModeConfigFromDB when user context is available.
 func (sm *SettingsManager) GetDefaultModeConfig(mode string) (*ModeFullConfig, error) {
-	log.Printf("[SETTINGS] WARNING: GetDefaultModeConfig(%s) called - should only be used for defaults, not runtime trading", mode)
-
 	if !ValidModes[mode] {
 		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", mode)
 	}
@@ -4240,9 +4246,17 @@ func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig)
 // IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
 // This ensures the dedicated column is the single source of truth (Story 4.11).
 // Returns error if config not found - caller must handle missing configs explicitly.
+// NOTE: scalp_reentry uses ScalpReentryConfig, NOT ModeFullConfig. Do not call this for scalp_reentry.
+// Use GetUserScalpReentryConfig for scalp_reentry or handle it specially in the API handler.
 func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *database.Repository, userID, modeName string) (*ModeFullConfig, error) {
+	// scalp_reentry is a position optimizer with its own config format (ScalpReentryConfig)
+	// It should NOT be loaded via this function - use GetUserScalpReentryConfig or handle in API
+	if modeName == "scalp_reentry" {
+		return nil, fmt.Errorf("scalp_reentry uses ScalpReentryConfig format, not ModeFullConfig. Use /ginie/scalp-reentry-config endpoint")
+	}
+
 	if !ValidModes[modeName] {
-		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, position, or scalp_reentry", modeName)
+		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, or position", modeName)
 	}
 
 	// Get both enabled column AND config JSON from database
@@ -4263,8 +4277,7 @@ func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *data
 
 	// CRITICAL: Detect old format data (all nested pointers are nil)
 	// Old format has flat fields like "dca_on_loss", "tp1_percent" which don't map to new nested structure
-	// NOTE: scalp_reentry uses ScalpReentryConfig which CORRECTLY has these fields - skip detection for it
-	if modeName != "scalp_reentry" && config.MTF == nil && config.Size == nil && config.SLTP == nil &&
+	if config.MTF == nil && config.Size == nil && config.SLTP == nil &&
 	   config.Timeframe == nil && config.Confidence == nil {
 		// Check if this is actually old format by looking at raw JSON
 		var rawMap map[string]interface{}
@@ -4291,10 +4304,16 @@ func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *data
 // GetAllUserModeConfigsFromDB retrieves all mode configurations from database for a user.
 // IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
 // Returns map[modeName]*ModeFullConfig
+// NOTE: Excludes scalp_reentry which uses ScalpReentryConfig, not ModeFullConfig
 func (sm *SettingsManager) GetAllUserModeConfigsFromDB(ctx context.Context, db *database.Repository, userID string) (map[string]*ModeFullConfig, error) {
 	configs := make(map[string]*ModeFullConfig)
 
 	for modeName := range ValidModes {
+		// Skip scalp_reentry - it uses ScalpReentryConfig format, not ModeFullConfig
+		if modeName == "scalp_reentry" {
+			continue
+		}
+
 		// Get both enabled column AND config JSON
 		enabledFromColumn, configJSON, err := db.GetUserModeConfigWithEnabled(ctx, userID, modeName)
 		if err != nil {

@@ -225,6 +225,15 @@ type UserEarlyWarning struct {
 	MinLossPercent    float64 `json:"min_loss_percent"`    // Minimum loss % to trigger warning
 	CloseOnReversal   bool    `json:"close_on_reversal"`   // Auto-close on reversal detection
 
+	// Extended Early Warning Fields (Story 9.4 Phase 4)
+	TightenSLOnWarning      bool    `json:"tighten_sl_on_warning"`       // Tighten SL if warning detected (default: true)
+	MinConfidence           float64 `json:"min_confidence"`              // Min LLM confidence to act (default: 0.7)
+	MaxLLMCallsPerPos       int     `json:"max_llm_calls_per_pos"`       // Max LLM calls per position per cycle (default: 3)
+	CloseMinHoldMins        int     `json:"close_min_hold_mins"`         // Min hold time before close_now allowed (default: 15)
+	CloseMinConfidence      float64 `json:"close_min_confidence"`        // Higher confidence for close_now action (default: 0.85)
+	CloseRequireConsecutive int     `json:"close_require_consecutive"`   // Require X consecutive warnings before close (default: 2)
+	CloseSLProximityPct     int     `json:"close_sl_proximity_pct"`      // Only close if within X% of SL distance (default: 50)
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -238,6 +247,14 @@ func DefaultUserEarlyWarning() *UserEarlyWarning {
 		OnlyUnderwater:    true,
 		MinLossPercent:    0.3,
 		CloseOnReversal:   true,
+		// Extended fields (Story 9.4 Phase 4)
+		TightenSLOnWarning:      true,
+		MinConfidence:           0.7,
+		MaxLLMCallsPerPos:       3,
+		CloseMinHoldMins:        15,
+		CloseMinConfidence:      0.85,
+		CloseRequireConsecutive: 2,
+		CloseSLProximityPct:     50,
 	}
 }
 

@@ -80,3 +80,52 @@ func (db *DB) RunUserSettingsMigrations(ctx context.Context) error {
 	log.Println("User Settings database migrations (013-019) completed")
 	return nil
 }
+
+// MigrateEarlyWarningExtendedFields adds new columns to user_early_warning table (Story 9.4 Phase 4)
+// These extended fields support more sophisticated early warning behavior
+func (db *DB) MigrateEarlyWarningExtendedFields(ctx context.Context) error {
+	log.Println("Running user_early_warning extended fields migration (Story 9.4 Phase 4)...")
+
+	migrations := []string{
+		// Add 7 new columns to user_early_warning table
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS tighten_sl_on_warning BOOLEAN DEFAULT true`,
+
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS min_confidence NUMERIC(5,4) DEFAULT 0.7`,
+
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS max_llm_calls_per_pos INTEGER DEFAULT 3`,
+
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS close_min_hold_mins INTEGER DEFAULT 15`,
+
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS close_min_confidence NUMERIC(5,4) DEFAULT 0.85`,
+
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS close_require_consecutive INTEGER DEFAULT 2`,
+
+		`ALTER TABLE user_early_warning
+		ADD COLUMN IF NOT EXISTS close_sl_proximity_pct INTEGER DEFAULT 50`,
+
+		// Add comments for documentation
+		`COMMENT ON COLUMN user_early_warning.tighten_sl_on_warning IS 'Tighten SL if warning detected (default: true)'`,
+		`COMMENT ON COLUMN user_early_warning.min_confidence IS 'Min LLM confidence to act on warning (0.0-1.0, default: 0.7)'`,
+		`COMMENT ON COLUMN user_early_warning.max_llm_calls_per_pos IS 'Max LLM calls per position per cycle (default: 3)'`,
+		`COMMENT ON COLUMN user_early_warning.close_min_hold_mins IS 'Min hold time before close_now allowed (default: 15)'`,
+		`COMMENT ON COLUMN user_early_warning.close_min_confidence IS 'Higher confidence for close_now action (default: 0.85)'`,
+		`COMMENT ON COLUMN user_early_warning.close_require_consecutive IS 'Require X consecutive warnings before close (default: 2)'`,
+		`COMMENT ON COLUMN user_early_warning.close_sl_proximity_pct IS 'Only close if within X% of SL distance (default: 50)'`,
+	}
+
+	for i, migration := range migrations {
+		_, err := db.Pool.Exec(ctx, migration)
+		if err != nil {
+			log.Printf("[MIGRATION] Warning on step %d: %v (continuing...)", i+1, err)
+		}
+	}
+
+	log.Println("user_early_warning extended fields migration completed")
+	return nil
+}

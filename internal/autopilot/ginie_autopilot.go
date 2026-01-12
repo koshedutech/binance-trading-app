@@ -1098,22 +1098,25 @@ func NewGinieAutopilot(
 // selectEnabledModeForPosition returns the first enabled trading mode for synced/external positions.
 // This replaces hardcoded defaults to respect user mode preferences.
 // Priority: scalp > swing > position > ultra_fast (scalp is most common for active trading)
+// CRITICAL FIX: Now reads from database for real-time mode status instead of stale in-memory config.
 func (ga *GinieAutopilot) selectEnabledModeForPosition() GinieTradingMode {
 	// Check modes in order of preference for position management
+	// Uses isModeEnabled which now reads from DB for real-time status
+
 	// Check scalp first (most common for active trading)
-	if ga.config.EnableScalpMode {
+	if ga.isModeEnabled(GinieModeScalp) {
 		return GinieModeScalp
 	}
 	// Then swing
-	if ga.config.EnableSwingMode {
+	if ga.isModeEnabled(GinieModeSwing) {
 		return GinieModeSwing
 	}
 	// Then position
-	if ga.config.EnablePositionMode {
+	if ga.isModeEnabled(GinieModePosition) {
 		return GinieModePosition
 	}
-	// Finally ultra_fast (from config loaded on startup)
-	if ga.config.EnableUltraFastMode {
+	// Finally ultra_fast
+	if ga.isModeEnabled(GinieModeUltraFast) {
 		return GinieModeUltraFast
 	}
 	// Fallback: if no modes enabled, default to scalp (most common)
@@ -1123,7 +1126,47 @@ func (ga *GinieAutopilot) selectEnabledModeForPosition() GinieTradingMode {
 
 // isModeEnabled checks if a specific trading mode is enabled in user settings.
 // Used for defense-in-depth validation before executing mode-specific operations.
+// CRITICAL FIX: Now reads from database for real-time mode status instead of stale in-memory config.
+// This ensures disabled modes NEVER generate signals or decisions.
 func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
+	// Map mode to database config key
+	modeKey := ""
+	switch mode {
+	case GinieModeScalp:
+		modeKey = "scalp"
+	case GinieModeSwing:
+		modeKey = "swing"
+	case GinieModePosition:
+		modeKey = "position"
+	case GinieModeUltraFast:
+		modeKey = "ultra_fast"
+	case GinieModeScalpReentry:
+		// Scalp re-entry mode is enabled via settings config (separate from mode config)
+		sm := GetSettingsManager()
+		settings := sm.GetCurrentSettings()
+		return settings.ScalpReentryConfig.Enabled
+	default:
+		return false
+	}
+
+	// Read from database for real-time mode status (same as main scan loop)
+	// This ensures toggling a mode in UI takes effect immediately
+	if ga.repo != nil && ga.userID != "" {
+		ctx := context.Background()
+		sm := GetSettingsManager()
+		modeConfig, err := sm.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, modeKey)
+		if err != nil {
+			// Config not found or error - mode is disabled
+			log.Printf("[MODE-CHECK] %s: disabled (DB read error: %v)", mode, err)
+			return false
+		}
+		if modeConfig != nil {
+			log.Printf("[MODE-CHECK] %s: %v (from DB)", mode, modeConfig.Enabled)
+			return modeConfig.Enabled
+		}
+	}
+
+	// Fallback to in-memory config if no DB access (legacy mode)
 	switch mode {
 	case GinieModeScalp:
 		return ga.config.EnableScalpMode
@@ -1131,13 +1174,7 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 		return ga.config.EnableSwingMode
 	case GinieModePosition:
 		return ga.config.EnablePositionMode
-	case GinieModeScalpReentry:
-		// Scalp re-entry mode is enabled via settings config
-		sm := GetSettingsManager()
-		settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
-		return settings.ScalpReentryConfig.Enabled
 	case GinieModeUltraFast:
-		// Check config.EnableUltraFastMode (loaded from database on startup)
 		return ga.config.EnableUltraFastMode
 	default:
 		return false
@@ -1176,16 +1213,17 @@ func (ga *GinieAutopilot) LoadPnLStats() {
 		return
 	}
 
-	// Get daily PnL and trade count
-	dailyPnL, err := db.GetDailyFuturesPnLForUser(ctx, ga.userID)
+	// Get daily PnL and trade count - FILTERED BY CURRENT MODE (paper vs live)
+	// This ensures paper trading losses don't block live trades and vice versa
+	dailyPnL, err := db.GetDailyFuturesPnLForUser(ctx, ga.userID, ga.config.DryRun)
 	if err != nil {
-		ga.logger.Warn("Failed to get daily PnL from database", "error", err)
+		ga.logger.Warn("Failed to get daily PnL from database", "error", err, "dry_run", ga.config.DryRun)
 		dailyPnL = 0
 	}
 
-	dailyTrades, err := db.GetDailyFuturesTradeCountForUser(ctx, ga.userID)
+	dailyTrades, err := db.GetDailyFuturesTradeCountForUser(ctx, ga.userID, ga.config.DryRun)
 	if err != nil {
-		ga.logger.Warn("Failed to get daily trade count from database", "error", err)
+		ga.logger.Warn("Failed to get daily trade count from database", "error", err, "dry_run", ga.config.DryRun)
 		dailyTrades = 0
 	}
 
@@ -1683,8 +1721,8 @@ func (ga *GinieAutopilot) Start() error {
 	}
 
 	// Start ultra-fast scalping monitor (500ms polling for rapid exits)
-	// Check config.EnableUltraFastMode (loaded from database on startup)
-	if ga.config.EnableUltraFastMode {
+	// Uses isModeEnabled() for real-time DB read to respect current mode state
+	if ga.isModeEnabled(GinieModeUltraFast) {
 		ga.wg.Add(1)
 		go ga.monitorUltraFastPositions()
 		ga.logger.Info("Ultra-fast scalping monitor started - 500ms polling enabled")
@@ -2196,6 +2234,13 @@ func (ga *GinieAutopilot) canTrade() bool {
 // Uses 4-layer signal generation: Trend, Volatility, Entry, Dynamic TP
 // Calls executeUltraFastEntry when confidence >= threshold
 func (ga *GinieAutopilot) scanForUltraFast() {
+	// DEFENSE-IN-DEPTH: Verify mode is actually enabled before scanning
+	// This catches any edge cases where the main loop check was bypassed
+	if !ga.isModeEnabled(GinieModeUltraFast) {
+		log.Printf("[ULTRA-FAST-SCAN] Mode disabled in user settings, skipping scan")
+		return
+	}
+
 	symbols := ga.analyzer.watchSymbols
 	settingsManager := GetSettingsManager()
 	currentSettings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
@@ -4503,6 +4548,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				EntryTime:    time.Now(),
 				TradeSource:  "ginie",
 				TradingMode:  &tradingMode,
+				DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 			}
 			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 				ga.logger.Warn("Failed to create futures trade record", "error", err, "symbol", symbol)
@@ -6684,6 +6730,45 @@ func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 	return nil
 }
 
+// getEarlyWarningConfig retrieves the early warning configuration for a given mode
+// Priority: 1) Mode-specific config from ModeFullConfig.EarlyWarning
+//           2) Fall back to global early warning settings
+//           3) Fall back to code defaults
+// This implements Story 9.4 Phase 4 - Mode-specific early warning
+func (ga *GinieAutopilot) getEarlyWarningConfig(mode GinieTradingMode) *ModeEarlyWarningConfig {
+	// 1. Try mode-specific config from ModeFullConfig
+	if modeConfig := ga.getModeConfig(mode); modeConfig != nil && modeConfig.EarlyWarning != nil {
+		log.Printf("[EARLY-WARNING] Using mode-specific config for %s: StartAfter=%d min, MinLoss=%.2f%%, Interval=%d sec",
+			mode, modeConfig.EarlyWarning.StartAfterMinutes, modeConfig.EarlyWarning.MinLossPercent, modeConfig.EarlyWarning.CheckIntervalSecs)
+		return modeConfig.EarlyWarning
+	}
+
+	// 2. Fall back to global early warning settings from SettingsManager
+	sm := GetSettingsManager()
+	if sm != nil {
+		settings := sm.GetCurrentSettings()
+		if settings != nil {
+			log.Printf("[EARLY-WARNING] Using GLOBAL config for mode %s: StartAfter=%d min, MinLoss=%.2f%%",
+				mode, settings.EarlyWarningStartAfterMinutes, settings.EarlyWarningMinLossPercent)
+			return &ModeEarlyWarningConfig{
+				Enabled:           settings.EarlyWarningEnabled,
+				StartAfterMinutes: settings.EarlyWarningStartAfterMinutes,
+				MinLossPercent:    settings.EarlyWarningMinLossPercent,
+				CheckIntervalSecs: settings.EarlyWarningCheckIntervalSecs,
+			}
+		}
+	}
+
+	// 3. Fall back to code defaults
+	log.Printf("[EARLY-WARNING] Using CODE DEFAULTS for mode %s", mode)
+	return &ModeEarlyWarningConfig{
+		Enabled:           true,
+		StartAfterMinutes: 10,
+		MinLossPercent:    1.0,
+		CheckIntervalSecs: 30,
+	}
+}
+
 // getEntryTimeframe returns the entry timeframe for a given mode
 // This is used to fetch the previous candle for LIMIT order entry pricing
 func (ga *GinieAutopilot) getEntryTimeframe(mode GinieTradingMode) string {
@@ -7371,6 +7456,7 @@ func (ga *GinieAutopilot) persistTradeToDatabase(result GinieTradeResult) {
 			TradeSource:        "ginie",
 			AIDecisionID:       &aiDecision.ID,
 			TradingMode:        &tradingMode,
+			DryRun:             ga.config.DryRun, // CRITICAL: Track paper vs live trade
 		}
 
 		if err := ga.repo.CreateFuturesTrade(ctx, trade); err != nil {
@@ -7597,6 +7683,9 @@ func (ga *GinieAutopilot) GetStats() map[string]interface{} {
 		unrealizedPnL += pos.UnrealizedPnL + pos.RealizedPnL
 	}
 
+	// Calculate max_positions by summing only enabled modes' MaxPositions
+	maxPositions := ga.calculateEnabledModesMaxPositions()
+
 	return map[string]interface{}{
 		"running":          ga.running,
 		"dry_run":          ga.config.DryRun,
@@ -7609,8 +7698,51 @@ func (ga *GinieAutopilot) GetStats() map[string]interface{} {
 		"unrealized_pnl":   unrealizedPnL,
 		"combined_pnl":     ga.dailyPnL + unrealizedPnL, // Daily realized + current unrealized
 		"active_positions": len(ga.positions),
-		"max_positions":    ga.config.MaxPositions,
+		"max_positions":    maxPositions,
 	}
+}
+
+// calculateEnabledModesMaxPositions sums MaxPositions from only enabled trading modes
+// CRITICAL FIX: Uses isModeEnabled() which reads from database in real-time
+// This ensures position count updates IMMEDIATELY when user toggles modes
+func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
+	settings := GetSettingsManager().GetCurrentSettings()
+	if settings == nil || settings.ModeConfigs == nil {
+		// Fallback to global config if settings unavailable
+		return ga.config.MaxPositions
+	}
+
+	totalMaxPositions := 0
+
+	// Check ultra_fast mode - uses isModeEnabled() for real-time DB read
+	if ga.isModeEnabled(GinieModeUltraFast) {
+		if cfg, ok := settings.ModeConfigs["ultra_fast"]; ok && cfg != nil && cfg.Size != nil {
+			totalMaxPositions += cfg.Size.MaxPositions
+		}
+	}
+
+	// Check scalp mode - uses isModeEnabled() for real-time DB read
+	if ga.isModeEnabled(GinieModeScalp) {
+		if cfg, ok := settings.ModeConfigs["scalp"]; ok && cfg != nil && cfg.Size != nil {
+			totalMaxPositions += cfg.Size.MaxPositions
+		}
+	}
+
+	// Check swing mode - uses isModeEnabled() for real-time DB read
+	if ga.isModeEnabled(GinieModeSwing) {
+		if cfg, ok := settings.ModeConfigs["swing"]; ok && cfg != nil && cfg.Size != nil {
+			totalMaxPositions += cfg.Size.MaxPositions
+		}
+	}
+
+	// Check position mode - uses isModeEnabled() for real-time DB read
+	if ga.isModeEnabled(GinieModePosition) {
+		if cfg, ok := settings.ModeConfigs["position"]; ok && cfg != nil && cfg.Size != nil {
+			totalMaxPositions += cfg.Size.MaxPositions
+		}
+	}
+
+	return totalMaxPositions
 }
 
 // ========== Circuit Breaker Methods (Ginie-specific) ==========
@@ -7830,6 +7962,7 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 					EntryTime:    time.Now(),
 					TradeSource:  "force_sync", // Mark as force synced from exchange
 					TradingMode:  &tradingMode,
+					DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 				}
 				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 					ga.logger.Warn("Failed to create futures trade record for force-synced position", "error", err, "symbol", symbol)
@@ -8119,6 +8252,7 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 					EntryTime:    time.Now(),
 					TradeSource:  "sync", // Mark as synced from exchange
 					TradingMode:  &tradingMode,
+					DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 				}
 				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 					ga.logger.Warn("Failed to create futures trade record for synced position", "error", err, "symbol", symbol)
@@ -12482,8 +12616,8 @@ func (ga *GinieAutopilot) canTradeWithReasonLocked() (bool, string) {
 			-ga.dailyPnL, ga.config.MaxDailyLoss)
 	}
 
-	// Check if any mode is enabled
-	if !ga.config.EnableScalpMode && !ga.config.EnableSwingMode && !ga.config.EnablePositionMode {
+	// Check if any mode is enabled - uses isModeEnabled() for real-time DB read
+	if !ga.isModeEnabled(GinieModeScalp) && !ga.isModeEnabled(GinieModeSwing) && !ga.isModeEnabled(GinieModePosition) {
 		return false, "no_modes: No trading modes enabled (scalp/swing/position)"
 	}
 
@@ -12564,14 +12698,15 @@ func (ga *GinieAutopilot) getScanDiagnosticsLocked() ScanDiagnostics {
 		timeUntilNext = int64(time.Until(ga.nextScanTime).Seconds())
 	}
 
+	// Use isModeEnabled() for real-time DB read of enabled status
 	return ScanDiagnostics{
 		LastScanTime:         lastScan,
 		SecondsSinceLastScan: secondsSinceLastScan,
 		SymbolsInWatchlist:   symbolsCount,
 		SymbolsScannedLast:   ga.symbolsScannedLastCycle,
-		ScalpEnabled:         ga.config.EnableScalpMode,
-		SwingEnabled:         ga.config.EnableSwingMode,
-		PositionEnabled:      ga.config.EnablePositionMode,
+		ScalpEnabled:         ga.isModeEnabled(GinieModeScalp),
+		SwingEnabled:         ga.isModeEnabled(GinieModeSwing),
+		PositionEnabled:      ga.isModeEnabled(GinieModePosition),
 		// New scan status fields (Issue 2B)
 		ScanningActive:    ga.scanningActive,
 		CurrentPhase:      ga.currentPhase,
@@ -13821,9 +13956,9 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 			ga.logger.Info("Ultra-fast position monitor stopping")
 			return
 		case <-ticker.C:
-			// Check if ultra-fast mode is still enabled (loaded from database on startup)
+			// Check if ultra-fast mode is still enabled - uses isModeEnabled() for real-time DB read
 			// If mode was disabled, stop the monitor goroutine
-			if !ga.config.EnableUltraFastMode {
+			if !ga.isModeEnabled(GinieModeUltraFast) {
 				ga.logger.Info("Ultra-fast mode disabled - stopping position monitor")
 				log.Printf("[ULTRA-FAST] Mode disabled - stopping monitor goroutine")
 				return
@@ -15427,6 +15562,7 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 			EntryTime:    time.Now(),
 			TradeSource:  "ginie",
 			TradingMode:  &tradingMode,
+			DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 		}
 		if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 			ga.logger.Warn("Failed to create futures trade record for ultra-fast", "error", err, "symbol", symbol)
@@ -17087,16 +17223,19 @@ func (ga *GinieAutopilot) GetTradeConditions() TradeConditionsResponse {
 		blockingCount++
 	}
 
-	// 8. Trading modes enabled check
-	modesEnabled := ga.config.EnableScalpMode || ga.config.EnableSwingMode || ga.config.EnablePositionMode
+	// 8. Trading modes enabled check - uses isModeEnabled() for real-time DB read
+	scalpEnabled := ga.isModeEnabled(GinieModeScalp)
+	swingEnabled := ga.isModeEnabled(GinieModeSwing)
+	positionEnabled := ga.isModeEnabled(GinieModePosition)
+	modesEnabled := scalpEnabled || swingEnabled || positionEnabled
 	modesList := []string{}
-	if ga.config.EnableScalpMode {
+	if scalpEnabled {
 		modesList = append(modesList, "scalp")
 	}
-	if ga.config.EnableSwingMode {
+	if swingEnabled {
 		modesList = append(modesList, "swing")
 	}
-	if ga.config.EnablePositionMode {
+	if positionEnabled {
 		modesList = append(modesList, "position")
 	}
 	modesDetail := "No modes enabled"

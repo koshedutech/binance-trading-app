@@ -94,3 +94,33 @@ func (db *DB) MigrateRemoveScalpReentryMode(ctx context.Context) error {
 	log.Println("Scalp_reentry mode removal migration completed")
 	return nil
 }
+
+// MigrateModeConfigEarlyWarning adds early_warning JSONB column to user_mode_configs table (Story 9.4 Phase 4)
+// This allows per-mode early warning configuration overrides
+func (db *DB) MigrateModeConfigEarlyWarning(ctx context.Context) error {
+	log.Println("Running user_mode_configs early_warning column migration (Story 9.4 Phase 4)...")
+
+	migrations := []string{
+		// Add early_warning JSONB column
+		`ALTER TABLE user_mode_configs
+		ADD COLUMN IF NOT EXISTS early_warning JSONB DEFAULT NULL`,
+
+		// Create index for efficient querying of early_warning settings
+		`CREATE INDEX IF NOT EXISTS idx_user_mode_configs_early_warning
+		ON user_mode_configs USING GIN (early_warning) WHERE early_warning IS NOT NULL`,
+
+		// Add comment for documentation
+		`COMMENT ON COLUMN user_mode_configs.early_warning IS
+		'Mode-specific early warning settings (JSON with enabled, start_after_minutes, min_loss_percent, check_interval_secs). Story 9.4 Phase 4.'`,
+	}
+
+	for i, migration := range migrations {
+		_, err := db.Pool.Exec(ctx, migration)
+		if err != nil {
+			log.Printf("[MIGRATION] Warning on step %d: %v (continuing...)", i+1, err)
+		}
+	}
+
+	log.Println("user_mode_configs early_warning column migration completed")
+	return nil
+}

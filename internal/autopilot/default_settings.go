@@ -27,6 +27,7 @@ type DefaultSettingsFile struct {
 	LLMConfig            LLMConfigDefaults              `json:"llm_config"`
 	EarlyWarning         EarlyWarningDefaults           `json:"early_warning"`
 	CapitalAllocation    CapitalAllocationDefaults      `json:"capital_allocation"`
+	ScalpReentry         *ScalpReentryConfig            `json:"scalp_reentry_config,omitempty"`
 	SettingsRiskIndex    SettingsRiskIndex              `json:"_settings_risk_index"`
 }
 
@@ -117,6 +118,14 @@ type EarlyWarningDefaults struct {
 	OnlyUnderwater     bool    `json:"only_underwater"`
 	MinLossPercent     float64 `json:"min_loss_percent"`
 	CloseOnReversal    bool    `json:"close_on_reversal"`
+	// Extended early warning fields (Story 9.4 Phase 1)
+	TightenSLOnWarning      bool    `json:"tighten_sl_on_warning"`
+	MinConfidence           float64 `json:"min_confidence"`
+	MaxLLMCallsPerPos       int     `json:"max_llm_calls_per_pos"`
+	CloseMinHoldMins        int     `json:"close_min_hold_mins"`
+	CloseMinConfidence      float64 `json:"close_min_confidence"`
+	CloseRequireConsecutive int     `json:"close_require_consecutive"`
+	CloseSLProximityPct     int     `json:"close_sl_proximity_pct"`
 }
 
 // CapitalAllocationDefaults holds capital allocation percentages per mode
