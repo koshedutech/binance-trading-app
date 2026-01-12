@@ -1,10 +1,11 @@
 {
   "metadata": {
-    "version": "1.1.0",
-    "schema_version": 2,
-    "last_updated": "2026-01-12T15:30:00Z",
+    "version": "1.2.0",
+    "schema_version": 3,
+    "last_updated": "2026-01-12T18:00:00Z",
     "updated_by": "admin",
-    "description": "Master default settings for Binance Trading Bot - Single source of truth for all user defaults"
+    "description": "Master default settings for Binance Trading Bot - Single source of truth for all user defaults. Phase 5 migration complete: added category_confidence_boost, category_size_multiplier, morning_auto_block, breakout_config, safety_settings, mode_allocation, mode_llm_settings, adaptive_ai_config, coin_confluence_configs, and symbol_settings_template.",
+    "migration_notes": "v1.2.0 - Story 9.4 Phase 5: Full settings sync from autopilot_settings.json. Runtime state (PnL, circuit breaker stats, symbol runtime data) now in ginie_runtime_state.json."
   },
   "global_trading": {
     "risk_level": "moderate",
@@ -881,6 +882,179 @@
     "taker_fee_percent": 0.04,
     "maker_fee_percent": 0.02,
     "vip_level": 0
+  },
+  "category_confidence_boost": {
+    "best": -5,
+    "good": 0,
+    "neutral": 0,
+    "poor": 10,
+    "worst": 20,
+    "blacklist": 100
+  },
+  "category_size_multiplier": {
+    "best": 1.5,
+    "good": 1.2,
+    "neutral": 1.0,
+    "poor": 0.5,
+    "worst": 0.25,
+    "blacklist": 0
+  },
+  "morning_auto_block": {
+    "enabled": true,
+    "hour_utc": 0,
+    "min_utc": 5
+  },
+  "breakout_config": {
+    "enabled": true,
+    "volume_spike_multiplier": 2,
+    "volume_profile_period": 24,
+    "near_24h_high_percent": 0.5,
+    "candle_acceleration_ratio": 1.5,
+    "range_contraction_threshold": 0.7,
+    "roc_acceleration_threshold": 0.5,
+    "mtf_consensus_required": 3,
+    "bid_ask_imbalance_threshold": 1.5,
+    "large_order_multiplier": 5,
+    "volume_weight": 0.3,
+    "price_weight": 0.25,
+    "momentum_weight": 0.25,
+    "order_book_weight": 0.2,
+    "min_signals_for_breakout": 2,
+    "min_breakout_score": 60
+  },
+  "safety_settings": {
+    "ultra_fast": {
+      "max_trades_per_minute": 5,
+      "max_trades_per_hour": 20,
+      "max_trades_per_day": 50,
+      "enable_profit_monitor": true,
+      "profit_window_minutes": 10,
+      "max_loss_percent_in_window": -1.5,
+      "pause_cooldown_minutes": 30,
+      "enable_win_rate_monitor": true,
+      "win_rate_sample_size": 15,
+      "min_win_rate_threshold": 50,
+      "win_rate_cooldown_minutes": 60
+    },
+    "scalp": {
+      "max_trades_per_minute": 8,
+      "max_trades_per_hour": 30,
+      "max_trades_per_day": 100,
+      "enable_profit_monitor": true,
+      "profit_window_minutes": 15,
+      "max_loss_percent_in_window": -2,
+      "pause_cooldown_minutes": 30,
+      "enable_win_rate_monitor": true,
+      "win_rate_sample_size": 20,
+      "min_win_rate_threshold": 50,
+      "win_rate_cooldown_minutes": 60
+    },
+    "swing": {
+      "max_trades_per_minute": 10,
+      "max_trades_per_hour": 30,
+      "max_trades_per_day": 80,
+      "enable_profit_monitor": true,
+      "profit_window_minutes": 60,
+      "max_loss_percent_in_window": -3,
+      "pause_cooldown_minutes": 60,
+      "enable_win_rate_monitor": true,
+      "win_rate_sample_size": 25,
+      "min_win_rate_threshold": 55,
+      "win_rate_cooldown_minutes": 120
+    },
+    "position": {
+      "max_trades_per_minute": 5,
+      "max_trades_per_hour": 15,
+      "max_trades_per_day": 50,
+      "enable_profit_monitor": true,
+      "profit_window_minutes": 120,
+      "max_loss_percent_in_window": -5,
+      "pause_cooldown_minutes": 120,
+      "enable_win_rate_monitor": true,
+      "win_rate_sample_size": 30,
+      "min_win_rate_threshold": 60,
+      "win_rate_cooldown_minutes": 180
+    }
+  },
+  "mode_allocation": {
+    "ultra_fast_scalp_percent": 0,
+    "scalp_percent": 100,
+    "swing_percent": 0,
+    "position_percent": 0,
+    "max_ultra_fast_positions": 3,
+    "max_scalp_positions": 3,
+    "max_swing_positions": 5,
+    "max_position_positions": 2,
+    "max_ultra_fast_usd_per_position": 200,
+    "max_scalp_usd_per_position": 600,
+    "max_swing_usd_per_position": 500,
+    "max_position_usd_per_position": 600,
+    "allow_dynamic_rebalance": false,
+    "rebalance_threshold_pct": 0
+  },
+  "mode_llm_settings": {
+    "ultra_fast": {
+      "llm_enabled": true,
+      "llm_weight": 0.1,
+      "skip_on_timeout": true,
+      "min_llm_confidence": 40,
+      "block_on_disagreement": false,
+      "cache_enabled": true
+    },
+    "scalp": {
+      "llm_enabled": true,
+      "llm_weight": 0.2,
+      "skip_on_timeout": true,
+      "min_llm_confidence": 50,
+      "block_on_disagreement": false,
+      "cache_enabled": true
+    },
+    "swing": {
+      "llm_enabled": true,
+      "llm_weight": 0.4,
+      "skip_on_timeout": false,
+      "min_llm_confidence": 60,
+      "block_on_disagreement": true,
+      "cache_enabled": false
+    },
+    "position": {
+      "llm_enabled": true,
+      "llm_weight": 0.5,
+      "skip_on_timeout": false,
+      "min_llm_confidence": 65,
+      "block_on_disagreement": true,
+      "cache_enabled": false
+    },
+    "scalp_reentry": {
+      "llm_enabled": true,
+      "llm_weight": 0.35,
+      "skip_on_timeout": false,
+      "min_llm_confidence": 55,
+      "block_on_disagreement": false,
+      "cache_enabled": true
+    }
+  },
+  "adaptive_ai_config": {
+    "enabled": true,
+    "learning_window_trades": 50,
+    "learning_window_hours": 24,
+    "auto_adjust_enabled": false,
+    "max_auto_adjustment_percent": 10,
+    "require_approval": true,
+    "min_trades_for_learning": 20,
+    "store_decision_context": true
+  },
+  "coin_confluence_configs": {},
+  "symbol_settings_template": {
+    "_description": "Template for per-symbol settings. Actual symbol data is runtime state.",
+    "category": "neutral",
+    "min_confidence": 0,
+    "max_position_usd": 0,
+    "size_multiplier": 1,
+    "leverage_override": 0,
+    "enabled": true,
+    "custom_roi_percent": 0,
+    "notes": ""
   },
   "_settings_risk_index": {
     "high_risk_settings": [
