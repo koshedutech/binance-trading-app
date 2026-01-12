@@ -56,3 +56,41 @@ func (db *DB) MigrateUserModeConfigs(ctx context.Context) error {
 	log.Println("User mode configs migration completed successfully")
 	return nil
 }
+
+// MigrateRemoveScalpReentryMode removes scalp_reentry from valid modes (Story 9.4 Phase 2)
+// scalp_reentry is an optimization feature, not a trading mode
+func (db *DB) MigrateRemoveScalpReentryMode(ctx context.Context) error {
+	log.Println("Running scalp_reentry mode removal migration (Story 9.4)...")
+
+	migrations := []string{
+		// Step 1: Mark any existing scalp_reentry mode configs as deprecated
+		`UPDATE user_mode_configs
+		SET config_json = jsonb_set(config_json, '{deprecated}', 'true')
+		WHERE mode_name = 'scalp_reentry'`,
+
+		// Step 2: Drop the old CHECK constraint
+		`ALTER TABLE user_mode_configs
+		DROP CONSTRAINT IF EXISTS user_mode_configs_mode_name_check`,
+
+		// Step 3: Add new CHECK constraint without scalp_reentry
+		// Note: scalp_reentry is NOT a mode - it's an optimization for scalp mode
+		`ALTER TABLE user_mode_configs
+		ADD CONSTRAINT user_mode_configs_mode_name_check
+		CHECK (mode_name IN ('ultra_fast', 'scalp', 'swing', 'position'))`,
+	}
+
+	for i, migration := range migrations {
+		_, err := db.Pool.Exec(ctx, migration)
+		if err != nil {
+			// Log but continue if constraint doesn't exist or update fails on empty table
+			log.Printf("[MIGRATION] Warning on step %d: %v (continuing...)", i+1, err)
+		}
+	}
+
+	// Optionally delete deprecated scalp_reentry configs
+	// (keeping them with deprecated flag for now - can delete later)
+	// _, _ = db.Pool.Exec(ctx, `DELETE FROM user_mode_configs WHERE mode_name = 'scalp_reentry'`)
+
+	log.Println("Scalp_reentry mode removal migration completed")
+	return nil
+}

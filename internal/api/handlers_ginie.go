@@ -56,6 +56,10 @@ func (s *Server) handleGetGinieStatus(c *gin.Context) {
 		if activePos, ok := userStats["active_positions"].(int); ok {
 			status.ActivePositions = activePos
 		}
+		// Override max_positions with sum of enabled modes' MaxPositions
+		if maxPos, ok := userStats["max_positions"].(int); ok {
+			status.MaxPositions = maxPos
+		}
 	}
 
 	c.JSON(http.StatusOK, status)
@@ -1775,16 +1779,23 @@ func (s *Server) handleGetModeConfigs(c *gin.Context) {
 // handleGetModeConfig returns configuration for a specific mode
 // GET /api/futures/ginie/mode-config/:mode
 // DATABASE ONLY: Reads from database for authenticated user. No JSON fallback for existing users.
+// NOTE: scalp_reentry is NOT a trading mode - it's an optimization feature for scalp mode.
+// Use /ginie/scalp-reentry-config for scalp_reentry optimization settings.
 func (s *Server) handleGetModeConfig(c *gin.Context) {
 	mode := c.Param("mode")
 	log.Printf("[MODE-CONFIG] Getting configuration for mode: %s (DATABASE ONLY)", mode)
 
-	// Validate mode name
+	// Validate mode name - only 4 trading modes exist
+	// Note: scalp_reentry is NOT a mode, it's an optimization for scalp mode
 	validModes := map[string]bool{
-		"ultra_fast": true, "scalp": true, "swing": true,
-		"position": true, "scalp_reentry": true,
+		"ultra_fast": true, "scalp": true, "swing": true, "position": true,
 	}
 	if !validModes[mode] {
+		// Special handling for scalp_reentry - redirect to correct endpoint
+		if mode == "scalp_reentry" {
+			errorResponse(c, http.StatusBadRequest, "scalp_reentry is not a trading mode. Use /api/futures/ginie/scalp-reentry-config for optimization settings.")
+			return
+		}
 		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid mode: %s", mode))
 		return
 	}
@@ -1845,15 +1856,19 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 
 // handleUpdateModeConfig updates configuration for a specific mode
 // PUT /api/futures/ginie/mode-config/:mode
+// Note: scalp_reentry is NOT a mode - use /api/futures/ginie/scalp-reentry-config instead
 func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 	mode := c.Param("mode")
 
-	// Validate mode name
+	// Validate mode name - only 4 trading modes exist
 	validModes := map[string]bool{
-		"ultra_fast": true, "scalp": true, "swing": true,
-		"position": true, "scalp_reentry": true,
+		"ultra_fast": true, "scalp": true, "swing": true, "position": true,
 	}
 	if !validModes[mode] {
+		if mode == "scalp_reentry" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "scalp_reentry is not a trading mode. Use /api/futures/ginie/scalp-reentry-config for optimization settings."})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid mode: %s", mode)})
 		return
 	}
@@ -1898,12 +1913,9 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 		// Don't fail - database is the source of truth now
 	}
 
-	// Story 4.15: Auto-sync to default-settings.json if admin user
-	// Get user email to check if admin
-	user, err := s.repo.GetUserByID(ctx, userIDStr)
-	if err == nil && user != nil {
-		SyncAdminModeConfigIfAdmin(ctx, user.Email, mode, &config)
-	}
+	// NOTE: Admin sync to default-settings.json removed.
+	// Admin settings are saved to database only. The reset/restore defaults
+	// dialog now allows direct editing of values for all users.
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -1915,15 +1927,19 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 
 // handleToggleModeEnabled toggles mode enabled status (quick toggle without full config)
 // POST /api/futures/ginie/mode-config/:mode/toggle
+// Note: scalp_reentry is NOT a mode - use scalp-reentry-config endpoint instead
 func (s *Server) handleToggleModeEnabled(c *gin.Context) {
 	mode := c.Param("mode")
 
-	// Validate mode name
+	// Validate mode name - only 4 trading modes exist
 	validModes := map[string]bool{
-		"ultra_fast": true, "scalp": true, "swing": true,
-		"position": true, "scalp_reentry": true,
+		"ultra_fast": true, "scalp": true, "swing": true, "position": true,
 	}
 	if !validModes[mode] {
+		if mode == "scalp_reentry" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "scalp_reentry is not a trading mode. Use /api/futures/ginie/scalp-reentry-config for optimization settings."})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid mode: %s", mode)})
 		return
 	}

@@ -188,6 +188,13 @@ func main() {
 		}
 		logger.Info("User Mode Config migrations completed")
 
+		// Run scalp_reentry mode removal migration (Story 9.4 Phase 2)
+		// scalp_reentry is an optimization, not a trading mode
+		if err := db.MigrateRemoveScalpReentryMode(ctx); err != nil {
+			log.Printf("Warning: Scalp_reentry mode removal migration failed: %v", err)
+		}
+		logger.Info("Scalp_reentry mode removal migration completed")
+
 		// Run User Settings migrations (013-019: LLM config, capital allocation, circuit breaker, etc.)
 		if err := db.RunUserSettingsMigrations(ctx); err != nil {
 			log.Printf("Warning: User Settings migrations failed: %v", err)
