@@ -582,6 +582,25 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 		return nil
 	}
 
+	// ============ OPTION C: TREND CONFIRMATION CHECK (Story 9.4) ============
+	// Block rebuy in sideways/choppy markets by requiring ADX above threshold
+	if config.ReentryRequireTrendConfirmation {
+		adxValue := g.getADXForSymbol(pos.Symbol)
+		if adxValue < config.ReentryMinADX {
+			sr.AddDebugLog(fmt.Sprintf("Re-entry blocked - ADX %.1f below threshold %.1f (sideways market)",
+				adxValue, config.ReentryMinADX))
+			cycle.ReentryState = ReentryStateSkipped
+			cycle.EndTime = time.Now()
+			cycle.Outcome = "skipped"
+			cycle.OutcomeReason = fmt.Sprintf("adx_below_threshold_%.1f", adxValue)
+			sr.SkippedReentries++
+			sr.NextTPBlocked = false
+			return nil
+		}
+		sr.AddDebugLog(fmt.Sprintf("ADX check passed: %.1f >= %.1f (trend confirmed)",
+			adxValue, config.ReentryMinADX))
+	}
+
 	// Price is at breakeven - get AI decision if enabled
 	if config.UseAIDecisions {
 		shouldReenter, aiDecision := g.getAIReentryDecision(pos, cycle)
@@ -960,6 +979,40 @@ func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, pr
 	log.Printf("[SCALP-REENTRY] %s: Placing LIMIT re-entry order at %.8f (current: %.8f)", pos.Symbol, limitPrice, price)
 
 	return g.placeOrder(order)
+}
+
+// getADXForSymbol fetches klines and calculates ADX for Option C trend confirmation
+// Returns ADX value (0-100 scale), returns default value on error (fail-open)
+func (g *GinieAutopilot) getADXForSymbol(symbol string) float64 {
+	// Default ADX if we can't calculate (fail-open: allow rebuy)
+	const defaultADX = 25.0
+
+	// Check if we have analyzer and futures client
+	if g.analyzer == nil || g.futuresClient == nil {
+		log.Printf("[SCALP-REENTRY] %s: No analyzer/client, using default ADX %.1f", symbol, defaultADX)
+		return defaultADX
+	}
+
+	// Fetch klines for ADX calculation (5m timeframe, 50 candles for 14-period ADX)
+	klines, err := g.futuresClient.GetFuturesKlines(symbol, "5m", 50)
+	if err != nil {
+		log.Printf("[SCALP-REENTRY] %s: Failed to fetch klines for ADX: %v", symbol, err)
+		return defaultADX
+	}
+	if len(klines) < 30 {
+		log.Printf("[SCALP-REENTRY] %s: Insufficient klines (%d) for ADX calculation", symbol, len(klines))
+		return defaultADX
+	}
+
+	// Calculate ADX (14-period is standard)
+	adx, _, _ := g.analyzer.calculateADX(klines, 14)
+	if adx <= 0 {
+		log.Printf("[SCALP-REENTRY] %s: Invalid ADX value %.1f, using default", symbol, adx)
+		return defaultADX
+	}
+
+	log.Printf("[SCALP-REENTRY] %s: ADX calculated = %.1f", symbol, adx)
+	return adx
 }
 
 // calculateNewBreakeven calculates the new breakeven after re-entry

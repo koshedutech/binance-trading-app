@@ -366,10 +366,12 @@ type ScalpReentryConfig struct {
 	TP3SellPercent float64 `json:"tp3_sell_percent"` // 80 (sell 80%, keep 20%)
 
 	// Re-entry configuration
-	ReentryPercent     float64 `json:"reentry_percent"`      // 80 (buy back 80% of sold qty)
-	ReentryPriceBuffer float64 `json:"reentry_price_buffer"` // 0.05 (0.05% buffer from breakeven)
-	MaxReentryAttempts int     `json:"max_reentry_attempts"` // 3 max attempts before skipping
-	ReentryTimeoutSec  int     `json:"reentry_timeout_sec"`  // 300 (5 min timeout)
+	ReentryPercent                 float64 `json:"reentry_percent"`                    // 50 (buy back 50% of sold qty) - reduced from 80
+	ReentryPriceBuffer             float64 `json:"reentry_price_buffer"`               // 0.05 (0.05% buffer from breakeven)
+	MaxReentryAttempts             int     `json:"max_reentry_attempts"`               // 1 max attempts - reduced from 3
+	ReentryTimeoutSec              int     `json:"reentry_timeout_sec"`                // 300 (5 min timeout)
+	ReentryRequireTrendConfirmation bool    `json:"reentry_require_trend_confirmation"` // Option C: require trend before rebuy
+	ReentryMinADX                  float64 `json:"reentry_min_adx"`                    // Minimum ADX for rebuy (default 20)
 
 	// Final portion (20% remaining after 1%)
 	FinalTrailingPercent float64 `json:"final_trailing_percent"` // 5.0 (5% trailing from peak)
@@ -460,11 +462,13 @@ func DefaultScalpReentryConfig() ScalpReentryConfig {
 		TP3Percent:     1.0,
 		TP3SellPercent: 80,
 
-		// Re-entry
-		ReentryPercent:     80,
-		ReentryPriceBuffer: 0.05,
-		MaxReentryAttempts: 3,
-		ReentryTimeoutSec:  300,
+		// Re-entry (Story 9.4 - reduced exposure, Option C trend confirmation)
+		ReentryPercent:                 50,    // Reduced from 80 to 50 for less exposure
+		ReentryPriceBuffer:             0.05,
+		MaxReentryAttempts:             1,     // Reduced from 3 to 1 for less exposure
+		ReentryTimeoutSec:              300,
+		ReentryRequireTrendConfirmation: true,  // Option C: require trend before rebuy
+		ReentryMinADX:                  20,    // Minimum ADX for trend confirmation
 
 		// Final portion
 		FinalTrailingPercent: 5.0,
