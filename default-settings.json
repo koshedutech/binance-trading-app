@@ -1,11 +1,10 @@
 {
   "metadata": {
-    "version": "1.2.0",
+    "version": "1.3.0",
     "schema_version": 3,
-    "last_updated": "2026-01-12T18:00:00Z",
-    "updated_by": "admin",
-    "description": "Master default settings for Binance Trading Bot - Single source of truth for all user defaults. Phase 5 migration complete: added category_confidence_boost, category_size_multiplier, morning_auto_block, breakout_config, safety_settings, mode_allocation, mode_llm_settings, adaptive_ai_config, coin_confluence_configs, and symbol_settings_template.",
-    "migration_notes": "v1.2.0 - Story 9.4 Phase 5: Full settings sync from autopilot_settings.json. Runtime state (PnL, circuit breaker stats, symbol runtime data) now in ginie_runtime_state.json."
+    "last_updated": "2026-01-12T23:10:00Z",
+    "updated_by": "claude-fix",
+    "description": "Master default settings for Binance Trading Bot. CRITICAL FIX: scalp requires_trend_align=true (prevents LONG in bearish markets), added mode_llm_settings with block_on_disagreement=true for all modes, scalp llm_weight=0.35."
   },
   "global_trading": {
     "risk_level": "moderate",
@@ -38,20 +37,20 @@
         "ultra_confidence": 92
       },
       "size": {
-        "base_size_usd": 400,
+        "base_size_usd": 600,
         "max_size_usd": 600,
         "max_positions": 2,
         "leverage": 3,
         "size_multiplier_lo": 0,
         "size_multiplier_hi": 0,
         "safety_margin": 0.9,
-        "min_balance_usd": 0,
-        "min_position_size_usd": 200,
+        "min_balance_usd": 50,
+        "min_position_size_usd": 600,
         "risk_multiplier_conservative": 0,
         "risk_multiplier_moderate": 0,
         "risk_multiplier_aggressive": 0,
-        "confidence_multiplier_base": 0,
-        "confidence_multiplier_scale": 0,
+        "confidence_multiplier_base": 0.5,
+        "confidence_multiplier_scale": 0.5,
         "auto_size_enabled": false,
         "auto_size_min_cover_fee": 0
       },
@@ -82,8 +81,8 @@
         "use_roi_based_sltp": false,
         "roi_stop_loss_percent": 0,
         "roi_take_profit_percent": 0,
-        "margin_type": "",
-        "isolated_margin_percent": 0,
+        "margin_type": "ISOLATED",
+        "isolated_margin_percent": 100,
         "atr_sl_multiplier": 0,
         "atr_tp_multiplier": 0,
         "atr_sl_min": 0,
@@ -92,13 +91,13 @@
         "atr_tp_max": 0,
         "llm_weight": 0,
         "atr_weight": 0,
-        "auto_sltp_enabled": false,
+        "auto_sltp_enabled": true,
         "auto_trailing_enabled": false,
         "min_profit_to_trail_pct": 0,
         "min_sl_distance_from_zero": 0
       },
       "hedge": {
-        "allow_hedge": true,
+        "allow_hedge": false,
         "min_confidence_for_hedge": 85,
         "existing_must_be_in_profit": 2,
         "max_hedge_size_percent": 50,
@@ -162,9 +161,9 @@
         "min_adx": 30
       },
       "trend_divergence": {
-        "enabled": false,
+        "enabled": true,
         "min_divergence_percent": 0,
-        "block_on_divergence": false,
+        "block_on_divergence": true,
         "divergence_weight": 0
       },
       "mtf": {
@@ -198,7 +197,7 @@
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 30,
-        "min_loss_percent": 3.0,
+        "min_loss_percent": 3,
         "check_interval_secs": 120
       }
     },
@@ -217,19 +216,19 @@
       },
       "size": {
         "base_size_usd": 200,
-        "max_size_usd": 600,
+        "max_size_usd": 200,
         "max_positions": 10,
         "leverage": 10,
         "size_multiplier_lo": 0,
         "size_multiplier_hi": 0,
         "safety_margin": 0.9,
-        "min_balance_usd": 0,
-        "min_position_size_usd": 100,
+        "min_balance_usd": 50,
+        "min_position_size_usd": 200,
         "risk_multiplier_conservative": 0,
         "risk_multiplier_moderate": 0,
         "risk_multiplier_aggressive": 0,
-        "confidence_multiplier_base": 0,
-        "confidence_multiplier_scale": 0,
+        "confidence_multiplier_base": 0.5,
+        "confidence_multiplier_scale": 0.5,
         "auto_size_enabled": false,
         "auto_size_min_cover_fee": 0
       },
@@ -260,8 +259,8 @@
         "use_roi_based_sltp": false,
         "roi_stop_loss_percent": 0,
         "roi_take_profit_percent": 0,
-        "margin_type": "",
-        "isolated_margin_percent": 0,
+        "margin_type": "ISOLATED",
+        "isolated_margin_percent": 100,
         "atr_sl_multiplier": 0,
         "atr_tp_multiplier": 0,
         "atr_sl_min": 0,
@@ -270,13 +269,13 @@
         "atr_tp_max": 0,
         "llm_weight": 0,
         "atr_weight": 0,
-        "auto_sltp_enabled": false,
+        "auto_sltp_enabled": true,
         "auto_trailing_enabled": false,
         "min_profit_to_trail_pct": 0,
         "min_sl_distance_from_zero": 0
       },
       "hedge": {
-        "allow_hedge": true,
+        "allow_hedge": false,
         "min_confidence_for_hedge": 75,
         "existing_must_be_in_profit": 0,
         "max_hedge_size_percent": 75,
@@ -317,7 +316,7 @@
         "risk_score_max": 45,
         "profit_potential_min": 1,
         "profit_potential_max": 3,
-        "requires_trend_align": false,
+        "requires_trend_align": true,
         "priority_weight": 1
       },
       "funding_rate": {
@@ -340,9 +339,9 @@
         "min_adx": 20
       },
       "trend_divergence": {
-        "enabled": false,
+        "enabled": true,
         "min_divergence_percent": 0,
-        "block_on_divergence": false,
+        "block_on_divergence": true,
         "divergence_weight": 0
       },
       "mtf": {
@@ -376,13 +375,13 @@
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 10,
-        "min_loss_percent": 1.0,
+        "min_loss_percent": 1,
         "check_interval_secs": 30
       }
     },
     "swing": {
       "mode_name": "swing",
-      "enabled": true,
+      "enabled": false,
       "timeframe": {
         "trend_timeframe": "1h",
         "entry_timeframe": "15m",
@@ -395,19 +394,19 @@
       },
       "size": {
         "base_size_usd": 300,
-        "max_size_usd": 500,
+        "max_size_usd": 300,
         "max_positions": 5,
-        "leverage": 9,
+        "leverage": 10,
         "size_multiplier_lo": 0,
         "size_multiplier_hi": 0,
         "safety_margin": 0.9,
-        "min_balance_usd": 0,
-        "min_position_size_usd": 100,
+        "min_balance_usd": 50,
+        "min_position_size_usd": 300,
         "risk_multiplier_conservative": 0,
         "risk_multiplier_moderate": 0,
         "risk_multiplier_aggressive": 0,
-        "confidence_multiplier_base": 0,
-        "confidence_multiplier_scale": 0,
+        "confidence_multiplier_base": 0.5,
+        "confidence_multiplier_scale": 0.5,
         "auto_size_enabled": false,
         "auto_size_min_cover_fee": 0
       },
@@ -438,8 +437,8 @@
         "use_roi_based_sltp": false,
         "roi_stop_loss_percent": 0,
         "roi_take_profit_percent": 0,
-        "margin_type": "",
-        "isolated_margin_percent": 0,
+        "margin_type": "ISOLATED",
+        "isolated_margin_percent": 100,
         "atr_sl_multiplier": 0,
         "atr_tp_multiplier": 0,
         "atr_sl_min": 0,
@@ -448,7 +447,7 @@
         "atr_tp_max": 0,
         "llm_weight": 0,
         "atr_weight": 0,
-        "auto_sltp_enabled": false,
+        "auto_sltp_enabled": true,
         "auto_trailing_enabled": false,
         "min_profit_to_trail_pct": 0,
         "min_sl_distance_from_zero": 0
@@ -518,9 +517,9 @@
         "min_adx": 25
       },
       "trend_divergence": {
-        "enabled": false,
+        "enabled": true,
         "min_divergence_percent": 0,
-        "block_on_divergence": false,
+        "block_on_divergence": true,
         "divergence_weight": 0
       },
       "mtf": {
@@ -554,7 +553,7 @@
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 15,
-        "min_loss_percent": 2.0,
+        "min_loss_percent": 2,
         "check_interval_secs": 60
       }
     },
@@ -572,20 +571,20 @@
         "ultra_confidence": 90
       },
       "size": {
-        "base_size_usd": 50,
+        "base_size_usd": 200,
         "max_size_usd": 200,
         "max_positions": 1,
         "leverage": 10,
         "size_multiplier_lo": 0,
         "size_multiplier_hi": 0,
         "safety_margin": 0.9,
-        "min_balance_usd": 0,
-        "min_position_size_usd": 50,
+        "min_balance_usd": 50,
+        "min_position_size_usd": 200,
         "risk_multiplier_conservative": 0,
         "risk_multiplier_moderate": 0,
         "risk_multiplier_aggressive": 0,
-        "confidence_multiplier_base": 0,
-        "confidence_multiplier_scale": 0,
+        "confidence_multiplier_base": 0.5,
+        "confidence_multiplier_scale": 0.5,
         "auto_size_enabled": false,
         "auto_size_min_cover_fee": 0
       },
@@ -616,8 +615,8 @@
         "use_roi_based_sltp": false,
         "roi_stop_loss_percent": 0,
         "roi_take_profit_percent": 0,
-        "margin_type": "",
-        "isolated_margin_percent": 0,
+        "margin_type": "ISOLATED",
+        "isolated_margin_percent": 100,
         "atr_sl_multiplier": 0,
         "atr_tp_multiplier": 0,
         "atr_sl_min": 0,
@@ -626,7 +625,7 @@
         "atr_tp_max": 0,
         "llm_weight": 0,
         "atr_weight": 0,
-        "auto_sltp_enabled": false,
+        "auto_sltp_enabled": true,
         "auto_trailing_enabled": false,
         "min_profit_to_trail_pct": 0,
         "min_sl_distance_from_zero": 0
@@ -696,9 +695,9 @@
         "min_adx": 15
       },
       "trend_divergence": {
-        "enabled": false,
+        "enabled": true,
         "min_divergence_percent": 0,
-        "block_on_divergence": false,
+        "block_on_divergence": true,
         "divergence_weight": 0
       },
       "mtf": {
@@ -770,9 +769,9 @@
     "global": {
       "enabled": true,
       "max_loss_per_hour": 100,
-      "max_daily_loss": 500,
+      "max_daily_loss": 450,
       "max_consecutive_losses": 15,
-      "cooldown_minutes": 30,
+      "cooldown_minutes": 25,
       "max_trades_per_minute": 10,
       "max_daily_trades": 1000
     },
@@ -788,7 +787,7 @@
       "enabled": true,
       "provider": "deepseek",
       "model": "deepseek-chat",
-      "timeout_ms": 5000,
+      "timeout_ms": 6000,
       "retry_count": 0,
       "cache_duration_sec": 300
     },
@@ -800,29 +799,31 @@
     }
   },
   "early_warning": {
-    "enabled": true,
-    "start_after_minutes": 10,
-    "check_interval_secs": 30,
-    "only_underwater": true,
-    "min_loss_percent": 1,
-    "close_on_reversal": true,
-    "tighten_sl_on_warning": true,
-    "min_confidence": 0.7,
-    "max_llm_calls_per_pos": 3,
-    "close_min_hold_mins": 15,
-    "close_min_confidence": 0.85,
-    "close_require_consecutive": 2,
-    "close_sl_proximity_pct": 50
+    "enabled": false,
+    "start_after_minutes": 0,
+    "check_interval_secs": 0,
+    "only_underwater": false,
+    "min_loss_percent": 0,
+    "close_on_reversal": false,
+    "tighten_sl_on_warning": false,
+    "min_confidence": 0,
+    "max_llm_calls_per_pos": 0,
+    "close_min_hold_mins": 0,
+    "close_min_confidence": 0,
+    "close_require_consecutive": 0,
+    "close_sl_proximity_pct": 0
   },
   "capital_allocation": {
     "ultra_fast_percent": 0,
     "scalp_percent": 100,
     "swing_percent": 0,
-    "position_percent": 0
+    "position_percent": 0,
+    "allow_dynamic_rebalance": true,
+    "rebalance_threshold_pct": 15
   },
   "scalp_reentry_config": {
-    "enabled": false,
-    "tp1_percent": 0.5,
+    "enabled": true,
+    "tp1_percent": 0.35,
     "tp1_sell_percent": 30,
     "tp2_percent": 0.7,
     "tp2_sell_percent": 50,
@@ -831,9 +832,9 @@
     "reentry_percent": 50,
     "reentry_price_buffer": 0.05,
     "max_reentry_attempts": 1,
+    "reentry_timeout_sec": 300,
     "reentry_require_trend_confirmation": true,
     "reentry_min_adx": 20,
-    "reentry_timeout_sec": 300,
     "final_trailing_percent": 5,
     "final_hold_min_percent": 20,
     "dynamic_sl_max_loss_pct": 40,
@@ -878,53 +879,33 @@
     "allow_hedge_chains": false,
     "max_hedge_chain_depth": 2
   },
-  "trading_fees": {
-    "taker_fee_percent": 0.04,
-    "maker_fee_percent": 0.02,
-    "vip_level": 0
-  },
-  "category_confidence_boost": {
-    "best": -5,
-    "good": 0,
-    "neutral": 0,
-    "poor": 10,
-    "worst": 20,
-    "blacklist": 100
-  },
-  "category_size_multiplier": {
-    "best": 1.5,
-    "good": 1.2,
-    "neutral": 1.0,
-    "poor": 0.5,
-    "worst": 0.25,
-    "blacklist": 0
-  },
-  "morning_auto_block": {
-    "enabled": true,
-    "hour_utc": 0,
-    "min_utc": 5
-  },
-  "breakout_config": {
-    "enabled": true,
-    "volume_spike_multiplier": 2,
-    "volume_profile_period": 24,
-    "near_24h_high_percent": 0.5,
-    "candle_acceleration_ratio": 1.5,
-    "range_contraction_threshold": 0.7,
-    "roc_acceleration_threshold": 0.5,
-    "mtf_consensus_required": 3,
-    "bid_ask_imbalance_threshold": 1.5,
-    "large_order_multiplier": 5,
-    "volume_weight": 0.3,
-    "price_weight": 0.25,
-    "momentum_weight": 0.25,
-    "order_book_weight": 0.2,
-    "min_signals_for_breakout": 2,
-    "min_breakout_score": 60
+  "mode_llm_settings": {
+    "_description": "Per-mode LLM configuration for AI-assisted trading decisions. block_on_disagreement prevents entries when LLM disagrees with technical signals.",
+    "ultra_fast": {
+      "llm_weight": 0.2,
+      "block_on_disagreement": true,
+      "require_llm_confirmation": false
+    },
+    "scalp": {
+      "llm_weight": 0.35,
+      "block_on_disagreement": true,
+      "require_llm_confirmation": false
+    },
+    "swing": {
+      "llm_weight": 0.3,
+      "block_on_disagreement": true,
+      "require_llm_confirmation": false
+    },
+    "position": {
+      "llm_weight": 0.25,
+      "block_on_disagreement": true,
+      "require_llm_confirmation": false
+    }
   },
   "safety_settings": {
+    "_description": "Per-mode safety controls for rate limiting, profit monitoring, and win-rate monitoring. These settings protect against excessive trading and consecutive losses.",
     "ultra_fast": {
-      "max_trades_per_minute": 5,
+      "max_trades_per_minute": 10,
       "max_trades_per_hour": 20,
       "max_trades_per_day": 50,
       "enable_profit_monitor": true,
@@ -975,86 +956,6 @@
       "min_win_rate_threshold": 60,
       "win_rate_cooldown_minutes": 180
     }
-  },
-  "mode_allocation": {
-    "ultra_fast_scalp_percent": 0,
-    "scalp_percent": 100,
-    "swing_percent": 0,
-    "position_percent": 0,
-    "max_ultra_fast_positions": 3,
-    "max_scalp_positions": 3,
-    "max_swing_positions": 5,
-    "max_position_positions": 2,
-    "max_ultra_fast_usd_per_position": 200,
-    "max_scalp_usd_per_position": 600,
-    "max_swing_usd_per_position": 500,
-    "max_position_usd_per_position": 600,
-    "allow_dynamic_rebalance": false,
-    "rebalance_threshold_pct": 0
-  },
-  "mode_llm_settings": {
-    "ultra_fast": {
-      "llm_enabled": true,
-      "llm_weight": 0.1,
-      "skip_on_timeout": true,
-      "min_llm_confidence": 40,
-      "block_on_disagreement": false,
-      "cache_enabled": true
-    },
-    "scalp": {
-      "llm_enabled": true,
-      "llm_weight": 0.2,
-      "skip_on_timeout": true,
-      "min_llm_confidence": 50,
-      "block_on_disagreement": false,
-      "cache_enabled": true
-    },
-    "swing": {
-      "llm_enabled": true,
-      "llm_weight": 0.4,
-      "skip_on_timeout": false,
-      "min_llm_confidence": 60,
-      "block_on_disagreement": true,
-      "cache_enabled": false
-    },
-    "position": {
-      "llm_enabled": true,
-      "llm_weight": 0.5,
-      "skip_on_timeout": false,
-      "min_llm_confidence": 65,
-      "block_on_disagreement": true,
-      "cache_enabled": false
-    },
-    "scalp_reentry": {
-      "llm_enabled": true,
-      "llm_weight": 0.35,
-      "skip_on_timeout": false,
-      "min_llm_confidence": 55,
-      "block_on_disagreement": false,
-      "cache_enabled": true
-    }
-  },
-  "adaptive_ai_config": {
-    "enabled": true,
-    "learning_window_trades": 50,
-    "learning_window_hours": 24,
-    "auto_adjust_enabled": false,
-    "max_auto_adjustment_percent": 10,
-    "require_approval": true,
-    "min_trades_for_learning": 20,
-    "store_decision_context": true
-  },
-  "coin_confluence_configs": {},
-  "symbol_settings_template": {
-    "_description": "Template for per-symbol settings. Actual symbol data is runtime state.",
-    "category": "neutral",
-    "min_confidence": 0,
-    "max_position_usd": 0,
-    "size_multiplier": 1,
-    "leverage_override": 0,
-    "enabled": true,
-    "custom_roi_percent": 0,
-    "notes": ""
   },
   "_settings_risk_index": {
     "high_risk_settings": [

@@ -28,7 +28,32 @@ type DefaultSettingsFile struct {
 	EarlyWarning         EarlyWarningDefaults           `json:"early_warning"`
 	CapitalAllocation    CapitalAllocationDefaults      `json:"capital_allocation"`
 	ScalpReentry         *ScalpReentryConfig            `json:"scalp_reentry_config,omitempty"`
+	SafetySettings       *SafetySettingsAllModes        `json:"safety_settings,omitempty"`
 	SettingsRiskIndex    SettingsRiskIndex              `json:"_settings_risk_index"`
+}
+
+// SafetySettingsAllModes contains safety settings for all trading modes
+type SafetySettingsAllModes struct {
+	Description string               `json:"_description,omitempty"`
+	UltraFast   *SafetySettingsMode  `json:"ultra_fast,omitempty"`
+	Scalp       *SafetySettingsMode  `json:"scalp,omitempty"`
+	Swing       *SafetySettingsMode  `json:"swing,omitempty"`
+	Position    *SafetySettingsMode  `json:"position,omitempty"`
+}
+
+// SafetySettingsMode contains per-mode safety settings
+type SafetySettingsMode struct {
+	MaxTradesPerMinute     int     `json:"max_trades_per_minute"`
+	MaxTradesPerHour       int     `json:"max_trades_per_hour"`
+	MaxTradesPerDay        int     `json:"max_trades_per_day"`
+	EnableProfitMonitor    bool    `json:"enable_profit_monitor"`
+	ProfitWindowMinutes    int     `json:"profit_window_minutes"`
+	MaxLossPercentInWindow float64 `json:"max_loss_percent_in_window"`
+	PauseCooldownMinutes   int     `json:"pause_cooldown_minutes"`
+	EnableWinRateMonitor   bool    `json:"enable_win_rate_monitor"`
+	WinRateSampleSize      int     `json:"win_rate_sample_size"`
+	MinWinRateThreshold    float64 `json:"min_win_rate_threshold"`
+	WinRateCooldownMinutes int     `json:"win_rate_cooldown_minutes"`
 }
 
 // DefaultMetadata holds version and update information
@@ -130,10 +155,12 @@ type EarlyWarningDefaults struct {
 
 // CapitalAllocationDefaults holds capital allocation percentages per mode
 type CapitalAllocationDefaults struct {
-	UltraFastPercent float64 `json:"ultra_fast_percent"`
-	ScalpPercent     float64 `json:"scalp_percent"`
-	SwingPercent     float64 `json:"swing_percent"`
-	PositionPercent  float64 `json:"position_percent"`
+	UltraFastPercent      float64 `json:"ultra_fast_percent"`
+	ScalpPercent          float64 `json:"scalp_percent"`
+	SwingPercent          float64 `json:"swing_percent"`
+	PositionPercent       float64 `json:"position_percent"`
+	AllowDynamicRebalance bool    `json:"allow_dynamic_rebalance"`
+	RebalanceThresholdPct float64 `json:"rebalance_threshold_pct"`
 }
 
 // SettingsRiskIndex categorizes settings by risk level
@@ -251,6 +278,46 @@ func deepCopyModeConfig(src *ModeFullConfig) *ModeFullConfig {
 	return &dst
 }
 
+// GetDefaultScalpReentryConfig returns default ScalpReentryConfig from default-settings.json
+// ScalpReentry is stored separately from ModeConfigs because it's a Position Optimization
+// feature, not a trading mode
+func GetDefaultScalpReentryConfig() (*ScalpReentryConfig, error) {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		return nil, err
+	}
+
+	if defaults.ScalpReentry == nil {
+		return nil, fmt.Errorf("scalp_reentry_config not found in default settings")
+	}
+
+	// Return a deep copy to prevent mutation
+	configCopy := deepCopyScalpReentryConfig(defaults.ScalpReentry)
+	return configCopy, nil
+}
+
+// deepCopyScalpReentryConfig creates a deep copy of ScalpReentryConfig using JSON marshaling
+func deepCopyScalpReentryConfig(src *ScalpReentryConfig) *ScalpReentryConfig {
+	if src == nil {
+		return nil
+	}
+
+	// Use JSON marshaling for deep copy
+	data, err := json.Marshal(src)
+	if err != nil {
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to marshal ScalpReentryConfig for deep copy: %v", err)
+		return nil
+	}
+
+	var dst ScalpReentryConfig
+	if err := json.Unmarshal(data, &dst); err != nil {
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to unmarshal ScalpReentryConfig for deep copy: %v", err)
+		return nil
+	}
+
+	return &dst
+}
+
 // ReloadDefaultSettings forces a reload of the defaults from disk
 // This is useful for admin sync operations when default-settings.json is updated
 // WARNING: This resets the singleton, so the next call to LoadDefaultSettings will re-read the file
@@ -286,16 +353,22 @@ func ValidateDefaultSettings() error {
 		return fmt.Errorf("metadata.schema_version must be >= 1")
 	}
 
-	// Validate mode configs
+	// Validate mode configs (4 trading modes - scalp_reentry is NOT a mode, it's Position Optimization)
 	if len(defaults.ModeConfigs) == 0 {
 		return fmt.Errorf("mode_configs is empty - at least one mode must be defined")
 	}
 
-	requiredModes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
+	// NOTE: scalp_reentry is NOT a trading mode - it's stored separately as ScalpReentry
+	requiredModes := []string{"ultra_fast", "scalp", "swing", "position"}
 	for _, mode := range requiredModes {
 		if _, exists := defaults.ModeConfigs[mode]; !exists {
 			return fmt.Errorf("mode_configs.%s is required", mode)
 		}
+	}
+
+	// Validate scalp_reentry_config exists separately
+	if defaults.ScalpReentry == nil {
+		return fmt.Errorf("scalp_reentry_config is required (stored separately from mode_configs)")
 	}
 
 	// Validate capital allocation sums to 100%

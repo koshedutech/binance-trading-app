@@ -1,6 +1,7 @@
 package api
 
 import (
+	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
 	"encoding/json"
@@ -40,26 +41,34 @@ type SettingDifference struct {
 
 // ModeDiffResponse represents the diff response for a specific mode
 type ModeDiffResponse struct {
-	Preview       bool                `json:"preview"`        // true if preview mode
-	Mode          string              `json:"mode"`           // Mode name
-	TotalChanges  int                 `json:"total_changes"`  // Count of differences
-	AllMatch      bool                `json:"all_match"`      // true if settings match defaults
-	Differences   []SettingDifference `json:"differences"`    // List of differences (only fields that differ)
-	AllValues     []FieldComparison   `json:"all_values"`     // ALL fields with current vs default comparison
-	AppliedAt     string              `json:"applied_at,omitempty"` // Timestamp if applied
+	Preview       bool                `json:"preview"`                  // true if preview mode
+	Mode          string              `json:"mode"`                     // Mode name (legacy)
+	ConfigType    string              `json:"config_type"`              // Config type for frontend (scalp, swing, scalp_reentry, etc)
+	TotalChanges  int                 `json:"total_changes"`            // Count of differences
+	AllMatch      bool                `json:"all_match"`                // true if settings match defaults
+	Differences   []SettingDifference `json:"differences"`              // List of differences (only fields that differ)
+	AllValues     []FieldComparison   `json:"all_values"`               // ALL fields with current vs default comparison
+	AppliedAt     string              `json:"applied_at,omitempty"`     // Timestamp if applied
+	IsAdmin       bool                `json:"is_admin"`                 // true if user is admin (Story 9.4)
+	DefaultValue  interface{}         `json:"default_value,omitempty"`  // Raw default config object for admin editing (Story 9.4)
 }
 
 // AllModesDiffResponse represents the diff response for all modes
 type AllModesDiffResponse struct {
-	Preview      bool                        `json:"preview"`       // true if preview mode
-	TotalChanges int                         `json:"total_changes"` // Total across all modes
-	AllMatch     bool                        `json:"all_match"`     // true if all settings match
-	Modes        map[string]*ModeDiffResponse `json:"modes"`        // Per-mode diffs
-	AppliedAt    string                      `json:"applied_at,omitempty"` // Timestamp if applied
+	Preview      bool                         `json:"preview"`                 // true if preview mode
+	ConfigType   string                       `json:"config_type"`             // Config type for frontend
+	TotalChanges int                          `json:"total_changes"`           // Total across all modes
+	AllMatch     bool                         `json:"all_match"`               // true if all settings match
+	Modes        map[string]*ModeDiffResponse `json:"modes"`                   // Per-mode diffs
+	AppliedAt    string                       `json:"applied_at,omitempty"`    // Timestamp if applied
+	IsAdmin      bool                         `json:"is_admin"`                // true if user is admin (Story 9.4)
+	DefaultValue interface{}                  `json:"default_value,omitempty"` // Raw default config object for admin editing (Story 9.4)
 }
 
 // handleLoadModeDefaults loads default settings for a specific mode
 // POST /api/futures/ginie/modes/:mode/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
 func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -87,17 +96,13 @@ func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 	}
 
 	preview := c.Query("preview") == "true"
-
-	// Get user's current settings FROM DATABASE (not JSON file!)
-	sm := autopilot.GetSettingsManager()
 	ctx := c.Request.Context()
-	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database: "+err.Error())
-		return
-	}
-	if currentMode == nil {
-		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Mode config not found in database: %s", mode))
+	isAdmin := auth.IsAdmin(c)
+
+	// SPECIAL CASE: scalp_reentry is NOT a regular mode - it's stored separately as ScalpReentryConfig
+	// It has a completely different structure (~50 fields) and uses different database methods
+	if mode == "scalp_reentry" {
+		s.handleLoadScalpReentryDefaultsInternal(c, userID, preview, isAdmin)
 		return
 	}
 
@@ -108,8 +113,40 @@ func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 		return
 	}
 
-	// Compare and generate diff
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	// Admin doesn't need comparison - they edit the defaults themselves
+	if isAdmin && preview {
+		// Return defaults directly with all values for admin editing
+		response := &ModeDiffResponse{
+			Preview:      true,
+			Mode:         mode,
+			ConfigType:   mode, // Frontend expects config_type for admin editing
+			IsAdmin:      true,
+			AllMatch:     true,                                          // No comparison needed for admin
+			TotalChanges: 0,                                             // No changes to show - just displaying defaults
+			Differences:  []SettingDifference{},
+			AllValues:    buildAllValuesFromDefaults(mode, defaultMode), // All default values for editing
+			DefaultValue: defaultMode,                                   // Raw config object for admin editing
+		}
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// REGULAR USER: Get current settings from DB for comparison
+	sm := autopilot.GetSettingsManager()
+	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database: "+err.Error())
+		return
+	}
+	if currentMode == nil {
+		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Mode config not found in database: %s", mode))
+		return
+	}
+
+	// Compare user's settings vs defaults
 	diff := compareModeConfigs(mode, currentMode, defaultMode)
+	diff.IsAdmin = isAdmin
 
 	// If not preview mode, apply the defaults to user's database
 	if !preview {
@@ -148,8 +185,75 @@ func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 	c.JSON(http.StatusOK, diff)
 }
 
+// buildAllValuesFromDefaults creates AllValues list from default config only (for admin view)
+// Shows all default values without comparison - admin sees/edits the defaults directly
+func buildAllValuesFromDefaults(mode string, defaultMode *autopilot.ModeFullConfig) []FieldComparison {
+	var allValues []FieldComparison
+
+	if defaultMode == nil {
+		return allValues
+	}
+
+	// Use reflection to extract all fields from default config
+	addDefaultFields("", reflect.ValueOf(defaultMode).Elem(), &allValues)
+
+	return allValues
+}
+
+// addDefaultFields recursively extracts fields from a struct for admin view
+func addDefaultFields(prefix string, v reflect.Value, allValues *[]FieldComparison) {
+	t := v.Type()
+
+	for i := 0; i < v.NumField(); i++ {
+		field := t.Field(i)
+		fieldValue := v.Field(i)
+
+		// Get JSON tag name
+		jsonTag := field.Tag.Get("json")
+		if jsonTag == "" || jsonTag == "-" {
+			continue
+		}
+		// Remove omitempty suffix
+		if idx := len(jsonTag) - 1; idx >= 0 {
+			for j := 0; j < len(jsonTag); j++ {
+				if jsonTag[j] == ',' {
+					jsonTag = jsonTag[:j]
+					break
+				}
+			}
+		}
+
+		// Build path
+		path := jsonTag
+		if prefix != "" {
+			path = prefix + "." + jsonTag
+		}
+
+		// Handle different types
+		switch fieldValue.Kind() {
+		case reflect.Struct:
+			// Recurse into nested structs
+			addDefaultFields(path, fieldValue, allValues)
+		case reflect.Ptr:
+			if !fieldValue.IsNil() {
+				addDefaultFields(path, fieldValue.Elem(), allValues)
+			}
+		default:
+			// Add leaf field - for admin, Current = Default (no comparison)
+			*allValues = append(*allValues, FieldComparison{
+				Path:    path,
+				Current: fieldValue.Interface(), // Show default as current
+				Default: fieldValue.Interface(), // Same as default
+				Match:   true,                   // Always match for admin view
+			})
+		}
+	}
+}
+
 // handleLoadAllModeDefaults loads default settings for all modes
 // POST /api/futures/ginie/modes/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
 func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -158,7 +262,7 @@ func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 
 	preview := c.Query("preview") == "true"
 	ctx := c.Request.Context()
-	sm := autopilot.GetSettingsManager()
+	isAdmin := auth.IsAdmin(c)
 
 	// Get all default mode configs from default-settings.json
 	defaultModes, err := autopilot.GetAllDefaultModeFullConfigs()
@@ -167,13 +271,59 @@ func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 		return
 	}
 
-	// Compare all modes - get current user configs from DATABASE
+	// NOTE: scalp_reentry is NOT a trading mode - it's a Position Optimization feature
+	// It's handled separately and uses ScalpReentryConfig instead of ModeFullConfig
+	modeNames := []string{"ultra_fast", "scalp", "swing", "position"}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		// Build combined default value map for all modes
+		allDefaultsMap := make(map[string]interface{})
+		for _, modeName := range modeNames {
+			if defaultModes[modeName] != nil {
+				allDefaultsMap[modeName] = defaultModes[modeName]
+			}
+		}
+
+		response := &AllModesDiffResponse{
+			Preview:      true,
+			ConfigType:   "all_modes", // Frontend expects config_type
+			IsAdmin:      true,
+			AllMatch:     true, // No comparison needed for admin
+			TotalChanges: 0,
+			Modes:        make(map[string]*ModeDiffResponse),
+			DefaultValue: allDefaultsMap, // Raw config object for admin editing
+		}
+
+		for _, modeName := range modeNames {
+			defaultMode := defaultModes[modeName]
+			if defaultMode != nil {
+				response.Modes[modeName] = &ModeDiffResponse{
+					Preview:      true,
+					Mode:         modeName,
+					ConfigType:   modeName, // Frontend expects config_type
+					IsAdmin:      true,
+					AllMatch:     true,
+					TotalChanges: 0,
+					Differences:  []SettingDifference{},
+					AllValues:    buildAllValuesFromDefaults(modeName, defaultMode),
+					DefaultValue: defaultMode, // Raw config object for admin editing
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// REGULAR USER: Compare user's DB settings vs defaults
+	sm := autopilot.GetSettingsManager()
 	response := &AllModesDiffResponse{
 		Preview: preview,
 		Modes:   make(map[string]*ModeDiffResponse),
+		IsAdmin: isAdmin,
 	}
 
-	modeNames := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
 	totalChanges := 0
 	allMatch := true
 
@@ -188,6 +338,7 @@ func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 		defaultMode := defaultModes[modeName]
 		if currentMode != nil && defaultMode != nil {
 			diff := compareModeConfigs(modeName, currentMode, defaultMode)
+			diff.IsAdmin = isAdmin
 			response.Modes[modeName] = diff
 			totalChanges += diff.TotalChanges
 			if !diff.AllMatch {
@@ -273,9 +424,17 @@ func (s *Server) handleGetModeDiff(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
+
+	// SPECIAL CASE: scalp_reentry is NOT a regular mode - it's stored separately as ScalpReentryConfig
+	if mode == "scalp_reentry" {
+		s.handleGetScalpReentryDiffInternal(c, userID, isAdmin)
+		return
+	}
+
 	// Get user's current settings FROM DATABASE (not JSON file!)
 	sm := autopilot.GetSettingsManager()
-	ctx := c.Request.Context()
 	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database: "+err.Error())
@@ -295,7 +454,42 @@ func (s *Server) handleGetModeDiff(c *gin.Context) {
 
 	// Compare and generate diff
 	diff := compareModeConfigs(mode, currentMode, defaultMode)
-	diff.Preview = true // This is read-only, always preview
+	diff.Preview = true   // This is read-only, always preview
+	diff.IsAdmin = isAdmin // Set admin flag for frontend (Story 9.4)
+
+	c.JSON(http.StatusOK, diff)
+}
+
+// handleGetScalpReentryDiffInternal handles scalp_reentry diff request
+func (s *Server) handleGetScalpReentryDiffInternal(c *gin.Context, userID string, isAdmin bool) {
+	ctx := c.Request.Context()
+
+	// Get user's CURRENT scalp_reentry config from DATABASE
+	currentConfigJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user scalp_reentry config: "+err.Error())
+		return
+	}
+
+	// Parse current config (or use empty if not found)
+	var currentConfig autopilot.ScalpReentryConfig
+	if currentConfigJSON != nil {
+		if err := json.Unmarshal(currentConfigJSON, &currentConfig); err != nil {
+			log.Printf("[SCALP-REENTRY-DIFF] WARNING: Failed to parse user config, using empty: %v", err)
+		}
+	}
+
+	// Get default scalp_reentry config from default-settings.json
+	defaultConfig, err := autopilot.GetDefaultScalpReentryConfig()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load default scalp_reentry settings: "+err.Error())
+		return
+	}
+
+	// Compare and generate diff
+	diff := compareScalpReentryConfigs(&currentConfig, defaultConfig)
+	diff.Preview = true    // This is read-only, always preview
+	diff.IsAdmin = isAdmin // Set admin flag for frontend (Story 9.4)
 
 	c.JSON(http.StatusOK, diff)
 }
@@ -303,7 +497,8 @@ func (s *Server) handleGetModeDiff(c *gin.Context) {
 // handleLoadAllDefaults loads all default settings (global + all modes)
 // POST /api/user/settings/load-defaults
 func (s *Server) handleLoadAllDefaults(c *gin.Context) {
-	_, ok := s.getUserIDRequired(c)
+	// FIXED: Get userID for database operations - no fallback allowed
+	userID, ok := s.getUserIDRequired(c)
 	if !ok {
 		return
 	}
@@ -317,11 +512,12 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 		return
 	}
 
-	// Get user's current settings
+	// FIXED: Get user's current settings from database, not GetDefaultSettings()
 	sm := autopilot.GetSettingsManager()
-	currentSettings := sm.GetDefaultSettings()
-	if currentSettings == nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings")
+	currentSettings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+	if loadErr != nil || currentSettings == nil {
+		log.Printf("[SETTINGS-DEFAULTS] ERROR: Failed to load user settings from database: %v", loadErr)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
 		return
 	}
 
@@ -332,6 +528,8 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 	}
 
 	// Compare mode configs
+	// NOTE: scalp_reentry is NOT a trading mode - it's a Position Optimization feature
+	// stored separately as ScalpReentryConfig, not in ModeConfigs
 	modes := []struct {
 		name    string
 		current *autopilot.ModeFullConfig
@@ -339,7 +537,6 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 	}{
 		{"ultra_fast", currentSettings.ModeConfigs["ultra_fast"], defaults.ModeConfigs["ultra_fast"]},
 		{"scalp", currentSettings.ModeConfigs["scalp"], defaults.ModeConfigs["scalp"]},
-		{"scalp_reentry", currentSettings.ModeConfigs["scalp_reentry"], defaults.ModeConfigs["scalp_reentry"]},
 		{"swing", currentSettings.ModeConfigs["swing"], defaults.ModeConfigs["swing"]},
 		{"position", currentSettings.ModeConfigs["position"], defaults.ModeConfigs["position"]},
 	}
@@ -363,10 +560,9 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 
 	// If not preview mode, apply all defaults
 	if !preview {
-		// Apply mode configs
+		// Apply mode configs (4 trading modes - scalp_reentry is separate)
 		currentSettings.ModeConfigs["ultra_fast"] = defaults.ModeConfigs["ultra_fast"]
 		currentSettings.ModeConfigs["scalp"] = defaults.ModeConfigs["scalp"]
-		currentSettings.ModeConfigs["scalp_reentry"] = defaults.ModeConfigs["scalp_reentry"]
 		currentSettings.ModeConfigs["swing"] = defaults.ModeConfigs["swing"]
 		currentSettings.ModeConfigs["position"] = defaults.ModeConfigs["position"]
 
@@ -724,8 +920,10 @@ type ConfigResetPreview struct {
 	ConfigType   string              `json:"config_type"`
 	AllMatch     bool                `json:"all_match"`
 	TotalChanges int                 `json:"total_changes"`
-	Differences  []SettingDifference `json:"differences"` // Only fields that differ
-	AllValues    []FieldComparison   `json:"all_values"`  // ALL fields with current vs default comparison
+	Differences  []SettingDifference `json:"differences"`              // Only fields that differ
+	AllValues    []FieldComparison   `json:"all_values"`               // ALL fields with current vs default comparison
+	IsAdmin      bool                `json:"is_admin"`                 // true if user is admin (Story 9.4)
+	DefaultValue interface{}         `json:"default_value,omitempty"`  // Raw default config object for admin editing (Story 9.4)
 }
 
 // ConfigResetResult represents the response after applying config reset
@@ -738,6 +936,8 @@ type ConfigResetResult struct {
 
 // handleLoadCircuitBreakerDefaults resets circuit breaker to default values
 // POST /api/futures/ginie/circuit-breaker/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
 func (s *Server) handleLoadCircuitBreakerDefaults(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -746,8 +946,40 @@ func (s *Server) handleLoadCircuitBreakerDefaults(c *gin.Context) {
 
 	preview := c.Query("preview") == "true"
 	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
 
-	// Get user's CURRENT circuit breaker config from DATABASE
+	// Load defaults from default-settings.json
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load defaults: %v", err)})
+		return
+	}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		allValues := []FieldComparison{
+			{Path: "circuit_breaker.enabled", Current: defaults.CircuitBreaker.Global.Enabled, Default: defaults.CircuitBreaker.Global.Enabled, Match: true},
+			{Path: "circuit_breaker.max_loss_per_hour", Current: defaults.CircuitBreaker.Global.MaxLossPerHour, Default: defaults.CircuitBreaker.Global.MaxLossPerHour, Match: true},
+			{Path: "circuit_breaker.max_daily_loss", Current: defaults.CircuitBreaker.Global.MaxDailyLoss, Default: defaults.CircuitBreaker.Global.MaxDailyLoss, Match: true},
+			{Path: "circuit_breaker.max_consecutive_losses", Current: defaults.CircuitBreaker.Global.MaxConsecutiveLosses, Default: defaults.CircuitBreaker.Global.MaxConsecutiveLosses, Match: true},
+			{Path: "circuit_breaker.cooldown_minutes", Current: defaults.CircuitBreaker.Global.CooldownMinutes, Default: defaults.CircuitBreaker.Global.CooldownMinutes, Match: true},
+			{Path: "circuit_breaker.max_trades_per_minute", Current: defaults.CircuitBreaker.Global.MaxTradesPerMinute, Default: defaults.CircuitBreaker.Global.MaxTradesPerMinute, Match: true},
+			{Path: "circuit_breaker.max_daily_trades", Current: defaults.CircuitBreaker.Global.MaxDailyTrades, Default: defaults.CircuitBreaker.Global.MaxDailyTrades, Match: true},
+		}
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "circuit_breaker",
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			IsAdmin:      true,
+			DefaultValue: defaults.CircuitBreaker.Global, // Raw config object for admin editing
+		})
+		return
+	}
+
+	// REGULAR USER: Get current settings from DB for comparison
 	currentCB, err := s.repo.GetUserGlobalCircuitBreaker(ctx, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load user circuit breaker: %v", err)})
@@ -763,13 +995,6 @@ func (s *Server) handleLoadCircuitBreakerDefaults(c *gin.Context) {
 			MaxConsecutiveLosses: 3,
 			CooldownMinutes:      30,
 		}
-	}
-
-	// Load defaults from default-settings.json
-	defaults, err := autopilot.LoadDefaultSettings()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load defaults: %v", err)})
-		return
 	}
 
 	// Compare current vs defaults
@@ -833,6 +1058,7 @@ func (s *Server) handleLoadCircuitBreakerDefaults(c *gin.Context) {
 			TotalChanges: len(differences),
 			Differences:  differences,
 			AllValues:    allValues,
+			IsAdmin:      isAdmin, // Set admin flag for frontend (Story 9.4)
 		})
 		return
 	}
@@ -874,6 +1100,8 @@ func (s *Server) handleLoadCircuitBreakerDefaults(c *gin.Context) {
 
 // handleLoadLLMConfigDefaults resets LLM config to default values
 // POST /api/futures/ginie/llm-config/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
 func (s *Server) handleLoadLLMConfigDefaults(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -882,8 +1110,39 @@ func (s *Server) handleLoadLLMConfigDefaults(c *gin.Context) {
 
 	preview := c.Query("preview") == "true"
 	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
 
-	// Get user's CURRENT LLM config from DATABASE
+	// Load defaults from default-settings.json
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load defaults: %v", err)})
+		return
+	}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		allValues := []FieldComparison{
+			{Path: "llm_config.enabled", Current: defaults.LLMConfig.Global.Enabled, Default: defaults.LLMConfig.Global.Enabled, Match: true},
+			{Path: "llm_config.provider", Current: defaults.LLMConfig.Global.Provider, Default: defaults.LLMConfig.Global.Provider, Match: true},
+			{Path: "llm_config.model", Current: defaults.LLMConfig.Global.Model, Default: defaults.LLMConfig.Global.Model, Match: true},
+			{Path: "llm_config.timeout_ms", Current: defaults.LLMConfig.Global.TimeoutMS, Default: defaults.LLMConfig.Global.TimeoutMS, Match: true},
+			{Path: "llm_config.retry_count", Current: defaults.LLMConfig.Global.RetryCount, Default: defaults.LLMConfig.Global.RetryCount, Match: true},
+			{Path: "llm_config.cache_duration_sec", Current: defaults.LLMConfig.Global.CacheDurationSec, Default: defaults.LLMConfig.Global.CacheDurationSec, Match: true},
+		}
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "llm_config",
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			IsAdmin:      true,
+			DefaultValue: defaults.LLMConfig.Global, // Raw config object for admin editing
+		})
+		return
+	}
+
+	// REGULAR USER: Get current settings from DB for comparison
 	currentLLM, err := s.repo.GetUserLLMConfig(ctx, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load user LLM config: %v", err)})
@@ -896,14 +1155,7 @@ func (s *Server) handleLoadLLMConfigDefaults(c *gin.Context) {
 		currentLLM.UserID = userID
 	}
 
-	// Load defaults from default-settings.json
-	defaults, err := autopilot.LoadDefaultSettings()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load defaults: %v", err)})
-		return
-	}
-
-	// Compare current vs defaults
+	// Compare current vs defaults (defaults already loaded above)
 	var differences []SettingDifference
 	var allValues []FieldComparison
 
@@ -964,6 +1216,7 @@ func (s *Server) handleLoadLLMConfigDefaults(c *gin.Context) {
 			TotalChanges: len(differences),
 			Differences:  differences,
 			AllValues:    allValues,
+			IsAdmin:      isAdmin, // Set admin flag for frontend (Story 9.4)
 		})
 		return
 	}
@@ -1005,6 +1258,8 @@ func (s *Server) handleLoadLLMConfigDefaults(c *gin.Context) {
 
 // handleLoadCapitalAllocationDefaults resets capital allocation to default values
 // POST /api/futures/ginie/capital-allocation/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
 func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -1013,8 +1268,59 @@ func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 
 	preview := c.Query("preview") == "true"
 	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
 
-	// Get user's CURRENT capital allocation from DATABASE
+	// ADMIN USER PREVIEW: Return values from default-settings.json for editing
+	if isAdmin && preview {
+		// Load from default-settings.json (the source of truth for admin editing)
+		defaults, err := autopilot.LoadDefaultSettings()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load default-settings.json: %v", err)})
+			return
+		}
+
+		// Get capital allocation from the JSON file
+		jsonAlloc := defaults.CapitalAllocation
+
+		allValues := []FieldComparison{
+			{Path: "ultra_fast_percent", Current: jsonAlloc.UltraFastPercent, Default: jsonAlloc.UltraFastPercent, Match: true},
+			{Path: "scalp_percent", Current: jsonAlloc.ScalpPercent, Default: jsonAlloc.ScalpPercent, Match: true},
+			{Path: "swing_percent", Current: jsonAlloc.SwingPercent, Default: jsonAlloc.SwingPercent, Match: true},
+			{Path: "position_percent", Current: jsonAlloc.PositionPercent, Default: jsonAlloc.PositionPercent, Match: true},
+			{Path: "allow_dynamic_rebalance", Current: jsonAlloc.AllowDynamicRebalance, Default: jsonAlloc.AllowDynamicRebalance, Match: true},
+			{Path: "rebalance_threshold_pct", Current: jsonAlloc.RebalanceThresholdPct, Default: jsonAlloc.RebalanceThresholdPct, Match: true},
+		}
+		// Create a simplified default value map for admin editing
+		defaultValueMap := map[string]interface{}{
+			"ultra_fast_percent":       jsonAlloc.UltraFastPercent,
+			"scalp_percent":            jsonAlloc.ScalpPercent,
+			"swing_percent":            jsonAlloc.SwingPercent,
+			"position_percent":         jsonAlloc.PositionPercent,
+			"allow_dynamic_rebalance":  jsonAlloc.AllowDynamicRebalance,
+			"rebalance_threshold_pct":  jsonAlloc.RebalanceThresholdPct,
+		}
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "capital_allocation",
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			IsAdmin:      true,
+			DefaultValue: defaultValueMap, // Raw config object for admin editing
+		})
+		return
+	}
+
+	// For regular users, load defaults from default-settings.json (source of truth)
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load default-settings.json: %v", err)})
+		return
+	}
+	jsonAlloc := defaults.CapitalAllocation
+
+	// REGULAR USER: Get current settings from DB for comparison
 	currentAlloc, err := s.repo.GetUserCapitalAllocation(ctx, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load user capital allocation: %v", err)})
@@ -1027,11 +1333,7 @@ func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 		currentAlloc.UserID = userID
 	}
 
-	// Use database defaults (NOT from default-settings.json, as capital allocation is per-user in database)
-	defaultAlloc := database.DefaultUserCapitalAllocation()
-	defaultAlloc.UserID = userID
-
-	// Compare current vs defaults
+	// Compare current vs defaults from default-settings.json
 	var differences []SettingDifference
 	var allValues []FieldComparison
 
@@ -1064,35 +1366,35 @@ func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 		}
 	}
 
-	// Capital Allocation Percentages
+	// Capital Allocation Percentages - compare against default-settings.json values
 	addField("capital_allocation.ultra_fast_percent",
-		currentAlloc.UltraFastPercent, defaultAlloc.UltraFastPercent,
-		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.UltraFastPercent, defaultAlloc.UltraFastPercent),
+		currentAlloc.UltraFastPercent, jsonAlloc.UltraFastPercent,
+		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.UltraFastPercent, jsonAlloc.UltraFastPercent),
 		"Use default ultra fast allocation")
 
 	addField("capital_allocation.scalp_percent",
-		currentAlloc.ScalpPercent, defaultAlloc.ScalpPercent,
-		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.ScalpPercent, defaultAlloc.ScalpPercent),
+		currentAlloc.ScalpPercent, jsonAlloc.ScalpPercent,
+		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.ScalpPercent, jsonAlloc.ScalpPercent),
 		"Use default scalp allocation")
 
 	addField("capital_allocation.swing_percent",
-		currentAlloc.SwingPercent, defaultAlloc.SwingPercent,
-		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.SwingPercent, defaultAlloc.SwingPercent),
+		currentAlloc.SwingPercent, jsonAlloc.SwingPercent,
+		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.SwingPercent, jsonAlloc.SwingPercent),
 		"Use default swing allocation")
 
 	addField("capital_allocation.position_percent",
-		currentAlloc.PositionPercent, defaultAlloc.PositionPercent,
-		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.PositionPercent, defaultAlloc.PositionPercent),
+		currentAlloc.PositionPercent, jsonAlloc.PositionPercent,
+		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentAlloc.PositionPercent, jsonAlloc.PositionPercent),
 		"Use default position allocation")
 
 	addField("capital_allocation.allow_dynamic_rebalance",
-		currentAlloc.AllowDynamicRebalance, defaultAlloc.AllowDynamicRebalance,
-		"low", fmt.Sprintf("Dynamic rebalance: %v, Default: %v", currentAlloc.AllowDynamicRebalance, defaultAlloc.AllowDynamicRebalance),
+		currentAlloc.AllowDynamicRebalance, jsonAlloc.AllowDynamicRebalance,
+		"low", fmt.Sprintf("Dynamic rebalance: %v, Default: %v", currentAlloc.AllowDynamicRebalance, jsonAlloc.AllowDynamicRebalance),
 		"Enable dynamic rebalancing for adaptive allocation")
 
 	addField("capital_allocation.rebalance_threshold_pct",
-		currentAlloc.RebalanceThresholdPct, defaultAlloc.RebalanceThresholdPct,
-		"low", fmt.Sprintf("Current threshold: %.1f%%, Default: %.1f%%", currentAlloc.RebalanceThresholdPct, defaultAlloc.RebalanceThresholdPct),
+		currentAlloc.RebalanceThresholdPct, jsonAlloc.RebalanceThresholdPct,
+		"low", fmt.Sprintf("Current threshold: %.1f%%, Default: %.1f%%", currentAlloc.RebalanceThresholdPct, jsonAlloc.RebalanceThresholdPct),
 		"Use default rebalance threshold")
 
 	if preview {
@@ -1103,12 +1405,21 @@ func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 			TotalChanges: len(differences),
 			Differences:  differences,
 			AllValues:    allValues,
+			IsAdmin:      isAdmin, // Set admin flag for frontend (Story 9.4)
 		})
 		return
 	}
 
-	// Apply defaults to database
-	if err := s.repo.SaveUserCapitalAllocation(ctx, defaultAlloc); err != nil {
+	// Apply defaults from default-settings.json to database
+	// Update only the fields managed by defaults (preserve other fields like max positions)
+	currentAlloc.UltraFastPercent = jsonAlloc.UltraFastPercent
+	currentAlloc.ScalpPercent = jsonAlloc.ScalpPercent
+	currentAlloc.SwingPercent = jsonAlloc.SwingPercent
+	currentAlloc.PositionPercent = jsonAlloc.PositionPercent
+	currentAlloc.AllowDynamicRebalance = jsonAlloc.AllowDynamicRebalance
+	currentAlloc.RebalanceThresholdPct = jsonAlloc.RebalanceThresholdPct
+
+	if err := s.repo.SaveUserCapitalAllocation(ctx, currentAlloc); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save capital allocation: %v", err)})
 		return
 	}
@@ -1377,6 +1688,8 @@ func _compareCapitalAllocationSettings(current, defaultCfg *autopilot.CapitalAll
 
 // handleLoadHedgeDefaults resets hedge mode settings to default values
 // POST /api/futures/ginie/hedge-mode/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
 func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -1385,7 +1698,7 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 
 	preview := c.Query("preview") == "true"
 	ctx := c.Request.Context()
-	sm := autopilot.GetSettingsManager()
+	isAdmin := auth.IsAdmin(c)
 
 	// Load defaults from default-settings.json
 	defaults, err := autopilot.LoadDefaultSettings()
@@ -1394,10 +1707,52 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 		return
 	}
 
-	// Hedge settings are per-mode, so we need to compare all modes
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		var allValues []FieldComparison
+		defaultValueMap := make(map[string]interface{})
+		for _, mode := range modes {
+			defaultMode := defaults.ModeConfigs[mode]
+			if defaultMode != nil && defaultMode.Hedge != nil {
+				h := defaultMode.Hedge
+				allValues = append(allValues,
+					FieldComparison{Path: fmt.Sprintf("%s.hedge.allow_hedge", mode), Current: h.AllowHedge, Default: h.AllowHedge, Match: true},
+					FieldComparison{Path: fmt.Sprintf("%s.hedge.min_confidence_for_hedge", mode), Current: h.MinConfidenceForHedge, Default: h.MinConfidenceForHedge, Match: true},
+					FieldComparison{Path: fmt.Sprintf("%s.hedge.existing_must_be_in_profit", mode), Current: h.ExistingMustBeInProfit, Default: h.ExistingMustBeInProfit, Match: true},
+					FieldComparison{Path: fmt.Sprintf("%s.hedge.max_hedge_size_percent", mode), Current: h.MaxHedgeSizePercent, Default: h.MaxHedgeSizePercent, Match: true},
+					FieldComparison{Path: fmt.Sprintf("%s.hedge.allow_same_mode_hedge", mode), Current: h.AllowSameModeHedge, Default: h.AllowSameModeHedge, Match: true},
+					FieldComparison{Path: fmt.Sprintf("%s.hedge.max_total_exposure_multiplier", mode), Current: h.MaxTotalExposureMultiplier, Default: h.MaxTotalExposureMultiplier, Match: true},
+				)
+				// Add to default value map for admin editing
+				defaultValueMap[mode] = map[string]interface{}{
+					"allow_hedge":                   h.AllowHedge,
+					"min_confidence_for_hedge":      h.MinConfidenceForHedge,
+					"existing_must_be_in_profit":    h.ExistingMustBeInProfit,
+					"max_hedge_size_percent":        h.MaxHedgeSizePercent,
+					"allow_same_mode_hedge":         h.AllowSameModeHedge,
+					"max_total_exposure_multiplier": h.MaxTotalExposureMultiplier,
+				}
+			}
+		}
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "hedge_mode",
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			IsAdmin:      true,
+			DefaultValue: defaultValueMap, // Raw config object for admin editing
+		})
+		return
+	}
+
+	// REGULAR USER: Compare user's DB settings vs defaults
+	sm := autopilot.GetSettingsManager()
 	var differences []SettingDifference
 	var allValues []FieldComparison
-	modes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
 
 	// Helper to add field comparison
 	addField := func(path string, current, defaultVal interface{}, riskLevel, impact, recommendation string) {
@@ -1488,6 +1843,7 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 			TotalChanges: len(differences),
 			Differences:  differences,
 			AllValues:    allValues,
+			IsAdmin:      isAdmin, // Set admin flag for frontend (Story 9.4)
 		})
 		return
 	}
@@ -1529,5 +1885,529 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 		ConfigType:     "hedge_mode",
 		ChangesApplied: len(differences),
 		Message:        fmt.Sprintf("Hedge mode settings reset to defaults for %d modes (%d changes applied)", changesApplied, len(differences)),
+	})
+}
+
+// handleLoadScalpReentryDefaultsInternal handles scalp_reentry config reset
+// ScalpReentryConfig is a Position Optimization feature, NOT a regular trading mode
+// It has ~50 fields and uses a completely different structure than ModeFullConfig
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
+func (s *Server) handleLoadScalpReentryDefaultsInternal(c *gin.Context, userID string, preview bool, isAdmin bool) {
+	ctx := c.Request.Context()
+
+	// Get default scalp_reentry config from default-settings.json
+	defaultConfig, err := autopilot.GetDefaultScalpReentryConfig()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load default scalp_reentry settings: "+err.Error())
+		return
+	}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		// Build all values from defaults only (no comparison)
+		var allValues []FieldComparison
+		addDefaultFields("scalp_reentry", reflect.ValueOf(defaultConfig).Elem(), &allValues)
+
+		response := &ModeDiffResponse{
+			Preview:      true,
+			Mode:         "scalp_reentry",
+			ConfigType:   "scalp_reentry", // Frontend expects config_type for admin editing
+			IsAdmin:      true,
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			DefaultValue: defaultConfig, // Raw config object for admin editing
+		}
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// REGULAR USER: Get current settings from DB for comparison
+	currentConfigJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user scalp_reentry config: "+err.Error())
+		return
+	}
+
+	// Parse current config (or use empty if not found)
+	var currentConfig autopilot.ScalpReentryConfig
+	if currentConfigJSON != nil {
+		if err := json.Unmarshal(currentConfigJSON, &currentConfig); err != nil {
+			log.Printf("[SCALP-REENTRY-DEFAULTS] WARNING: Failed to parse user config, using empty: %v", err)
+		}
+	}
+
+	// Compare and generate diff
+	diff := compareScalpReentryConfigs(&currentConfig, defaultConfig)
+	diff.IsAdmin = isAdmin
+
+	if preview {
+		c.JSON(http.StatusOK, diff)
+		return
+	}
+
+	// Apply defaults to database
+	configJSON, marshalErr := json.Marshal(defaultConfig)
+	if marshalErr != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to serialize default scalp_reentry config: "+marshalErr.Error())
+		return
+	}
+
+	if saveErr := s.repo.SaveUserScalpReentryConfig(ctx, userID, configJSON); saveErr != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save scalp_reentry config to database: "+saveErr.Error())
+		return
+	}
+
+	// Trigger immediate config reload in running autopilot
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[DEFAULTS-RESET] Triggered immediate config reload for user %s scalp_reentry", userID)
+		}
+	}
+
+	c.JSON(http.StatusOK, ConfigResetResult{
+		Success:        true,
+		ConfigType:     "scalp_reentry",
+		ChangesApplied: diff.TotalChanges,
+		Message:        fmt.Sprintf("Scalp re-entry optimization reset to defaults (%d changes applied)", diff.TotalChanges),
+	})
+}
+
+// compareScalpReentryConfigs compares user's scalp_reentry config with defaults
+func compareScalpReentryConfigs(current, defaultCfg *autopilot.ScalpReentryConfig) *ModeDiffResponse {
+	response := &ModeDiffResponse{
+		Mode:        "scalp_reentry",
+		Preview:     true,
+		Differences: []SettingDifference{},
+		AllValues:   []FieldComparison{},
+		AllMatch:    true,
+	}
+
+	if current == nil || defaultCfg == nil {
+		return response
+	}
+
+	// Use reflection to compare all fields
+	compareSections("scalp_reentry", current, defaultCfg, response)
+
+	response.TotalChanges = len(response.Differences)
+	if response.TotalChanges > 0 {
+		response.AllMatch = false
+	}
+
+	return response
+}
+
+// ====== GET ALL DEFAULT SETTINGS HANDLER (Story 9.4) ======
+// This handler returns all default settings from default-settings.json
+// Used by ResetSettings UI to display view-only default values
+
+// AllDefaultSettingsResponse represents the response for getting all defaults
+type AllDefaultSettingsResponse struct {
+	Success  bool        `json:"success"`
+	Defaults interface{} `json:"defaults"` // Full default-settings.json content
+	IsAdmin  bool        `json:"is_admin"` // true if user is admin
+}
+
+// handleGetAllDefaultSettings returns all default settings from default-settings.json
+// GET /api/futures/ginie/default-settings
+func (s *Server) handleGetAllDefaultSettings(c *gin.Context) {
+	// Get user ID to determine admin status
+	_, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	isAdmin := auth.IsAdmin(c)
+
+	// Load defaults from default-settings.json
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load default settings: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, AllDefaultSettingsResponse{
+		Success:  true,
+		Defaults: defaults,
+		IsAdmin:  isAdmin,
+	})
+}
+
+// ====== SAFETY SETTINGS HANDLERS (Story 9.4) ======
+// Per-mode safety controls for rate limiting, profit monitoring, and win-rate monitoring
+
+// handleLoadSafetySettingsDefaults loads default safety settings for all modes
+// POST /api/futures/ginie/safety-settings/load-defaults?preview=true
+func (s *Server) handleLoadSafetySettingsDefaults(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	preview := c.Query("preview") == "true"
+	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
+
+	// Get user's CURRENT safety settings from DATABASE for all modes
+	currentSettings, err := s.repo.GetAllUserSafetySettings(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user safety settings: "+err.Error())
+		return
+	}
+
+	// Load defaults from default-settings.json
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load defaults: "+err.Error())
+		return
+	}
+
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		var allValues []FieldComparison
+		defaultValueMap := make(map[string]interface{})
+
+		for _, mode := range modes {
+			var defaultSafety *autopilot.SafetySettingsMode
+			if defaults.SafetySettings != nil {
+				switch mode {
+				case "ultra_fast":
+					defaultSafety = defaults.SafetySettings.UltraFast
+				case "scalp":
+					defaultSafety = defaults.SafetySettings.Scalp
+				case "swing":
+					defaultSafety = defaults.SafetySettings.Swing
+				case "position":
+					defaultSafety = defaults.SafetySettings.Position
+				}
+			}
+			// If no defaults from JSON, use hardcoded defaults
+			if defaultSafety == nil {
+				hardcodedDefault := database.DefaultUserSafetySettings(mode)
+				defaultSafety = &autopilot.SafetySettingsMode{
+					MaxTradesPerMinute:     hardcodedDefault.MaxTradesPerMinute,
+					MaxTradesPerHour:       hardcodedDefault.MaxTradesPerHour,
+					MaxTradesPerDay:        hardcodedDefault.MaxTradesPerDay,
+					EnableProfitMonitor:    hardcodedDefault.EnableProfitMonitor,
+					ProfitWindowMinutes:    hardcodedDefault.ProfitWindowMinutes,
+					MaxLossPercentInWindow: hardcodedDefault.MaxLossPercentInWindow,
+					PauseCooldownMinutes:   hardcodedDefault.PauseCooldownMinutes,
+					EnableWinRateMonitor:   hardcodedDefault.EnableWinRateMonitor,
+					WinRateSampleSize:      hardcodedDefault.WinRateSampleSize,
+					MinWinRateThreshold:    hardcodedDefault.MinWinRateThreshold,
+					WinRateCooldownMinutes: hardcodedDefault.WinRateCooldownMinutes,
+				}
+			}
+
+			prefix := fmt.Sprintf("safety_settings.%s.", mode)
+			allValues = append(allValues,
+				FieldComparison{Path: prefix + "max_trades_per_minute", Current: defaultSafety.MaxTradesPerMinute, Default: defaultSafety.MaxTradesPerMinute, Match: true},
+				FieldComparison{Path: prefix + "max_trades_per_hour", Current: defaultSafety.MaxTradesPerHour, Default: defaultSafety.MaxTradesPerHour, Match: true},
+				FieldComparison{Path: prefix + "max_trades_per_day", Current: defaultSafety.MaxTradesPerDay, Default: defaultSafety.MaxTradesPerDay, Match: true},
+				FieldComparison{Path: prefix + "enable_profit_monitor", Current: defaultSafety.EnableProfitMonitor, Default: defaultSafety.EnableProfitMonitor, Match: true},
+				FieldComparison{Path: prefix + "profit_window_minutes", Current: defaultSafety.ProfitWindowMinutes, Default: defaultSafety.ProfitWindowMinutes, Match: true},
+				FieldComparison{Path: prefix + "max_loss_percent_in_window", Current: defaultSafety.MaxLossPercentInWindow, Default: defaultSafety.MaxLossPercentInWindow, Match: true},
+				FieldComparison{Path: prefix + "pause_cooldown_minutes", Current: defaultSafety.PauseCooldownMinutes, Default: defaultSafety.PauseCooldownMinutes, Match: true},
+				FieldComparison{Path: prefix + "enable_win_rate_monitor", Current: defaultSafety.EnableWinRateMonitor, Default: defaultSafety.EnableWinRateMonitor, Match: true},
+				FieldComparison{Path: prefix + "win_rate_sample_size", Current: defaultSafety.WinRateSampleSize, Default: defaultSafety.WinRateSampleSize, Match: true},
+				FieldComparison{Path: prefix + "min_win_rate_threshold", Current: defaultSafety.MinWinRateThreshold, Default: defaultSafety.MinWinRateThreshold, Match: true},
+				FieldComparison{Path: prefix + "win_rate_cooldown_minutes", Current: defaultSafety.WinRateCooldownMinutes, Default: defaultSafety.WinRateCooldownMinutes, Match: true},
+			)
+			defaultValueMap[mode] = defaultSafety
+		}
+
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "safety_settings",
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			IsAdmin:      true,
+			DefaultValue: defaultValueMap, // Raw config object for admin editing
+		})
+		return
+	}
+
+	// REGULAR USER: Prepare response comparing user's DB settings vs defaults
+	var differences []SettingDifference
+	var allValues []FieldComparison
+
+	for _, mode := range modes {
+		// Get current settings for this mode (or defaults if not found)
+		current := currentSettings[mode]
+		if current == nil {
+			current = database.DefaultUserSafetySettings(mode)
+			current.UserID = userID
+		}
+
+		// Get defaults for this mode
+		var defaultSafety *autopilot.SafetySettingsMode
+		if defaults.SafetySettings != nil {
+			switch mode {
+			case "ultra_fast":
+				defaultSafety = defaults.SafetySettings.UltraFast
+			case "scalp":
+				defaultSafety = defaults.SafetySettings.Scalp
+			case "swing":
+				defaultSafety = defaults.SafetySettings.Swing
+			case "position":
+				defaultSafety = defaults.SafetySettings.Position
+			}
+		}
+
+		// If no defaults from JSON, use hardcoded defaults
+		if defaultSafety == nil {
+			hardcodedDefault := database.DefaultUserSafetySettings(mode)
+			defaultSafety = &autopilot.SafetySettingsMode{
+				MaxTradesPerMinute:     hardcodedDefault.MaxTradesPerMinute,
+				MaxTradesPerHour:       hardcodedDefault.MaxTradesPerHour,
+				MaxTradesPerDay:        hardcodedDefault.MaxTradesPerDay,
+				EnableProfitMonitor:    hardcodedDefault.EnableProfitMonitor,
+				ProfitWindowMinutes:    hardcodedDefault.ProfitWindowMinutes,
+				MaxLossPercentInWindow: hardcodedDefault.MaxLossPercentInWindow,
+				PauseCooldownMinutes:   hardcodedDefault.PauseCooldownMinutes,
+				EnableWinRateMonitor:   hardcodedDefault.EnableWinRateMonitor,
+				WinRateSampleSize:      hardcodedDefault.WinRateSampleSize,
+				MinWinRateThreshold:    hardcodedDefault.MinWinRateThreshold,
+				WinRateCooldownMinutes: hardcodedDefault.WinRateCooldownMinutes,
+			}
+		}
+
+		// Compare fields
+		prefix := fmt.Sprintf("safety_settings.%s.", mode)
+
+		addSafetyField := func(name string, currentVal, defaultVal interface{}, riskLevel, impact string) {
+			match := reflect.DeepEqual(currentVal, defaultVal)
+			allValues = append(allValues, FieldComparison{
+				Path:      prefix + name,
+				Current:   currentVal,
+				Default:   defaultVal,
+				Match:     match,
+				RiskLevel: riskLevel,
+			})
+			if !match {
+				differences = append(differences, SettingDifference{
+					Path:           prefix + name,
+					Current:        currentVal,
+					Default:        defaultVal,
+					RiskLevel:      riskLevel,
+					Impact:         impact,
+					Recommendation: "Use default for balanced safety",
+				})
+			}
+		}
+
+		addSafetyField("max_trades_per_minute", current.MaxTradesPerMinute, defaultSafety.MaxTradesPerMinute, "medium", "Rate limit per minute")
+		addSafetyField("max_trades_per_hour", current.MaxTradesPerHour, defaultSafety.MaxTradesPerHour, "medium", "Rate limit per hour")
+		addSafetyField("max_trades_per_day", current.MaxTradesPerDay, defaultSafety.MaxTradesPerDay, "medium", "Rate limit per day")
+		addSafetyField("enable_profit_monitor", current.EnableProfitMonitor, defaultSafety.EnableProfitMonitor, "high", "Profit loss protection")
+		addSafetyField("profit_window_minutes", current.ProfitWindowMinutes, defaultSafety.ProfitWindowMinutes, "low", "Profit monitoring window")
+		addSafetyField("max_loss_percent_in_window", current.MaxLossPercentInWindow, defaultSafety.MaxLossPercentInWindow, "high", "Max allowed loss")
+		addSafetyField("pause_cooldown_minutes", current.PauseCooldownMinutes, defaultSafety.PauseCooldownMinutes, "medium", "Pause duration after loss")
+		addSafetyField("enable_win_rate_monitor", current.EnableWinRateMonitor, defaultSafety.EnableWinRateMonitor, "high", "Win rate protection")
+		addSafetyField("win_rate_sample_size", current.WinRateSampleSize, defaultSafety.WinRateSampleSize, "low", "Win rate sample size")
+		addSafetyField("min_win_rate_threshold", current.MinWinRateThreshold, defaultSafety.MinWinRateThreshold, "high", "Min required win rate")
+		addSafetyField("win_rate_cooldown_minutes", current.WinRateCooldownMinutes, defaultSafety.WinRateCooldownMinutes, "medium", "Cooldown after low win rate")
+	}
+
+	if preview {
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "safety_settings",
+			AllMatch:     len(differences) == 0,
+			TotalChanges: len(differences),
+			Differences:  differences,
+			AllValues:    allValues,
+			IsAdmin:      isAdmin,
+		})
+		return
+	}
+
+	// Apply defaults from default-settings.json to database - reset all modes
+	for _, mode := range modes {
+		// Get defaults from default-settings.json (same source used for comparison)
+		var defaultSafety *autopilot.SafetySettingsMode
+		if defaults.SafetySettings != nil {
+			switch mode {
+			case "ultra_fast":
+				defaultSafety = defaults.SafetySettings.UltraFast
+			case "scalp":
+				defaultSafety = defaults.SafetySettings.Scalp
+			case "swing":
+				defaultSafety = defaults.SafetySettings.Swing
+			case "position":
+				defaultSafety = defaults.SafetySettings.Position
+			}
+		}
+
+		// Create database settings from default-settings.json values
+		defaultSettings := &database.UserSafetySettings{
+			UserID: userID,
+			Mode:   mode,
+		}
+
+		if defaultSafety != nil {
+			// Use values from default-settings.json
+			defaultSettings.MaxTradesPerMinute = defaultSafety.MaxTradesPerMinute
+			defaultSettings.MaxTradesPerHour = defaultSafety.MaxTradesPerHour
+			defaultSettings.MaxTradesPerDay = defaultSafety.MaxTradesPerDay
+			defaultSettings.EnableProfitMonitor = defaultSafety.EnableProfitMonitor
+			defaultSettings.ProfitWindowMinutes = defaultSafety.ProfitWindowMinutes
+			defaultSettings.MaxLossPercentInWindow = defaultSafety.MaxLossPercentInWindow
+			defaultSettings.PauseCooldownMinutes = defaultSafety.PauseCooldownMinutes
+			defaultSettings.EnableWinRateMonitor = defaultSafety.EnableWinRateMonitor
+			defaultSettings.WinRateSampleSize = defaultSafety.WinRateSampleSize
+			defaultSettings.MinWinRateThreshold = defaultSafety.MinWinRateThreshold
+			defaultSettings.WinRateCooldownMinutes = defaultSafety.WinRateCooldownMinutes
+		} else {
+			// Fallback to hardcoded defaults only if not in default-settings.json
+			hardcoded := database.DefaultUserSafetySettings(mode)
+			defaultSettings.MaxTradesPerMinute = hardcoded.MaxTradesPerMinute
+			defaultSettings.MaxTradesPerHour = hardcoded.MaxTradesPerHour
+			defaultSettings.MaxTradesPerDay = hardcoded.MaxTradesPerDay
+			defaultSettings.EnableProfitMonitor = hardcoded.EnableProfitMonitor
+			defaultSettings.ProfitWindowMinutes = hardcoded.ProfitWindowMinutes
+			defaultSettings.MaxLossPercentInWindow = hardcoded.MaxLossPercentInWindow
+			defaultSettings.PauseCooldownMinutes = hardcoded.PauseCooldownMinutes
+			defaultSettings.EnableWinRateMonitor = hardcoded.EnableWinRateMonitor
+			defaultSettings.WinRateSampleSize = hardcoded.WinRateSampleSize
+			defaultSettings.MinWinRateThreshold = hardcoded.MinWinRateThreshold
+			defaultSettings.WinRateCooldownMinutes = hardcoded.WinRateCooldownMinutes
+		}
+
+		if err := s.repo.SaveUserSafetySettings(ctx, defaultSettings); err != nil {
+			log.Printf("[SAFETY-SETTINGS] Warning: Failed to reset %s safety settings: %v", mode, err)
+		}
+	}
+
+	// Trigger config reload
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[SAFETY-SETTINGS] Triggered config reload for user %s", userID)
+		}
+	}
+
+	c.JSON(http.StatusOK, ConfigResetResult{
+		Success:        true,
+		ConfigType:     "safety_settings",
+		ChangesApplied: len(differences),
+		Message:        fmt.Sprintf("Safety settings reset to defaults for all modes (%d changes applied)", len(differences)),
+	})
+}
+
+// handleGetUserSafetySettings returns user's current safety settings
+// GET /api/futures/ginie/safety-settings
+func (s *Server) handleGetUserSafetySettings(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get all user safety settings from database
+	settings, err := s.repo.GetAllUserSafetySettings(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load safety settings: "+err.Error())
+		return
+	}
+
+	// If no settings exist, return defaults
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	result := make(map[string]*database.UserSafetySettings)
+
+	for _, mode := range modes {
+		if existing := settings[mode]; existing != nil {
+			result[mode] = existing
+		} else {
+			result[mode] = database.DefaultUserSafetySettings(mode)
+			result[mode].UserID = userID
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"settings": result,
+	})
+}
+
+// handleUpdateUserSafetySettings updates user's safety settings for a specific mode
+// PUT /api/futures/ginie/safety-settings/:mode
+func (s *Server) handleUpdateUserSafetySettings(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	mode := c.Param("mode")
+	validModes := map[string]bool{"ultra_fast": true, "scalp": true, "swing": true, "position": true}
+	if !validModes[mode] {
+		errorResponse(c, http.StatusBadRequest, "Invalid mode. Valid modes: ultra_fast, scalp, swing, position")
+		return
+	}
+
+	var req database.UserSafetySettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	// Validate fields
+	if req.MaxTradesPerMinute < 1 || req.MaxTradesPerMinute > 100 {
+		errorResponse(c, http.StatusBadRequest, "max_trades_per_minute must be 1-100")
+		return
+	}
+	if req.MaxTradesPerHour < 1 || req.MaxTradesPerHour > 1000 {
+		errorResponse(c, http.StatusBadRequest, "max_trades_per_hour must be 1-1000")
+		return
+	}
+	if req.MaxTradesPerDay < 1 || req.MaxTradesPerDay > 10000 {
+		errorResponse(c, http.StatusBadRequest, "max_trades_per_day must be 1-10000")
+		return
+	}
+	if req.MaxLossPercentInWindow > 0 || req.MaxLossPercentInWindow < -100 {
+		errorResponse(c, http.StatusBadRequest, "max_loss_percent_in_window must be -100 to 0 (negative value)")
+		return
+	}
+	if req.MinWinRateThreshold < 0 || req.MinWinRateThreshold > 100 {
+		errorResponse(c, http.StatusBadRequest, "min_win_rate_threshold must be 0-100")
+		return
+	}
+
+	// Set user ID and mode
+	req.UserID = userID
+	req.Mode = mode
+
+	ctx := c.Request.Context()
+	if err := s.repo.SaveUserSafetySettings(ctx, &req); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save safety settings: "+err.Error())
+		return
+	}
+
+	// Trigger config reload
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+		}
+	}
+
+	log.Printf("[SAFETY-SETTINGS] Updated %s safety settings for user %s", mode, userID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"mode":     mode,
+		"settings": req,
+		"message":  fmt.Sprintf("%s safety settings updated", mode),
 	})
 }
