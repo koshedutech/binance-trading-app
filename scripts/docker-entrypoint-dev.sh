@@ -27,8 +27,9 @@ fi
 
 echo "Building Go application..."
 cd /app
-go build -o trading-bot main.go
+# Build to /tmp to avoid WSL2 volume mount issues causing segfaults
+go build -o /tmp/trading-bot main.go
 echo "Go application built successfully"
 
 echo "Starting application..."
-exec ./trading-bot
+exec /tmp/trading-bot

@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { apiService } from './api';
 import type {
   FuturesAccountInfo,
   FuturesPosition,
@@ -1751,6 +1752,15 @@ class FuturesAPIService {
     return data;
   }
 
+  async toggleModeEnabled(mode: string, enabled: boolean): Promise<{
+    success: boolean;
+    mode: string;
+    enabled: boolean;
+  }> {
+    const { data } = await this.client.post(`/ginie/mode-config/${mode}/toggle`, { enabled });
+    return data;
+  }
+
   async resetModeConfigs(): Promise<{
     success: boolean;
     message: string;
@@ -2053,6 +2063,24 @@ class FuturesAPIService {
     const { data } = await this.client.post(`/ginie/modes/scalp_reentry/load-defaults${preview ? '?preview=true' : ''}`);
     return data;
   }
+
+  /**
+   * Load default configuration for safety settings (preview or apply)
+   * Story 9.4: Per-mode safety controls (rate limits, profit monitoring, win-rate monitoring)
+   */
+  async loadSafetySettingsDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/safety-settings/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Get all default settings from default-settings.json (Story 9.4)
+   * Returns all sections for display in ResetSettings UI
+   */
+  async getAllDefaultSettings(): Promise<{ success: boolean; defaults: Record<string, unknown> }> {
+    const { data } = await this.client.get('/ginie/default-settings');
+    return data;
+  }
 }
 
 // ==================== HEDGE MODE TYPES ====================
@@ -2143,6 +2171,10 @@ export interface ConfigResetPreview {
   all_match: boolean;
   total_changes: number;
   differences: SettingDiff[];
+  // Admin-specific fields (when is_admin is true, default_value contains all defaults)
+  is_admin?: boolean;
+  default_value?: any;
+  message?: string;
 }
 
 export interface ConfigResetResult {
@@ -4162,6 +4194,49 @@ export async function loadHedgeDefaults(preview: boolean = true): Promise<Config
  */
 export async function loadScalpReentryDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
   return futuresApi.loadScalpReentryDefaults(preview);
+}
+
+/**
+ * Load default configuration for safety settings (preview or apply)
+ * Story 9.4: Per-mode safety controls (rate limits, profit monitoring, win-rate monitoring)
+ */
+export async function loadSafetySettingsDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadSafetySettingsDefaults(preview);
+}
+
+/**
+ * Get all default settings from default-settings.json (Story 9.4)
+ * Returns all sections for display in ResetSettings UI
+ */
+export async function getAllDefaultSettings(): Promise<{ success: boolean; defaults: Record<string, unknown> }> {
+  return futuresApi.getAllDefaultSettings();
+}
+
+// ==================== ADMIN DEFAULTS APIs ====================
+
+/**
+ * Admin save defaults response
+ */
+export interface AdminSaveDefaultsResponse {
+  success: boolean;
+  config_type: string;
+  message: string;
+  changes_count: number;
+}
+
+/**
+ * Admin: Save edited default values directly to default-settings.json
+ * Only available to admin users
+ */
+export async function saveAdminDefaults(
+  configType: string,
+  editedValues: Record<string, any>
+): Promise<AdminSaveDefaultsResponse> {
+  const response = await apiService.post<AdminSaveDefaultsResponse>(
+    `/admin/defaults/${configType}`,
+    { edited_values: editedValues }
+  );
+  return response.data;
 }
 
 /**

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RefreshCw, AlertTriangle, Info, CheckCircle2, Loader2 } from 'lucide-react';
+import { RefreshCw, AlertTriangle, Info, CheckCircle2, Loader2, Eye } from 'lucide-react';
 import {
   loadModeDefaults,
   loadCircuitBreakerDefaults,
@@ -7,7 +7,9 @@ import {
   loadCapitalAllocationDefaults,
   loadHedgeDefaults,
   loadScalpReentryDefaults,
+  loadSafetySettingsDefaults,
   loadAllModesDefaults,
+  getAllDefaultSettings,
   ConfigResetPreview,
   ConfigResetResult,
 } from '../services/futuresApi';
@@ -40,12 +42,12 @@ const settingGroups: SettingGroup[] = [
     configType: 'Scalp Mode',
   },
   {
-    id: 'scalp-reentry',
-    name: 'Scalp Re-entry Mode',
-    description: 'Reset Scalp Re-entry mode configuration to default values',
+    id: 'scalp-reentry-config',
+    name: 'Scalp Re-entry Optimization',
+    description: 'Reset Scalp Re-entry optimization config (not a mode - enhances scalp positions)',
     riskLevel: 'medium',
     resetFn: (preview) => loadScalpReentryDefaults(preview),
-    configType: 'Scalp Re-entry Mode',
+    configType: 'Scalp Re-entry Config',
   },
   {
     id: 'swing',
@@ -95,6 +97,44 @@ const settingGroups: SettingGroup[] = [
     resetFn: (preview) => loadCapitalAllocationDefaults(preview),
     configType: 'Capital Allocation',
   },
+  {
+    id: 'safety-settings',
+    name: 'Safety Settings',
+    description: 'Reset per-mode safety controls (rate limits, profit monitoring, win-rate monitoring)',
+    riskLevel: 'medium',
+    resetFn: (preview) => loadSafetySettingsDefaults(preview),
+    configType: 'Safety Settings',
+  },
+];
+
+// View-only settings groups (no database backing - display defaults only)
+// These are settings from default-settings.json that exist and can be displayed
+interface ViewOnlyGroup {
+  id: string;
+  name: string;
+  description: string;
+  jsonKey: string; // Key in default-settings.json
+}
+
+const viewOnlyGroups: ViewOnlyGroup[] = [
+  {
+    id: 'global-trading',
+    name: 'Global Trading',
+    description: 'Global trading settings like risk level and max allocation',
+    jsonKey: 'global_trading',
+  },
+  {
+    id: 'position-optimization',
+    name: 'Position Optimization',
+    description: 'Averaging and hedging optimization settings',
+    jsonKey: 'position_optimization',
+  },
+  {
+    id: 'early-warning',
+    name: 'Early Warning',
+    description: 'Early warning monitoring settings for loss detection',
+    jsonKey: 'early_warning',
+  },
 ];
 
 export default function ResetSettings() {
@@ -110,6 +150,15 @@ export default function ResetSettings() {
   const [cardPreviews, setCardPreviews] = useState<Record<string, ConfigResetPreview>>({});
   const [cardLoadingStates, setCardLoadingStates] = useState<Record<string, boolean>>({});
   const [cardErrors, setCardErrors] = useState<Record<string, string>>({});
+
+  // View-only defaults from default-settings.json
+  const [allDefaults, setAllDefaults] = useState<Record<string, unknown> | null>(null);
+  const [defaultsLoading, setDefaultsLoading] = useState(true);
+  const [defaultsError, setDefaultsError] = useState<string | null>(null);
+
+  // View-only dialog state
+  const [selectedViewOnlyGroup, setSelectedViewOnlyGroup] = useState<ViewOnlyGroup | null>(null);
+  const [showViewOnlyDialog, setShowViewOnlyDialog] = useState(false);
 
   // Auto-load preview data on mount
   useEffect(() => {
@@ -133,6 +182,25 @@ export default function ResetSettings() {
     };
 
     loadAllPreviews();
+  }, []);
+
+  // Load all default settings for view-only display
+  useEffect(() => {
+    const loadDefaults = async () => {
+      try {
+        setDefaultsLoading(true);
+        const result = await getAllDefaultSettings();
+        if (result.success && result.defaults) {
+          setAllDefaults(result.defaults);
+        }
+      } catch (error: any) {
+        setDefaultsError(error.response?.data?.error || 'Failed to load default settings');
+      } finally {
+        setDefaultsLoading(false);
+      }
+    };
+
+    loadDefaults();
   }, []);
 
   const getRiskColor = (risk: 'high' | 'medium' | 'low') => {
@@ -309,6 +377,56 @@ export default function ResetSettings() {
     }
   };
 
+  // Refresh a specific card's preview data after admin saves
+  const refreshCardPreview = async (groupId: string) => {
+    const group = settingGroups.find(g => g.id === groupId);
+    if (!group) return;
+
+    setCardLoadingStates(prev => ({ ...prev, [groupId]: true }));
+    try {
+      const result = await group.resetFn(true);
+      if ('preview' in result && result.preview) {
+        setCardPreviews(prev => ({ ...prev, [groupId]: result }));
+      }
+    } catch (error: any) {
+      console.error('Failed to refresh card preview:', error);
+    } finally {
+      setCardLoadingStates(prev => ({ ...prev, [groupId]: false }));
+    }
+  };
+
+  // Map configType back to group.id for refreshing
+  const getGroupIdFromConfigType = (configType: string): string | null => {
+    const mapping: Record<string, string> = {
+      'ultra_fast': 'ultra-fast',
+      'scalp': 'scalp',
+      'scalp_reentry': 'scalp-reentry-config',
+      'swing': 'swing',
+      'position': 'position',
+      'hedge_mode': 'hedge',
+      'circuit_breaker': 'circuit-breaker',
+      'llm_config': 'llm',
+      'capital_allocation': 'capital-allocation',
+      'safety_settings': 'safety-settings',
+    };
+    return mapping[configType] || null;
+  };
+
+  // Helper to flatten nested objects for display
+  const flattenObject = (obj: any, prefix = ''): { key: string; value: any }[] => {
+    const result: { key: string; value: any }[] = [];
+    for (const key in obj) {
+      const newKey = prefix ? `${prefix}.${key}` : key;
+      const value = obj[key];
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        result.push(...flattenObject(value, newKey));
+      } else {
+        result.push({ key: newKey, value });
+      }
+    }
+    return result;
+  };
+
   const renderCardPreview = (group: SettingGroup) => {
     const preview = cardPreviews[group.id];
     const isLoading = cardLoadingStates[group.id];
@@ -346,8 +464,45 @@ export default function ResetSettings() {
       return null;
     }
 
+    // Admin preview - show all default values
+    if (preview.is_admin && preview.default_value) {
+      const flattened = flattenObject(preview.default_value);
+      const topValues = flattened.slice(0, 8);
+      const hasMore = flattened.length > 8;
+
+      return (
+        <div className="mb-4 space-y-2">
+          {/* Admin Badge */}
+          <div className="flex items-center gap-2 mb-2">
+            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium bg-purple-500/20 text-purple-400 border border-purple-500/30">
+              <Info className="w-3 h-3" />
+              Admin View - Default Values
+            </span>
+          </div>
+
+          {/* Default Values Preview */}
+          <div className="space-y-1.5 text-xs max-h-48 overflow-y-auto">
+            {topValues.map((item, idx) => (
+              <div key={idx} className="flex items-start gap-2 text-gray-300">
+                <span className="text-gray-500 flex-shrink-0">•</span>
+                <div className="flex-1 min-w-0">
+                  <span className="font-medium text-white">{item.key}:</span>{' '}
+                  <span className="text-green-400">{formatValue(item.value)}</span>
+                </div>
+              </div>
+            ))}
+            {hasMore && (
+              <p className="text-gray-500 italic">
+                +{flattened.length - 8} more settings (click Preview All to see full list)
+              </p>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // Regular user preview - show differences
     const differences = preview.differences || [];
-    const allValues = preview.all_values || [];
     const topDiffs = differences.slice(0, 5);
     const hasMore = differences.length > 5;
 
@@ -537,6 +692,103 @@ export default function ResetSettings() {
           ))}
         </div>
 
+        {/* View-Only Settings Section */}
+        <div className="mt-10">
+          <div className="mb-6">
+            <div className="flex items-center gap-3 mb-2">
+              <Eye className="w-6 h-6 text-purple-500" />
+              <h2 className="text-2xl font-bold text-white">Additional Settings (View Only)</h2>
+            </div>
+            <p className="text-gray-400">
+              These settings are from default-settings.json. Contact admin to modify defaults.
+            </p>
+          </div>
+
+          {defaultsLoading && (
+            <div className="flex items-center gap-2 text-gray-400 p-4">
+              <Loader2 className="w-5 h-5 animate-spin" />
+              <span>Loading default settings...</span>
+            </div>
+          )}
+
+          {defaultsError && (
+            <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400">
+              {defaultsError}
+            </div>
+          )}
+
+          {allDefaults && !defaultsLoading && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {viewOnlyGroups.map((group) => {
+                const sectionData = allDefaults[group.jsonKey];
+                return (
+                  <div
+                    key={group.id}
+                    className="bg-gray-800/50 rounded-lg border border-purple-500/20 p-5 hover:border-purple-500/40 transition-colors"
+                  >
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex-1">
+                        <h3 className="text-lg font-semibold text-white mb-1">{group.name}</h3>
+                        <p className="text-sm text-gray-400 mb-3">{group.description}</p>
+                      </div>
+                    </div>
+
+                    {/* View Only Badge */}
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium border bg-purple-500/20 text-purple-400 border-purple-500/30">
+                        <Eye className="w-3 h-3" />
+                        VIEW ONLY
+                      </span>
+                    </div>
+
+                    {/* Settings Preview */}
+                    <div className="space-y-1.5 text-xs max-h-48 overflow-y-auto mb-4">
+                      {sectionData && typeof sectionData === 'object' ? (
+                        Object.entries(sectionData as Record<string, unknown>)
+                          .filter(([key]) => !key.startsWith('_')) // Skip _risk_info etc
+                          .slice(0, 8)
+                          .map(([key, value]) => (
+                            <div key={key} className="flex items-start gap-2 text-gray-300">
+                              <span className="text-purple-400 flex-shrink-0">•</span>
+                              <div className="flex-1 min-w-0">
+                                <span className="font-medium text-white">{key}:</span>{' '}
+                                <span className="text-green-400">
+                                  {typeof value === 'object' ? JSON.stringify(value).slice(0, 50) + '...' : String(value)}
+                                </span>
+                              </div>
+                            </div>
+                          ))
+                      ) : (
+                        <p className="text-gray-500 italic">No data available</p>
+                      )}
+                      {sectionData && typeof sectionData === 'object' &&
+                        Object.keys(sectionData as Record<string, unknown>).filter(k => !k.startsWith('_')).length > 8 && (
+                        <p className="text-gray-500 italic">
+                          +{Object.keys(sectionData as Record<string, unknown>).filter(k => !k.startsWith('_')).length - 8} more fields
+                        </p>
+                      )}
+                    </div>
+
+                    {/* View All Button */}
+                    {sectionData && typeof sectionData === 'object' && (
+                      <button
+                        onClick={() => {
+                          setSelectedViewOnlyGroup(group);
+                          setShowViewOnlyDialog(true);
+                        }}
+                        className="w-full py-2 px-3 bg-purple-600/50 hover:bg-purple-600 text-white text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Eye className="w-4 h-4" />
+                        View All Settings
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
         {/* Reset Confirm Dialog */}
         <ResetConfirmDialog
           open={showConfirmDialog}
@@ -553,7 +805,137 @@ export default function ResetSettings() {
           allMatch={previewData?.all_match || false}
           differences={previewData?.differences || []}
           totalChanges={previewData?.total_changes || 0}
+          isAdmin={previewData?.is_admin}
+          defaultValue={previewData?.default_value}
+          onSaveSuccess={async () => {
+            // Refresh the specific card's preview data after admin saves
+            const configType = previewData?.config_type || '';
+            const groupId = getGroupIdFromConfigType(configType);
+            if (groupId) {
+              refreshCardPreview(groupId);
+            } else if (isResetAll) {
+              // Refresh all cards if "Reset All" was used
+              settingGroups.forEach(group => refreshCardPreview(group.id));
+            }
+            // Also refresh the allDefaults for view-only cards
+            try {
+              const result = await getAllDefaultSettings();
+              if (result.success && result.defaults) {
+                setAllDefaults(result.defaults);
+              }
+            } catch (error) {
+              console.error('Failed to refresh all defaults:', error);
+            }
+          }}
         />
+
+        {/* View-Only Settings Dialog */}
+        {showViewOnlyDialog && selectedViewOnlyGroup && allDefaults && (
+          <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+            <div className="bg-gray-800 rounded-xl max-w-3xl w-full max-h-[90vh] shadow-2xl border border-gray-700 flex flex-col">
+              {/* Header */}
+              <div className="flex items-center justify-between p-4 border-b border-gray-700">
+                <div className="flex items-center gap-3">
+                  <h3 className="text-lg font-bold text-white">{selectedViewOnlyGroup.name}</h3>
+                  <span className="px-2 py-1 text-xs bg-purple-500/20 text-purple-400 rounded border border-purple-500/30 flex items-center gap-1">
+                    <Eye className="w-3 h-3" /> View Only
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowViewOnlyDialog(false);
+                    setSelectedViewOnlyGroup(null);
+                  }}
+                  className="text-gray-400 hover:text-white transition-colors"
+                >
+                  <span className="text-2xl">&times;</span>
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="p-4 overflow-y-auto flex-1">
+                <div className="bg-purple-500/10 border border-purple-500/30 rounded-lg p-4 mb-4">
+                  <p className="text-purple-400 font-medium">Default Settings from JSON</p>
+                  <p className="text-sm text-gray-400 mt-1">
+                    {selectedViewOnlyGroup.description}. These values are from <code className="px-1 bg-gray-700 rounded text-xs">default-settings.json</code>.
+                  </p>
+                </div>
+
+                {/* All Settings Table */}
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-gray-700">
+                        <th className="text-left py-2 px-3 text-xs font-semibold text-gray-300">Setting</th>
+                        <th className="text-left py-2 px-3 text-xs font-semibold text-gray-300">Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        const sectionData = allDefaults[selectedViewOnlyGroup.jsonKey];
+                        if (!sectionData || typeof sectionData !== 'object') {
+                          return (
+                            <tr>
+                              <td colSpan={2} className="py-4 text-center text-gray-500">No data available</td>
+                            </tr>
+                          );
+                        }
+
+                        // Flatten nested objects for display
+                        const flattenObject = (obj: any, prefix = ''): { key: string; value: any }[] => {
+                          const result: { key: string; value: any }[] = [];
+                          for (const key in obj) {
+                            if (key.startsWith('_')) continue; // Skip internal keys
+                            const newKey = prefix ? `${prefix}.${key}` : key;
+                            const value = obj[key];
+                            if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+                              result.push(...flattenObject(value, newKey));
+                            } else {
+                              result.push({ key: newKey, value });
+                            }
+                          }
+                          return result;
+                        };
+
+                        const flattenedData = flattenObject(sectionData);
+
+                        return flattenedData.map((item, index) => (
+                          <tr key={index} className="border-b border-gray-700/50 hover:bg-gray-700/20">
+                            <td className="py-2 px-3">
+                              <span className="text-sm text-white font-medium">{item.key}</span>
+                            </td>
+                            <td className="py-2 px-3 text-sm font-mono">
+                              <span className="text-green-400">
+                                {typeof item.value === 'boolean'
+                                  ? item.value ? 'Yes' : 'No'
+                                  : typeof item.value === 'object'
+                                    ? JSON.stringify(item.value)
+                                    : String(item.value)}
+                              </span>
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="p-4 border-t border-gray-700">
+                <button
+                  onClick={() => {
+                    setShowViewOnlyDialog(false);
+                    setSelectedViewOnlyGroup(null);
+                  }}
+                  className="w-full py-2 px-4 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

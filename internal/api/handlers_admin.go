@@ -504,3 +504,42 @@ func SyncAdminModeConfigIfAdmin(ctx context.Context, userEmail string, modeName 
 		_ = err // Suppress unused variable warning
 	}
 }
+
+// handleAdminSaveDefaults saves admin-edited default values to default-settings.json
+// POST /api/admin/defaults/:configType
+// Story 9.4: Admin can edit default values for all config types
+func (s *Server) handleAdminSaveDefaults(c *gin.Context) {
+	configType := c.Param("configType")
+	if configType == "" {
+		errorResponse(c, http.StatusBadRequest, "Config type is required")
+		return
+	}
+
+	var req struct {
+		EditedValues map[string]interface{} `json:"edited_values"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if len(req.EditedValues) == 0 {
+		errorResponse(c, http.StatusBadRequest, "No values to save")
+		return
+	}
+
+	// Use the admin sync service to save defaults
+	syncService := autopilot.GetAdminSyncService()
+	changesCount, err := syncService.SaveFlattenedDefaults(configType, req.EditedValues)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save defaults: "+err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"config_type":   configType,
+		"changes_count": changesCount,
+		"message":       "Defaults saved successfully",
+	})
+}

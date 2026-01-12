@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { futuresApi } from '../services/futuresApi';
 import { Shield, Settings, AlertTriangle, RefreshCw, TrendingDown, Activity, Clock, Target, Check, Save, X, RotateCcw } from 'lucide-react';
+import { useFuturesStore } from '../store/futuresStore';
 
 interface CircuitBreakerStatus {
   available: boolean;
@@ -33,6 +34,9 @@ export default function CircuitBreakerPanel() {
   const [isResetting, setIsResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
+  const tradingMode = useFuturesStore((state) => state.tradingMode);
   // String inputs for proper text field behavior (allows clearing and typing)
   const [configInputs, setConfigInputs] = useState({
     max_loss_per_hour: '',
@@ -66,6 +70,13 @@ export default function CircuitBreakerPanel() {
     const interval = setInterval(fetchStatus, 15000);
     return () => clearInterval(interval);
   }, []);
+
+  // CRITICAL: Refresh circuit breaker status when trading mode changes (paper <-> live)
+  // This ensures daily_loss, hourly_loss display correct mode-specific values
+  useEffect(() => {
+    console.log('CircuitBreakerPanel: Trading mode changed to', tradingMode.mode, '- refreshing');
+    fetchStatus();
+  }, [tradingMode.dryRun]);
 
   const handleReset = async () => {
     setIsResetting(true);

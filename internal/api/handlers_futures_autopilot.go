@@ -7,6 +7,7 @@ import (
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -703,6 +704,13 @@ func (s *Server) handleUpdateFuturesCircuitBreakerConfig(c *gin.Context) {
 
 // handleToggleFuturesCircuitBreaker enables or disables the futures circuit breaker
 func (s *Server) handleToggleFuturesCircuitBreaker(c *gin.Context) {
+	// FIXED: Get userID for database operations - no fallback allowed
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -723,13 +731,20 @@ func (s *Server) handleToggleFuturesCircuitBreaker(c *gin.Context) {
 		return
 	}
 
-	// Persist circuit breaker enabled state
+	// FIXED: Persist circuit breaker enabled state using database call, not GetDefaultSettings()
+	// Capture repo and userID for goroutine (c.Request.Context() not safe after handler returns)
+	repo := s.repo
 	go func() {
 		sm := autopilot.GetSettingsManager()
-		settings := sm.GetDefaultSettings()
+		ctx := context.Background()
+		settings, loadErr := sm.LoadSettingsFromDB(ctx, repo, userID)
+		if loadErr != nil || settings == nil {
+			fmt.Printf("[FUTURES-CB] ERROR: Failed to load settings from database for user %s: %v\n", userID, loadErr)
+			return
+		}
 		settings.CircuitBreakerEnabled = req.Enabled
 		if err := sm.SaveSettings(settings); err != nil {
-			fmt.Printf("Failed to persist circuit breaker enabled state: %v\n", err)
+			fmt.Printf("[FUTURES-CB] Failed to persist circuit breaker enabled state: %v\n", err)
 		}
 	}()
 

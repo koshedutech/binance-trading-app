@@ -58,6 +58,12 @@ COPY --from=backend-builder /app/web/dist ./web/dist
 # Copy config example (user will mount real config)
 COPY config.json.example ./config.json.example
 
+# Copy default settings for admin restore functionality
+COPY default-settings.json ./default-settings.json
+
+# Copy migrations folder for database migrations
+COPY migrations/ ./migrations/
+
 # Change ownership
 RUN chown -R appuser:appuser /app
 

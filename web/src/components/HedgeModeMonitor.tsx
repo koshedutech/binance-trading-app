@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Shield, Layers, ArrowLeftRight, DollarSign, AlertTriangle, Activity, Target, Settings, Save, RotateCcw } from 'lucide-react';
-import { futuresApi, HedgeModePositionData, HedgeModeConfig, ConfigResetPreview } from '../services/futuresApi';
+import { futuresApi, HedgeModePositionData, HedgeModeConfig, ConfigResetPreview, saveAdminDefaults } from '../services/futuresApi';
 import ResetConfirmDialog from './ResetConfirmDialog';
+import { useAuth } from '../contexts/AuthContext';
 
 interface HedgeModeMonitorProps {
   autoRefresh?: boolean;
@@ -23,6 +24,14 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [resetPreview, setResetPreview] = useState<ConfigResetPreview | null>(null);
+
+  // Admin-specific state for editing defaults
+  const { user } = useAuth();
+  const isAdmin = user?.is_admin ?? false;
+  const [adminDefaultValue, setAdminDefaultValue] = useState<any>(undefined);
+  const [isAdminPreview, setIsAdminPreview] = useState(false);
+  // Key to force dialog remount on each open (ensures fresh state)
+  const [dialogKey, setDialogKey] = useState(0);
 
   const fetchData = useCallback(async () => {
     try {
@@ -87,17 +96,38 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
   };
 
   const handleResetClick = async () => {
+    // Increment key to force dialog remount with fresh state
+    setDialogKey(prev => prev + 1);
     setResetDialogOpen(true);
     setResetLoading(true);
+    setIsAdminPreview(false);
+    setAdminDefaultValue(undefined);
     try {
-      const preview = await futuresApi.loadHedgeDefaults(true);
-      setResetPreview(preview as ConfigResetPreview);
+      const preview = await futuresApi.loadHedgeDefaults(true) as any;
+      // Check if this is an admin preview response
+      if (preview.is_admin && preview.default_value !== undefined) {
+        setIsAdminPreview(true);
+        setAdminDefaultValue(preview.default_value);
+        setResetPreview(null);
+      } else {
+        setResetPreview(preview as ConfigResetPreview);
+      }
     } catch (error) {
       console.error('Failed to load reset preview:', error);
       setError('Failed to load reset preview');
     } finally {
       setResetLoading(false);
     }
+  };
+
+  // Admin handler to save defaults to default-settings.json
+  const handleAdminSaveDefaults = async (values: Record<string, any>) => {
+    console.log('[HEDGE-MODE] handleAdminSaveDefaults called with:', values);
+    await saveAdminDefaults('hedge_mode', values);
+    setResetDialogOpen(false);
+    setAdminDefaultValue(undefined);
+    setIsAdminPreview(false);
+    await fetchData();
   };
 
   const handleResetConfirm = async () => {
@@ -117,6 +147,8 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
   const handleResetClose = () => {
     setResetDialogOpen(false);
     setResetPreview(null);
+    setIsAdminPreview(false);
+    setAdminDefaultValue(undefined);
   };
 
   const formatPrice = (price: number) => {
@@ -773,17 +805,22 @@ const HedgeModeMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: HedgeM
         </div>
       )}
 
-      {/* Reset Confirmation Dialog */}
+      {/* Reset Confirmation Dialog - key forces remount for fresh state */}
       <ResetConfirmDialog
+        key={dialogKey}
         open={resetDialogOpen}
         onClose={handleResetClose}
         onConfirm={handleResetConfirm}
         title="Reset Hedge Mode Settings"
-        configType="hedge mode"
+        configType="hedge_mode"
         loading={resetLoading}
         allMatch={resetPreview?.all_match ?? false}
         differences={resetPreview?.differences ?? []}
         totalChanges={resetPreview?.total_changes ?? 0}
+        isAdmin={isAdminPreview}
+        defaultValue={adminDefaultValue}
+        onSaveDefaults={handleAdminSaveDefaults}
+        onSaveSuccess={fetchData}
       />
     </div>
   );

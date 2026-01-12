@@ -98,15 +98,16 @@ export default function FuturesDashboard() {
     };
   }, [selectedSymbol, fetchMarkPrice, fetchFundingRate]);
 
-  // Periodic account/position refresh
+  // Periodic account/position/metrics refresh - 10 seconds for near real-time wallet sync
   useEffect(() => {
     const interval = setInterval(() => {
       fetchAccountInfo();
       fetchPositions();
-    }, 60000); // Reduced to 60s to avoid rate limits
+      fetchMetrics();
+    }, 10000); // Refresh every 10 seconds for near real-time updates
 
     return () => clearInterval(interval);
-  }, [fetchAccountInfo, fetchPositions]);
+  }, [fetchAccountInfo, fetchPositions, fetchMetrics]);
 
   // Safely parse values that may come as strings from API
   const safeNum = (val: number | string | null | undefined): number => {
@@ -409,12 +410,14 @@ export default function FuturesDashboard() {
               value={formatUSD(metrics?.totalRealizedPnl || 0)}
               icon={Wallet}
               valueColor={getPositionColor(metrics?.totalRealizedPnl || 0)}
+              tooltip="Total realized profit from closed trades in the last 7 days (does not include unrealized P&L from open positions)"
             />
             <StatCard
               title="Today's Realized"
               value={formatUSD(metrics?.dailyRealizedPnl || 0)}
               icon={TrendingUp}
               valueColor={getPositionColor(metrics?.dailyRealizedPnl || 0)}
+              tooltip="Today's realized profit from closed trades only (does not include unrealized P&L from open positions)"
             />
             <StatCard
               title="ROI"
@@ -469,14 +472,16 @@ function StatCard({
   value,
   icon: Icon,
   valueColor = 'text-white',
+  tooltip,
 }: {
   title: string;
   value: string | number;
   icon: any;
   valueColor?: string;
+  tooltip?: string;
 }) {
   return (
-    <div className="bg-gray-900 rounded-lg border border-gray-700 p-4">
+    <div className="bg-gray-900 rounded-lg border border-gray-700 p-4" title={tooltip}>
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs text-gray-500">{title}</span>
         <Icon className="w-4 h-4 text-gray-600" />

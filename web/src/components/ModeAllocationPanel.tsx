@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import { DollarSign, Zap, TrendingUp, Shield, Clock, Edit2, Save, X, AlertCircle, RefreshCw, RotateCcw } from 'lucide-react';
-import { futuresApi, formatUSD, loadCapitalAllocationDefaults, ConfigResetPreview, SettingDiff } from '../services/futuresApi';
+import { futuresApi, formatUSD, loadCapitalAllocationDefaults, ConfigResetPreview, SettingDiff, saveAdminDefaults } from '../services/futuresApi';
 import ResetConfirmDialog from './ResetConfirmDialog';
+import { useFuturesStore } from '../store/futuresStore';
+import { useAuth } from '../contexts/AuthContext';
 
 interface ModeAllocation {
   mode: string;
@@ -45,6 +47,13 @@ export default function ModeAllocationPanel() {
   const [isSaving, setIsSaving] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
 
+  // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
+  const tradingMode = useFuturesStore((state) => state.tradingMode);
+
+  // Get admin status for reset dialog
+  const { user } = useAuth();
+  const isAdmin = user?.is_admin ?? false;
+
   const [config, setConfig] = useState<AllocationConfig>({
     ultra_fast_percent: 20,
     scalp_percent: 30,
@@ -69,6 +78,10 @@ export default function ModeAllocationPanel() {
     differences: SettingDiff[];
     totalChanges: number;
     onConfirm: () => Promise<void>;
+    // Admin-specific props
+    isAdmin?: boolean;
+    defaultValue?: any;
+    onSaveDefaults?: (values: Record<string, any>) => Promise<void>;
   }>({
     open: false,
     title: '',
@@ -78,7 +91,12 @@ export default function ModeAllocationPanel() {
     differences: [],
     totalChanges: 0,
     onConfirm: async () => {},
+    isAdmin: false,
+    defaultValue: undefined,
+    onSaveDefaults: undefined,
   });
+  // Key to force dialog remount on each open (ensures fresh state)
+  const [dialogKey, setDialogKey] = useState(0);
 
   const modeNames: { [key: string]: string } = {
     ultra_fast: 'Ultra-Fast Scalping',
@@ -139,8 +157,44 @@ export default function ModeAllocationPanel() {
     return () => clearInterval(interval);
   }, []);
 
+  // CRITICAL: Refresh allocations when trading mode changes (paper <-> live)
+  useEffect(() => {
+    console.log('ModeAllocationPanel: Trading mode changed to', tradingMode.mode, '- refreshing');
+    fetchAllocations();
+  }, [tradingMode.dryRun]);
+
+  // Define save handlers outside of the state update to ensure they're always available
+  const handleAdminSaveDefaults = async (values: Record<string, any>) => {
+    console.log('[CAPITAL-ALLOC] handleAdminSaveDefaults called with:', values);
+    // Save to default-settings.json for new users
+    await saveAdminDefaults('capital_allocation', values);
+    // Also apply to current user's allocation immediately
+    await futuresApi.updateModeAllocations({
+      ultra_fast_percent: values['ultra_fast_percent'],
+      scalp_percent: values['scalp_percent'],
+      swing_percent: values['swing_percent'],
+      position_percent: values['position_percent'],
+    });
+    setResetDialog(prev => ({ ...prev, open: false }));
+    await fetchAllocations();
+  };
+
+  const handleUserResetConfirm = async () => {
+    try {
+      await loadCapitalAllocationDefaults(false);
+      setResetDialog(prev => ({ ...prev, open: false }));
+      await fetchAllocations();
+      setError(null);
+    } catch (err) {
+      setError('Failed to reset capital allocation');
+      console.error(err);
+    }
+  };
+
   const handleResetCapitalAllocation = async () => {
     try {
+      // Increment key to force dialog remount with fresh state
+      setDialogKey(prev => prev + 1);
       // Open dialog with loading state
       setResetDialog({
         open: true,
@@ -150,31 +204,48 @@ export default function ModeAllocationPanel() {
         allMatch: false,
         differences: [],
         totalChanges: 0,
-        onConfirm: async () => {
-          try {
-            // Apply the reset
-            await loadCapitalAllocationDefaults(false);
-            setResetDialog(prev => ({ ...prev, open: false }));
-            // Refresh allocations after reset
-            await fetchAllocations();
-            setError(null);
-          } catch (err) {
-            setError('Failed to reset capital allocation');
-            console.error(err);
-          }
-        },
+        isAdmin: false,
+        defaultValue: undefined,
+        onConfirm: handleUserResetConfirm,
+        onSaveDefaults: handleAdminSaveDefaults,
       });
 
       // Fetch preview
-      const preview = await loadCapitalAllocationDefaults(true) as ConfigResetPreview;
+      const preview = await loadCapitalAllocationDefaults(true) as any;
+      console.log('[CAPITAL-ALLOC] Preview response:', preview);
 
-      setResetDialog(prev => ({
-        ...prev,
-        loading: false,
-        allMatch: preview.all_match || false,
-        differences: preview.differences || [],
-        totalChanges: preview.total_changes || 0,
-      }));
+      // Check if this is an admin preview response
+      if (preview.is_admin && preview.default_value !== undefined) {
+        console.log('[CAPITAL-ALLOC] Admin preview detected, setting defaultValue');
+        // Admin user: Show editable default values
+        setResetDialog(prev => ({
+          ...prev,
+          loading: false,
+          isAdmin: true,
+          defaultValue: preview.default_value,
+          allMatch: false,
+          differences: [],
+          totalChanges: 0,
+          // Explicitly preserve handlers
+          onConfirm: handleUserResetConfirm,
+          onSaveDefaults: handleAdminSaveDefaults,
+        }));
+      } else {
+        console.log('[CAPITAL-ALLOC] User preview detected');
+        // Regular user: Show comparison
+        setResetDialog(prev => ({
+          ...prev,
+          loading: false,
+          isAdmin: false,
+          defaultValue: undefined,
+          allMatch: preview.all_match || false,
+          differences: preview.differences || [],
+          totalChanges: preview.total_changes || 0,
+          // Explicitly preserve handlers
+          onConfirm: handleUserResetConfirm,
+          onSaveDefaults: handleAdminSaveDefaults,
+        }));
+      }
     } catch (err) {
       setError('Failed to load capital allocation defaults preview');
       console.error(err);
@@ -446,8 +517,9 @@ export default function ModeAllocationPanel() {
         </p>
       )}
 
-      {/* Reset Confirm Dialog */}
+      {/* Reset Confirm Dialog - key forces remount for fresh state */}
       <ResetConfirmDialog
+        key={dialogKey}
         open={resetDialog.open}
         onClose={() => setResetDialog(prev => ({ ...prev, open: false }))}
         onConfirm={resetDialog.onConfirm}
@@ -457,6 +529,10 @@ export default function ModeAllocationPanel() {
         allMatch={resetDialog.allMatch}
         differences={resetDialog.differences}
         totalChanges={resetDialog.totalChanges}
+        isAdmin={resetDialog.isAdmin}
+        defaultValue={resetDialog.defaultValue}
+        onSaveDefaults={resetDialog.onSaveDefaults}
+        onSaveSuccess={fetchAllocations}
       />
     </div>
   );

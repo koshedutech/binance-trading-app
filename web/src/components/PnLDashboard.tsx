@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
 import { TrendingUp, TrendingDown, DollarSign, Target, AlertTriangle } from 'lucide-react';
+import { useFuturesStore } from '../store/futuresStore';
 
 interface PnLData {
   timestamp: string;
@@ -43,12 +44,21 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initia
   const [winRate, setWinRate] = useState(0);
   const [maxDrawdown, setMaxDrawdown] = useState(0);
 
+  // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
+  const tradingMode = useFuturesStore((state) => state.tradingMode);
+
   // Fetch initial data
   useEffect(() => {
     fetchDashboardData();
     const interval = setInterval(fetchDashboardData, 30000); // Reduced from 5s to 30s to avoid rate limits
     return () => clearInterval(interval);
   }, []);
+
+  // CRITICAL: Refresh PnL data when trading mode changes (paper <-> live)
+  useEffect(() => {
+    console.log('PnLDashboard: Trading mode changed to', tradingMode.mode, '- refreshing');
+    fetchDashboardData();
+  }, [tradingMode.dryRun]);
 
   const fetchDashboardData = async () => {
     try {

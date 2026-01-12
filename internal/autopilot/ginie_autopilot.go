@@ -1016,53 +1016,71 @@ func NewGinieAutopilot(
 		pendingLimitOrders:   make(map[string]*PendingLimitOrder),
 	}
 
-	// Initialize safety configs and states from settings
-	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	// DATABASE-FIRST: Load mode enable/disable settings ONLY from DATABASE
+	// Safety configs use hardcoded defaults (not user-specific)
+	// NO FILE-BASED LOADING - Story 9.4: Database is single source of truth
+	ctx := context.Background()
 
-	// Initialize AdaptiveAI for dynamic parameter optimization
+	// Use hardcoded defaults for safety configs (not stored per-user in database)
+	defaultSettings := DefaultSettings()
+	ga.modeSafetyConfigs["ultra_fast"] = defaultSettings.SafetyUltraFast
+	ga.modeSafetyConfigs["scalp"] = defaultSettings.SafetyScalp
+	ga.modeSafetyConfigs["swing"] = defaultSettings.SafetySwing
+	ga.modeSafetyConfigs["position"] = defaultSettings.SafetyPosition
+
+	// Initialize AdaptiveAI with SettingsManager (for non-file operations)
+	settingsManager := GetSettingsManager()
 	ga.adaptiveAI = NewAdaptiveAI(settingsManager)
 
 	// Initialize anti-panic sell tracking maps
 	ga.earlyWarningCounter = make(map[string]int)
 	ga.lastWarningTime = make(map[string]time.Time)
 
-	// Load safety configs
-	ga.modeSafetyConfigs["ultra_fast"] = settings.SafetyUltraFast
-	ga.modeSafetyConfigs["scalp"] = settings.SafetyScalp
-	ga.modeSafetyConfigs["swing"] = settings.SafetySwing
-	ga.modeSafetyConfigs["position"] = settings.SafetyPosition
-
-	// CRITICAL FIX: Load user mode enable/disable settings from DATABASE
-	// This ensures user's mode preferences from DB are respected (Story 4.11)
-	ctx := context.Background()
-
+	// DATABASE-FIRST: Load mode enable/disable directly from database
+	// NO FALLBACKS TO HARDCODED DEFAULTS - if DB doesn't have config, log error
+	// User initialization should have created these records
 	if ultraFastConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "ultra_fast"); err == nil && ultraFastConfig != nil {
 		ga.config.EnableUltraFastMode = ultraFastConfig.Enabled
 		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from DATABASE: %v", ultraFastConfig.Enabled)
+	} else if err != nil {
+		log.Printf("[GINIE-INIT] ERROR: Failed to load ultra_fast config from DB for user %s: %v - defaulting to DISABLED", userID, err)
+		ga.config.EnableUltraFastMode = false
 	} else {
-		log.Printf("[GINIE-INIT] Ultra-fast mode config not found in DB, using default: %v", ga.config.EnableUltraFastMode)
+		log.Printf("[GINIE-INIT] ERROR: Ultra-fast mode config missing in DB for user %s - defaulting to DISABLED", userID)
+		ga.config.EnableUltraFastMode = false
 	}
 
 	if scalpConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "scalp"); err == nil && scalpConfig != nil {
 		ga.config.EnableScalpMode = scalpConfig.Enabled
 		log.Printf("[GINIE-INIT] Scalp mode enabled from DATABASE: %v", scalpConfig.Enabled)
+	} else if err != nil {
+		log.Printf("[GINIE-INIT] ERROR: Failed to load scalp config from DB for user %s: %v - defaulting to DISABLED", userID, err)
+		ga.config.EnableScalpMode = false
 	} else {
-		log.Printf("[GINIE-INIT] Scalp mode config not found in DB, using default: %v", ga.config.EnableScalpMode)
+		log.Printf("[GINIE-INIT] ERROR: Scalp mode config missing in DB for user %s - defaulting to DISABLED", userID)
+		ga.config.EnableScalpMode = false
 	}
 
 	if swingConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "swing"); err == nil && swingConfig != nil {
 		ga.config.EnableSwingMode = swingConfig.Enabled
 		log.Printf("[GINIE-INIT] Swing mode enabled from DATABASE: %v", swingConfig.Enabled)
+	} else if err != nil {
+		log.Printf("[GINIE-INIT] ERROR: Failed to load swing config from DB for user %s: %v - defaulting to DISABLED", userID, err)
+		ga.config.EnableSwingMode = false
 	} else {
-		log.Printf("[GINIE-INIT] Swing mode config not found in DB, using default: %v", ga.config.EnableSwingMode)
+		log.Printf("[GINIE-INIT] ERROR: Swing mode config missing in DB for user %s - defaulting to DISABLED", userID)
+		ga.config.EnableSwingMode = false
 	}
 
 	if positionConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "position"); err == nil && positionConfig != nil {
 		ga.config.EnablePositionMode = positionConfig.Enabled
 		log.Printf("[GINIE-INIT] Position mode enabled from DATABASE: %v", positionConfig.Enabled)
+	} else if err != nil {
+		log.Printf("[GINIE-INIT] ERROR: Failed to load position config from DB for user %s: %v - defaulting to DISABLED", userID, err)
+		ga.config.EnablePositionMode = false
 	} else {
-		log.Printf("[GINIE-INIT] Position mode config not found in DB, using default: %v", ga.config.EnablePositionMode)
+		log.Printf("[GINIE-INIT] ERROR: Position mode config missing in DB for user %s - defaulting to DISABLED", userID)
+		ga.config.EnablePositionMode = false
 	}
 
 	// Initialize safety states
@@ -1141,10 +1159,10 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 	case GinieModeUltraFast:
 		modeKey = "ultra_fast"
 	case GinieModeScalpReentry:
-		// Scalp re-entry mode is enabled via settings config (separate from mode config)
-		sm := GetSettingsManager()
-		settings := sm.GetCurrentSettings()
-		return settings.ScalpReentryConfig.Enabled
+		// Scalp re-entry mode is enabled via user's DATABASE settings (not JSON file)
+		// CRITICAL FIX: Use getUserScalpReentryConfig() which reads from database per-user
+		scalpReentryConfig := ga.getUserScalpReentryConfig()
+		return scalpReentryConfig.Enabled
 	default:
 		return false
 	}
@@ -1213,17 +1231,16 @@ func (ga *GinieAutopilot) LoadPnLStats() {
 		return
 	}
 
-	// Get daily PnL and trade count - FILTERED BY CURRENT MODE (paper vs live)
-	// This ensures paper trading losses don't block live trades and vice versa
-	dailyPnL, err := db.GetDailyFuturesPnLForUser(ctx, ga.userID, ga.config.DryRun)
+	// Get daily PnL and trade count for user (from database)
+	dailyPnL, err := db.GetDailyFuturesPnLForUser(ctx, ga.userID)
 	if err != nil {
-		ga.logger.Warn("Failed to get daily PnL from database", "error", err, "dry_run", ga.config.DryRun)
+		ga.logger.Warn("Failed to get daily PnL from database", "error", err)
 		dailyPnL = 0
 	}
 
-	dailyTrades, err := db.GetDailyFuturesTradeCountForUser(ctx, ga.userID, ga.config.DryRun)
+	dailyTrades, err := db.GetDailyFuturesTradeCountForUser(ctx, ga.userID)
 	if err != nil {
-		ga.logger.Warn("Failed to get daily trade count from database", "error", err, "dry_run", ga.config.DryRun)
+		ga.logger.Warn("Failed to get daily trade count from database", "error", err)
 		dailyTrades = 0
 	}
 
@@ -1299,7 +1316,11 @@ func (ga *GinieAutopilot) SetFuturesClient(client binance.FuturesClient) {
 			// 2. Auto-start Ginie if enabled in settings and not already running
 			if !wasRunning {
 				settingsManager := GetSettingsManager()
-				settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+				settings, err := settingsManager.LoadSettings()
+				if err != nil {
+					log.Printf("[SETTINGS] ERROR: Failed to load settings: %v - skipping operation", err)
+					return
+				}
 				if settings.GinieAutoStart {
 					ga.logger.Info("Auto-starting Ginie autopilot (ginie_auto_start=true)")
 					if err := ga.Start(); err != nil {
@@ -1713,7 +1734,11 @@ func (ga *GinieAutopilot) Start() error {
 	}
 
 	// Start early warning monitor (multi-timeframe LLM analysis for early loss detection)
-	settingsForEW := GetSettingsManager().GetCurrentSettings() // Use current settings from file (synced with DB)
+	settingsForEW, err := GetSettingsManager().LoadSettings()
+	if err != nil {
+		ga.logger.Error("Failed to load settings for early warning check", "error", err)
+		return fmt.Errorf("failed to load settings: %w", err)
+	}
 	if settingsForEW.EarlyWarningEnabled && ga.llmAnalyzer != nil {
 		ga.wg.Add(1)
 		go ga.runEarlyWarningMonitor()
@@ -2005,13 +2030,17 @@ func (ga *GinieAutopilot) runMainLoop() {
 			// Uses milliseconds for interval, converts to duration
 			// Read settings for interval configuration
 			if enabledModesMap["ultra_fast"] {
-				currentSettings := GetSettingsManager().GetCurrentSettings() // Use current settings from file (synced with DB)
-				ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
-				if now.Sub(lastUltraFastScan) >= ultraFastInterval {
-					log.Printf("[ULTRA-FAST-SCAN] Starting ultra-fast scan cycle at %s (DB-enabled)", now.Format("15:04:05.000"))
-					ga.scanForUltraFast()
-					lastUltraFastScan = now
-					scansPerformed++
+				currentSettings, settingsErr := GetSettingsManager().LoadSettings()
+				if settingsErr != nil {
+					log.Printf("[ULTRA-FAST-SCAN] ERROR: Failed to load settings: %v - skipping scan", settingsErr)
+				} else {
+					ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
+					if now.Sub(lastUltraFastScan) >= ultraFastInterval {
+						log.Printf("[ULTRA-FAST-SCAN] Starting ultra-fast scan cycle at %s (DB-enabled)", now.Format("15:04:05.000"))
+						ga.scanForUltraFast()
+						lastUltraFastScan = now
+						scansPerformed++
+					}
 				}
 			}
 
@@ -2053,10 +2082,14 @@ func (ga *GinieAutopilot) runMainLoop() {
 				// Calculate next scan time based on shortest enabled interval
 				shortestInterval := time.Duration(ga.config.ScalpScanInterval) * time.Second
 				if enabledModesMap["ultra_fast"] {
-					currentSettings := GetSettingsManager().GetCurrentSettings() // Use current settings from file (synced with DB)
-					ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
-					if ultraFastInterval < shortestInterval {
-						shortestInterval = ultraFastInterval
+					currentSettings, settingsErr := GetSettingsManager().LoadSettings()
+					if settingsErr != nil {
+						log.Printf("[SCAN-STATUS] ERROR: Failed to load settings: %v", settingsErr)
+					} else {
+						ultraFastInterval := time.Duration(currentSettings.UltraFastScanInterval) * time.Millisecond
+						if ultraFastInterval < shortestInterval {
+							shortestInterval = ultraFastInterval
+						}
 					}
 				}
 				ga.nextScanTime = time.Now().Add(shortestInterval)
@@ -2243,7 +2276,11 @@ func (ga *GinieAutopilot) scanForUltraFast() {
 
 	symbols := ga.analyzer.watchSymbols
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	currentSettings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v - skipping ultra-fast scan", settingsLoadErr)
+		return
+	}
 
 	// Check if circuit breaker is tripped - skip entire scan
 	if currentSettings.UltraFastCircuitBreakerTripped {
@@ -2503,7 +2540,11 @@ func (ga *GinieAutopilot) rankSymbolsByMarginEfficiency(symbols []string, availa
 
 		// Get min confidence from settings (default 60%)
 		settingsManager := GetSettingsManager()
-		currentSettings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+		currentSettings, settingsLoadErr := settingsManager.LoadSettings()
+		if settingsLoadErr != nil {
+			log.Printf("[SETTINGS] ERROR: Failed to load settings: %v - returning empty ranking", settingsLoadErr)
+			return nil
+		}
 		minConfidence := currentSettings.UltraFastMinConfidence
 		if minConfidence <= 0 {
 			minConfidence = 60.0 // Default 60%
@@ -2742,9 +2783,10 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			// exchange TP detection, hedge mode monitoring, and other optimization features.
 			// The actual re-entry ORDERS happen after TP1, but the monitoring features run from entry.
 			if mode == GinieModeScalp {
-				sm := GetSettingsManager()
-				settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
-				if settings.ScalpReentryConfig.Enabled {
+				// CRITICAL FIX: Use getUserScalpReentryConfig() which reads from DATABASE per-user
+				// (was using LoadSettings() which reads from JSON file - wrong for multi-tenant)
+				scalpReentryConfig := ga.getUserScalpReentryConfig()
+				if scalpReentryConfig.Enabled {
 					// Override to scalp_reentry mode for progressive TP and re-entry at breakeven
 					decision.SelectedMode = GinieModeScalpReentry
 					log.Printf("[SCALP-REENTRY] %s: Upgrading scalp entry to scalp_reentry mode (progressive TP)", symbol)
@@ -3518,7 +3560,11 @@ func parseHoldDuration(durationStr string) time.Duration {
 // Returns (shouldClose bool, holdDuration time.Duration, maxHoldDuration time.Duration)
 func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, time.Duration, time.Duration) {
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := sm.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return false, 0, 0
+	}
 
 	// Get mode-specific config
 	modeKey := map[GinieTradingMode]string{
@@ -4548,7 +4594,6 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				EntryTime:    time.Now(),
 				TradeSource:  "ginie",
 				TradingMode:  &tradingMode,
-				DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 			}
 			if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 				ga.logger.Warn("Failed to create futures trade record", "error", err, "symbol", symbol)
@@ -4784,9 +4829,10 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		// This is a fallback - positions should already be scalp_reentry from entry if enabled
 		// This ensures progressive TP monitoring runs for all scalp positions when scalp_reentry is enabled
 		if pos.Mode == GinieModeScalp && pos.ScalpReentry == nil {
-			sm := GetSettingsManager()
-			settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
-			if settings.ScalpReentryConfig.Enabled {
+			// CRITICAL FIX: Use getUserScalpReentryConfig() which reads from DATABASE per-user
+			// (was using LoadSettings() which reads from JSON file - wrong for multi-tenant)
+			scalpReentryConfig := ga.getUserScalpReentryConfig()
+			if scalpReentryConfig.Enabled {
 				// Upgrade the position mode
 				oldMode := pos.Mode
 				pos.Mode = GinieModeScalpReentry
@@ -4890,7 +4936,11 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		// Ultra-fast and Scalp modes: NO trailing (disabled in settings)
 		if !pos.TrailingActive {
 			settingsManager := GetSettingsManager()
-			settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+			settings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return
+	}
 
 			// Check if trailing is enabled for this mode (read from ModeConfigs)
 			modeToConfigKey := map[string]string{
@@ -5213,7 +5263,11 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 
 				// 3. Fallback to mode-based threshold from ModeConfigs (not hardcoded)
 				// Use mode-specific TP% from settings, converted to ROI by multiplying by leverage
-				settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+				settings, settingsLoadErr := settingsManager.LoadSettings()
+				if settingsLoadErr != nil {
+					log.Printf("[SETTINGS] ERROR: Failed to load settings for early profit check: %v", settingsLoadErr)
+					return false, 0, "" // Cannot determine threshold without settings
+				}
 				modeToConfigKey := map[string]string{
 					string(GinieModeUltraFast):    "ultra_fast",
 					string(GinieModeScalp):        "scalp",
@@ -6746,8 +6800,10 @@ func (ga *GinieAutopilot) getEarlyWarningConfig(mode GinieTradingMode) *ModeEarl
 	// 2. Fall back to global early warning settings from SettingsManager
 	sm := GetSettingsManager()
 	if sm != nil {
-		settings := sm.GetCurrentSettings()
-		if settings != nil {
+		settings, loadErr := sm.LoadSettings()
+		if loadErr != nil {
+			log.Printf("[EARLY-WARNING] ERROR loading settings for mode %s: %v - using code defaults", mode, loadErr)
+		} else if settings != nil {
 			log.Printf("[EARLY-WARNING] Using GLOBAL config for mode %s: StartAfter=%d min, MinLoss=%.2f%%",
 				mode, settings.EarlyWarningStartAfterMinutes, settings.EarlyWarningMinLossPercent)
 			return &ModeEarlyWarningConfig{
@@ -7456,7 +7512,6 @@ func (ga *GinieAutopilot) persistTradeToDatabase(result GinieTradeResult) {
 			TradeSource:        "ginie",
 			AIDecisionID:       &aiDecision.ID,
 			TradingMode:        &tradingMode,
-			DryRun:             ga.config.DryRun, // CRITICAL: Track paper vs live trade
 		}
 
 		if err := ga.repo.CreateFuturesTrade(ctx, trade); err != nil {
@@ -7594,7 +7649,11 @@ func (ga *GinieAutopilot) morningAutoBlockWorstPerformers() {
 
 	for {
 		// Get current settings to check if enabled and get scheduled time
-		settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+		settings, err := sm.LoadSettings()
+		if err != nil {
+			log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", err)
+			return
+		}
 		if !settings.MorningAutoBlockEnabled {
 			ga.logger.Info("Morning auto-block is disabled, checking again in 1 hour")
 			select {
@@ -7639,7 +7698,11 @@ func (ga *GinieAutopilot) morningAutoBlockWorstPerformers() {
 		}
 
 		// Re-check if still enabled (settings might have changed)
-		settings = sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+		settings, err = sm.LoadSettings()
+		if err != nil {
+			ga.logger.Error("Morning auto-block: failed to reload settings before execution", "error", err)
+			continue
+		}
 		if !settings.MorningAutoBlockEnabled {
 			ga.logger.Info("Morning auto-block was disabled before execution, skipping")
 			continue
@@ -7706,7 +7769,11 @@ func (ga *GinieAutopilot) GetStats() map[string]interface{} {
 // CRITICAL FIX: Uses isModeEnabled() which reads from database in real-time
 // This ensures position count updates IMMEDIATELY when user toggles modes
 func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
-	settings := GetSettingsManager().GetCurrentSettings()
+	settings, settingsLoadErr := GetSettingsManager().LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v - using defaults", settingsLoadErr)
+		return ga.config.MaxPositions
+	}
 	if settings == nil || settings.ModeConfigs == nil {
 		// Fallback to global config if settings unavailable
 		return ga.config.MaxPositions
@@ -7962,7 +8029,6 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 					EntryTime:    time.Now(),
 					TradeSource:  "force_sync", // Mark as force synced from exchange
 					TradingMode:  &tradingMode,
-					DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 				}
 				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 					ga.logger.Warn("Failed to create futures trade record for force-synced position", "error", err, "symbol", symbol)
@@ -8252,7 +8318,6 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 					EntryTime:    time.Now(),
 					TradeSource:  "sync", // Mark as synced from exchange
 					TradingMode:  &tradingMode,
-					DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 				}
 				if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 					ga.logger.Warn("Failed to create futures trade record for synced position", "error", err, "symbol", symbol)
@@ -8387,7 +8452,11 @@ func (ga *GinieAutopilot) SyncPnLFromBinance() error {
 
 	// Update settings with synced values
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings for PnL sync: %v", settingsLoadErr)
+		return settingsLoadErr
+	}
 
 	oldDaily := settings.UltraFastDailyPnL
 	oldTotal := settings.UltraFastTotalPnL
@@ -10355,7 +10424,11 @@ func (ga *GinieAutopilot) runEarlyWarningMonitor() {
 
 	// Get settings
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := sm.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings for early warning monitor: %v", settingsLoadErr)
+		return
+	}
 
 	if !settings.EarlyWarningEnabled {
 		ga.logger.Info("Early warning monitor disabled by settings")
@@ -10394,7 +10467,11 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 
 	// Get fresh settings
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := sm.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings for early warning check: %v", settingsLoadErr)
+		return
+	}
 
 	if !settings.EarlyWarningEnabled {
 		return
@@ -11175,7 +11252,11 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 
 		// Check for manual SL/TP override from ModeConfigs
 		sm := GetSettingsManager()
-		settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+		settings, settingsLoadErr := sm.LoadSettings()
+		if settingsLoadErr != nil {
+			log.Printf("[SETTINGS] ERROR: Failed to load settings for SLTP recalc: %v", settingsLoadErr)
+			return 0, settingsLoadErr
+		}
 		var manualSLPct, manualTPPct float64
 
 		modeToConfigKey := map[string]string{
@@ -11780,7 +11861,11 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 
 	// Get settings
 	sm := GetSettingsManager()
-	settings := sm.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := sm.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings for single SLTP recalc: %v", settingsLoadErr)
+		return settingsLoadErr
+	}
 
 	// Determine mode for this position
 	mode := pos.Mode
@@ -13939,7 +14024,11 @@ func (ga *GinieAutopilot) monitorUltraFastPositions() {
 	}()
 
 	// Get configurable interval from settings (default 2000ms)
-	settings := GetSettingsManager().GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := GetSettingsManager().LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return
+	}
 	monitorInterval := settings.UltraFastMonitorInterval
 	if monitorInterval <= 0 {
 		monitorInterval = 2000 // Default to 2 seconds
@@ -13989,7 +14078,11 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 	defer ga.mu.Unlock()
 
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return
+	}
 
 	// Check if circuit breaker is tripped
 	if settings.UltraFastCircuitBreakerTripped {
@@ -14135,10 +14228,14 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 
 			// Update win tracking for partial close
 			settingsManager := GetSettingsManager()
-			s := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
-			s.UltraFastDailyPnL += partialPnL
-			s.UltraFastTotalPnL += partialPnL
-			settingsManager.SaveSettings(s)
+			s, loadErr := settingsManager.LoadSettings()
+			if loadErr != nil {
+				log.Printf("[SETTINGS] ERROR: Failed to load settings for PnL update: %v", loadErr)
+			} else {
+				s.UltraFastDailyPnL += partialPnL
+				s.UltraFastTotalPnL += partialPnL
+				settingsManager.SaveSettings(s)
+			}
 		}
 
 		// ============ EXIT PRIORITY 3: TP2 (1.0%) → Close 30% ============
@@ -14153,10 +14250,14 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 
 			// Update tracking
 			settingsManager := GetSettingsManager()
-			s := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
-			s.UltraFastDailyPnL += partialPnL
-			s.UltraFastTotalPnL += partialPnL
-			settingsManager.SaveSettings(s)
+			s, loadErr := settingsManager.LoadSettings()
+			if loadErr != nil {
+				log.Printf("[SETTINGS] ERROR: Failed to load settings for PnL update: %v", loadErr)
+			} else {
+				s.UltraFastDailyPnL += partialPnL
+				s.UltraFastTotalPnL += partialPnL
+				settingsManager.SaveSettings(s)
+			}
 		}
 
 		// ============ EXIT PRIORITY 4: TP3 (2.0%) → Close remaining 30% ============
@@ -14292,7 +14393,11 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 
 	// Update ultra-fast specific statistics
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return
+	}
 
 	// Check if we need to reset daily stats (new day)
 	today := time.Now().Format("2006-01-02")
@@ -14444,7 +14549,11 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 
 	// Get settings for circuit breaker thresholds
 	settingsManager := GetSettingsManager()
-	settings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	settings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings for loss decision: %v", settingsLoadErr)
+		return "book_loss" // Safe default: book loss when settings unavailable
+	}
 
 	// Check ADX - for ultra-fast, lower threshold since we're catching momentum not trends
 	minADX := settings.UltraFastMinADX
@@ -14986,7 +15095,11 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 	}
 
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	currentSettings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return fmt.Errorf("failed to load settings: %w", settingsLoadErr)
+	}
 	maxUltraFastPositions := currentSettings.UltraFastMaxPositions
 	if currentUltraFastCount >= maxUltraFastPositions {
 		return fmt.Errorf("ultra-fast position limit reached: %d/%d", currentUltraFastCount, maxUltraFastPositions)
@@ -15285,7 +15398,11 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	}
 
 	settingsManager := GetSettingsManager()
-	currentSettings := settingsManager.GetCurrentSettings() // Use current settings from file (synced with DB)
+	currentSettings, settingsLoadErr := settingsManager.LoadSettings()
+	if settingsLoadErr != nil {
+		log.Printf("[SETTINGS] ERROR: Failed to load settings: %v", settingsLoadErr)
+		return fmt.Errorf("failed to load settings: %w", settingsLoadErr)
+	}
 	maxUltraFastPositions := currentSettings.UltraFastMaxPositions
 	if currentUltraFastCount >= maxUltraFastPositions {
 		return fmt.Errorf("ultra-fast position limit reached: %d/%d", currentUltraFastCount, maxUltraFastPositions)
@@ -15562,7 +15679,6 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 			EntryTime:    time.Now(),
 			TradeSource:  "ginie",
 			TradingMode:  &tradingMode,
-			DryRun:       ga.config.DryRun, // CRITICAL: Track paper vs live trade
 		}
 		if err := ga.repo.CreateFuturesTrade(context.Background(), trade); err != nil {
 			ga.logger.Warn("Failed to create futures trade record for ultra-fast", "error", err, "symbol", symbol)

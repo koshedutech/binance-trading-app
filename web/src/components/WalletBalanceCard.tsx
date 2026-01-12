@@ -27,7 +27,7 @@ export default function WalletBalanceCard() {
 
   useEffect(() => {
     fetchBalance();
-    const interval = setInterval(fetchBalance, 30000); // Refresh every 30 seconds
+    const interval = setInterval(fetchBalance, 10000); // Refresh every 10 seconds for near real-time updates
     return () => clearInterval(interval);
   }, [tradingMode]); // Re-fetch when trading mode changes
 

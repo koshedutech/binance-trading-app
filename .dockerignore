@@ -40,7 +40,6 @@ Thumbs.db
 # BMAD workflow files (not needed for runtime)
 _bmad/
 .bmad/
-.agentvibes/
 .claude/
 
 # Output files

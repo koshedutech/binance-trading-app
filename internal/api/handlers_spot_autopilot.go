@@ -3,6 +3,7 @@ package api
 import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/circuit"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -496,8 +497,9 @@ func (s *Server) handleUpdateSpotCircuitBreakerConfig(c *gin.Context) {
 
 // handleToggleSpotCircuitBreaker enables or disables the spot circuit breaker
 func (s *Server) handleToggleSpotCircuitBreaker(c *gin.Context) {
+	// FIXED: Get userID for database operations - no fallback allowed
 	userID := s.getUserID(c)
-	if userID == "" && s.authEnabled {
+	if userID == "" {
 		errorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
@@ -529,13 +531,20 @@ func (s *Server) handleToggleSpotCircuitBreaker(c *gin.Context) {
 		return
 	}
 
-	// Persist circuit breaker enabled state
+	// FIXED: Persist circuit breaker enabled state using database call, not GetDefaultSettings()
+	// Capture repo for goroutine (c.Request.Context() not safe after handler returns)
+	repo := s.repo
 	go func() {
 		sm := autopilot.GetSettingsManager()
-		settings := sm.GetDefaultSettings()
+		ctx := context.Background()
+		settings, loadErr := sm.LoadSettingsFromDB(ctx, repo, userID)
+		if loadErr != nil || settings == nil {
+			fmt.Printf("[SPOT-CB] ERROR: Failed to load settings from database for user %s: %v\n", userID, loadErr)
+			return
+		}
 		settings.SpotCircuitBreakerEnabled = req.Enabled
 		if err := sm.SaveSettings(settings); err != nil {
-			fmt.Printf("Failed to persist spot circuit breaker enabled state: %v\n", err)
+			fmt.Printf("[SPOT-CB] Failed to persist spot circuit breaker enabled state: %v\n", err)
 		}
 	}()
 

@@ -165,8 +165,13 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 			}
 		}
 
-		// Get dry_run mode from settings
-		currentSettings := sm.GetCurrentSettings()
+		// Get dry_run mode from settings - MUST load from database
+		currentSettings, err := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+		if err != nil || currentSettings == nil {
+			log.Printf("[GINIE-TOGGLE] ERROR: Failed to load user settings from database: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+			return
+		}
 		dryRun = currentSettings.GinieDryRunMode
 
 		// Broadcast autopilot status change to the SPECIFIC user via WebSocket (multi-user safe)
@@ -992,6 +997,41 @@ func (s *Server) handleUpdateGlobalCircuitBreaker(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+
+	// Check if this is an admin user - admin saves to default-settings.json
+	if auth.IsAdmin(c) {
+		// Admin user: Save to default-settings.json file
+		cbDefaults := autopilot.CircuitBreakerDefaults{
+			Global: autopilot.GlobalCircuitBreakerConfig{
+				Enabled:              req.Enabled,
+				MaxLossPerHour:       req.MaxLossPerHour,
+				MaxDailyLoss:         req.MaxDailyLoss,
+				MaxConsecutiveLosses: req.MaxConsecutiveLosses,
+				CooldownMinutes:      req.CooldownMinutes,
+				MaxTradesPerMinute:   req.MaxTradesPerMinute,
+				MaxDailyTrades:       req.MaxDailyTrades,
+			},
+		}
+
+		syncService := autopilot.GetAdminSyncService()
+		if err := syncService.SyncAdminSettingToDefaults(ctx, "circuit_breaker", cbDefaults); err != nil {
+			log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save circuit breaker to default-settings.json: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save circuit breaker to defaults file")
+			return
+		}
+
+		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Admin saved circuit breaker config to default-settings.json")
+
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "Global circuit breaker config saved to default-settings.json (admin)",
+			"config":  cbDefaults.Global,
+		})
+		return
+	}
+
+	// Regular user: Save to DATABASE
 	// Create UserGlobalCircuitBreaker from request
 	config := &database.UserGlobalCircuitBreaker{
 		UserID:               userID,
@@ -1005,7 +1045,7 @@ func (s *Server) handleUpdateGlobalCircuitBreaker(c *gin.Context) {
 	}
 
 	// Save to database
-	if err := s.repo.SaveUserGlobalCircuitBreaker(c.Request.Context(), config); err != nil {
+	if err := s.repo.SaveUserGlobalCircuitBreaker(ctx, config); err != nil {
 		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save config for user %s: %v", userID, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to save global circuit breaker config")
 		return
@@ -1895,8 +1935,30 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 		return
 	}
 
-	// CRITICAL: Save to DATABASE (not just JSON file)
 	ctx := context.Background()
+
+	// Check if this is an admin user - admin saves to default-settings.json
+	if auth.IsAdmin(c) {
+		// Admin user: Save to default-settings.json file
+		syncService := autopilot.GetAdminSyncService()
+		if err := syncService.SyncAdminModeConfig(ctx, mode, &config); err != nil {
+			log.Printf("[MODE-CONFIG] Failed to save %s config to default-settings.json: %v", mode, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save mode config to defaults file"})
+			return
+		}
+
+		log.Printf("[MODE-CONFIG] Admin saved %s config to default-settings.json (enabled=%v)", mode, config.Enabled)
+
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"mode":    mode,
+			"enabled": config.Enabled,
+			"message": "Mode config saved to default-settings.json (admin)",
+		})
+		return
+	}
+
+	// Regular user: Save to DATABASE
 	err = s.repo.SaveUserModeConfig(ctx, userIDStr, mode, config.Enabled, configJSON)
 	if err != nil {
 		log.Printf("[MODE-CONFIG] Failed to save %s config to database for user %s: %v", mode, userIDStr, err)
@@ -1912,10 +1974,6 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 		log.Printf("[MODE-CONFIG] Warning: failed to update in-memory config: %v", err)
 		// Don't fail - database is the source of truth now
 	}
-
-	// NOTE: Admin sync to default-settings.json removed.
-	// Admin settings are saved to database only. The reset/restore defaults
-	// dialog now allows direct editing of values for all users.
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -2337,8 +2395,19 @@ var validLLMProviders = map[string]bool{
 func (s *Server) handleGetLLMConfig(c *gin.Context) {
 	log.Println("[LLM-CONFIG] Getting LLM configuration")
 
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings, err := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+	if err != nil || settings == nil {
+		log.Printf("[LLM-CONFIG] ERROR: Failed to load user settings from database: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+		return
+	}
 
 	// Get the nested LLMConfig from settings
 	llmCfg := settings.LLMConfig
@@ -2445,8 +2514,61 @@ func (s *Server) handleUpdateLLMConfig(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+
+	// Check if this is an admin user - admin saves to default-settings.json
+	if auth.IsAdmin(c) {
+		// Admin user: Save to default-settings.json file
+		llmDefaults := autopilot.LLMConfigDefaults{
+			Global: autopilot.GlobalLLMConfig{
+				Enabled:          true,
+				Provider:         req.Provider,
+				Model:            req.Model,
+				TimeoutMS:        req.TimeoutMs,
+				RetryCount:       req.MaxRetries,
+				CacheDurationSec: 300, // Default cache duration
+			},
+		}
+
+		syncService := autopilot.GetAdminSyncService()
+		if err := syncService.SyncAdminSettingToDefaults(ctx, "llm_config", llmDefaults); err != nil {
+			log.Printf("[LLM-CONFIG] Failed to save LLM config to default-settings.json: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save LLM config to defaults file")
+			return
+		}
+
+		log.Printf("[LLM-CONFIG] Admin saved LLM config to default-settings.json: provider=%s, model=%s",
+			req.Provider, req.Model)
+
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "Global LLM configuration saved to default-settings.json (admin)",
+			"config": LLMConfig{
+				Provider:         req.Provider,
+				Model:            req.Model,
+				TimeoutMs:        req.TimeoutMs,
+				MaxRetries:       req.MaxRetries,
+				FallbackEnabled:  req.FallbackEnabled,
+				FallbackProvider: req.FallbackProvider,
+			},
+		})
+		return
+	}
+
+	// Regular user: Load settings from database first, then save
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings, loadErr := sm.LoadSettingsFromDB(ctx, s.repo, userID)
+	if loadErr != nil || settings == nil {
+		log.Printf("[LLM-CONFIG] ERROR: Failed to load user settings from database: %v", loadErr)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+		return
+	}
 
 	// Update the nested LLMConfig struct
 	if req.Provider != "" {
@@ -2530,8 +2652,19 @@ func (s *Server) handleUpdateModeLLMSettings(c *gin.Context) {
 		return
 	}
 
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+	if loadErr != nil || settings == nil {
+		log.Printf("[LLM-CONFIG] ERROR: Failed to load user settings from database: %v", loadErr)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+		return
+	}
 
 	// Initialize the map if nil
 	if settings.ModeLLMSettings == nil {
@@ -3354,8 +3487,19 @@ func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
 // handleGetMorningAutoBlockConfig returns morning auto-block configuration
 // GET /api/futures/autopilot/morning-auto-block/config
 func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetCurrentSettings()
+	settings, err := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+	if err != nil || settings == nil {
+		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to load user settings from database: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+		return
+	}
 
 	// Calculate next scheduled time
 	hour := settings.MorningAutoBlockHourUTC
@@ -3386,6 +3530,12 @@ func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 // handleUpdateMorningAutoBlockConfig updates morning auto-block configuration
 // POST /api/futures/autopilot/morning-auto-block/config
 func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	var req struct {
 		Enabled   *bool `json:"enabled"`
 		HourUTC   *int  `json:"hour_utc"`
@@ -3398,7 +3548,12 @@ func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 	}
 
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+	if loadErr != nil || settings == nil {
+		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to load user settings from database: %v", loadErr)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+		return
+	}
 
 	// Update only provided fields
 	if req.Enabled != nil {
@@ -4047,14 +4202,9 @@ func (s *Server) handleToggleScalpReentry(c *gin.Context) {
 	}
 	log.Printf("[SCALP-REENTRY] Saved scalp_reentry enabled=%v to database for user %s", req.Enabled, userIDStr)
 
-	// 4. Update SettingsManager in-memory for consistency (optional fallback)
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
-	settings.ScalpReentryConfig = config
-	sm.SaveSettings(settings) // Update in-memory copy
-
-	// Note: Ginie autopilot will reload config from database on next scan cycle
-	log.Printf("[SCALP-REENTRY] Config will take effect on next scan cycle (no restart needed)")
+	// DATABASE-FIRST: No file-based SettingsManager updates needed
+	// Ginie autopilot will reload config from database on next scan cycle
+	log.Printf("[SCALP-REENTRY] DB update complete - config will take effect on next scan cycle")
 
 	status := "disabled"
 	if req.Enabled {
@@ -4145,6 +4295,11 @@ func (s *Server) handleGetHedgeModeConfig(c *gin.Context) {
 // handleUpdateHedgeModeConfig updates the hedge mode configuration
 // POST /api/futures/ginie/hedge-config
 func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
 	log.Println("[HEDGE-MODE] Updating hedge mode configuration")
 
 	// Parse request as raw JSON to detect which fields are set
@@ -4154,9 +4309,14 @@ func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
 		return
 	}
 
-	// Get existing settings
+	// Get existing settings from database
 	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	settings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+	if loadErr != nil || settings == nil {
+		log.Printf("[HEDGE-MODE] ERROR: Failed to load user settings from database: %v", loadErr)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+		return
+	}
 	cfg := &settings.ScalpReentryConfig
 
 	// Helper to check if field was provided
@@ -4333,14 +4493,9 @@ func (s *Server) handleToggleHedgeMode(c *gin.Context) {
 	}
 	log.Printf("[HEDGE-MODE] Saved hedge_mode enabled=%v to database for user %s", req.Enabled, userIDStr)
 
-	// 4. Update SettingsManager in-memory for consistency (optional fallback)
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetDefaultSettings()
-	settings.ScalpReentryConfig = config
-	sm.SaveSettings(settings) // Update in-memory copy
-
-	// Note: Ginie autopilot will reload config from database on next scan cycle
-	log.Printf("[HEDGE-MODE] Config will take effect on next scan cycle (no restart needed)")
+	// DATABASE-FIRST: No file-based SettingsManager updates needed
+	// Ginie autopilot will reload config from database on next scan cycle
+	log.Printf("[HEDGE-MODE] DB update complete - config will take effect on next scan cycle")
 
 	status := "disabled"
 	if req.Enabled {

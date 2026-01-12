@@ -718,12 +718,18 @@ func (s *Server) setupRoutes() {
 			// Load Defaults endpoints (Story 4.14)
 			futures.POST("/ginie/modes/:mode/load-defaults", s.handleLoadModeDefaults)
 			futures.POST("/ginie/modes/load-defaults", s.handleLoadAllModeDefaults)
+			futures.GET("/ginie/default-settings", s.handleGetAllDefaultSettings) // Get all defaults from default-settings.json (Story 9.4)
 
 			// Config Reset endpoints (Story 4.17)
 			futures.POST("/ginie/circuit-breaker/load-defaults", s.handleLoadCircuitBreakerDefaults)
 			futures.POST("/ginie/llm-config/load-defaults", s.handleLoadLLMConfigDefaults)
 			futures.POST("/ginie/capital-allocation/load-defaults", s.handleLoadCapitalAllocationDefaults)
 			futures.POST("/ginie/hedge-mode/load-defaults", s.handleLoadHedgeDefaults)
+			futures.POST("/ginie/safety-settings/load-defaults", s.handleLoadSafetySettingsDefaults)
+
+			// Safety Settings CRUD endpoints (Story 9.4)
+			futures.GET("/ginie/safety-settings", s.handleGetUserSafetySettings)
+			futures.PUT("/ginie/safety-settings/:mode", s.handleUpdateUserSafetySettings)
 
 			// Mode Allocation endpoints (per-mode capital management)
 			futures.GET("/modes/allocations", s.handleGetModeAllocations)
@@ -845,6 +851,9 @@ func (s *Server) setupRoutes() {
 		admin.POST("/sync-defaults", s.handleAdminSyncDefaults)
 		admin.GET("/sync-status", s.handleAdminSyncStatus)
 		admin.POST("/restore-backup", s.handleAdminRestoreBackup)
+
+		// Admin defaults editing (Story 9.4)
+		admin.POST("/defaults/:configType", s.handleAdminSaveDefaults)
 	}
 
 	// WebSocket endpoints

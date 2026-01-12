@@ -3507,18 +3507,34 @@ func (g *GinieAnalyzer) checkADXStrengthRequirement(adx, plusDI, minusDI float64
 	}
 
 	// Alternative check: Strong directional movement (+DI or -DI >= 25)
-	// This allows trades when there's clear directional movement even if ADX is building
+	// ONLY allow DI bypass for ultra_fast mode - other modes must strictly respect min_adx
+	// This prevents scalp/swing/position trades in weak trend conditions
 	diThreshold := 25.0
-	if plusDI >= diThreshold || minusDI >= diThreshold {
+	allowDIBypass := mode == GinieModeUltraFast
+	if allowDIBypass && (plusDI >= diThreshold || minusDI >= diThreshold) {
 		if g.logger != nil {
-			g.logger.Debug("ADX below threshold but DI strong - allowing trade with penalty",
+			g.logger.Debug("ADX below threshold but DI strong - allowing trade with penalty (ultra_fast only)",
 				"adx", adx,
 				"threshold", threshold,
 				"plus_di", plusDI,
 				"minus_di", minusDI,
-				"di_threshold", diThreshold)
+				"di_threshold", diThreshold,
+				"mode", mode)
 		}
 		return true, 0.95 // Allow with 5% penalty
+	}
+
+	// Log when DI bypass is NOT allowed for non-ultra_fast modes
+	if !allowDIBypass && (plusDI >= diThreshold || minusDI >= diThreshold) {
+		if g.logger != nil {
+			g.logger.Debug("ADX below threshold - DI bypass NOT allowed for this mode",
+				"adx", adx,
+				"threshold", threshold,
+				"plus_di", plusDI,
+				"minus_di", minusDI,
+				"mode", mode,
+				"reason", "DI bypass only allowed for ultra_fast mode")
+		}
 	}
 
 	// Both checks failed

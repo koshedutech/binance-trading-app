@@ -4369,6 +4369,40 @@ func (sm *SettingsManager) LoadUserSettings(ctx context.Context, repo *database.
 	return nil
 }
 
+// LoadSettingsFromDB loads user-specific AutopilotSettings from database.
+// This is the preferred method for API handlers that need full settings.
+// It loads base settings and overlays user-specific values from DB tables.
+// Returns error if loading fails - handlers should return appropriate HTTP error.
+func (sm *SettingsManager) LoadSettingsFromDB(ctx context.Context, repo *database.Repository, userID string) (*AutopilotSettings, error) {
+	// Start with defaults
+	settings := DefaultSettings()
+
+	// Load user ginie settings from DB (dry_run_mode, etc.)
+	ginieSettings, err := repo.GetUserGinieSettings(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load user ginie settings: %w", err)
+	}
+	if ginieSettings != nil {
+		settings.GinieDryRunMode = ginieSettings.DryRunMode
+		settings.GinieAutoStart = ginieSettings.AutoStart
+		settings.GinieMaxPositions = ginieSettings.MaxPositions
+	}
+
+	// Load mode configurations from DB
+	modeConfigs, err := sm.GetAllUserModeConfigsFromDB(ctx, repo, userID)
+	if err != nil {
+		log.Printf("[SETTINGS] Warning: Failed to load mode configs from DB for user %s: %v", userID, err)
+		// Continue with defaults - mode configs are not critical for all operations
+	} else {
+		settings.ModeConfigs = modeConfigs
+	}
+
+	log.Printf("[SETTINGS] LoadSettingsFromDB: Loaded settings for user %s (dry_run=%v, mode_configs=%d)",
+		userID, settings.GinieDryRunMode, len(settings.ModeConfigs))
+
+	return settings, nil
+}
+
 // ResetModeConfigs resets all mode configurations to defaults
 func (sm *SettingsManager) ResetModeConfigs() error {
 	settings := sm.GetDefaultSettings()

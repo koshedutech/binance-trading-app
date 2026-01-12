@@ -129,3 +129,85 @@ func (db *DB) MigrateEarlyWarningExtendedFields(ctx context.Context) error {
 	log.Println("user_early_warning extended fields migration completed")
 	return nil
 }
+
+// RunUserSafetySettingsMigration creates the user_safety_settings table (Migration 023)
+// Story 9.4: Per-user safety controls per trading mode
+func (db *DB) RunUserSafetySettingsMigration(ctx context.Context) error {
+	log.Println("Running User Safety Settings migration (023)...")
+
+	// Get the project root directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Try to find migrations directory
+	migrationsDir := filepath.Join(currentDir, "migrations")
+	if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+		migrationsDir = filepath.Join(currentDir, "..", "migrations")
+		if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+			migrationsDir = filepath.Join(currentDir, "..", "..", "migrations")
+			if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+				return fmt.Errorf("migrations directory not found: %w", err)
+			}
+		}
+	}
+
+	migrationPath := filepath.Join(migrationsDir, "023_user_safety_settings.sql")
+
+	// Read the SQL file
+	sqlContent, err := os.ReadFile(migrationPath)
+	if err != nil {
+		log.Printf("[MIGRATION] Warning: Failed to read migration file 023_user_safety_settings.sql: %v", err)
+		// Try inline migration
+		return db.runUserSafetySettingsInlineMigration(ctx)
+	}
+
+	// Execute the SQL
+	if _, err := db.Pool.Exec(ctx, string(sqlContent)); err != nil {
+		log.Printf("[MIGRATION] Migration 023 file failed: %v, trying inline migration", err)
+		return db.runUserSafetySettingsInlineMigration(ctx)
+	}
+
+	log.Println("User Safety Settings migration (023) completed successfully")
+	return nil
+}
+
+// runUserSafetySettingsInlineMigration runs the migration using inline SQL
+func (db *DB) runUserSafetySettingsInlineMigration(ctx context.Context) error {
+	log.Println("Running inline User Safety Settings migration...")
+
+	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS user_safety_settings (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			mode VARCHAR(20) NOT NULL,
+			max_trades_per_minute INTEGER NOT NULL DEFAULT 5,
+			max_trades_per_hour INTEGER NOT NULL DEFAULT 20,
+			max_trades_per_day INTEGER NOT NULL DEFAULT 50,
+			enable_profit_monitor BOOLEAN NOT NULL DEFAULT true,
+			profit_window_minutes INTEGER NOT NULL DEFAULT 10,
+			max_loss_percent_in_window DECIMAL(5,2) NOT NULL DEFAULT -1.5,
+			pause_cooldown_minutes INTEGER NOT NULL DEFAULT 30,
+			enable_win_rate_monitor BOOLEAN NOT NULL DEFAULT true,
+			win_rate_sample_size INTEGER NOT NULL DEFAULT 15,
+			min_win_rate_threshold DECIMAL(5,2) NOT NULL DEFAULT 50,
+			win_rate_cooldown_minutes INTEGER NOT NULL DEFAULT 60,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			UNIQUE(user_id, mode)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_safety_settings_user_id ON user_safety_settings(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_safety_settings_user_mode ON user_safety_settings(user_id, mode)`,
+	}
+
+	for i, migration := range migrations {
+		_, err := db.Pool.Exec(ctx, migration)
+		if err != nil {
+			log.Printf("[MIGRATION] Warning on step %d: %v (continuing...)", i+1, err)
+		}
+	}
+
+	log.Println("Inline User Safety Settings migration completed")
+	return nil
+}

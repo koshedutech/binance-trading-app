@@ -2,7 +2,28 @@
 # Usage: docker-compose -f docker-compose.prod.yml up -d
 # IMPORTANT: Edit the environment variables below before deploying!
 
+# Explicit project name to avoid conflicts with development
+name: binance-prod
+
 services:
+  # Redis Cache (Epic 6 - Settings Cache Infrastructure)
+  redis:
+    image: redis:7-alpine
+    container_name: binance-bot-redis-prod
+    restart: always
+    command: redis-server --appendonly yes
+    environment:
+      - TZ=Asia/Phnom_Penh
+    volumes:
+      - redis-data:/data
+    networks:
+      - trading-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # PostgreSQL Database with production settings
   postgres:
     image: postgres:15-alpine
@@ -10,8 +31,9 @@ services:
     restart: always
     environment:
       - POSTGRES_USER=trading_bot
-      - POSTGRES_PASSWORD=trading_bot_password
+      - POSTGRES_PASSWORD=Kosh-2025
       - POSTGRES_DB=trading_bot
+      - TZ=Asia/Phnom_Penh
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./backups:/backups
@@ -22,12 +44,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 256M
 
   # Trading Bot - Production Mode
   trading-bot:
@@ -40,7 +56,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
+      # Timezone - Cambodia
+      - TZ=Asia/Phnom_Penh
       # Binance API - Keys are stored per-user in database
       - BINANCE_BASE_URL=https://fapi.binance.com
       - BINANCE_TESTNET=false
@@ -50,7 +70,7 @@ services:
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=trading_bot
-      - DB_PASSWORD=trading_bot_password
+      - DB_PASSWORD=Kosh-2025
       - DB_NAME=trading_bot
       - DB_SSLMODE=disable
       # Web Server (Production uses port 8095)
@@ -105,6 +125,15 @@ services:
       - AUTH_REFRESH_TOKEN_DURATION=168h
       # Subscription Configuration
       - SUBSCRIPTION_ENABLED=false
+      # API Key Encryption (required for secure API key storage)
+      - ENCRYPTION_KEY=prod-encryption-key-32-chars-1234567890ab
+      # Redis Cache Configuration (Epic 6)
+      - REDIS_ENABLED=true
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - REDIS_DB=0
+      - REDIS_POOL_SIZE=10
     volumes:
       - ./logs:/app/logs
       - ./config.json:/app/config.json:ro
@@ -121,12 +150,6 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-        reservations:
-          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8095/health"]
       interval: 30s
@@ -159,9 +182,10 @@ services:
     depends_on:
       - postgres
     environment:
+      - TZ=Asia/Phnom_Penh
       - PGHOST=postgres
       - PGUSER=trading_bot
-      - PGPASSWORD=trading_bot_password
+      - PGPASSWORD=Kosh-2025
       - PGDATABASE=trading_bot
     volumes:
       - ./backups:/backups
@@ -186,4 +210,6 @@ networks:
 
 volumes:
   postgres-data:
+    driver: local
+  redis-data:
     driver: local

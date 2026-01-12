@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Shield, AlertTriangle, Pause, Play, TrendingUp, Activity, BarChart3, RefreshCw, AlertCircle } from 'lucide-react';
 import { futuresApi } from '../services/futuresApi';
+import { useFuturesStore } from '../store/futuresStore';
 
 interface ModeStatus {
   mode: string;
@@ -26,6 +27,9 @@ export default function ModeSafetyPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+
+  // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
+  const tradingMode = useFuturesStore((state) => state.tradingMode);
 
   const modeNames: { [key: string]: string } = {
     ultra_fast: 'Ultra-Fast Scalping',
@@ -61,6 +65,12 @@ export default function ModeSafetyPanel() {
     const interval = setInterval(fetchSafetyStatus, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  // CRITICAL: Refresh safety status when trading mode changes (paper <-> live)
+  useEffect(() => {
+    console.log('ModeSafetyPanel: Trading mode changed to', tradingMode.mode, '- refreshing');
+    fetchSafetyStatus();
+  }, [tradingMode.dryRun]);
 
   const handleResumeMode = async (mode: string) => {
     try {

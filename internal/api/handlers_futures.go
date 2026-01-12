@@ -253,16 +253,23 @@ func (s *Server) handleGetFuturesPositions(c *gin.Context) {
 		}
 	}
 
-	// Then, get symbol-level custom ROI from Settings (for all symbols)
-	settingsManager := autopilot.GetSettingsManager()
-	if settingsManager != nil {
-		settings := settingsManager.GetDefaultSettings()
-		if settings != nil && settings.SymbolSettings != nil {
-			for symbol, symbolSettings := range settings.SymbolSettings {
-				// Only add symbol-level ROI if we don't already have position-level ROI
-				if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
-					if _, exists := customROIMap[symbol]; !exists {
-						customROIMap[symbol] = symbolSettings.CustomROIPercent
+	// FIXED: Get symbol-level custom ROI from Settings using database call, not GetDefaultSettings()
+	// This requires user authentication to load from database
+	userID := s.getUserID(c)
+	if userID != "" {
+		settingsManager := autopilot.GetSettingsManager()
+		if settingsManager != nil {
+			settings, loadErr := settingsManager.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
+			if loadErr != nil {
+				// Log but don't fail - this is optional enrichment
+				log.Printf("[FUTURES-POS] WARNING: Failed to load settings for custom ROI enrichment: %v", loadErr)
+			} else if settings != nil && settings.SymbolSettings != nil {
+				for symbol, symbolSettings := range settings.SymbolSettings {
+					// Only add symbol-level ROI if we don't already have position-level ROI
+					if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
+						if _, exists := customROIMap[symbol]; !exists {
+							customROIMap[symbol] = symbolSettings.CustomROIPercent
+						}
 					}
 				}
 			}

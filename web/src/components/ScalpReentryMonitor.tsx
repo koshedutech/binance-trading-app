@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, TrendingUp, TrendingDown, Clock, CheckCircle, XCircle, AlertCircle, ChevronDown, ChevronUp, Target, ArrowRight, RotateCcw } from 'lucide-react';
-import { futuresApi, ScalpReentryPositionStatus, ScalpReentryCycleInfo, ScalpReentryPositionsSummary, ConfigResetPreview } from '../services/futuresApi';
+import { futuresApi, ScalpReentryPositionStatus, ScalpReentryCycleInfo, ScalpReentryPositionsSummary, ConfigResetPreview, saveAdminDefaults, ScalpReentryConfig } from '../services/futuresApi';
 import ResetConfirmDialog from './ResetConfirmDialog';
+import { useAuth } from '../contexts/AuthContext';
 
 interface ScalpReentryMonitorProps {
   autoRefresh?: boolean;
@@ -18,6 +19,16 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [resetPreview, setResetPreview] = useState<ConfigResetPreview | null>(null);
+  // TP config values from scalp_reentry_config
+  const [tpConfig, setTpConfig] = useState<{ tp1: number; tp2: number; tp3: number }>({ tp1: 0.4, tp2: 0.7, tp3: 1.0 });
+
+  // Admin-specific state for editing defaults
+  const { user } = useAuth();
+  const isAdmin = user?.is_admin ?? false;
+  const [adminDefaultValue, setAdminDefaultValue] = useState<any>(undefined);
+  const [isAdminPreview, setIsAdminPreview] = useState(false);
+  // Key to force dialog remount on each open (ensures fresh state)
+  const [dialogKey, setDialogKey] = useState(0);
 
   const fetchData = useCallback(async () => {
     try {
@@ -41,18 +52,57 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
     }
   }, [fetchData, autoRefresh, refreshInterval]);
 
+  // Fetch TP config values from scalp_reentry_config on mount
+  useEffect(() => {
+    const fetchTpConfig = async () => {
+      try {
+        const config = await futuresApi.getScalpReentryConfig();
+        setTpConfig({
+          tp1: config.tp1_percent,
+          tp2: config.tp2_percent,
+          tp3: config.tp3_percent,
+        });
+      } catch (err) {
+        console.error('Failed to fetch TP config:', err);
+        // Keep defaults if fetch fails
+      }
+    };
+    fetchTpConfig();
+  }, []);
+
   const handleResetClick = async () => {
+    // Increment key to force dialog remount with fresh state
+    setDialogKey(prev => prev + 1);
     setResetDialogOpen(true);
     setResetLoading(true);
+    setIsAdminPreview(false);
+    setAdminDefaultValue(undefined);
     try {
-      const preview = await futuresApi.loadScalpReentryDefaults(true);
-      setResetPreview(preview as ConfigResetPreview);
+      const preview = await futuresApi.loadScalpReentryDefaults(true) as any;
+      // Check if this is an admin preview response
+      if (preview.is_admin && preview.default_value !== undefined) {
+        setIsAdminPreview(true);
+        setAdminDefaultValue(preview.default_value);
+        setResetPreview(null);
+      } else {
+        setResetPreview(preview as ConfigResetPreview);
+      }
     } catch (error) {
       console.error('Failed to load reset preview:', error);
       setError('Failed to load reset preview');
     } finally {
       setResetLoading(false);
     }
+  };
+
+  // Admin handler to save defaults to default-settings.json
+  const handleAdminSaveDefaults = async (values: Record<string, any>) => {
+    console.log('[SCALP-REENTRY] handleAdminSaveDefaults called with:', values);
+    await saveAdminDefaults('scalp_reentry', values);
+    setResetDialogOpen(false);
+    setAdminDefaultValue(undefined);
+    setIsAdminPreview(false);
+    await fetchData();
   };
 
   const handleResetConfirm = async () => {
@@ -72,6 +122,8 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
   const handleResetClose = () => {
     setResetDialogOpen(false);
     setResetPreview(null);
+    setIsAdminPreview(false);
+    setAdminDefaultValue(undefined);
   };
 
   const getStateIcon = (state: string) => {
@@ -127,10 +179,11 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
   };
 
   const renderTPProgress = (pos: ScalpReentryPositionStatus) => {
+    // Use config values from scalp_reentry_config (not hardcoded)
     const tpLevels = [
-      { level: 1, label: 'TP1', percent: pos.next_tp_level === 1 ? pos.next_tp_percent : 0.3 },
-      { level: 2, label: 'TP2', percent: pos.next_tp_level === 2 ? pos.next_tp_percent : 0.6 },
-      { level: 3, label: 'TP3', percent: pos.next_tp_level === 3 ? pos.next_tp_percent : 1.0 },
+      { level: 1, label: 'TP1', percent: pos.next_tp_level === 1 ? pos.next_tp_percent : tpConfig.tp1 },
+      { level: 2, label: 'TP2', percent: pos.next_tp_level === 2 ? pos.next_tp_percent : tpConfig.tp2 },
+      { level: 3, label: 'TP3', percent: pos.next_tp_level === 3 ? pos.next_tp_percent : tpConfig.tp3 },
     ];
 
     return (
@@ -404,17 +457,22 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
         </div>
       )}
 
-      {/* Reset Confirm Dialog */}
+      {/* Reset Confirm Dialog - key forces remount for fresh state */}
       <ResetConfirmDialog
+        key={dialogKey}
         open={resetDialogOpen}
         onClose={handleResetClose}
         onConfirm={handleResetConfirm}
         title="Reset Scalp Reentry Settings"
-        configType="scalp reentry"
+        configType="scalp_reentry"
         loading={resetLoading}
         allMatch={resetPreview?.all_match ?? false}
         differences={resetPreview?.differences ?? []}
         totalChanges={resetPreview?.total_changes ?? 0}
+        isAdmin={isAdminPreview}
+        defaultValue={adminDefaultValue}
+        onSaveDefaults={handleAdminSaveDefaults}
+        onSaveSuccess={fetchData}
       />
     </div>
   );

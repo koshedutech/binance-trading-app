@@ -13,69 +13,38 @@ import (
 
 // ============ SCALP RE-ENTRY CORE LOGIC ============
 
-// getUserScalpReentryConfig loads the user's scalp_reentry config from the database
-// Falls back to default settings if database is unavailable or config not found
-// FIXED: Detects both OLD format (ModeFullConfig with sltp.tp_allocation) and
-// NEW format (ScalpReentryConfig with tp1_percent, tp1_sell_percent)
+// getUserScalpReentryConfig loads the user's scalp_reentry config from DATABASE
+// Story 9.4: scalp_reentry is an optimization feature stored in user_mode_configs table
+// DATABASE-FIRST: All runtime reads come from database, not JSON files
 func (g *GinieAutopilot) getUserScalpReentryConfig() ScalpReentryConfig {
-	// Fallback to defaults if no repo or userID
-	if g.repo == nil || g.userID == "" {
-		log.Printf("[SCALP-REENTRY] No database access, using DefaultScalpReentryConfig()")
-		return DefaultScalpReentryConfig()
-	}
+	// DATABASE-FIRST: Load scalp_reentry config from database
+	if g.repo != nil && g.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+		configJSON, err := g.repo.GetUserScalpReentryConfig(ctx, g.userID)
+		if err != nil {
+			log.Printf("[SCALP-REENTRY] ERROR: Failed to load scalp_reentry config from DB for user %s: %v - using defaults", g.userID, err)
+			return DefaultScalpReentryConfig()
+		}
+		if configJSON == nil {
+			log.Printf("[SCALP-REENTRY] ERROR: scalp_reentry config missing in DB for user %s - using defaults", g.userID)
+			return DefaultScalpReentryConfig()
+		}
 
-	// Load from user_mode_configs table for mode_name = "scalp_reentry"
-	configJSON, err := g.repo.GetUserModeConfig(ctx, g.userID, "scalp_reentry")
-	if err != nil {
-		log.Printf("[SCALP-REENTRY] Failed to load config from database: %v, using defaults", err)
-		return DefaultScalpReentryConfig()
-	}
+		// Parse the JSON config
+		var config ScalpReentryConfig
+		if err := json.Unmarshal(configJSON, &config); err != nil {
+			log.Printf("[SCALP-REENTRY] ERROR: Failed to parse scalp_reentry config JSON for user %s: %v - using defaults", g.userID, err)
+			return DefaultScalpReentryConfig()
+		}
 
-	if configJSON == nil {
-		log.Printf("[SCALP-REENTRY] No config found in database for user %s, using defaults", g.userID)
-		return DefaultScalpReentryConfig()
-	}
-
-	// Try to parse as ScalpReentryConfig (NEW format)
-	var config ScalpReentryConfig
-	if err := json.Unmarshal(configJSON, &config); err == nil && config.TP1Percent > 0 {
-		log.Printf("[SCALP-REENTRY] Loaded NEW format from DB: TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
-			config.TP1Percent, config.TP1SellPercent, config.TP2Percent, config.TP2SellPercent, config.TP3Percent, config.TP3SellPercent)
+		log.Printf("[SCALP-REENTRY] Loaded from DATABASE: enabled=%v, TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
+			config.Enabled, config.TP1Percent, config.TP1SellPercent, config.TP2Percent, config.TP2SellPercent, config.TP3Percent, config.TP3SellPercent)
 		return config
 	}
 
-	// DETECTION: If TP1Percent is 0, check if this is OLD format (ModeFullConfig)
-	// OLD format has sltp.tp_allocation array instead of tp1_sell_percent fields
-	var modeConfig ModeFullConfig
-	if err := json.Unmarshal(configJSON, &modeConfig); err == nil && modeConfig.SLTP != nil {
-		// Convert OLD format to ScalpReentryConfig
-		config = DefaultScalpReentryConfig() // Start with defaults
-		config.Enabled = modeConfig.Enabled
-
-		// Extract TP sell percentages from sltp.tp_allocation
-		if len(modeConfig.SLTP.TPAllocation) >= 3 {
-			config.TP1SellPercent = modeConfig.SLTP.TPAllocation[0]
-			config.TP2SellPercent = modeConfig.SLTP.TPAllocation[1]
-			config.TP3SellPercent = modeConfig.SLTP.TPAllocation[2]
-		}
-
-		// Extract TP gain levels from sltp.tp_gain_levels (if set)
-		if len(modeConfig.SLTP.TPGainLevels) >= 3 {
-			config.TP1Percent = modeConfig.SLTP.TPGainLevels[0]
-			config.TP2Percent = modeConfig.SLTP.TPGainLevels[1]
-			config.TP3Percent = modeConfig.SLTP.TPGainLevels[2]
-		}
-		// If no TPGainLevels, keep defaults (0.4%, 0.7%, 1.0%)
-
-		log.Printf("[SCALP-REENTRY] Converted OLD format from DB: TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
-			config.TP1Percent, config.TP1SellPercent, config.TP2Percent, config.TP2SellPercent, config.TP3Percent, config.TP3SellPercent)
-		return config
-	}
-
-	log.Printf("[SCALP-REENTRY] Failed to parse config from DB, using defaults")
+	log.Printf("[SCALP-REENTRY] ERROR: No repository or userID available - using defaults")
 	return DefaultScalpReentryConfig()
 }
 

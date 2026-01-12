@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
-import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig, StuckPositionAlert, loadModeDefaults, loadCircuitBreakerDefaults, loadLLMConfigDefaults, loadCapitalAllocationDefaults, SettingDiff, ConfigResetPreview, TradeConditionsResponse, TradeCondition, PendingOrdersResponse, PendingOrderInfo } from '../services/futuresApi';
+import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig, StuckPositionAlert, loadModeDefaults, loadCircuitBreakerDefaults, loadLLMConfigDefaults, loadCapitalAllocationDefaults, SettingDiff, ConfigResetPreview, TradeConditionsResponse, TradeCondition, PendingOrdersResponse, PendingOrderInfo, saveAdminDefaults } from '../services/futuresApi';
 import { apiService } from '../services/api';
 import { useFuturesStore, selectActivePositions } from '../store/futuresStore';
+import { useAuth } from '../contexts/AuthContext';
 import type { FuturesPosition } from '../types/futures';
 import {
   Sparkles, Power, PowerOff, RefreshCw, Shield, CheckCircle, XCircle,
@@ -281,8 +282,8 @@ export default function GiniePanel() {
   const [loadingScanPreview, setLoadingScanPreview] = useState(false);
   const [savedCoinsInput, setSavedCoinsInput] = useState('');
 
-  // Scalp Re-entry Mode Configuration state (using ModeFullConfig from mode-config endpoint)
-  const [scalpReentryConfig, setScalpReentryConfig] = useState<ModeFullConfig | null>(null);
+  // Scalp Re-entry Configuration state
+  // Story 9.4: scalp_reentry is an optimization feature, NOT a mode - only uses ScalpReentryConfig
   const [scalpReentrySpecificConfig, setScalpReentrySpecificConfig] = useState<ScalpReentryConfig | null>(null);
   const [showScalpReentry, setShowScalpReentry] = useState(false);
   const [savingScalpReentry, setSavingScalpReentry] = useState(false);
@@ -306,6 +307,11 @@ export default function GiniePanel() {
     differences: SettingDiff[];
     totalChanges: number;
     onConfirm: () => void;
+    onSave?: (values: Record<string, any>) => Promise<void>;
+    // Admin-specific props
+    isAdmin?: boolean;
+    defaultValue?: any;
+    onSaveDefaults?: (values: Record<string, any>) => Promise<void>;
   }>({
     open: false,
     title: '',
@@ -315,7 +321,13 @@ export default function GiniePanel() {
     differences: [],
     totalChanges: 0,
     onConfirm: () => {},
+    onSave: undefined,
+    isAdmin: false,
+    defaultValue: undefined,
+    onSaveDefaults: undefined,
   });
+  // Key to force dialog remount on each open (ensures fresh state)
+  const [dialogKey, setDialogKey] = useState(0);
 
   // Loading timeout tracking
   const [loadingWarning, setLoadingWarning] = useState(false);
@@ -326,6 +338,8 @@ export default function GiniePanel() {
 
   // Use global trading mode from futuresStore (synced via WebSocket)
   const { tradingMode, fetchTradingMode } = useFuturesStore();
+  const { user } = useAuth();
+  const isAdmin = user?.is_admin ?? false;
   const isRunning = autopilotStatus?.stats?.running ?? false;
   const isDryRun = tradingMode.dryRun;
 
@@ -425,9 +439,13 @@ export default function GiniePanel() {
   const openResetDialog = async (
     title: string,
     configType: string,
-    previewFn: () => Promise<ConfigResetPreview>,
-    applyFn: () => Promise<any>
+    previewFn: () => Promise<ConfigResetPreview | any>,
+    applyFn: () => Promise<any>,
+    saveFn?: (values: Record<string, any>) => Promise<void>,
+    saveDefaultsFn?: (values: Record<string, any>) => Promise<void>
   ) => {
+    // Increment key to force dialog remount with fresh state
+    setDialogKey(prev => prev + 1);
     setResetDialog({
       open: true,
       title,
@@ -436,6 +454,8 @@ export default function GiniePanel() {
       allMatch: false,
       differences: [],
       totalChanges: 0,
+      isAdmin: false,
+      defaultValue: undefined,
       onConfirm: async () => {
         try {
           await applyFn();
@@ -451,22 +471,81 @@ export default function GiniePanel() {
           setResetDialog(prev => ({ ...prev, open: false }));
         }
       },
+      onSave: saveFn,
+      onSaveDefaults: saveDefaultsFn,
     });
 
     try {
       const preview = await previewFn();
-      setResetDialog(prev => ({
-        ...prev,
-        loading: false,
-        allMatch: preview.all_match,
-        differences: preview.differences || [],
-        totalChanges: preview.total_changes || 0,
-      }));
+
+      // Check if this is an admin preview response (has is_admin and default_value)
+      if (preview.is_admin && preview.default_value !== undefined) {
+        // Admin user: Show editable default values
+        // CRITICAL: Must explicitly set onSaveDefaults - cannot rely on prev due to async state updates
+        setResetDialog(prev => ({
+          ...prev,
+          loading: false,
+          isAdmin: true,
+          defaultValue: preview.default_value,
+          allMatch: false,
+          differences: [],
+          totalChanges: 0,
+          onSaveDefaults: saveDefaultsFn,
+        }));
+      } else {
+        // Regular user: Show comparison
+        setResetDialog(prev => ({
+          ...prev,
+          loading: false,
+          isAdmin: false,
+          defaultValue: undefined,
+          allMatch: preview.all_match,
+          differences: preview.differences || [],
+          totalChanges: preview.total_changes || 0,
+          onSaveDefaults: saveDefaultsFn,
+        }));
+      }
     } catch (error) {
       console.error('Failed to load preview:', error);
       setError('Failed to load reset preview');
       setResetDialog(prev => ({ ...prev, open: false }));
     }
+  };
+
+  // Function to save edited mode config values from the dialog
+  const saveEditedModeConfig = async (mode: string, editedValues: Record<string, any>) => {
+    // Get the current mode config as a base
+    const currentConfig = modeConfigs[mode];
+    if (!currentConfig) {
+      throw new Error(`Mode config for ${mode} not found`);
+    }
+
+    // Deep clone the current config to avoid mutations
+    const updatedConfig = JSON.parse(JSON.stringify(currentConfig)) as ModeFullConfig;
+
+    // Apply each edited value to the config
+    Object.entries(editedValues).forEach(([path, value]) => {
+      const parts = path.split('.');
+      if (parts.length === 1) {
+        // Top-level property (e.g., "enabled")
+        (updatedConfig as any)[parts[0]] = value;
+      } else if (parts.length === 2) {
+        // Nested property (e.g., "confidence.min_confidence")
+        const section = parts[0] as keyof ModeFullConfig;
+        if (!updatedConfig[section]) {
+          (updatedConfig as any)[section] = {};
+        }
+        (updatedConfig[section] as any)[parts[1]] = value;
+      }
+    });
+
+    // Save the full config via API
+    await futuresApi.updateModeConfig(mode, updatedConfig);
+    setSuccessMsg(`${mode} configuration saved`);
+    setTimeout(() => setSuccessMsg(null), 3000);
+
+    // Refresh mode configs to reflect the changes
+    await fetchModeConfigs();
   };
 
   const fetchMarketMovers = async () => {
@@ -580,15 +659,14 @@ export default function GiniePanel() {
   };
 
   // Fetch scalp re-entry configuration
+  // Story 9.4: scalp_reentry is an optimization feature, NOT a mode
+  // It only uses ScalpReentryConfig, NOT ModeFullConfig from user_mode_configs
   const fetchScalpReentryConfig = async () => {
     setLoadingScalpReentry(true);
     setScalpReentryError(null);
     try {
-      // Fetch mode config (has size, leverage, max_positions, stop_loss_percent, etc.)
-      const modeResponse = await futuresApi.getModeConfig('scalp_reentry');
-      setScalpReentryConfig(modeResponse.config);
-
-      // Also fetch scalp-reentry specific config for TP levels and re-entry settings
+      // Fetch scalp re-entry specific config (TP levels, re-entry settings, enabled status)
+      // This is the ONLY config needed - scalp_reentry doesn't have mode_config
       const specificConfig = await futuresApi.getScalpReentryConfig();
       setScalpReentrySpecificConfig(specificConfig);
       setScalpReentryError(null);
@@ -624,19 +702,17 @@ export default function GiniePanel() {
     setScalpReentrySpecificConfig(updated);
   };
 
-  // Save both mode config and specific config
+  // Save scalp re-entry config
+  // Story 9.4: scalp_reentry only uses ScalpReentryConfig, NOT ModeFullConfig
   const saveScalpReentrySpecificConfig = async () => {
-    if (!scalpReentryConfig || !scalpReentrySpecificConfig) return;
+    if (!scalpReentrySpecificConfig) return;
     setSavingScalpReentry(true);
     try {
-      // Save mode config (size, sltp, etc.)
-      await futuresApi.updateModeConfig('scalp_reentry', scalpReentryConfig);
-
-      // Save scalp re-entry specific config (TP levels, re-entry settings, etc.)
+      // Save scalp re-entry specific config (TP levels, re-entry settings, enabled status)
       const result = await futuresApi.updateScalpReentryConfig(scalpReentrySpecificConfig);
       setScalpReentrySpecificConfig(result.config);
 
-      setSuccessMsg('All scalp re-entry configurations saved');
+      setSuccessMsg('Scalp re-entry configuration saved');
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (err: any) {
       setError(err?.response?.data?.error || 'Failed to save scalp re-entry config');
@@ -1182,6 +1258,33 @@ export default function GiniePanel() {
     setModeConfigErrors({ ...modeConfigErrors, [mode]: '' });
   };
 
+  // Toggle mode enabled/disabled with immediate persistence
+  const handleToggleModeEnabled = async (mode: string) => {
+    const currentEnabled = modeConfigs[mode]?.enabled ?? false;
+    const newEnabled = !currentEnabled;
+
+    try {
+      const result = await futuresApi.toggleModeEnabled(mode, newEnabled);
+      if (result.success) {
+        // Update local state on success
+        setModeConfigs(prev => ({
+          ...prev,
+          [mode]: {
+            ...prev[mode],
+            enabled: result.enabled
+          }
+        }));
+        const modeName = mode === 'ultra_fast' ? 'Ultra-Fast' : mode.charAt(0).toUpperCase() + mode.slice(1);
+        setSuccessMsg(`${modeName} mode ${result.enabled ? 'enabled' : 'disabled'}`);
+        setTimeout(() => setSuccessMsg(null), 3000);
+      }
+    } catch (err: any) {
+      const modeName = mode === 'ultra_fast' ? 'Ultra-Fast' : mode.charAt(0).toUpperCase() + mode.slice(1);
+      setError(err?.response?.data?.error || `Failed to toggle ${modeName} mode`);
+      setTimeout(() => setError(null), 3000);
+    }
+  };
+
   // LLM & Adaptive AI functions (Story 2.8)
   const fetchLLMConfig = async () => {
     try {
@@ -1607,9 +1710,11 @@ export default function GiniePanel() {
               <button
                 onClick={() => openResetDialog(
                   'Reset Circuit Breaker to Defaults?',
-                  'Circuit Breaker',
+                  'circuit_breaker',
                   () => loadCircuitBreakerDefaults(true),
-                  () => loadCircuitBreakerDefaults(false)
+                  () => loadCircuitBreakerDefaults(false),
+                  undefined,
+                  (values) => saveAdminDefaults('circuit_breaker', values)
                 )}
                 className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
                 title="Reset Circuit Breaker to defaults"
@@ -1894,7 +1999,7 @@ export default function GiniePanel() {
                   <label className="text-xs text-gray-300 font-medium" title="Enable or disable this trading mode. When disabled, no new positions will be opened using this mode's parameters.">Enable {selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode</label>
                   <div className="flex items-center gap-2">
                     <button
-                      onClick={() => updateModeConfig(selectedModeConfig, 'enabled', !modeConfigs[selectedModeConfig]?.enabled)}
+                      onClick={() => handleToggleModeEnabled(selectedModeConfig)}
                       className={`px-2 py-1 rounded text-[10px] transition-colors ${
                         modeConfigs[selectedModeConfig]?.enabled
                           ? 'bg-green-900/50 text-green-400 border border-green-700'
@@ -1906,9 +2011,11 @@ export default function GiniePanel() {
                     <button
                       onClick={() => openResetDialog(
                         `Reset ${selectedModeConfig === 'ultra_fast' ? 'Ultra-Fast' : selectedModeConfig.charAt(0).toUpperCase() + selectedModeConfig.slice(1)} Mode to Defaults?`,
-                        selectedModeConfig,
+                        'mode_config',
                         () => loadModeDefaults(selectedModeConfig, true),
-                        () => loadModeDefaults(selectedModeConfig, false)
+                        () => loadModeDefaults(selectedModeConfig, false),
+                        (values) => saveEditedModeConfig(selectedModeConfig, values),
+                        (values) => saveAdminDefaults(selectedModeConfig, values)
                       )}
                       className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
                       title={`Reset ${selectedModeConfig} to defaults`}
@@ -3619,7 +3726,7 @@ export default function GiniePanel() {
                     <label className="flex items-center gap-2 text-[10px] text-gray-300">
                       <input
                         type="checkbox"
-                        checked={scalpReentryConfig.use_multi_agent}
+                        checked={scalpReentrySpecificConfig?.use_multi_agent || false}
                         onChange={(e) => updateScalpReentrySpecificConfig('use_multi_agent', e.target.checked)}
                         className="w-3 h-3"
                       />
@@ -3638,7 +3745,7 @@ export default function GiniePanel() {
                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
-                  {scalpReentryConfig.use_multi_agent && (
+                  {scalpReentrySpecificConfig?.use_multi_agent && (
                     <div className="grid grid-cols-3 gap-2 pt-1 border-t border-gray-600">
                       <label className="flex items-center gap-1 text-[10px] text-gray-300">
                         <input
@@ -3760,9 +3867,11 @@ export default function GiniePanel() {
                   <button
                     onClick={() => openResetDialog(
                       'Reset LLM Config to Defaults?',
-                      'LLM Config',
+                      'llm_config',
                       () => loadLLMConfigDefaults(true),
-                      () => loadLLMConfigDefaults(false)
+                      () => loadLLMConfigDefaults(false),
+                      undefined,
+                      (values) => saveAdminDefaults('llm_config', values)
                     )}
                     className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
                     title="Reset LLM Config to defaults"
@@ -6019,8 +6128,9 @@ export default function GiniePanel() {
         </div>
       )}
 
-      {/* Reset Confirm Dialog */}
+      {/* Reset Confirm Dialog - key forces remount for fresh state */}
       <ResetConfirmDialog
+        key={dialogKey}
         open={resetDialog.open}
         onClose={() => setResetDialog(prev => ({ ...prev, open: false }))}
         onConfirm={resetDialog.onConfirm}
@@ -6030,6 +6140,15 @@ export default function GiniePanel() {
         allMatch={resetDialog.allMatch}
         differences={resetDialog.differences}
         totalChanges={resetDialog.totalChanges}
+        isAdmin={resetDialog.isAdmin}
+        defaultValue={resetDialog.defaultValue}
+        onSaveDefaults={resetDialog.onSaveDefaults}
+        onSaveSuccess={() => {
+          // Refresh all related data after admin save
+          fetchModeConfigs();
+          fetchCircuitBreaker();
+          fetchLLMConfig();
+        }}
       />
     </div>
   );

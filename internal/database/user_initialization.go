@@ -10,7 +10,8 @@ import (
 
 // InitializeUserDefaultSettings copies ALL default settings from default-settings.json
 // to the database for a new user. This includes:
-// - mode_configs (5 modes: ultra_fast, scalp, scalp_reentry, swing, position)
+// - mode_configs (4 trading modes: ultra_fast, scalp, swing, position)
+// - scalp_reentry_config (Position Optimization, NOT a trading mode - stored separately)
 // - global circuit breaker settings
 // - user_llm_config - LLM provider and model settings
 // - user_capital_allocation - Capital allocation rules
@@ -31,7 +32,8 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 
 	// Parse the defaults file
 	var defaults struct {
-		ModeConfigs    map[string]json.RawMessage `json:"mode_configs"`
+		ModeConfigs       map[string]json.RawMessage `json:"mode_configs"`
+		ScalpReentryConfig json.RawMessage           `json:"scalp_reentry_config"` // Separate from mode_configs!
 		CircuitBreaker struct {
 			Global struct {
 				Enabled               bool    `json:"enabled"`
@@ -73,8 +75,9 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 		return fmt.Errorf("failed to parse default-settings.json: %w", err)
 	}
 
-	// ===== 1. Initialize Mode Configs =====
-	modes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
+	// ===== 1. Initialize Mode Configs (4 trading modes) =====
+	// NOTE: scalp_reentry is NOT a trading mode - it's stored separately as scalp_reentry_config
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
 	modesInitialized := 0
 
 	for _, modeName := range modes {
@@ -103,6 +106,25 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 
 		log.Printf("[USER-INIT] Initialized mode %s for user %s (enabled: %v, copied ALL fields from defaults)", modeName, userID, modeConfig.Enabled)
 		modesInitialized++
+	}
+
+	// ===== 1b. Initialize Scalp Reentry Config (Position Optimization, NOT a trading mode) =====
+	if len(defaults.ScalpReentryConfig) > 0 {
+		var scalpReentryConfig struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(defaults.ScalpReentryConfig, &scalpReentryConfig); err != nil {
+			log.Printf("[USER-INIT] Warning: Failed to parse scalp_reentry_config: %v", err)
+		} else {
+			if err := r.SaveUserModeConfig(ctx, userID, "scalp_reentry", scalpReentryConfig.Enabled, defaults.ScalpReentryConfig); err != nil {
+				log.Printf("[USER-INIT] Warning: Failed to save scalp_reentry for user %s: %v", userID, err)
+			} else {
+				log.Printf("[USER-INIT] Initialized scalp_reentry for user %s (enabled: %v)", userID, scalpReentryConfig.Enabled)
+				modesInitialized++
+			}
+		}
+	} else {
+		log.Printf("[USER-INIT] Warning: scalp_reentry_config not found in defaults")
 	}
 
 	// ===== 2. Initialize Global Circuit Breaker =====
@@ -187,8 +209,16 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 	}
 	log.Printf("[USER-INIT] Initialized CB stats for %d modes", modesStatsInitialized)
 
+	// ===== 9. Initialize Safety Settings =====
+	// Per-mode safety controls for rate limiting, profit monitoring, and win-rate monitoring
+	if err := r.InitializeUserSafetySettings(ctx, userID); err != nil {
+		log.Printf("[USER-INIT] Warning: Failed to initialize safety settings: %v", err)
+	} else {
+		log.Printf("[USER-INIT] Initialized safety settings for user %s (all 4 modes)", userID)
+	}
+
 	// ===== Summary =====
-	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, and %d mode CB stats",
+	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, and safety settings",
 		userID, modesInitialized, modesStatsInitialized)
 
 	return nil
@@ -208,7 +238,8 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 
 	// Parse the defaults file
 	var defaults struct {
-		ModeConfigs    map[string]json.RawMessage `json:"mode_configs"`
+		ModeConfigs       map[string]json.RawMessage `json:"mode_configs"`
+		ScalpReentryConfig json.RawMessage           `json:"scalp_reentry_config"` // Separate from mode_configs!
 		CircuitBreaker struct {
 			Global struct {
 				Enabled               bool    `json:"enabled"`
@@ -250,8 +281,9 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 		return fmt.Errorf("failed to parse default-settings.json: %w", err)
 	}
 
-	// ===== 1. Restore Mode Configs =====
-	modes := []string{"ultra_fast", "scalp", "scalp_reentry", "swing", "position"}
+	// ===== 1. Restore Mode Configs (4 trading modes) =====
+	// NOTE: scalp_reentry is NOT a trading mode - it's stored separately as scalp_reentry_config
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
 	modesRestored := 0
 
 	for _, modeName := range modes {
@@ -278,6 +310,25 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 
 		log.Printf("[USER-RESTORE] Restored mode %s for user %s (enabled: %v)", modeName, userID, modeConfig.Enabled)
 		modesRestored++
+	}
+
+	// ===== 1b. Restore Scalp Reentry Config (Position Optimization, NOT a trading mode) =====
+	if len(defaults.ScalpReentryConfig) > 0 {
+		var scalpReentryConfig struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.Unmarshal(defaults.ScalpReentryConfig, &scalpReentryConfig); err != nil {
+			log.Printf("[USER-RESTORE] Warning: Failed to parse scalp_reentry_config: %v", err)
+		} else {
+			if err := r.SaveUserModeConfig(ctx, userID, "scalp_reentry", scalpReentryConfig.Enabled, defaults.ScalpReentryConfig); err != nil {
+				log.Printf("[USER-RESTORE] Warning: Failed to restore scalp_reentry for user %s: %v", userID, err)
+			} else {
+				log.Printf("[USER-RESTORE] Restored scalp_reentry for user %s (enabled: %v)", userID, scalpReentryConfig.Enabled)
+				modesRestored++
+			}
+		}
+	} else {
+		log.Printf("[USER-RESTORE] Warning: scalp_reentry_config not found in defaults")
 	}
 
 	// ===== 2. Restore Global Circuit Breaker =====
@@ -356,7 +407,15 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 	}
 	log.Printf("[USER-RESTORE] Restored CB stats for %d modes", modesStatsRestored)
 
-	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, and %d mode CB stats",
+	// ===== 9. Restore Safety Settings =====
+	// Reset to defaults for all 4 modes
+	if err := r.InitializeUserSafetySettings(ctx, userID); err != nil {
+		log.Printf("[USER-RESTORE] Warning: Failed to restore safety settings: %v", err)
+	} else {
+		log.Printf("[USER-RESTORE] Restored safety settings for user %s (all 4 modes)", userID)
+	}
+
+	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, and safety settings",
 		userID, modesRestored, modesStatsRestored)
 
 	return nil

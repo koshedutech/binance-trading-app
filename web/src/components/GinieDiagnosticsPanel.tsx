@@ -8,6 +8,7 @@ import {
   TradeConditionsResponse,
   PendingOrdersResponse,
 } from '../services/futuresApi';
+import { useFuturesStore } from '../store/futuresStore';
 import {
   Activity,
   AlertTriangle,
@@ -46,6 +47,9 @@ export default function GinieDiagnosticsPanel() {
   const [resettingSymbol, setResettingSymbol] = useState<string | null>(null);
   const [holdSignals, setHoldSignals] = useState(false);
   const [showConditionsDetail, setShowConditionsDetail] = useState(false);
+
+  // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
+  const tradingMode = useFuturesStore((state) => state.tradingMode);
 
   // Expandable section states - all collapsed by default
   const [showTradeConditions, setShowTradeConditions] = useState(false);
@@ -150,6 +154,13 @@ export default function GinieDiagnosticsPanel() {
     const interval = setInterval(() => refreshAll(false), 10000); // Refresh every 10s
     return () => clearInterval(interval);
   }, []); // Empty dependency array - only runs once on mount
+
+  // CRITICAL: Refresh all diagnostics when trading mode changes (paper <-> live)
+  // This ensures daily loss, trade counts, and other mode-specific stats update immediately
+  useEffect(() => {
+    console.log('GinieDiagnosticsPanel: Trading mode changed to', tradingMode.mode, '- refreshing all data');
+    refreshAll(true);
+  }, [tradingMode.dryRun]); // Watch specifically dryRun to detect paper/live switch
 
   // Fetch signals when filter changes (separate from interval)
   useEffect(() => {

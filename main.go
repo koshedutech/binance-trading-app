@@ -212,6 +212,12 @@ func main() {
 			log.Printf("Warning: Mode Config early_warning migration failed: %v", err)
 		}
 		logger.Info("Mode Config early_warning migration completed")
+
+		// Run User Safety Settings migration (023) - Story 9.4
+		if err := db.RunUserSafetySettingsMigration(ctx); err != nil {
+			log.Printf("Warning: User Safety Settings migration failed: %v", err)
+		}
+		logger.Info("User Safety Settings migration completed")
 	}
 
 	// Create repository early for API key service

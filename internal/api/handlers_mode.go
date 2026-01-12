@@ -1,6 +1,7 @@
 package api
 
 import (
+	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
 	"context"
@@ -177,20 +178,10 @@ func (s *Server) handleGetModeAllocations(c *gin.Context) {
 }
 
 // handleUpdateModeAllocations updates capital allocation percentages for modes
+// NOTE: This handler saves to database even when Ginie autopilot is off.
+// The database is the source of truth; when Ginie starts, it loads from DB.
 func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 	userID := s.getUserID(c)
-	controller := s.getFuturesAutopilot()
-	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
-		return
-	}
-
-	// Add ownership check for write operations
-	ownerID := controller.GetOwnerUserID()
-	if ownerID != "" && ownerID != userID {
-		errorResponse(c, http.StatusForbidden, "This autopilot is owned by another user")
-		return
-	}
 
 	var req struct {
 		UltraFastPercent float64 `json:"ultra_fast_percent"`
@@ -217,6 +208,34 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	// Check if this is an admin user - admin saves to default-settings.json
+	if auth.IsAdmin(c) {
+		// Admin user: Save to default-settings.json file
+		capitalAlloc := autopilot.CapitalAllocationDefaults{
+			UltraFastPercent: req.UltraFastPercent,
+			ScalpPercent:     req.ScalpPercent,
+			SwingPercent:     req.SwingPercent,
+			PositionPercent:  req.PositionPercent,
+		}
+
+		syncService := autopilot.GetAdminSyncService()
+		if err := syncService.SyncAdminSettingToDefaults(ctx, "capital_allocation", capitalAlloc); err != nil {
+			log.Printf("[MODE-ALLOCATION] Failed to save capital allocation to default-settings.json: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save capital allocation to defaults file")
+			return
+		}
+
+		log.Printf("[MODE-ALLOCATION] Admin saved capital allocation to default-settings.json")
+
+		c.JSON(http.StatusOK, gin.H{
+			"success":    true,
+			"message":    "Mode allocation saved to default-settings.json (admin)",
+			"allocation": capitalAlloc,
+		})
+		return
+	}
+
+	// Regular user: Save to DATABASE
 	// 1. Load current allocation from database (or use defaults)
 	currentAllocation, err := s.repo.GetUserCapitalAllocation(ctx, userID)
 	if err != nil {
@@ -263,9 +282,9 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":      true,
-		"message":      "Mode allocation updated",
-		"allocation":   allocation,
+		"success":    true,
+		"message":    "Mode allocation updated",
+		"allocation": allocation,
 	})
 }
 
