@@ -1,8 +1,8 @@
 {
   "metadata": {
-    "version": "1.0.0",
-    "schema_version": 1,
-    "last_updated": "2026-01-12T11:36:23Z",
+    "version": "1.1.0",
+    "schema_version": 2,
+    "last_updated": "2026-01-12T15:30:00Z",
     "updated_by": "admin",
     "description": "Master default settings for Binance Trading Bot - Single source of truth for all user defaults"
   },
@@ -939,7 +939,14 @@
     "check_interval_secs": 30,
     "only_underwater": true,
     "min_loss_percent": 1,
-    "close_on_reversal": true
+    "close_on_reversal": true,
+    "tighten_sl_on_warning": true,
+    "min_confidence": 0.7,
+    "max_llm_calls_per_pos": 3,
+    "close_min_hold_mins": 15,
+    "close_min_confidence": 0.85,
+    "close_require_consecutive": 2,
+    "close_sl_proximity_pct": 50
   },
   "capital_allocation": {
     "ultra_fast_percent": 0,
@@ -949,15 +956,17 @@
   },
   "scalp_reentry_config": {
     "enabled": false,
-    "tp1_percent": 0.35,
+    "tp1_percent": 0.5,
     "tp1_sell_percent": 30,
     "tp2_percent": 0.7,
     "tp2_sell_percent": 50,
     "tp3_percent": 1,
     "tp3_sell_percent": 80,
-    "reentry_percent": 80,
+    "reentry_percent": 50,
     "reentry_price_buffer": 0.05,
-    "max_reentry_attempts": 3,
+    "max_reentry_attempts": 1,
+    "reentry_require_trend_confirmation": true,
+    "reentry_min_adx": 20,
     "reentry_timeout_sec": 300,
     "final_trailing_percent": 5,
     "final_hold_min_percent": 20,
@@ -1002,6 +1011,11 @@
     "max_loss_of_earned_profit": 50,
     "allow_hedge_chains": false,
     "max_hedge_chain_depth": 2
+  },
+  "trading_fees": {
+    "taker_fee_percent": 0.04,
+    "maker_fee_percent": 0.02,
+    "vip_level": 0
   },
   "_settings_risk_index": {
     "high_risk_settings": [

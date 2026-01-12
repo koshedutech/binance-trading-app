@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "schema_version": 1,
+    "description": "Runtime state file for dynamic/ephemeral data - NOT for configuration defaults"
+  },
+  "ginie_stats": {
+    "ginie_total_pnl": 0,
+    "ginie_daily_pnl": 0,
+    "ginie_total_trades": 0,
+    "ginie_winning_trades": 0,
+    "ginie_losing_trades": 0,
+    "ginie_win_rate": 0,
+    "last_reset_date": null
+  },
+  "mode_circuit_breaker_stats": {
+    "ultra_fast": {
+      "triggered": false,
+      "trigger_count": 0,
+      "last_triggered": null,
+      "cooldown_until": null
+    },
+    "scalp": {
+      "triggered": false,
+      "trigger_count": 0,
+      "last_triggered": null,
+      "cooldown_until": null
+    },
+    "swing": {
+      "triggered": false,
+      "trigger_count": 0,
+      "last_triggered": null,
+      "cooldown_until": null
+    },
+    "position": {
+      "triggered": false,
+      "trigger_count": 0,
+      "last_triggered": null,
+      "cooldown_until": null
+    }
+  },
+  "symbol_runtime_state": {}
+}
