@@ -361,8 +361,25 @@ func ValidateDefaultSettings() error {
 	// NOTE: scalp_reentry is NOT a trading mode - it's stored separately as ScalpReentry
 	requiredModes := []string{"ultra_fast", "scalp", "swing", "position"}
 	for _, mode := range requiredModes {
-		if _, exists := defaults.ModeConfigs[mode]; !exists {
+		config, exists := defaults.ModeConfigs[mode]
+		if !exists {
 			return fmt.Errorf("mode_configs.%s is required", mode)
+		}
+
+		// Validate trend_filters exists in each mode config (Story 9.5)
+		if config.TrendFilters == nil {
+			return fmt.Errorf("mode_configs.%s.trend_filters is required (Story 9.5)", mode)
+		}
+
+		// Validate trend_filters sub-configs exist
+		if config.TrendFilters.BTCTrendCheck == nil {
+			return fmt.Errorf("mode_configs.%s.trend_filters.btc_trend_check is required", mode)
+		}
+		if config.TrendFilters.PriceVsEMA == nil {
+			return fmt.Errorf("mode_configs.%s.trend_filters.price_vs_ema is required", mode)
+		}
+		if config.TrendFilters.VWAPFilter == nil {
+			return fmt.Errorf("mode_configs.%s.trend_filters.vwap_filter is required", mode)
 		}
 	}
 
@@ -385,4 +402,35 @@ func ValidateDefaultSettings() error {
 
 	log.Printf("[DEFAULT-SETTINGS] Validation passed for default-settings.json")
 	return nil
+}
+
+// GetDefaultTrendFiltersForMode returns default TrendFiltersConfig for a mode
+// Used when database has NULL trend_filters (backward compatibility - Story 9.5)
+func GetDefaultTrendFiltersForMode(modeName string) *TrendFiltersConfig {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to load defaults for trend_filters: %v", err)
+		return nil
+	}
+
+	config, exists := defaults.ModeConfigs[modeName]
+	if !exists || config.TrendFilters == nil {
+		log.Printf("[DEFAULT-SETTINGS] WARNING: No trend_filters found for mode %s", modeName)
+		return nil
+	}
+
+	// Deep copy to prevent mutation of cached defaults
+	data, err := json.Marshal(config.TrendFilters)
+	if err != nil {
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to marshal TrendFiltersConfig for deep copy: %v", err)
+		return nil
+	}
+
+	var copy TrendFiltersConfig
+	if err := json.Unmarshal(data, &copy); err != nil {
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to unmarshal TrendFiltersConfig for deep copy: %v", err)
+		return nil
+	}
+
+	return &copy
 }

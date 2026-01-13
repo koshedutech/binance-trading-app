@@ -320,6 +320,57 @@ type ModeMTFConfig struct {
 	TrendStabilityCheck bool    `json:"trend_stability_check"`   // Check if trend flipped in last 3 candles
 }
 
+// ====== SIMPLIFIED MTF BLOCKING CONFIGURATION (Story 9.5) ======
+// HigherTFConfig configures higher timeframe blocking for trend validation
+type HigherTFConfig struct {
+	Enabled             bool   `json:"enabled"`               // Enable higher TF check
+	Timeframe           string `json:"timeframe"`             // Higher TF for trend (e.g., "1h" for scalp, "4h" for swing)
+	BlockOnDisagreement bool   `json:"block_on_disagreement"` // Block trade if higher TF disagrees
+	CheckEMATrend       bool   `json:"check_ema_trend"`       // Use EMA crossover for trend detection
+	EMAFast             int    `json:"ema_fast"`              // Fast EMA period (default: 20)
+	EMASlow             int    `json:"ema_slow"`              // Slow EMA period (default: 50)
+}
+
+// TradingTFConfig configures trading timeframe settings
+type TradingTFConfig struct {
+	Timeframe        string `json:"timeframe"`         // Trading TF (e.g., "15m" for scalp)
+	RequireAlignment bool   `json:"require_alignment"` // Require trading TF to align with higher TF
+}
+
+// ====== TREND VALIDATION FILTERS (Story 9.5) ======
+// TrendFiltersConfig holds all trend validation filter settings
+type TrendFiltersConfig struct {
+	Description   string               `json:"_description,omitempty"`
+	BTCTrendCheck *BTCTrendCheckConfig `json:"btc_trend_check,omitempty"`
+	PriceVsEMA    *PriceVsEMAConfig    `json:"price_vs_ema,omitempty"`
+	VWAPFilter    *VWAPFilterConfig    `json:"vwap_filter,omitempty"`
+}
+
+// BTCTrendCheckConfig configures BTC correlation filter
+type BTCTrendCheckConfig struct {
+	Enabled                     bool   `json:"enabled"`
+	BTCSymbol                   string `json:"btc_symbol"`
+	BlockAltLongWhenBTCBearish  bool   `json:"block_alt_long_when_btc_bearish"`
+	BlockAltShortWhenBTCBullish bool   `json:"block_alt_short_when_btc_bullish"`
+	BTCTrendTimeframe           string `json:"btc_trend_timeframe"`
+}
+
+// PriceVsEMAConfig configures price/EMA position filter
+type PriceVsEMAConfig struct {
+	Enabled                      bool `json:"enabled"`
+	RequirePriceAboveEMAForLong  bool `json:"require_price_above_ema_for_long"`
+	RequirePriceBelowEMAForShort bool `json:"require_price_below_ema_for_short"`
+	EMAPeriod                    int  `json:"ema_period"`
+}
+
+// VWAPFilterConfig configures VWAP alignment filter
+type VWAPFilterConfig struct {
+	Enabled                       bool    `json:"enabled"`
+	RequirePriceAboveVWAPForLong  bool    `json:"require_price_above_vwap_for_long"`
+	RequirePriceBelowVWAPForShort bool    `json:"require_price_below_vwap_for_short"`
+	NearVWAPTolerancePercent      float64 `json:"near_vwap_tolerance_percent"`
+}
+
 // ====== DYNAMIC AI EXIT CONFIGURATION ======
 // ModeDynamicAIExitConfig holds dynamic AI-driven exit settings
 // AI continuously evaluates market conditions to decide hold/exit instead of fixed timeouts
@@ -376,6 +427,9 @@ type ModeFullConfig struct {
 	MTF           *ModeMTFConfig           `json:"mtf"`             // Multi-timeframe weighted consensus
 	DynamicAIExit *ModeDynamicAIExitConfig `json:"dynamic_ai_exit"` // AI-driven adaptive exit logic
 	Reversal      *ModeReversalConfig      `json:"reversal"`        // Reversal entry via LIMIT orders
+
+	// ====== NEW: Trend Validation Filters (Story 9.5) ======
+	TrendFilters *TrendFiltersConfig `json:"trend_filters,omitempty"` // Trend validation filters (BTC check, Price/EMA, VWAP)
 
 	// ====== NEW: Mode-specific Early Warning (Story 9.4 Phase 4) ======
 	EarlyWarning *ModeEarlyWarningConfig `json:"early_warning,omitempty"` // Mode-specific early warning settings

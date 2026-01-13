@@ -22,7 +22,7 @@ const (
 	SourceSentiment      SignalSource = "sentiment"
 	SourcePatternScanner SignalSource = "pattern_scanner"
 	SourceTechnical      SignalSource = "technical"
-	SourceMultiTimeframe SignalSource = "multi_timeframe"
+	// NOTE: SourceMultiTimeframe removed - MTF logic now handled by TrendFilterValidator as blocking filter
 )
 
 // EnhancedSignal represents a signal from any source with rich metadata
@@ -38,16 +38,17 @@ type EnhancedSignal struct {
 }
 
 // SignalWeight defines the weight for each signal source based on trading style
+// NOTE: MultiTimeframe removed - MTF logic now handled by TrendFilterValidator as blocking filter
 type SignalWeight struct {
 	MLPredictor    float64
 	LLMAnalyzer    float64
 	Sentiment      float64
 	PatternScanner float64
 	Technical      float64
-	MultiTimeframe float64
 }
 
 // DefaultSignalWeights returns weights for different trading styles
+// NOTE: MultiTimeframe weights removed - MTF logic now handled by TrendFilterValidator as blocking filter
 func GetSignalWeights(style TradingStyle) SignalWeight {
 	switch style {
 	case StyleScalping:
@@ -55,37 +56,33 @@ func GetSignalWeights(style TradingStyle) SignalWeight {
 			MLPredictor:    0.30, // ML is very important for quick decisions
 			LLMAnalyzer:    0.15, // Less important for scalping (slow)
 			Sentiment:      0.05, // Minimal importance
-			PatternScanner: 0.20, // Important for entry timing
+			PatternScanner: 0.25, // Important for entry timing
 			Technical:      0.25, // RSI/MACD important for momentum
-			MultiTimeframe: 0.05, // Less important for scalping
 		}
 	case StyleSwing:
 		return SignalWeight{
-			MLPredictor:    0.20,
+			MLPredictor:    0.25,
 			LLMAnalyzer:    0.25, // LLM important for swing analysis
 			Sentiment:      0.10,
-			PatternScanner: 0.15,
-			Technical:      0.15,
-			MultiTimeframe: 0.15, // Trend alignment matters
+			PatternScanner: 0.20,
+			Technical:      0.20,
 		}
 	case StylePosition:
 		return SignalWeight{
-			MLPredictor:    0.10,
-			LLMAnalyzer:    0.20,
-			Sentiment:      0.15, // Sentiment matters for long-term
-			PatternScanner: 0.10,
-			Technical:      0.15,
-			MultiTimeframe: 0.30, // Trend alignment very important
+			MLPredictor:    0.15,
+			LLMAnalyzer:    0.25,
+			Sentiment:      0.20, // Sentiment matters for long-term
+			PatternScanner: 0.15,
+			Technical:      0.25,
 		}
 	default:
 		// Balanced weights
 		return SignalWeight{
-			MLPredictor:    0.20,
+			MLPredictor:    0.25,
 			LLMAnalyzer:    0.20,
 			Sentiment:      0.10,
-			PatternScanner: 0.15,
-			Technical:      0.20,
-			MultiTimeframe: 0.15,
+			PatternScanner: 0.20,
+			Technical:      0.25,
 		}
 	}
 }
@@ -317,22 +314,9 @@ func (sa *SignalAggregator) CollectAllSignals(
 			"required", 50)
 	}
 
-	// 6. Multi-Timeframe Signal (NEW)
-	// Only for swing and position trading
-	if style != StyleScalping {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			signal := sa.collectMultiTimeframeSignal(symbol, currentPrice, style)
-			if signal != nil {
-				mu.Lock()
-				signals = append(signals, *signal)
-				mu.Unlock()
-			}
-		}()
-	} else {
-		sa.logger.Debug("Multi-timeframe signal skipped for scalping", "symbol", symbol)
-	}
+	// NOTE: Multi-Timeframe Signal removed from weighted signals
+	// MTF logic is now handled by TrendFilterValidator as a blocking filter (Story 9.5)
+	// This ensures ALL trading styles (including scalp) check higher timeframes before entry
 
 	wg.Wait()
 
@@ -614,104 +598,12 @@ func (sa *SignalAggregator) collectTechnicalSignal(symbol string, currentPrice f
 	}
 }
 
-// collectMultiTimeframeSignal collects signal from multiple timeframes
-func (sa *SignalAggregator) collectMultiTimeframeSignal(symbol string, currentPrice float64, style TradingStyle) *EnhancedSignal {
-	// Define timeframes based on trading style
-	var timeframes []string
-	switch style {
-	case StyleSwing:
-		timeframes = []string{"1d", "4h", "1h"}
-	case StylePosition:
-		timeframes = []string{"1w", "1d", "4h"}
-	default:
-		timeframes = []string{"4h", "1h", "15m"}
-	}
-
-	// Collect trend from each timeframe
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	trends := make(map[string]string)
-
-	for _, tf := range timeframes {
-		wg.Add(1)
-		go func(timeframe string) {
-			defer wg.Done()
-
-			// Fetch klines for this timeframe
-			klines, err := sa.futuresClient.GetFuturesKlines(symbol, timeframe, 100)
-			if err != nil || len(klines) < 20 {
-				sa.logger.Debug("Failed to fetch MTF klines",
-					"symbol", symbol,
-					"timeframe", timeframe,
-					"error", err)
-				return
-			}
-
-			// Detect trend using EMA crossover
-			trend := strategy.DetectTrend(klines, 9, 21)
-
-			mu.Lock()
-			trends[timeframe] = string(trend)
-			mu.Unlock()
-		}(tf)
-	}
-
-	wg.Wait()
-
-	if len(trends) == 0 {
-		sa.logger.Debug("No MTF trends collected", "symbol", symbol)
-		return nil
-	}
-
-	// Analyze trend alignment
-	uptrends := 0
-	downtrends := 0
-	for _, trend := range trends {
-		if trend == "UPTREND" {
-			uptrends++
-		} else if trend == "DOWNTREND" {
-			downtrends++
-		}
-	}
-
-	direction := "neutral"
-	confidence := 0.5
-	aligned := false
-
-	if uptrends == len(trends) {
-		direction = "long"
-		confidence = 0.85 // High confidence when all timeframes agree
-		aligned = true
-	} else if downtrends == len(trends) {
-		direction = "short"
-		confidence = 0.85
-		aligned = true
-	} else if uptrends > downtrends {
-		direction = "long"
-		confidence = 0.5 + float64(uptrends-downtrends)*0.1
-	} else if downtrends > uptrends {
-		direction = "short"
-		confidence = 0.5 + float64(downtrends-uptrends)*0.1
-	}
-
-	reasoning := fmt.Sprintf("MTF Analysis: %d/%d uptrend, %d/%d downtrend",
-		uptrends, len(trends), downtrends, len(trends))
-
-	return &EnhancedSignal{
-		Source:       SourceMultiTimeframe,
-		Symbol:       symbol,
-		Direction:    direction,
-		Confidence:   confidence,
-		Reasoning:    reasoning,
-		TrendAligned: aligned,
-		Metadata: map[string]interface{}{
-			"timeframes": timeframes,
-			"trends":     trends,
-			"uptrends":   uptrends,
-			"downtrends": downtrends,
-		},
-	}
-}
+// NOTE: collectMultiTimeframeSignal removed (Story 9.5)
+// MTF logic is now handled by TrendFilterValidator in ginie_trend_filters.go
+// This change ensures:
+// 1. ALL trading styles (including scalp) check higher timeframes
+// 2. MTF acts as a BLOCKING filter, not a weighted signal contributor
+// 3. Higher TF disagreement blocks trades entirely instead of just reducing confidence
 
 // logSignals logs all collected signals for debugging
 func (sa *SignalAggregator) logSignals(symbol string, signals []EnhancedSignal) {
@@ -849,8 +741,7 @@ func (sa *SignalAggregator) getWeight(source SignalSource, weights SignalWeight)
 		return weights.PatternScanner
 	case SourceTechnical:
 		return weights.Technical
-	case SourceMultiTimeframe:
-		return weights.MultiTimeframe
+	// NOTE: SourceMultiTimeframe case removed - MTF now handled by TrendFilterValidator
 	default:
 		return 0.1
 	}

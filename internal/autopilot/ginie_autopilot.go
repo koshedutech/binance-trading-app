@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"os"
 	"sort"
@@ -936,6 +937,9 @@ type GinieAutopilot struct {
 
 	// Instance Control for active/standby coordination (Story 9.6)
 	instanceControl *InstanceControl
+
+	// Trend Filter Validator for blocking wrong-direction trades (Story 9.5)
+	trendValidator *TrendFilterValidator
 }
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
@@ -4109,6 +4113,50 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 		return false, fmt.Sprintf("funding_rate: %s", reason)
 	}
 
+	// TREND FILTER VALIDATION (Story 9.5): Block wrong-direction trades
+	// Validates: Price vs EMA, VWAP alignment, Higher TF trend, BTC trend
+	modeConfig := ga.getModeConfig(selectedMode)
+	if modeConfig != nil && (modeConfig.TrendFilters != nil || modeConfig.MTF != nil) {
+		// Extract EMA and VWAP from EntryConfluence (calculated during signal generation)
+		var currentPrice, ema, vwap float64
+		if decision.EntryConfluence != nil {
+			ema = decision.EntryConfluence.EMA20
+			vwap = decision.EntryConfluence.VWAPValue
+		}
+		// Get current price for validation (use EntryLow/High midpoint or fetch fresh)
+		if decision.TradeExecution.EntryLow > 0 && decision.TradeExecution.EntryHigh > 0 {
+			currentPrice = (decision.TradeExecution.EntryLow + decision.TradeExecution.EntryHigh) / 2
+		}
+		if currentPrice <= 0 {
+			// Fetch fresh price if not available in decision
+			if freshPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol); err == nil {
+				currentPrice = freshPrice
+			}
+		}
+
+		// Create validator with mode-specific config
+		validator := NewTrendFilterValidator(
+			modeConfig.TrendFilters,
+			modeConfig.MTF,
+			ga.futuresClient,
+			slog.Default(),
+		)
+
+		// Validate all trend filters - block if any fail
+		direction := action // "LONG" or "SHORT"
+		passed, reason := validator.ValidateAll(symbol, direction, currentPrice, ema, vwap)
+		if !passed {
+			log.Printf("[TREND-FILTER] %s: Trade BLOCKED - %s", symbol, reason)
+			ga.logger.Warn("Ginie trade blocked by trend filter",
+				"symbol", symbol,
+				"direction", direction,
+				"mode", selectedMode,
+				"reason", reason,
+			)
+			return false, fmt.Sprintf("trend_filter: %s", reason)
+		}
+	}
+
 	// Check if we already have a position - if so, evaluate hedge opportunity
 	if existingPos, exists := ga.positions[symbol]; exists {
 		// Check if we should open a hedge position (opposite direction)
@@ -4263,7 +4311,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	var stagedEntryMaxLevels int
 	var stagedEntryFirstLevelPct float64 = 40.0 // Default: 40% first level
 
-	modeConfig := ga.getModeConfig(selectedMode)
+	modeConfig = ga.getModeConfig(selectedMode)
 	if modeConfig != nil && modeConfig.Averaging != nil && modeConfig.Averaging.StagedEntryEnabled {
 		stagedEntryActive = true
 		stagedEntryTargetQty = quantity // Store the full target quantity

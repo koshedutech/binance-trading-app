@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "version": "1.4.0",
+    "version": "1.5.0",
     "schema_version": 3,
-    "last_updated": "2026-01-12T23:45:00Z",
-    "updated_by": "claude-fix",
-    "description": "Master default settings. Scalp min_adx reduced from 20 to 15 (allows signals in moderate trends). Previous fixes: requires_trend_align=true, block_on_disagreement=true."
+    "last_updated": "2026-01-13T10:00:00Z",
+    "updated_by": "claude-story-9.5",
+    "description": "Story 9.5 Phase 1A: Refactored MTF with blocking capability, added trend_filters (BTC check, Price/EMA, VWAP). Previous: requires_trend_align=true, block_on_disagreement=true."
   },
   "global_trading": {
     "risk_level": "moderate",
@@ -167,16 +167,42 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "mtf_enabled": true,
-        "primary_timeframe": "1d",
-        "primary_weight": 0.5,
-        "secondary_timeframe": "4h",
-        "secondary_weight": 0.3,
-        "tertiary_timeframe": "1h",
-        "tertiary_weight": 0.2,
-        "min_consensus": 2,
-        "min_weighted_strength": 50,
-        "trend_stability_check": true
+        "_description": "Multi-timeframe analysis with blocking capability",
+        "enabled": true,
+        "higher_tf": {
+          "enabled": true,
+          "timeframe": "1d",
+          "block_on_disagreement": true,
+          "check_ema_trend": true,
+          "ema_fast": 20,
+          "ema_slow": 50
+        },
+        "trading_tf": {
+          "timeframe": "4h",
+          "require_alignment": true
+        }
+      },
+      "trend_filters": {
+        "_description": "Additional trend validation filters that block wrong-direction trades",
+        "btc_trend_check": {
+          "enabled": true,
+          "btc_symbol": "BTCUSDT",
+          "block_alt_long_when_btc_bearish": true,
+          "block_alt_short_when_btc_bullish": true,
+          "btc_trend_timeframe": "4h"
+        },
+        "price_vs_ema": {
+          "enabled": true,
+          "require_price_above_ema_for_long": true,
+          "require_price_below_ema_for_short": true,
+          "ema_period": 100
+        },
+        "vwap_filter": {
+          "enabled": false,
+          "require_price_above_vwap_for_long": true,
+          "require_price_below_vwap_for_short": true,
+          "near_vwap_tolerance_percent": 0
+        }
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -345,16 +371,42 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "mtf_enabled": true,
-        "primary_timeframe": "15m",
-        "primary_weight": 0.4,
-        "secondary_timeframe": "5m",
-        "secondary_weight": 0.35,
-        "tertiary_timeframe": "1m",
-        "tertiary_weight": 0.25,
-        "min_consensus": 2,
-        "min_weighted_strength": 60,
-        "trend_stability_check": true
+        "_description": "Multi-timeframe analysis with blocking capability",
+        "enabled": true,
+        "higher_tf": {
+          "enabled": true,
+          "timeframe": "1h",
+          "block_on_disagreement": true,
+          "check_ema_trend": true,
+          "ema_fast": 20,
+          "ema_slow": 50
+        },
+        "trading_tf": {
+          "timeframe": "15m",
+          "require_alignment": true
+        }
+      },
+      "trend_filters": {
+        "_description": "Additional trend validation filters that block wrong-direction trades",
+        "btc_trend_check": {
+          "enabled": true,
+          "btc_symbol": "BTCUSDT",
+          "block_alt_long_when_btc_bearish": true,
+          "block_alt_short_when_btc_bullish": true,
+          "btc_trend_timeframe": "15m"
+        },
+        "price_vs_ema": {
+          "enabled": true,
+          "require_price_above_ema_for_long": true,
+          "require_price_below_ema_for_short": true,
+          "ema_period": 20
+        },
+        "vwap_filter": {
+          "enabled": true,
+          "require_price_above_vwap_for_long": true,
+          "require_price_below_vwap_for_short": true,
+          "near_vwap_tolerance_percent": 0.1
+        }
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -523,16 +575,42 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "mtf_enabled": true,
-        "primary_timeframe": "4h",
-        "primary_weight": 0.45,
-        "secondary_timeframe": "1h",
-        "secondary_weight": 0.35,
-        "tertiary_timeframe": "15m",
-        "tertiary_weight": 0.2,
-        "min_consensus": 2,
-        "min_weighted_strength": 55,
-        "trend_stability_check": true
+        "_description": "Multi-timeframe analysis with blocking capability",
+        "enabled": true,
+        "higher_tf": {
+          "enabled": true,
+          "timeframe": "4h",
+          "block_on_disagreement": true,
+          "check_ema_trend": true,
+          "ema_fast": 20,
+          "ema_slow": 50
+        },
+        "trading_tf": {
+          "timeframe": "1h",
+          "require_alignment": true
+        }
+      },
+      "trend_filters": {
+        "_description": "Additional trend validation filters that block wrong-direction trades",
+        "btc_trend_check": {
+          "enabled": true,
+          "btc_symbol": "BTCUSDT",
+          "block_alt_long_when_btc_bearish": true,
+          "block_alt_short_when_btc_bullish": true,
+          "btc_trend_timeframe": "1h"
+        },
+        "price_vs_ema": {
+          "enabled": true,
+          "require_price_above_ema_for_long": true,
+          "require_price_below_ema_for_short": true,
+          "ema_period": 50
+        },
+        "vwap_filter": {
+          "enabled": true,
+          "require_price_above_vwap_for_long": true,
+          "require_price_below_vwap_for_short": true,
+          "near_vwap_tolerance_percent": 0.2
+        }
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
@@ -701,16 +779,42 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "mtf_enabled": true,
-        "primary_timeframe": "5m",
-        "primary_weight": 0.4,
-        "secondary_timeframe": "3m",
-        "secondary_weight": 0.35,
-        "tertiary_timeframe": "1m",
-        "tertiary_weight": 0.25,
-        "min_consensus": 2,
-        "min_weighted_strength": 50,
-        "trend_stability_check": true
+        "_description": "Multi-timeframe analysis with blocking capability",
+        "enabled": true,
+        "higher_tf": {
+          "enabled": true,
+          "timeframe": "15m",
+          "block_on_disagreement": true,
+          "check_ema_trend": true,
+          "ema_fast": 20,
+          "ema_slow": 50
+        },
+        "trading_tf": {
+          "timeframe": "5m",
+          "require_alignment": true
+        }
+      },
+      "trend_filters": {
+        "_description": "Additional trend validation filters that block wrong-direction trades",
+        "btc_trend_check": {
+          "enabled": false,
+          "btc_symbol": "BTCUSDT",
+          "block_alt_long_when_btc_bearish": true,
+          "block_alt_short_when_btc_bullish": true,
+          "btc_trend_timeframe": "5m"
+        },
+        "price_vs_ema": {
+          "enabled": true,
+          "require_price_above_ema_for_long": true,
+          "require_price_below_ema_for_short": true,
+          "ema_period": 9
+        },
+        "vwap_filter": {
+          "enabled": true,
+          "require_price_above_vwap_for_long": true,
+          "require_price_below_vwap_for_short": true,
+          "near_vwap_tolerance_percent": 0.05
+        }
       },
       "dynamic_ai_exit": {
         "dynamic_ai_exit_enabled": true,
