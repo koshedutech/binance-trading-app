@@ -1,30 +1,16 @@
 # Production Docker Compose Configuration
-# Usage: docker-compose -f docker-compose.prod.yml up -d
-# IMPORTANT: Edit the environment variables below before deploying!
+# SHARED INFRASTRUCTURE: Uses infra's Redis for position state and instance control
+#
+# Usage:
+#   1. First start infra: docker-compose -f docker-compose.infra.yml up -d
+#   2. Then start prod: docker-compose -f docker-compose.prod.yml up -d
+#
+# IMPORTANT: Prod is ACTIVE by default - it manages trades while dev is standby
 
-# Explicit project name to avoid conflicts with development
 name: binance-prod
 
 services:
-  # Redis Cache (Epic 6 - Settings Cache Infrastructure)
-  redis:
-    image: redis:7-alpine
-    container_name: binance-bot-redis-prod
-    restart: always
-    command: redis-server --appendonly yes
-    environment:
-      - TZ=Asia/Phnom_Penh
-    volumes:
-      - redis-data:/data
-    networks:
-      - trading-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # PostgreSQL Database with production settings
+  # PostgreSQL Database - Prod's own (stable schema)
   postgres:
     image: postgres:15-alpine
     container_name: binance-bot-postgres-prod
@@ -38,7 +24,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./backups:/backups
     networks:
-      - trading-network
+      - prod-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trading_bot"]
       interval: 10s
@@ -56,9 +42,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
+      # Instance Control - Prod is ACTIVE by default
+      - INSTANCE_ID=prod
+      - ACTIVE_BY_DEFAULT=true
       # Timezone - Cambodia
       - TZ=Asia/Phnom_Penh
       # Binance API - Keys are stored per-user in database
@@ -66,7 +53,7 @@ services:
       - BINANCE_TESTNET=false
       - MOCK_MODE=false
       - TRADING_DRY_RUN=false
-      # Database
+      # Database - Prod's own PostgreSQL
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=trading_bot
@@ -127,9 +114,9 @@ services:
       - SUBSCRIPTION_ENABLED=false
       # API Key Encryption (required for secure API key storage)
       - ENCRYPTION_KEY=prod-encryption-key-32-chars-1234567890ab
-      # Redis Cache Configuration (Epic 6)
+      # Redis Cache Configuration - Connect to SHARED Redis
       - REDIS_ENABLED=true
-      - REDIS_HOST=redis
+      - REDIS_HOST=binance-bot-redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
       - REDIS_DB=0
@@ -137,12 +124,10 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./config.json:/app/config.json:ro
-      # BUG FIX: Persist Ginie state files across container restarts
-      # Without this, scalp_reentry TP levels reset to TP1 on restart
-      - ./ginie_position_state.json:/app/ginie_position_state.json
-      - ./autopilot_settings.json:/app/autopilot_settings.json
+      # Note: ginie_position_state.json removed - now using Redis
     networks:
-      - trading-network
+      - prod-network
+      - binance-infra_infra-network  # Connect to shared Redis
     ports:
       - "8095:8095"
     logging:
@@ -168,7 +153,7 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
     networks:
-      - trading-network
+      - prod-network
     ports:
       - "80:80"
       - "443:443"
@@ -190,7 +175,7 @@ services:
     volumes:
       - ./backups:/backups
     networks:
-      - trading-network
+      - prod-network
     entrypoint: /bin/sh
     command: >
       -c 'while true; do
@@ -205,11 +190,12 @@ services:
       - with-backup
 
 networks:
-  trading-network:
+  prod-network:
     driver: bridge
+  # External network for shared Redis
+  binance-infra_infra-network:
+    external: true
 
 volumes:
   postgres-data:
-    driver: local
-  redis-data:
     driver: local

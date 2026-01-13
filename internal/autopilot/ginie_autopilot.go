@@ -933,6 +933,9 @@ type GinieAutopilot struct {
 	// Anti-panic sell tracking (consecutive warning counter per symbol)
 	earlyWarningCounter map[string]int       // symbol -> consecutive close_now warning count
 	lastWarningTime     map[string]time.Time // symbol -> time of last warning
+
+	// Instance Control for active/standby coordination (Story 9.6)
+	instanceControl *InstanceControl
 }
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
@@ -1351,6 +1354,48 @@ func (ga *GinieAutopilot) SetLLMAnalyzer(analyzer *llm.Analyzer) {
 			ga.logger.Info("LLM client propagated to GinieAnalyzer for coin selection")
 		}
 	}
+}
+
+// SetInstanceControl sets the instance control manager for active/standby coordination (Story 9.6)
+func (ga *GinieAutopilot) SetInstanceControl(ic *InstanceControl) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.instanceControl = ic
+	if ic != nil {
+		ga.logger.Info("Instance control set for Ginie",
+			"instance_id", ic.GetInstanceID(),
+			"is_active", ic.IsActive())
+	}
+}
+
+// GetInstanceControl returns the instance control manager
+func (ga *GinieAutopilot) GetInstanceControl() *InstanceControl {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return ga.instanceControl
+}
+
+// requireActive returns an error if this instance is in STANDBY mode
+// This is used as a guard at the start of trade execution functions to prevent
+// duplicate orders when multiple instances are running (Story 9.6)
+func (ga *GinieAutopilot) requireActive() error {
+	if ga.instanceControl != nil && !ga.instanceControl.IsActive() {
+		return fmt.Errorf("instance %s is in STANDBY mode - trade execution blocked",
+			ga.instanceControl.GetInstanceID())
+	}
+	return nil
+}
+
+// requireActiveWithSymbol returns an error with symbol context if in STANDBY mode
+// This provides more detailed logging for debugging
+func (ga *GinieAutopilot) requireActiveWithSymbol(symbol, operation string) error {
+	if ga.instanceControl != nil && !ga.instanceControl.IsActive() {
+		instanceID := ga.instanceControl.GetInstanceID()
+		log.Printf("[GINIE] Instance %s is STANDBY - skipping %s for %s", instanceID, operation, symbol)
+		return fmt.Errorf("instance %s is in STANDBY mode - skipping %s for %s",
+			instanceID, operation, symbol)
+	}
+	return nil
 }
 
 // HasLLMAnalyzer returns true if an LLM analyzer is configured and enabled
@@ -3920,6 +3965,12 @@ func (ga *GinieAutopilot) checkAndExecuteStagedEntry(pos *GiniePosition) {
 // executeStagedEntryOrder places the order for a staged entry level
 func (ga *GinieAutopilot) executeStagedEntryOrder(pos *GiniePosition, quantity float64, currentPrice float64) {
 	symbol := pos.Symbol
+
+	// STANDBY CHECK: Block staged entry if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, fmt.Sprintf("staged entry level %d", pos.StagedEntryLevel+1)); err != nil {
+		return
+	}
+
 	isLong := pos.Side == "LONG"
 
 	// Determine order parameters
@@ -4018,6 +4069,11 @@ func (ga *GinieAutopilot) executeStagedEntryOrder(pos *GiniePosition, quantity f
 // - success=true: order was placed (may be MARKET fill or pending LIMIT)
 // - success=false: trade was rejected with reason
 func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) (bool, string) {
+	// STANDBY CHECK: Block trade execution if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(decision.Symbol, "trade entry"); err != nil {
+		return false, "instance_standby"
+	}
+
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -5442,6 +5498,11 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 
 // executePartialClose closes a portion of the position
 func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice float64, tpLevel int) {
+	// STANDBY CHECK: Block TP execution if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(pos.Symbol, fmt.Sprintf("TP%d execution", tpLevel)); err != nil {
+		return
+	}
+
 	// Calculate quantity to close
 	tpConfig := pos.TakeProfits[tpLevel-1]
 	closePercent := tpConfig.Percent / 100.0
@@ -5680,6 +5741,11 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition, reason string) {
 
 // placeNextTPOrder places the next TP order on Binance after a TP level is hit
 func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel int) {
+	// STANDBY CHECK: Block TP order placement if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(pos.Symbol, fmt.Sprintf("TP%d order placement", currentTPLevel+1)); err != nil {
+		return
+	}
+
 	nextTPIndex := currentTPLevel // currentTPLevel is 1-based, so index for next is same as level
 
 	// CRITICAL: If TakeProfits is empty or has insufficient levels, regenerate them
@@ -6023,6 +6089,11 @@ func (ga *GinieAutopilot) updateBinanceSLOrder(pos *GiniePosition) {
 // placeSLOrder places a new SL algo order (helper for updateBinanceSLOrder)
 // CRITICAL: Uses ClosePosition=true to ensure the ENTIRE position is closed regardless of quantity tracking
 func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
+	// STANDBY CHECK: Block SL placement if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(pos.Symbol, "SL order placement"); err != nil {
+		return
+	}
+
 	closeSide := "SELL"
 	positionSide := binance.PositionSideLong
 	if pos.Side == "SHORT" {
@@ -6165,6 +6236,11 @@ func (ga *GinieAutopilot) persistTradeClosure(pos *GiniePosition, exitPrice floa
 
 // closePosition closes the entire remaining position
 func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, currentPrice float64, reason string, tpLevel int) {
+	// STANDBY CHECK: Block position close if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, fmt.Sprintf("close position (%s)", reason)); err != nil {
+		return
+	}
+
 	// CRITICAL: Prevent duplicate close calls using IsClosing flag
 	ga.mu.Lock()
 	if pos.IsClosing {
@@ -6379,6 +6455,11 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	}
 
 	symbol := pos.Symbol
+
+	// STANDBY CHECK: Block market close if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, fmt.Sprintf("market close (%s)", reason)); err != nil {
+		return err
+	}
 
 	// CRITICAL: Prevent duplicate close calls using IsClosing flag
 	ga.mu.Lock()
@@ -8640,6 +8721,11 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 		return
 	}
 
+	// STANDBY CHECK: Block SL/TP placement if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(pos.Symbol, "SL/TP placement"); err != nil {
+		return
+	}
+
 	// CRITICAL FIX: Validate SL/TP prices are reasonable before placing orders
 	// This guards against bugs where prices are calculated incorrectly (e.g., 97.xx instead of 12.xx)
 	pos = ga.validateAndFixSLTPPrices(pos)
@@ -9257,6 +9343,11 @@ func (ga *GinieAutopilot) emergencyClosePosition(pos *GiniePosition, reason stri
 		return fmt.Errorf("nil position")
 	}
 
+	// STANDBY CHECK: Block emergency close if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(pos.Symbol, fmt.Sprintf("emergency close (%s)", reason)); err != nil {
+		return err
+	}
+
 	// Skip dust positions - they cannot be closed with quantity-based orders
 	// These are positions below the minimum tradeable size and will need manual handling
 	if pos.IsDustPosition {
@@ -9370,6 +9461,11 @@ func (ga *GinieAutopilot) checkSinglePositionProtection(pos *GiniePosition) {
 func (ga *GinieAutopilot) placeTPOrderOnly(pos *GiniePosition) {
 	if pos == nil {
 		log.Printf("[PROTECTION-TP] placeTPOrderOnly called with nil position")
+		return
+	}
+
+	// STANDBY CHECK: Block TP placement if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(pos.Symbol, "TP order placement"); err != nil {
 		return
 	}
 
@@ -12510,6 +12606,12 @@ func (ga *GinieAutopilot) GetSLUpdateStats() map[string]interface{} {
 
 // CloseAllPositions closes all Ginie-managed positions (Ginie panic button)
 func (ga *GinieAutopilot) CloseAllPositions() (int, float64, error) {
+	// STANDBY CHECK: Block panic close if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActive(); err != nil {
+		log.Printf("[GINIE] Panic close blocked - instance in STANDBY mode")
+		return 0, 0, err
+	}
+
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -13201,6 +13303,11 @@ func (ga *GinieAutopilot) scanStrategies() {
 
 // executeStrategyTrade executes a trade based on a strategy signal
 func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
+	// STANDBY CHECK: Block strategy trade if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(signal.Symbol, fmt.Sprintf("strategy trade (%s)", signal.StrategyName)); err != nil {
+		return
+	}
+
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -14743,6 +14850,11 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice float64, reason string) {
 	symbol := pos.Symbol
 
+	// STANDBY CHECK: Block ultra-fast exit if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, fmt.Sprintf("ultra-fast exit (%s)", reason)); err != nil {
+		return
+	}
+
 	// Calculate quantity to close (all remaining)
 	closeQty := pos.RemainingQty
 
@@ -14917,6 +15029,11 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 func (ga *GinieAutopilot) executeUltraFastPartialClose(pos *GiniePosition, currentPrice float64, closePercent float64, tpLevel int, pnlPercent float64) float64 {
 	symbol := pos.Symbol
 
+	// STANDBY CHECK: Block ultra-fast partial close if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, fmt.Sprintf("ultra-fast TP%d partial close", tpLevel)); err != nil {
+		return 0
+	}
+
 	// Calculate quantity to close (percentage of remaining)
 	closeQty := pos.RemainingQty * (closePercent / 100.0)
 	if closeQty <= 0 {
@@ -15078,6 +15195,11 @@ func (ga *GinieAutopilot) checkUltraFastTrailingStopHit(pos *GiniePosition, curr
 // executeUltraFastEntry opens an ultra-fast position with signal-derived parameters
 // Validates safety checks and applies fee-aware profit targets
 func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFastSignal) error {
+	// STANDBY CHECK: Block ultra-fast entry if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, "ultra-fast entry"); err != nil {
+		return err
+	}
+
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -15381,6 +15503,11 @@ func (ga *GinieAutopilot) executeUltraFastEntry(symbol string, signal *UltraFast
 // executeUltraFastEntryWithSize executes an ultra-fast entry with dynamic position sizing
 // This is used by the smart margin allocation system to optimize capital usage
 func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *UltraFastSignal, positionUSD float64) error {
+	// STANDBY CHECK: Block ultra-fast entry if this instance is in standby mode (Story 9.6)
+	if err := ga.requireActiveWithSymbol(symbol, "ultra-fast entry with size"); err != nil {
+		return err
+	}
+
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 

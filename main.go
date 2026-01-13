@@ -21,6 +21,7 @@ import (
 	"binance-trading-bot/internal/billing"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/bot"
+	"binance-trading-bot/internal/cache"
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/continuous"
 	"binance-trading-bot/internal/database"
@@ -226,6 +227,22 @@ func main() {
 	// Initialize API Key Service for user-specific keys from database
 	apiKeyService := apikeys.NewService(earlyRepo) // Used by UserAutopilotManager for per-user AI keys
 	logger.Info("API Key Service initialized (using user-stored keys from database)")
+
+	// Initialize Redis Cache Service for caching and instance control
+	var cacheService *cache.CacheService
+	if cfg.RedisConfig.Enabled {
+		var err error
+		cacheService, err = cache.NewCacheService(cfg.RedisConfig)
+		if err != nil {
+			logger.Warn("Failed to initialize Redis cache service", "error", err)
+		} else {
+			logger.Info("Redis cache service initialized",
+				"address", cfg.RedisConfig.Address,
+				"healthy", cacheService.IsHealthy())
+		}
+	} else {
+		logger.Info("Redis cache service disabled - running without caching")
+	}
 
 	// Initialize Futures clients - NO GLOBAL API KEYS
 	// All API keys are per-user and stored in the database
@@ -588,6 +605,34 @@ func main() {
 				"symbols_cached", symbolValidator.GetCacheSize())
 			// Start periodic sync in background
 			symbolValidator.StartPeriodicSync()
+		}
+
+		// Initialize InstanceControl for active/standby coordination (Story 9.6)
+		// Only if Redis is enabled and healthy
+		if cacheService != nil && cacheService.IsHealthy() {
+			instanceID := getEnv("INSTANCE_ID", "standalone")
+			activeByDefault := getEnvBool("ACTIVE_BY_DEFAULT", true)
+
+			instanceControl := autopilot.NewInstanceControl(
+				cacheService.GetClient(),
+				instanceID,
+				activeByDefault,
+			)
+
+			// Start the instance control (heartbeat + pub/sub)
+			if err := instanceControl.Start(ctx); err != nil {
+				logger.Warn("Failed to start instance control", "error", err)
+			} else {
+				// Wire it to FuturesController
+				futuresAutopilotController.SetInstanceControl(instanceControl)
+
+				logger.Info("Instance control initialized",
+					"instance_id", instanceID,
+					"is_active", instanceControl.IsActive(),
+					"active_by_default", activeByDefault)
+			}
+		} else {
+			logger.Info("Instance control not initialized - Redis not available, running in standalone mode")
 		}
 	}
 
@@ -982,6 +1027,11 @@ func main() {
 		logger.Info("Autopilot stopped")
 	}
 	if futuresAutopilotController != nil {
+		// Stop instance control first (gracefully deactivate before shutdown)
+		if ic := futuresAutopilotController.GetInstanceControl(); ic != nil {
+			ic.Stop()
+			logger.Info("Instance control stopped")
+		}
 		futuresAutopilotController.Stop()
 		logger.Info("Futures autopilot stopped")
 	}
@@ -1010,6 +1060,15 @@ func main() {
 	tradingBot.Stop()
 	coinScreener.Stop()
 	strategyScanner.Stop()
+
+	// Close Redis cache service
+	if cacheService != nil {
+		if err := cacheService.Close(); err != nil {
+			logger.Warn("Error closing cache service", "error", err)
+		} else {
+			logger.Info("Cache service closed")
+		}
+	}
 
 	log.Println("Shutdown complete")
 }

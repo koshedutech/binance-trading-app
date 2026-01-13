@@ -1,26 +1,17 @@
-# Development Docker Compose - Explicit project name to avoid conflicts with production
+# Development Docker Compose
+# SHARED INFRASTRUCTURE: Uses infra's Redis for position state and instance control
+#
+# Usage:
+#   1. First start infra: docker-compose -f docker-compose.infra.yml up -d
+#   2. Then start dev: docker-compose up -d
+#   OR use: ./scripts/docker-dev.sh (handles both automatically)
+#
+# Dev can restart freely without affecting shared Redis!
+
 name: binance-dev
 
 services:
-  # Redis Cache (Epic 6 - Settings Cache Infrastructure)
-  redis:
-    image: redis:7-alpine
-    container_name: binance-bot-redis-dev
-    restart: unless-stopped
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
-    volumes:
-      - redis-data:/data
-    ports:
-      - "6380:6379"
-    networks:
-      - dev-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # PostgreSQL Database
+  # PostgreSQL Database - Dev's own (separate schema from prod)
   postgres:
     image: postgres:15-alpine
     container_name: binance-bot-postgres-dev
@@ -51,16 +42,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     environment:
+      # Instance Control - Dev is STANDBY by default (Prod is active)
+      - INSTANCE_ID=dev
+      - ACTIVE_BY_DEFAULT=false
       # Binance API - All API keys are per-user, stored in database via Settings UI
       # No global/environment API keys supported
       - BINANCE_BASE_URL=https://fapi.binance.com
       - BINANCE_TESTNET=false
       - MOCK_MODE=true
       - TRADING_DRY_RUN=true
-      # Database
+      # Database - Dev's own PostgreSQL
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=trading_bot
@@ -148,9 +140,9 @@ services:
       - ENCRYPTION_KEY=dev-encryption-key-32-chars-1234567890ab
       # Subscription Configuration
       - SUBSCRIPTION_ENABLED=false
-      # Redis Cache Configuration (Epic 6)
+      # Redis Cache Configuration - Connect to SHARED Redis
       - REDIS_ENABLED=true
-      - REDIS_HOST=redis
+      - REDIS_HOST=binance-bot-redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
       - REDIS_DB=0
@@ -170,6 +162,7 @@ services:
       - "8094:8094"
     networks:
       - dev-network
+      - binance-infra_infra-network  # Connect to shared Redis
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8094/health"]
       interval: 30s
@@ -185,10 +178,12 @@ services:
 networks:
   dev-network:
     driver: bridge
+  # External network for shared Redis
+  binance-infra_infra-network:
+    external: true
 
 volumes:
   postgres-data:
-  redis-data:
   go-mod-cache:
   go-build-cache:
   node-modules-cache:

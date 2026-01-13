@@ -572,6 +572,9 @@ type FuturesController struct {
 	sentimentTotalCount   int
 	confluenceAgreements  int
 	confluenceTotal       int
+
+	// Instance control for active/standby coordination (Story 9.6)
+	instanceControl *InstanceControl
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -1116,6 +1119,20 @@ func (fc *FuturesController) GetUserAutopilotManager() *UserAutopilotManager {
 	fc.mu.RLock()
 	defer fc.mu.RUnlock()
 	return fc.userAutopilotManager
+}
+
+// SetInstanceControl sets the instance control for active/standby coordination
+func (fc *FuturesController) SetInstanceControl(ic *InstanceControl) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.instanceControl = ic
+}
+
+// GetInstanceControl returns the instance control
+func (fc *FuturesController) GetInstanceControl() *InstanceControl {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+	return fc.instanceControl
 }
 
 // StartGinieAutopilot starts the Ginie autonomous trading

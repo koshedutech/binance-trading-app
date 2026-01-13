@@ -188,6 +188,10 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/ginie/adaptive-recommendations":  true,
 		"/api/futures/ginie/llm-diagnostics-v2":        true,
 		"/api/futures/ginie/trade-history-ai":          true,
+		// Instance Control endpoints (Story 9.6 - Redis state only, no Binance API)
+		"/api/futures/ginie/instance-status":           true,
+		"/api/futures/ginie/take-control":              true,
+		"/api/futures/ginie/release-control":           true,
 		// Autopilot status endpoints (internal state)
 		"/api/futures/autopilot/status":                true,
 		"/api/futures/autopilot/circuit-breaker/status": true,
@@ -783,6 +787,12 @@ func (s *Server) setupRoutes() {
 
 			// Position Mode Conversion endpoint
 			futures.POST("/ginie/positions/:symbol/convert-mode", s.handleConvertPositionMode)
+
+			// Instance Control endpoints (Story 9.6 - Active/Standby Container Control)
+			// These endpoints manage multi-instance coordination for zero-downtime protection
+			futures.GET("/ginie/instance-status", s.handleGetInstanceStatus)
+			futures.POST("/ginie/take-control", s.handleTakeControl)
+			futures.POST("/ginie/release-control", s.handleReleaseControl)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

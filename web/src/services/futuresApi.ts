@@ -1400,6 +1400,37 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== INSTANCE CONTROL (Story 9.6) ====================
+
+  async getInstanceStatus(): Promise<{
+    instance_id: string;        // "dev" or "prod"
+    is_active: boolean;         // This instance's status
+    active_instance: string;    // Which instance is active
+    other_alive: boolean;       // Is other instance running
+    last_heartbeat: string;     // Last heartbeat time (ISO string)
+    can_take_control: boolean;  // Can this instance take over
+  }> {
+    const { data } = await this.client.get('/ginie/instance-status');
+    return data;
+  }
+
+  async takeControl(request: { force?: boolean } = {}): Promise<{
+    success: boolean;
+    message: string;
+    wait_seconds?: number;
+  }> {
+    const { data } = await this.client.post('/ginie/take-control', request);
+    return data;
+  }
+
+  async releaseControl(): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const { data } = await this.client.post('/ginie/release-control');
+    return data;
+  }
+
   // ==================== SYMBOL PERFORMANCE SETTINGS ====================
 
   async getSymbolPerformanceSettings(): Promise<{

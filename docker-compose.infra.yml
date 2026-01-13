@@ -1,0 +1,43 @@
+# Infrastructure Docker Compose - Shared Redis
+# This runs INDEPENDENTLY and should NEVER be restarted during dev/prod operations
+#
+# Usage:
+#   Start:  docker-compose -f docker-compose.infra.yml up -d
+#   Stop:   docker-compose -f docker-compose.infra.yml down
+#   Status: docker-compose -f docker-compose.infra.yml ps
+#
+# IMPORTANT: Start this FIRST before starting dev or prod containers!
+
+name: binance-infra
+
+services:
+  # Redis - Shared by Dev and Prod for:
+  #   - Position state (TP levels, scalp reentry cycles)
+  #   - Active instance control
+  #   - Pub/Sub signaling between containers
+  redis:
+    image: redis:7-alpine
+    container_name: binance-bot-redis
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    environment:
+      - TZ=Asia/Phnom_Penh
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - infra-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  infra-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+    driver: local

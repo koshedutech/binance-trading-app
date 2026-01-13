@@ -425,6 +425,15 @@ func applyEnvOverrides(cfg *Config) {
 	cfg.BillingConfig.StripePublishableKey = getEnvOrDefault("STRIPE_PUBLISHABLE_KEY", cfg.BillingConfig.StripePublishableKey)
 	cfg.BillingConfig.StripeWebhookSecret = getEnvOrDefault("STRIPE_WEBHOOK_SECRET", cfg.BillingConfig.StripeWebhookSecret)
 
+	// Redis config
+	cfg.RedisConfig.Enabled = getEnvOrDefault("REDIS_ENABLED", "false") == "true"
+	redisHost := getEnvOrDefault("REDIS_HOST", "localhost")
+	redisPort := getEnvOrDefault("REDIS_PORT", "6379")
+	cfg.RedisConfig.Address = redisHost + ":" + redisPort
+	cfg.RedisConfig.Password = getEnvOrDefault("REDIS_PASSWORD", "")
+	cfg.RedisConfig.DB = getEnvIntOrDefault("REDIS_DB", 0)
+	cfg.RedisConfig.PoolSize = getEnvIntOrDefault("REDIS_POOL_SIZE", 10)
+
 }
 
 
