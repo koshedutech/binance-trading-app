@@ -1,10 +1,10 @@
 {
   "metadata": {
-    "version": "1.3.0",
+    "version": "1.4.0",
     "schema_version": 3,
-    "last_updated": "2026-01-12T23:10:00Z",
+    "last_updated": "2026-01-12T23:45:00Z",
     "updated_by": "claude-fix",
-    "description": "Master default settings for Binance Trading Bot. CRITICAL FIX: scalp requires_trend_align=true (prevents LONG in bearish markets), added mode_llm_settings with block_on_disagreement=true for all modes, scalp llm_weight=0.35."
+    "description": "Master default settings. Scalp min_adx reduced from 20 to 15 (allows signals in moderate trends). Previous fixes: requires_trend_align=true, block_on_disagreement=true."
   },
   "global_trading": {
     "risk_level": "moderate",
@@ -158,7 +158,7 @@
         "risk_multiplier_aggressive": 0,
         "max_drawdown_percent": 0,
         "max_daily_loss_percent": 0,
-        "min_adx": 30
+        "min_adx": 25
       },
       "trend_divergence": {
         "enabled": true,
@@ -336,7 +336,7 @@
         "risk_multiplier_aggressive": 0,
         "max_drawdown_percent": 0,
         "max_daily_loss_percent": 0,
-        "min_adx": 20
+        "min_adx": 15
       },
       "trend_divergence": {
         "enabled": true,
@@ -834,7 +834,7 @@
     "max_reentry_attempts": 1,
     "reentry_timeout_sec": 300,
     "reentry_require_trend_confirmation": true,
-    "reentry_min_adx": 20,
+    "reentry_min_adx": 25,
     "final_trailing_percent": 5,
     "final_hold_min_percent": 20,
     "dynamic_sl_max_loss_pct": 40,

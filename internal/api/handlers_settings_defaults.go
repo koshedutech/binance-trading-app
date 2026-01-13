@@ -505,6 +505,11 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 
 	preview := c.Query("preview") == "true"
 
+	// Force reload defaults from disk to pick up any changes without container restart
+	if reloadErr := autopilot.ReloadDefaultSettings(); reloadErr != nil {
+		log.Printf("[SETTINGS-DEFAULTS] Warning: Failed to reload defaults from disk: %v", reloadErr)
+	}
+
 	// Load complete default settings file
 	defaults, err := autopilot.LoadDefaultSettings()
 	if err != nil {
