@@ -17,10 +17,10 @@ import (
 func (s *Server) handleGetModeAllocations(c *gin.Context) {
 	userID := s.getUserID(c)
 
-	// Use per-user Ginie autopilot for multi-user isolation
-	ginie := s.getGinieAutopilotForUser(c)
+	// Use per-user Ginie autopilot with fallback to shared controller
+	ginie := s.getGinieAutopilotWithFallback(c)
 	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 

@@ -10,8 +10,8 @@ import (
 
 // ============ ADAPTIVE LEARNING ENGINE ============
 
-// ScalpReentryLearningRecord represents a single learning record
-type ScalpReentryLearningRecord struct {
+// PositionOptimizationLearningRecord represents a single learning record
+type PositionOptimizationLearningRecord struct {
 	ID                string    `json:"id"`
 	Symbol            string    `json:"symbol"`
 	Side              string    `json:"side"`
@@ -51,8 +51,8 @@ type ConditionStats struct {
 	ShouldReenter bool   `json:"should_reenter"` // Learned recommendation
 }
 
-// ScalpReentryStats holds aggregate statistics
-type ScalpReentryStats struct {
+// PositionOptimizationStats holds aggregate statistics
+type PositionOptimizationStats struct {
 	TotalReentries      int     `json:"total_reentries"`
 	SuccessfulReentries int     `json:"successful_reentries"`
 	FailedReentries     int     `json:"failed_reentries"`
@@ -83,12 +83,12 @@ type SymbolReentryStats struct {
 	AvgPnL    float64 `json:"avg_pnl"`
 }
 
-// ScalpReentryAdaptiveEngine manages adaptive learning for scalp re-entry
-type ScalpReentryAdaptiveEngine struct {
+// PositionOptimizationAdaptiveEngine manages adaptive learning for position optimization
+type PositionOptimizationAdaptiveEngine struct {
 	mu               sync.RWMutex
-	records          []ScalpReentryLearningRecord
-	stats            *ScalpReentryStats
-	config           *ScalpReentryConfig
+	records          []PositionOptimizationLearningRecord
+	stats            *PositionOptimizationStats
+	config           *PositionOptimizationConfig
 
 	// Dynamically adjusted parameters
 	currentReentryPct    float64 // Adjusted re-entry percentage (starts at config value)
@@ -102,10 +102,10 @@ type ScalpReentryAdaptiveEngine struct {
 	dataFile string
 }
 
-// NewScalpReentryAdaptiveEngine creates a new adaptive learning engine
-func NewScalpReentryAdaptiveEngine(config *ScalpReentryConfig, dataFile string) *ScalpReentryAdaptiveEngine {
-	engine := &ScalpReentryAdaptiveEngine{
-		records:              []ScalpReentryLearningRecord{},
+// NewPositionOptimizationAdaptiveEngine creates a new adaptive learning engine
+func NewPositionOptimizationAdaptiveEngine(config *PositionOptimizationConfig, dataFile string) *PositionOptimizationAdaptiveEngine {
+	engine := &PositionOptimizationAdaptiveEngine{
+		records:              []PositionOptimizationLearningRecord{},
 		config:               config,
 		currentReentryPct:    config.ReentryPercent,
 		currentConfidenceMin: config.AIMinConfidence,
@@ -114,7 +114,7 @@ func NewScalpReentryAdaptiveEngine(config *ScalpReentryConfig, dataFile string) 
 		dataFile:             dataFile,
 	}
 
-	engine.stats = &ScalpReentryStats{
+	engine.stats = &PositionOptimizationStats{
 		ByTPLevel:         make(map[int]*TPLevelStats),
 		ByMarketCondition: make(map[string]*ConditionStats),
 		BySymbol:          make(map[string]*SymbolReentryStats),
@@ -132,13 +132,13 @@ func NewScalpReentryAdaptiveEngine(config *ScalpReentryConfig, dataFile string) 
 }
 
 // RecordOutcome records the outcome of a re-entry decision
-func (e *ScalpReentryAdaptiveEngine) RecordOutcome(record *ScalpReentryLearningRecord) {
+func (e *PositionOptimizationAdaptiveEngine) RecordOutcome(record *PositionOptimizationLearningRecord) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	// Generate ID if not set
 	if record.ID == "" {
-		record.ID = fmt.Sprintf("sr_%d_%s", time.Now().UnixNano(), record.Symbol)
+		record.ID = fmt.Sprintf("po_%d_%s", time.Now().UnixNano(), record.Symbol)
 	}
 	record.Timestamp = time.Now()
 
@@ -165,7 +165,7 @@ func (e *ScalpReentryAdaptiveEngine) RecordOutcome(record *ScalpReentryLearningR
 }
 
 // updateStats updates aggregate statistics
-func (e *ScalpReentryAdaptiveEngine) updateStats(record *ScalpReentryLearningRecord) {
+func (e *PositionOptimizationAdaptiveEngine) updateStats(record *PositionOptimizationLearningRecord) {
 	s := e.stats
 
 	// Overall stats
@@ -246,7 +246,7 @@ func (e *ScalpReentryAdaptiveEngine) updateStats(record *ScalpReentryLearningRec
 }
 
 // adjustParameters adjusts re-entry parameters based on performance
-func (e *ScalpReentryAdaptiveEngine) adjustParameters() {
+func (e *PositionOptimizationAdaptiveEngine) adjustParameters() {
 	if len(e.records) < e.config.AdaptiveMinTrades {
 		return
 	}
@@ -289,7 +289,7 @@ func (e *ScalpReentryAdaptiveEngine) adjustParameters() {
 }
 
 // getRecentRecords returns the most recent N records
-func (e *ScalpReentryAdaptiveEngine) getRecentRecords(n int) []ScalpReentryLearningRecord {
+func (e *PositionOptimizationAdaptiveEngine) getRecentRecords(n int) []PositionOptimizationLearningRecord {
 	if len(e.records) <= n {
 		return e.records
 	}
@@ -297,7 +297,7 @@ func (e *ScalpReentryAdaptiveEngine) getRecentRecords(n int) []ScalpReentryLearn
 }
 
 // calculateWinRate calculates win rate for a set of records
-func (e *ScalpReentryAdaptiveEngine) calculateWinRate(records []ScalpReentryLearningRecord) float64 {
+func (e *PositionOptimizationAdaptiveEngine) calculateWinRate(records []PositionOptimizationLearningRecord) float64 {
 	if len(records) == 0 {
 		return 0
 	}
@@ -318,7 +318,7 @@ func (e *ScalpReentryAdaptiveEngine) calculateWinRate(records []ScalpReentryLear
 }
 
 // calculateAvgPnL calculates average PnL for a set of records
-func (e *ScalpReentryAdaptiveEngine) calculateAvgPnL(records []ScalpReentryLearningRecord) float64 {
+func (e *PositionOptimizationAdaptiveEngine) calculateAvgPnL(records []PositionOptimizationLearningRecord) float64 {
 	if len(records) == 0 {
 		return 0
 	}
@@ -330,7 +330,7 @@ func (e *ScalpReentryAdaptiveEngine) calculateAvgPnL(records []ScalpReentryLearn
 }
 
 // countFalsePositives counts high-confidence decisions that resulted in losses
-func (e *ScalpReentryAdaptiveEngine) countFalsePositives(records []ScalpReentryLearningRecord) int {
+func (e *PositionOptimizationAdaptiveEngine) countFalsePositives(records []PositionOptimizationLearningRecord) int {
 	count := 0
 	for _, r := range records {
 		if r.ReentryDecision && r.ReentryConfidence > e.currentConfidenceMin && r.Outcome == "loss" {
@@ -341,21 +341,21 @@ func (e *ScalpReentryAdaptiveEngine) countFalsePositives(records []ScalpReentryL
 }
 
 // GetRecommendedReentryPercent returns the current recommended re-entry percentage
-func (e *ScalpReentryAdaptiveEngine) GetRecommendedReentryPercent() float64 {
+func (e *PositionOptimizationAdaptiveEngine) GetRecommendedReentryPercent() float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.currentReentryPct
 }
 
 // GetConfidenceThreshold returns the current confidence threshold
-func (e *ScalpReentryAdaptiveEngine) GetConfidenceThreshold() float64 {
+func (e *PositionOptimizationAdaptiveEngine) GetConfidenceThreshold() float64 {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.currentConfidenceMin
 }
 
 // ShouldSkipReentry returns true if learning suggests skipping re-entry for given conditions
-func (e *ScalpReentryAdaptiveEngine) ShouldSkipReentry(tpLevel int, condition string) bool {
+func (e *PositionOptimizationAdaptiveEngine) ShouldSkipReentry(tpLevel int, condition string) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -377,14 +377,14 @@ func (e *ScalpReentryAdaptiveEngine) ShouldSkipReentry(tpLevel int, condition st
 }
 
 // GetStats returns current statistics
-func (e *ScalpReentryAdaptiveEngine) GetStats() *ScalpReentryStats {
+func (e *PositionOptimizationAdaptiveEngine) GetStats() *PositionOptimizationStats {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.stats
 }
 
 // GetSymbolRecommendation returns whether to trade a specific symbol based on history
-func (e *ScalpReentryAdaptiveEngine) GetSymbolRecommendation(symbol string) (shouldTrade bool, confidence float64, reason string) {
+func (e *PositionOptimizationAdaptiveEngine) GetSymbolRecommendation(symbol string) (shouldTrade bool, confidence float64, reason string) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -405,7 +405,7 @@ func (e *ScalpReentryAdaptiveEngine) GetSymbolRecommendation(symbol string) (sho
 }
 
 // saveToFile persists learning data to file
-func (e *ScalpReentryAdaptiveEngine) saveToFile() error {
+func (e *PositionOptimizationAdaptiveEngine) saveToFile() error {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -414,8 +414,8 @@ func (e *ScalpReentryAdaptiveEngine) saveToFile() error {
 	}
 
 	data := struct {
-		Records          []ScalpReentryLearningRecord `json:"records"`
-		Stats            *ScalpReentryStats           `json:"stats"`
+		Records          []PositionOptimizationLearningRecord `json:"records"`
+		Stats            *PositionOptimizationStats           `json:"stats"`
 		CurrentReentryPct float64                     `json:"current_reentry_pct"`
 		CurrentConfMin   float64                      `json:"current_confidence_min"`
 		SavedAt          time.Time                    `json:"saved_at"`
@@ -436,7 +436,7 @@ func (e *ScalpReentryAdaptiveEngine) saveToFile() error {
 }
 
 // loadFromFile loads learning data from file
-func (e *ScalpReentryAdaptiveEngine) loadFromFile() error {
+func (e *PositionOptimizationAdaptiveEngine) loadFromFile() error {
 	if e.dataFile == "" {
 		return nil
 	}
@@ -450,8 +450,8 @@ func (e *ScalpReentryAdaptiveEngine) loadFromFile() error {
 	}
 
 	var loaded struct {
-		Records          []ScalpReentryLearningRecord `json:"records"`
-		Stats            *ScalpReentryStats           `json:"stats"`
+		Records          []PositionOptimizationLearningRecord `json:"records"`
+		Stats            *PositionOptimizationStats           `json:"stats"`
 		CurrentReentryPct float64                     `json:"current_reentry_pct"`
 		CurrentConfMin   float64                      `json:"current_confidence_min"`
 	}

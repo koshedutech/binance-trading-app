@@ -472,7 +472,7 @@ func (s *Server) handleGetScalpReentryDiffInternal(c *gin.Context, userID string
 	}
 
 	// Parse current config (or use empty if not found)
-	var currentConfig autopilot.ScalpReentryConfig
+	var currentConfig autopilot.PositionOptimizationConfig
 	if currentConfigJSON != nil {
 		if err := json.Unmarshal(currentConfigJSON, &currentConfig); err != nil {
 			log.Printf("[SCALP-REENTRY-DIFF] WARNING: Failed to parse user config, using empty: %v", err)
@@ -480,7 +480,7 @@ func (s *Server) handleGetScalpReentryDiffInternal(c *gin.Context, userID string
 	}
 
 	// Get default scalp_reentry config from default-settings.json
-	defaultConfig, err := autopilot.GetDefaultScalpReentryConfig()
+	defaultConfig, err := autopilot.GetDefaultPositionOptimizationConfig()
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load default scalp_reentry settings: "+err.Error())
 		return
@@ -623,6 +623,14 @@ func compareModeConfigs(modeName string, current, defaultCfg *autopilot.ModeFull
 	compareSections("funding_rate", current.FundingRate, defaultCfg.FundingRate, response)
 	compareSections("trend_divergence", current.TrendDivergence, defaultCfg.TrendDivergence, response)
 
+	// Compare position_optimization (Story 9.9 - TP1/TP2/TP3, DCA, Reentry, Hedging, etc.)
+	compareSections("position_optimization", current.PositionOptimization, defaultCfg.PositionOptimization, response)
+
+	// Compare trend_filters sub-sections (Story 9.5)
+	// Each sub-filter (btc_trend_check, price_vs_ema, vwap_filter, candlestick_alignment) is compared separately
+	// to generate proper nested paths like "trend_filters.candlestick_alignment.enabled"
+	compareTrendFilters(current.TrendFilters, defaultCfg.TrendFilters, response)
+
 	// Compare enabled flag
 	enabledMatch := current.Enabled == defaultCfg.Enabled
 
@@ -764,6 +772,35 @@ func compareSections(sectionName string, current, defaultCfg interface{}, respon
 			response.AllMatch = false
 		}
 	}
+}
+
+// compareTrendFilters compares trend_filters sub-sections (Story 9.5)
+// Handles nested structure: trend_filters.{btc_trend_check|price_vs_ema|vwap_filter|candlestick_alignment}
+func compareTrendFilters(current, defaultCfg *autopilot.TrendFiltersConfig, response *ModeDiffResponse) {
+	// Handle nil cases
+	if current == nil && defaultCfg == nil {
+		return
+	}
+
+	// If user has no trend_filters but default does, show all defaults as differences
+	if current == nil && defaultCfg != nil {
+		compareSections("trend_filters.btc_trend_check", nil, defaultCfg.BTCTrendCheck, response)
+		compareSections("trend_filters.price_vs_ema", nil, defaultCfg.PriceVsEMA, response)
+		compareSections("trend_filters.vwap_filter", nil, defaultCfg.VWAPFilter, response)
+		compareSections("trend_filters.candlestick_alignment", nil, defaultCfg.CandlestickAlignment, response)
+		return
+	}
+
+	// If user has trend_filters but default doesn't, skip (keep user's values)
+	if current != nil && defaultCfg == nil {
+		return
+	}
+
+	// Both exist - compare each sub-section
+	compareSections("trend_filters.btc_trend_check", current.BTCTrendCheck, defaultCfg.BTCTrendCheck, response)
+	compareSections("trend_filters.price_vs_ema", current.PriceVsEMA, defaultCfg.PriceVsEMA, response)
+	compareSections("trend_filters.vwap_filter", current.VWAPFilter, defaultCfg.VWAPFilter, response)
+	compareSections("trend_filters.candlestick_alignment", current.CandlestickAlignment, defaultCfg.CandlestickAlignment, response)
 }
 
 // addEntireSectionAsDifference adds all fields from a default section as differences
@@ -1902,7 +1939,7 @@ func (s *Server) handleLoadScalpReentryDefaultsInternal(c *gin.Context, userID s
 	ctx := c.Request.Context()
 
 	// Get default scalp_reentry config from default-settings.json
-	defaultConfig, err := autopilot.GetDefaultScalpReentryConfig()
+	defaultConfig, err := autopilot.GetDefaultPositionOptimizationConfig()
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load default scalp_reentry settings: "+err.Error())
 		return
@@ -1937,7 +1974,7 @@ func (s *Server) handleLoadScalpReentryDefaultsInternal(c *gin.Context, userID s
 	}
 
 	// Parse current config (or use empty if not found)
-	var currentConfig autopilot.ScalpReentryConfig
+	var currentConfig autopilot.PositionOptimizationConfig
 	if currentConfigJSON != nil {
 		if err := json.Unmarshal(currentConfigJSON, &currentConfig); err != nil {
 			log.Printf("[SCALP-REENTRY-DEFAULTS] WARNING: Failed to parse user config, using empty: %v", err)
@@ -1983,7 +2020,7 @@ func (s *Server) handleLoadScalpReentryDefaultsInternal(c *gin.Context, userID s
 }
 
 // compareScalpReentryConfigs compares user's scalp_reentry config with defaults
-func compareScalpReentryConfigs(current, defaultCfg *autopilot.ScalpReentryConfig) *ModeDiffResponse {
+func compareScalpReentryConfigs(current, defaultCfg *autopilot.PositionOptimizationConfig) *ModeDiffResponse {
 	response := &ModeDiffResponse{
 		Mode:        "scalp_reentry",
 		Preview:     true,

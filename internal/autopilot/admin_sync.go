@@ -433,7 +433,7 @@ func (s *AdminSyncService) SaveFlattenedDefaults(configType string, editedValues
 
 	case "scalp_reentry":
 		if defaults.ScalpReentry == nil {
-			defaults.ScalpReentry = &ScalpReentryConfig{}
+			defaults.ScalpReentry = &PositionOptimizationConfig{}
 		}
 		changesCount = s.updateScalpReentryFromFlattened(defaults.ScalpReentry, editedValues)
 
@@ -647,7 +647,7 @@ func (s *AdminSyncService) updateCapitalAllocationFromFlattened(ca *CapitalAlloc
 }
 
 // updateScalpReentryFromFlattened updates scalp reentry config from flattened values
-func (s *AdminSyncService) updateScalpReentryFromFlattened(sr *ScalpReentryConfig, values map[string]interface{}) int {
+func (s *AdminSyncService) updateScalpReentryFromFlattened(sr *PositionOptimizationConfig, values map[string]interface{}) int {
 	count := 0
 	for key, value := range values {
 		parts := splitKeyPath(key)
@@ -692,12 +692,603 @@ func (s *AdminSyncService) updateScalpReentryFromFlattened(sr *ScalpReentryConfi
 	return count
 }
 
-// updateModeConfigFromFlattened updates mode config from flattened values (stub - complex structure)
+// updateModeConfigFromFlattened updates mode config from flattened values
 func (s *AdminSyncService) updateModeConfigFromFlattened(mc *ModeFullConfig, values map[string]interface{}) int {
-	// Mode configs have deeply nested structure - this would require more complex parsing
-	// For now, log a warning and return 0 changes
-	log.Printf("[ADMIN-SAVE] Mode config update from flattened values not fully implemented yet")
-	return len(values) // Return count as if all were applied for now
+	count := 0
+	for key, value := range values {
+		parts := splitKeyPath(key)
+		if len(parts) < 2 {
+			continue
+		}
+
+		section := parts[0]
+		field := parts[1]
+
+		switch section {
+		case "sltp":
+			if mc.SLTP == nil {
+				mc.SLTP = &ModeSLTPConfig{}
+			}
+			count += updateSLTPConfig(mc.SLTP, field, parts[2:], value)
+		case "size":
+			if mc.Size == nil {
+				mc.Size = &ModeSizeConfig{}
+			}
+			count += updateSizeConfig(mc.Size, field, value)
+		case "confidence":
+			if mc.Confidence == nil {
+				mc.Confidence = &ModeConfidenceConfig{}
+			}
+			count += updateConfidenceConfig(mc.Confidence, field, value)
+		case "circuit_breaker":
+			if mc.CircuitBreaker == nil {
+				mc.CircuitBreaker = &ModeCircuitBreakerConfig{}
+			}
+			count += updateCircuitBreakerConfig(mc.CircuitBreaker, field, value)
+		case "timeframe":
+			if mc.Timeframe == nil {
+				mc.Timeframe = &ModeTimeframeConfig{}
+			}
+			count += updateTimeframeConfig(mc.Timeframe, field, value)
+		case "hedge":
+			if mc.Hedge == nil {
+				mc.Hedge = &HedgeModeConfig{}
+			}
+			count += updateHedgeConfig(mc.Hedge, field, value)
+		case "averaging":
+			if mc.Averaging == nil {
+				mc.Averaging = &PositionAveragingConfig{}
+			}
+			count += updateAveragingConfig(mc.Averaging, field, value)
+		case "stale_release":
+			if mc.StaleRelease == nil {
+				mc.StaleRelease = &StalePositionReleaseConfig{}
+			}
+			count += updateStaleReleaseConfig(mc.StaleRelease, field, value)
+		case "funding_rate":
+			if mc.FundingRate == nil {
+				mc.FundingRate = &ModeFundingRateConfig{}
+			}
+			count += updateFundingRateConfig(mc.FundingRate, field, value)
+		case "risk":
+			if mc.Risk == nil {
+				mc.Risk = &ModeRiskConfig{}
+			}
+			count += updateRiskConfig(mc.Risk, field, value)
+		case "trend_filters":
+			if mc.TrendFilters == nil {
+				mc.TrendFilters = &TrendFiltersConfig{}
+			}
+			count += updateTrendFiltersConfig(mc.TrendFilters, field, parts[2:], value)
+		case "mtf":
+			if mc.MTF == nil {
+				mc.MTF = &ModeMTFConfig{}
+			}
+			count += updateMTFConfig(mc.MTF, field, value)
+		case "dynamic_ai_exit":
+			if mc.DynamicAIExit == nil {
+				mc.DynamicAIExit = &ModeDynamicAIExitConfig{}
+			}
+			count += updateDynamicAIExitConfig(mc.DynamicAIExit, field, value)
+		default:
+			log.Printf("[ADMIN-SAVE] Unknown mode config section: %s", section)
+		}
+	}
+	return count
+}
+
+// updateSLTPConfig updates SLTP config from field/value
+func updateSLTPConfig(sltp *ModeSLTPConfig, field string, subparts []string, value interface{}) int {
+	switch field {
+	case "stop_loss_percent":
+		sltp.StopLossPercent = toFloat64(value)
+		return 1
+	case "take_profit_percent":
+		sltp.TakeProfitPercent = toFloat64(value)
+		return 1
+	case "trailing_stop_enabled":
+		sltp.TrailingStopEnabled = toBool(value)
+		return 1
+	case "trailing_stop_percent":
+		sltp.TrailingStopPercent = toFloat64(value)
+		return 1
+	case "trailing_stop_activation":
+		sltp.TrailingStopActivation = toFloat64(value)
+		return 1
+	case "trailing_activation_price":
+		sltp.TrailingActivationPrice = toFloat64(value)
+		return 1
+	case "max_hold_duration":
+		sltp.MaxHoldDuration = toString(value)
+		return 1
+	case "use_single_tp":
+		sltp.UseSingleTP = toBool(value)
+		return 1
+	case "single_tp_percent":
+		sltp.SingleTPPercent = toFloat64(value)
+		return 1
+	case "trailing_activation_mode":
+		sltp.TrailingActivationMode = toString(value)
+		return 1
+	case "use_roi_based_sltp":
+		sltp.UseROIBasedSLTP = toBool(value)
+		return 1
+	case "roi_stop_loss_percent":
+		sltp.ROIStopLossPercent = toFloat64(value)
+		return 1
+	case "roi_take_profit_percent":
+		sltp.ROITakeProfitPercent = toFloat64(value)
+		return 1
+	case "margin_type":
+		sltp.MarginType = toString(value)
+		return 1
+	case "isolated_margin_percent":
+		sltp.IsolatedMarginPercent = toFloat64(value)
+		return 1
+	case "atr_sl_multiplier":
+		sltp.ATRSLMultiplier = toFloat64(value)
+		return 1
+	case "atr_tp_multiplier":
+		sltp.ATRTPMultiplier = toFloat64(value)
+		return 1
+	case "llm_weight":
+		sltp.LLMWeight = toFloat64(value)
+		return 1
+	case "atr_weight":
+		sltp.ATRWeight = toFloat64(value)
+		return 1
+	case "auto_sltp_enabled":
+		sltp.AutoSLTPEnabled = toBool(value)
+		return 1
+	case "auto_trailing_enabled":
+		sltp.AutoTrailingEnabled = toBool(value)
+		return 1
+	case "min_profit_to_trail_pct":
+		sltp.MinProfitToTrailPct = toFloat64(value)
+		return 1
+	case "min_sl_distance_from_zero":
+		sltp.MinSLDistanceFromZero = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateSizeConfig updates Size config from field/value
+func updateSizeConfig(size *ModeSizeConfig, field string, value interface{}) int {
+	switch field {
+	case "base_size_usd":
+		size.BaseSizeUSD = toFloat64(value)
+		return 1
+	case "max_size_usd":
+		size.MaxSizeUSD = toFloat64(value)
+		return 1
+	case "max_positions":
+		size.MaxPositions = toInt(value)
+		return 1
+	case "leverage":
+		size.Leverage = toInt(value)
+		return 1
+	case "size_multiplier_lo":
+		size.SizeMultiplierLo = toFloat64(value)
+		return 1
+	case "size_multiplier_hi":
+		size.SizeMultiplierHi = toFloat64(value)
+		return 1
+	case "safety_margin":
+		size.SafetyMargin = toFloat64(value)
+		return 1
+	case "min_balance_usd":
+		size.MinBalanceUSD = toFloat64(value)
+		return 1
+	case "min_position_size_usd":
+		size.MinPositionSizeUSD = toFloat64(value)
+		return 1
+	case "auto_size_enabled":
+		size.AutoSizeEnabled = toBool(value)
+		return 1
+	case "auto_size_min_cover_fee":
+		size.AutoSizeMinCoverFee = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateConfidenceConfig updates Confidence config from field/value
+func updateConfidenceConfig(conf *ModeConfidenceConfig, field string, value interface{}) int {
+	switch field {
+	case "min_confidence":
+		conf.MinConfidence = toFloat64(value)
+		return 1
+	case "high_confidence":
+		conf.HighConfidence = toFloat64(value)
+		return 1
+	case "ultra_confidence":
+		conf.UltraConfidence = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateCircuitBreakerConfig updates CircuitBreaker config from field/value
+func updateCircuitBreakerConfig(cb *ModeCircuitBreakerConfig, field string, value interface{}) int {
+	switch field {
+	case "max_loss_per_hour":
+		cb.MaxLossPerHour = toFloat64(value)
+		return 1
+	case "max_loss_per_day":
+		cb.MaxLossPerDay = toFloat64(value)
+		return 1
+	case "max_consecutive_losses":
+		cb.MaxConsecutiveLosses = toInt(value)
+		return 1
+	case "cooldown_minutes":
+		cb.CooldownMinutes = toInt(value)
+		return 1
+	case "max_trades_per_minute":
+		cb.MaxTradesPerMinute = toInt(value)
+		return 1
+	case "max_trades_per_hour":
+		cb.MaxTradesPerHour = toInt(value)
+		return 1
+	case "max_trades_per_day":
+		cb.MaxTradesPerDay = toInt(value)
+		return 1
+	case "win_rate_check_after":
+		cb.WinRateCheckAfter = toInt(value)
+		return 1
+	case "min_win_rate":
+		cb.MinWinRate = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateTimeframeConfig updates Timeframe config from field/value
+func updateTimeframeConfig(tf *ModeTimeframeConfig, field string, value interface{}) int {
+	switch field {
+	case "trend_timeframe":
+		tf.TrendTimeframe = toString(value)
+		return 1
+	case "entry_timeframe":
+		tf.EntryTimeframe = toString(value)
+		return 1
+	case "analysis_timeframe":
+		tf.AnalysisTimeframe = toString(value)
+		return 1
+	}
+	return 0
+}
+
+// updateHedgeConfig updates Hedge config from field/value
+func updateHedgeConfig(hedge *HedgeModeConfig, field string, value interface{}) int {
+	switch field {
+	case "allow_hedge":
+		hedge.AllowHedge = toBool(value)
+		return 1
+	case "min_confidence_for_hedge":
+		hedge.MinConfidenceForHedge = toFloat64(value)
+		return 1
+	case "existing_must_be_in_profit":
+		hedge.ExistingMustBeInProfit = toFloat64(value)
+		return 1
+	case "max_hedge_size_percent":
+		hedge.MaxHedgeSizePercent = toFloat64(value)
+		return 1
+	case "allow_same_mode_hedge":
+		hedge.AllowSameModeHedge = toBool(value)
+		return 1
+	case "max_total_exposure_multiplier":
+		hedge.MaxTotalExposureMultiplier = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateAveragingConfig updates Averaging config from field/value
+func updateAveragingConfig(avg *PositionAveragingConfig, field string, value interface{}) int {
+	switch field {
+	case "allow_averaging":
+		avg.AllowAveraging = toBool(value)
+		return 1
+	case "average_up_profit_percent":
+		avg.AverageUpProfitPercent = toFloat64(value)
+		return 1
+	case "average_down_loss_percent":
+		avg.AverageDownLossPercent = toFloat64(value)
+		return 1
+	case "add_size_percent":
+		avg.AddSizePercent = toFloat64(value)
+		return 1
+	case "max_averages":
+		avg.MaxAverages = toInt(value)
+		return 1
+	case "min_confidence_for_average":
+		avg.MinConfidenceForAverage = toFloat64(value)
+		return 1
+	case "use_llm_for_averaging":
+		avg.UseLLMForAveraging = toBool(value)
+		return 1
+	case "staged_entry_enabled":
+		avg.StagedEntryEnabled = toBool(value)
+		return 1
+	case "staged_entry_levels":
+		avg.StagedEntryLevels = toInt(value)
+		return 1
+	case "staged_entry_price_improve":
+		avg.StagedEntryPriceImprove = toFloat64(value)
+		return 1
+	case "staged_entry_cooldown_sec":
+		avg.StagedEntryCooldownSec = toInt(value)
+		return 1
+	case "staged_entry_max_wait_sec":
+		avg.StagedEntryMaxWaitSec = toInt(value)
+		return 1
+	}
+	return 0
+}
+
+// updateStaleReleaseConfig updates StaleRelease config from field/value
+func updateStaleReleaseConfig(sr *StalePositionReleaseConfig, field string, value interface{}) int {
+	switch field {
+	case "enabled":
+		sr.Enabled = toBool(value)
+		return 1
+	case "max_hold_duration":
+		sr.MaxHoldDuration = toString(value)
+		return 1
+	case "min_profit_to_keep":
+		sr.MinProfitToKeep = toFloat64(value)
+		return 1
+	case "max_loss_to_force_close":
+		sr.MaxLossToForceClose = toFloat64(value)
+		return 1
+	case "stale_zone_lo":
+		sr.StaleZoneLo = toFloat64(value)
+		return 1
+	case "stale_zone_hi":
+		sr.StaleZoneHi = toFloat64(value)
+		return 1
+	case "stale_zone_close_action":
+		sr.StaleZoneCloseAction = toString(value)
+		return 1
+	}
+	return 0
+}
+
+// updateFundingRateConfig updates FundingRate config from field/value
+func updateFundingRateConfig(fr *ModeFundingRateConfig, field string, value interface{}) int {
+	switch field {
+	case "enabled":
+		fr.Enabled = toBool(value)
+		return 1
+	case "max_funding_rate":
+		fr.MaxFundingRate = toFloat64(value)
+		return 1
+	case "exit_time_minutes":
+		fr.ExitTimeMinutes = toInt(value)
+		return 1
+	case "fee_threshold_percent":
+		fr.FeeThresholdPercent = toFloat64(value)
+		return 1
+	case "extreme_funding_rate":
+		fr.ExtremeFundingRate = toFloat64(value)
+		return 1
+	case "high_rate_reduction":
+		fr.HighRateReduction = toFloat64(value)
+		return 1
+	case "elevated_rate_reduction":
+		fr.ElevatedRateReduction = toFloat64(value)
+		return 1
+	case "block_time_minutes":
+		fr.BlockTimeMinutes = toInt(value)
+		return 1
+	}
+	return 0
+}
+
+// updateRiskConfig updates Risk config from field/value
+func updateRiskConfig(risk *ModeRiskConfig, field string, value interface{}) int {
+	switch field {
+	case "risk_level":
+		risk.RiskLevel = toString(value)
+		return 1
+	case "risk_multiplier_conservative":
+		risk.RiskMultiplierConservative = toFloat64(value)
+		return 1
+	case "risk_multiplier_moderate":
+		risk.RiskMultiplierModerate = toFloat64(value)
+		return 1
+	case "risk_multiplier_aggressive":
+		risk.RiskMultiplierAggressive = toFloat64(value)
+		return 1
+	case "max_drawdown_percent":
+		risk.MaxDrawdownPercent = toFloat64(value)
+		return 1
+	case "max_daily_loss_percent":
+		risk.MaxDailyLossPercent = toFloat64(value)
+		return 1
+	case "min_adx":
+		risk.MinADX = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateTrendFiltersConfig updates TrendFilters config from field/value
+func updateTrendFiltersConfig(tf *TrendFiltersConfig, field string, subparts []string, value interface{}) int {
+	switch field {
+	case "btc_trend_check":
+		if tf.BTCTrendCheck == nil {
+			tf.BTCTrendCheck = &BTCTrendCheckConfig{}
+		}
+		return updateBTCTrendCheckConfig(tf.BTCTrendCheck, subparts, value)
+	case "price_vs_ema":
+		if tf.PriceVsEMA == nil {
+			tf.PriceVsEMA = &PriceVsEMAConfig{}
+		}
+		return updatePriceVsEMAConfig(tf.PriceVsEMA, subparts, value)
+	case "vwap_filter":
+		if tf.VWAPFilter == nil {
+			tf.VWAPFilter = &VWAPFilterConfig{}
+		}
+		return updateVWAPFilterConfig(tf.VWAPFilter, subparts, value)
+	case "candlestick_alignment":
+		if tf.CandlestickAlignment == nil {
+			tf.CandlestickAlignment = &CandlestickAlignmentConfig{}
+		}
+		return updateCandlestickAlignmentConfig(tf.CandlestickAlignment, subparts, value)
+	}
+	return 0
+}
+
+// updateBTCTrendCheckConfig updates BTCTrendCheck config
+func updateBTCTrendCheckConfig(btc *BTCTrendCheckConfig, subparts []string, value interface{}) int {
+	if len(subparts) == 0 {
+		return 0
+	}
+	switch subparts[0] {
+	case "enabled":
+		btc.Enabled = toBool(value)
+		return 1
+	case "btc_symbol":
+		btc.BTCSymbol = toString(value)
+		return 1
+	case "block_alt_long_when_btc_bearish":
+		btc.BlockAltLongWhenBTCBearish = toBool(value)
+		return 1
+	case "block_alt_short_when_btc_bullish":
+		btc.BlockAltShortWhenBTCBullish = toBool(value)
+		return 1
+	case "btc_trend_timeframe":
+		btc.BTCTrendTimeframe = toString(value)
+		return 1
+	}
+	return 0
+}
+
+// updatePriceVsEMAConfig updates PriceVsEMA config
+func updatePriceVsEMAConfig(ema *PriceVsEMAConfig, subparts []string, value interface{}) int {
+	if len(subparts) == 0 {
+		return 0
+	}
+	switch subparts[0] {
+	case "enabled":
+		ema.Enabled = toBool(value)
+		return 1
+	case "require_price_above_ema_for_long":
+		ema.RequirePriceAboveEMAForLong = toBool(value)
+		return 1
+	case "require_price_below_ema_for_short":
+		ema.RequirePriceBelowEMAForShort = toBool(value)
+		return 1
+	case "ema_period":
+		ema.EMAPeriod = toInt(value)
+		return 1
+	}
+	return 0
+}
+
+// updateVWAPFilterConfig updates VWAPFilter config
+func updateVWAPFilterConfig(vwap *VWAPFilterConfig, subparts []string, value interface{}) int {
+	if len(subparts) == 0 {
+		return 0
+	}
+	switch subparts[0] {
+	case "enabled":
+		vwap.Enabled = toBool(value)
+		return 1
+	case "require_price_above_vwap_for_long":
+		vwap.RequirePriceAboveVWAPForLong = toBool(value)
+		return 1
+	case "require_price_below_vwap_for_short":
+		vwap.RequirePriceBelowVWAPForShort = toBool(value)
+		return 1
+	case "near_vwap_tolerance_percent":
+		vwap.NearVWAPTolerancePercent = toFloat64(value)
+		return 1
+	}
+	return 0
+}
+
+// updateCandlestickAlignmentConfig updates CandlestickAlignment config
+func updateCandlestickAlignmentConfig(ca *CandlestickAlignmentConfig, subparts []string, value interface{}) int {
+	if len(subparts) == 0 {
+		return 0
+	}
+	switch subparts[0] {
+	case "enabled":
+		ca.Enabled = toBool(value)
+		return 1
+	case "min_confidence_to_block":
+		ca.MinConfidenceToBlock = toFloat64(value)
+		return 1
+	case "log_only_mode":
+		ca.LogOnlyMode = toBool(value)
+		return 1
+	}
+	return 0
+}
+
+// updateMTFConfig updates MTF config from field/value
+func updateMTFConfig(mtf *ModeMTFConfig, field string, value interface{}) int {
+	switch field {
+	case "mtf_enabled":
+		mtf.Enabled = toBool(value)
+		return 1
+	case "primary_timeframe":
+		mtf.PrimaryTimeframe = toString(value)
+		return 1
+	case "primary_weight":
+		mtf.PrimaryWeight = toFloat64(value)
+		return 1
+	case "secondary_timeframe":
+		mtf.SecondaryTimeframe = toString(value)
+		return 1
+	case "secondary_weight":
+		mtf.SecondaryWeight = toFloat64(value)
+		return 1
+	case "tertiary_timeframe":
+		mtf.TertiaryTimeframe = toString(value)
+		return 1
+	case "tertiary_weight":
+		mtf.TertiaryWeight = toFloat64(value)
+		return 1
+	case "min_consensus":
+		mtf.MinConsensus = toInt(value)
+		return 1
+	case "min_weighted_strength":
+		mtf.MinWeightedStrength = toFloat64(value)
+		return 1
+	case "trend_stability_check":
+		mtf.TrendStabilityCheck = toBool(value)
+		return 1
+	}
+	return 0
+}
+
+// updateDynamicAIExitConfig updates DynamicAIExit config from field/value
+func updateDynamicAIExitConfig(dae *ModeDynamicAIExitConfig, field string, value interface{}) int {
+	switch field {
+	case "dynamic_ai_exit_enabled":
+		dae.Enabled = toBool(value)
+		return 1
+	case "min_hold_before_ai_ms":
+		dae.MinHoldBeforeAIMS = toInt(value)
+		return 1
+	case "ai_check_interval_ms":
+		dae.AICheckIntervalMS = toInt(value)
+		return 1
+	case "use_llm_for_loss":
+		dae.UseLLMForLoss = toBool(value)
+		return 1
+	case "use_llm_for_profit":
+		dae.UseLLMForProfit = toBool(value)
+		return 1
+	case "max_hold_time_ms":
+		dae.MaxHoldTimeMS = toInt(value)
+		return 1
+	}
+	return 0
 }
 
 // Helper functions for type conversion

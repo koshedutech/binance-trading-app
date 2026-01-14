@@ -700,11 +700,208 @@ docker restart binance-trading-bot-dev
 
 ---
 
-## Phase 2: Monitoring & Adaptive Filters (Future Enhancement)
+## Phase 2: Candlestick Pattern Alignment Filter
 
-**Phase 2 builds on Phase 1 after validating filter effectiveness in production.**
+**Status:** Ready for Implementation
+**Priority:** P1 (Prevents ~2-5% additional wrong-direction trades)
+**Estimated Effort:** 4-6 hours
 
-### Phase 2 Goals
+### Problem Statement
+
+Current direction selection uses weighted signals (RSI/Stoch/EMA) but **ignores candlestick patterns** in the direction decision. This leads to conflicts like:
+
+```
+OPUSDT: direction="short", candle_signal="BULLISH" (bullish_engulfing 95%)
+```
+
+The system chooses SHORT based on EMA trend, but a strong bullish candlestick pattern suggests the opposite.
+
+### Impact Analysis (from logs)
+
+| Metric | Value |
+|--------|-------|
+| Scans with candle pattern detected | ~30% |
+| Pattern ALIGNED with direction | ~95% |
+| Pattern CONFLICTS with direction | ~5% |
+| **Additional blocks if filter enabled** | **~2-5%** |
+
+### Proposed Settings Structure
+
+Add to `trend_filters` section in each mode:
+
+```json
+{
+  "mode_configs": {
+    "scalp": {
+      "trend_filters": {
+        "candlestick_alignment": {
+          "_description": "Block trades where strong candle pattern contradicts direction",
+          "enabled": true,
+          "min_confidence_to_block": 80,
+          "log_only_mode": false
+        }
+      }
+    }
+  }
+}
+```
+
+### Mode-Specific Defaults
+
+| Mode | Enabled | Min Confidence | Log Only |
+|------|---------|----------------|----------|
+| Ultra Fast | false | 90 | true |
+| Scalp | true | 80 | false |
+| Swing | true | 75 | false |
+| Position | true | 70 | false |
+
+### Phase 2 Acceptance Criteria
+
+#### AC9.5.9: Candlestick Alignment Filter
+- [ ] When `candlestick_alignment.enabled = true`:
+  - [ ] For LONG: Block if candle_signal = "BEARISH" AND confidence >= threshold
+  - [ ] For SHORT: Block if candle_signal = "BULLISH" AND confidence >= threshold
+  - [ ] If pattern conflicts → Block trade with log message
+- [ ] `min_confidence_to_block` configurable (default: 80%)
+- [ ] Log: `"Trade blocked - BULLISH candlestick (95%) contradicts SHORT direction"`
+
+#### AC9.5.10: Log-Only Mode
+- [ ] When `log_only_mode = true`:
+  - [ ] Log conflict but DO NOT block trade
+  - [ ] Log: `"[LOG-ONLY] Would block: BULLISH candlestick contradicts SHORT"`
+- [ ] Use log-only for first week to validate impact
+- [ ] Can be toggled without code change
+
+#### AC9.5.11: Filter Integration
+- [ ] Add to `TrendFiltersConfig` struct
+- [ ] Check AFTER direction is determined, BEFORE other filters
+- [ ] Filter order becomes: **Candlestick → Price/EMA → VWAP → Higher TF → BTC**
+- [ ] Early exit on failure (performance)
+
+#### AC9.5.12: Settings Integration
+- [ ] Add `candlestick_alignment` to `default-settings.json` for all 4 modes
+- [ ] NULL handling: If missing, default to enabled=true, confidence=80
+- [ ] "Reset to Defaults" includes new settings
+
+### Go Struct Definition
+
+```go
+// CandlestickAlignmentConfig configures candlestick pattern alignment filter
+type CandlestickAlignmentConfig struct {
+    Description          string  `json:"_description,omitempty"`
+    Enabled              bool    `json:"enabled"`
+    MinConfidenceToBlock float64 `json:"min_confidence_to_block"` // 0-100
+    LogOnlyMode          bool    `json:"log_only_mode"`
+}
+
+// Add to TrendFiltersConfig:
+type TrendFiltersConfig struct {
+    Description            string                       `json:"_description,omitempty"`
+    BTCTrendCheck          *BTCTrendCheckConfig         `json:"btc_trend_check,omitempty"`
+    PriceVsEMA             *PriceVsEMAConfig            `json:"price_vs_ema,omitempty"`
+    VWAPFilter             *VWAPFilterConfig            `json:"vwap_filter,omitempty"`
+    CandlestickAlignment   *CandlestickAlignmentConfig  `json:"candlestick_alignment,omitempty"` // NEW
+}
+```
+
+### Implementation
+
+Add to `ginie_trend_filters.go`:
+
+```go
+// checkCandlestickAlignment validates candlestick pattern aligns with direction
+// For LONG: Bearish pattern with high confidence = block
+// For SHORT: Bullish pattern with high confidence = block
+func (v *TrendFilterValidator) checkCandlestickAlignment(
+    symbol, direction string,
+    candleSignal string,      // "BULLISH", "BEARISH", or ""
+    candleConfidence float64, // 0-100
+) (bool, string) {
+    cfg := v.config.CandlestickAlignment
+    if cfg == nil || !cfg.Enabled {
+        return true, ""
+    }
+
+    // Skip if no pattern detected or low confidence
+    if candleSignal == "" || candleConfidence < cfg.MinConfidenceToBlock {
+        return true, ""
+    }
+
+    // Check for conflict
+    conflict := false
+    if direction == "LONG" && candleSignal == "BEARISH" {
+        conflict = true
+    }
+    if direction == "SHORT" && candleSignal == "BULLISH" {
+        conflict = true
+    }
+
+    if conflict {
+        reason := fmt.Sprintf("%s candlestick (%.0f%%) contradicts %s direction",
+            candleSignal, candleConfidence, direction)
+
+        if cfg.LogOnlyMode {
+            v.logger.Warn(fmt.Sprintf("[TREND-FILTER] %s: candlestick_alignment LOG-ONLY - %s", symbol, reason))
+            return true, "" // Don't block in log-only mode
+        }
+
+        v.logger.Info(fmt.Sprintf("[TREND-FILTER] %s: candlestick_alignment BLOCKED - %s", symbol, reason))
+        return false, reason
+    }
+
+    return true, ""
+}
+```
+
+### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `default-settings.json` | Add `candlestick_alignment` to all 4 modes |
+| `internal/autopilot/settings.go` | Add `CandlestickAlignmentConfig` struct |
+| `internal/autopilot/ginie_trend_filters.go` | Add `checkCandlestickAlignment()` method |
+| `internal/autopilot/ginie_autopilot.go` | Pass candle signal/confidence to validator |
+
+### Testing
+
+```bash
+# Watch for candlestick alignment blocks
+docker logs -f binance-trading-bot-dev 2>&1 | grep -E "candlestick_alignment|candlestick.*contradicts"
+
+# In log-only mode, watch for would-block messages
+docker logs -f binance-trading-bot-dev 2>&1 | grep "LOG-ONLY.*candlestick"
+```
+
+### Rollback
+
+```bash
+# Disable filter without code change
+docker exec binance-bot-postgres-dev psql -U trading_bot -d trading_bot -c "
+UPDATE user_mode_configs
+SET trend_filters = jsonb_set(
+  COALESCE(trend_filters, '{}'),
+  '{candlestick_alignment,enabled}',
+  'false'
+);
+"
+docker restart binance-trading-bot-dev
+```
+
+### Risk Assessment
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Over-filtering | LOW | LOW | Only blocks high confidence (80%+) conflicts |
+| Missing good trades | LOW | VERY LOW | ~2-5% impact, mostly catches wrong-direction |
+| Performance | NONE | N/A | Instant check, no API calls |
+
+---
+
+## Phase 3: Monitoring & Adaptive Filters (Future Enhancement)
+
+**Phase 3 builds on Phase 1+2 after validating filter effectiveness in production.**
+
+### Phase 3 Goals
 
 | Feature | Description | Benefit |
 |---------|-------------|---------|
@@ -713,41 +910,235 @@ docker restart binance-trading-bot-dev
 | **Blocked Trade Alerts** | Notify when good setups are blocked | Manual override opportunity |
 | **Filter Bypass Override** | Admin can bypass specific filters | Emergency flexibility |
 
-### Phase 2 Acceptance Criteria
+### Phase 3 Acceptance Criteria
 
-#### AC9.5.9: Filter Statistics Dashboard
-- [ ] Track per-filter block counts (BTC, Price/EMA, Higher TF, VWAP)
+#### AC9.5.13: Filter Statistics Dashboard
+- [ ] Track per-filter block counts (Candlestick, BTC, Price/EMA, Higher TF, VWAP)
 - [ ] Store hourly/daily statistics in database
 - [ ] Display in Ginie Diagnostics Panel
 - [ ] Show which filter blocks most trades
 
-#### AC9.5.10: Adaptive Thresholds
+#### AC9.5.14: Adaptive Thresholds
 - [ ] When volatility high → stricter filters (all required)
 - [ ] When volatility low → allow some filter relaxation
 - [ ] Configurable via `adaptive_mode: true/false`
 - [ ] Log when adaptive mode changes thresholds
 
-#### AC9.5.11: Blocked Trade Alerts
+#### AC9.5.15: Blocked Trade Alerts
 - [ ] When setup has high confluence (5+) but blocked by filter → log prominently
 - [ ] Optional webhook/notification for blocked high-quality signals
 - [ ] Manual review queue for blocked trades
 
-#### AC9.5.12: Filter Bypass Override
+#### AC9.5.16: Filter Bypass Override
 - [ ] Admin API endpoint to temporarily disable specific filter
 - [ ] Time-limited bypass (auto-re-enable after N minutes)
 - [ ] Audit log of all bypasses
 
-### Phase 2 Estimated Effort
+### Phase 3 Estimated Effort
 - Statistics Dashboard: 4 hours
 - Adaptive Thresholds: 6 hours
 - Blocked Trade Alerts: 4 hours
 - Filter Bypass Override: 4 hours
-- **Total Phase 2: 18-20 hours**
+- **Total Phase 3: 18-20 hours**
 
-### Phase 2 Dependencies
-- Phase 1 complete and validated in production
+### Phase 3 Dependencies
+- Phase 1 + Phase 2 complete and validated in production
 - Statistics show which filters are most impactful
 - User feedback on filter effectiveness
+
+---
+
+## Phase 4: MTF Higher Timeframe Fix (Critical Bug Fix)
+
+**Status:** Ready for Implementation
+**Priority:** P0 (CRITICAL - Root cause of wrong-direction trades)
+**Estimated Effort:** 4-6 hours
+**Issue Date:** 2026-01-14
+
+### Problem Statement
+
+**CRITICAL BUG:** The MTF Higher Timeframe check was implemented but is NOT working correctly:
+
+1. **Wrong timeframe used:** Code uses `PrimaryTimeframe` (trading TF) instead of actual HIGHER timeframe
+2. **MTF disabled in defaults:** `mtf_enabled: false` in default-settings.json
+3. **Empty timeframe:** `primary_timeframe: ""` in all mode configs
+4. **Old structure still in use:** `ModeMTFConfig` with old fields instead of new `HigherTFConfig`
+
+### Evidence from Production Logs (2026-01-14)
+
+```
+WIFUSDT Trade:
+- Log: "[TREND-FILTER] WIFUSDT: higher_tf PASSED - 15m trend UPTREND aligns with LONG"
+- Problem: 15m is the TRADING timeframe, NOT a higher timeframe!
+- Should check: 1h trend for scalp mode
+- Result: Trade executed in wrong direction, lost -0.68%
+
+DOTUSDT Trade:
+- Log: "[TREND-FILTER] DOTUSDT: higher_tf PASSED - 15m trend UPTREND aligns with LONG"
+- Same problem: Using 15m instead of 1h
+- LLM disagreed (agreement=false) but trade still executed
+```
+
+### Root Cause Analysis
+
+| Component | Current State | Should Be |
+|-----------|--------------|-----------|
+| `ginie_trend_filters.go` checkHigherTF() | Uses `v.mtfConfig.PrimaryTimeframe` | Should use mode-specific HIGHER TF |
+| `default-settings.json` mtf section | `mtf_enabled: false`, `primary_timeframe: ""` | Should have correct higher TF per mode |
+| Scalp mode higher TF | Empty or 15m | **1h** |
+| Swing mode higher TF | Empty or 15m | **4h** |
+| Position mode higher TF | Empty | **1d** |
+| Ultra Fast mode higher TF | Empty | **15m** |
+
+### Phase 4 Solution
+
+#### Option A: Quick Fix (Use Existing Structure)
+Populate `primary_timeframe` in default-settings.json with CORRECT higher timeframes and enable MTF.
+
+#### Option B: Full Refactor (Implement New HigherTFConfig)
+Integrate the already-defined `HigherTFConfig` struct properly.
+
+**Decision: Option A** - Quick fix is sufficient. The `ModeMTFConfig.PrimaryTimeframe` field CAN work as the higher TF check; it just needs correct values.
+
+### Phase 4 Acceptance Criteria
+
+#### AC9.5.17: Enable MTF with Correct Higher Timeframes
+- [ ] `default-settings.json`: Set `mtf_enabled: true` for all modes
+- [ ] `default-settings.json`: Set correct `primary_timeframe` per mode:
+  - Ultra Fast: `"15m"` (higher than 5m trading TF)
+  - Scalp: `"1h"` (higher than 15m trading TF)
+  - Swing: `"4h"` (higher than 1h trading TF)
+  - Position: `"1d"` (higher than 4h trading TF)
+- [ ] Validate `checkHigherTF()` uses the correct timeframe
+
+#### AC9.5.18: Verify Blocking Works
+- [ ] When 1h trend is BEARISH → Block scalp LONG trades
+- [ ] When 1h trend is BULLISH → Block scalp SHORT trades
+- [ ] Log: `"[TREND-FILTER] SYMBOL: higher_tf BLOCKED - 1h trend bearish, blocking LONG entry"`
+- [ ] Verify "PASSED" logs show correct higher TF (1h for scalp, not 15m)
+
+#### AC9.5.19: Database Migration
+- [ ] Update existing users' MTF config with correct higher timeframes
+- [ ] Set `mtf_enabled: true` for users who had it disabled
+- [ ] Preserve any user customizations where intentional
+
+### Files to Modify
+
+| File | Changes |
+|------|---------|
+| `default-settings.json` | Enable MTF, set correct higher TF per mode |
+| Database migration | Update user configs with correct higher TF |
+
+### Implementation
+
+#### Step 1: Update default-settings.json MTF Section
+
+For each mode, update the `mtf` section:
+
+```json
+// Ultra Fast mode
+"mtf": {
+  "mtf_enabled": true,
+  "primary_timeframe": "15m",
+  "primary_weight": 0.4,
+  "secondary_timeframe": "5m",
+  "secondary_weight": 0.35,
+  "tertiary_timeframe": "1m",
+  "tertiary_weight": 0.25,
+  "min_consensus": 2,
+  "min_weighted_strength": 60,
+  "trend_stability_check": true
+}
+
+// Scalp mode
+"mtf": {
+  "mtf_enabled": true,
+  "primary_timeframe": "1h",
+  "primary_weight": 0.4,
+  "secondary_timeframe": "15m",
+  "secondary_weight": 0.35,
+  "tertiary_timeframe": "5m",
+  "tertiary_weight": 0.25,
+  "min_consensus": 2,
+  "min_weighted_strength": 60,
+  "trend_stability_check": true
+}
+
+// Swing mode
+"mtf": {
+  "mtf_enabled": true,
+  "primary_timeframe": "4h",
+  "primary_weight": 0.4,
+  "secondary_timeframe": "1h",
+  "secondary_weight": 0.35,
+  "tertiary_timeframe": "15m",
+  "tertiary_weight": 0.25,
+  "min_consensus": 2,
+  "min_weighted_strength": 60,
+  "trend_stability_check": true
+}
+
+// Position mode
+"mtf": {
+  "mtf_enabled": true,
+  "primary_timeframe": "1d",
+  "primary_weight": 0.4,
+  "secondary_timeframe": "4h",
+  "secondary_weight": 0.35,
+  "tertiary_timeframe": "1h",
+  "tertiary_weight": 0.25,
+  "min_consensus": 2,
+  "min_weighted_strength": 60,
+  "trend_stability_check": true
+}
+```
+
+#### Step 2: Verify checkHigherTF() Logic
+
+The existing `ginie_trend_filters.go` checkHigherTF() should work correctly once `primary_timeframe` has the correct value:
+
+```go
+// This code is already correct - just needs proper config
+higherTF := v.mtfConfig.PrimaryTimeframe // Will now be "1h" for scalp
+// ... fetches 1h klines and checks trend
+```
+
+### Testing
+
+```bash
+# After implementation, verify logs show correct higher TF
+docker logs -f binance-trading-bot-dev 2>&1 | grep "higher_tf"
+
+# Expected for scalp mode:
+# [TREND-FILTER] SYMBOL: higher_tf PASSED - 1h trend UPTREND aligns with LONG
+# [TREND-FILTER] SYMBOL: higher_tf BLOCKED - 1h trend DOWNTREND, blocking LONG entry
+
+# NOT this (current bug):
+# [TREND-FILTER] SYMBOL: higher_tf PASSED - 15m trend UPTREND aligns with LONG
+```
+
+### Rollback
+
+```bash
+# If issues, disable MTF without code change
+docker exec binance-bot-postgres-dev psql -U trading_bot -d trading_bot -c "
+UPDATE user_mode_configs
+SET config_json = jsonb_set(
+  config_json,
+  '{mtf,mtf_enabled}',
+  'false'
+);
+"
+docker restart binance-trading-bot-dev
+```
+
+### Risk Assessment
+
+| Risk | Impact | Likelihood | Mitigation |
+|------|--------|------------|------------|
+| Too many blocks | MEDIUM | LOW | Higher TF trend usually aligns |
+| API rate limits | LOW | LOW | Already using caching |
+| Wrong TF configured | HIGH | LOW | Thorough testing before deploy |
 
 ---
 

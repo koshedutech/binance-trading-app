@@ -479,10 +479,15 @@ func (s *UserDataStream) handleOrderUpdate(message []byte) {
 	}
 }
 
-// keepAliveLoop sends keepalive requests every 30 minutes
+// keepAliveLoop sends keepalive requests every 15 minutes
+// Binance listen keys expire after 60 minutes, so 15 min interval provides safety margin
 func (s *UserDataStream) keepAliveLoop() {
-	ticker := time.NewTicker(30 * time.Minute)
+	// Use 15 minute interval for safer margin (keys expire at 60 min)
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
+
+	consecutiveFailures := 0
+	const maxConsecutiveFailures = 3
 
 	for {
 		select {
@@ -498,11 +503,38 @@ func (s *UserDataStream) keepAliveLoop() {
 				return
 			}
 
-			if err := s.client.KeepAliveListenKey(listenKey); err != nil {
-				log.Printf("[USER-DATA-STREAM] Failed to keep alive listen key: %v", err)
-				s.refreshListenKey()
+			// Try keepalive with retries - this is CRITICAL for maintaining connection
+			var lastErr error
+			success := false
+
+			for attempt := 1; attempt <= 3; attempt++ {
+				if err := s.client.KeepAliveListenKey(listenKey); err != nil {
+					lastErr = err
+					log.Printf("[USER-DATA-STREAM] Keepalive attempt %d/3 failed: %v", attempt, err)
+					if attempt < 3 {
+						// Wait 5 seconds between retries
+						time.Sleep(5 * time.Second)
+					}
+				} else {
+					success = true
+					break
+				}
+			}
+
+			if success {
+				consecutiveFailures = 0
+				log.Printf("[USER-DATA-STREAM] Listen key kept alive successfully")
 			} else {
-				log.Printf("[USER-DATA-STREAM] Listen key kept alive")
+				consecutiveFailures++
+				log.Printf("[USER-DATA-STREAM] CRITICAL: All keepalive attempts failed: %v (consecutive failures: %d)",
+					lastErr, consecutiveFailures)
+
+				// If we've failed multiple times, try to get a completely new listen key
+				if consecutiveFailures >= maxConsecutiveFailures {
+					log.Printf("[USER-DATA-STREAM] Max consecutive failures reached, forcing listen key refresh")
+					s.refreshListenKey()
+					consecutiveFailures = 0
+				}
 			}
 		}
 	}

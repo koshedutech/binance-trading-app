@@ -406,6 +406,16 @@ type ListenKeyResponse struct {
 	ListenKey string `json:"listenKey"`
 }
 
+// ==================== COMMISSION RATES ====================
+
+// CommissionRate represents user's actual fee rates from Binance
+// Fetched from GET /fapi/v1/commissionRate
+type CommissionRate struct {
+	Symbol              string  `json:"symbol"`
+	MakerCommissionRate float64 `json:"makerCommissionRate,string"` // e.g., 0.0002 (0.02%)
+	TakerCommissionRate float64 `json:"takerCommissionRate,string"` // e.g., 0.0005 (0.05%)
+}
+
 // ==================== ALGO ORDER TYPES (NEW API as of 2025-12-09) ====================
 
 // AlgoType for algo orders

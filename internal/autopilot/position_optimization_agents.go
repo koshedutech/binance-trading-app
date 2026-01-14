@@ -10,10 +10,10 @@ import (
 
 // ============ MULTI-AGENT ORCHESTRATOR ============
 
-// ScalpReentryOrchestrator coordinates multiple specialized AI agents
-type ScalpReentryOrchestrator struct {
+// PositionOptimizationOrchestrator coordinates multiple specialized AI agents
+type PositionOptimizationOrchestrator struct {
 	analyzer       *llm.Analyzer
-	config         *ScalpReentryConfig
+	config         *PositionOptimizationConfig
 
 	// Specialized sub-agents
 	reentryAgent   *ReentryDecisionAgent
@@ -46,9 +46,9 @@ type OrchestratorDecision struct {
 	TPDecision        *TPTimingDecision        `json:"tp_decision,omitempty"`
 }
 
-// NewScalpReentryOrchestrator creates a new multi-agent orchestrator
-func NewScalpReentryOrchestrator(analyzer *llm.Analyzer, config *ScalpReentryConfig) *ScalpReentryOrchestrator {
-	o := &ScalpReentryOrchestrator{
+// NewPositionOptimizationOrchestrator creates a new multi-agent orchestrator
+func NewPositionOptimizationOrchestrator(analyzer *llm.Analyzer, config *PositionOptimizationConfig) *PositionOptimizationOrchestrator {
+	o := &PositionOptimizationOrchestrator{
 		analyzer:      analyzer,
 		config:        config,
 		decisionCache: make(map[string]*OrchestratorDecision),
@@ -65,7 +65,7 @@ func NewScalpReentryOrchestrator(analyzer *llm.Analyzer, config *ScalpReentryCon
 }
 
 // ProcessPosition runs all agents and returns a coordinated decision
-func (o *ScalpReentryOrchestrator) ProcessPosition(pos *GiniePosition, marketData *ScalpReentryMarketData) (*OrchestratorDecision, error) {
+func (o *PositionOptimizationOrchestrator) ProcessPosition(pos *GiniePosition, marketData *PositionOptimizationMarketData) (*OrchestratorDecision, error) {
 	if !o.config.UseMultiAgent {
 		// Fall back to single-agent decision
 		return o.singleAgentDecision(pos, marketData)
@@ -173,7 +173,7 @@ func (o *ScalpReentryOrchestrator) ProcessPosition(pos *GiniePosition, marketDat
 }
 
 // synthesizeDecisions combines all agent decisions into a final decision
-func (o *ScalpReentryOrchestrator) synthesizeDecisions(
+func (o *PositionOptimizationOrchestrator) synthesizeDecisions(
 	pos *GiniePosition,
 	reentry *ReentryAIDecision,
 	sentiment *MarketSentimentResult,
@@ -267,7 +267,7 @@ func (o *ScalpReentryOrchestrator) synthesizeDecisions(
 }
 
 // singleAgentDecision falls back to single-agent mode
-func (o *ScalpReentryOrchestrator) singleAgentDecision(pos *GiniePosition, marketData *ScalpReentryMarketData) (*OrchestratorDecision, error) {
+func (o *PositionOptimizationOrchestrator) singleAgentDecision(pos *GiniePosition, marketData *PositionOptimizationMarketData) (*OrchestratorDecision, error) {
 	decision := &OrchestratorDecision{
 		PrimaryAction:  "hold",
 		ActionParams:   make(map[string]interface{}),
@@ -293,7 +293,7 @@ func (o *ScalpReentryOrchestrator) singleAgentDecision(pos *GiniePosition, marke
 }
 
 // getCachedDecision retrieves a cached decision if still valid
-func (o *ScalpReentryOrchestrator) getCachedDecision(key string) *OrchestratorDecision {
+func (o *PositionOptimizationOrchestrator) getCachedDecision(key string) *OrchestratorDecision {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 
@@ -306,7 +306,7 @@ func (o *ScalpReentryOrchestrator) getCachedDecision(key string) *OrchestratorDe
 }
 
 // cacheDecision stores a decision in cache
-func (o *ScalpReentryOrchestrator) cacheDecision(key string, decision *OrchestratorDecision) {
+func (o *PositionOptimizationOrchestrator) cacheDecision(key string, decision *OrchestratorDecision) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.decisionCache[key] = decision
@@ -317,11 +317,11 @@ func (o *ScalpReentryOrchestrator) cacheDecision(key string, decision *Orchestra
 // ReentryDecisionAgent decides whether to execute a re-entry
 type ReentryDecisionAgent struct {
 	analyzer *llm.Analyzer
-	config   *ScalpReentryConfig
+	config   *PositionOptimizationConfig
 }
 
 // Analyze analyzes whether to re-enter
-func (a *ReentryDecisionAgent) Analyze(ctx context.Context, pos *GiniePosition, data *ScalpReentryMarketData) (*ReentryAIDecision, error) {
+func (a *ReentryDecisionAgent) Analyze(ctx context.Context, pos *GiniePosition, data *PositionOptimizationMarketData) (*ReentryAIDecision, error) {
 	if a.analyzer == nil {
 		return a.heuristicDecision(pos, data), nil
 	}
@@ -377,7 +377,7 @@ func (a *ReentryDecisionAgent) Analyze(ctx context.Context, pos *GiniePosition, 
 }
 
 // heuristicDecision provides a fallback decision without LLM
-func (a *ReentryDecisionAgent) heuristicDecision(pos *GiniePosition, data *ScalpReentryMarketData) *ReentryAIDecision {
+func (a *ReentryDecisionAgent) heuristicDecision(pos *GiniePosition, data *PositionOptimizationMarketData) *ReentryAIDecision {
 	decision := &ReentryAIDecision{
 		ShouldReenter:     true,
 		Confidence:        0.6,
@@ -415,7 +415,7 @@ type MarketSentimentAgent struct {
 }
 
 // Analyze analyzes market sentiment
-func (a *MarketSentimentAgent) Analyze(ctx context.Context, symbol string, data *ScalpReentryMarketData) (*MarketSentimentResult, error) {
+func (a *MarketSentimentAgent) Analyze(ctx context.Context, symbol string, data *PositionOptimizationMarketData) (*MarketSentimentResult, error) {
 	result := &MarketSentimentResult{
 		Symbol:     symbol,
 		Sentiment:  "neutral",
@@ -470,11 +470,11 @@ func (a *MarketSentimentAgent) Analyze(ctx context.Context, symbol string, data 
 // RiskManagementAgent manages dynamic stop loss
 type RiskManagementAgent struct {
 	analyzer *llm.Analyzer
-	config   *ScalpReentryConfig
+	config   *PositionOptimizationConfig
 }
 
 // Analyze analyzes and recommends dynamic SL
-func (a *RiskManagementAgent) Analyze(ctx context.Context, pos *GiniePosition, data *ScalpReentryMarketData) (*DynamicSLDecision, error) {
+func (a *RiskManagementAgent) Analyze(ctx context.Context, pos *GiniePosition, data *PositionOptimizationMarketData) (*DynamicSLDecision, error) {
 	sr := pos.ScalpReentry
 
 	// Calculate protection levels
@@ -513,11 +513,11 @@ func (a *RiskManagementAgent) Analyze(ctx context.Context, pos *GiniePosition, d
 // TPTimingAgent optimizes take profit timing
 type TPTimingAgent struct {
 	analyzer *llm.Analyzer
-	config   *ScalpReentryConfig
+	config   *PositionOptimizationConfig
 }
 
 // Analyze analyzes optimal TP timing
-func (a *TPTimingAgent) Analyze(ctx context.Context, pos *GiniePosition, data *ScalpReentryMarketData) (*TPTimingDecision, error) {
+func (a *TPTimingAgent) Analyze(ctx context.Context, pos *GiniePosition, data *PositionOptimizationMarketData) (*TPTimingDecision, error) {
 	sr := pos.ScalpReentry
 	nextTPLevel := sr.TPLevelUnlocked + 1
 

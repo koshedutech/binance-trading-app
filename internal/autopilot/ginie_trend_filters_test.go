@@ -135,9 +135,18 @@ func (m *mockFuturesClient) GetIncomeHistory(incomeType string, startTime, endTi
 }
 
 // ==================== WebSocket ====================
-func (m *mockFuturesClient) GetListenKey() (string, error)          { return "", nil }
+func (m *mockFuturesClient) GetListenKey() (string, error)             { return "", nil }
 func (m *mockFuturesClient) KeepAliveListenKey(listenKey string) error { return nil }
-func (m *mockFuturesClient) CloseListenKey(listenKey string) error  { return nil }
+func (m *mockFuturesClient) CloseListenKey(listenKey string) error     { return nil }
+
+// ==================== Commission ====================
+func (m *mockFuturesClient) GetCommissionRate(symbol string) (*binance.CommissionRate, error) {
+	return &binance.CommissionRate{
+		Symbol:              symbol,
+		MakerCommissionRate: 0.0002, // 0.02%
+		TakerCommissionRate: 0.0005, // 0.05%
+	}, nil
+}
 
 // ==================== HELPER FUNCTIONS ====================
 

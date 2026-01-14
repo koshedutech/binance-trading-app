@@ -876,6 +876,29 @@ func (c *FuturesClientImpl) GetIncomeHistory(incomeType string, startTime, endTi
 	return records, nil
 }
 
+// ==================== COMMISSION RATES ====================
+
+// GetCommissionRate fetches user's actual commission rates from Binance
+// This returns the real maker/taker fees for the authenticated user's account tier
+func (c *FuturesClientImpl) GetCommissionRate(symbol string) (*CommissionRate, error) {
+	params := map[string]string{
+		"symbol":    symbol,
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+
+	resp, err := c.signedGet("/fapi/v1/commissionRate", params)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching commission rate: %w", err)
+	}
+
+	var rate CommissionRate
+	if err := json.Unmarshal(resp, &rate); err != nil {
+		return nil, fmt.Errorf("error parsing commission rate: %w", err)
+	}
+
+	return &rate, nil
+}
+
 // ==================== WEBSOCKET ====================
 
 // GetListenKey creates a new user data stream listen key
@@ -894,12 +917,15 @@ func (c *FuturesClientImpl) GetListenKey() (string, error) {
 }
 
 // KeepAliveListenKey extends the validity of a listen key
+// CRITICAL: This bypasses rate limiter circuit breaker to prevent disconnection
+// Listen key keepalive is essential for maintaining WebSocket connection
 func (c *FuturesClientImpl) KeepAliveListenKey(listenKey string) error {
 	params := map[string]string{
 		"listenKey": listenKey,
 	}
 
-	_, err := c.signedPut("/fapi/v1/listenKey", params)
+	// Use critical PUT that bypasses circuit breaker
+	_, err := c.criticalPut("/fapi/v1/listenKey", params)
 	if err != nil {
 		return fmt.Errorf("error keeping listen key alive: %w", err)
 	}
@@ -1207,6 +1233,108 @@ func (c *FuturesClientImpl) signedPost(endpoint string, params map[string]string
 
 		// Record successful request
 		rateLimiter.RecordRequest(endpoint)
+		return body, nil
+	}
+
+	return nil, lastErr
+}
+
+// criticalPut performs an authenticated PUT request that BYPASSES the circuit breaker
+// This is used for critical operations like listen key keepalive that MUST go through
+// even when the circuit breaker is open due to rate limiting
+func (c *FuturesClientImpl) criticalPut(endpoint string, params map[string]string) ([]byte, error) {
+	rateLimiter := GetRateLimiter()
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// BYPASS circuit breaker check - only do weight-based limiting
+		// This is intentional for critical operations that must succeed
+		result := rateLimiter.TryAcquire(endpoint, PriorityCritical)
+
+		// Even if circuit is open, allow critical requests through with a warning
+		if !result.Acquired && result.Reason == "circuit_breaker_open" {
+			log.Printf("[BINANCE] CRITICAL PUT %s bypassing circuit breaker (keepalive essential)", endpoint)
+			// Don't block, proceed anyway for critical operations
+		} else if !result.Acquired {
+			// For other reasons (weight limit), wait briefly and retry
+			if result.WaitTime > 0 && attempt < maxRetries {
+				waitTime := result.WaitTime
+				if waitTime > 5*time.Second {
+					waitTime = 5 * time.Second
+				}
+				log.Printf("[BINANCE] CRITICAL PUT %s waiting %v: %s", endpoint, waitTime, result.Reason)
+				time.Sleep(waitTime)
+				continue
+			}
+		}
+
+		// Refresh timestamp for each attempt and set recvWindow for clock skew tolerance
+		if params == nil {
+			params = make(map[string]string)
+		}
+		params["timestamp"] = strconv.FormatInt(time.Now().UnixMilli(), 10)
+		params["recvWindow"] = "10000" // 10 seconds tolerance for clock skew
+		query := c.signParams(params)
+		reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
+
+		req, err := http.NewRequest("PUT", reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		req.URL.RawQuery = query
+		req.Header.Set("X-MBX-APIKEY", c.apiKey)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				delay := calculateRetryDelay(attempt)
+				log.Printf("[BINANCE] CRITICAL PUT %s failed (attempt %d/%d): %v, retrying in %v",
+					endpoint, attempt+1, maxRetries+1, err, delay)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, err
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+
+		// Update rate limiter from headers
+		if usedWeight := resp.Header.Get("X-MBX-USED-WEIGHT-1M"); usedWeight != "" {
+			if weight, err := strconv.Atoi(usedWeight); err == nil {
+				rateLimiter.UpdateFromHeaders(0, weight)
+			}
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("API error: %s", string(body))
+
+			// For critical requests, still record rate limit errors but don't block future critical requests
+			if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 418 ||
+				strings.Contains(string(body), "-1003") {
+				banUntil := ParseBanUntilFromError(string(body))
+				rateLimiter.RecordRateLimitError(banUntil)
+				log.Printf("[BINANCE] CRITICAL PUT %s got rate limited - will retry after backoff", endpoint)
+			}
+
+			if isRetryableError(resp.StatusCode, string(body)) && attempt < maxRetries {
+				delay := calculateRetryDelay(attempt)
+				log.Printf("[BINANCE] CRITICAL PUT %s returned %d (attempt %d/%d): %s, retrying in %v",
+					endpoint, resp.StatusCode, attempt+1, maxRetries+1, string(body), delay)
+				time.Sleep(delay)
+				continue
+			}
+			return nil, lastErr
+		}
+
+		// Record successful request
+		rateLimiter.RecordRequest(endpoint)
+		log.Printf("[BINANCE] CRITICAL PUT %s succeeded", endpoint)
 		return body, nil
 	}
 

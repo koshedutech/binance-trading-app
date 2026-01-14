@@ -2138,6 +2138,7 @@ export interface HedgeModeConfig {
 
 export interface HedgeModePositionData {
   symbol: string;
+  mode: string; // Trading mode that owns this position (scalp, swing, position, etc.)
   original_side: string;
   entry_price: number;
   current_price: number;
@@ -3778,6 +3779,78 @@ export interface PositionAveragingConfig {
   use_llm_for_averaging?: boolean;     // Use AI to decide averaging
 }
 
+// [Story 9.9] Position Optimization Config - embedded in each mode
+export interface PositionOptimizationConfig {
+  enabled?: boolean;
+  // Progressive Profit Taking
+  tp1_percent?: number;
+  tp1_sell_percent?: number;
+  tp2_percent?: number;
+  tp2_sell_percent?: number;
+  tp3_percent?: number;
+  tp3_sell_percent?: number;
+  // Re-entry settings
+  reentry_percent?: number;
+  reentry_price_buffer?: number;
+  max_reentry_attempts?: number;
+  reentry_timeout_sec?: number;
+  reentry_require_trend_confirmation?: boolean;
+  reentry_min_adx?: number;
+  // Final trailing
+  final_trailing_percent?: number;
+  final_hold_min_percent?: number;
+  // Dynamic SL
+  dynamic_sl_max_loss_pct?: number;
+  dynamic_sl_protect_pct?: number;
+  dynamic_sl_update_int?: number;
+  // AI settings
+  use_ai_decisions?: boolean;
+  ai_min_confidence?: number;
+  ai_tp_optimization?: boolean;
+  ai_dynamic_sl?: boolean;
+  // Multi-agent settings
+  use_multi_agent?: boolean;
+  enable_sentiment_agent?: boolean;
+  enable_risk_agent?: boolean;
+  enable_tp_agent?: boolean;
+  // Adaptive learning
+  enable_adaptive_learning?: boolean;
+  adaptive_window_trades?: number;
+  adaptive_min_trades?: number;
+  adaptive_max_reentry_adjust?: number;
+  // Limits
+  max_cycles_per_position?: number;
+  max_daily_reentries?: number;
+  min_position_size_usd?: number;
+  stop_loss_percent?: number;
+  // Hedging - Same fields as HedgeModeConfig
+  hedge_mode_enabled?: boolean;
+  allow_hedge_chains?: boolean;
+  max_hedge_chain_depth?: number;
+  profit_protection_enabled?: boolean;
+  profit_protection_percent?: number;
+  max_loss_of_earned_profit?: number;
+  // Hedge Triggers
+  trigger_on_profit_tp?: boolean;
+  trigger_on_loss_tp?: boolean;
+  dca_on_loss?: boolean;
+  max_position_multiple?: number;
+  combined_roi_exit_pct?: number;
+  wide_sl_atr_multiplier?: number;
+  disable_ai_sl?: boolean;
+  // Rally Exit
+  rally_exit_enabled?: boolean;
+  rally_adx_threshold?: number;
+  rally_sustained_move_pct?: number;
+  // Negative TP Levels (hedge DCA levels)
+  neg_tp1_percent?: number;
+  neg_tp1_add_percent?: number;
+  neg_tp2_percent?: number;
+  neg_tp2_add_percent?: number;
+  neg_tp3_percent?: number;
+  neg_tp3_add_percent?: number;
+}
+
 export interface ModeFullConfig {
   mode_name: string;  // "ultra_fast", "scalp", "swing", "position"
   enabled: boolean;   // Enable this mode
@@ -3792,6 +3865,7 @@ export interface ModeFullConfig {
   trend_divergence?: ModeTrendDivergenceConfig;
   funding_rate?: ModeFundingRateConfig;
   averaging?: PositionAveragingConfig;
+  position_optimization?: PositionOptimizationConfig; // [Story 9.9] Position optimization settings per mode
 }
 
 export interface ModeConfigsResponse {

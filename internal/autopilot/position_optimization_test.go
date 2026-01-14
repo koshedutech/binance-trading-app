@@ -249,7 +249,7 @@ func TestCalculateNewBreakeven(t *testing.T) {
 	tests := []struct {
 		name           string
 		pos            *GiniePosition
-		sr             *ScalpReentryStatus
+		sr             *PositionOptimizationStatus
 		expectedBE     float64
 		allowedDelta   float64
 		description    string
@@ -261,7 +261,7 @@ func TestCalculateNewBreakeven(t *testing.T) {
 				EntryPrice:  100.0,
 				OriginalQty: 10.0,
 			},
-			sr: &ScalpReentryStatus{
+			sr: &PositionOptimizationStatus{
 				Cycles: []ReentryCycle{},
 			},
 			expectedBE:   100.0,
@@ -275,7 +275,7 @@ func TestCalculateNewBreakeven(t *testing.T) {
 				EntryPrice:  100.0,
 				OriginalQty: 10.0,
 			},
-			sr: &ScalpReentryStatus{
+			sr: &PositionOptimizationStatus{
 				Cycles: []ReentryCycle{
 					{
 						SellPrice:    100.30, // Sold at 0.3% profit
@@ -298,7 +298,7 @@ func TestCalculateNewBreakeven(t *testing.T) {
 				EntryPrice:  100.0,
 				OriginalQty: 10.0,
 			},
-			sr: &ScalpReentryStatus{
+			sr: &PositionOptimizationStatus{
 				Cycles: []ReentryCycle{
 					{
 						SellPrice:          100.30,
@@ -323,7 +323,7 @@ func TestCalculateNewBreakeven(t *testing.T) {
 				EntryPrice:  100.0,
 				OriginalQty: 10.0,
 			},
-			sr: &ScalpReentryStatus{
+			sr: &PositionOptimizationStatus{
 				Cycles: []ReentryCycle{
 					{
 						SellPrice:          100.30, // TP1: +0.3%
@@ -354,7 +354,7 @@ func TestCalculateNewBreakeven(t *testing.T) {
 				EntryPrice:  100.0,
 				OriginalQty: 10.0,
 			},
-			sr: &ScalpReentryStatus{
+			sr: &PositionOptimizationStatus{
 				Cycles: []ReentryCycle{
 					{
 						SellPrice:    100.30,
@@ -386,8 +386,8 @@ func TestCalculateNewBreakeven(t *testing.T) {
 
 // ============ TP HIT DETECTION TESTS (AC2) ============
 
-// TestCheckScalpReentryTP tests TP level hit detection
-func TestCheckScalpReentryTP(t *testing.T) {
+// TestCheckPositionOptimizationTP tests TP level hit detection
+func TestCheckPositionOptimizationTP(t *testing.T) {
 	// Initialize settings manager for test
 	initTestSettings()
 
@@ -489,9 +489,9 @@ func TestCheckScalpReentryTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hit, tpPrice := g.checkScalpReentryTP(tt.pos, tt.currentPrice, tt.tpLevel)
+			hit, tpPrice := g.checkPositionOptimizationTP(tt.pos, tt.currentPrice, tt.tpLevel)
 			if hit != tt.expectedHit {
-				t.Errorf("%s: checkScalpReentryTP() hit=%v, want %v (price=%.4f, tp=%.4f)",
+				t.Errorf("%s: checkPositionOptimizationTP() hit=%v, want %v (price=%.4f, tp=%.4f)",
 					tt.description, hit, tt.expectedHit, tt.currentPrice, tpPrice)
 			}
 			t.Logf("%s: hit=%v, tpPrice=%.4f", tt.name, hit, tpPrice)
@@ -577,7 +577,7 @@ func TestMinQuantityValidation(t *testing.T) {
 
 // TestMaxCyclesLimit tests the maximum cycles per position limit
 func TestMaxCyclesLimit(t *testing.T) {
-	config := DefaultScalpReentryConfig()
+	config := DefaultPositionOptimizationConfig()
 
 	tests := []struct {
 		name         string
@@ -607,7 +607,7 @@ func TestMaxCyclesLimit(t *testing.T) {
 
 // TestReentryTimeout tests the reentry timeout logic
 func TestReentryTimeout(t *testing.T) {
-	config := DefaultScalpReentryConfig()
+	config := DefaultPositionOptimizationConfig()
 	config.ReentryTimeoutSec = 300 // 5 minutes
 
 	tests := []struct {
@@ -749,8 +749,8 @@ func TestFullTPCycleWithReentry(t *testing.T) {
 		Side:        "LONG",
 	}
 
-	config := DefaultScalpReentryConfig()
-	sr := NewScalpReentryStatus(pos.EntryPrice, pos.OriginalQty, config)
+	config := DefaultPositionOptimizationConfig()
+	sr := NewPositionOptimizationStatus(pos.EntryPrice, pos.OriginalQty, config)
 	pos.ScalpReentry = sr
 
 	// === PHASE 1: TP1 at 0.3% ===
@@ -881,8 +881,8 @@ func initTestSettings() {
 	sm := GetSettingsManager()
 	if sm != nil {
 		settings := sm.GetDefaultSettings()
-		settings.ScalpReentryConfig = DefaultScalpReentryConfig()
-		settings.ScalpReentryConfig.Enabled = true
+		settings.PositionOptimizationConfig = DefaultPositionOptimizationConfig()
+		settings.PositionOptimizationConfig.Enabled = true
 	}
 }
 

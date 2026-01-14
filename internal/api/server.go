@@ -436,6 +436,7 @@ func (s *Server) setupRoutes() {
 		{
 			// Account endpoints
 			futures.GET("/account", s.handleGetFuturesAccountInfo)
+			futures.GET("/commission-rate", s.handleGetCommissionRate)
 			futures.GET("/wallet-balance", s.handleGetFuturesWalletBalance)
 			futures.GET("/positions", s.handleGetFuturesPositions)
 			futures.POST("/positions/close-all", s.handleCloseAllFuturesPositions) // Panic button - must be before :symbol route

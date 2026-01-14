@@ -343,6 +343,207 @@ func (s *Server) compareModeConfigs(
 				Recommendation: recommendation,
 			})
 		}
+
+		// Compare position_optimization settings (Story 9.9)
+		diffs = append(diffs, s.compareModePositionOptimization(prefix, userConfig.PositionOptimization, defaultConfig.PositionOptimization, riskIndex)...)
+	}
+
+	return diffs
+}
+
+// compareModePositionOptimization compares position optimization settings within a mode config
+func (s *Server) compareModePositionOptimization(
+	prefix string,
+	user *autopilot.PositionOptimizationConfig,
+	defaults *autopilot.PositionOptimizationConfig,
+	riskIndex autopilot.SettingsRiskIndex,
+) []Difference {
+	var diffs []Difference
+	posOptPrefix := prefix + ".position_optimization"
+
+	// Handle nil cases
+	if defaults == nil {
+		return diffs
+	}
+	if user == nil {
+		// User has no position_optimization, but defaults do - show all defaults as differences
+		user = &autopilot.PositionOptimizationConfig{}
+	}
+
+	// Compare enabled
+	if user.Enabled != defaults.Enabled {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".enabled",
+			Current:   user.Enabled,
+			Default:   defaults.Enabled,
+			RiskLevel: "medium",
+		})
+	}
+
+	// Compare TP levels (profit taking)
+	if user.TP1Percent != defaults.TP1Percent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".tp1_percent",
+			Current:   user.TP1Percent,
+			Default:   defaults.TP1Percent,
+			RiskLevel: "low",
+		})
+	}
+	if user.TP1SellPercent != defaults.TP1SellPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".tp1_sell_percent",
+			Current:   user.TP1SellPercent,
+			Default:   defaults.TP1SellPercent,
+			RiskLevel: "low",
+		})
+	}
+	if user.TP2Percent != defaults.TP2Percent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".tp2_percent",
+			Current:   user.TP2Percent,
+			Default:   defaults.TP2Percent,
+			RiskLevel: "low",
+		})
+	}
+	if user.TP2SellPercent != defaults.TP2SellPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".tp2_sell_percent",
+			Current:   user.TP2SellPercent,
+			Default:   defaults.TP2SellPercent,
+			RiskLevel: "low",
+		})
+	}
+	if user.TP3Percent != defaults.TP3Percent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".tp3_percent",
+			Current:   user.TP3Percent,
+			Default:   defaults.TP3Percent,
+			RiskLevel: "low",
+		})
+	}
+	if user.TP3SellPercent != defaults.TP3SellPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".tp3_sell_percent",
+			Current:   user.TP3SellPercent,
+			Default:   defaults.TP3SellPercent,
+			RiskLevel: "low",
+		})
+	}
+
+	// Compare negative TP levels (DCA on loss)
+	if user.NegTP1Percent != defaults.NegTP1Percent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".neg_tp1_percent",
+			Current:   user.NegTP1Percent,
+			Default:   defaults.NegTP1Percent,
+			RiskLevel: "medium",
+		})
+	}
+	if user.NegTP1AddPercent != defaults.NegTP1AddPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".neg_tp1_add_percent",
+			Current:   user.NegTP1AddPercent,
+			Default:   defaults.NegTP1AddPercent,
+			RiskLevel: "medium",
+		})
+	}
+	if user.NegTP2Percent != defaults.NegTP2Percent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".neg_tp2_percent",
+			Current:   user.NegTP2Percent,
+			Default:   defaults.NegTP2Percent,
+			RiskLevel: "medium",
+		})
+	}
+	if user.NegTP2AddPercent != defaults.NegTP2AddPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".neg_tp2_add_percent",
+			Current:   user.NegTP2AddPercent,
+			Default:   defaults.NegTP2AddPercent,
+			RiskLevel: "medium",
+		})
+	}
+	if user.NegTP3Percent != defaults.NegTP3Percent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".neg_tp3_percent",
+			Current:   user.NegTP3Percent,
+			Default:   defaults.NegTP3Percent,
+			RiskLevel: "medium",
+		})
+	}
+	if user.NegTP3AddPercent != defaults.NegTP3AddPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".neg_tp3_add_percent",
+			Current:   user.NegTP3AddPercent,
+			Default:   defaults.NegTP3AddPercent,
+			RiskLevel: "medium",
+		})
+	}
+
+	// Compare reentry settings
+	if user.ReentryPercent != defaults.ReentryPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".reentry_percent",
+			Current:   user.ReentryPercent,
+			Default:   defaults.ReentryPercent,
+			RiskLevel: "low",
+		})
+	}
+	if user.ReentryMinADX != defaults.ReentryMinADX {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".reentry_min_adx",
+			Current:   user.ReentryMinADX,
+			Default:   defaults.ReentryMinADX,
+			RiskLevel: "low",
+		})
+	}
+
+	// Compare AI settings
+	if user.UseAIDecisions != defaults.UseAIDecisions {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".use_ai_decisions",
+			Current:   user.UseAIDecisions,
+			Default:   defaults.UseAIDecisions,
+			RiskLevel: "medium",
+		})
+	}
+
+	// Compare hedge mode
+	if user.HedgeModeEnabled != defaults.HedgeModeEnabled {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".hedge_mode_enabled",
+			Current:   user.HedgeModeEnabled,
+			Default:   defaults.HedgeModeEnabled,
+			RiskLevel: "high",
+		})
+	}
+
+	// Compare DCA on loss
+	if user.DCAOnLoss != defaults.DCAOnLoss {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".dca_on_loss",
+			Current:   user.DCAOnLoss,
+			Default:   defaults.DCAOnLoss,
+			RiskLevel: "high",
+		})
+	}
+
+	// Compare profit protection
+	if user.ProfitProtectionEnabled != defaults.ProfitProtectionEnabled {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".profit_protection_enabled",
+			Current:   user.ProfitProtectionEnabled,
+			Default:   defaults.ProfitProtectionEnabled,
+			RiskLevel: "medium",
+		})
+	}
+	if user.ProfitProtectionPercent != defaults.ProfitProtectionPercent {
+		diffs = append(diffs, Difference{
+			Path:      posOptPrefix + ".profit_protection_percent",
+			Current:   user.ProfitProtectionPercent,
+			Default:   defaults.ProfitProtectionPercent,
+			RiskLevel: "low",
+		})
 	}
 
 	return diffs

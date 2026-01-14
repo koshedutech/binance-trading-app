@@ -13,6 +13,9 @@ type FuturesClient interface {
 	// GetPositionBySymbol retrieves position for a specific symbol
 	GetPositionBySymbol(symbol string) (*FuturesPosition, error)
 
+	// GetCommissionRate retrieves user's actual maker/taker fee rates from Binance
+	GetCommissionRate(symbol string) (*CommissionRate, error)
+
 	// ==================== LEVERAGE & MARGIN ====================
 
 	// SetLeverage sets the leverage for a symbol (1-125x)

@@ -22,7 +22,7 @@ const (
 type ReentryCycle struct {
 	CycleNumber int          `json:"cycle_number"` // 1, 2, 3...
 	TPLevel     int          `json:"tp_level"`     // 1=0.3%, 2=0.6%, 3=1%
-	Mode        string       `json:"mode"`         // scalp_reentry
+	Mode        string       `json:"mode"`         // position_optimization
 	Side        string       `json:"side"`         // LONG or SHORT
 
 	// Sell details
@@ -33,14 +33,15 @@ type ReentryCycle struct {
 	SellTime     time.Time `json:"sell_time"`
 
 	// Re-entry details
-	ReentryTargetPrice float64      `json:"reentry_target_price"` // Breakeven + buffer
-	ReentryQuantity    float64      `json:"reentry_quantity"`     // SellQty * ReentryPercent
-	ReentryState       ReentryState `json:"reentry_state"`
-	ReentryAttempts    int          `json:"reentry_attempts"`
-	ReentryOrderID     int64        `json:"reentry_order_id"`
-	ReentryFilledPrice float64      `json:"reentry_filled_price"`
-	ReentryFilledQty   float64      `json:"reentry_filled_qty"`
-	ReentryFillTime    time.Time    `json:"reentry_fill_time"`
+	ReentryTargetPrice   float64      `json:"reentry_target_price"`    // Breakeven + buffer
+	ReentryQuantity      float64      `json:"reentry_quantity"`        // SellQty * ReentryPercent
+	ReentryState         ReentryState `json:"reentry_state"`
+	ReentryAttempts      int          `json:"reentry_attempts"`
+	ReentryOrderID       int64        `json:"reentry_order_id"`
+	ReentryOrderPlacedAt time.Time    `json:"reentry_order_placed_at"` // When LIMIT order was placed (for timeout tracking)
+	ReentryFilledPrice   float64      `json:"reentry_filled_price"`
+	ReentryFilledQty     float64      `json:"reentry_filled_qty"`
+	ReentryFillTime      time.Time    `json:"reentry_fill_time"`
 
 	// AI Decision
 	AIDecision *ReentryAIDecision `json:"ai_decision,omitempty"`
@@ -56,10 +57,10 @@ type ReentryCycle struct {
 	OutcomeReason string  `json:"outcome_reason"`  // Why this outcome
 }
 
-// ============ SCALP RE-ENTRY STATUS ============
+// ============ POSITION OPTIMIZATION STATUS ============
 
-// ScalpReentryStatus tracks all re-entry state for a position
-type ScalpReentryStatus struct {
+// PositionOptimizationStatus tracks all re-entry state for a position
+type PositionOptimizationStatus struct {
 	Enabled bool `json:"enabled"`
 
 	// Cycle tracking
@@ -173,8 +174,8 @@ type FinalExitDecision struct {
 
 // ============ MARKET DATA FOR AI ANALYSIS ============
 
-// ScalpReentryMarketData holds market data for AI analysis
-type ScalpReentryMarketData struct {
+// PositionOptimizationMarketData holds market data for AI analysis
+type PositionOptimizationMarketData struct {
 	Symbol       string  `json:"symbol"`
 	CurrentPrice float64 `json:"current_price"`
 	EntryPrice   float64 `json:"entry_price"`
@@ -243,7 +244,7 @@ type MarketSentimentResult struct {
 
 // ============ HEDGE MODE TYPES ============
 
-// HedgeReentryState tracks DCA + Hedge state for scalp_reentry hedge mode
+// HedgeReentryState tracks DCA + Hedge state for position_optimization hedge mode
 type HedgeReentryState struct {
 	// Master state
 	Enabled     bool   `json:"enabled"`
@@ -352,8 +353,8 @@ func (h *HedgeReentryState) AddDebugLog(message string) {
 
 // ============ CONFIGURATION ============
 
-// ScalpReentryConfig holds configuration for scalp re-entry mode
-type ScalpReentryConfig struct {
+// PositionOptimizationConfig holds configuration for position optimization
+type PositionOptimizationConfig struct {
 	// Master toggle
 	Enabled bool `json:"enabled"`
 
@@ -449,9 +450,9 @@ type ScalpReentryConfig struct {
 	MaxHedgeChainDepth int  `json:"max_hedge_chain_depth"` // Max chain depth if chains allowed (default 2)
 }
 
-// DefaultScalpReentryConfig returns default configuration
-func DefaultScalpReentryConfig() ScalpReentryConfig {
-	return ScalpReentryConfig{
+// DefaultPositionOptimizationConfig returns default configuration
+func DefaultPositionOptimizationConfig() PositionOptimizationConfig {
+	return PositionOptimizationConfig{
 		Enabled: false, // Disabled by default, feature flag
 
 		// TP Levels (0.4% → 30%, 0.7% → 50%, 1.0% → 80%, remaining 20% trails)
@@ -543,9 +544,9 @@ func DefaultScalpReentryConfig() ScalpReentryConfig {
 
 // ============ HELPER METHODS ============
 
-// NewScalpReentryStatus creates a new scalp reentry status for a position
-func NewScalpReentryStatus(entryPrice, quantity float64, config ScalpReentryConfig) *ScalpReentryStatus {
-	return &ScalpReentryStatus{
+// NewPositionOptimizationStatus creates a new position optimization status for a position
+func NewPositionOptimizationStatus(entryPrice, quantity float64, config PositionOptimizationConfig) *PositionOptimizationStatus {
+	return &PositionOptimizationStatus{
 		Enabled:              true,
 		CurrentCycle:         0,
 		Cycles:               []ReentryCycle{},
@@ -566,7 +567,7 @@ func NewScalpReentryStatus(entryPrice, quantity float64, config ScalpReentryConf
 }
 
 // AddDebugLog adds a debug log entry
-func (s *ScalpReentryStatus) AddDebugLog(message string) {
+func (s *PositionOptimizationStatus) AddDebugLog(message string) {
 	timestamp := time.Now().Format("15:04:05")
 	s.DebugLog = append(s.DebugLog, timestamp+": "+message)
 	// Keep only last 50 entries
@@ -577,7 +578,7 @@ func (s *ScalpReentryStatus) AddDebugLog(message string) {
 }
 
 // GetCurrentCycle returns the current active cycle or nil
-func (s *ScalpReentryStatus) GetCurrentCycle() *ReentryCycle {
+func (s *PositionOptimizationStatus) GetCurrentCycle() *ReentryCycle {
 	if s.CurrentCycle <= 0 || s.CurrentCycle > len(s.Cycles) {
 		return nil
 	}
@@ -585,13 +586,13 @@ func (s *ScalpReentryStatus) GetCurrentCycle() *ReentryCycle {
 }
 
 // IsWaitingForReentry returns true if waiting for re-entry
-func (s *ScalpReentryStatus) IsWaitingForReentry() bool {
+func (s *PositionOptimizationStatus) IsWaitingForReentry() bool {
 	cycle := s.GetCurrentCycle()
 	return cycle != nil && cycle.ReentryState == ReentryStateWaiting
 }
 
 // CanProceedToNextTP returns true if next TP level is allowed
-func (s *ScalpReentryStatus) CanProceedToNextTP() bool {
+func (s *PositionOptimizationStatus) CanProceedToNextTP() bool {
 	if !s.NextTPBlocked {
 		return true
 	}
@@ -600,7 +601,7 @@ func (s *ScalpReentryStatus) CanProceedToNextTP() bool {
 }
 
 // GetTPConfig returns TP percent and sell percent for a level
-func (c *ScalpReentryConfig) GetTPConfig(level int) (tpPercent, sellPercent float64) {
+func (c *PositionOptimizationConfig) GetTPConfig(level int) (tpPercent, sellPercent float64) {
 	switch level {
 	case 1:
 		return c.TP1Percent, c.TP1SellPercent
@@ -614,7 +615,7 @@ func (c *ScalpReentryConfig) GetTPConfig(level int) (tpPercent, sellPercent floa
 }
 
 // GetNegTPConfig returns negative TP percent and add percent for a level (loss triggers)
-func (c *ScalpReentryConfig) GetNegTPConfig(level int) (lossPct, addPct float64) {
+func (c *PositionOptimizationConfig) GetNegTPConfig(level int) (lossPct, addPct float64) {
 	switch level {
 	case 1:
 		return c.NegTP1Percent, c.NegTP1AddPercent
@@ -628,7 +629,7 @@ func (c *ScalpReentryConfig) GetNegTPConfig(level int) (lossPct, addPct float64)
 }
 
 // NewHedgeReentryState creates a new hedge reentry state
-func NewHedgeReentryState(originalQty float64, config ScalpReentryConfig) *HedgeReentryState {
+func NewHedgeReentryState(originalQty float64, config PositionOptimizationConfig) *HedgeReentryState {
 	return &HedgeReentryState{
 		Enabled:             config.HedgeModeEnabled,
 		HedgeActive:         false,

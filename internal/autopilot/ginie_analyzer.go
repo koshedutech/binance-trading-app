@@ -4588,8 +4588,8 @@ func (g *GinieAnalyzer) ClassifyVolatilityRegime(symbol string) (*VolatilityRegi
 // Formula: MinProfitTarget% = (EntryFee + ExitFee) / Margin × 100 + (0.5 × ATR%)
 // NOTE: positionUSD is NOTIONAL VALUE, fees are calculated on notional, profit % is relative to margin
 func (g *GinieAnalyzer) CalculateFeeAwareTP(symbol string, positionUSD float64, leverage int, atrPercent float64) float64 {
-	// Binance taker fee: 0.04% per order
-	const binanceTakerFee = 0.0004
+	// Binance taker fee: 0.05% per order (standard tier, verified from API)
+	const binanceTakerFee = 0.0005
 
 	// positionUSD is NOTIONAL VALUE (e.g., $500 with 10x leverage = $50 margin)
 	notionalValue := positionUSD

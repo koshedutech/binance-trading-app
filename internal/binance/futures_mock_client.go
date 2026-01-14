@@ -112,6 +112,16 @@ func (c *FuturesMockClient) GetPositionBySymbol(symbol string) (*FuturesPosition
 	return pos, nil
 }
 
+// GetCommissionRate returns mock commission rates (standard tier)
+func (c *FuturesMockClient) GetCommissionRate(symbol string) (*CommissionRate, error) {
+	// Return standard tier rates for mock (verified from Binance API)
+	return &CommissionRate{
+		Symbol:              symbol,
+		MakerCommissionRate: 0.0002, // 0.02%
+		TakerCommissionRate: 0.0005, // 0.05%
+	}, nil
+}
+
 // ==================== LEVERAGE & MARGIN ====================
 
 func (c *FuturesMockClient) SetLeverage(symbol string, leverage int) (*LeverageResponse, error) {
@@ -269,7 +279,7 @@ func (c *FuturesMockClient) PlaceFuturesOrder(params FuturesOrderParams) (*Futur
 		Qty:          params.Quantity,
 		RealizedPnl:  0, // Calculate if closing position
 		QuoteQty:     executionPrice * params.Quantity,
-		Commission:   executionPrice * params.Quantity * 0.0004, // 0.04% fee
+		Commission:   executionPrice * params.Quantity * 0.0005, // 0.05% fee (standard tier)
 		Time:         time.Now().UnixMilli(),
 		PositionSide: string(params.PositionSide),
 		Buyer:        params.Side == "BUY",

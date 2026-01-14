@@ -56,9 +56,10 @@ type UserAutopilotManager struct {
 	instances sync.Map // map[userID string] -> *UserAutopilotInstance
 
 	// Shared components (read-only, safe to share)
-	repo          *database.Repository
-	ginieAnalyzer *GinieAnalyzer
-	logger        *logging.Logger
+	repo              *database.Repository
+	positionStateRepo *database.RedisPositionStateRepository // Shared Redis position state
+	ginieAnalyzer     *GinieAnalyzer
+	logger            *logging.Logger
 
 	// Client factory for creating per-user Binance clients
 	clientFactory *binance.ClientFactory
@@ -81,6 +82,7 @@ type UserAutopilotManager struct {
 }
 
 // NewUserAutopilotManager creates a new multi-user autopilot manager
+// positionStateRepo can be nil (position state will fall back to JSON file only)
 func NewUserAutopilotManager(
 	repo *database.Repository,
 	ginieAnalyzer *GinieAnalyzer,
@@ -88,9 +90,11 @@ func NewUserAutopilotManager(
 	apiKeyService *apikeys.Service,
 	llmConfig *llm.AnalyzerConfig,
 	logger *logging.Logger,
+	positionStateRepo *database.RedisPositionStateRepository,
 ) *UserAutopilotManager {
 	mgr := &UserAutopilotManager{
 		repo:               repo,
+		positionStateRepo:  positionStateRepo,
 		ginieAnalyzer:      ginieAnalyzer,
 		clientFactory:      clientFactory,
 		apiKeyService:      apiKeyService,
@@ -216,12 +220,14 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	}
 
 	// Create per-user GinieAutopilot instance with userID for multi-tenant PnL isolation
+	// Pass shared Redis position state repository for cross-instance state sharing
 	autopilot := NewGinieAutopilot(
 		m.ginieAnalyzer,
 		futuresClient,
 		m.logger,
 		m.repo,
 		userID,
+		m.positionStateRepo, // Shared Redis position state (may be nil)
 	)
 
 	// Set the LLM analyzer if we have one

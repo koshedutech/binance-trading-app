@@ -120,6 +120,7 @@ func NewTrendFilterValidator(
 // ValidateAll checks all enabled filters in order (fastest first)
 // Returns (passed, rejectionReason)
 // Filter evaluation order: Price/EMA -> VWAP -> Higher TF -> BTC
+// NOTE: Use ValidateAllWithCandlestick if candlestick data is available
 func (v *TrendFilterValidator) ValidateAll(
 	symbol string,
 	direction string,
@@ -127,10 +128,34 @@ func (v *TrendFilterValidator) ValidateAll(
 	ema float64,
 	vwap float64,
 ) (bool, string) {
+	// Delegate to extended method with no candlestick data
+	return v.ValidateAllWithCandlestick(symbol, direction, currentPrice, ema, vwap, "", 0)
+}
+
+// ValidateAllWithCandlestick checks all enabled filters including candlestick alignment
+// Returns (passed, rejectionReason)
+// Filter evaluation order: Candlestick -> Price/EMA -> VWAP -> Higher TF -> BTC
+func (v *TrendFilterValidator) ValidateAllWithCandlestick(
+	symbol string,
+	direction string,
+	currentPrice float64,
+	ema float64,
+	vwap float64,
+	candleSignal string, // "BULLISH", "BEARISH", or ""
+	candleConfidence float64, // 0-100
+) (bool, string) {
 	// Normalize direction to uppercase for comparison
 	dir := strings.ToUpper(direction)
 
-	// 1. Price vs EMA check (instant - FASTEST)
+	// 0. Candlestick alignment check (instant - FASTEST, Phase 2)
+	if v.config != nil && v.config.CandlestickAlignment != nil && v.config.CandlestickAlignment.Enabled {
+		passed, reason := v.checkCandlestickAlignment(symbol, dir, candleSignal, candleConfidence)
+		if !passed {
+			return false, reason
+		}
+	}
+
+	// 1. Price vs EMA check (instant - FAST)
 	if v.config != nil && v.config.PriceVsEMA != nil && v.config.PriceVsEMA.Enabled {
 		passed, reason := v.checkPriceVsEMA(symbol, dir, currentPrice, ema)
 		if !passed {
@@ -399,4 +424,53 @@ func (v *TrendFilterValidator) ClearCache() {
 	v.higherTFCache.mu.Lock()
 	v.higherTFCache.cache = make(map[string]*TrendCacheEntry)
 	v.higherTFCache.mu.Unlock()
+}
+
+// checkCandlestickAlignment validates candlestick pattern aligns with direction (Phase 2)
+// For LONG: Bearish pattern with high confidence = block
+// For SHORT: Bullish pattern with high confidence = block
+func (v *TrendFilterValidator) checkCandlestickAlignment(
+	symbol, direction string,
+	candleSignal string, // "BULLISH", "BEARISH", or ""
+	candleConfidence float64, // 0-100
+) (bool, string) {
+	if v.config == nil || v.config.CandlestickAlignment == nil || !v.config.CandlestickAlignment.Enabled {
+		return true, ""
+	}
+
+	cfg := v.config.CandlestickAlignment
+
+	// Skip if no pattern detected or low confidence
+	if candleSignal == "" || candleConfidence < cfg.MinConfidenceToBlock {
+		return true, ""
+	}
+
+	// Normalize direction
+	dir := strings.ToUpper(direction)
+
+	// Check for conflict
+	conflict := false
+	if dir == "LONG" && candleSignal == "BEARISH" {
+		conflict = true
+	}
+	if dir == "SHORT" && candleSignal == "BULLISH" {
+		conflict = true
+	}
+
+	if conflict {
+		reason := fmt.Sprintf("%s candlestick (%.0f%%) contradicts %s direction",
+			candleSignal, candleConfidence, dir)
+
+		if cfg.LogOnlyMode {
+			v.logger.Warn(fmt.Sprintf("[TREND-FILTER] %s: candlestick_alignment LOG-ONLY - %s", symbol, reason))
+			return true, "" // Don't block in log-only mode
+		}
+
+		v.logger.Info(fmt.Sprintf("[TREND-FILTER] %s: candlestick_alignment BLOCKED - %s", symbol, reason))
+		return false, reason
+	}
+
+	v.logger.Info(fmt.Sprintf("[TREND-FILTER] %s: candlestick_alignment PASSED - %s pattern (%.0f%%) aligns with %s",
+		symbol, candleSignal, candleConfidence, dir))
+	return true, ""
 }

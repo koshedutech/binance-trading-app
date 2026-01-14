@@ -27,7 +27,7 @@ type DefaultSettingsFile struct {
 	LLMConfig            LLMConfigDefaults              `json:"llm_config"`
 	EarlyWarning         EarlyWarningDefaults           `json:"early_warning"`
 	CapitalAllocation    CapitalAllocationDefaults      `json:"capital_allocation"`
-	ScalpReentry         *ScalpReentryConfig            `json:"scalp_reentry_config,omitempty"`
+	ScalpReentry         *PositionOptimizationConfig            `json:"scalp_reentry_config,omitempty"`
 	SafetySettings       *SafetySettingsAllModes        `json:"safety_settings,omitempty"`
 	SettingsRiskIndex    SettingsRiskIndex              `json:"_settings_risk_index"`
 }
@@ -278,10 +278,10 @@ func deepCopyModeConfig(src *ModeFullConfig) *ModeFullConfig {
 	return &dst
 }
 
-// GetDefaultScalpReentryConfig returns default ScalpReentryConfig from default-settings.json
+// GetDefaultPositionOptimizationConfig returns default PositionOptimizationConfig from default-settings.json
 // ScalpReentry is stored separately from ModeConfigs because it's a Position Optimization
 // feature, not a trading mode
-func GetDefaultScalpReentryConfig() (*ScalpReentryConfig, error) {
+func GetDefaultPositionOptimizationConfig() (*PositionOptimizationConfig, error) {
 	defaults, err := LoadDefaultSettings()
 	if err != nil {
 		return nil, err
@@ -292,12 +292,12 @@ func GetDefaultScalpReentryConfig() (*ScalpReentryConfig, error) {
 	}
 
 	// Return a deep copy to prevent mutation
-	configCopy := deepCopyScalpReentryConfig(defaults.ScalpReentry)
+	configCopy := deepCopyPositionOptimizationConfig(defaults.ScalpReentry)
 	return configCopy, nil
 }
 
-// deepCopyScalpReentryConfig creates a deep copy of ScalpReentryConfig using JSON marshaling
-func deepCopyScalpReentryConfig(src *ScalpReentryConfig) *ScalpReentryConfig {
+// deepCopyPositionOptimizationConfig creates a deep copy of PositionOptimizationConfig using JSON marshaling
+func deepCopyPositionOptimizationConfig(src *PositionOptimizationConfig) *PositionOptimizationConfig {
 	if src == nil {
 		return nil
 	}
@@ -305,13 +305,13 @@ func deepCopyScalpReentryConfig(src *ScalpReentryConfig) *ScalpReentryConfig {
 	// Use JSON marshaling for deep copy
 	data, err := json.Marshal(src)
 	if err != nil {
-		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to marshal ScalpReentryConfig for deep copy: %v", err)
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to marshal PositionOptimizationConfig for deep copy: %v", err)
 		return nil
 	}
 
-	var dst ScalpReentryConfig
+	var dst PositionOptimizationConfig
 	if err := json.Unmarshal(data, &dst); err != nil {
-		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to unmarshal ScalpReentryConfig for deep copy: %v", err)
+		log.Printf("[DEFAULT-SETTINGS] ERROR: Failed to unmarshal PositionOptimizationConfig for deep copy: %v", err)
 		return nil
 	}
 

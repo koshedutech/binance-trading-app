@@ -114,6 +114,12 @@ func NewRedisPositionStateRepository(client *redis.Client) *RedisPositionStateRe
 	return repo
 }
 
+// GetClient returns the underlying Redis client.
+// Returns nil if operating in memory-only mode.
+func (r *RedisPositionStateRepository) GetClient() *redis.Client {
+	return r.client
+}
+
 // positionKey generates the Redis key for a position state.
 // Format: ginie:position:{userID}:{symbol}
 func (r *RedisPositionStateRepository) positionKey(userID, symbol string) string {

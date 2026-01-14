@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -391,10 +392,11 @@ func (s *Server) handleGinieAnalyzeAll(c *gin.Context) {
 // ==================== Ginie Autopilot Handlers ====================
 
 // handleGetGinieAutopilotStatus returns current Ginie autopilot status
+// Uses non-blocking PnL fetch to prevent API timeouts
 func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
-	autopilot := s.getGinieAutopilotForUser(c)
+	autopilot := s.getGinieAutopilotWithFallback(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 
@@ -407,9 +409,9 @@ func (s *Server) handleGetGinieAutopilotStatus(c *gin.Context) {
 	// Get available balance for adaptive sizing info
 	availableBalance, walletBalance := autopilot.GetBalanceInfo()
 
-	// Fetch P/L directly from Binance Income History for accuracy
-	// Uses the autopilot's futures client which is already authenticated
-	dailyPnL, totalPnL := s.GetBinancePnLForAutopilot(autopilot)
+	// Non-blocking PnL fetch with 2-second timeout
+	// Returns cached data immediately, triggers background refresh if expired
+	dailyPnL, totalPnL := s.GetBinancePnLNonBlocking(autopilot)
 
 	// Override internal counter values with actual Binance values
 	stats["daily_pnl"] = dailyPnL
@@ -751,9 +753,9 @@ func (s *Server) handleStopGinieAutopilot(c *gin.Context) {
 
 // handleGetGinieAutopilotPositions returns active Ginie positions
 func (s *Server) handleGetGinieAutopilotPositions(c *gin.Context) {
-	autopilot := s.getGinieAutopilotForUser(c)
+	autopilot := s.getGinieAutopilotWithFallback(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 
@@ -767,9 +769,9 @@ func (s *Server) handleGetGinieAutopilotPositions(c *gin.Context) {
 
 // handleGetGinieAutopilotTradeHistory returns Ginie trade history
 func (s *Server) handleGetGinieAutopilotTradeHistory(c *gin.Context) {
-	autopilot := s.getGinieAutopilotForUser(c)
+	autopilot := s.getGinieAutopilotWithFallback(c)
 	if autopilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 
@@ -1592,9 +1594,9 @@ func (s *Server) handleGetGinieSLStats(c *gin.Context) {
 
 // handleGetGinieLLMSLStatus returns LLM SL kill switch status
 func (s *Server) handleGetGinieLLMSLStatus(c *gin.Context) {
-	giniePilot := s.getGinieAutopilotForUser(c)
+	giniePilot := s.getGinieAutopilotWithFallback(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 
@@ -1635,10 +1637,10 @@ func (s *Server) handleResetGinieLLMSL(c *gin.Context) {
 // handleGetGinieDiagnostics returns comprehensive diagnostic info for troubleshooting
 // Multi-user isolation: Uses per-user GinieAutopilot for accurate running state
 func (s *Server) handleGetGinieDiagnostics(c *gin.Context) {
-	// Use per-user GinieAutopilot for accurate "autopilot_running" status
-	giniePilot := s.getGinieAutopilotForUser(c)
+	// Use per-user GinieAutopilot with fallback to shared controller
+	giniePilot := s.getGinieAutopilotWithFallback(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 
@@ -1768,6 +1770,83 @@ func parseIntParam(s string) (int, error) {
 
 // ==================== Mode Configuration CRUD Handlers (Story 2.7 Task 2.7.10) ====================
 
+// mergeWithDefaults fills in nil nested configs from defaults
+// This ensures user's existing configs get new fields like position_optimization
+func mergeWithDefaults(userCfg, defaultCfg *autopilot.ModeFullConfig) *autopilot.ModeFullConfig {
+	if userCfg == nil {
+		return defaultCfg
+	}
+	if defaultCfg == nil {
+		return userCfg
+	}
+
+	// Preserve user's enabled status and mode name
+	result := *userCfg
+
+	// Merge nil nested configs with defaults
+	if result.Timeframe == nil && defaultCfg.Timeframe != nil {
+		result.Timeframe = defaultCfg.Timeframe
+	}
+	if result.Entry == nil && defaultCfg.Entry != nil {
+		result.Entry = defaultCfg.Entry
+	}
+	if result.Confidence == nil && defaultCfg.Confidence != nil {
+		result.Confidence = defaultCfg.Confidence
+	}
+	if result.Size == nil && defaultCfg.Size != nil {
+		result.Size = defaultCfg.Size
+	}
+	if result.CircuitBreaker == nil && defaultCfg.CircuitBreaker != nil {
+		result.CircuitBreaker = defaultCfg.CircuitBreaker
+	}
+	if result.SLTP == nil && defaultCfg.SLTP != nil {
+		result.SLTP = defaultCfg.SLTP
+	}
+	if result.Hedge == nil && defaultCfg.Hedge != nil {
+		result.Hedge = defaultCfg.Hedge
+	}
+	if result.Averaging == nil && defaultCfg.Averaging != nil {
+		result.Averaging = defaultCfg.Averaging
+	}
+	if result.StaleRelease == nil && defaultCfg.StaleRelease != nil {
+		result.StaleRelease = defaultCfg.StaleRelease
+	}
+	if result.Assignment == nil && defaultCfg.Assignment != nil {
+		result.Assignment = defaultCfg.Assignment
+	}
+	if result.FundingRate == nil && defaultCfg.FundingRate != nil {
+		result.FundingRate = defaultCfg.FundingRate
+	}
+	if result.Risk == nil && defaultCfg.Risk != nil {
+		result.Risk = defaultCfg.Risk
+	}
+	if result.TrendDivergence == nil && defaultCfg.TrendDivergence != nil {
+		result.TrendDivergence = defaultCfg.TrendDivergence
+	}
+	if result.MTF == nil && defaultCfg.MTF != nil {
+		result.MTF = defaultCfg.MTF
+	}
+	if result.DynamicAIExit == nil && defaultCfg.DynamicAIExit != nil {
+		result.DynamicAIExit = defaultCfg.DynamicAIExit
+	}
+	if result.Reversal == nil && defaultCfg.Reversal != nil {
+		result.Reversal = defaultCfg.Reversal
+	}
+	if result.TrendFilters == nil && defaultCfg.TrendFilters != nil {
+		result.TrendFilters = defaultCfg.TrendFilters
+	}
+	if result.EarlyWarning == nil && defaultCfg.EarlyWarning != nil {
+		result.EarlyWarning = defaultCfg.EarlyWarning
+	}
+	// CRITICAL: position_optimization - fill in if nil (new Story 9.9 field)
+	if result.PositionOptimization == nil && defaultCfg.PositionOptimization != nil {
+		result.PositionOptimization = defaultCfg.PositionOptimization
+		log.Printf("[MODE-CONFIG] Filled in missing position_optimization from defaults")
+	}
+
+	return &result
+}
+
 // handleGetModeConfigs returns all 4 mode configurations (ultrafast, scalp, swing, position)
 // GET /api/futures/ginie/mode-configs
 // DATABASE ONLY: Reads from database for authenticated user. No JSON fallback for existing users.
@@ -1793,14 +1872,16 @@ func (s *Server) handleGetModeConfigs(c *gin.Context) {
 		return
 	}
 
-	// Ensure all modes are present - if user is missing a mode, log warning
-	// This should NOT happen for properly initialized users
+	// Ensure all modes are present AND merge with defaults for missing nested configs
+	// This handles cases where user's DB config doesn't have new fields like position_optimization
 	defaultConfigs := autopilot.DefaultModeConfigs()
 	mergedConfigs := make(map[string]*autopilot.ModeFullConfig)
 	for mode, defaultCfg := range defaultConfigs {
 		if dbCfg, ok := dbConfigs[mode]; ok {
-			mergedConfigs[mode] = dbCfg
-			log.Printf("[MODE-CONFIG] %s: loaded from DB (enabled=%v)", mode, dbCfg.Enabled)
+			// Merge with defaults to fill in any missing nested configs
+			mergedConfig := mergeWithDefaults(dbCfg, defaultCfg)
+			mergedConfigs[mode] = mergedConfig
+			log.Printf("[MODE-CONFIG] %s: loaded from DB (enabled=%v)", mode, mergedConfig.Enabled)
 		} else {
 			// This should only happen for new users or incomplete DB setup
 			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s in DB - using default (this may indicate incomplete initialization)", userIDStr, mode)
@@ -1883,6 +1964,12 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 		// For other errors, return error response
 		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode config from database: %v", err))
 		return
+	}
+
+	// Merge with defaults to fill in any nil nested configs (e.g., position_optimization)
+	defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
+	if defaultErr == nil && defaultConfig != nil {
+		config = mergeWithDefaults(config, defaultConfig)
 	}
 
 	log.Printf("[MODE-CONFIG] Loaded %s from DB for user %s (enabled=%v)", mode, userIDStr, config.Enabled)
@@ -2863,9 +2950,9 @@ func (s *Server) handleApplyAllRecommendations(c *gin.Context) {
 func (s *Server) handleGetLLMDiagnosticsV2(c *gin.Context) {
 	log.Println("[LLM-DIAG] Getting LLM diagnostics")
 
-	giniePilot := s.getGinieAutopilotForUser(c)
+	giniePilot := s.getGinieAutopilotWithFallback(c)
 	if giniePilot == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available for this user")
+		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
 	}
 
@@ -3989,11 +4076,11 @@ func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
 		return
 	}
 
-	var config autopilot.ScalpReentryConfig
+	var config autopilot.PositionOptimizationConfig
 
 	if configJSON == nil {
 		log.Printf("[SCALP-REENTRY] No config in database - using defaults")
-		config = autopilot.DefaultScalpReentryConfig()
+		config = autopilot.DefaultPositionOptimizationConfig()
 		config.Enabled = enabledFromDB
 	} else {
 		// Try to parse as ScalpReentryConfig directly first (correct format)
@@ -4009,7 +4096,7 @@ func (s *Server) handleGetScalpReentryConfig(c *gin.Context) {
 		// Check if config has valid TP levels (detect if it was stored in wrong format)
 		if config.TP1Percent <= 0 || config.TP2Percent <= 0 || config.TP3Percent <= 0 {
 			log.Printf("[SCALP-REENTRY] Config has invalid TP levels (possibly wrong format) - merging with defaults")
-			defaults := autopilot.DefaultScalpReentryConfig()
+			defaults := autopilot.DefaultPositionOptimizationConfig()
 			// Use defaults for TP levels if they are zero
 			if config.TP1Percent <= 0 {
 				config.TP1Percent = defaults.TP1Percent
@@ -4071,7 +4158,7 @@ func (s *Server) handleUpdateScalpReentryConfig(c *gin.Context) {
 	userID := s.getUserID(c)
 	log.Printf("[SCALP-REENTRY] Updating scalp re-entry configuration for user %s", userID)
 
-	var req autopilot.ScalpReentryConfig
+	var req autopilot.PositionOptimizationConfig
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
@@ -4172,10 +4259,10 @@ func (s *Server) handleToggleScalpReentry(c *gin.Context) {
 	ctx := context.Background()
 	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr)
 
-	var config autopilot.ScalpReentryConfig
+	var config autopilot.PositionOptimizationConfig
 	if configJSON == nil || err != nil {
 		// No DB config, use defaults
-		config = autopilot.DefaultScalpReentryConfig()
+		config = autopilot.DefaultPositionOptimizationConfig()
 	} else {
 		// Parse existing config
 		if err := json.Unmarshal(configJSON, &config); err != nil {
@@ -4254,11 +4341,11 @@ func (s *Server) handleGetHedgeModeConfig(c *gin.Context) {
 	ctx := c.Request.Context()
 	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userID)
 
-	var config autopilot.ScalpReentryConfig
+	var config autopilot.PositionOptimizationConfig
 	if configJSON == nil || err != nil {
 		// No config in database - use defaults
 		log.Println("[HEDGE-MODE] No config in database, using defaults")
-		config = autopilot.DefaultScalpReentryConfig()
+		config = autopilot.DefaultPositionOptimizationConfig()
 	} else {
 		// Parse the config from database
 		if err := json.Unmarshal(configJSON, &config); err != nil {
@@ -4317,7 +4404,7 @@ func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
 		return
 	}
-	cfg := &settings.ScalpReentryConfig
+	cfg := &settings.PositionOptimizationConfig
 
 	// Helper to check if field was provided
 	hasField := func(name string) bool {
@@ -4464,10 +4551,10 @@ func (s *Server) handleToggleHedgeMode(c *gin.Context) {
 	ctx := context.Background()
 	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr)
 
-	var config autopilot.ScalpReentryConfig
+	var config autopilot.PositionOptimizationConfig
 	if configJSON == nil || err != nil {
 		// No DB config, use defaults
-		config = autopilot.DefaultScalpReentryConfig()
+		config = autopilot.DefaultPositionOptimizationConfig()
 	} else {
 		// Parse existing config
 		if err := json.Unmarshal(configJSON, &config); err != nil {
@@ -4553,6 +4640,7 @@ func (s *Server) handleGetHedgeModePositions(c *gin.Context) {
 
 		hedgePositions = append(hedgePositions, gin.H{
 			"symbol":        pos.Symbol,
+			"mode":          string(pos.Mode), // Trading mode that owns this position
 			"original_side": pos.Side,
 			"entry_price":   pos.EntryPrice,
 			"current_price": currentPrice,
@@ -4684,7 +4772,7 @@ type ScalpReentryCycleInfo struct {
 func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 	log.Println("[SCALP-REENTRY-MONITOR] Getting scalp re-entry positions")
 
-	giniePilot := s.getGinieAutopilotForUser(c)
+	giniePilot := s.getGinieAutopilotWithFallback(c)
 	if giniePilot == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
@@ -4695,14 +4783,14 @@ func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 
 	// Get scalp reentry config for TP level info from user's database config
 	// FIXED: Detects both OLD format (ModeFullConfig) and NEW format (ScalpReentryConfig)
-	config := autopilot.DefaultScalpReentryConfig() // Start with safe defaults
+	config := autopilot.DefaultPositionOptimizationConfig() // Start with safe defaults
 	userID, exists := c.Get("user_id")
 	if exists && userID != nil {
 		userIDStr := userID.(string)
 		ctx := context.Background()
 		if configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr); err == nil && configJSON != nil {
 			// Try NEW format first (ScalpReentryConfig)
-			var scalpConfig autopilot.ScalpReentryConfig
+			var scalpConfig autopilot.PositionOptimizationConfig
 			if err := json.Unmarshal(configJSON, &scalpConfig); err == nil && scalpConfig.TP1Percent > 0 {
 				config = scalpConfig
 				log.Printf("[SCALP-REENTRY-MONITOR] Loaded NEW format from DB for user %s: TP1=%.2f%% (sell %.0f%%)",
@@ -4733,8 +4821,8 @@ func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 	var scalpPositions []ScalpReentryPositionStatus
 
 	for _, pos := range allPositions {
-		// Include if mode is scalp_reentry OR has ScalpReentry tracking
-		if pos.Mode != autopilot.GinieModeScalpReentry && pos.ScalpReentry == nil {
+		// Include if has position optimization (ScalpReentry) tracking
+		if pos.ScalpReentry == nil {
 			continue
 		}
 
@@ -4854,6 +4942,11 @@ func (s *Server) handleGetScalpReentryPositions(c *gin.Context) {
 		scalpPositions = append(scalpPositions, status)
 	}
 
+	// Sort positions alphabetically by symbol for stable UI order
+	sort.Slice(scalpPositions, func(i, j int) bool {
+		return scalpPositions[i].Symbol < scalpPositions[j].Symbol
+	})
+
 	// Get global stats
 	totalAccumulatedProfit := 0.0
 	totalCycles := 0
@@ -4884,7 +4977,7 @@ func (s *Server) handleGetScalpReentryPositionStatus(c *gin.Context) {
 	symbol := c.Param("symbol")
 	log.Printf("[SCALP-REENTRY-MONITOR] Getting status for %s", symbol)
 
-	giniePilot := s.getGinieAutopilotForUser(c)
+	giniePilot := s.getGinieAutopilotWithFallback(c)
 	if giniePilot == nil {
 		errorResponse(c, http.StatusServiceUnavailable, "Ginie autopilot not available")
 		return
@@ -4915,14 +5008,14 @@ func (s *Server) handleGetScalpReentryPositionStatus(c *gin.Context) {
 
 	// Get scalp reentry config from user's database config
 	// FIXED: Detects both OLD format (ModeFullConfig) and NEW format (ScalpReentryConfig)
-	config := autopilot.DefaultScalpReentryConfig() // Start with safe defaults
+	config := autopilot.DefaultPositionOptimizationConfig() // Start with safe defaults
 	userID, exists := c.Get("user_id")
 	if exists && userID != nil {
 		userIDStr := userID.(string)
 		ctx := context.Background()
 		if configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userIDStr); err == nil && configJSON != nil {
 			// Try NEW format first
-			var scalpConfig autopilot.ScalpReentryConfig
+			var scalpConfig autopilot.PositionOptimizationConfig
 			if err := json.Unmarshal(configJSON, &scalpConfig); err == nil && scalpConfig.TP1Percent > 0 {
 				config = scalpConfig
 			} else {
@@ -5049,19 +5142,18 @@ func (s *Server) handleConvertPositionMode(c *gin.Context) {
 		return
 	}
 
-	// Validate target mode
+	// Validate target mode (scalp_reentry removed - it's now a feature, not a mode)
 	validModes := map[string]autopilot.GinieTradingMode{
-		"ultra_fast":    autopilot.GinieModeUltraFast,
-		"scalp":         autopilot.GinieModeScalp,
-		"scalp_reentry": autopilot.GinieModeScalpReentry,
-		"swing":         autopilot.GinieModeSwing,
-		"position":      autopilot.GinieModePosition,
+		"ultra_fast": autopilot.GinieModeUltraFast,
+		"scalp":      autopilot.GinieModeScalp,
+		"swing":      autopilot.GinieModeSwing,
+		"position":   autopilot.GinieModePosition,
 	}
 
 	targetMode, ok := validModes[req.TargetMode]
 	if !ok {
 		errorResponse(c, http.StatusBadRequest,
-			"Invalid target_mode. Must be one of: ultra_fast, scalp, scalp_reentry, swing, position")
+			"Invalid target_mode. Must be one of: ultra_fast, scalp, swing, position")
 		return
 	}
 

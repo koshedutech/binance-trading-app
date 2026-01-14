@@ -11,61 +11,96 @@ import (
 	"binance-trading-bot/internal/binance"
 )
 
-// ============ SCALP RE-ENTRY CORE LOGIC ============
+// ============ POSITION OPTIMIZATION CORE LOGIC ============
 
-// getUserScalpReentryConfig loads the user's scalp_reentry config from DATABASE
-// Story 9.4: scalp_reentry is an optimization feature stored in user_mode_configs table
+// getUserPositionOptimizationConfig loads the user's position_optimization config from DATABASE
+// Story 9.4: position_optimization is an optimization feature stored in user_mode_configs table
 // DATABASE-FIRST: All runtime reads come from database, not JSON files
-func (g *GinieAutopilot) getUserScalpReentryConfig() ScalpReentryConfig {
-	// DATABASE-FIRST: Load scalp_reentry config from database
+func (g *GinieAutopilot) getUserPositionOptimizationConfig() PositionOptimizationConfig {
+	// DATABASE-FIRST: Load position_optimization config from database
 	if g.repo != nil && g.userID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		configJSON, err := g.repo.GetUserScalpReentryConfig(ctx, g.userID)
 		if err != nil {
-			log.Printf("[SCALP-REENTRY] ERROR: Failed to load scalp_reentry config from DB for user %s: %v - using defaults", g.userID, err)
-			return DefaultScalpReentryConfig()
+			log.Printf("[POSITION-OPT] ERROR: Failed to load position_optimization config from DB for user %s: %v - using defaults", g.userID, err)
+			return DefaultPositionOptimizationConfig()
 		}
 		if configJSON == nil {
-			log.Printf("[SCALP-REENTRY] ERROR: scalp_reentry config missing in DB for user %s - using defaults", g.userID)
-			return DefaultScalpReentryConfig()
+			log.Printf("[POSITION-OPT] ERROR: position_optimization config missing in DB for user %s - using defaults", g.userID)
+			return DefaultPositionOptimizationConfig()
 		}
 
 		// Parse the JSON config
-		var config ScalpReentryConfig
+		var config PositionOptimizationConfig
 		if err := json.Unmarshal(configJSON, &config); err != nil {
-			log.Printf("[SCALP-REENTRY] ERROR: Failed to parse scalp_reentry config JSON for user %s: %v - using defaults", g.userID, err)
-			return DefaultScalpReentryConfig()
+			log.Printf("[POSITION-OPT] ERROR: Failed to parse position_optimization config JSON for user %s: %v - using defaults", g.userID, err)
+			return DefaultPositionOptimizationConfig()
 		}
 
-		log.Printf("[SCALP-REENTRY] Loaded from DATABASE: enabled=%v, TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
+		log.Printf("[POSITION-OPT] Loaded from DATABASE: enabled=%v, TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
 			config.Enabled, config.TP1Percent, config.TP1SellPercent, config.TP2Percent, config.TP2SellPercent, config.TP3Percent, config.TP3SellPercent)
 		return config
 	}
 
-	log.Printf("[SCALP-REENTRY] ERROR: No repository or userID available - using defaults")
-	return DefaultScalpReentryConfig()
+	log.Printf("[POSITION-OPT] ERROR: No repository or userID available - using defaults")
+	return DefaultPositionOptimizationConfig()
 }
 
-// initScalpReentry initializes scalp re-entry status for a position
-func (g *GinieAutopilot) initScalpReentry(pos *GiniePosition) *ScalpReentryStatus {
-	config := g.getUserScalpReentryConfig()
+// initPositionOptimization initializes scalp re-entry status for a position (LEGACY - uses old global config)
+// DEPRECATED: Use initPositionOptimizationFromModeConfig with the mode's PositionOptimization config instead
+func (g *GinieAutopilot) initPositionOptimization(pos *GiniePosition) *PositionOptimizationStatus {
+	config := g.getUserPositionOptimizationConfig()
 
-	status := NewScalpReentryStatus(pos.EntryPrice, pos.OriginalQty, config)
-	status.AddDebugLog(fmt.Sprintf("Initialized scalp_reentry for %s %s @ %.8f", pos.Symbol, pos.Side, pos.EntryPrice))
+	status := NewPositionOptimizationStatus(pos.EntryPrice, pos.OriginalQty, config)
+	status.AddDebugLog(fmt.Sprintf("Initialized position_optimization for %s %s @ %.8f", pos.Symbol, pos.Side, pos.EntryPrice))
 
 	return status
 }
 
-// monitorScalpReentryPosition monitors a position in scalp_reentry mode
-func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
+// initPositionOptimizationFromModeConfig initializes position optimization using mode's config
+// [Story 9.9] Each mode has its own position_optimization section - use this instead of getUserPositionOptimizationConfig
+func (g *GinieAutopilot) initPositionOptimizationFromModeConfig(pos *GiniePosition, config *PositionOptimizationConfig) *PositionOptimizationStatus {
+	if config == nil {
+		// Fallback to defaults if nil
+		defaultConfig := DefaultPositionOptimizationConfig()
+		config = &defaultConfig
+	}
+
+	status := NewPositionOptimizationStatus(pos.EntryPrice, pos.OriginalQty, *config)
+	status.AddDebugLog(fmt.Sprintf("[Story 9.9] Initialized position_optimization for %s %s @ %.8f (mode: %s, TP1=%.1f%%, TP2=%.1f%%, TP3=%.1f%%)",
+		pos.Symbol, pos.Side, pos.EntryPrice, pos.Mode, config.TP1Percent, config.TP2Percent, config.TP3Percent))
+
+	return status
+}
+
+// monitorPositionOptimization monitors a position in position_optimization mode
+func (g *GinieAutopilot) monitorPositionOptimization(pos *GiniePosition) error {
+	// [Story 9.9] Get position optimization config from the position's mode
+	modeConfig := g.getModeConfig(pos.Mode)
+	var posOptConfig *PositionOptimizationConfig
+	if modeConfig != nil && modeConfig.PositionOptimization != nil {
+		posOptConfig = modeConfig.PositionOptimization
+	}
+
 	if pos.ScalpReentry == nil {
-		pos.ScalpReentry = g.initScalpReentry(pos)
+		if posOptConfig != nil {
+			pos.ScalpReentry = g.initPositionOptimizationFromModeConfig(pos, posOptConfig)
+		} else {
+			pos.ScalpReentry = g.initPositionOptimization(pos) // Fallback to old behavior
+		}
 	}
 
 	sr := pos.ScalpReentry
-	config := g.getUserScalpReentryConfig()
+	// Use mode's config if available, otherwise fallback to old global config
+	var config PositionOptimizationConfig
+	if posOptConfig != nil {
+		config = *posOptConfig
+	} else {
+		config = g.getUserPositionOptimizationConfig()
+	}
+	_ = config // Config used implicitly through sr.Config
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 
 	// Log monitoring
@@ -95,7 +130,7 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 	if !sr.NextTPBlocked || sr.CanProceedToNextTP() {
 		nextTPLevel := sr.TPLevelUnlocked + 1
 		if nextTPLevel <= 3 {
-			tpHit, _ := g.checkScalpReentryTP(pos, currentPrice, nextTPLevel)
+			tpHit, _ := g.checkPositionOptimizationTP(pos, currentPrice, nextTPLevel)
 			if tpHit {
 				// Check if position qty already reduced (exchange filled)
 				expectedQtyAfterTP := sr.RemainingQuantity
@@ -105,7 +140,7 @@ func (g *GinieAutopilot) monitorScalpReentryPosition(pos *GiniePosition) error {
 					return g.processExchangeTPFill(pos, nextTPLevel, currentPrice)
 				}
 				// Exchange didn't fill - use internal execution as fallback
-				log.Printf("[SCALP-REENTRY] %s: TP%d hit but exchange order not filled, using internal execution", pos.Symbol, nextTPLevel)
+				log.Printf("[POSITION-OPT] %s: TP%d hit but exchange order not filled, using internal execution", pos.Symbol, nextTPLevel)
 				return g.executeTPSell(pos, nextTPLevel)
 			}
 		}
@@ -157,7 +192,7 @@ func (g *GinieAutopilot) detectExchangeTPFill(pos *GiniePosition, currentPrice f
 		return false // All TPs already hit
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	_, sellPercent := config.GetTPConfig(nextTPLevel)
 	sellPercentExact := float64(int(sellPercent)) / 100.0
 	expectedSellQty := expectedQty * sellPercentExact
@@ -176,7 +211,7 @@ func (g *GinieAutopilot) detectExchangeTPFill(pos *GiniePosition, currentPrice f
 // processExchangeTPFill updates state after exchange LIMIT TP order fills
 // This is called instead of executeTPSell since exchange already executed the order
 func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, currentPrice float64) error {
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	sr := pos.ScalpReentry
 
 	tpPercent, sellPercent := config.GetTPConfig(tpLevel)
@@ -186,7 +221,7 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 
 	sr.AddDebugLog(fmt.Sprintf("TP%d EXCHANGE FILL: profit %.2f%%, sold %.4f (%.0f%% of remaining)",
 		tpLevel, tpPercent, sellQty, sellPercent))
-	log.Printf("[SCALP-REENTRY] %s: Exchange LIMIT TP%d filled (saved taker fees!)", pos.Symbol, tpLevel)
+	log.Printf("[POSITION-OPT] %s: Exchange LIMIT TP%d filled (saved taker fees!)", pos.Symbol, tpLevel)
 
 	// Calculate PnL for this sell
 	var pnl float64
@@ -206,7 +241,7 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 		}
 	}
 
-	// LOG TP HIT TO DATABASE - critical for tracking scalp_reentry TPs
+	// LOG TP HIT TO DATABASE - critical for tracking position_optimization TPs
 	go g.eventLogger.LogTPHit(
 		context.Background(),
 		pos.FuturesTradeID,
@@ -222,7 +257,7 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 	cycle := ReentryCycle{
 		CycleNumber:  len(sr.Cycles) + 1,
 		TPLevel:      tpLevel,
-		Mode:         string(GinieModeScalpReentry),
+		Mode:         "position_optimization", // [Story 9.9] Changed from string(GinieModeScalpReentry)
 		Side:         pos.Side,
 		SellPrice:    currentPrice,
 		SellQuantity: sellQty,
@@ -284,7 +319,7 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 		// Place next TP order on exchange for next level
 		// Note: placeNextTPOrder takes the CURRENT level and places order for level+1
 		if tpLevel < 3 && tpLevel < len(pos.TakeProfits) {
-			log.Printf("[SCALP-REENTRY] %s: Placing next TP order for level %d", pos.Symbol, tpLevel+1)
+			log.Printf("[POSITION-OPT] %s: Placing next TP order for level %d", pos.Symbol, tpLevel+1)
 			go g.placeNextTPOrder(pos, tpLevel)
 		}
 	}
@@ -301,9 +336,9 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 	return nil
 }
 
-// checkScalpReentryTP checks if a TP level has been reached
-func (g *GinieAutopilot) checkScalpReentryTP(pos *GiniePosition, currentPrice float64, tpLevel int) (bool, float64) {
-	config := g.getUserScalpReentryConfig()
+// checkPositionOptimizationTP checks if a TP level has been reached
+func (g *GinieAutopilot) checkPositionOptimizationTP(pos *GiniePosition, currentPrice float64, tpLevel int) (bool, float64) {
+	config := g.getUserPositionOptimizationConfig()
 	tpPercent, _ := config.GetTPConfig(tpLevel)
 
 	if tpPercent == 0 {
@@ -327,7 +362,7 @@ func (g *GinieAutopilot) checkScalpReentryTP(pos *GiniePosition, currentPrice fl
 
 // executeTPSell executes a partial sell at a TP level
 func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	sr := pos.ScalpReentry
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 
@@ -351,6 +386,9 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sellQty = g.roundQuantity(pos.Symbol, sellQty)
 	minQty := g.getMinQuantity(pos.Symbol)
 
+	// USD-based minimum threshold for position value
+	const minPositionValueUSD = 10.0
+
 	// Handle small positions: if partial sell is below minimum, close entire remaining
 	if sellQty < minQty {
 		remainingQty := g.roundQuantity(pos.Symbol, sr.RemainingQuantity)
@@ -360,13 +398,38 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 			sellQty = remainingQty
 			sellPercent = 100.0
 		} else {
-			// ALERT: Position is stuck - too small to execute any trade
-			alertMsg := fmt.Sprintf("TP%d: Position too small (%.4f < min %.4f) - NEEDS MANUAL INTERVENTION", tpLevel, remainingQty, minQty)
+			// Check USD value of remaining position
+			positionValueUSD := remainingQty * currentPrice
+			if positionValueUSD < minPositionValueUSD {
+				// Position value below $10 - auto-close with market order
+				sr.AddDebugLog(fmt.Sprintf("TP%d: Position value $%.2f below $%.2f minimum - auto-closing", tpLevel, positionValueUSD, minPositionValueUSD))
+				log.Printf("[POSITION-OPT] %s %s: Position value $%.2f below $%.2f minimum - auto-closing",
+					pos.Symbol, pos.Side, positionValueUSD, minPositionValueUSD)
+
+				// Execute market order to close the remaining position
+				err := g.executePositionOptPartialClose(pos, remainingQty, fmt.Sprintf("position_optimization_TP%d_low_value_autoclose", tpLevel))
+				if err != nil {
+					sr.AddDebugLog(fmt.Sprintf("TP%d auto-close failed: %v", tpLevel, err))
+					log.Printf("[POSITION-OPT] %s: Auto-close failed: %v", pos.Symbol, err)
+					return err
+				}
+
+				// Update position state as closed
+				sr.RemainingQuantity = 0
+				sr.FinalPortionQty = 0
+				sr.LastUpdate = time.Now()
+				sr.AddDebugLog(fmt.Sprintf("TP%d: Low value position auto-closed successfully", tpLevel))
+
+				return nil
+			}
+
+			// Position has value >= $10 but qty below exchange minimum - needs manual intervention
+			alertMsg := fmt.Sprintf("TP%d: Position qty %.6f below exchange min %.6f (value $%.2f) - NEEDS MANUAL INTERVENTION", tpLevel, remainingQty, minQty, positionValueUSD)
 			sr.AddDebugLog(alertMsg)
 
 			// Set visible alert flags for UI
 			sr.NeedsManualIntervention = true
-			sr.ManualInterventionReason = fmt.Sprintf("Position quantity %.6f is below minimum tradeable %.6f. Cannot execute TP%d sell. Please close manually.", remainingQty, minQty, tpLevel)
+			sr.ManualInterventionReason = fmt.Sprintf("Position quantity %.6f is below exchange minimum %.6f (value $%.2f). Cannot execute TP%d sell. Please close manually.", remainingQty, minQty, positionValueUSD, tpLevel)
 			sr.ManualInterventionAlertAt = time.Now().Format(time.RFC3339)
 			sr.LastUpdate = time.Now()
 
@@ -393,7 +456,7 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	cycle := ReentryCycle{
 		CycleNumber: len(sr.Cycles) + 1,
 		TPLevel:     tpLevel,
-		Mode:        string(GinieModeScalpReentry),
+		Mode:        "position_optimization", // [Story 9.9] Changed from string(GinieModeScalpReentry)
 		Side:        pos.Side,
 		SellPrice:   currentPrice,
 		SellQuantity: sellQty,
@@ -404,7 +467,7 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	}
 
 	// Execute the partial close
-	err := g.executeScalpPartialClose(pos, sellQty, fmt.Sprintf("scalp_reentry_TP%d", tpLevel))
+	err := g.executePositionOptPartialClose(pos, sellQty, fmt.Sprintf("position_optimization_TP%d", tpLevel))
 	if err != nil {
 		sr.AddDebugLog(fmt.Sprintf("TP%d sell failed: %v", tpLevel, err))
 		return err
@@ -420,7 +483,7 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 		}
 	}
 
-	// LOG TP HIT TO DATABASE - critical for tracking scalp_reentry TPs
+	// LOG TP HIT TO DATABASE - critical for tracking position_optimization TPs
 	go g.eventLogger.LogTPHit(
 		context.Background(),
 		pos.FuturesTradeID,
@@ -438,10 +501,10 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sr.TPLevelUnlocked = tpLevel
 
 	// CRITICAL: Sync pos.RemainingQty with sr.RemainingQuantity to avoid divergence
-	// sr.RemainingQuantity is the source of truth for scalp_reentry mode
+	// sr.RemainingQuantity is the source of truth for position_optimization mode
 	pos.RemainingQty = sr.RemainingQuantity
 
-	// CRITICAL: Sync main position TP state with scalp_reentry
+	// CRITICAL: Sync main position TP state with position_optimization
 	// This prevents protection system from trying to re-place TP orders
 	pos.CurrentTPLevel = tpLevel
 	if tpLevel > 0 && tpLevel <= len(pos.TakeProfits) {
@@ -499,7 +562,7 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sr.LastUpdate = time.Now()
 
 	// CRITICAL: Save position state after TP hit to survive restarts
-	// This ensures scalp_reentry doesn't reset to TP1 on refresh/restart
+	// This ensures position_optimization doesn't reset to TP1 on refresh/restart
 	go g.SavePositionState()
 
 	// HEDGE MODE: Check if this TP should trigger a hedge position
@@ -512,11 +575,37 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 // checkAndExecuteReentry checks if re-entry conditions are met and executes
 func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice float64) error {
 	sr := pos.ScalpReentry
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	cycle := sr.GetCurrentCycle()
 
 	if cycle == nil || cycle.ReentryState != ReentryStateWaiting {
 		return nil
+	}
+
+	// CRITICAL FIX: Check for pending re-entry orders that have timed out
+	// Even if an order was placed, it may not fill - we need to track and cancel stale orders
+	if cycle.ReentryOrderID > 0 && !cycle.ReentryOrderPlacedAt.IsZero() {
+		orderAge := time.Since(cycle.ReentryOrderPlacedAt)
+		if orderAge > time.Duration(config.ReentryTimeoutSec)*time.Second {
+			sr.AddDebugLog(fmt.Sprintf("Pending re-entry order %d timed out after %v, canceling", cycle.ReentryOrderID, orderAge))
+
+			// Cancel the stale order to free margin
+			if err := g.cancelReentryOrder(pos.Symbol, cycle.ReentryOrderID); err != nil {
+				log.Printf("[POSITION-OPT] %s: Warning - failed to cancel stale order %d: %v",
+					pos.Symbol, cycle.ReentryOrderID, err)
+			}
+
+			// Mark cycle as skipped due to timeout
+			cycle.ReentryOrderID = 0
+			cycle.ReentryState = ReentryStateSkipped
+			cycle.EndTime = time.Now()
+			cycle.Outcome = "skipped"
+			cycle.OutcomeReason = "order_timeout"
+			sr.SkippedReentries++
+			sr.NextTPBlocked = false
+			go g.SavePositionState()
+			return nil
+		}
 	}
 
 	// Check if price is near breakeven
@@ -540,6 +629,18 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 		// Not at breakeven yet - check for timeout
 		if time.Since(cycle.StartTime) > time.Duration(config.ReentryTimeoutSec)*time.Second {
 			sr.AddDebugLog(fmt.Sprintf("Re-entry timeout after %ds, skipping", config.ReentryTimeoutSec))
+
+			// CRITICAL FIX: Cancel any pending re-entry LIMIT order to free margin
+			// Orders placed but unfilled will block margin indefinitely without this
+			if cycle.ReentryOrderID > 0 {
+				sr.AddDebugLog(fmt.Sprintf("Canceling pending re-entry order %d on timeout", cycle.ReentryOrderID))
+				if err := g.cancelReentryOrder(pos.Symbol, cycle.ReentryOrderID); err != nil {
+					log.Printf("[POSITION-OPT] %s: Warning - failed to cancel order %d on timeout: %v",
+						pos.Symbol, cycle.ReentryOrderID, err)
+				}
+				cycle.ReentryOrderID = 0 // Clear the order ID
+			}
+
 			cycle.ReentryState = ReentryStateSkipped
 			cycle.EndTime = time.Now()
 			cycle.Outcome = "skipped"
@@ -611,7 +712,7 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 		return nil
 	}
 
-	err := g.executeReentryOrder(pos, reentryQty, currentPrice)
+	orderID, err := g.executeReentryOrder(pos, reentryQty, currentPrice)
 	if err != nil {
 		cycle.ReentryAttempts++
 		if cycle.ReentryAttempts >= config.MaxReentryAttempts {
@@ -625,7 +726,15 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 		return err
 	}
 
-	// Success
+	// CRITICAL FIX: Store the order ID and timestamp for tracking pending orders
+	// This allows us to cancel stale orders that don't fill and block margin
+	cycle.ReentryOrderID = orderID
+	cycle.ReentryOrderPlacedAt = time.Now()
+	sr.AddDebugLog(fmt.Sprintf("Re-entry order placed: orderID=%d, will timeout in %ds if not filled",
+		orderID, config.ReentryTimeoutSec))
+
+	// Success - order placed (assuming quick fill due to price offset)
+	// For LIMIT orders with 0.05% offset, they typically fill immediately
 	cycle.ReentryState = ReentryStateCompleted
 	cycle.ReentryFilledPrice = currentPrice
 	cycle.ReentryFilledQty = reentryQty
@@ -640,7 +749,7 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 	sr.NextTPBlocked = false
 
 	// CRITICAL: Sync pos.RemainingQty with sr.RemainingQuantity after reentry
-	// sr.RemainingQuantity is the source of truth for scalp_reentry mode
+	// sr.RemainingQuantity is the source of truth for position_optimization mode
 	pos.RemainingQty = sr.RemainingQuantity
 
 	// Update breakeven after re-entry
@@ -652,7 +761,7 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 	// CRITICAL: Update SL order for new quantity after reentry
 	// The old SL order covers the old quantity, but now we have more position
 	// Place SL at the new breakeven minus the SL percent
-	// Use configured SL percent from ScalpReentryConfig (default 2.0%)
+	// Use configured SL percent from PositionOptimizationConfig (default 2.0%)
 	slPercent := config.StopLossPercent
 	if slPercent <= 0 {
 		slPercent = 2.0 // Fallback to 2.0% if not configured
@@ -667,10 +776,10 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 
 	// Update the SL order on Binance with new quantity and price
 	if err := g.updatePositionStopLoss(pos, newSL); err != nil {
-		log.Printf("[SCALP-REENTRY] %s: Failed to update SL after reentry: %v", pos.Symbol, err)
+		log.Printf("[POSITION-OPT] %s: Failed to update SL after reentry: %v", pos.Symbol, err)
 		sr.AddDebugLog(fmt.Sprintf("WARNING: Failed to update SL after reentry: %v", err))
 	} else {
-		log.Printf("[SCALP-REENTRY] %s: SL updated for new position size %.4f, BE=%.8f, SL=%.8f",
+		log.Printf("[POSITION-OPT] %s: SL updated for new position size %.4f, BE=%.8f, SL=%.8f",
 			pos.Symbol, sr.RemainingQuantity, sr.CurrentBreakeven, newSL)
 		sr.AddDebugLog(fmt.Sprintf("SL updated for reentry: new SL=%.8f (BE=%.8f, SL%%=%.1f)", newSL, sr.CurrentBreakeven, slPercent))
 	}
@@ -684,7 +793,7 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 // monitorFinalTrailing monitors the final 20% position with trailing stop
 func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice float64) error {
 	sr := pos.ScalpReentry
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 
 	// Update peak price
 	if pos.Side == "LONG" {
@@ -734,6 +843,10 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 		// Validate and round the final portion quantity
 		finalQty := g.roundQuantity(pos.Symbol, sr.FinalPortionQty)
 		minQty := g.getMinQuantity(pos.Symbol)
+
+		// USD-based minimum threshold for position value
+		const minPositionValueUSD = 10.0
+
 		if finalQty < minQty {
 			sr.AddDebugLog(fmt.Sprintf("Final portion qty %.8f below minimum %.8f, using minimum", finalQty, minQty))
 			// If below minimum, try to close whatever is available
@@ -741,12 +854,37 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 				finalQty = g.roundQuantity(pos.Symbol, sr.RemainingQuantity)
 			}
 			if finalQty < minQty {
-				// ALERT: Final portion stuck - too small to close
-				alertMsg := "Final portion too small to close - NEEDS MANUAL INTERVENTION"
+				// Check USD value of remaining position
+				positionValueUSD := finalQty * currentPrice
+				if positionValueUSD < minPositionValueUSD {
+					// Position value below $10 - auto-close with market order
+					sr.AddDebugLog(fmt.Sprintf("Final portion: Position value $%.2f below $%.2f minimum - auto-closing", positionValueUSD, minPositionValueUSD))
+					log.Printf("[POSITION-OPT] %s %s: Position value $%.2f below $%.2f minimum - auto-closing",
+						pos.Symbol, pos.Side, positionValueUSD, minPositionValueUSD)
+
+					// Execute market order to close the remaining position
+					err := g.executePositionOptPartialClose(pos, finalQty, fmt.Sprintf("position_optimization_final_%s_low_value_autoclose", reason))
+					if err != nil {
+						sr.AddDebugLog(fmt.Sprintf("Final portion auto-close failed: %v", err))
+						log.Printf("[POSITION-OPT] %s: Final portion auto-close failed: %v", pos.Symbol, err)
+						return err
+					}
+
+					// Update position state as closed
+					sr.RemainingQuantity = 0
+					sr.FinalPortionQty = 0
+					sr.LastUpdate = time.Now()
+					sr.AddDebugLog("Final portion: Low value position auto-closed successfully")
+
+					return nil
+				}
+
+				// Position has value >= $10 but qty below exchange minimum - needs manual intervention
+				alertMsg := fmt.Sprintf("Final portion: qty %.6f below exchange min %.6f (value $%.2f) - NEEDS MANUAL INTERVENTION", finalQty, minQty, positionValueUSD)
 				sr.AddDebugLog(alertMsg)
 
 				sr.NeedsManualIntervention = true
-				sr.ManualInterventionReason = fmt.Sprintf("Final portion quantity %.6f is below minimum %.6f. Cannot close trailing position. Please close manually.", sr.RemainingQuantity, minQty)
+				sr.ManualInterventionReason = fmt.Sprintf("Final portion quantity %.6f is below exchange minimum %.6f (value $%.2f). Cannot close trailing position. Please close manually.", sr.RemainingQuantity, minQty, positionValueUSD)
 				sr.ManualInterventionAlertAt = time.Now().Format(time.RFC3339)
 				sr.LastUpdate = time.Now()
 
@@ -758,7 +896,7 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 		}
 
 		// Close final portion
-		err := g.executeScalpPartialClose(pos, finalQty, fmt.Sprintf("scalp_reentry_final_%s", reason))
+		err := g.executePositionOptPartialClose(pos, finalQty, fmt.Sprintf("position_optimization_final_%s", reason))
 		if err != nil {
 			return err
 		}
@@ -773,7 +911,7 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 		sr.AccumulatedProfit += finalPnl
 		sr.TotalCyclePnL = sr.AccumulatedProfit
 
-		sr.AddDebugLog(fmt.Sprintf("Scalp re-entry complete! Total PnL: $%.2f, Cycles: %d, Reentries: %d/%d",
+		sr.AddDebugLog(fmt.Sprintf("Position optimization complete! Total PnL: $%.2f, Cycles: %d, Reentries: %d/%d",
 			sr.AccumulatedProfit, len(sr.Cycles), sr.SuccessfulReentries, sr.TotalReentries))
 
 		// Position is now fully closed
@@ -796,7 +934,7 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 }
 
 // updateDynamicSL updates the dynamic stop loss after 1% threshold
-func (g *GinieAutopilot) updateDynamicSL(pos *GiniePosition, currentPrice float64, config ScalpReentryConfig) error {
+func (g *GinieAutopilot) updateDynamicSL(pos *GiniePosition, currentPrice float64, config PositionOptimizationConfig) error {
 	sr := pos.ScalpReentry
 
 	// Calculate current unrealized PnL for remaining position
@@ -870,7 +1008,7 @@ func (g *GinieAutopilot) updateDynamicSL(pos *GiniePosition, currentPrice float6
 
 // getAIReentryDecision gets AI decision for re-entry
 func (g *GinieAutopilot) getAIReentryDecision(pos *GiniePosition, cycle *ReentryCycle) (bool, *ReentryAIDecision) {
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 
 	// Default decision if AI is unavailable
@@ -915,8 +1053,8 @@ func (g *GinieAutopilot) getAIReentryDecision(pos *GiniePosition, cycle *Reentry
 	return aiDecision.ShouldReenter, aiDecision
 }
 
-// executeReentryOrder executes a re-entry order
-func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, price float64) error {
+// executeReentryOrder executes a re-entry order and returns the order ID for tracking
+func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, price float64) (int64, error) {
 	// Determine order side based on position side
 	orderSide := "BUY"
 	positionSide := "LONG"
@@ -945,9 +1083,9 @@ func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, pr
 		Price:        limitPrice,
 	}
 
-	log.Printf("[SCALP-REENTRY] %s: Placing LIMIT re-entry order at %.8f (current: %.8f)", pos.Symbol, limitPrice, price)
+	log.Printf("[POSITION-OPT] %s: Placing LIMIT re-entry order at %.8f (current: %.8f)", pos.Symbol, limitPrice, price)
 
-	return g.placeOrder(order)
+	return g.placeOrderWithID(order)
 }
 
 // getADXForSymbol fetches klines and calculates ADX for Option C trend confirmation
@@ -958,29 +1096,29 @@ func (g *GinieAutopilot) getADXForSymbol(symbol string) float64 {
 
 	// Check if we have analyzer and futures client
 	if g.analyzer == nil || g.futuresClient == nil {
-		log.Printf("[SCALP-REENTRY] %s: No analyzer/client, using default ADX %.1f", symbol, defaultADX)
+		log.Printf("[POSITION-OPT] %s: No analyzer/client, using default ADX %.1f", symbol, defaultADX)
 		return defaultADX
 	}
 
 	// Fetch klines for ADX calculation (5m timeframe, 50 candles for 14-period ADX)
 	klines, err := g.futuresClient.GetFuturesKlines(symbol, "5m", 50)
 	if err != nil {
-		log.Printf("[SCALP-REENTRY] %s: Failed to fetch klines for ADX: %v", symbol, err)
+		log.Printf("[POSITION-OPT] %s: Failed to fetch klines for ADX: %v", symbol, err)
 		return defaultADX
 	}
 	if len(klines) < 30 {
-		log.Printf("[SCALP-REENTRY] %s: Insufficient klines (%d) for ADX calculation", symbol, len(klines))
+		log.Printf("[POSITION-OPT] %s: Insufficient klines (%d) for ADX calculation", symbol, len(klines))
 		return defaultADX
 	}
 
 	// Calculate ADX (14-period is standard)
 	adx, _, _ := g.analyzer.calculateADX(klines, 14)
 	if adx <= 0 {
-		log.Printf("[SCALP-REENTRY] %s: Invalid ADX value %.1f, using default", symbol, adx)
+		log.Printf("[POSITION-OPT] %s: Invalid ADX value %.1f, using default", symbol, adx)
 		return defaultADX
 	}
 
-	log.Printf("[SCALP-REENTRY] %s: ADX calculated = %.1f", symbol, adx)
+	log.Printf("[POSITION-OPT] %s: ADX calculated = %.1f", symbol, adx)
 	return adx
 }
 
@@ -988,7 +1126,7 @@ func (g *GinieAutopilot) getADXForSymbol(symbol string) float64 {
 // CORRECT FORMULA: breakeven = netCost / remainingQty
 // where netCost = (original_cost - sold_value + reentry_costs)
 // and remainingQty = (original_qty - sold_qty + reentry_qty)
-func (g *GinieAutopilot) calculateNewBreakeven(pos *GiniePosition, sr *ScalpReentryStatus) float64 {
+func (g *GinieAutopilot) calculateNewBreakeven(pos *GiniePosition, sr *PositionOptimizationStatus) float64 {
 	// Start with original entry
 	netCost := pos.EntryPrice * pos.OriginalQty
 	netQty := pos.OriginalQty
@@ -1034,12 +1172,12 @@ func (g *GinieAutopilot) recordFinalExitForLearning(pos *GiniePosition, reason s
 // getCurrentPrice gets current price for a symbol from Binance API
 func (g *GinieAutopilot) getCurrentPrice(symbol string) float64 {
 	if g.futuresClient == nil {
-		log.Printf("[SCALP-REENTRY] %s: futuresClient is nil, cannot get price", symbol)
+		log.Printf("[POSITION-OPT] %s: futuresClient is nil, cannot get price", symbol)
 		return 0
 	}
 	price, err := g.futuresClient.GetFuturesCurrentPrice(symbol)
 	if err != nil {
-		log.Printf("[SCALP-REENTRY] %s: Failed to get current price: %v", symbol, err)
+		log.Printf("[POSITION-OPT] %s: Failed to get current price: %v", symbol, err)
 		return 0
 	}
 	return price
@@ -1055,9 +1193,9 @@ func (g *GinieAutopilot) roundQuantity(symbol string, qty float64) float64 {
 
 // NOTE: getMinQuantity is implemented in ginie_autopilot.go
 
-// executeScalpPartialClose executes a partial close for scalp re-entry mode
+// executePositionOptPartialClose executes a partial close for scalp re-entry mode
 // This differs from the standard executePartialClose by taking explicit qty and reason
-func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float64, reason string) error {
+func (g *GinieAutopilot) executePositionOptPartialClose(pos *GiniePosition, qty float64, reason string) error {
 	// Use LIMIT order for better price execution
 	if qty <= 0 {
 		return fmt.Errorf("invalid quantity: %.8f", qty)
@@ -1075,7 +1213,7 @@ func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float6
 	currentPrice := g.getCurrentPrice(pos.Symbol)
 	if currentPrice <= 0 {
 		// Fallback to market order if price unavailable
-		log.Printf("[SCALP-REENTRY] %s: Price unavailable, using MARKET order for close", pos.Symbol)
+		log.Printf("[POSITION-OPT] %s: Price unavailable, using MARKET order for close", pos.Symbol)
 		order := &FuturesOrder{
 			Symbol:       pos.Symbol,
 			Side:         closeSide,
@@ -1107,7 +1245,7 @@ func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float6
 		Price:        limitPrice,
 	}
 
-	log.Printf("[SCALP-REENTRY] %s: Executing LIMIT partial close at %.8f (current: %.8f): qty=%.8f, reason=%s",
+	log.Printf("[POSITION-OPT] %s: Executing LIMIT partial close at %.8f (current: %.8f): qty=%.8f, reason=%s",
 		pos.Symbol, limitPrice, currentPrice, qty, reason)
 
 	return g.placeOrder(order)
@@ -1116,13 +1254,20 @@ func (g *GinieAutopilot) executeScalpPartialClose(pos *GiniePosition, qty float6
 // placeOrder places a futures order using the actual Binance API
 // Uses SymbolValidator for proper precision and pre-validation
 func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
+	_, err := g.placeOrderWithID(order)
+	return err
+}
+
+// placeOrderWithID places a futures order and returns the order ID for tracking
+// This allows callers to track LIMIT orders that may not fill immediately
+func (g *GinieAutopilot) placeOrderWithID(order *FuturesOrder) (int64, error) {
 	if order == nil {
-		return fmt.Errorf("order is nil")
+		return 0, fmt.Errorf("order is nil")
 	}
 
 	// Validate quantity
 	if order.Quantity <= 0 {
-		return fmt.Errorf("invalid order quantity: %.8f", order.Quantity)
+		return 0, fmt.Errorf("invalid order quantity: %.8f", order.Quantity)
 	}
 
 	// Get effective position side for hedge mode compatibility
@@ -1141,9 +1286,9 @@ func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
 			log.Printf("[SCALP-ORDER] %s: Validation failed - %s", order.Symbol, verr.Message)
 		}
 		if len(validation.Errors) > 0 {
-			return fmt.Errorf("order validation failed for %s: %s", order.Symbol, validation.Errors[0].Message)
+			return 0, fmt.Errorf("order validation failed for %s: %s", order.Symbol, validation.Errors[0].Message)
 		}
-		return fmt.Errorf("order validation failed for %s: unknown error", order.Symbol)
+		return 0, fmt.Errorf("order validation failed for %s: unknown error", order.Symbol)
 	}
 
 	// Use validated and rounded values
@@ -1151,7 +1296,7 @@ func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
 	roundedPrice := validation.RoundedPrice
 
 	if roundedQty <= 0 {
-		return fmt.Errorf("rounded quantity is 0 for %s (original: %.8f)", order.Symbol, order.Quantity)
+		return 0, fmt.Errorf("rounded quantity is 0 for %s (original: %.8f)", order.Symbol, order.Quantity)
 	}
 
 	// Log any warnings
@@ -1181,12 +1326,32 @@ func (g *GinieAutopilot) placeOrder(order *FuturesOrder) error {
 	result, err := g.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
 		log.Printf("[SCALP-ORDER] %s: Order failed: %v", order.Symbol, err)
-		return fmt.Errorf("failed to place order: %w", err)
+		return 0, fmt.Errorf("failed to place order: %w", err)
 	}
 
 	log.Printf("[SCALP-ORDER] %s: Order placed successfully, orderId=%d, status=%s",
 		order.Symbol, result.OrderId, result.Status)
 
+	return result.OrderId, nil
+}
+
+// cancelReentryOrder cancels a pending re-entry LIMIT order on Binance
+// This is called when a re-entry order has been pending too long (timeout)
+// to free up margin that would otherwise be blocked indefinitely
+func (g *GinieAutopilot) cancelReentryOrder(symbol string, orderID int64) error {
+	if orderID <= 0 {
+		return fmt.Errorf("invalid order ID: %d", orderID)
+	}
+
+	log.Printf("[POSITION-OPT] %s: Canceling stale re-entry order ID=%d to free margin", symbol, orderID)
+
+	err := g.futuresClient.CancelFuturesOrder(symbol, orderID)
+	if err != nil {
+		log.Printf("[POSITION-OPT] %s: Failed to cancel re-entry order %d: %v", symbol, orderID, err)
+		return fmt.Errorf("failed to cancel re-entry order: %w", err)
+	}
+
+	log.Printf("[POSITION-OPT] %s: Successfully canceled re-entry order %d", symbol, orderID)
 	return nil
 }
 
@@ -1273,7 +1438,7 @@ type FuturesOrder struct {
 
 // initHedgeReentryState initializes hedge mode state for a position
 func (g *GinieAutopilot) initHedgeReentryState(pos *GiniePosition) *HedgeReentryState {
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	sr := pos.ScalpReentry
 
 	state := NewHedgeReentryState(pos.OriginalQty, config)
@@ -1285,7 +1450,7 @@ func (g *GinieAutopilot) initHedgeReentryState(pos *GiniePosition) *HedgeReentry
 
 // checkAndTriggerHedge checks if hedge should be triggered after a TP hit
 func (g *GinieAutopilot) checkAndTriggerHedge(pos *GiniePosition, tpLevel int, sellQty float64, currentPrice float64) {
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	sr := pos.ScalpReentry
 
 	if !config.HedgeModeEnabled {
@@ -1325,7 +1490,7 @@ func (g *GinieAutopilot) checkAndTriggerHedge(pos *GiniePosition, tpLevel int, s
 	if config.TriggerOnProfitTP {
 		if !hm.HedgeActive {
 			// First trigger - open hedge position
-			// NOTE: For scalp_reentry hedge mode triggered by TP hit, we treat the TP trigger
+			// NOTE: For position_optimization hedge mode triggered by TP hit, we treat the TP trigger
 			// itself as implicit confidence validation (position is in profit = successful setup)
 			// MinConfidenceForHedge would apply to NEW hedge entries based on fresh signals,
 			// but TP-triggered hedges are reactionary risk management, not signal-based entries
@@ -1344,7 +1509,7 @@ func (g *GinieAutopilot) checkNegativeTPTrigger(pos *GiniePosition, currentPrice
 		return
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 
 	if !config.HedgeModeEnabled || !config.TriggerOnLossTP {
 		return
@@ -1652,7 +1817,7 @@ func (g *GinieAutopilot) checkCombinedExit(pos *GiniePosition, currentPrice floa
 		return false, ""
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	combinedROI := g.calculateCombinedROI(pos, currentPrice)
 
 	if combinedROI >= config.CombinedROIExitPct {
@@ -1674,7 +1839,7 @@ func (g *GinieAutopilot) checkRallyExit(pos *GiniePosition, currentPrice float64
 		return false, ""
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 	if !config.RallyExitEnabled {
 		return false, ""
 	}
@@ -1733,7 +1898,7 @@ func (g *GinieAutopilot) updateHedgeWideSL(pos *GiniePosition) {
 		return
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 
 	klines, err := g.futuresClient.GetFuturesKlines(pos.Symbol, "15m", 20)
 	if err != nil || len(klines) < 14 {
@@ -1771,7 +1936,7 @@ func (g *GinieAutopilot) executeCombinedExit(pos *GiniePosition, reason string) 
 	log.Printf("[HEDGE-EXIT] %s: Combined exit triggered - %s, ROI=%.2f%%", pos.Symbol, reason, finalROI)
 
 	if sr.RemainingQuantity > 0 {
-		err := g.executeScalpPartialClose(pos, sr.RemainingQuantity, "hedge_combined_exit_original")
+		err := g.executePositionOptPartialClose(pos, sr.RemainingQuantity, "hedge_combined_exit_original")
 		if err != nil {
 			log.Printf("[HEDGE-EXIT] %s: Failed to close original: %v", pos.Symbol, err)
 		}
@@ -1822,7 +1987,7 @@ func (g *GinieAutopilot) monitorHedgeMode(pos *GiniePosition, currentPrice float
 		return "", false
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 
 	if sr.HedgeMode == nil && config.HedgeModeEnabled {
 		sr.HedgeMode = g.initHedgeReentryState(pos)
@@ -1884,7 +2049,7 @@ func (g *GinieAutopilot) monitorHedgeTPs(pos *GiniePosition, currentPrice float6
 		return
 	}
 
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 
 	nextTPLevel := hm.HedgeTPLevel + 1
 	if nextTPLevel > 3 {
@@ -1990,7 +2155,7 @@ func (g *GinieAutopilot) executeHedgeTPSell(pos *GiniePosition, tpLevel int, cur
 func (g *GinieAutopilot) activateProfitProtection(pos *GiniePosition, earnedProfit float64, closedSide string) {
 	sr := pos.ScalpReentry
 	hm := sr.HedgeMode
-	config := g.getUserScalpReentryConfig()
+	config := g.getUserPositionOptimizationConfig()
 
 	if !config.ProfitProtectionEnabled || hm == nil {
 		return

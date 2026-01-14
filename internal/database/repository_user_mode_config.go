@@ -235,6 +235,54 @@ func (r *Repository) IsModeEnabledForUser(ctx context.Context, userID, modeName 
 	return enabled, nil
 }
 
+// ModeEnabledConfig holds both enabled status and config JSON for a mode
+type ModeEnabledConfig struct {
+	ModeName   string
+	Enabled    bool
+	ConfigJSON []byte
+}
+
+// GetAllUserModeConfigsWithEnabled retrieves all mode configs with their enabled status in ONE query
+// This is a performance-critical method used by GetStats() to avoid N+1 database queries
+// Returns a map of mode_name -> ModeEnabledConfig
+func (r *Repository) GetAllUserModeConfigsWithEnabled(ctx context.Context, userID string) (map[string]*ModeEnabledConfig, error) {
+	query := `
+		SELECT mode_name, enabled, config_json
+		FROM user_mode_configs
+		WHERE user_id = $1
+		ORDER BY mode_name
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user mode configs with enabled: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]*ModeEnabledConfig)
+	for rows.Next() {
+		var modeName string
+		var enabled bool
+		var configJSON []byte
+
+		if err := rows.Scan(&modeName, &enabled, &configJSON); err != nil {
+			return nil, fmt.Errorf("failed to scan mode config row: %w", err)
+		}
+
+		result[modeName] = &ModeEnabledConfig{
+			ModeName:   modeName,
+			Enabled:    enabled,
+			ConfigJSON: configJSON,
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating user mode configs: %w", err)
+	}
+
+	return result, nil
+}
+
 // =====================================================
 // SCALP REENTRY CONFIGURATION CRUD OPERATIONS
 // =====================================================

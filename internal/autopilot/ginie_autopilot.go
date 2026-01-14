@@ -21,10 +21,11 @@ import (
 )
 
 // ==================== TRADING FEE CONSTANTS ====================
-// Binance Futures trading fees (VIP0 level - adjust based on actual tier)
+// Binance Futures trading fees (Standard tier - verified from API)
+// Note: These are fallback values. Actual user rates are stored in user_fee_rates table
 const (
-	// TakerFeeRate is the fee for market orders (0.04% = 0.0004)
-	TakerFeeRate = 0.0004
+	// TakerFeeRate is the fee for market orders (0.05% = 0.0005)
+	TakerFeeRate = 0.0005
 
 	// MakerFeeRate is the fee for limit orders (0.02% = 0.0002)
 	// Not used currently as we primarily use market orders
@@ -50,7 +51,7 @@ type PersistedPositionState struct {
 	Side           string              `json:"side"`
 	Mode           GinieTradingMode    `json:"mode"`
 	CurrentTPLevel int                 `json:"current_tp_level"`
-	ScalpReentry   *ScalpReentryStatus `json:"scalp_reentry,omitempty"` // Full scalp_reentry state
+	ScalpReentry   *PositionOptimizationStatus `json:"scalp_reentry,omitempty"` // Full scalp_reentry state
 	SavedAt        time.Time           `json:"saved_at"`
 }
 
@@ -60,7 +61,7 @@ type PositionStateStore struct {
 	UpdatedAt time.Time                         `json:"updated_at"`
 }
 
-// SavePositionState saves critical position state to disk
+// SavePositionState saves critical position state to Redis (primary) and JSON file (backup)
 // Call this after TP hits, state changes, or periodically
 func (ga *GinieAutopilot) SavePositionState() error {
 	ga.mu.RLock()
@@ -87,7 +88,34 @@ func (ga *GinieAutopilot) SavePositionState() error {
 	}
 	ga.mu.RUnlock()
 
-	// Write to file atomically
+	// Phase 2: Save to Redis first (primary storage)
+	if ga.positionStateRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Determine userID - use stored userID or default for legacy mode
+		userID := ga.userID
+		if userID == "" {
+			userID = "default" // Legacy/shared mode
+		}
+
+		savedToRedis := 0
+		for symbol, state := range store.Positions {
+			// Convert autopilot.PersistedPositionState to database.PersistedPositionState
+			redisState := ga.convertToRedisState(&state)
+			if err := ga.positionStateRepo.SavePositionState(ctx, userID, symbol, redisState); err != nil {
+				log.Printf("[POSITION-STATE] Redis save failed for %s: %v", symbol, err)
+			} else {
+				savedToRedis++
+			}
+		}
+
+		if savedToRedis > 0 {
+			log.Printf("[POSITION-STATE] Saved %d positions to Redis (userID=%s)", savedToRedis, userID)
+		}
+	}
+
+	// JSON file backup (secondary storage for disaster recovery)
 	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		log.Printf("[POSITION-STATE] Failed to marshal position state: %v", err)
@@ -106,13 +134,97 @@ func (ga *GinieAutopilot) SavePositionState() error {
 		return err
 	}
 
-	log.Printf("[POSITION-STATE] Saved state for %d positions", len(store.Positions))
+	log.Printf("[POSITION-STATE] Saved state for %d positions (Redis + JSON backup)", len(store.Positions))
 	return nil
 }
 
-// LoadPositionState loads persisted position state from disk
+// convertToRedisState converts autopilot.PersistedPositionState to database.PersistedPositionState
+func (ga *GinieAutopilot) convertToRedisState(state *PersistedPositionState) *database.PersistedPositionState {
+	redisState := &database.PersistedPositionState{
+		Symbol:         state.Symbol,
+		Side:           state.Side,
+		Mode:           string(state.Mode), // GinieTradingMode -> string
+		CurrentTPLevel: state.CurrentTPLevel,
+		SavedAt:        state.SavedAt,
+	}
+
+	// Convert PositionOptimizationStatus to ScalpReentryStateData if present
+	if state.ScalpReentry != nil {
+		sr := state.ScalpReentry
+		redisState.ScalpReentry = &database.ScalpReentryStateData{
+			Enabled:            sr.Enabled,
+			CurrentCycle:       sr.CurrentCycle,
+			AccumulatedProfit:  sr.AccumulatedProfit,
+			TPLevelUnlocked:    sr.TPLevelUnlocked,
+			NextTPBlocked:      sr.NextTPBlocked,
+			OriginalEntryPrice: sr.OriginalEntryPrice,
+			CurrentBreakeven:   sr.CurrentBreakeven,
+			RemainingQuantity:  sr.RemainingQuantity,
+			DynamicSLActive:    sr.DynamicSLActive,
+			DynamicSLPrice:     sr.DynamicSLPrice,
+			ProtectedProfit:    sr.ProtectedProfit,
+		}
+
+		// Convert cycles (map autopilot.ReentryCycle to database.ReentryCycleData)
+		// Note: Field names differ between the two structs
+		if len(sr.Cycles) > 0 {
+			redisState.ScalpReentry.Cycles = make([]database.ReentryCycleData, len(sr.Cycles))
+			for i, cycle := range sr.Cycles {
+				redisState.ScalpReentry.Cycles[i] = database.ReentryCycleData{
+					CycleNumber:      cycle.CycleNumber,
+					EntryPrice:       cycle.ReentryFilledPrice, // Entry from reentry fill
+					EntryQuantity:    cycle.ReentryFilledQty,   // Quantity from reentry fill
+					TPHitPrice:       cycle.SellPrice,          // TP hit = sell price
+					TPHitQuantity:    cycle.SellQuantity,       // TP hit = sell quantity
+					RealizedProfit:   cycle.SellPnL,            // Realized from this cycle
+					ReentryTriggered: cycle.ReentryState == ReentryStateCompleted || cycle.ReentryFilledQty > 0,
+					ReentryPrice:     cycle.ReentryFilledPrice,
+					ReentryQuantity:  cycle.ReentryQuantity,
+					CycleStartTime:   cycle.StartTime,
+					CycleEndTime:     cycle.EndTime,
+				}
+			}
+		}
+	}
+
+	return redisState
+}
+
+// LoadPositionState loads persisted position state from Redis (primary) with JSON fallback
+// This is a method on GinieAutopilot to access Redis repository
 // Returns map[symbol]PersistedPositionState
-func LoadPositionState() (map[string]PersistedPositionState, error) {
+func (ga *GinieAutopilot) LoadPositionState() (map[string]PersistedPositionState, error) {
+	// Try Redis first if available
+	if ga.positionStateRepo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Determine userID - use stored userID or default for legacy mode
+		userID := ga.userID
+		if userID == "" {
+			userID = "default" // Legacy/shared mode
+		}
+
+		redisStates, err := ga.positionStateRepo.LoadAllPositions(ctx, userID)
+		if err != nil {
+			log.Printf("[POSITION-STATE] Redis load failed: %v, falling back to JSON", err)
+		} else if len(redisStates) > 0 {
+			// Convert from database.PersistedPositionState to autopilot.PersistedPositionState
+			result := make(map[string]PersistedPositionState)
+			for symbol, redisState := range redisStates {
+				result[symbol] = ga.convertFromRedisState(redisState)
+			}
+			log.Printf("[POSITION-STATE] Loaded %d positions from Redis (userID=%s)", len(result), userID)
+			return result, nil
+		}
+	}
+
+	// Fall back to JSON file (either Redis unavailable or empty)
+	return loadPositionStateFromJSON()
+}
+
+// loadPositionStateFromJSON loads position state from JSON file (internal helper)
+func loadPositionStateFromJSON() (map[string]PersistedPositionState, error) {
 	data, err := os.ReadFile(positionStateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -129,10 +241,72 @@ func LoadPositionState() (map[string]PersistedPositionState, error) {
 		return nil, err
 	}
 
-	log.Printf("[POSITION-STATE] Loaded state for %d positions (saved at %s)",
+	log.Printf("[POSITION-STATE] Loaded state for %d positions from JSON (saved at %s)",
 		len(store.Positions), store.UpdatedAt.Format("15:04:05"))
 
 	return store.Positions, nil
+}
+
+// convertFromRedisState converts database.PersistedPositionState to autopilot.PersistedPositionState
+func (ga *GinieAutopilot) convertFromRedisState(redisState *database.PersistedPositionState) PersistedPositionState {
+	state := PersistedPositionState{
+		Symbol:         redisState.Symbol,
+		Side:           redisState.Side,
+		Mode:           GinieTradingMode(redisState.Mode), // string -> GinieTradingMode
+		CurrentTPLevel: redisState.CurrentTPLevel,
+		SavedAt:        redisState.SavedAt,
+	}
+
+	// Convert ScalpReentryStateData to PositionOptimizationStatus if present
+	if redisState.ScalpReentry != nil {
+		sr := redisState.ScalpReentry
+		state.ScalpReentry = &PositionOptimizationStatus{
+			Enabled:            sr.Enabled,
+			CurrentCycle:       sr.CurrentCycle,
+			AccumulatedProfit:  sr.AccumulatedProfit,
+			TPLevelUnlocked:    sr.TPLevelUnlocked,
+			NextTPBlocked:      sr.NextTPBlocked,
+			OriginalEntryPrice: sr.OriginalEntryPrice,
+			CurrentBreakeven:   sr.CurrentBreakeven,
+			RemainingQuantity:  sr.RemainingQuantity,
+			DynamicSLActive:    sr.DynamicSLActive,
+			DynamicSLPrice:     sr.DynamicSLPrice,
+			ProtectedProfit:    sr.ProtectedProfit,
+		}
+
+		// Convert cycles (map database.ReentryCycleData to autopilot.ReentryCycle)
+		// Note: Field names differ between the two structs
+		if len(sr.Cycles) > 0 {
+			state.ScalpReentry.Cycles = make([]ReentryCycle, len(sr.Cycles))
+			for i, cycle := range sr.Cycles {
+				var reentryState ReentryState
+				if cycle.ReentryTriggered {
+					reentryState = ReentryStateCompleted
+				}
+				state.ScalpReentry.Cycles[i] = ReentryCycle{
+					CycleNumber:       cycle.CycleNumber,
+					SellPrice:         cycle.TPHitPrice,    // TP hit = sell price
+					SellQuantity:      cycle.TPHitQuantity, // TP hit = sell quantity
+					SellPnL:           cycle.RealizedProfit,
+					ReentryFilledPrice: cycle.EntryPrice,
+					ReentryFilledQty:   cycle.EntryQuantity,
+					ReentryQuantity:   cycle.ReentryQuantity,
+					ReentryState:      reentryState,
+					StartTime:         cycle.CycleStartTime,
+					EndTime:           cycle.CycleEndTime,
+				}
+			}
+		}
+	}
+
+	return state
+}
+
+// LoadPositionStateStatic is a static helper for loading from JSON file only
+// Used during initialization before GinieAutopilot is fully created
+// Deprecated: Use ga.LoadPositionState() method when possible
+func LoadPositionStateStatic() (map[string]PersistedPositionState, error) {
+	return loadPositionStateFromJSON()
 }
 
 // RestorePositionState restores saved state to a position after reconciliation
@@ -156,15 +330,15 @@ func (ga *GinieAutopilot) RestorePositionState(pos *GiniePosition, savedState Pe
 		pos.CurrentTPLevel = savedState.CurrentTPLevel
 	}
 
-	// BUG FIX: Restore ScalpReentry state based on SAVED mode, not current position mode
-	// The position may have been assigned a different mode during reconciliation (e.g., "scalp" vs "scalp_reentry")
-	// We must check the SAVED mode to ensure state is properly restored
-	if savedState.Mode == GinieModeScalpReentry && savedState.ScalpReentry != nil {
-		log.Printf("[POSITION-STATE] Restoring %s ScalpReentry state: TPUnlocked=%d, Cycles=%d, Mode: %s -> %s",
+	// [Story 9.9] BUG FIX: Restore ScalpReentry state based on saved ScalpReentry, not mode
+	// Position mode no longer changes to scalp_reentry - it's now a feature flag
+	// Restore ScalpReentry (position optimization) state if it was active
+	if savedState.ScalpReentry != nil {
+		log.Printf("[POSITION-STATE] Restoring %s ScalpReentry state: TPUnlocked=%d, Cycles=%d, Mode: %s",
 			pos.Symbol, savedState.ScalpReentry.TPLevelUnlocked, len(savedState.ScalpReentry.Cycles),
-			pos.Mode, savedState.Mode)
-		// Restore the mode to scalp_reentry (critical for proper TP tracking)
-		pos.Mode = savedState.Mode
+			pos.Mode)
+		// [Story 9.9] REMOVED: Mode is no longer changed - mode stays as original
+		// Only restore the position optimization state
 		pos.ScalpReentry = savedState.ScalpReentry
 	}
 }
@@ -461,6 +635,13 @@ type GiniePosition struct {
 	DecisionReport *GinieDecisionReport `json:"decision_report,omitempty"`
 	FuturesTradeID int64                `json:"futures_trade_id,omitempty"` // Database trade ID for lifecycle events
 
+	// Fee Tracking (actual fees from Binance API/WebSocket)
+	EntryFeeUSD   float64 `json:"entry_fee_usd,omitempty"`   // Actual entry fee in USD
+	EntryWasMaker bool    `json:"entry_was_maker,omitempty"` // true if entry was maker order
+	ExitFeeUSD    float64 `json:"exit_fee_usd,omitempty"`    // Actual exit fee in USD
+	ExitWasMaker  bool    `json:"exit_was_maker,omitempty"`  // true if exit was maker order
+	TotalFeesUSD  float64 `json:"total_fees_usd,omitempty"`  // EntryFeeUSD + ExitFeeUSD
+
 	// Trade Source Tracking
 	Source       string  `json:"source"`                  // "ai" or "strategy"
 	StrategyID   *int64  `json:"strategy_id,omitempty"`   // Strategy ID if source is "strategy"
@@ -493,7 +674,7 @@ type GiniePosition struct {
 	CustomROIPercent *float64 `json:"custom_roi_percent,omitempty"` // Custom ROI% for this position (nil = use mode defaults)
 
 	// Scalp Re-entry Mode (progressive TP with re-entry at breakeven)
-	ScalpReentry *ScalpReentryStatus `json:"scalp_reentry,omitempty"` // Scalp re-entry state tracking
+	ScalpReentry *PositionOptimizationStatus `json:"scalp_reentry,omitempty"` // Scalp re-entry state tracking
 
 	// === 3-LEVEL STAGED ENTRY TRACKING ===
 	// Tracks progress of intelligent 3-level averaging for better entry prices
@@ -816,9 +997,10 @@ type GinieAutopilot struct {
 	llmAnalyzer   *llm.Analyzer // LLM for adaptive SL/TP
 	futuresClient binance.FuturesClient
 	logger        *logging.Logger
-	repo          *database.Repository // Database for trade persistence
-	eventLogger   *TradeEventLogger    // Trade lifecycle event logging
-	userID        string               // User ID for multi-tenant PnL isolation
+	repo              *database.Repository                   // Database for trade persistence
+	positionStateRepo *database.RedisPositionStateRepository // Redis-based position state storage
+	eventLogger       *TradeEventLogger                      // Trade lifecycle event logging
+	userID            string                                 // User ID for multi-tenant PnL isolation
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -940,15 +1122,20 @@ type GinieAutopilot struct {
 
 	// Trend Filter Validator for blocking wrong-direction trades (Story 9.5)
 	trendValidator *TrendFilterValidator
+
+	// Redis-based order tracker for timeout management
+	orderTracker *database.RedisOrderTracker
 }
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
+// redisClient can be nil (position state will fall back to JSON file only)
 func NewGinieAutopilot(
 	analyzer *GinieAnalyzer,
 	futuresClient binance.FuturesClient,
 	logger *logging.Logger,
 	repo *database.Repository,
 	userID string,
+	positionStateRepo *database.RedisPositionStateRepository,
 ) *GinieAutopilot {
 	config := DefaultGinieAutopilotConfig()
 
@@ -991,6 +1178,7 @@ func NewGinieAutopilot(
 		futuresClient:        futuresClient,
 		logger:               logger,
 		repo:                 repo,
+		positionStateRepo:    positionStateRepo, // Redis-based position state (may be nil)
 		eventLogger:          NewTradeEventLogger(repo.GetDB()),
 		userID:               userID,
 		circuitBreaker:       circuit.NewCircuitBreaker(cbConfig),
@@ -1117,6 +1305,19 @@ func NewGinieAutopilot(
 	// Initialize mode circuit breakers from default configs (Story 2.7 Task 2.7.4)
 	ga.initModeCircuitBreakers()
 
+	// Initialize Redis-based order tracker for timeout management
+	// Default timeout: 180 seconds (3 minutes) for limit orders
+	if positionStateRepo != nil && positionStateRepo.GetClient() != nil {
+		ga.orderTracker = database.NewRedisOrderTracker(positionStateRepo.GetClient(), 180)
+		// Set the cancel function to use Binance API
+		ga.orderTracker.SetCancelFunc(func(symbol string, orderID int64) error {
+			return ga.cancelOrderOnBinance(symbol, orderID)
+		})
+		log.Printf("[GINIE-INIT] Order tracker initialized with 180s timeout")
+	} else {
+		log.Printf("[GINIE-INIT] Order tracker not initialized (Redis not available)")
+	}
+
 	return ga
 }
 
@@ -1165,11 +1366,8 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 		modeKey = "position"
 	case GinieModeUltraFast:
 		modeKey = "ultra_fast"
-	case GinieModeScalpReentry:
-		// Scalp re-entry mode is enabled via user's DATABASE settings (not JSON file)
-		// CRITICAL FIX: Use getUserScalpReentryConfig() which reads from database per-user
-		scalpReentryConfig := ga.getUserScalpReentryConfig()
-		return scalpReentryConfig.Enabled
+	// [Story 9.9] REMOVED: GinieModeScalpReentry case - it's now a feature, not a mode
+	// Position optimization is checked via ScalpReentry != nil, not mode
 	default:
 		return false
 	}
@@ -1543,6 +1741,50 @@ func (ga *GinieAutopilot) GetPositions() []*GiniePosition {
 	return positions
 }
 
+// UpdatePositionFees updates the fee tracking data for a position
+// Called when we receive ORDER_TRADE_UPDATE with actual fee data from Binance
+func (ga *GinieAutopilot) UpdatePositionFees(symbol string, feeUSD float64, isMaker bool, isEntry bool) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	pos, exists := ga.positions[symbol]
+	if !exists {
+		// Position doesn't exist yet - might be receiving fee before position is created
+		// This is normal for entry orders
+		ga.logger.Debug("Fee update for non-existent position (may be entry)",
+			"symbol", symbol,
+			"fee_usd", feeUSD,
+			"is_maker", isMaker,
+			"is_entry", isEntry)
+		return
+	}
+
+	if isEntry {
+		pos.EntryFeeUSD = feeUSD
+		pos.EntryWasMaker = isMaker
+	} else {
+		pos.ExitFeeUSD += feeUSD // Accumulate for partial closes
+		pos.ExitWasMaker = isMaker
+	}
+	pos.TotalFeesUSD = pos.EntryFeeUSD + pos.ExitFeeUSD
+
+	ga.logger.Debug("Position fee updated",
+		"symbol", symbol,
+		"fee_usd", feeUSD,
+		"is_maker", isMaker,
+		"is_entry", isEntry,
+		"total_fees", pos.TotalFeesUSD)
+}
+
+// GetPosition returns a specific position by symbol (thread-safe)
+func (ga *GinieAutopilot) GetPosition(symbol string) (*GiniePosition, bool) {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	pos, exists := ga.positions[symbol]
+	return pos, exists
+}
+
 // StuckPositionAlert represents a position that needs manual intervention
 type StuckPositionAlert struct {
 	Symbol     string  `json:"symbol"`
@@ -1833,6 +2075,12 @@ func (ga *GinieAutopilot) Start() error {
 	go ga.monitorPendingLimitOrders()
 	ga.logger.Info("Pending LIMIT order monitor started - 120s timeout for reversal entries")
 
+	// Start Redis-based order tracker monitor (3 minute timeout for all orders)
+	if ga.orderTracker != nil {
+		ga.orderTracker.StartMonitor()
+		ga.logger.Info("Redis order tracker monitor started - 180s timeout for all LIMIT orders")
+	}
+
 	ga.mu.Unlock()
 	// CRITICAL: Release lock BEFORE doing any blocking operations (prevents API handler timeouts)
 
@@ -1901,6 +2149,11 @@ func (ga *GinieAutopilot) Stop() error {
 	close(ga.stopChan)
 	ga.mu.Unlock()
 
+	// Stop order tracker monitor
+	if ga.orderTracker != nil {
+		ga.orderTracker.StopMonitor()
+	}
+
 	// CRITICAL FIX: Don't block waiting for goroutines - return immediately
 	// Let goroutines clean up in background
 	go func() {
@@ -1921,6 +2174,69 @@ func (ga *GinieAutopilot) TriggerConfigReload() {
 	default:
 		log.Println("[GINIE] Config reload already pending, skipping duplicate signal")
 	}
+}
+
+// cancelOrderOnBinance cancels an order on Binance exchange
+// This is used by the order tracker to cancel timed-out orders
+func (ga *GinieAutopilot) cancelOrderOnBinance(symbol string, orderID int64) error {
+	if ga.futuresClient == nil {
+		return fmt.Errorf("futures client not available")
+	}
+	log.Printf("[ORDER-CANCEL] Canceling order %d for %s via Binance API", orderID, symbol)
+	return ga.futuresClient.CancelFuturesOrder(symbol, orderID)
+}
+
+// TrackPendingOrder adds a LIMIT order to the Redis tracker for timeout monitoring
+// Should be called after any LIMIT order is successfully placed
+func (ga *GinieAutopilot) TrackPendingOrder(symbol string, orderID int64, side string, orderType string, price, quantity float64, source string) {
+	if ga.orderTracker == nil {
+		return
+	}
+
+	// Only track LIMIT orders (MARKET orders fill immediately)
+	if orderType != "LIMIT" {
+		return
+	}
+
+	ctx := context.Background()
+	info := database.PendingOrderInfo{
+		OrderID:     orderID,
+		Symbol:      symbol,
+		Side:        side,
+		Type:        orderType,
+		Price:       price,
+		Quantity:    quantity,
+		Source:      source,
+		Description: fmt.Sprintf("%s %s LIMIT order at %.8f", side, source, price),
+	}
+
+	if err := ga.orderTracker.TrackOrder(ctx, info); err != nil {
+		log.Printf("[ORDER-TRACKER] Warning: Failed to track order %d: %v", orderID, err)
+	}
+}
+
+// RemoveTrackedOrder removes an order from the tracker when it's filled or cancelled
+// Should be called when order fill/cancel is detected from WebSocket or polling
+func (ga *GinieAutopilot) RemoveTrackedOrder(symbol string, orderID int64) {
+	if ga.orderTracker == nil {
+		return
+	}
+	ctx := context.Background()
+	ga.orderTracker.RemoveOrder(ctx, symbol, orderID)
+}
+
+// GetOrderTrackerStats returns statistics about pending order tracking
+func (ga *GinieAutopilot) GetOrderTrackerStats() map[string]interface{} {
+	if ga.orderTracker == nil {
+		return map[string]interface{}{
+			"enabled": false,
+			"reason":  "order tracker not initialized",
+		}
+	}
+	ctx := context.Background()
+	stats := ga.orderTracker.GetStats(ctx)
+	stats["enabled"] = true
+	return stats
 }
 
 // runMainLoop is the main trading loop that scans for opportunities
@@ -2006,7 +2322,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 			enabledModesMap := make(map[string]bool)
 			// NOTE: Only 4 trading modes generate signals. scalp_reentry is NOT a trading mode -
 			// it's a position optimization feature that upgrades scalp positions to use progressive TP.
-			// When scalp mode is enabled AND ScalpReentryConfig.Enabled is true, scalp entries
+			// When scalp mode is enabled AND PositionOptimizationConfig.Enabled is true, scalp entries
 			// automatically get upgraded to scalp_reentry mode during scanning (see scanForMode).
 			modeChecks := []struct {
 				modeName    string
@@ -2094,7 +2410,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 			}
 
 			// NOTE: scalp_reentry is NOT scanned separately - it's a position optimization feature.
-			// When scalp mode is enabled AND ScalpReentryConfig.Enabled is true, scalp signals
+			// When scalp mode is enabled AND PositionOptimizationConfig.Enabled is true, scalp signals
 			// are automatically upgraded to scalp_reentry mode inside scanForMode() for
 			// progressive TP management (TP1/TP2/TP3 + re-entry at breakeven).
 
@@ -2826,20 +3142,13 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			}
 
 			// ===== SCALP RE-ENTRY MODE SELECTION =====
-			// If scanning for scalp mode and scalp_reentry is enabled, use scalp_reentry mode instead
-			// This allows scalp_reentry to share entry logic with scalp but use different position management
-			// scalp_reentry enables: progressive TP (TP1/TP2/TP3), re-entry at breakeven, dynamic SL,
-			// exchange TP detection, hedge mode monitoring, and other optimization features.
-			// The actual re-entry ORDERS happen after TP1, but the monitoring features run from entry.
-			if mode == GinieModeScalp {
-				// CRITICAL FIX: Use getUserScalpReentryConfig() which reads from DATABASE per-user
-				// (was using LoadSettings() which reads from JSON file - wrong for multi-tenant)
-				scalpReentryConfig := ga.getUserScalpReentryConfig()
-				if scalpReentryConfig.Enabled {
-					// Override to scalp_reentry mode for progressive TP and re-entry at breakeven
-					decision.SelectedMode = GinieModeScalpReentry
-					log.Printf("[SCALP-REENTRY] %s: Upgrading scalp entry to scalp_reentry mode (progressive TP)", symbol)
-				}
+			// [Story 9.9] Position optimization (progressive TP, re-entry at breakeven, dynamic SL)
+			// is now a FEATURE FLAG per-mode, not a separate mode. Positions stay in their original mode (scalp, swing, etc.)
+			// The actual optimization is handled in the monitoring loop via pos.ScalpReentry != nil check
+			// Mode selection is NOT changed here - mode stays as scalp/swing/position/ultra_fast
+			modeConfigCheck := ga.getModeConfig(mode)
+			if modeConfigCheck != nil && modeConfigCheck.PositionOptimization != nil && modeConfigCheck.PositionOptimization.Enabled {
+				log.Printf("[POS-OPTIMIZATION] %s [%s]: Position optimization enabled for entry (progressive TP)", symbol, mode)
 			}
 
 			// Scalp mode: Log detailed signal evaluation per symbol (AC-2.2.2)
@@ -3616,12 +3925,12 @@ func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, ti
 	}
 
 	// Get mode-specific config
+	// [Story 9.9] Removed scalp_reentry - positions with ScalpReentry != nil use their original mode's config
 	modeKey := map[GinieTradingMode]string{
-		GinieModeUltraFast:    "ultra_fast",
-		GinieModeScalp:        "scalp",
-		GinieModeSwing:        "swing",
-		GinieModePosition:     "position",
-		GinieModeScalpReentry: "scalp_reentry",
+		GinieModeUltraFast: "ultra_fast",
+		GinieModeScalp:     "scalp",
+		GinieModeSwing:     "swing",
+		GinieModePosition:  "position",
 	}[pos.Mode]
 
 	modeConfig := settings.ModeConfigs[modeKey]
@@ -4142,9 +4451,17 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			slog.Default(),
 		)
 
-		// Validate all trend filters - block if any fail
+		// Extract candlestick data from EntryConfluence (Phase 2: Story 9.5)
+		var candleSignal string
+		var candleConfidence float64
+		if decision.EntryConfluence != nil {
+			candleSignal = decision.EntryConfluence.CandlestickSignal
+			candleConfidence = decision.EntryConfluence.CandlestickConfidence
+		}
+
+		// Validate all trend filters including candlestick alignment - block if any fail
 		direction := action // "LONG" or "SHORT"
-		passed, reason := validator.ValidateAll(symbol, direction, currentPrice, ema, vwap)
+		passed, reason := validator.ValidateAllWithCandlestick(symbol, direction, currentPrice, ema, vwap, candleSignal, candleConfidence)
 		if !passed {
 			log.Printf("[TREND-FILTER] %s: Trade BLOCKED - %s", symbol, reason)
 			ga.logger.Warn("Ginie trade blocked by trend filter",
@@ -4281,16 +4598,18 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 		leverage = ga.config.DefaultLeverage
 	}
 
-	// SCALP_REENTRY POSITION SIZING: Use minimum 10x leverage for adequate buying power
+	// [Story 9.9] Position optimization sizing: Use minimum 10x leverage for positions
+	// with position optimization enabled (any mode can have position_optimization)
 	// positionUSD is the NOTIONAL VALUE (e.g., $500 notional with 10x leverage requires $50 margin)
-	if decision.SelectedMode == GinieModeScalpReentry {
-		// Minimum 10x leverage for scalp_reentry
+	posOptModeConfig := ga.getModeConfig(decision.SelectedMode)
+	if posOptModeConfig != nil && posOptModeConfig.PositionOptimization != nil && posOptModeConfig.PositionOptimization.Enabled {
+		// Minimum 10x leverage for position optimization
 		if leverage < 10 {
-			log.Printf("[SCALP-REENTRY] %s: Upgrading leverage from %dx to 10x (minimum for scalp_reentry)", symbol, leverage)
+			log.Printf("[POS-OPTIMIZATION] %s [%s]: Upgrading leverage from %dx to 10x (minimum for position optimization)", symbol, decision.SelectedMode, leverage)
 			leverage = 10
 		}
-		log.Printf("[SCALP-REENTRY] %s: Position notional: $%.2f, leverage: %dx, required margin: $%.2f",
-			symbol, positionUSD, leverage, positionUSD/float64(leverage))
+		log.Printf("[POS-OPTIMIZATION] %s [%s]: Position notional: $%.2f, leverage: %dx, required margin: $%.2f",
+			symbol, decision.SelectedMode, positionUSD, leverage, positionUSD/float64(leverage))
 	}
 
 	// Calculate quantity based on adaptive position size
@@ -4420,7 +4739,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				return false, fmt.Sprintf("reversal_limit_order_failed: %v", err)
 			}
 
-			// Track pending LIMIT order with 120-second timeout
+			// Track pending LIMIT order with 120-second timeout (in-memory)
 			timeoutAt := time.Now().Add(120 * time.Second)
 			ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
 				OrderID:      limitOrder.OrderId,
@@ -4434,6 +4753,9 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				Source:       "reversal",
 				Mode:         decision.SelectedMode,
 			}
+
+			// Also track in Redis for cross-instance visibility and timeout
+			ga.TrackPendingOrder(symbol, limitOrder.OrderId, string(side), "LIMIT", limitPrice, quantity, "reversal_entry")
 
 			ga.logger.Info("Reversal LIMIT order placed - awaiting fill",
 				"symbol", symbol,
@@ -4540,7 +4862,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 					"error", err.Error())
 				return false, fmt.Sprintf("limit_order_failed: %v", err)
 			} else {
-				// Track pending LIMIT order with timeout
+				// Track pending LIMIT order with timeout (in-memory)
 				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
 				ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
 					OrderID:      limitOrder.OrderId,
@@ -4554,6 +4876,9 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 					Source:       "prev_candle_entry",
 					Mode:         decision.SelectedMode,
 				}
+
+				// Also track in Redis for cross-instance visibility and timeout
+				ga.TrackPendingOrder(symbol, limitOrder.OrderId, string(side), "LIMIT", limitEntryPrice, quantity, "prev_candle_entry")
 
 				timeframe := ga.getEntryTimeframe(decision.SelectedMode)
 				ga.logger.Info("LIMIT order placed at prev candle extreme - awaiting fill",
@@ -4622,12 +4947,12 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	ga.dailyTrades++
 	ga.totalTrades++
 
-	// FIX: Initialize ScalpReentry status immediately if position enters in scalp_reentry mode
-	// This ensures the position appears in the scalp-reentry/positions API endpoint right away
-	// Previously, ScalpReentry was only initialized during monitor loop, causing sync gap
-	if position.Mode == GinieModeScalpReentry {
-		position.ScalpReentry = ga.initScalpReentry(position)
-		ga.logger.Info("ScalpReentry status initialized at entry",
+	// [Story 9.9] Initialize position optimization if enabled for this mode
+	// Each mode (scalp, swing, position) has its own position_optimization section
+	modeConfigForPosOpt := ga.getModeConfig(position.Mode)
+	if modeConfigForPosOpt != nil && modeConfigForPosOpt.PositionOptimization != nil && modeConfigForPosOpt.PositionOptimization.Enabled {
+		position.ScalpReentry = ga.initPositionOptimizationFromModeConfig(position, modeConfigForPosOpt.PositionOptimization)
+		ga.logger.Info("Position optimization initialized at entry",
 			"symbol", symbol,
 			"mode", position.Mode,
 			"entry_price", position.EntryPrice,
@@ -4928,33 +5253,29 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 			ga.checkAndExecuteStagedEntry(pos)
 		}
 
-		// === SCALP TO SCALP_REENTRY UPGRADE ===
-		// Only upgrade SCALP positions to scalp_reentry (swing stays as swing)
-		// This is a fallback - positions should already be scalp_reentry from entry if enabled
-		// This ensures progressive TP monitoring runs for all scalp positions when scalp_reentry is enabled
-		if pos.Mode == GinieModeScalp && pos.ScalpReentry == nil {
-			// CRITICAL FIX: Use getUserScalpReentryConfig() which reads from DATABASE per-user
-			// (was using LoadSettings() which reads from JSON file - wrong for multi-tenant)
-			scalpReentryConfig := ga.getUserScalpReentryConfig()
-			if scalpReentryConfig.Enabled {
-				// Upgrade the position mode
-				oldMode := pos.Mode
-				pos.Mode = GinieModeScalpReentry
-				pos.ScalpReentry = ga.initScalpReentry(pos)
-				log.Printf("[SCALP-UPGRADE] %s: Upgraded %s position to scalp_reentry mode", symbol, oldMode)
-				log.Printf("[SCALP-UPGRADE] %s: Entry=%.8f, Qty=%.4f, Side=%s - now using progressive TP",
+		// === POSITION OPTIMIZATION ACTIVATION ===
+		// [Story 9.9] Activate position optimization for ANY mode with position_optimization enabled
+		// Position mode NEVER changes - scalp stays scalp, swing stays swing
+		// Position optimization is a FEATURE FLAG per-mode, not a mode change
+		if pos.ScalpReentry == nil {
+			posOptConfig := ga.getModeConfig(pos.Mode)
+			if posOptConfig != nil && posOptConfig.PositionOptimization != nil && posOptConfig.PositionOptimization.Enabled {
+				pos.ScalpReentry = ga.initPositionOptimizationFromModeConfig(pos, posOptConfig.PositionOptimization)
+				log.Printf("[POS-OPTIMIZATION] %s [%s]: Activated position optimization", symbol, pos.Mode)
+				log.Printf("[POS-OPTIMIZATION] %s: Entry=%.8f, Qty=%.4f, Side=%s - now using progressive TP",
 					symbol, pos.EntryPrice, pos.OriginalQty, pos.Side)
 			}
 		}
 
-		// === SCALP RE-ENTRY MODE HANDLING ===
-		// Delegate scalp_reentry positions to specialized monitor
-		if pos.Mode == GinieModeScalpReentry {
+		// === POSITION OPTIMIZATION MONITORING ===
+		// [Story 9.9] Check if position optimization is active by checking ScalpReentry != nil
+		// This replaces the old mode-based check (pos.Mode == GinieModeScalpReentry)
+		if pos.ScalpReentry != nil {
 			ga.mu.Unlock()
-			if err := ga.monitorScalpReentryPosition(pos); err != nil {
-				log.Printf("[SCALP-REENTRY-MONITOR] %s: Error monitoring position: %v", symbol, err)
+			if err := ga.monitorPositionOptimization(pos); err != nil {
+				log.Printf("[POS-OPTIMIZATION-MONITOR] %s: Error monitoring position: %v", symbol, err)
 			}
-			continue // Skip regular monitoring for scalp_reentry positions
+			continue // Skip regular monitoring - position optimization has its own logic
 		}
 
 		// Update high/low tracking
@@ -5047,12 +5368,12 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 	}
 
 			// Check if trailing is enabled for this mode (read from ModeConfigs)
+			// [Story 9.9] Removed scalp_reentry - positions use their original mode's config
 			modeToConfigKey := map[string]string{
-				string(GinieModeUltraFast):    "ultra_fast",
-				string(GinieModeScalp):        "scalp",
-				string(GinieModeSwing):        "swing",
-				string(GinieModePosition):     "position",
-				string(GinieModeScalpReentry): "scalp_reentry",
+				string(GinieModeUltraFast): "ultra_fast",
+				string(GinieModeScalp):     "scalp",
+				string(GinieModeSwing):     "swing",
+				string(GinieModePosition):  "position",
 			}
 			trailingEnabled := false
 			if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
@@ -5372,19 +5693,18 @@ func (ga *GinieAutopilot) shouldBookEarlyProfit(pos *GiniePosition, currentPrice
 					log.Printf("[SETTINGS] ERROR: Failed to load settings for early profit check: %v", settingsLoadErr)
 					return false, 0, "" // Cannot determine threshold without settings
 				}
+				// [Story 9.9] Removed scalp_reentry - positions use their original mode's config
 				modeToConfigKey := map[string]string{
-					string(GinieModeUltraFast):    "ultra_fast",
-					string(GinieModeScalp):        "scalp",
-					string(GinieModeSwing):        "swing",
-					string(GinieModePosition):     "position",
-					string(GinieModeScalpReentry): "scalp_reentry",
+					string(GinieModeUltraFast): "ultra_fast",
+					string(GinieModeScalp):     "scalp",
+					string(GinieModeSwing):     "swing",
+					string(GinieModePosition):  "position",
 				}
 				modeDefaults := map[string]float64{
-					"ultra_fast":    2.0,
-					"scalp":         3.0,
-					"swing":         5.0,
-					"position":      8.0,
-					"scalp_reentry": 1.0, // Progressive TP for scalp_reentry
+					"ultra_fast": 2.0,
+					"scalp":      3.0,
+					"swing":      5.0,
+					"position":   8.0,
 				}
 
 				var tpPercent float64
@@ -6865,16 +7185,11 @@ func (ga *GinieAutopilot) getTPPercent(level int) float64 {
 }
 
 // getModeConfigForSizing retrieves the mode configuration for sizing-related parameters.
-// scalp_reentry is an enhancement of scalp mode and doesn't have its own sizing config,
-// so it falls back to scalp mode's sizing configuration.
+// [Story 9.9] scalp_reentry mode removed - positions use their original mode's config
 // Use this method when you need sizing-related settings (base_size_usd, safety_margin, min_balance_usd, etc.)
 func (ga *GinieAutopilot) getModeConfigForSizing(mode GinieTradingMode) *ModeFullConfig {
-	// scalp_reentry uses scalp mode's sizing configuration
-	configMode := mode
-	if mode == GinieModeScalpReentry {
-		configMode = GinieModeScalp
-	}
-	return ga.getModeConfig(configMode)
+	// [Story 9.9] Mode is always one of the 4 valid modes now
+	return ga.getModeConfig(mode)
 }
 
 // getModeConfig retrieves the mode configuration from SettingsManager with database-first approach
@@ -7275,25 +7590,61 @@ func (ga *GinieAutopilot) calculateSmartEntryPrice(symbol string, mode GinieTrad
 		}
 	}
 
-	// === DEFAULT: Use previous candle extreme ===
-	if isLong {
-		result.EntryPrice = prevCandle.Low
-		result.EntryType = "prev_candle"
-		result.Reason = "Standard entry at previous candle low"
-	} else {
-		result.EntryPrice = prevCandle.High
-		result.EntryType = "prev_candle"
-		result.Reason = "Standard entry at previous candle high"
+	// === DEFAULT: Use configurable gap from current price ===
+	// Get entry config from mode settings
+	modeConfig := ga.getModeConfig(mode)
+	gapPercent := 0.10 // Default: 0.10% gap from current price (much tighter than prev candle)
+
+	if modeConfig != nil && modeConfig.Entry != nil {
+		if modeConfig.Entry.LimitOrderGapPercent > 0 {
+			gapPercent = modeConfig.Entry.LimitOrderGapPercent
+		}
+		// If market entry enabled, return current price (will be handled by caller)
+		if modeConfig.Entry.UseMarketEntry {
+			result.EntryPrice = currentPrice
+			result.EntryType = "market_entry"
+			result.IsImmediate = true
+			result.Reason = "Market entry enabled - using current price"
+			ga.logger.Info("Smart entry: Market entry mode",
+				"symbol", symbol,
+				"mode", mode,
+				"direction", map[bool]string{true: "LONG", false: "SHORT"}[isLong],
+				"entry_price", result.EntryPrice)
+			return result, nil
+		}
 	}
 
-	ga.logger.Info("Smart entry: Using prev candle extreme",
+	// Calculate entry price using gap from current price
+	// For LONG: Entry slightly below current price
+	// For SHORT: Entry slightly above current price
+	gapFactor := gapPercent / 100.0
+	if isLong {
+		result.EntryPrice = currentPrice * (1 - gapFactor) // Slightly below for better fill
+		result.EntryType = "limit_gap"
+		result.Reason = fmt.Sprintf("Limit entry %.2f%% below current price", gapPercent)
+	} else {
+		result.EntryPrice = currentPrice * (1 + gapFactor) // Slightly above for better fill
+		result.EntryType = "limit_gap"
+		result.Reason = fmt.Sprintf("Limit entry %.2f%% above current price", gapPercent)
+	}
+
+	// Calculate actual gap from prev candle extreme for logging
+	var prevCandleGapPct float64
+	if isLong {
+		prevCandleGapPct = ((currentPrice - prevCandle.Low) / currentPrice) * 100
+	} else {
+		prevCandleGapPct = ((prevCandle.High - currentPrice) / currentPrice) * 100
+	}
+
+	ga.logger.Info("Smart entry: Using limit gap from current price",
 		"symbol", symbol,
 		"mode", mode,
 		"direction", map[bool]string{true: "LONG", false: "SHORT"}[isLong],
-		"timeframe", timeframe,
-		"prev_candle_low", prevCandle.Low,
-		"prev_candle_high", prevCandle.High,
-		"entry_price", result.EntryPrice)
+		"current_price", currentPrice,
+		"limit_gap_pct", gapPercent,
+		"entry_price", result.EntryPrice,
+		"prev_candle_gap_pct", fmt.Sprintf("%.2f%%", prevCandleGapPct),
+		"prev_candle_extreme", map[bool]float64{true: prevCandle.Low, false: prevCandle.High}[isLong])
 
 	return result, nil
 }
@@ -7410,22 +7761,21 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 
 	modeConfig := ga.getModeConfig(mode)
 
-	// SCALP_REENTRY SPECIAL CASE: Use ScalpReentryConfig for TP levels
-	// This mode has its own progressive TP config (0.4%, 0.7%, 1.0% with specific sell %)
-	if mode == GinieModeScalpReentry {
-		// FIXED: Use getUserScalpReentryConfig() which handles both OLD (ModeFullConfig)
-		// and NEW (ScalpReentryConfig) formats from the database
-		scalpReentryConfig := ga.getUserScalpReentryConfig()
-		log.Printf("[GINIE] %s: Using scalp_reentry config: TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
-			symbol, scalpReentryConfig.TP1Percent, scalpReentryConfig.TP1SellPercent,
-			scalpReentryConfig.TP2Percent, scalpReentryConfig.TP2SellPercent,
-			scalpReentryConfig.TP3Percent, scalpReentryConfig.TP3SellPercent)
+	// [Story 9.9] Position Optimization: Use mode's PositionOptimization config for TP levels
+	// Each mode (scalp, swing, position) has its own position_optimization section
+	// CRITICAL: Read from mode's position_optimization, NOT old global scalp_reentry config
+	if modeConfig != nil && modeConfig.PositionOptimization != nil && modeConfig.PositionOptimization.Enabled {
+		posOptConfig := modeConfig.PositionOptimization
+		log.Printf("[GINIE] %s [%s]: Using mode's position_optimization config: TP1=%.2f%% (sell %.0f%%), TP2=%.2f%% (sell %.0f%%), TP3=%.2f%% (sell %.0f%%)",
+			symbol, mode, posOptConfig.TP1Percent, posOptConfig.TP1SellPercent,
+			posOptConfig.TP2Percent, posOptConfig.TP2SellPercent,
+			posOptConfig.TP3Percent, posOptConfig.TP3SellPercent)
 		// TP1: tp1_percent% gain, sell tp1_sell_percent%
 		// TP2: tp2_percent% gain, sell tp2_sell_percent%
 		// TP3: tp3_percent% gain, sell tp3_sell_percent%
 		// Remaining 20%: trailing stop (handled separately)
-		tpGains := []float64{scalpReentryConfig.TP1Percent, scalpReentryConfig.TP2Percent, scalpReentryConfig.TP3Percent, 0}
-		tpAllocation := []float64{scalpReentryConfig.TP1SellPercent, scalpReentryConfig.TP2SellPercent, scalpReentryConfig.TP3SellPercent, 0}
+		tpGains := []float64{posOptConfig.TP1Percent, posOptConfig.TP2Percent, posOptConfig.TP3Percent, 0}
+		tpAllocation := []float64{posOptConfig.TP1SellPercent, posOptConfig.TP2SellPercent, posOptConfig.TP3SellPercent, 0}
 
 		// Determine side string for proper rounding
 		side := "LONG"
@@ -7454,12 +7804,12 @@ func (ga *GinieAutopilot) generateDefaultTPs(symbol string, entryPrice float64, 
 		}
 		// Log TP levels only if we have generated at least 3 TPs
 		if len(tps) >= 3 {
-			log.Printf("[GINIE] %s: Generated scalp_reentry TPs from ScalpReentryConfig: TP1=%.4f (%.1f%%), TP2=%.4f (%.1f%%), TP3=%.4f (%.1f%%)",
-				symbol, tps[0].Price, tps[0].GainPct, tps[1].Price, tps[1].GainPct, tps[2].Price, tps[2].GainPct)
+			log.Printf("[GINIE] %s [%s]: Generated position optimization TPs: TP1=%.4f (%.1f%%), TP2=%.4f (%.1f%%), TP3=%.4f (%.1f%%)",
+				symbol, mode, tps[0].Price, tps[0].GainPct, tps[1].Price, tps[1].GainPct, tps[2].Price, tps[2].GainPct)
 		} else if len(tps) > 0 {
-			log.Printf("[GINIE] %s: Generated %d scalp_reentry TP level(s) from ScalpReentryConfig", symbol, len(tps))
+			log.Printf("[GINIE] %s [%s]: Generated %d position optimization TP level(s)", symbol, mode, len(tps))
 		} else {
-			log.Printf("[GINIE] %s: Warning - No scalp_reentry TPs generated (all allocations <= 0)", symbol)
+			log.Printf("[GINIE] %s [%s]: Warning - No position optimization TPs generated (all allocations <= 0)", symbol, mode)
 		}
 		return tps
 	}
@@ -7895,7 +8245,7 @@ func (ga *GinieAutopilot) GetStats() map[string]interface{} {
 }
 
 // calculateEnabledModesMaxPositions sums MaxPositions from only enabled trading modes
-// CRITICAL FIX: Uses isModeEnabled() which reads from database in real-time
+// PERFORMANCE FIX: Uses single batch DB query instead of N+1 queries per mode
 // This ensures position count updates IMMEDIATELY when user toggles modes
 func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
 	settings, settingsLoadErr := GetSettingsManager().LoadSettings()
@@ -7908,31 +8258,65 @@ func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
 		return ga.config.MaxPositions
 	}
 
+	// PERFORMANCE: Use single batch query to get all mode enabled statuses
+	// Instead of calling isModeEnabled() 4 times (4 DB queries each)
+	enabledModes := make(map[string]bool)
+
+	if ga.repo != nil && ga.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		modeConfigs, err := ga.repo.GetAllUserModeConfigsWithEnabled(ctx, ga.userID)
+		if err != nil {
+			log.Printf("[SETTINGS] WARN: Batch mode config load failed: %v - using fallback", err)
+		} else {
+			for modeName, cfg := range modeConfigs {
+				enabledModes[modeName] = cfg.Enabled
+			}
+		}
+	}
+
+	// If no DB data available, fall back to in-memory config (legacy mode)
+	if len(enabledModes) == 0 {
+		if ga.config.EnableUltraFastMode {
+			enabledModes["ultra_fast"] = true
+		}
+		if ga.config.EnableScalpMode {
+			enabledModes["scalp"] = true
+		}
+		if ga.config.EnableSwingMode {
+			enabledModes["swing"] = true
+		}
+		if ga.config.EnablePositionMode {
+			enabledModes["position"] = true
+		}
+	}
+
 	totalMaxPositions := 0
 
-	// Check ultra_fast mode - uses isModeEnabled() for real-time DB read
-	if ga.isModeEnabled(GinieModeUltraFast) {
+	// Check ultra_fast mode
+	if enabledModes["ultra_fast"] {
 		if cfg, ok := settings.ModeConfigs["ultra_fast"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
 	}
 
-	// Check scalp mode - uses isModeEnabled() for real-time DB read
-	if ga.isModeEnabled(GinieModeScalp) {
+	// Check scalp mode
+	if enabledModes["scalp"] {
 		if cfg, ok := settings.ModeConfigs["scalp"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
 	}
 
-	// Check swing mode - uses isModeEnabled() for real-time DB read
-	if ga.isModeEnabled(GinieModeSwing) {
+	// Check swing mode
+	if enabledModes["swing"] {
 		if cfg, ok := settings.ModeConfigs["swing"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
 	}
 
-	// Check position mode - uses isModeEnabled() for real-time DB read
-	if ga.isModeEnabled(GinieModePosition) {
+	// Check position mode
+	if enabledModes["position"] {
 		if cfg, ok := settings.ModeConfigs["position"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
@@ -8197,11 +8581,13 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 		ga.positions[symbol] = position
 		synced++
 
-		// FIX: Initialize ScalpReentry status for force-synced positions in scalp_reentry mode
-		if position.Mode == GinieModeScalpReentry {
-			position.ScalpReentry = ga.initScalpReentry(position)
-			ga.logger.Info("ScalpReentry status initialized for force-synced position",
-				"symbol", symbol)
+		// [Story 9.9] Initialize position optimization for force-synced positions if enabled for their mode
+		forceOptConfig := ga.getModeConfig(position.Mode)
+		if forceOptConfig != nil && forceOptConfig.PositionOptimization != nil && forceOptConfig.PositionOptimization.Enabled {
+			position.ScalpReentry = ga.initPositionOptimizationFromModeConfig(position, forceOptConfig.PositionOptimization)
+			ga.logger.Info("Position optimization initialized for force-synced position",
+				"symbol", symbol,
+				"mode", position.Mode)
 		}
 
 		ga.logger.Info("Force-synced position from exchange",
@@ -8490,11 +8876,13 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 			ga.positions[symbol] = position
 			synced++
 
-			// FIX: Initialize ScalpReentry status for synced positions in scalp_reentry mode
-			if position.Mode == GinieModeScalpReentry {
-				position.ScalpReentry = ga.initScalpReentry(position)
-				ga.logger.Info("ScalpReentry status initialized for synced position",
-					"symbol", symbol)
+			// [Story 9.9] Initialize position optimization for synced positions if enabled for their mode
+			syncOptConfig := ga.getModeConfig(position.Mode)
+			if syncOptConfig != nil && syncOptConfig.PositionOptimization != nil && syncOptConfig.PositionOptimization.Enabled {
+				position.ScalpReentry = ga.initPositionOptimizationFromModeConfig(position, syncOptConfig.PositionOptimization)
+				ga.logger.Info("Position optimization initialized for synced position",
+					"symbol", symbol,
+					"mode", position.Mode)
 			}
 
 			ga.logger.Info("Synced position from exchange",
@@ -9885,7 +10273,8 @@ func (ga *GinieAutopilot) reconcilePositions() {
 
 	// CRITICAL: Load persisted position state BEFORE processing
 	// This ensures we can restore scalp_reentry state and CurrentTPLevel
-	savedStates, stateErr := LoadPositionState()
+	// Phase 2: Now uses Redis with JSON fallback
+	savedStates, stateErr := ga.LoadPositionState()
 	if stateErr != nil {
 		log.Printf("[RECONCILE] Warning: Failed to load saved position state: %v", stateErr)
 		savedStates = make(map[string]PersistedPositionState)
@@ -10171,12 +10560,16 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				ga.RestorePositionState(newPos, savedState)
 			}
 
-			// FIX: Initialize ScalpReentry status for reconciled positions in scalp_reentry mode
+			// [Story 9.9] Initialize position optimization for reconciled positions if enabled for their mode
 			// Do this after RestorePositionState in case saved state doesn't have ScalpReentry
-			if newPos.Mode == GinieModeScalpReentry && newPos.ScalpReentry == nil {
-				newPos.ScalpReentry = ga.initScalpReentry(newPos)
-				ga.logger.Info("ScalpReentry status initialized for reconciled position",
-					"symbol", exchangePos.Symbol)
+			if newPos.ScalpReentry == nil {
+				reconOptConfig := ga.getModeConfig(newPos.Mode)
+				if reconOptConfig != nil && reconOptConfig.PositionOptimization != nil && reconOptConfig.PositionOptimization.Enabled {
+					newPos.ScalpReentry = ga.initPositionOptimizationFromModeConfig(newPos, reconOptConfig.PositionOptimization)
+					ga.logger.Info("Position optimization initialized for reconciled position",
+						"symbol", exchangePos.Symbol,
+						"mode", newPos.Mode)
+				}
 			}
 
 			// Add position to map AFTER state is fully restored
@@ -10400,6 +10793,57 @@ func (ga *GinieAutopilot) cleanupAllOrphanOrders() {
 			cancelledCount += success
 			time.Sleep(50 * time.Millisecond)
 		}
+	}
+
+	// CRITICAL: Also cleanup stale LIMIT entry orders (not tracked after container restart)
+	// These are reversal/trend entry orders that may have been orphaned
+	regularOrders, err := ga.futuresClient.GetOpenOrders("")
+	if err != nil {
+		log.Printf("[GINIE-CLEANUP] Warning: Failed to get regular open orders: %v", err)
+	} else {
+		staleThreshold := 3 * time.Minute // Cancel LIMIT orders older than 3 minutes without position
+		now := time.Now()
+		staleLimitCancelled := 0
+
+		for _, order := range regularOrders {
+			// Only process LIMIT orders (not reduce-only market orders)
+			if order.Type != "LIMIT" || order.ReduceOnly {
+				continue
+			}
+
+			// Check if order is older than threshold
+			orderTime := time.Unix(0, order.Time*int64(time.Millisecond))
+			orderAge := now.Sub(orderTime)
+
+			if orderAge < staleThreshold {
+				continue // Order is too new, might still be actively managed
+			}
+
+			// Check if this order has an associated position
+			hasPosition := symbolsWithPositions[order.Symbol]
+
+			if !hasPosition {
+				// Orphan LIMIT order - no position exists, cancel it
+				log.Printf("[GINIE-CLEANUP] Found stale LIMIT order %d for %s (age: %v, no position), cancelling",
+					order.OrderId, order.Symbol, orderAge.Round(time.Second))
+
+				err := ga.futuresClient.CancelFuturesOrder(order.Symbol, order.OrderId)
+				if err != nil {
+					log.Printf("[GINIE-CLEANUP] WARNING: Failed to cancel stale LIMIT order %d for %s: %v",
+						order.OrderId, order.Symbol, err)
+				} else {
+					log.Printf("[GINIE-CLEANUP] Successfully cancelled stale LIMIT order %d for %s",
+						order.OrderId, order.Symbol)
+					staleLimitCancelled++
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+
+		if staleLimitCancelled > 0 {
+			log.Printf("[GINIE-CLEANUP] Cancelled %d stale LIMIT orders", staleLimitCancelled)
+		}
+		cancelledCount += staleLimitCancelled
 	}
 
 	log.Printf("[GINIE-CLEANUP] Cleanup complete: %d total orders checked, %d successfully cancelled", orderCount, cancelledCount)
@@ -10640,10 +11084,9 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 	minConfidence := settings.EarlyWarningMinConfidence
 
 	for _, pos := range positionsToCheck {
-		// Skip scalp_reentry mode - let it manage its own exits via progressive TP
-		if pos.Mode == GinieModeScalpReentry {
-			continue
-		}
+		// [Story 9.9] REMOVED: Early warning skip for scalp_reentry mode
+		// All positions now go through early warning regardless of position optimization status
+		// Position optimization is a feature, not a mode - original mode rules still apply
 
 		// Skip if position too new
 		if time.Since(pos.EntryTime) < startAfter {
@@ -11403,12 +11846,12 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		}
 		var manualSLPct, manualTPPct float64
 
+		// [Story 9.9] Removed scalp_reentry - positions use their original mode's config
 		modeToConfigKey := map[string]string{
-			string(GinieModeUltraFast):    "ultra_fast",
-			string(GinieModeScalp):        "scalp",
-			string(GinieModeSwing):        "swing",
-			string(GinieModePosition):     "position",
-			string(GinieModeScalpReentry): "scalp_reentry",
+			string(GinieModeUltraFast): "ultra_fast",
+			string(GinieModeScalp):     "scalp",
+			string(GinieModeSwing):     "swing",
+			string(GinieModePosition):  "position",
 		}
 		if modeKey, ok := modeToConfigKey[string(pos.Mode)]; ok {
 			if modeConfig := settings.ModeConfigs[modeKey]; modeConfig != nil {
@@ -11635,56 +12078,48 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 
 			// Get allocation and gain levels from mode config
 			modeConfig := ga.getModeConfig(pos.Mode)
-			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
-				rawAlloc := modeConfig.SLTP.TPAllocation[:4]
-				// For scalp_reentry, allocations are cumulative (30, 50, 80) - convert to per-level
-				if pos.Mode == GinieModeScalpReentry {
-					tpAllocation = []float64{
-						rawAlloc[0],
-						rawAlloc[1] - rawAlloc[0],
-						rawAlloc[2] - rawAlloc[1],
-						rawAlloc[3] - rawAlloc[2],
-					}
-				} else {
-					tpAllocation = rawAlloc
+			// [Story 9.9] Check if position optimization is active via ScalpReentry != nil
+			if pos.ScalpReentry != nil {
+				// Position optimization uses cumulative allocation (30, 50, 80) - convert to per-level
+				scalpCfg := settings.PositionOptimizationConfig
+				tpGains = []float64{scalpCfg.TP1Percent, scalpCfg.TP2Percent, scalpCfg.TP3Percent, 0}
+				tpAllocation = []float64{
+					scalpCfg.TP1SellPercent,
+					scalpCfg.TP2SellPercent - scalpCfg.TP1SellPercent,
+					scalpCfg.TP3SellPercent - scalpCfg.TP2SellPercent,
+					0,
 				}
+			} else if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
+				tpAllocation = modeConfig.SLTP.TPAllocation[:4]
 			} else {
 				// Fallback allocation defaults
 				tpAllocation = []float64{25, 25, 25, 25}
 			}
 
-			// Get TPGainLevels for price calculation (ROI % per level)
-			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
-				tpGains = modeConfig.SLTP.TPGainLevels[:4]
-				ga.logger.Debug("Using TPGainLevels from mode_configs",
-					"symbol", symbol,
-					"mode", pos.Mode,
-					"gain_levels", tpGains,
-					"allocation", tpAllocation)
-			} else {
-				// Fallback: derive gain levels based on mode and finalTPPct
-				switch pos.Mode {
-				case GinieModeUltraFast:
-					tpGains = []float64{0.3, 0.5, 0.8, 1.0}
-				case GinieModeScalp:
-					tpGains = []float64{0.5, 1.0, 1.5, 2.0}
-				case GinieModeScalpReentry:
-					// Use scalp_reentry_config values (cumulative sell %)
-					scalpCfg := settings.ScalpReentryConfig
-					tpGains = []float64{scalpCfg.TP1Percent, scalpCfg.TP2Percent, scalpCfg.TP3Percent, 0}
-					// Convert cumulative to per-level: 30, 20, 30, 0 (30%, then 20% more, then 30% more)
-					tpAllocation = []float64{
-						scalpCfg.TP1SellPercent,
-						scalpCfg.TP2SellPercent - scalpCfg.TP1SellPercent,
-						scalpCfg.TP3SellPercent - scalpCfg.TP2SellPercent,
-						0,
+			// Get TPGainLevels for price calculation (ROI % per level) - skip if position optimization already set them
+			if pos.ScalpReentry == nil {
+				if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
+					tpGains = modeConfig.SLTP.TPGainLevels[:4]
+					ga.logger.Debug("Using TPGainLevels from mode_configs",
+						"symbol", symbol,
+						"mode", pos.Mode,
+						"gain_levels", tpGains,
+						"allocation", tpAllocation)
+				} else {
+					// Fallback: derive gain levels based on mode and finalTPPct
+					switch pos.Mode {
+					case GinieModeUltraFast:
+						tpGains = []float64{0.3, 0.5, 0.8, 1.0}
+					case GinieModeScalp:
+						tpGains = []float64{0.5, 1.0, 1.5, 2.0}
+					// [Story 9.9] REMOVED: GinieModeScalpReentry case - handled above via ScalpReentry != nil
+					case GinieModeSwing:
+						tpGains = []float64{1.0, 2.0, 3.0, 4.0}
+					case GinieModePosition:
+						tpGains = []float64{2.0, 4.0, 6.0, 8.0}
+					default:
+						tpGains = []float64{finalTPPct * 0.25, finalTPPct * 0.5, finalTPPct * 0.75, finalTPPct}
 					}
-				case GinieModeSwing:
-					tpGains = []float64{1.0, 2.0, 3.0, 4.0}
-				case GinieModePosition:
-					tpGains = []float64{2.0, 4.0, 6.0, 8.0}
-				default:
-					tpGains = []float64{finalTPPct * 0.25, finalTPPct * 0.5, finalTPPct * 0.75, finalTPPct}
 				}
 			}
 
@@ -12098,56 +12533,48 @@ func (ga *GinieAutopilot) recalculateSinglePositionSLTP(pos *GiniePosition) erro
 
 		// Get allocation and gain levels from mode config
 		modeConfig := ga.getModeConfig(pos.Mode)
-		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
-			rawAlloc := modeConfig.SLTP.TPAllocation[:4]
-			// For scalp_reentry, allocations are cumulative (30, 50, 80) - convert to per-level
-			if pos.Mode == GinieModeScalpReentry {
-				tpAllocation = []float64{
-					rawAlloc[0],
-					rawAlloc[1] - rawAlloc[0],
-					rawAlloc[2] - rawAlloc[1],
-					rawAlloc[3] - rawAlloc[2],
-				}
-			} else {
-				tpAllocation = rawAlloc
+		// [Story 9.9] Check if position optimization is active via ScalpReentry != nil
+		if pos.ScalpReentry != nil {
+			// Position optimization uses cumulative allocation (30, 50, 80) - convert to per-level
+			scalpCfg := settings.PositionOptimizationConfig
+			tpGains = []float64{scalpCfg.TP1Percent, scalpCfg.TP2Percent, scalpCfg.TP3Percent, 0}
+			tpAllocation = []float64{
+				scalpCfg.TP1SellPercent,
+				scalpCfg.TP2SellPercent - scalpCfg.TP1SellPercent,
+				scalpCfg.TP3SellPercent - scalpCfg.TP2SellPercent,
+				0,
 			}
+		} else if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPAllocation) >= 4 {
+			tpAllocation = modeConfig.SLTP.TPAllocation[:4]
 		} else {
 			// Fallback allocation defaults
 			tpAllocation = []float64{25, 25, 25, 25}
 		}
 
-		// Get TPGainLevels for price calculation (ROI % per level)
-		if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
-			tpGains = modeConfig.SLTP.TPGainLevels[:4]
-			ga.logger.Debug("Using TPGainLevels from mode_configs (async)",
-				"symbol", pos.Symbol,
-				"mode", pos.Mode,
-				"gain_levels", tpGains,
-				"allocation", tpAllocation)
-		} else {
-			// Fallback: derive gain levels based on mode and finalTPPct
-			switch pos.Mode {
-			case GinieModeUltraFast:
-				tpGains = []float64{0.3, 0.5, 0.8, 1.0}
-			case GinieModeScalp:
-				tpGains = []float64{0.5, 1.0, 1.5, 2.0}
-			case GinieModeScalpReentry:
-				// Use scalp_reentry_config values (cumulative sell %)
-				scalpCfg := settings.ScalpReentryConfig
-				tpGains = []float64{scalpCfg.TP1Percent, scalpCfg.TP2Percent, scalpCfg.TP3Percent, 0}
-				// Convert cumulative to per-level: 30, 20, 30, 0 (30%, then 20% more, then 30% more)
-				tpAllocation = []float64{
-					scalpCfg.TP1SellPercent,
-					scalpCfg.TP2SellPercent - scalpCfg.TP1SellPercent,
-					scalpCfg.TP3SellPercent - scalpCfg.TP2SellPercent,
-					0,
+		// Get TPGainLevels for price calculation (ROI % per level) - skip if position optimization already set them
+		if pos.ScalpReentry == nil {
+			if modeConfig != nil && modeConfig.SLTP != nil && len(modeConfig.SLTP.TPGainLevels) >= 4 {
+				tpGains = modeConfig.SLTP.TPGainLevels[:4]
+				ga.logger.Debug("Using TPGainLevels from mode_configs (async)",
+					"symbol", pos.Symbol,
+					"mode", pos.Mode,
+					"gain_levels", tpGains,
+					"allocation", tpAllocation)
+			} else {
+				// Fallback: derive gain levels based on mode and finalTPPct
+				switch pos.Mode {
+				case GinieModeUltraFast:
+					tpGains = []float64{0.3, 0.5, 0.8, 1.0}
+				case GinieModeScalp:
+					tpGains = []float64{0.5, 1.0, 1.5, 2.0}
+				// [Story 9.9] REMOVED: GinieModeScalpReentry case - handled above via ScalpReentry != nil
+				case GinieModeSwing:
+					tpGains = []float64{1.0, 2.0, 3.0, 4.0}
+				case GinieModePosition:
+					tpGains = []float64{2.0, 4.0, 6.0, 8.0}
+				default:
+					tpGains = []float64{finalTPPct * 0.25, finalTPPct * 0.5, finalTPPct * 0.75, finalTPPct}
 				}
-			case GinieModeSwing:
-				tpGains = []float64{1.0, 2.0, 3.0, 4.0}
-			case GinieModePosition:
-				tpGains = []float64{2.0, 4.0, 6.0, 8.0}
-			default:
-				tpGains = []float64{finalTPPct * 0.25, finalTPPct * 0.5, finalTPPct * 0.75, finalTPPct}
 			}
 		}
 
@@ -13679,12 +14106,8 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 		return false, "insufficient balance"
 	}
 
-	// scalp_reentry shares allocation with scalp mode
-	// Map scalp_reentry to scalp for allocation checks
+	// [Story 9.9] scalp_reentry mode removed - positions use their original mode for allocation
 	allocationMode := mode
-	if mode == GinieModeScalpReentry {
-		allocationMode = GinieModeScalp
-	}
 
 	// Get current positions and capital usage per mode
 	currentPositions := make(map[string]int)
@@ -13704,11 +14127,7 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 		}
 		posUSD := pos.EntryPrice * pos.RemainingQty / float64(leverage)
 		modeStr := string(pos.Mode)
-
-		// Map scalp_reentry positions to scalp for allocation tracking
-		if pos.Mode == GinieModeScalpReentry {
-			modeStr = string(GinieModeScalp)
-		}
+		// [Story 9.9] scalp_reentry mode removed - positions use their original mode
 
 		currentUsedUSD[modeStr] += posUSD
 		currentPositions[modeStr]++
@@ -13775,12 +14194,8 @@ func (ga *GinieAutopilot) canAllocateForMode(mode GinieTradingMode, requestedUSD
 
 // allocateCapital allocates capital for a position
 func (ga *GinieAutopilot) allocateCapital(mode GinieTradingMode, positionUSD float64) {
-	// scalp_reentry shares allocation tracking with scalp mode
-	trackingMode := mode
-	if mode == GinieModeScalpReentry {
-		trackingMode = GinieModeScalp
-	}
-	modeStr := string(trackingMode)
+	// [Story 9.9] scalp_reentry mode removed - positions use their original mode
+	modeStr := string(mode)
 
 	ga.mu.Lock()
 	ga.modeUsedUSD[modeStr] += positionUSD
@@ -13789,7 +14204,6 @@ func (ga *GinieAutopilot) allocateCapital(mode GinieTradingMode, positionUSD flo
 
 	ga.logger.Info("Capital allocated",
 		"mode", mode,
-		"tracking_as", trackingMode,
 		"position_usd", positionUSD,
 		"total_used", ga.modeUsedUSD[modeStr],
 		"position_count", ga.modePositionCounts[modeStr])
@@ -13797,12 +14211,8 @@ func (ga *GinieAutopilot) allocateCapital(mode GinieTradingMode, positionUSD flo
 
 // releaseCapital releases capital from a closed position
 func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD float64) {
-	// scalp_reentry shares allocation tracking with scalp mode
-	trackingMode := mode
-	if mode == GinieModeScalpReentry {
-		trackingMode = GinieModeScalp
-	}
-	modeStr := string(trackingMode)
+	// [Story 9.9] scalp_reentry mode removed - positions use their original mode
+	modeStr := string(mode)
 
 	ga.mu.Lock()
 	ga.modeUsedUSD[modeStr] -= positionUSD
@@ -13817,7 +14227,6 @@ func (ga *GinieAutopilot) releaseCapital(mode GinieTradingMode, positionUSD floa
 
 	ga.logger.Info("Capital released",
 		"mode", mode,
-		"tracking_as", trackingMode,
 		"position_usd", positionUSD,
 		"total_used", ga.modeUsedUSD[modeStr],
 		"position_count", ga.modePositionCounts[modeStr])
@@ -14326,12 +14735,12 @@ func (ga *GinieAutopilot) checkUltraFastExits() {
 			pnlUSD = 0
 		} else if pos.Side == "LONG" {
 			pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
-			exitFeeUSD := currentPrice * closeQty * 0.0004 // 0.04% taker fee
+			exitFeeUSD := currentPrice * closeQty * TakerFeeRate // 0.05% taker fee
 			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
 		} else {
 			pnlBeforeFees := (pos.EntryPrice - currentPrice) * closeQty
-			exitFeeUSD := currentPrice * closeQty * 0.0004 // 0.04% taker fee
+			exitFeeUSD := currentPrice * closeQty * TakerFeeRate // 0.05% taker fee
 			pnlUSD = pnlBeforeFees - exitFeeUSD
 			pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
 		}
@@ -14916,12 +15325,12 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 	} else if pos.Side == "LONG" {
 		pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
 		// Only count exit fee (entry fee already deducted at position open)
-		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+		exitFeeUSD = currentPrice * closeQty * TakerFeeRate // 0.05% taker fee
 		pnlUSD = pnlBeforeFees - exitFeeUSD
 		pnlPercent = ((currentPrice - pos.EntryPrice) / pos.EntryPrice) * 100
 	} else {
 		pnlBeforeFees := (pos.EntryPrice - currentPrice) * closeQty
-		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+		exitFeeUSD = currentPrice * closeQty * TakerFeeRate // 0.05% taker fee
 		pnlUSD = pnlBeforeFees - exitFeeUSD
 		pnlPercent = ((pos.EntryPrice - currentPrice) / pos.EntryPrice) * 100
 	}
@@ -15092,11 +15501,11 @@ func (ga *GinieAutopilot) executeUltraFastPartialClose(pos *GiniePosition, curre
 	var pnlUSD, exitFeeUSD float64
 	if pos.Side == "LONG" {
 		pnlBeforeFees := (currentPrice - pos.EntryPrice) * closeQty
-		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+		exitFeeUSD = currentPrice * closeQty * TakerFeeRate // 0.05% taker fee
 		pnlUSD = pnlBeforeFees - exitFeeUSD
 	} else {
 		pnlBeforeFees := (pos.EntryPrice - currentPrice) * closeQty
-		exitFeeUSD = currentPrice * closeQty * 0.0004 // 0.04% taker fee
+		exitFeeUSD = currentPrice * closeQty * TakerFeeRate // 0.05% taker fee
 		pnlUSD = pnlBeforeFees - exitFeeUSD
 	}
 
@@ -15912,11 +16321,9 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 // ========== Mode-Specific Circuit Breaker Methods (Story 2.7 Task 2.7.4) ==========
 
 // initModeCircuitBreakers initializes mode circuit breakers from default configs
-// NOTE: scalp_reentry is included here because positions CAN exist in scalp_reentry mode
-// (upgraded from scalp signals when ScalpReentryConfig.Enabled is true). The circuit breaker
-// tracks wins/losses for those positions - this is position management, NOT signal generation.
+// [Story 9.9] scalp_reentry mode removed - circuit breakers only track the 4 base modes
 func (ga *GinieAutopilot) initModeCircuitBreakers() {
-	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeScalpReentry, GinieModeSwing, GinieModePosition}
+	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition}
 
 	// Load persisted stats from settings
 	persistedStats := GetSettingsManager().GetAllModeCircuitBreakerStats()
@@ -17072,12 +17479,12 @@ func (ga *GinieAutopilot) ConvertPositionMode(symbol string, targetMode GinieTra
 	defer ga.mu.Unlock()
 
 	// Validate target mode
+	// [Story 9.9] scalp_reentry mode removed - only 4 base modes are valid
 	validModes := map[GinieTradingMode]bool{
-		GinieModeUltraFast:    true,
-		GinieModeScalp:        true,
-		GinieModeScalpReentry: true,
-		GinieModeSwing:        true,
-		GinieModePosition:     true,
+		GinieModeUltraFast: true,
+		GinieModeScalp:     true,
+		GinieModeSwing:     true,
+		GinieModePosition:  true,
 	}
 	if !validModes[targetMode] {
 		return nil, fmt.Errorf("invalid target mode: %s", targetMode)
@@ -17179,14 +17586,15 @@ func (ga *GinieAutopilot) ConvertPositionMode(symbol string, targetMode GinieTra
 		"symbol", symbol,
 		"note", fmt.Sprintf("Mode converted from %s to %s", oldMode, targetMode))
 
-	// Handle scalp_reentry specific setup
-	if targetMode == GinieModeScalpReentry {
-		config := DefaultScalpReentryConfig()
-		pos.ScalpReentry = NewScalpReentryStatus(pos.EntryPrice, pos.RemainingQty, config)
+	// [Story 9.9] Handle position optimization - activate if enabled for target mode
+	// Any mode can have position_optimization - check target mode's config
+	if modeConfig.PositionOptimization != nil && modeConfig.PositionOptimization.Enabled {
+		posOptCfg := modeConfig.PositionOptimization
+		pos.ScalpReentry = NewPositionOptimizationStatus(pos.EntryPrice, pos.RemainingQty, *posOptCfg)
 
-		tp1Pct, tp1Sell := config.GetTPConfig(1)
-		tp2Pct, tp2Sell := config.GetTPConfig(2)
-		tp3Pct, tp3Sell := config.GetTPConfig(3)
+		tp1Pct, tp1Sell := posOptCfg.GetTPConfig(1)
+		tp2Pct, tp2Sell := posOptCfg.GetTPConfig(2)
+		tp3Pct, tp3Sell := posOptCfg.GetTPConfig(3)
 
 		if pos.Side == "LONG" {
 			pos.TakeProfits = []GinieTakeProfitLevel{
@@ -17201,6 +17609,8 @@ func (ga *GinieAutopilot) ConvertPositionMode(symbol string, targetMode GinieTra
 				{Level: 3, Price: pos.EntryPrice * (1 - tp3Pct/100), Percent: tp3Sell, GainPct: tp3Pct, Status: "pending"},
 			}
 		}
+		ga.logger.Info("[MODE-CONVERT] Position optimization activated for new mode",
+			"symbol", symbol, "mode", targetMode)
 	}
 
 	// Set trailing activation based on mode config
@@ -17241,7 +17651,8 @@ func (ga *GinieAutopilot) calculateNewTPLevels(pos *GiniePosition, mode GinieTra
 
 	tpMultipliers := []float64{0.33, 0.66, 1.0, 1.5}
 	switch mode {
-	case GinieModeScalp, GinieModeScalpReentry:
+	case GinieModeScalp:
+		// [Story 9.9] GinieModeScalpReentry removed - scalp mode covers position optimization
 		tpMultipliers = []float64{0.3, 0.6, 1.0, 0}
 	case GinieModeSwing:
 		tpMultipliers = []float64{0.5, 1.0, 1.5, 2.0}

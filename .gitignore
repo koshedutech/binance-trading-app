@@ -62,3 +62,8 @@ build/
 # Node modules
 node_modules/
 web/node_modules/
+
+# Production releases (large volume backups)
+releases/
+!releases/.gitkeep
+binance-bot

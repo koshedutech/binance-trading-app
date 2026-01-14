@@ -10,7 +10,7 @@ import {
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
   ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge, Coins, Star, Layers, Box,
-  Triangle, Flag, Repeat, RotateCcw, Pause, Pin
+  Triangle, Flag, Repeat, RotateCcw, Pause, Pin, ArrowLeftRight
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
@@ -3327,6 +3327,563 @@ export default function GiniePanel() {
                   )}
                 </div>
 
+                {/* Position Optimization - Story 9.9 */}
+                <div className={`rounded ${expandedModeSection === 'pos_opt' ? 'border-2 border-purple-400' : 'border border-gray-700'}`}>
+                  <button
+                    onClick={() => setExpandedModeSection(expandedModeSection === 'pos_opt' ? null : 'pos_opt')}
+                    className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
+                  >
+                    <span className="font-medium flex items-center gap-1">
+                      <span>Position Optimization</span>
+                      {modeConfigs[selectedModeConfig]?.position_optimization?.enabled && (
+                        <span className="px-1 py-0.5 bg-purple-900/50 text-purple-400 rounded text-[9px]">ON</span>
+                      )}
+                    </span>
+                    {expandedModeSection === 'pos_opt' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                  </button>
+                  {expandedModeSection === 'pos_opt' && (
+                    <div className="px-2 py-2 border-t border-gray-700 space-y-3">
+                      {/* Enable/Disable Toggle */}
+                      <div className="flex items-center justify-between p-2 bg-purple-900/20 border border-purple-700/30 rounded">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-purple-400 font-medium">Enable Position Optimization</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={modeConfigs[selectedModeConfig]?.position_optimization?.enabled ?? false}
+                          onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.enabled', e.target.checked)}
+                          className="w-4 h-4"
+                        />
+                      </div>
+
+                      {modeConfigs[selectedModeConfig]?.position_optimization?.enabled && (
+                        <>
+                          {/* Progressive Profit Taking */}
+                          <div className="space-y-2">
+                            <div className="text-[10px] text-purple-400 font-medium border-b border-gray-700 pb-1">Progressive Profit Taking</div>
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="First take profit level percentage">TP1 %</label>
+                                <input
+                                  type="number"
+                                  min="0.1"
+                                  max="5"
+                                  step="0.05"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.tp1_percent ?? 0.35}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp1_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Second take profit level percentage">TP2 %</label>
+                                <input
+                                  type="number"
+                                  min="0.2"
+                                  max="10"
+                                  step="0.1"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.tp2_percent ?? 0.7}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp2_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Third take profit level percentage">TP3 %</label>
+                                <input
+                                  type="number"
+                                  min="0.5"
+                                  max="15"
+                                  step="0.1"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.tp3_percent ?? 1.0}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp3_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Percentage to sell at TP1">Sell at TP1 %</label>
+                                <input
+                                  type="number"
+                                  min="10"
+                                  max="50"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.tp1_sell_percent ?? 30}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp1_sell_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Percentage to sell at TP2">Sell at TP2 %</label>
+                                <input
+                                  type="number"
+                                  min="20"
+                                  max="80"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.tp2_sell_percent ?? 50}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp2_sell_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Percentage to sell at TP3">Sell at TP3 %</label>
+                                <input
+                                  type="number"
+                                  min="50"
+                                  max="100"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.tp3_sell_percent ?? 80}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp3_sell_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Re-entry Settings */}
+                          <div className="space-y-2">
+                            <div className="text-[10px] text-purple-400 font-medium border-b border-gray-700 pb-1">Re-entry Settings</div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of sold quantity to rebuy">Rebuy %</label>
+                                <input
+                                  type="number"
+                                  min="25"
+                                  max="100"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_percent ?? 50}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Buffer from breakeven for re-entry">Price Buffer %</label>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  max="1"
+                                  step="0.01"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_price_buffer ?? 0.05}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_price_buffer', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Maximum re-entry attempts">Max Attempts</label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="5"
+                                  step="1"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.max_reentry_attempts ?? 1}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_reentry_attempts', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Timeout for re-entry in seconds">Timeout (sec)</label>
+                                <input
+                                  type="number"
+                                  min="60"
+                                  max="900"
+                                  step="30"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_timeout_sec ?? 300}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_timeout_sec', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-gray-400" title="Require trend confirmation before re-entry">Require Trend Confirm</span>
+                              <input
+                                type="checkbox"
+                                checked={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_require_trend_confirmation ?? true}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_require_trend_confirmation', e.target.checked)}
+                                className="w-4 h-4"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Final Trailing & Dynamic SL */}
+                          <div className="space-y-2">
+                            <div className="text-[10px] text-purple-400 font-medium border-b border-gray-700 pb-1">Trailing & Dynamic SL</div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Trailing stop % from peak for remaining position">Final Trail %</label>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  max="15"
+                                  step="0.5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.final_trailing_percent ?? 5}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.final_trailing_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Minimum % to hold for final trailing">Min Hold %</label>
+                                <input
+                                  type="number"
+                                  min="10"
+                                  max="40"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.final_hold_min_percent ?? 20}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.final_hold_min_percent', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Max loss % of accumulated profit before exit">Max Loss %</label>
+                                <input
+                                  type="number"
+                                  min="20"
+                                  max="70"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.dynamic_sl_max_loss_pct ?? 40}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.dynamic_sl_max_loss_pct', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of profit to protect">Protect %</label>
+                                <input
+                                  type="number"
+                                  min="30"
+                                  max="80"
+                                  step="5"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.dynamic_sl_protect_pct ?? 60}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.dynamic_sl_protect_pct', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* AI Settings */}
+                          <div className="space-y-2">
+                            <div className="text-[10px] text-purple-400 font-medium border-b border-gray-700 pb-1">AI Configuration</div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="flex items-center justify-between col-span-2">
+                                <span className="text-[10px] text-gray-400">Use AI Decisions</span>
+                                <input
+                                  type="checkbox"
+                                  checked={modeConfigs[selectedModeConfig]?.position_optimization?.use_ai_decisions ?? true}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.use_ai_decisions', e.target.checked)}
+                                  className="w-4 h-4"
+                                />
+                              </div>
+                              <div className="flex items-center justify-between col-span-2">
+                                <span className="text-[10px] text-gray-400">AI TP Optimization</span>
+                                <input
+                                  type="checkbox"
+                                  checked={modeConfigs[selectedModeConfig]?.position_optimization?.ai_tp_optimization ?? true}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.ai_tp_optimization', e.target.checked)}
+                                  className="w-4 h-4"
+                                />
+                              </div>
+                              <div className="flex items-center justify-between col-span-2">
+                                <span className="text-[10px] text-gray-400">AI Dynamic SL</span>
+                                <input
+                                  type="checkbox"
+                                  checked={modeConfigs[selectedModeConfig]?.position_optimization?.ai_dynamic_sl ?? true}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.ai_dynamic_sl', e.target.checked)}
+                                  className="w-4 h-4"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-gray-400 mb-1">AI Min Confidence</label>
+                                <input
+                                  type="number"
+                                  min="0.3"
+                                  max="0.9"
+                                  step="0.05"
+                                  value={modeConfigs[selectedModeConfig]?.position_optimization?.ai_min_confidence ?? 0.65}
+                                  onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.ai_min_confidence', Number(e.target.value))}
+                                  className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Hedging Section */}
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between p-2 bg-orange-900/20 border border-orange-700/30 rounded">
+                              <span className="text-[10px] text-orange-400 font-medium">Enable Hedge Mode</span>
+                              <input
+                                type="checkbox"
+                                checked={modeConfigs[selectedModeConfig]?.position_optimization?.hedge_mode_enabled ?? false}
+                                onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.hedge_mode_enabled', e.target.checked)}
+                                className="w-4 h-4"
+                              />
+                            </div>
+
+                            {/* Hedge Settings - only shown when enabled */}
+                            {modeConfigs[selectedModeConfig]?.position_optimization?.hedge_mode_enabled && (
+                              <div className="space-y-2 p-2 bg-orange-900/10 border border-orange-700/20 rounded">
+                                <div className="text-[10px] text-orange-400 font-medium border-b border-orange-700/30 pb-1">Hedge Settings</div>
+
+                                {/* DCA on Loss */}
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-gray-400" title="Enable DCA when position is in loss">DCA on Loss</span>
+                                  <input
+                                    type="checkbox"
+                                    checked={modeConfigs[selectedModeConfig]?.position_optimization?.dca_on_loss ?? true}
+                                    onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.dca_on_loss', e.target.checked)}
+                                    className="w-4 h-4"
+                                  />
+                                </div>
+
+                                {/* Allow Hedge Chains */}
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] text-gray-400" title="Allow multiple hedge layers">Allow Hedge Chains</span>
+                                  <input
+                                    type="checkbox"
+                                    checked={modeConfigs[selectedModeConfig]?.position_optimization?.allow_hedge_chains ?? false}
+                                    onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.allow_hedge_chains', e.target.checked)}
+                                    className="w-4 h-4"
+                                  />
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="block text-[10px] text-gray-400 mb-1" title="Maximum hedge chain depth">Max Chain Depth</label>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="5"
+                                      step="1"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.max_hedge_chain_depth ?? 2}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_hedge_chain_depth', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[10px] text-gray-400 mb-1" title="Maximum position size as multiple of original">Max Position X</label>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="10"
+                                      step="0.5"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.max_position_multiple ?? 3}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_position_multiple', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[10px] text-gray-400 mb-1" title="Combined ROI % to exit all positions">Combined Exit ROI %</label>
+                                    <input
+                                      type="number"
+                                      min="0.5"
+                                      max="10"
+                                      step="0.5"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.combined_roi_exit_pct ?? 2}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.combined_roi_exit_pct', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[10px] text-gray-400 mb-1" title="ATR multiplier for wide stop loss">Wide SL ATR X</label>
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="5"
+                                      step="0.5"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.wide_sl_atr_multiplier ?? 2.5}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.wide_sl_atr_multiplier', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                    />
+                                  </div>
+                                </div>
+
+                                {/* Hedge Triggers */}
+                                <div className="pt-1 border-t border-orange-700/20">
+                                  <div className="text-[10px] text-orange-400 font-medium mb-1">Hedge Triggers</div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={modeConfigs[selectedModeConfig]?.position_optimization?.trigger_on_profit_tp ?? true}
+                                        onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.trigger_on_profit_tp', e.target.checked)}
+                                        className="w-3 h-3"
+                                      />
+                                      <span className="text-[9px] text-gray-400">On Profit TP</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={modeConfigs[selectedModeConfig]?.position_optimization?.trigger_on_loss_tp ?? true}
+                                        onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.trigger_on_loss_tp', e.target.checked)}
+                                        className="w-3 h-3"
+                                      />
+                                      <span className="text-[9px] text-gray-400">On Loss TP</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={modeConfigs[selectedModeConfig]?.position_optimization?.disable_ai_sl ?? false}
+                                        onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.disable_ai_sl', e.target.checked)}
+                                        className="w-3 h-3"
+                                      />
+                                      <span className="text-[9px] text-gray-400">Disable AI SL</span>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={modeConfigs[selectedModeConfig]?.position_optimization?.rally_exit_enabled ?? false}
+                                        onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.rally_exit_enabled', e.target.checked)}
+                                        className="w-3 h-3"
+                                      />
+                                      <span className="text-[9px] text-gray-400">Rally Exit</span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Rally Settings - only shown when rally exit enabled */}
+                                {modeConfigs[selectedModeConfig]?.position_optimization?.rally_exit_enabled && (
+                                  <div className="grid grid-cols-2 gap-2 pt-1">
+                                    <div>
+                                      <label className="block text-[10px] text-gray-400 mb-1">Rally ADX Threshold</label>
+                                      <input
+                                        type="number"
+                                        min="15"
+                                        max="50"
+                                        step="1"
+                                        value={modeConfigs[selectedModeConfig]?.position_optimization?.rally_adx_threshold ?? 25}
+                                        onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.rally_adx_threshold', Number(e.target.value))}
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-[10px] text-gray-400 mb-1">Rally Move %</label>
+                                      <input
+                                        type="number"
+                                        min="1"
+                                        max="10"
+                                        step="0.5"
+                                        value={modeConfigs[selectedModeConfig]?.position_optimization?.rally_sustained_move_pct ?? 3}
+                                        onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.rally_sustained_move_pct', Number(e.target.value))}
+                                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                      />
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Negative TP Levels (DCA levels) */}
+                                <div className="pt-1 border-t border-orange-700/20">
+                                  <div className="text-[10px] text-orange-400 font-medium mb-1">DCA Levels (Negative TPs)</div>
+                                  <div className="grid grid-cols-4 gap-1 text-[9px]">
+                                    <div className="text-gray-500">Level</div>
+                                    <div className="text-gray-500">Loss %</div>
+                                    <div className="text-gray-500">Add %</div>
+                                    <div></div>
+
+                                    <div className="text-gray-400">TP1</div>
+                                    <input
+                                      type="number"
+                                      min="0.1"
+                                      max="2"
+                                      step="0.1"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp1_percent ?? 0.4}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp1_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
+                                    />
+                                    <input
+                                      type="number"
+                                      min="10"
+                                      max="100"
+                                      step="10"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp1_add_percent ?? 30}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp1_add_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
+                                    />
+                                    <div></div>
+
+                                    <div className="text-gray-400">TP2</div>
+                                    <input
+                                      type="number"
+                                      min="0.3"
+                                      max="3"
+                                      step="0.1"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp2_percent ?? 0.7}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp2_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
+                                    />
+                                    <input
+                                      type="number"
+                                      min="10"
+                                      max="100"
+                                      step="10"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp2_add_percent ?? 50}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp2_add_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
+                                    />
+                                    <div></div>
+
+                                    <div className="text-gray-400">TP3</div>
+                                    <input
+                                      type="number"
+                                      min="0.5"
+                                      max="5"
+                                      step="0.1"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp3_percent ?? 1.0}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp3_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
+                                    />
+                                    <input
+                                      type="number"
+                                      min="10"
+                                      max="100"
+                                      step="10"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp3_add_percent ?? 80}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp3_add_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
+                                    />
+                                    <div></div>
+                                  </div>
+                                </div>
+
+                                {/* Profit Protection */}
+                                <div className="grid grid-cols-2 gap-2 pt-1 border-t border-orange-700/20">
+                                  <div>
+                                    <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of profit to protect">Profit Protect %</label>
+                                    <input
+                                      type="number"
+                                      min="20"
+                                      max="80"
+                                      step="5"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.profit_protection_percent ?? 50}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.profit_protection_percent', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-[10px] text-gray-400 mb-1" title="Max loss of earned profit before exit">Max Profit Loss %</label>
+                                    <input
+                                      type="number"
+                                      min="20"
+                                      max="80"
+                                      step="5"
+                                      value={modeConfigs[selectedModeConfig]?.position_optimization?.max_loss_of_earned_profit ?? 50}
+                                      onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_loss_of_earned_profit', Number(e.target.value))}
+                                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
+                                    />
+                                  </div>
+                                </div>
+
+                                <p className="text-[9px] text-orange-400/60 mt-1">
+                                  Hedge mode opens counter-positions to manage risk and capture rebounds.
+                                </p>
+                              </div>
+                            )}
+                          </div>
+
+                          <p className="text-[9px] text-gray-500">
+                            Progressive profit taking with re-entry capability. Takes partial profits at TP levels and can rebuy at breakeven for more upside.</p>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {/* Validation Errors */}
                 {modeConfigErrors[selectedModeConfig] && (
                   <div className="px-2 py-1.5 bg-red-900/30 border border-red-700 rounded text-[10px] text-red-400 flex items-center gap-1">
@@ -3356,66 +3913,39 @@ export default function GiniePanel() {
         )}
       </div>
 
-      {/* Scalp Re-entry Mode Section */}
+      {/* [Story 9.9] Position Optimization Monitor - Shows TP progress and hedge status */}
+      {/* Config settings are now inside each mode's configuration tab */}
       <div className="space-y-2 mb-3">
         <div
           className={`flex items-center justify-between gap-2 px-2 py-1.5 bg-gray-700/30 rounded cursor-pointer hover:bg-gray-700/50 transition-colors ${
-            showScalpReentry ? 'border-2 border-green-500' : 'border border-gray-600'
+            showScalpReentry ? 'border-2 border-purple-500' : 'border border-gray-600'
           }`}
           onClick={() => {
             setShowScalpReentry(!showScalpReentry);
-            if (!showScalpReentry) fetchScalpReentryConfig();
+            // [Story 9.9] Only fetch hedge config when opening - Monitor uses autopilotStatus.positions
+            if (!showScalpReentry && !scalpReentrySpecificConfig) fetchScalpReentryConfig();
           }}
         >
           <div className="flex items-center gap-2">
-            <Repeat className="w-3.5 h-3.5 text-green-400 flex-shrink-0" />
-            <span className="text-xs text-gray-300 font-medium">Scalp Re-entry Mode</span>
+            <Repeat className="w-3.5 h-3.5 text-purple-400 flex-shrink-0" />
+            <span className="text-xs text-gray-300 font-medium">Position Optimization Monitor</span>
             {scalpReentrySpecificConfig?.enabled && (
-              <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px]">ON</span>
+              <span className="px-1 py-0.5 bg-purple-900/50 text-purple-400 rounded text-[10px]">ACTIVE</span>
             )}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={(e) => { e.stopPropagation(); handleToggleScalpReentry(); }}
-              disabled={togglingScalpReentry || loadingScalpReentry || !scalpReentrySpecificConfig}
-              className={`px-1.5 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                scalpReentrySpecificConfig?.enabled
-                  ? 'bg-green-900/50 text-green-400 border border-green-700'
-                  : 'bg-gray-700/50 text-gray-400 border border-gray-600'
-              }`}
-            >
-              {togglingScalpReentry ? '...' : loadingScalpReentry ? 'Loading...' : scalpReentrySpecificConfig?.enabled ? 'Enabled' : 'Disabled'}
-            </button>
             {showScalpReentry ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
           </div>
         </div>
 
         {showScalpReentry && (
           <div className="px-2 py-2 bg-gray-800/50 border border-gray-600 rounded space-y-3">
-            {loadingScalpReentry ? (
-              <div className="flex items-center justify-center py-4">
-                <div className="text-[10px] text-gray-400">Loading scalp re-entry configuration...</div>
-              </div>
-            ) : scalpReentryError ? (
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 text-[10px] text-red-400">
-                  <AlertTriangle className="w-3 h-3" />
-                  <span>{scalpReentryError}</span>
-                </div>
-                <button
-                  onClick={fetchScalpReentryConfig}
-                  className="text-[10px] px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded transition-colors"
-                >
-                  Retry
-                </button>
-              </div>
-            ) : scalpReentrySpecificConfig ? (
-              <>
-                <p className="text-[10px] text-gray-500">
-                  Progressive TP with re-entry: Takes partial profits at increasing levels, buys back at breakeven for more upside.
-                </p>
+            {/* [Story 9.9] Monitor tab shows immediately - no loading needed, uses autopilotStatus.positions */}
+            <p className="text-[10px] text-gray-500">
+              Track TP progress and position optimization status. Configure settings in each mode's config tab above.
+            </p>
 
-            {/* Tab Navigation */}
+            {/* Tab Navigation - Monitor always available, Hedge shows when any mode has it enabled */}
             <div className="flex gap-1 border-b border-gray-700 pb-1">
               <button
                 onClick={() => setScalpReentryTab('monitor')}
@@ -3426,19 +3956,10 @@ export default function GiniePanel() {
                 }`}
               >
                 <Eye className="w-3 h-3 inline mr-1" />
-                Monitor
+                TP & Rebuy
               </button>
-              <button
-                onClick={() => setScalpReentryTab('config')}
-                className={`px-2 py-1 text-[10px] rounded-t transition-colors ${
-                  scalpReentryTab === 'config'
-                    ? 'bg-gray-700 text-gray-300 border border-gray-600 border-b-0'
-                    : 'text-gray-400 hover:text-gray-300 hover:bg-gray-700/30'
-                }`}
-              >
-                <Settings className="w-3 h-3 inline mr-1" />
-                Config
-              </button>
+              {/* Hedge tab shows when ANY mode has hedge_mode_enabled in position_optimization */}
+              {(Object.values(modeConfigs).some(cfg => cfg?.position_optimization?.hedge_mode_enabled) || scalpReentrySpecificConfig?.hedge_mode_enabled) && (
               <button
                 onClick={() => setScalpReentryTab('hedge')}
                 className={`px-2 py-1 text-[10px] rounded-t transition-colors ${
@@ -3450,360 +3971,322 @@ export default function GiniePanel() {
                 <TrendingUp className="w-3 h-3 inline mr-1" />
                 Hedge
               </button>
+              )}
             </div>
 
-            {/* Monitor Tab */}
+            {/* Monitor Tab - Shows TP progress and rebuy status using already-loaded positions */}
             {scalpReentryTab === 'monitor' && (
-              <ScalpReentryMonitor autoRefresh={true} refreshInterval={5000} />
+              <div className="space-y-2">
+                {/* Position Optimization Monitor - sorted by TP progress (most completed first), then by symbol */}
+                {autopilotStatus?.positions && autopilotStatus.positions.length > 0 ? (
+                  [...autopilotStatus.positions]
+                    .sort((a, b) => {
+                      // First sort by TP progress (higher = more TPs completed)
+                      const aProgress = a.current_tp_level || 0;
+                      const bProgress = b.current_tp_level || 0;
+                      if (bProgress !== aProgress) return bProgress - aProgress; // Higher progress first
+                      // Then by symbol for stable ordering within same progress
+                      return a.symbol.localeCompare(b.symbol);
+                    })
+                    .map(pos => {
+                    // Calculate current PnL percentage based on original position value
+                    const originalValue = pos.entry_price * pos.original_qty;
+                    const currentPnlPct = originalValue > 0 ? (pos.unrealized_pnl / originalValue) * 100 : 0;
+
+                    return (
+                      <div key={pos.symbol} className="bg-gray-700/50 rounded p-2 space-y-1.5">
+                        {/* Header Row - Mode + Symbol, Side, PnL */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5">
+                            {/* Mode badge first */}
+                            <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-medium ${
+                              pos.mode === 'scalp' ? 'bg-yellow-900/50 text-yellow-400' :
+                              pos.mode === 'swing' ? 'bg-blue-900/50 text-blue-400' :
+                              pos.mode === 'position' ? 'bg-green-900/50 text-green-400' :
+                              'bg-red-900/50 text-red-400'
+                            }`}>
+                              {pos.mode}
+                            </span>
+                            {/* Symbol with direction */}
+                            <span className="font-medium text-sm text-gray-200">{pos.symbol}</span>
+                            {pos.side === 'LONG' ? (
+                              <TrendingUp className="w-3.5 h-3.5 text-green-400" />
+                            ) : (
+                              <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+                            )}
+                          </div>
+                          <div className={`text-xs font-medium ${pos.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {currentPnlPct >= 0 ? '+' : ''}{currentPnlPct.toFixed(2)}% (${pos.unrealized_pnl?.toFixed(2) || '0.00'})
+                          </div>
+                        </div>
+
+                        {/* Position Value Summary */}
+                        <div className="flex items-center justify-between text-[9px] text-gray-400 px-1">
+                          <span>Entry: ${pos.entry_price?.toFixed(4)} × {pos.original_qty?.toFixed(4)} = ${(pos.entry_price * pos.original_qty).toFixed(2)}</span>
+                          <span className="text-purple-400">Holding: ${(pos.remaining_qty * pos.entry_price).toFixed(2)}</span>
+                        </div>
+
+                        {/* TP Progress Cards - Fixed grid layout */}
+                        <div className="grid grid-cols-3 gap-1">
+                          {(() => {
+                            // Calculate cumulative sold % up to each level using actual TP percentages
+                            const tp1 = pos.take_profits?.find(t => t.level === 1);
+                            const tp2 = pos.take_profits?.find(t => t.level === 2);
+                            const tp3 = pos.take_profits?.find(t => t.level === 3);
+                            const tp1SellPct = tp1?.percent || 30;
+                            const tp2SellPct = tp2?.percent || 30;
+                            const tp3SellPct = tp3?.percent || 20;
+                            const totalTPSellPct = tp1SellPct + tp2SellPct + tp3SellPct;
+                            const trailingRemainingPct = Math.max(0, 100 - totalTPSellPct); // What's left for trailing (typically 20%)
+
+                            return [1, 2, 3].map(level => {
+                              const tp = pos.take_profits?.find(t => t.level === level);
+                              const isHit = tp?.status === 'hit' || (pos.current_tp_level >= level);
+                              const targetPct = tp?.gain_pct || 0;
+                              // Progress toward this TP target
+                              const progressPct = targetPct > 0 ? Math.min(100, Math.max(0, (currentPnlPct / targetPct) * 100)) : 0;
+                              const distanceToTarget = targetPct - currentPnlPct;
+                              // Sell percentage for this level from actual config
+                              const sellPct = tp?.percent || (level === 1 ? tp1SellPct : level === 2 ? tp2SellPct : tp3SellPct);
+                              // Calculate quantities
+                              const qtyToSell = pos.original_qty * sellPct / 100;
+                              const soldQty = isHit ? qtyToSell : 0;
+                              // Calculate cumulative sold % up to this level
+                              const cumulativeSoldPct = level === 1 ? tp1SellPct :
+                                                        level === 2 ? tp1SellPct + tp2SellPct :
+                                                        tp1SellPct + tp2SellPct + tp3SellPct;
+                              // Remaining after this TP
+                              const remainingPct = 100 - cumulativeSoldPct;
+                              const remainingAfterTP = pos.original_qty * remainingPct / 100;
+                              // Calculate profit value
+                              const profitValue = soldQty * pos.entry_price * (targetPct / 100);
+
+                              return (
+                                <div key={level} className={`p-1.5 rounded ${isHit ? 'bg-green-900/30 border border-green-700/50' : 'bg-gray-800/50'}`}>
+                                  {/* TP Header - Level, Sell %, and Target % */}
+                                  <div className="flex items-center justify-between mb-1">
+                                    <span className={`text-[10px] font-medium ${isHit ? 'text-green-400' : 'text-gray-400'}`}>
+                                      TP{level} <span className="text-[8px] opacity-70">({sellPct}%)</span>
+                                    </span>
+                                    <span className={`text-[9px] ${isHit ? 'text-green-400' : 'text-gray-500'}`}>
+                                      @{targetPct.toFixed(1)}%
+                                    </span>
+                                  </div>
+
+                                  {/* Progress bar */}
+                                  <div className="h-1.5 bg-gray-700 rounded overflow-hidden mb-1">
+                                    <div
+                                      className={`h-full transition-all ${isHit ? 'bg-green-500' : currentPnlPct > 0 ? 'bg-blue-500' : 'bg-gray-600'}`}
+                                      style={{ width: `${isHit ? 100 : progressPct}%` }}
+                                    />
+                                  </div>
+
+                                  {isHit ? (
+                                    // HIT - Show what was sold and profit made
+                                    <div className="text-[8px] space-y-0.5">
+                                      <div className="text-green-400 font-medium">SOLD {sellPct}%</div>
+                                      <div className="text-green-300">{qtyToSell.toFixed(4)} @ ${(qtyToSell * pos.entry_price).toFixed(2)}</div>
+                                      <div className="text-green-300">+${profitValue.toFixed(2)} profit</div>
+                                      {level === 3 && trailingRemainingPct > 0 ? (
+                                        <div className="text-purple-400">Trail: {trailingRemainingPct}% ({(pos.original_qty * trailingRemainingPct / 100).toFixed(4)})</div>
+                                      ) : (
+                                        <div className="text-gray-400">Left: {remainingPct}% ({remainingAfterTP.toFixed(4)})</div>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    // NOT HIT - Show progress and what will be sold
+                                    <div className="text-[8px] space-y-0.5">
+                                      <div className="text-gray-400">
+                                        {currentPnlPct > 0
+                                          ? `${progressPct.toFixed(0)}% (${distanceToTarget.toFixed(2)}% to go)`
+                                          : `${Math.abs(distanceToTarget).toFixed(2)}% to target`
+                                        }
+                                      </div>
+                                      <div className="text-gray-500">Sell: {sellPct}% = {qtyToSell.toFixed(4)}</div>
+                                      {level === 3 && trailingRemainingPct > 0 ? (
+                                        <div className="text-purple-400/70">Trail: {trailingRemainingPct}% remains</div>
+                                      ) : (
+                                        <div className="text-gray-500">Keep: {remainingPct}% = {remainingAfterTP.toFixed(4)}</div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            });
+                          })()}
+                        </div>
+
+                        {/* Summary Row - Realized profit and current holdings */}
+                        <div className="flex items-center justify-between text-[9px] pt-1 border-t border-gray-700/50">
+                          {/* Realized Profit */}
+                          {pos.realized_pnl > 0 ? (
+                            <span className="text-green-400">
+                              Realized: +${pos.realized_pnl.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-gray-500">No profit realized yet</span>
+                          )}
+                          {/* Current holdings with dollar value */}
+                          {pos.original_qty > 0 && (
+                            <span className="text-purple-400">
+                              Holding: {pos.remaining_qty.toFixed(4)} (${(pos.remaining_qty * pos.entry_price).toFixed(2)}) - {Math.round((pos.remaining_qty / pos.original_qty) * 100)}%
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="p-3 text-center text-xs text-gray-500">
+                    No active positions
+                  </div>
+                )}
+              </div>
             )}
 
-            {/* Config Tab */}
-            {scalpReentryTab === 'config' && (
-            <>
-            {/* Note: Scalp Re-entry uses Size/SLTP settings from the parent Scalp mode */}
-            <p className="text-[9px] text-gray-500 mb-2 italic">
-              Size, leverage, and SL/TP settings are inherited from Scalp mode. Configure TP levels and re-entry settings below.
-            </p>
-
-            {/* TP Levels Section */}
-            <div className={`rounded ${expandedScalpReentrySection === 'tp_levels' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
-              <button
-                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'tp_levels' ? null : 'tp_levels')}
-                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
-              >
-                <span className="font-medium">TP Levels</span>
-                {expandedScalpReentrySection === 'tp_levels' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              </button>
-              {expandedScalpReentrySection === 'tp_levels' && (
-                <div className="px-2 py-2 border-t border-gray-700 space-y-2">
-                  <div className="grid grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1">TP1 % Profit</label>
-                      <input
-                        type="number"
-                        min="0.1"
-                        max="5"
-                        step="0.1"
-                        value={scalpReentrySpecificConfig.tp1_percent}
-                        onChange={(e) => updateScalpReentrySpecificConfig('tp1_percent', Number(e.target.value))}
-                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1">TP2 % Profit</label>
-                      <input
-                        type="number"
-                        min="0.2"
-                        max="5"
-                        step="0.1"
-                        value={scalpReentrySpecificConfig.tp2_percent}
-                        onChange={(e) => updateScalpReentrySpecificConfig('tp2_percent', Number(e.target.value))}
-                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1">TP3 % Profit</label>
-                      <input
-                        type="number"
-                        min="0.3"
-                        max="10"
-                        step="0.1"
-                        value={scalpReentrySpecificConfig.tp3_percent}
-                        onChange={(e) => updateScalpReentrySpecificConfig('tp3_percent', Number(e.target.value))}
-                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1">TP1 Sell %</label>
-                      <input
-                        type="number"
-                        min="10"
-                        max="50"
-                        step="5"
-                        value={scalpReentrySpecificConfig.tp1_sell_percent}
-                        onChange={(e) => updateScalpReentrySpecificConfig('tp1_sell_percent', Number(e.target.value))}
-                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1">TP2 Sell %</label>
-                      <input
-                        type="number"
-                        min="20"
-                        max="80"
-                        step="5"
-                        value={scalpReentrySpecificConfig.tp2_sell_percent}
-                        onChange={(e) => updateScalpReentrySpecificConfig('tp2_sell_percent', Number(e.target.value))}
-                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[10px] text-gray-400 mb-1">TP3 Sell %</label>
-                      <input
-                        type="number"
-                        min="50"
-                        max="100"
-                        step="5"
-                        value={scalpReentrySpecificConfig.tp3_sell_percent}
-                        onChange={(e) => updateScalpReentrySpecificConfig('tp3_sell_percent', Number(e.target.value))}
-                        className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                      />
-                    </div>
-                  </div>
-                  <p className="text-gray-500 text-[9px]">
-                    Default: 0.3%/30%, 0.6%/50%, 1%/80% - Progressive profit taking at each level.
-                  </p>
-                </div>
-              )}
-            </div>
-
-            {/* Re-entry Settings */}
-            <div className={`rounded ${expandedScalpReentrySection === 'reentry' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
-              <button
-                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'reentry' ? null : 'reentry')}
-                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
-              >
-                <span className="font-medium">Re-entry Settings</span>
-                {expandedScalpReentrySection === 'reentry' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              </button>
-              {expandedScalpReentrySection === 'reentry' && (
-                <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of sold quantity to buy back at breakeven">Re-entry %</label>
-                    <input
-                      type="number"
-                      min="50"
-                      max="100"
-                      step="5"
-                      value={scalpReentrySpecificConfig.reentry_percent}
-                      onChange={(e) => updateScalpReentrySpecificConfig('reentry_percent', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Buffer % from breakeven price for re-entry">Price Buffer %</label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      value={scalpReentrySpecificConfig.reentry_price_buffer}
-                      onChange={(e) => updateScalpReentrySpecificConfig('reentry_price_buffer', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Max attempts before skipping re-entry">Max Attempts</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="10"
-                      value={scalpReentrySpecificConfig.max_reentry_attempts}
-                      onChange={(e) => updateScalpReentrySpecificConfig('max_reentry_attempts', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Timeout in seconds before re-entry fails">Timeout (sec)</label>
-                    <input
-                      type="number"
-                      min="60"
-                      max="900"
-                      step="30"
-                      value={scalpReentrySpecificConfig.reentry_timeout_sec}
-                      onChange={(e) => updateScalpReentrySpecificConfig('reentry_timeout_sec', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Final Trailing & Dynamic SL */}
-            <div className={`rounded ${expandedScalpReentrySection === 'final' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
-              <button
-                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'final' ? null : 'final')}
-                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
-              >
-                <span className="font-medium">Final Trailing & Dynamic SL</span>
-                {expandedScalpReentrySection === 'final' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              </button>
-              {expandedScalpReentrySection === 'final' && (
-                <div className="px-2 py-2 border-t border-gray-700 grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Trailing % from peak for final 20% position">Final Trailing %</label>
-                    <input
-                      type="number"
-                      min="1"
-                      max="15"
-                      step="0.5"
-                      value={scalpReentrySpecificConfig.final_trailing_percent}
-                      onChange={(e) => updateScalpReentrySpecificConfig('final_trailing_percent', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Minimum % to hold for final trailing">Min Hold %</label>
-                    <input
-                      type="number"
-                      min="10"
-                      max="30"
-                      step="5"
-                      value={scalpReentrySpecificConfig.final_hold_min_percent}
-                      onChange={(e) => updateScalpReentrySpecificConfig('final_hold_min_percent', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="Max % of accumulated profit that can be lost">Max Loss %</label>
-                    <input
-                      type="number"
-                      min="20"
-                      max="60"
-                      step="5"
-                      value={scalpReentrySpecificConfig.dynamic_sl_max_loss_pct}
-                      onChange={(e) => updateScalpReentrySpecificConfig('dynamic_sl_max_loss_pct', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1" title="% of accumulated profit to protect">Protect %</label>
-                    <input
-                      type="number"
-                      min="40"
-                      max="80"
-                      step="5"
-                      value={scalpReentrySpecificConfig.dynamic_sl_protect_pct}
-                      onChange={(e) => updateScalpReentrySpecificConfig('dynamic_sl_protect_pct', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* AI Configuration */}
-            <div className={`rounded ${expandedScalpReentrySection === 'ai' ? 'border-2 border-green-400' : 'border border-gray-700'}`}>
-              <button
-                onClick={() => setExpandedScalpReentrySection(expandedScalpReentrySection === 'ai' ? null : 'ai')}
-                className="w-full flex items-center justify-between px-2 py-1.5 text-xs text-gray-300 hover:bg-gray-700/30"
-              >
-                <span className="font-medium">AI Configuration</span>
-                {expandedScalpReentrySection === 'ai' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-              </button>
-              {expandedScalpReentrySection === 'ai' && (
-                <div className="px-2 py-2 border-t border-gray-700 space-y-2">
-                  <div className="grid grid-cols-2 gap-2">
-                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
-                      <input
-                        type="checkbox"
-                        checked={scalpReentrySpecificConfig.use_ai_decisions}
-                        onChange={(e) => updateScalpReentrySpecificConfig('use_ai_decisions', e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      Use AI Decisions
-                    </label>
-                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
-                      <input
-                        type="checkbox"
-                        checked={scalpReentrySpecificConfig.ai_tp_optimization}
-                        onChange={(e) => updateScalpReentrySpecificConfig('ai_tp_optimization', e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      AI TP Optimization
-                    </label>
-                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
-                      <input
-                        type="checkbox"
-                        checked={scalpReentrySpecificConfig.ai_dynamic_sl}
-                        onChange={(e) => updateScalpReentrySpecificConfig('ai_dynamic_sl', e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      AI Dynamic SL
-                    </label>
-                    <label className="flex items-center gap-2 text-[10px] text-gray-300">
-                      <input
-                        type="checkbox"
-                        checked={scalpReentrySpecificConfig?.use_multi_agent || false}
-                        onChange={(e) => updateScalpReentrySpecificConfig('use_multi_agent', e.target.checked)}
-                        className="w-3 h-3"
-                      />
-                      Multi-Agent System
-                    </label>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-gray-400 mb-1">Min AI Confidence</label>
-                    <input
-                      type="number"
-                      min="0.3"
-                      max="0.95"
-                      step="0.05"
-                      value={scalpReentrySpecificConfig.ai_min_confidence}
-                      onChange={(e) => updateScalpReentrySpecificConfig('ai_min_confidence', Number(e.target.value))}
-                      className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
-                    />
-                  </div>
-                  {scalpReentrySpecificConfig?.use_multi_agent && (
-                    <div className="grid grid-cols-3 gap-2 pt-1 border-t border-gray-600">
-                      <label className="flex items-center gap-1 text-[10px] text-gray-300">
-                        <input
-                          type="checkbox"
-                          checked={scalpReentrySpecificConfig.enable_sentiment_agent}
-                          onChange={(e) => updateScalpReentrySpecificConfig('enable_sentiment_agent', e.target.checked)}
-                          className="w-3 h-3"
-                        />
-                        Sentiment
-                      </label>
-                      <label className="flex items-center gap-1 text-[10px] text-gray-300">
-                        <input
-                          type="checkbox"
-                          checked={scalpReentrySpecificConfig.enable_risk_agent}
-                          onChange={(e) => updateScalpReentrySpecificConfig('enable_risk_agent', e.target.checked)}
-                          className="w-3 h-3"
-                        />
-                        Risk
-                      </label>
-                      <label className="flex items-center gap-1 text-[10px] text-gray-300">
-                        <input
-                          type="checkbox"
-                          checked={scalpReentrySpecificConfig.enable_tp_agent}
-                          onChange={(e) => updateScalpReentrySpecificConfig('enable_tp_agent', e.target.checked)}
-                          className="w-3 h-3"
-                        />
-                        TP Agent
-                      </label>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Save Button */}
-            <div className="flex justify-end pt-1">
-              <button
-                onClick={saveScalpReentrySpecificConfig}
-                disabled={savingScalpReentry}
-                className="px-3 py-1 bg-green-900/50 hover:bg-green-900/70 text-green-400 rounded text-xs transition-colors disabled:opacity-50"
-              >
-                {savingScalpReentry ? 'Saving...' : 'Save Config'}
-              </button>
-            </div>
-            </>
-            )}
-
-            {/* Hedge Tab */}
+            {/* Hedge Tab - Uses same data as Monitor tab, shows hedge-eligible positions */}
             {scalpReentryTab === 'hedge' && (
-              <HedgeModeMonitor autoRefresh={true} refreshInterval={5000} />
+              <div className="space-y-2">
+                {/* Info Banner */}
+                <div className="px-2 py-1.5 bg-purple-900/20 border border-purple-700/30 rounded text-[10px] text-purple-400">
+                  Positions eligible for hedging. Hedge triggers when position goes into loss. Settings configured in each mode's Position Optimization section.
+                </div>
+
+                {/* Hedge Positions - same data source as Monitor tab */}
+                {autopilotStatus?.positions && autopilotStatus.positions.length > 0 ? (
+                  [...autopilotStatus.positions]
+                    .sort((a, b) => {
+                      // Sort by unrealized PnL (most loss first - hedge candidates)
+                      return (a.unrealized_pnl || 0) - (b.unrealized_pnl || 0);
+                    })
+                    .map(pos => {
+                      // Calculate values
+                      const originalValue = pos.entry_price * pos.original_qty;
+                      const currentPnlPct = originalValue > 0 ? (pos.unrealized_pnl / originalValue) * 100 : 0;
+                      const currentValue = pos.entry_price * pos.remaining_qty;
+                      const remainingValue = pos.remaining_qty * pos.entry_price;
+                      const soldQty = pos.original_qty - pos.remaining_qty;
+                      const soldValue = soldQty * pos.entry_price;
+
+                      // Check if hedge is enabled for this mode
+                      const modeConfig = modeConfigs[pos.mode];
+                      const hedgeEnabled = modeConfig?.position_optimization?.hedge_mode_enabled ?? false;
+                      const isInLoss = (pos.unrealized_pnl || 0) < 0;
+
+                      return (
+                        <div key={pos.symbol} className={`rounded p-2 space-y-1.5 ${
+                          isInLoss ? 'bg-red-900/20 border border-red-700/30' : 'bg-gray-700/50'
+                        }`}>
+                          {/* Header Row - Mode + Symbol, Side, PnL with $ and % */}
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              {/* Mode badge */}
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-medium ${
+                                pos.mode === 'scalp' ? 'bg-yellow-900/50 text-yellow-400' :
+                                pos.mode === 'swing' ? 'bg-blue-900/50 text-blue-400' :
+                                pos.mode === 'position' ? 'bg-green-900/50 text-green-400' :
+                                'bg-red-900/50 text-red-400'
+                              }`}>
+                                {pos.mode}
+                              </span>
+                              {/* Symbol */}
+                              <span className="font-medium text-sm text-gray-200">{pos.symbol}</span>
+                              {/* Direction */}
+                              {pos.side === 'LONG' ? (
+                                <TrendingUp className="w-3.5 h-3.5 text-green-400" />
+                              ) : (
+                                <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+                              )}
+                              {/* Hedge status badge */}
+                              {hedgeEnabled ? (
+                                isInLoss ? (
+                                  <span className="text-[8px] px-1 py-0.5 rounded bg-orange-900/50 text-orange-400 border border-orange-700">
+                                    HEDGE READY
+                                  </span>
+                                ) : (
+                                  <span className="text-[8px] px-1 py-0.5 rounded bg-gray-700/50 text-gray-400">
+                                    Hedge On Profit
+                                  </span>
+                                )
+                              ) : (
+                                <span className="text-[8px] px-1 py-0.5 rounded bg-gray-700/50 text-gray-500">
+                                  No Hedge
+                                </span>
+                              )}
+                            </div>
+                            {/* PnL: $X.XX (Y.YY%) */}
+                            <div className={`text-xs font-medium ${pos.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {currentPnlPct >= 0 ? '+' : ''}{currentPnlPct.toFixed(2)}% (${pos.unrealized_pnl?.toFixed(2) || '0.00'})
+                            </div>
+                          </div>
+
+                          {/* Position Details - Price, Qty, Value */}
+                          <div className="grid grid-cols-3 gap-2 text-[9px]">
+                            <div className="bg-gray-800/50 rounded p-1.5">
+                              <div className="text-gray-500">Entry Price</div>
+                              <div className="text-gray-200 font-medium">${pos.entry_price?.toFixed(4)}</div>
+                            </div>
+                            <div className="bg-gray-800/50 rounded p-1.5">
+                              <div className="text-gray-500">Original Qty</div>
+                              <div className="text-gray-200 font-medium">{pos.original_qty?.toFixed(4)}</div>
+                              <div className="text-gray-400">(${originalValue.toFixed(2)})</div>
+                            </div>
+                            <div className="bg-gray-800/50 rounded p-1.5">
+                              <div className="text-gray-500">Current Qty</div>
+                              <div className="text-purple-400 font-medium">{pos.remaining_qty?.toFixed(4)}</div>
+                              <div className="text-purple-300">(${remainingValue.toFixed(2)})</div>
+                            </div>
+                          </div>
+
+                          {/* Sold vs Remaining */}
+                          <div className="flex items-center justify-between text-[9px] pt-1 border-t border-gray-700/50">
+                            {soldQty > 0 ? (
+                              <span className="text-green-400">
+                                Sold: {soldQty.toFixed(4)} (${soldValue.toFixed(2)})
+                              </span>
+                            ) : (
+                              <span className="text-gray-500">Nothing sold yet</span>
+                            )}
+                            <span className="text-purple-400">
+                              Remaining: {pos.remaining_qty?.toFixed(4)} (${remainingValue.toFixed(2)})
+                            </span>
+                          </div>
+
+                          {/* Realized Profit */}
+                          {pos.realized_pnl > 0 && (
+                            <div className="text-[9px] text-green-400">
+                              Realized Profit: +${pos.realized_pnl.toFixed(2)}
+                            </div>
+                          )}
+
+                          {/* Hedge Info - when in loss and hedge enabled */}
+                          {isInLoss && hedgeEnabled && (
+                            <div className="mt-1 p-1.5 bg-orange-900/30 border border-orange-700/50 rounded text-[9px]">
+                              <div className="flex items-center gap-1 text-orange-400 font-medium">
+                                <ArrowLeftRight className="w-3 h-3" />
+                                Hedge Available
+                              </div>
+                              <div className="text-orange-300 mt-0.5">
+                                Position is {Math.abs(currentPnlPct).toFixed(2)}% in loss (${Math.abs(pos.unrealized_pnl || 0).toFixed(2)}).
+                                Hedge can be triggered from {pos.mode} mode settings.
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                ) : (
+                  <div className="p-3 text-center text-xs text-gray-500">
+                    No active positions
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Help Text */}
-            <div className="px-2 py-1.5 bg-green-900/20 border border-green-700/30 rounded text-[10px] text-green-400">
-              Upgrades scalp mode entries to use progressive TP with re-entry. Shares entry rules with scalp mode but has independent position management.
+            <div className="px-2 py-1.5 bg-purple-900/20 border border-purple-700/30 rounded text-[10px] text-purple-400">
+              Monitor TP1/TP2/TP3 progress and rebuy status. Configure settings in each mode's Position Optimization section above.
             </div>
-            </>
-            ) : null}
           </div>
         )}
       </div>
@@ -6249,6 +6732,30 @@ function PositionCard({ position, expanded, onToggle, realTimePrice }: { positio
           </span>
           {position.trailing_active && (
             <span className="px-1 py-0.5 bg-blue-900/50 text-blue-400 rounded text-xs">TRAIL</span>
+          )}
+          {/* TP Progress Badge - Story 9.9 inline display */}
+          {position.current_tp_level > 0 && (
+            <span className="px-1.5 py-0.5 bg-purple-900/50 text-purple-400 rounded text-xs font-medium flex items-center gap-1">
+              <Target className="w-3 h-3" />
+              TP{position.current_tp_level}
+              {position.original_qty > 0 && position.remaining_qty > 0 && (
+                <span className="text-purple-300">
+                  ({Math.round((1 - position.remaining_qty / position.original_qty) * 100)}% sold)
+                </span>
+              )}
+            </span>
+          )}
+          {/* Position Optimization Active Badge */}
+          {(position as any).scalp_reentry && (
+            <span className="px-1.5 py-0.5 bg-green-900/50 text-green-400 rounded text-xs font-medium flex items-center gap-1">
+              <RefreshCw className="w-3 h-3" />
+              OPT
+              {(position as any).scalp_reentry.accumulated_profit > 0 && (
+                <span className="text-green-300">
+                  +${((position as any).scalp_reentry.accumulated_profit).toFixed(2)}
+                </span>
+              )}
+            </span>
           )}
           {/* ROI Target Badge */}
           {(position as any).custom_roi_percent && (

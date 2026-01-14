@@ -40,6 +40,12 @@ const UI_VISIBLE_SETTINGS: Record<string, string[]> = {
     'hedge.allow_hedge', 'hedge.min_confidence_for_hedge',
     'trend_divergence.enabled', 'trend_divergence.block_on_divergence',
     'funding_rate.enabled', 'funding_rate.max_funding_rate',
+    // Story 9.5 Phase 2: Trend filters including candlestick alignment
+    'trend_filters.btc_trend_check.enabled', 'trend_filters.btc_trend_check.btc_trend_timeframe',
+    'trend_filters.price_vs_ema.enabled', 'trend_filters.price_vs_ema.ema_period',
+    'trend_filters.vwap_filter.enabled', 'trend_filters.vwap_filter.near_vwap_tolerance_percent',
+    'trend_filters.candlestick_alignment.enabled', 'trend_filters.candlestick_alignment.min_confidence_to_block',
+    'trend_filters.candlestick_alignment.log_only_mode',
   ],
   circuit_breaker: [
     'enabled', 'max_loss_per_hour', 'max_daily_loss', 'max_consecutive_losses',

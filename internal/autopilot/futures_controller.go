@@ -701,7 +701,8 @@ func NewFuturesController(
 
 	// Initialize Ginie autopilot (autonomous multi-mode trading)
 	// Empty userID = legacy shared mode (uses settings file for PnL)
-	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "")
+	// nil positionStateRepo = fall back to JSON file for position state (no Redis in legacy mode)
+	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "", nil)
 
 	// Load persisted PnL stats
 	ginieAuto.LoadPnLStats()
@@ -5275,7 +5276,30 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			"side", order.Side,
 			"qty", order.LastFilledQty,
 			"price", order.LastFilledPrice,
-			"pnl", order.RealizedProfit)
+			"pnl", order.RealizedProfit,
+			"commission", order.Commission,
+			"commission_asset", order.CommissionAsset,
+			"is_maker", order.IsMakerSide)
+
+		// Capture actual fee data from Binance WebSocket
+		// This provides real fee paid per trade instead of estimates
+		if fc.ginieAutopilot != nil && order.Commission > 0 {
+			// Determine if this is an entry or exit order
+			// - IsReduceOnly=true means it's reducing/closing a position
+			// - RealizedProfit != 0 typically indicates a closing trade
+			isEntry := !order.IsReduceOnly && order.RealizedProfit == 0
+
+			// Commission is typically in USDT for futures
+			// If it's in a different asset, we'd need to convert (rare for futures)
+			feeUSD := order.Commission
+
+			fc.ginieAutopilot.UpdatePositionFees(
+				order.Symbol,
+				feeUSD,
+				order.IsMakerSide,
+				isEntry,
+			)
+		}
 
 		// Record trade in circuit breaker if profit is significant
 		if fc.circuitBreaker != nil && order.RealizedProfit != 0 {

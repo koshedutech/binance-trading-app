@@ -2,8 +2,8 @@
   "metadata": {
     "version": "1.5.0",
     "schema_version": 3,
-    "last_updated": "2026-01-13T10:00:00Z",
-    "updated_by": "claude-story-9.5",
+    "last_updated": "2026-01-14T18:03:48Z",
+    "updated_by": "admin",
     "description": "Story 9.5 Phase 1A: Refactored MTF with blocking capability, added trend_filters (BTC check, Price/EMA, VWAP). Previous: requires_trend_align=true, block_on_disagreement=true."
   },
   "global_trading": {
@@ -30,6 +30,11 @@
         "trend_timeframe": "4h",
         "entry_timeframe": "1h",
         "analysis_timeframe": "1d"
+      },
+      "entry": {
+        "limit_order_gap_percent": 0.2,
+        "use_market_entry": false,
+        "max_limit_gap_percent": 1
       },
       "confidence": {
         "min_confidence": 55,
@@ -167,20 +172,32 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "_description": "Multi-timeframe analysis with blocking capability",
-        "enabled": true,
-        "higher_tf": {
-          "enabled": true,
-          "timeframe": "1d",
-          "block_on_disagreement": true,
-          "check_ema_trend": true,
-          "ema_fast": 20,
-          "ema_slow": 50
-        },
-        "trading_tf": {
-          "timeframe": "4h",
-          "require_alignment": true
-        }
+        "mtf_enabled": true,
+        "primary_timeframe": "1d",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "4h",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "1h",
+        "tertiary_weight": 0.25,
+        "min_consensus": 2,
+        "min_weighted_strength": 60,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 300000,
+        "ai_check_interval_ms": 1800000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 1209600000
+      },
+      "reversal": {
+        "reversal_enabled": false,
+        "reversal_min_llm_confidence": 0,
+        "reversal_consecutive_candles": 0,
+        "reversal_limit_timeout_sec": 0,
+        "reversal_require_all_tfs": false,
+        "use_market_entry": false
       },
       "trend_filters": {
         "_description": "Additional trend validation filters that block wrong-direction trades",
@@ -202,29 +219,76 @@
           "require_price_above_vwap_for_long": true,
           "require_price_below_vwap_for_short": true,
           "near_vwap_tolerance_percent": 0
+        },
+        "candlestick_alignment": {
+          "enabled": true,
+          "min_confidence_to_block": 70,
+          "log_only_mode": false
         }
-      },
-      "dynamic_ai_exit": {
-        "dynamic_ai_exit_enabled": true,
-        "min_hold_before_ai_ms": 300000,
-        "ai_check_interval_ms": 1800000,
-        "use_llm_for_loss": true,
-        "use_llm_for_profit": true,
-        "max_hold_time_ms": 1209600000
-      },
-      "reversal": {
-        "reversal_enabled": false,
-        "reversal_min_llm_confidence": 0,
-        "reversal_consecutive_candles": 0,
-        "reversal_limit_timeout_sec": 0,
-        "reversal_require_all_tfs": false,
-        "use_market_entry": false
       },
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 30,
         "min_loss_percent": 3,
         "check_interval_secs": 120
+      },
+      "position_optimization": {
+        "enabled": true,
+        "tp1_percent": 0.4,
+        "tp1_sell_percent": 30,
+        "tp2_percent": 0.7,
+        "tp2_sell_percent": 50,
+        "tp3_percent": 1,
+        "tp3_sell_percent": 80,
+        "reentry_percent": 50,
+        "reentry_price_buffer": 0.05,
+        "max_reentry_attempts": 1,
+        "reentry_timeout_sec": 300,
+        "reentry_require_trend_confirmation": true,
+        "reentry_min_adx": 20,
+        "final_trailing_percent": 5,
+        "final_hold_min_percent": 20,
+        "dynamic_sl_max_loss_pct": 40,
+        "dynamic_sl_protect_pct": 60,
+        "dynamic_sl_update_int": 30,
+        "use_ai_decisions": true,
+        "ai_min_confidence": 0.65,
+        "ai_tp_optimization": true,
+        "ai_dynamic_sl": true,
+        "use_multi_agent": true,
+        "enable_sentiment_agent": true,
+        "enable_risk_agent": true,
+        "enable_tp_agent": true,
+        "enable_adaptive_learning": true,
+        "adaptive_window_trades": 20,
+        "adaptive_min_trades": 10,
+        "adaptive_max_reentry_adjust": 20,
+        "max_cycles_per_position": 10,
+        "max_daily_reentries": 50,
+        "min_position_size_usd": 10,
+        "stop_loss_percent": 2,
+        "hedge_mode_enabled": false,
+        "trigger_on_profit_tp": true,
+        "trigger_on_loss_tp": true,
+        "dca_on_loss": true,
+        "max_position_multiple": 3,
+        "combined_roi_exit_pct": 2,
+        "wide_sl_atr_multiplier": 2.5,
+        "disable_ai_sl": true,
+        "rally_exit_enabled": true,
+        "rally_adx_threshold": 25,
+        "rally_sustained_move_pct": 3,
+        "neg_tp1_percent": 0.4,
+        "neg_tp1_add_percent": 30,
+        "neg_tp2_percent": 0.7,
+        "neg_tp2_add_percent": 50,
+        "neg_tp3_percent": 1,
+        "neg_tp3_add_percent": 80,
+        "profit_protection_enabled": true,
+        "profit_protection_percent": 50,
+        "max_loss_of_earned_profit": 50,
+        "allow_hedge_chains": false,
+        "max_hedge_chain_depth": 2
       }
     },
     "scalp": {
@@ -234,6 +298,11 @@
         "trend_timeframe": "15m",
         "entry_timeframe": "5m",
         "analysis_timeframe": "15m"
+      },
+      "entry": {
+        "limit_order_gap_percent": 0.1,
+        "use_market_entry": false,
+        "max_limit_gap_percent": 0.5
       },
       "confidence": {
         "min_confidence": 55,
@@ -272,9 +341,9 @@
       "sltp": {
         "stop_loss_percent": 2,
         "take_profit_percent": 1.5,
-        "trailing_stop_enabled": false,
-        "trailing_stop_percent": 0,
-        "trailing_stop_activation": 0,
+        "trailing_stop_enabled": true,
+        "trailing_stop_percent": 0.3,
+        "trailing_stop_activation": 0.5,
         "trailing_activation_price": 0,
         "max_hold_duration": "",
         "use_single_tp": false,
@@ -371,20 +440,32 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "_description": "Multi-timeframe analysis with blocking capability",
-        "enabled": true,
-        "higher_tf": {
-          "enabled": true,
-          "timeframe": "1h",
-          "block_on_disagreement": true,
-          "check_ema_trend": true,
-          "ema_fast": 20,
-          "ema_slow": 50
-        },
-        "trading_tf": {
-          "timeframe": "15m",
-          "require_alignment": true
-        }
+        "mtf_enabled": true,
+        "primary_timeframe": "1h",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "15m",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "5m",
+        "tertiary_weight": 0.25,
+        "min_consensus": 2,
+        "min_weighted_strength": 60,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 120000,
+        "ai_check_interval_ms": 120000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 14400000
+      },
+      "reversal": {
+        "reversal_enabled": true,
+        "reversal_min_llm_confidence": 0.65,
+        "reversal_consecutive_candles": 3,
+        "reversal_limit_timeout_sec": 120,
+        "reversal_require_all_tfs": false,
+        "use_market_entry": false
       },
       "trend_filters": {
         "_description": "Additional trend validation filters that block wrong-direction trades",
@@ -406,29 +487,76 @@
           "require_price_above_vwap_for_long": true,
           "require_price_below_vwap_for_short": true,
           "near_vwap_tolerance_percent": 0.1
+        },
+        "candlestick_alignment": {
+          "enabled": true,
+          "min_confidence_to_block": 80,
+          "log_only_mode": false
         }
-      },
-      "dynamic_ai_exit": {
-        "dynamic_ai_exit_enabled": true,
-        "min_hold_before_ai_ms": 120000,
-        "ai_check_interval_ms": 120000,
-        "use_llm_for_loss": true,
-        "use_llm_for_profit": true,
-        "max_hold_time_ms": 14400000
-      },
-      "reversal": {
-        "reversal_enabled": true,
-        "reversal_min_llm_confidence": 0.65,
-        "reversal_consecutive_candles": 3,
-        "reversal_limit_timeout_sec": 120,
-        "reversal_require_all_tfs": false,
-        "use_market_entry": false
       },
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 10,
         "min_loss_percent": 1,
         "check_interval_secs": 30
+      },
+      "position_optimization": {
+        "enabled": true,
+        "tp1_percent": 0.4,
+        "tp1_sell_percent": 30,
+        "tp2_percent": 0.7,
+        "tp2_sell_percent": 50,
+        "tp3_percent": 1,
+        "tp3_sell_percent": 80,
+        "reentry_percent": 50,
+        "reentry_price_buffer": 0.05,
+        "max_reentry_attempts": 1,
+        "reentry_timeout_sec": 300,
+        "reentry_require_trend_confirmation": true,
+        "reentry_min_adx": 20,
+        "final_trailing_percent": 5,
+        "final_hold_min_percent": 20,
+        "dynamic_sl_max_loss_pct": 40,
+        "dynamic_sl_protect_pct": 60,
+        "dynamic_sl_update_int": 30,
+        "use_ai_decisions": true,
+        "ai_min_confidence": 0.65,
+        "ai_tp_optimization": true,
+        "ai_dynamic_sl": true,
+        "use_multi_agent": true,
+        "enable_sentiment_agent": true,
+        "enable_risk_agent": true,
+        "enable_tp_agent": true,
+        "enable_adaptive_learning": true,
+        "adaptive_window_trades": 20,
+        "adaptive_min_trades": 10,
+        "adaptive_max_reentry_adjust": 20,
+        "max_cycles_per_position": 10,
+        "max_daily_reentries": 50,
+        "min_position_size_usd": 10,
+        "stop_loss_percent": 2,
+        "hedge_mode_enabled": false,
+        "trigger_on_profit_tp": true,
+        "trigger_on_loss_tp": true,
+        "dca_on_loss": true,
+        "max_position_multiple": 3,
+        "combined_roi_exit_pct": 2,
+        "wide_sl_atr_multiplier": 2.5,
+        "disable_ai_sl": true,
+        "rally_exit_enabled": true,
+        "rally_adx_threshold": 25,
+        "rally_sustained_move_pct": 3,
+        "neg_tp1_percent": 0.4,
+        "neg_tp1_add_percent": 30,
+        "neg_tp2_percent": 0.7,
+        "neg_tp2_add_percent": 50,
+        "neg_tp3_percent": 1,
+        "neg_tp3_add_percent": 80,
+        "profit_protection_enabled": true,
+        "profit_protection_percent": 50,
+        "max_loss_of_earned_profit": 50,
+        "allow_hedge_chains": false,
+        "max_hedge_chain_depth": 2
       }
     },
     "swing": {
@@ -438,6 +566,11 @@
         "trend_timeframe": "1h",
         "entry_timeframe": "15m",
         "analysis_timeframe": "4h"
+      },
+      "entry": {
+        "limit_order_gap_percent": 0.15,
+        "use_market_entry": false,
+        "max_limit_gap_percent": 0.75
       },
       "confidence": {
         "min_confidence": 55,
@@ -575,20 +708,32 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "_description": "Multi-timeframe analysis with blocking capability",
-        "enabled": true,
-        "higher_tf": {
-          "enabled": true,
-          "timeframe": "4h",
-          "block_on_disagreement": true,
-          "check_ema_trend": true,
-          "ema_fast": 20,
-          "ema_slow": 50
-        },
-        "trading_tf": {
-          "timeframe": "1h",
-          "require_alignment": true
-        }
+        "mtf_enabled": true,
+        "primary_timeframe": "4h",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "1h",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "15m",
+        "tertiary_weight": 0.25,
+        "min_consensus": 2,
+        "min_weighted_strength": 60,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 60000,
+        "ai_check_interval_ms": 300000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": true,
+        "max_hold_time_ms": 259200000
+      },
+      "reversal": {
+        "reversal_enabled": false,
+        "reversal_min_llm_confidence": 0,
+        "reversal_consecutive_candles": 0,
+        "reversal_limit_timeout_sec": 0,
+        "reversal_require_all_tfs": false,
+        "use_market_entry": false
       },
       "trend_filters": {
         "_description": "Additional trend validation filters that block wrong-direction trades",
@@ -610,29 +755,76 @@
           "require_price_above_vwap_for_long": true,
           "require_price_below_vwap_for_short": true,
           "near_vwap_tolerance_percent": 0.2
+        },
+        "candlestick_alignment": {
+          "enabled": true,
+          "min_confidence_to_block": 75,
+          "log_only_mode": false
         }
-      },
-      "dynamic_ai_exit": {
-        "dynamic_ai_exit_enabled": true,
-        "min_hold_before_ai_ms": 60000,
-        "ai_check_interval_ms": 300000,
-        "use_llm_for_loss": true,
-        "use_llm_for_profit": true,
-        "max_hold_time_ms": 259200000
-      },
-      "reversal": {
-        "reversal_enabled": false,
-        "reversal_min_llm_confidence": 0,
-        "reversal_consecutive_candles": 0,
-        "reversal_limit_timeout_sec": 0,
-        "reversal_require_all_tfs": false,
-        "use_market_entry": false
       },
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 15,
         "min_loss_percent": 2,
         "check_interval_secs": 60
+      },
+      "position_optimization": {
+        "enabled": true,
+        "tp1_percent": 0.4,
+        "tp1_sell_percent": 30,
+        "tp2_percent": 0.7,
+        "tp2_sell_percent": 50,
+        "tp3_percent": 1,
+        "tp3_sell_percent": 80,
+        "reentry_percent": 50,
+        "reentry_price_buffer": 0.05,
+        "max_reentry_attempts": 1,
+        "reentry_timeout_sec": 300,
+        "reentry_require_trend_confirmation": true,
+        "reentry_min_adx": 20,
+        "final_trailing_percent": 5,
+        "final_hold_min_percent": 20,
+        "dynamic_sl_max_loss_pct": 40,
+        "dynamic_sl_protect_pct": 60,
+        "dynamic_sl_update_int": 30,
+        "use_ai_decisions": true,
+        "ai_min_confidence": 0.65,
+        "ai_tp_optimization": true,
+        "ai_dynamic_sl": true,
+        "use_multi_agent": true,
+        "enable_sentiment_agent": true,
+        "enable_risk_agent": true,
+        "enable_tp_agent": true,
+        "enable_adaptive_learning": true,
+        "adaptive_window_trades": 20,
+        "adaptive_min_trades": 10,
+        "adaptive_max_reentry_adjust": 20,
+        "max_cycles_per_position": 10,
+        "max_daily_reentries": 50,
+        "min_position_size_usd": 10,
+        "stop_loss_percent": 2,
+        "hedge_mode_enabled": false,
+        "trigger_on_profit_tp": true,
+        "trigger_on_loss_tp": true,
+        "dca_on_loss": true,
+        "max_position_multiple": 3,
+        "combined_roi_exit_pct": 2,
+        "wide_sl_atr_multiplier": 2.5,
+        "disable_ai_sl": true,
+        "rally_exit_enabled": true,
+        "rally_adx_threshold": 25,
+        "rally_sustained_move_pct": 3,
+        "neg_tp1_percent": 0.4,
+        "neg_tp1_add_percent": 30,
+        "neg_tp2_percent": 0.7,
+        "neg_tp2_add_percent": 50,
+        "neg_tp3_percent": 1,
+        "neg_tp3_add_percent": 80,
+        "profit_protection_enabled": true,
+        "profit_protection_percent": 50,
+        "max_loss_of_earned_profit": 50,
+        "allow_hedge_chains": false,
+        "max_hedge_chain_depth": 2
       }
     },
     "ultra_fast": {
@@ -642,6 +834,11 @@
         "trend_timeframe": "5m",
         "entry_timeframe": "1m",
         "analysis_timeframe": "5m"
+      },
+      "entry": {
+        "limit_order_gap_percent": 0.05,
+        "use_market_entry": true,
+        "max_limit_gap_percent": 0.2
       },
       "confidence": {
         "min_confidence": 55,
@@ -779,20 +976,32 @@
         "divergence_weight": 0
       },
       "mtf": {
-        "_description": "Multi-timeframe analysis with blocking capability",
-        "enabled": true,
-        "higher_tf": {
-          "enabled": true,
-          "timeframe": "15m",
-          "block_on_disagreement": true,
-          "check_ema_trend": true,
-          "ema_fast": 20,
-          "ema_slow": 50
-        },
-        "trading_tf": {
-          "timeframe": "5m",
-          "require_alignment": true
-        }
+        "mtf_enabled": true,
+        "primary_timeframe": "15m",
+        "primary_weight": 0.4,
+        "secondary_timeframe": "5m",
+        "secondary_weight": 0.35,
+        "tertiary_timeframe": "1m",
+        "tertiary_weight": 0.25,
+        "min_consensus": 2,
+        "min_weighted_strength": 60,
+        "trend_stability_check": true
+      },
+      "dynamic_ai_exit": {
+        "dynamic_ai_exit_enabled": true,
+        "min_hold_before_ai_ms": 3000,
+        "ai_check_interval_ms": 5000,
+        "use_llm_for_loss": true,
+        "use_llm_for_profit": false,
+        "max_hold_time_ms": 0
+      },
+      "reversal": {
+        "reversal_enabled": false,
+        "reversal_min_llm_confidence": 0,
+        "reversal_consecutive_candles": 0,
+        "reversal_limit_timeout_sec": 0,
+        "reversal_require_all_tfs": false,
+        "use_market_entry": false
       },
       "trend_filters": {
         "_description": "Additional trend validation filters that block wrong-direction trades",
@@ -814,60 +1023,98 @@
           "require_price_above_vwap_for_long": true,
           "require_price_below_vwap_for_short": true,
           "near_vwap_tolerance_percent": 0.05
+        },
+        "candlestick_alignment": {
+          "enabled": false,
+          "min_confidence_to_block": 90,
+          "log_only_mode": true
         }
-      },
-      "dynamic_ai_exit": {
-        "dynamic_ai_exit_enabled": true,
-        "min_hold_before_ai_ms": 3000,
-        "ai_check_interval_ms": 5000,
-        "use_llm_for_loss": true,
-        "use_llm_for_profit": false,
-        "max_hold_time_ms": 0
-      },
-      "reversal": {
-        "reversal_enabled": false,
-        "reversal_min_llm_confidence": 0,
-        "reversal_consecutive_candles": 0,
-        "reversal_limit_timeout_sec": 0,
-        "reversal_require_all_tfs": false,
-        "use_market_entry": false
       },
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 2,
         "min_loss_percent": 0.5,
         "check_interval_secs": 15
+      },
+      "position_optimization": {
+        "enabled": true,
+        "tp1_percent": 0.4,
+        "tp1_sell_percent": 30,
+        "tp2_percent": 0.7,
+        "tp2_sell_percent": 50,
+        "tp3_percent": 1,
+        "tp3_sell_percent": 80,
+        "reentry_percent": 50,
+        "reentry_price_buffer": 0.05,
+        "max_reentry_attempts": 1,
+        "reentry_timeout_sec": 300,
+        "reentry_require_trend_confirmation": true,
+        "reentry_min_adx": 20,
+        "final_trailing_percent": 5,
+        "final_hold_min_percent": 20,
+        "dynamic_sl_max_loss_pct": 40,
+        "dynamic_sl_protect_pct": 60,
+        "dynamic_sl_update_int": 30,
+        "use_ai_decisions": true,
+        "ai_min_confidence": 0.65,
+        "ai_tp_optimization": true,
+        "ai_dynamic_sl": true,
+        "use_multi_agent": true,
+        "enable_sentiment_agent": true,
+        "enable_risk_agent": true,
+        "enable_tp_agent": true,
+        "enable_adaptive_learning": true,
+        "adaptive_window_trades": 20,
+        "adaptive_min_trades": 10,
+        "adaptive_max_reentry_adjust": 20,
+        "max_cycles_per_position": 10,
+        "max_daily_reentries": 50,
+        "min_position_size_usd": 10,
+        "stop_loss_percent": 2,
+        "hedge_mode_enabled": false,
+        "trigger_on_profit_tp": true,
+        "trigger_on_loss_tp": true,
+        "dca_on_loss": true,
+        "max_position_multiple": 3,
+        "combined_roi_exit_pct": 2,
+        "wide_sl_atr_multiplier": 2.5,
+        "disable_ai_sl": true,
+        "rally_exit_enabled": true,
+        "rally_adx_threshold": 25,
+        "rally_sustained_move_pct": 3,
+        "neg_tp1_percent": 0.4,
+        "neg_tp1_add_percent": 30,
+        "neg_tp2_percent": 0.7,
+        "neg_tp2_add_percent": 50,
+        "neg_tp3_percent": 1,
+        "neg_tp3_add_percent": 80,
+        "profit_protection_enabled": true,
+        "profit_protection_percent": 50,
+        "max_loss_of_earned_profit": 50,
+        "allow_hedge_chains": false,
+        "max_hedge_chain_depth": 2
       }
     }
   },
   "position_optimization": {
     "averaging": {
-      "enabled": true,
-      "max_entries": 3,
-      "entry_spacing_percent": 1.5,
-      "size_multiplier_per_level": 1,
+      "enabled": false,
+      "max_entries": 0,
+      "entry_spacing_percent": 0,
+      "size_multiplier_per_level": 0,
       "staged_entry_enabled": false,
-      "staged_entry_levels": 3,
-      "staged_entry_percent": [
-        40,
-        30,
-        30
-      ],
-      "staged_entry_cooldown_sec": 30
+      "staged_entry_levels": 0,
+      "staged_entry_percent": null,
+      "staged_entry_cooldown_sec": 0
     },
     "hedging": {
       "enabled": false,
-      "min_confidence_for_hedge": 75,
-      "existing_must_be_in_profit": 1,
-      "max_hedge_size_percent": 50,
+      "min_confidence_for_hedge": 0,
+      "existing_must_be_in_profit": 0,
+      "max_hedge_size_percent": 0,
       "allow_same_mode_hedge": false
     },
-    "_risk_info": {
-      "hedging.enabled": {
-        "impact": "high",
-        "recommendation": "Keep disabled - hedging is complex and can amplify losses"
-      }
-    }
+    "_risk_info": null
   },
   "circuit_breaker": {
     "global": {
@@ -924,87 +1171,6 @@
     "position_percent": 0,
     "allow_dynamic_rebalance": true,
     "rebalance_threshold_pct": 15
-  },
-  "scalp_reentry_config": {
-    "enabled": true,
-    "tp1_percent": 0.35,
-    "tp1_sell_percent": 30,
-    "tp2_percent": 0.7,
-    "tp2_sell_percent": 50,
-    "tp3_percent": 1,
-    "tp3_sell_percent": 80,
-    "reentry_percent": 50,
-    "reentry_price_buffer": 0.05,
-    "max_reentry_attempts": 1,
-    "reentry_timeout_sec": 300,
-    "reentry_require_trend_confirmation": true,
-    "reentry_min_adx": 25,
-    "final_trailing_percent": 5,
-    "final_hold_min_percent": 20,
-    "dynamic_sl_max_loss_pct": 40,
-    "dynamic_sl_protect_pct": 60,
-    "dynamic_sl_update_int": 30,
-    "use_ai_decisions": true,
-    "ai_min_confidence": 0.65,
-    "ai_tp_optimization": true,
-    "ai_dynamic_sl": true,
-    "use_multi_agent": true,
-    "enable_sentiment_agent": true,
-    "enable_risk_agent": true,
-    "enable_tp_agent": true,
-    "enable_adaptive_learning": true,
-    "adaptive_window_trades": 20,
-    "adaptive_min_trades": 10,
-    "adaptive_max_reentry_adjust": 20,
-    "max_cycles_per_position": 10,
-    "max_daily_reentries": 50,
-    "min_position_size_usd": 10,
-    "stop_loss_percent": 2,
-    "hedge_mode_enabled": false,
-    "trigger_on_profit_tp": true,
-    "trigger_on_loss_tp": true,
-    "dca_on_loss": true,
-    "max_position_multiple": 3,
-    "combined_roi_exit_pct": 2,
-    "wide_sl_atr_multiplier": 2.5,
-    "disable_ai_sl": true,
-    "rally_exit_enabled": true,
-    "rally_adx_threshold": 25,
-    "rally_sustained_move_pct": 3,
-    "neg_tp1_percent": 0.4,
-    "neg_tp1_add_percent": 30,
-    "neg_tp2_percent": 0.7,
-    "neg_tp2_add_percent": 50,
-    "neg_tp3_percent": 1,
-    "neg_tp3_add_percent": 80,
-    "profit_protection_enabled": true,
-    "profit_protection_percent": 50,
-    "max_loss_of_earned_profit": 50,
-    "allow_hedge_chains": false,
-    "max_hedge_chain_depth": 2
-  },
-  "mode_llm_settings": {
-    "_description": "Per-mode LLM configuration for AI-assisted trading decisions. block_on_disagreement prevents entries when LLM disagrees with technical signals.",
-    "ultra_fast": {
-      "llm_weight": 0.2,
-      "block_on_disagreement": true,
-      "require_llm_confirmation": false
-    },
-    "scalp": {
-      "llm_weight": 0.35,
-      "block_on_disagreement": true,
-      "require_llm_confirmation": false
-    },
-    "swing": {
-      "llm_weight": 0.3,
-      "block_on_disagreement": true,
-      "require_llm_confirmation": false
-    },
-    "position": {
-      "llm_weight": 0.25,
-      "block_on_disagreement": true,
-      "require_llm_confirmation": false
-    }
   },
   "safety_settings": {
     "_description": "Per-mode safety controls for rate limiting, profit monitoring, and win-rate monitoring. These settings protect against excessive trading and consecutive losses.",

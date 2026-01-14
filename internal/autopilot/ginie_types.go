@@ -6,24 +6,26 @@ import "time"
 type GinieTradingMode string
 
 const (
-	GinieModeScalp        GinieTradingMode = "scalp"
-	GinieModeSwing        GinieTradingMode = "swing"
-	GinieModePosition     GinieTradingMode = "position"
-	GinieModeUltraFast    GinieTradingMode = "ultra_fast"
-	GinieModeScalpReentry GinieTradingMode = "scalp_reentry" // Scalp with progressive TP and re-entry
+	GinieModeScalp     GinieTradingMode = "scalp"
+	GinieModeSwing     GinieTradingMode = "swing"
+	GinieModePosition  GinieTradingMode = "position"
+	GinieModeUltraFast GinieTradingMode = "ultra_fast"
+	// [Story 9.9] REMOVED: GinieModeScalpReentry - position optimization is now a feature, not a mode
+	// Positions keep their original mode throughout lifecycle. Use pos.ScalpReentry != nil to check
+	// if position optimization is active.
 )
 
 // GinieScanStatus represents the coin scan classification
 type GinieScanStatus string
 
 const (
-	ScanStatusScalpReady        GinieScanStatus = "SCALP-READY"
-	ScanStatusSwingReady        GinieScanStatus = "SWING-READY"
-	ScanStatusPositionReady     GinieScanStatus = "POSITION-READY"
-	ScanStatusUltraFastReady    GinieScanStatus = "ULTRAFAST-READY"
-	ScanStatusScalpReentryReady GinieScanStatus = "SCALP-REENTRY-READY" // Ready for scalp re-entry mode
-	ScanStatusHedgeRequired     GinieScanStatus = "HEDGE-REQUIRED"
-	ScanStatusAvoid             GinieScanStatus = "AVOID"
+	ScanStatusScalpReady     GinieScanStatus = "SCALP-READY"
+	ScanStatusSwingReady     GinieScanStatus = "SWING-READY"
+	ScanStatusPositionReady  GinieScanStatus = "POSITION-READY"
+	ScanStatusUltraFastReady GinieScanStatus = "ULTRAFAST-READY"
+	// [Story 9.9] REMOVED: ScanStatusScalpReentryReady - position optimization is activated per-mode
+	ScanStatusHedgeRequired GinieScanStatus = "HEDGE-REQUIRED"
+	ScanStatusAvoid         GinieScanStatus = "AVOID"
 )
 
 // GenieRecommendation represents overall recommendation

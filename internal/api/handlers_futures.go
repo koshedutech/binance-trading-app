@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"binance-trading-bot/internal/autopilot"
@@ -211,6 +213,36 @@ func (s *Server) handleGetFuturesAccountInfo(c *gin.Context) {
 		"can_withdraw":              accountInfo.CanWithdraw,
 		"update_time":               accountInfo.UpdateTime,
 		"is_simulated":              isSimulated,
+	})
+}
+
+// handleGetCommissionRate returns user's actual maker/taker fee rates from Binance
+func (s *Server) handleGetCommissionRate(c *gin.Context) {
+	symbol := c.DefaultQuery("symbol", "BTCUSDT")
+
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled - API keys required"})
+		return
+	}
+
+	rate, err := futuresClient.GetCommissionRate(symbol)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Calculate percentages for display
+	makerPercent := rate.MakerCommissionRate * 100
+	takerPercent := rate.TakerCommissionRate * 100
+
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":                  rate.Symbol,
+		"maker_commission_rate":   rate.MakerCommissionRate,
+		"taker_commission_rate":   rate.TakerCommissionRate,
+		"maker_percent":           makerPercent,
+		"taker_percent":           takerPercent,
+		"description":             fmt.Sprintf("Maker: %.4f%% | Taker: %.4f%%", makerPercent, takerPercent),
 	})
 }
 
@@ -1479,6 +1511,46 @@ func (s *Server) GetBinancePnLForAutopilot(ga *autopilot.GinieAutopilot) (dailyP
 	binancePnLCache.CacheTime = time.Now()
 
 	log.Printf("[PNL-SYNC] Fetched from Binance: daily=$%.2f, 7d_total=$%.2f (%d records)", dailyPnL, totalPnL, len(allRecords))
+	return dailyPnL, totalPnL
+}
+
+// pnlRefreshInProgress tracks if a background refresh is already running
+var pnlRefreshInProgress bool
+var pnlRefreshMutex sync.Mutex
+
+// GetBinancePnLNonBlocking returns cached PnL immediately and triggers background refresh if needed
+// This prevents API timeouts when Binance is slow
+func (s *Server) GetBinancePnLNonBlocking(ga *autopilot.GinieAutopilot) (dailyPnL float64, totalPnL float64) {
+	// Always return cached values immediately (even if stale)
+	dailyPnL = binancePnLCache.DailyPnL
+	totalPnL = binancePnLCache.TotalPnL
+
+	// Check if cache is expired and needs refresh
+	cacheExpired := time.Since(binancePnLCache.CacheTime) >= binancePnLCacheTTL
+
+	if cacheExpired && ga != nil {
+		// Check if a refresh is already in progress
+		pnlRefreshMutex.Lock()
+		if !pnlRefreshInProgress {
+			pnlRefreshInProgress = true
+			pnlRefreshMutex.Unlock()
+
+			// Trigger background refresh
+			go func() {
+				defer func() {
+					pnlRefreshMutex.Lock()
+					pnlRefreshInProgress = false
+					pnlRefreshMutex.Unlock()
+				}()
+
+				// Call the blocking version in background
+				s.GetBinancePnLForAutopilot(ga)
+			}()
+		} else {
+			pnlRefreshMutex.Unlock()
+		}
+	}
+
 	return dailyPnL, totalPnL
 }
 

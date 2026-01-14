@@ -924,6 +924,25 @@ func (s *Server) getGinieAutopilotForUser(c *gin.Context) *autopilot.GinieAutopi
 	return instance.Autopilot
 }
 
+// getGinieAutopilotWithFallback returns the GinieAutopilot for the current user,
+// falling back to the shared controller's GinieAutopilot if per-user instance is unavailable.
+// Use this for read-only endpoints that should work even without per-user API keys configured.
+func (s *Server) getGinieAutopilotWithFallback(c *gin.Context) *autopilot.GinieAutopilot {
+	// Try per-user instance first
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		return giniePilot
+	}
+
+	// Fallback to shared controller's GinieAutopilot
+	controller := s.getFuturesAutopilot()
+	if controller != nil {
+		return controller.GetGinieAutopilot()
+	}
+
+	return nil
+}
+
 // getFuturesControllerForUser returns the FuturesController for the current user.
 // In multi-user mode, handlers should prefer getGinieAutopilotForUser when only
 // GinieAutopilot functionality is needed.

@@ -6,7 +6,7 @@ import (
 )
 
 // TestCalculateROIAfterFees tests the ROI calculation function for various scenarios
-// Note: With TakerFeeRate = 0.04% (0.0004), entry + exit fees = ~0.08% of notional
+// Note: With TakerFeeRate = 0.05% (0.0005), entry + exit fees = ~0.10% of notional
 // This means small price moves can result in negative ROI due to fees
 func TestCalculateROIAfterFees(t *testing.T) {
 	tests := []struct {
@@ -242,15 +242,15 @@ func TestMinimumThresholdGuard(t *testing.T) {
 
 // TestCalculateTradingFee verifies the fee calculation
 func TestCalculateTradingFee(t *testing.T) {
-	// TakerFeeRate = 0.0004 (0.04%) - Binance VIP0 taker fee
+	// TakerFeeRate = 0.0005 (0.05%) - Binance standard tier taker fee
 	tests := []struct {
 		quantity float64
 		price    float64
 		expected float64
 	}{
-		{1.0, 100.0, 0.04},             // 100 * 0.0004 = 0.04
-		{0.003, 87438.50, 0.1049262},   // 0.003 * 87438.50 * 0.0004 = 0.1049262
-		{10.0, 50.0, 0.20},             // 500 * 0.0004 = 0.20
+		{1.0, 100.0, 0.05},              // 100 * 0.0005 = 0.05
+		{0.003, 87438.50, 0.13115775},   // 0.003 * 87438.50 * 0.0005 = 0.13115775
+		{10.0, 50.0, 0.25},              // 500 * 0.0005 = 0.25
 	}
 
 	for _, tt := range tests {

@@ -38,7 +38,7 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
       setLastUpdate(new Date());
       setError(null);
     } catch (err: any) {
-      setError(err?.response?.data?.error || 'Failed to fetch scalp reentry positions');
+      setError(err?.response?.data?.error || 'Failed to fetch position optimization data');
     } finally {
       setLoading(false);
     }
@@ -271,7 +271,7 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
     return (
       <div className="flex items-center justify-center p-4">
         <RefreshCw className="w-4 h-4 text-gray-400 animate-spin" />
-        <span className="ml-2 text-xs text-gray-400">Loading scalp reentry positions...</span>
+        <span className="ml-2 text-xs text-gray-400">Loading position optimization data...</span>
       </div>
     );
   }
@@ -313,14 +313,6 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
               </span>
             )}
             <button
-              onClick={handleResetClick}
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-gray-700/50 text-gray-400 hover:text-blue-400 hover:bg-gray-700 transition-colors"
-              title="Reset to defaults"
-            >
-              <RotateCcw size={12} />
-              Reset
-            </button>
-            <button
               onClick={fetchData}
               className="p-1 hover:bg-gray-700 rounded transition-colors"
               title="Refresh"
@@ -334,7 +326,7 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
       {/* Positions List */}
       {positions.length === 0 ? (
         <div className="p-4 text-center text-xs text-gray-500">
-          No positions in scalp_reentry mode
+          No positions with optimization active
         </div>
       ) : (
         <div className="space-y-2">
@@ -361,7 +353,7 @@ const ScalpReentryMonitor = ({ autoRefresh = true, refreshInterval = 5000 }: Sca
                     </span>
                     {pos.scalp_reentry_active && (
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-900/50 text-purple-400 border border-purple-700">
-                        SCALP-REENTRY
+                        OPTIMIZING
                       </span>
                     )}
                     {pos.hedge_mode_active && (

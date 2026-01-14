@@ -626,6 +626,24 @@ func main() {
 				// Wire it to FuturesController
 				futuresAutopilotController.SetInstanceControl(instanceControl)
 
+				// Register callbacks for auto-start/stop on control transfer
+				instanceControl.SetCallbacks(
+					func() {
+						// onActivate callback - when this instance becomes ACTIVE
+						log.Println("[INSTANCE-CTRL] Instance became ACTIVE, starting Ginie autopilot")
+						if err := futuresAutopilotController.StartGinieAutopilot(); err != nil {
+							log.Printf("[INSTANCE-CTRL] Failed to start Ginie autopilot on activation: %v", err)
+						}
+					},
+					func() {
+						// onDeactivate callback - when this instance becomes STANDBY
+						log.Println("[INSTANCE-CTRL] Instance becoming STANDBY, stopping Ginie autopilot")
+						if err := futuresAutopilotController.StopGinieAutopilot(); err != nil {
+							log.Printf("[INSTANCE-CTRL] Failed to stop Ginie autopilot on deactivation: %v", err)
+						}
+					},
+				)
+
 				logger.Info("Instance control initialized",
 					"instance_id", instanceID,
 					"is_active", instanceControl.IsActive(),
@@ -859,6 +877,16 @@ func main() {
 			Component:   "user_autopilot",
 		})
 
+		// Phase 2: Create Redis position state repository for cross-instance state sharing
+		// This enables dev/prod instances to share position state via Redis
+		var positionStateRepo *database.RedisPositionStateRepository
+		if cacheService != nil && cacheService.IsHealthy() {
+			positionStateRepo = database.NewRedisPositionStateRepository(cacheService.GetClient())
+			logger.Info("Redis position state repository initialized for cross-instance sharing")
+		} else {
+			logger.Info("Redis not available - position state will use JSON file fallback only")
+		}
+
 		userAutopilotManager = autopilot.NewUserAutopilotManager(
 			repo,
 			futuresAutopilotController.GetGinieAnalyzer(),
@@ -866,6 +894,7 @@ func main() {
 			apiKeyService,
 			llmConfig,
 			userAutopilotLogger,
+			positionStateRepo, // May be nil if Redis unavailable
 		)
 
 		// Set manager on FuturesController for access in handlers

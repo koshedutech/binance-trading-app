@@ -217,6 +217,12 @@ func (c *CachedFuturesClient) InvalidateUserDataCache() {
 	}
 }
 
+// ==================== COMMISSION RATES (pass-through, rates don't change often) ====================
+
+func (c *CachedFuturesClient) GetCommissionRate(symbol string) (*CommissionRate, error) {
+	return c.client.GetCommissionRate(symbol)
+}
+
 // ==================== LEVERAGE & MARGIN (no caching) ====================
 
 func (c *CachedFuturesClient) SetLeverage(symbol string, leverage int) (*LeverageResponse, error) {

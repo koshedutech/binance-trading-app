@@ -5,8 +5,7 @@ import {
   loadCircuitBreakerDefaults,
   loadLLMConfigDefaults,
   loadCapitalAllocationDefaults,
-  loadHedgeDefaults,
-  loadScalpReentryDefaults,
+  // [Story 9.9] Removed: loadHedgeDefaults, loadScalpReentryDefaults - now in mode's Position Optimization
   loadSafetySettingsDefaults,
   loadAllModesDefaults,
   getAllDefaultSettings,
@@ -41,14 +40,7 @@ const settingGroups: SettingGroup[] = [
     resetFn: (preview) => loadModeDefaults('scalp', preview),
     configType: 'Scalp Mode',
   },
-  {
-    id: 'scalp-reentry-config',
-    name: 'Scalp Re-entry Optimization',
-    description: 'Reset Scalp Re-entry optimization config (not a mode - enhances scalp positions)',
-    riskLevel: 'medium',
-    resetFn: (preview) => loadScalpReentryDefaults(preview),
-    configType: 'Scalp Re-entry Config',
-  },
+  // [Story 9.9] Removed: Scalp Re-entry Optimization - now part of each mode's Position Optimization
   {
     id: 'swing',
     name: 'Swing Mode',
@@ -65,14 +57,7 @@ const settingGroups: SettingGroup[] = [
     resetFn: (preview) => loadModeDefaults('position', preview),
     configType: 'Position Mode',
   },
-  {
-    id: 'hedge',
-    name: 'Hedge Mode Settings',
-    description: 'Reset hedge mode settings to default values',
-    riskLevel: 'high',
-    resetFn: (preview) => loadHedgeDefaults(preview),
-    configType: 'Hedge Mode',
-  },
+  // [Story 9.9] Removed: Hedge Mode Settings - now part of each mode's Position Optimization
   {
     id: 'circuit-breaker',
     name: 'Circuit Breaker Settings',

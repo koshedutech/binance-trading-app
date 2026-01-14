@@ -135,6 +135,13 @@ type ModeTimeframeConfig struct{
 	AnalysisTimeframe string `json:"analysis_timeframe"` // Pattern detection TF (e.g., "1m", "15m", "4h", "1d")
 }
 
+// ModeEntryConfig holds entry order settings for a mode
+type ModeEntryConfig struct {
+	LimitOrderGapPercent float64 `json:"limit_order_gap_percent"` // Gap from current price for limit orders (default: 0.1 = 0.1%)
+	UseMarketEntry       bool    `json:"use_market_entry"`        // Use MARKET orders instead of LIMIT for immediate fill
+	MaxLimitGapPercent   float64 `json:"max_limit_gap_percent"`   // Max gap allowed - use market if gap exceeds this (default: 0.5%)
+}
+
 // ModeConfidenceConfig holds confidence thresholds for a mode
 type ModeConfidenceConfig struct {
 	MinConfidence   float64 `json:"min_confidence"`   // Minimum to enter (e.g., 50, 60, 65, 75)
@@ -340,10 +347,11 @@ type TradingTFConfig struct {
 // ====== TREND VALIDATION FILTERS (Story 9.5) ======
 // TrendFiltersConfig holds all trend validation filter settings
 type TrendFiltersConfig struct {
-	Description   string               `json:"_description,omitempty"`
-	BTCTrendCheck *BTCTrendCheckConfig `json:"btc_trend_check,omitempty"`
-	PriceVsEMA    *PriceVsEMAConfig    `json:"price_vs_ema,omitempty"`
-	VWAPFilter    *VWAPFilterConfig    `json:"vwap_filter,omitempty"`
+	Description            string                       `json:"_description,omitempty"`
+	BTCTrendCheck          *BTCTrendCheckConfig         `json:"btc_trend_check,omitempty"`
+	PriceVsEMA             *PriceVsEMAConfig            `json:"price_vs_ema,omitempty"`
+	VWAPFilter             *VWAPFilterConfig            `json:"vwap_filter,omitempty"`
+	CandlestickAlignment   *CandlestickAlignmentConfig  `json:"candlestick_alignment,omitempty"` // Phase 2: Block when candle pattern contradicts direction
 }
 
 // BTCTrendCheckConfig configures BTC correlation filter
@@ -369,6 +377,14 @@ type VWAPFilterConfig struct {
 	RequirePriceAboveVWAPForLong  bool    `json:"require_price_above_vwap_for_long"`
 	RequirePriceBelowVWAPForShort bool    `json:"require_price_below_vwap_for_short"`
 	NearVWAPTolerancePercent      float64 `json:"near_vwap_tolerance_percent"`
+}
+
+// CandlestickAlignmentConfig configures candlestick pattern alignment filter (Phase 2)
+// Blocks trades where a strong candlestick pattern contradicts the chosen direction
+type CandlestickAlignmentConfig struct {
+	Enabled              bool    `json:"enabled"`
+	MinConfidenceToBlock float64 `json:"min_confidence_to_block"` // 0-100, only block if pattern confidence >= this
+	LogOnlyMode          bool    `json:"log_only_mode"`           // If true, log conflicts but don't block
 }
 
 // ====== DYNAMIC AI EXIT CONFIGURATION ======
@@ -411,6 +427,7 @@ type ModeFullConfig struct {
 
 	// Sub-configurations
 	Timeframe       *ModeTimeframeConfig        `json:"timeframe"`
+	Entry           *ModeEntryConfig            `json:"entry"`            // Entry order settings (limit gap, market entry)
 	Confidence      *ModeConfidenceConfig       `json:"confidence"`
 	Size            *ModeSizeConfig             `json:"size"`
 	CircuitBreaker  *ModeCircuitBreakerConfig   `json:"circuit_breaker"`
@@ -433,6 +450,9 @@ type ModeFullConfig struct {
 
 	// ====== NEW: Mode-specific Early Warning (Story 9.4 Phase 4) ======
 	EarlyWarning *ModeEarlyWarningConfig `json:"early_warning,omitempty"` // Mode-specific early warning settings
+
+	// ====== NEW: Position Optimization (Story 9.9) ======
+	PositionOptimization *PositionOptimizationConfig `json:"position_optimization,omitempty"` // Progressive TP + Rebuy + Hedging
 }
 
 // ====== LLM AND ADAPTIVE AI CONFIGURATION (Story 2.8) ======
@@ -520,14 +540,7 @@ func DefaultModeLLMSettings() map[GinieTradingMode]ModeLLMSettings {
 			BlockOnDisagreement: true,
 			CacheEnabled:        false,
 		},
-		GinieModeScalpReentry: {
-			LLMEnabled:          true,
-			LLMWeight:           0.35, // Higher weight for re-entry decisions
-			SkipOnTimeout:       false,
-			MinLLMConfidence:    55,
-			BlockOnDisagreement: false,
-			CacheEnabled:        true,
-		},
+		// [Story 9.9] GinieModeScalpReentry removed - position optimization is now a feature, not a mode
 	}
 }
 
@@ -812,7 +825,7 @@ func DefaultModeConfigs() map[string]*ModeFullConfig {
 		// Uses scalp entry logic but progressive TP (0.3%, 0.6%, 1%) with re-entry at breakeven
 		"scalp_reentry": {
 			ModeName: "scalp_reentry",
-			Enabled:  false, // Disabled by default - enable via ScalpReentryConfig
+			Enabled:  false, // Disabled by default - enable via PositionOptimizationConfig
 			Timeframe: &ModeTimeframeConfig{
 				TrendTimeframe:    "15m", // Same as scalp
 				EntryTimeframe:    "5m",
@@ -1463,7 +1476,7 @@ type AutopilotSettings struct {
 
 	// ====== SCALP RE-ENTRY MODE CONFIGURATION ======
 	// Progressive TP with re-entry at breakeven for maximizing gains
-	ScalpReentryConfig ScalpReentryConfig `json:"scalp_reentry_config"`
+	PositionOptimizationConfig PositionOptimizationConfig `json:"scalp_reentry_config"`
 
 	// ====== EARLY WARNING SYSTEM (Multi-Timeframe Position Health Monitor) ======
 	// AI-driven early loss detection using 1m, 3m, 5m, 15m candle analysis
@@ -1865,7 +1878,7 @@ func DefaultSettings() *AutopilotSettings {
 		AdaptiveAIConfig: DefaultAdaptiveAIConfig(),
 
 		// Scalp Re-entry Mode configuration defaults (Progressive TP with re-entry)
-		ScalpReentryConfig: DefaultScalpReentryConfig(),
+		PositionOptimizationConfig: DefaultPositionOptimizationConfig(),
 
 		// Early Warning System defaults (Multi-Timeframe Position Health Monitor)
 		EarlyWarningEnabled:            true,  // Enabled by default
@@ -4300,13 +4313,13 @@ func (sm *SettingsManager) UpdateModeConfig(mode string, config *ModeFullConfig)
 // IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
 // This ensures the dedicated column is the single source of truth (Story 4.11).
 // Returns error if config not found - caller must handle missing configs explicitly.
-// NOTE: scalp_reentry uses ScalpReentryConfig, NOT ModeFullConfig. Do not call this for scalp_reentry.
-// Use GetUserScalpReentryConfig for scalp_reentry or handle it specially in the API handler.
+// NOTE: scalp_reentry uses PositionOptimizationConfig, NOT ModeFullConfig. Do not call this for scalp_reentry.
+// Use GetUserPositionOptimizationConfig for scalp_reentry or handle it specially in the API handler.
 func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *database.Repository, userID, modeName string) (*ModeFullConfig, error) {
-	// scalp_reentry is a position optimizer with its own config format (ScalpReentryConfig)
-	// It should NOT be loaded via this function - use GetUserScalpReentryConfig or handle in API
+	// scalp_reentry is a position optimizer with its own config format (PositionOptimizationConfig)
+	// It should NOT be loaded via this function - use GetUserPositionOptimizationConfig or handle in API
 	if modeName == "scalp_reentry" {
-		return nil, fmt.Errorf("scalp_reentry uses ScalpReentryConfig format, not ModeFullConfig. Use /ginie/scalp-reentry-config endpoint")
+		return nil, fmt.Errorf("scalp_reentry uses PositionOptimizationConfig format, not ModeFullConfig. Use /ginie/scalp-reentry-config endpoint")
 	}
 
 	if !ValidModes[modeName] {
@@ -4358,12 +4371,12 @@ func (sm *SettingsManager) GetUserModeConfigFromDB(ctx context.Context, db *data
 // GetAllUserModeConfigsFromDB retrieves all mode configurations from database for a user.
 // IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
 // Returns map[modeName]*ModeFullConfig
-// NOTE: Excludes scalp_reentry which uses ScalpReentryConfig, not ModeFullConfig
+// NOTE: Excludes scalp_reentry which uses PositionOptimizationConfig, not ModeFullConfig
 func (sm *SettingsManager) GetAllUserModeConfigsFromDB(ctx context.Context, db *database.Repository, userID string) (map[string]*ModeFullConfig, error) {
 	configs := make(map[string]*ModeFullConfig)
 
 	for modeName := range ValidModes {
-		// Skip scalp_reentry - it uses ScalpReentryConfig format, not ModeFullConfig
+		// Skip scalp_reentry - it uses PositionOptimizationConfig format, not ModeFullConfig
 		if modeName == "scalp_reentry" {
 			continue
 		}
@@ -4709,60 +4722,8 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 			},
 		}
 
-	case GinieModeScalpReentry:
-		return GinieModeConfig{
-			Mode:    GinieModeScalpReentry,
-			Enabled: true,
-
-			// Timeframes - same as scalp but optimized for re-entry cycles
-			TrendTimeframe:    "15m",
-			EntryTimeframe:    "5m",
-			AnalysisTimeframe: "15m",
-
-			// Confidence - moderate thresholds for quick re-entries
-			MinConfidence:   55,
-			HighConfidence:  72,
-			UltraConfidence: 85,
-
-			// Position Sizing - MUST be configured by user - no defaults
-			BaseSizeUSD:    0, // MUST be configured by user - no default
-			MaxSizeUSD:     0, // MUST be configured by user - no default
-			MaxPositions:   4,
-			Leverage:       10,   // 10x leverage per user request
-			SizeMultiplier: 2.0,
-
-			// SL/TP - wider stops to avoid panic exits on normal volatility
-			StopLossPercent:   2.0,
-			TakeProfitPercent: 2.5,
-			TrailingEnabled:   false,  // Uses progressive TP instead
-			TrailingPercent:   0.4,
-			TrailingActivation: 0.8,
-			TrailingActivationPrice: 0,
-			MaxHoldDuration:   "2h",
-
-			// ROI-based SL/TP
-			UseROIBasedSLTP:      false,
-			ROIStopLossPercent:   -10,
-			ROITakeProfitPercent: 20,
-
-			// Margin
-			MarginType:            "CROSS",
-			IsolatedMarginPercent: 50,
-
-			// Circuit Breaker - aggressive for high-frequency re-entry trading
-			CircuitBreaker: ModeCircuitBreaker{
-				MaxLossPerHour:     35,
-				MaxLossPerDay:      80,
-				MaxConsecutiveLoss: 4,
-				MaxTradesPerMinute: 4,
-				MaxTradesPerHour:   25,
-				MaxTradesPerDay:    60,
-				WinRateCheckAfter:  12,
-				MinWinRatePercent:  48,
-				CooldownMinutes:    20,
-				AutoRecovery:       true,
-			},
-		}
+	// [Story 9.9] GinieModeScalpReentry case removed - position optimization is now a feature, not a mode
+	// Use scalp mode with PositionOptimizationConfig.Enabled = true for position optimization
 
 	default:
 		// Return scalp as default if unknown mode
@@ -4770,16 +4731,16 @@ func GetDefaultModeConfig(mode GinieTradingMode) GinieModeConfig {
 	}
 }
 
-// GetAllDefaultModeConfigs returns a map of all 5 trading mode configurations with their defaults.
+// GetAllDefaultModeConfigs returns a map of all 4 trading mode configurations with their defaults.
+// [Story 9.9] Reduced from 5 to 4 modes - scalp_reentry is now a feature (position optimization), not a mode.
 // This is useful for displaying all mode configurations in the UI or for initialization.
 // Returns map keyed by GinieTradingMode containing GinieModeConfig values.
 func GetAllDefaultModeConfigs() map[GinieTradingMode]GinieModeConfig {
 	return map[GinieTradingMode]GinieModeConfig{
-		GinieModeUltraFast:    GetDefaultModeConfig(GinieModeUltraFast),
-		GinieModeScalp:        GetDefaultModeConfig(GinieModeScalp),
-		GinieModeScalpReentry: GetDefaultModeConfig(GinieModeScalpReentry),
-		GinieModeSwing:        GetDefaultModeConfig(GinieModeSwing),
-		GinieModePosition:     GetDefaultModeConfig(GinieModePosition),
+		GinieModeUltraFast: GetDefaultModeConfig(GinieModeUltraFast),
+		GinieModeScalp:     GetDefaultModeConfig(GinieModeScalp),
+		GinieModeSwing:     GetDefaultModeConfig(GinieModeSwing),
+		GinieModePosition:  GetDefaultModeConfig(GinieModePosition),
 	}
 }
 
@@ -4788,7 +4749,8 @@ func GetAllDefaultModeConfigs() map[GinieTradingMode]GinieModeConfig {
 // The configuration is validated before saving.
 func (sm *SettingsManager) UpdateGinieModeConfig(mode GinieTradingMode, config GinieModeConfig) error {
 	// Validate mode
-	if mode != GinieModeUltraFast && mode != GinieModeScalp && mode != GinieModeScalpReentry && mode != GinieModeSwing && mode != GinieModePosition {
+	// [Story 9.9] scalp_reentry mode removed - only 4 base modes are valid
+	if mode != GinieModeUltraFast && mode != GinieModeScalp && mode != GinieModeSwing && mode != GinieModePosition {
 		return fmt.Errorf("invalid trading mode: %s", mode)
 	}
 
