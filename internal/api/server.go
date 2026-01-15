@@ -475,6 +475,7 @@ func (s *Server) setupRoutes() {
 			futures.GET("/funding-fees/history", s.handleGetFundingFeeHistory)
 			futures.GET("/transactions/history", s.handleGetFuturesTransactionHistory)
 			futures.GET("/income-history", s.handleGetIncomeHistory) // PnL, fees, funding from Binance
+			futures.GET("/pnl-summary", s.handleGetPnLSummary)      // Daily/Weekly PnL with fees breakdown
 			futures.GET("/metrics", s.handleGetFuturesMetrics)
 			futures.GET("/trade-source-stats", s.handleGetTradeSourceStats)
 			futures.GET("/position-trade-sources", s.handleGetPositionTradeSources)

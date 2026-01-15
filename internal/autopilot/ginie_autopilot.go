@@ -20,6 +20,26 @@ import (
 	"time"
 )
 
+// isCacheUnavailableError checks if the error indicates cache is unavailable
+// This avoids importing cache package to prevent circular imports
+func isCacheUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "cache unavailable")
+}
+
+// SettingsCacheReader defines the interface for reading settings from cache
+// This interface breaks the circular dependency between autopilot and cache packages
+type SettingsCacheReader interface {
+	// GetModeConfig returns the full mode configuration from cache
+	GetModeConfig(ctx context.Context, userID, mode string) (*ModeFullConfig, error)
+	// GetCircuitBreaker returns the global circuit breaker config from cache
+	GetCircuitBreaker(ctx context.Context, userID string) (*database.UserGlobalCircuitBreaker, error)
+	// GetCapitalAllocation returns the capital allocation config from cache
+	GetCapitalAllocation(ctx context.Context, userID string) (*database.UserCapitalAllocation, error)
+}
+
 // ==================== TRADING FEE CONSTANTS ====================
 // Binance Futures trading fees (Standard tier - verified from API)
 // Note: These are fallback values. Actual user rates are stored in user_fee_rates table
@@ -635,6 +655,9 @@ type GiniePosition struct {
 	DecisionReport *GinieDecisionReport `json:"decision_report,omitempty"`
 	FuturesTradeID int64                `json:"futures_trade_id,omitempty"` // Database trade ID for lifecycle events
 
+	// Client Order ID Chain (Epic 7: Trade Lifecycle Tracking)
+	ClientOrderBaseID string `json:"client_order_base_id,omitempty"` // Base ID for linking related orders (e.g., "SCA-15JAN-00001")
+
 	// Fee Tracking (actual fees from Binance API/WebSocket)
 	EntryFeeUSD   float64 `json:"entry_fee_usd,omitempty"`   // Actual entry fee in USD
 	EntryWasMaker bool    `json:"entry_was_maker,omitempty"` // true if entry was maker order
@@ -998,6 +1021,7 @@ type GinieAutopilot struct {
 	futuresClient binance.FuturesClient
 	logger        *logging.Logger
 	repo              *database.Repository                   // Database for trade persistence
+	settingsCache     SettingsCacheReader                    // Story 6.6: Cache-only settings reads (interface to break import cycle)
 	positionStateRepo *database.RedisPositionStateRepository // Redis-based position state storage
 	eventLogger       *TradeEventLogger                      // Trade lifecycle event logging
 	userID            string                                 // User ID for multi-tenant PnL isolation
@@ -1129,6 +1153,7 @@ type GinieAutopilot struct {
 
 // NewGinieAutopilot creates a new Ginie autonomous trading system
 // redisClient can be nil (position state will fall back to JSON file only)
+// settingsCache is required for cache-only settings reads during trading (Story 6.6)
 func NewGinieAutopilot(
 	analyzer *GinieAnalyzer,
 	futuresClient binance.FuturesClient,
@@ -1136,6 +1161,7 @@ func NewGinieAutopilot(
 	repo *database.Repository,
 	userID string,
 	positionStateRepo *database.RedisPositionStateRepository,
+	settingsCache SettingsCacheReader,
 ) *GinieAutopilot {
 	config := DefaultGinieAutopilotConfig()
 
@@ -1151,24 +1177,26 @@ func NewGinieAutopilot(
 		MaxDailyTrades:       100, // Default fallback
 	}
 
-	// Story 5.3: Override with per-user global circuit breaker config from database
-	if repo != nil && userID != "" {
+	// Story 6.6: Load from cache-first (no direct DB during trading)
+	if settingsCache != nil && userID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		if globalCBConfig, err := repo.GetUserGlobalCircuitBreaker(ctx, userID); err == nil && globalCBConfig != nil {
+		if globalCBConfig, err := settingsCache.GetCircuitBreaker(ctx, userID); err == nil && globalCBConfig != nil {
 			cbConfig.MaxLossPerHour = globalCBConfig.MaxLossPerHour
 			cbConfig.MaxDailyLoss = globalCBConfig.MaxDailyLoss
 			cbConfig.MaxConsecutiveLosses = globalCBConfig.MaxConsecutiveLosses
 			cbConfig.CooldownMinutes = globalCBConfig.CooldownMinutes
 			cbConfig.MaxTradesPerMinute = globalCBConfig.MaxTradesPerMinute
 			cbConfig.MaxDailyTrades = globalCBConfig.MaxDailyTrades
-			log.Printf("[GINIE-INIT] Loaded global circuit breaker config from database for user %s: MaxLossPerHour=$%.2f, MaxDailyLoss=$%.2f, MaxConsecutiveLosses=%d, CooldownMinutes=%d, MaxTradesPerMinute=%d, MaxDailyTrades=%d",
+			log.Printf("[GINIE-INIT] Loaded global circuit breaker config from cache for user %s: MaxLossPerHour=$%.2f, MaxDailyLoss=$%.2f, MaxConsecutiveLosses=%d, CooldownMinutes=%d, MaxTradesPerMinute=%d, MaxDailyTrades=%d",
 				userID, globalCBConfig.MaxLossPerHour, globalCBConfig.MaxDailyLoss, globalCBConfig.MaxConsecutiveLosses, globalCBConfig.CooldownMinutes, globalCBConfig.MaxTradesPerMinute, globalCBConfig.MaxDailyTrades)
+		} else if isCacheUnavailableError(err) {
+			log.Printf("[GINIE-INIT] Cache unavailable for user %s circuit breaker config (using defaults)", userID)
 		} else if err != nil {
-			log.Printf("[GINIE-INIT] Failed to load global circuit breaker config from database for user %s: %v (using defaults)", userID, err)
+			log.Printf("[GINIE-INIT] Failed to load global circuit breaker config from cache for user %s: %v (using defaults)", userID, err)
 		} else {
-			log.Printf("[GINIE-INIT] No global circuit breaker config found in database for user %s (using defaults)", userID)
+			log.Printf("[GINIE-INIT] No global circuit breaker config found in cache for user %s (using defaults)", userID)
 		}
 	}
 
@@ -1178,6 +1206,7 @@ func NewGinieAutopilot(
 		futuresClient:        futuresClient,
 		logger:               logger,
 		repo:                 repo,
+		settingsCache:        settingsCache, // Story 6.6: Cache-only settings reads
 		positionStateRepo:    positionStateRepo, // Redis-based position state (may be nil)
 		eventLogger:          NewTradeEventLogger(repo.GetDB()),
 		userID:               userID,
@@ -1231,50 +1260,74 @@ func NewGinieAutopilot(
 	ga.earlyWarningCounter = make(map[string]int)
 	ga.lastWarningTime = make(map[string]time.Time)
 
-	// DATABASE-FIRST: Load mode enable/disable directly from database
-	// NO FALLBACKS TO HARDCODED DEFAULTS - if DB doesn't have config, log error
-	// User initialization should have created these records
-	if ultraFastConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "ultra_fast"); err == nil && ultraFastConfig != nil {
-		ga.config.EnableUltraFastMode = ultraFastConfig.Enabled
-		log.Printf("[GINIE-INIT] Ultra-fast mode enabled from DATABASE: %v", ultraFastConfig.Enabled)
-	} else if err != nil {
-		log.Printf("[GINIE-INIT] ERROR: Failed to load ultra_fast config from DB for user %s: %v - defaulting to DISABLED", userID, err)
+	// CACHE-FIRST: Load mode enable/disable from cache (populated from DB on login)
+	// NO FALLBACKS TO HARDCODED DEFAULTS - if cache doesn't have config, log error
+	// User initialization should have created these records and LoadUserSettings cached them
+	if ga.settingsCache != nil {
+		if ultraFastConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, "ultra_fast"); err == nil && ultraFastConfig != nil {
+			ga.config.EnableUltraFastMode = ultraFastConfig.Enabled
+			log.Printf("[GINIE-INIT] Ultra-fast mode enabled from CACHE: %v", ultraFastConfig.Enabled)
+		} else if err != nil {
+			if isCacheUnavailableError(err) {
+				log.Printf("[GINIE-INIT] WARNING: Cache unavailable for ultra_fast config for user %s - defaulting to DISABLED", ga.userID)
+			} else {
+				log.Printf("[GINIE-INIT] ERROR: Failed to load ultra_fast config from cache for user %s: %v - defaulting to DISABLED", ga.userID, err)
+			}
+			ga.config.EnableUltraFastMode = false
+		} else {
+			log.Printf("[GINIE-INIT] ERROR: Ultra-fast mode config missing in cache for user %s - defaulting to DISABLED", ga.userID)
+			ga.config.EnableUltraFastMode = false
+		}
+
+		if scalpConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, "scalp"); err == nil && scalpConfig != nil {
+			ga.config.EnableScalpMode = scalpConfig.Enabled
+			log.Printf("[GINIE-INIT] Scalp mode enabled from CACHE: %v", scalpConfig.Enabled)
+		} else if err != nil {
+			if isCacheUnavailableError(err) {
+				log.Printf("[GINIE-INIT] WARNING: Cache unavailable for scalp config for user %s - defaulting to DISABLED", ga.userID)
+			} else {
+				log.Printf("[GINIE-INIT] ERROR: Failed to load scalp config from cache for user %s: %v - defaulting to DISABLED", ga.userID, err)
+			}
+			ga.config.EnableScalpMode = false
+		} else {
+			log.Printf("[GINIE-INIT] ERROR: Scalp mode config missing in cache for user %s - defaulting to DISABLED", ga.userID)
+			ga.config.EnableScalpMode = false
+		}
+
+		if swingConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, "swing"); err == nil && swingConfig != nil {
+			ga.config.EnableSwingMode = swingConfig.Enabled
+			log.Printf("[GINIE-INIT] Swing mode enabled from CACHE: %v", swingConfig.Enabled)
+		} else if err != nil {
+			if isCacheUnavailableError(err) {
+				log.Printf("[GINIE-INIT] WARNING: Cache unavailable for swing config for user %s - defaulting to DISABLED", ga.userID)
+			} else {
+				log.Printf("[GINIE-INIT] ERROR: Failed to load swing config from cache for user %s: %v - defaulting to DISABLED", ga.userID, err)
+			}
+			ga.config.EnableSwingMode = false
+		} else {
+			log.Printf("[GINIE-INIT] ERROR: Swing mode config missing in cache for user %s - defaulting to DISABLED", ga.userID)
+			ga.config.EnableSwingMode = false
+		}
+
+		if positionConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, "position"); err == nil && positionConfig != nil {
+			ga.config.EnablePositionMode = positionConfig.Enabled
+			log.Printf("[GINIE-INIT] Position mode enabled from CACHE: %v", positionConfig.Enabled)
+		} else if err != nil {
+			if isCacheUnavailableError(err) {
+				log.Printf("[GINIE-INIT] WARNING: Cache unavailable for position config for user %s - defaulting to DISABLED", ga.userID)
+			} else {
+				log.Printf("[GINIE-INIT] ERROR: Failed to load position config from cache for user %s: %v - defaulting to DISABLED", ga.userID, err)
+			}
+			ga.config.EnablePositionMode = false
+		} else {
+			log.Printf("[GINIE-INIT] ERROR: Position mode config missing in cache for user %s - defaulting to DISABLED", ga.userID)
+			ga.config.EnablePositionMode = false
+		}
+	} else {
+		log.Printf("[GINIE-INIT] WARNING: settingsCache not available, defaulting all modes to DISABLED")
 		ga.config.EnableUltraFastMode = false
-	} else {
-		log.Printf("[GINIE-INIT] ERROR: Ultra-fast mode config missing in DB for user %s - defaulting to DISABLED", userID)
-		ga.config.EnableUltraFastMode = false
-	}
-
-	if scalpConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "scalp"); err == nil && scalpConfig != nil {
-		ga.config.EnableScalpMode = scalpConfig.Enabled
-		log.Printf("[GINIE-INIT] Scalp mode enabled from DATABASE: %v", scalpConfig.Enabled)
-	} else if err != nil {
-		log.Printf("[GINIE-INIT] ERROR: Failed to load scalp config from DB for user %s: %v - defaulting to DISABLED", userID, err)
 		ga.config.EnableScalpMode = false
-	} else {
-		log.Printf("[GINIE-INIT] ERROR: Scalp mode config missing in DB for user %s - defaulting to DISABLED", userID)
-		ga.config.EnableScalpMode = false
-	}
-
-	if swingConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "swing"); err == nil && swingConfig != nil {
-		ga.config.EnableSwingMode = swingConfig.Enabled
-		log.Printf("[GINIE-INIT] Swing mode enabled from DATABASE: %v", swingConfig.Enabled)
-	} else if err != nil {
-		log.Printf("[GINIE-INIT] ERROR: Failed to load swing config from DB for user %s: %v - defaulting to DISABLED", userID, err)
 		ga.config.EnableSwingMode = false
-	} else {
-		log.Printf("[GINIE-INIT] ERROR: Swing mode config missing in DB for user %s - defaulting to DISABLED", userID)
-		ga.config.EnableSwingMode = false
-	}
-
-	if positionConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, repo, userID, "position"); err == nil && positionConfig != nil {
-		ga.config.EnablePositionMode = positionConfig.Enabled
-		log.Printf("[GINIE-INIT] Position mode enabled from DATABASE: %v", positionConfig.Enabled)
-	} else if err != nil {
-		log.Printf("[GINIE-INIT] ERROR: Failed to load position config from DB for user %s: %v - defaulting to DISABLED", userID, err)
-		ga.config.EnablePositionMode = false
-	} else {
-		log.Printf("[GINIE-INIT] ERROR: Position mode config missing in DB for user %s - defaulting to DISABLED", userID)
 		ga.config.EnablePositionMode = false
 	}
 
@@ -1372,19 +1425,22 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 		return false
 	}
 
-	// Read from database for real-time mode status (same as main scan loop)
+	// Read from cache for real-time mode status (same as main scan loop)
 	// This ensures toggling a mode in UI takes effect immediately
-	if ga.repo != nil && ga.userID != "" {
+	if ga.settingsCache != nil && ga.userID != "" {
 		ctx := context.Background()
-		sm := GetSettingsManager()
-		modeConfig, err := sm.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, modeKey)
+		modeConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, modeKey)
 		if err != nil {
 			// Config not found or error - mode is disabled
-			log.Printf("[MODE-CHECK] %s: disabled (DB read error: %v)", mode, err)
+			if isCacheUnavailableError(err) {
+				log.Printf("[MODE-CHECK] %s: disabled (cache unavailable)", mode)
+			} else {
+				log.Printf("[MODE-CHECK] %s: disabled (cache read error: %v)", mode, err)
+			}
 			return false
 		}
 		if modeConfig != nil {
-			log.Printf("[MODE-CHECK] %s: %v (from DB)", mode, modeConfig.Enabled)
+			log.Printf("[MODE-CHECK] %s: %v (from CACHE)", mode, modeConfig.Enabled)
 			return modeConfig.Enabled
 		}
 	}
@@ -2316,7 +2372,7 @@ func (ga *GinieAutopilot) runMainLoop() {
 			modesEnabled := 0
 			var enabledModes []string
 			ctx := context.Background()
-			settingsManager := GetSettingsManager()
+			// Note: settingsCache is now used directly for cache-first mode config reads
 
 			// Build enabled modes map from database - checked EVERY scan cycle for immediate effect
 			enabledModesMap := make(map[string]bool)
@@ -2336,19 +2392,27 @@ func (ga *GinieAutopilot) runMainLoop() {
 			}
 
 			for _, mc := range modeChecks {
-				modeConfig, err := settingsManager.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, mc.modeName)
-				if err != nil {
-					// Config not found or error - mode is disabled
-					log.Printf("[MODE-ORCHESTRATION] %s: disabled (no DB config)", mc.displayName)
+				if ga.settingsCache == nil {
+					log.Printf("[MODE-ORCHESTRATION] %s: disabled (cache not available)", mc.displayName)
 					continue
 				}
-				if modeConfig.Enabled {
+				modeConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, mc.modeName)
+				if err != nil {
+					// Config not found or error - mode is disabled
+					if isCacheUnavailableError(err) {
+						log.Printf("[MODE-ORCHESTRATION] %s: disabled (cache unavailable)", mc.displayName)
+					} else {
+						log.Printf("[MODE-ORCHESTRATION] %s: disabled (no cache config)", mc.displayName)
+					}
+					continue
+				}
+				if modeConfig != nil && modeConfig.Enabled {
 					modesEnabled++
 					enabledModes = append(enabledModes, mc.displayName)
 					enabledModesMap[mc.modeName] = true
-					log.Printf("[MODE-ORCHESTRATION] %s: enabled (from DB)", mc.displayName)
+					log.Printf("[MODE-ORCHESTRATION] %s: enabled (from CACHE)", mc.displayName)
 				} else {
-					log.Printf("[MODE-ORCHESTRATION] %s: disabled (from DB)", mc.displayName)
+					log.Printf("[MODE-ORCHESTRATION] %s: disabled (from CACHE)", mc.displayName)
 				}
 			}
 			if modesEnabled > 1 {
@@ -7192,37 +7256,42 @@ func (ga *GinieAutopilot) getModeConfigForSizing(mode GinieTradingMode) *ModeFul
 	return ga.getModeConfig(mode)
 }
 
-// getModeConfig retrieves the mode configuration from SettingsManager with database-first approach
+// getModeConfig retrieves the mode configuration from cache with fallback to defaults
 // This is a helper method that provides a unified way to get mode-specific configuration
-// Priority: 1) User-specific DB config, 2) Global defaults (for new users only)
+// Priority: 1) User-specific cache config, 2) Global defaults (for new users only)
 func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
-	sm := GetSettingsManager()
-	if sm == nil {
-		return nil
-	}
-
 	modeStr := string(mode)
 
-	// DATABASE-FIRST: Try to load user-specific config from database
-	if ga.repo != nil && ga.userID != "" {
+	// CACHE-FIRST: Try to load user-specific config from cache
+	if ga.settingsCache != nil && ga.userID != "" {
 		ctx := context.Background()
-		if modeConfig, err := sm.GetUserModeConfigFromDB(ctx, ga.repo, ga.userID, modeStr); err == nil && modeConfig != nil {
+		modeConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, modeStr)
+		if err != nil {
+			if isCacheUnavailableError(err) {
+				log.Printf("[MODE-CONFIG] WARNING: Cache unavailable for user %s mode %s", ga.userID, modeStr)
+			} else {
+				log.Printf("[MODE-CONFIG] ERROR: Cache read failed for user %s mode %s: %v", ga.userID, modeStr, err)
+			}
+		} else if modeConfig != nil {
 			// Safe logging with nil check for Size field
 			baseSizeUSD := 0.0
 			if modeConfig.Size != nil {
 				baseSizeUSD = modeConfig.Size.BaseSizeUSD
 			}
-			log.Printf("[MODE-CONFIG] Loaded from DATABASE for user %s mode %s: BaseSizeUSD=%.2f",
+			log.Printf("[MODE-CONFIG] Loaded from CACHE for user %s mode %s: BaseSizeUSD=%.2f",
 				ga.userID, modeStr, baseSizeUSD)
 			return modeConfig
 		}
 	}
 
-	// FALLBACK: Only use global config if no database config exists
+	// FALLBACK: Only use global config if no cache config exists
 	// This should only happen for brand new users who haven't customized settings
-	if modeConfig, err := sm.GetDefaultModeConfig(modeStr); err == nil && modeConfig != nil {
-		log.Printf("[MODE-CONFIG] Loaded from DEFAULTS for mode %s (user has no DB config)", modeStr)
-		return modeConfig
+	sm := GetSettingsManager()
+	if sm != nil {
+		if modeConfig, err := sm.GetDefaultModeConfig(modeStr); err == nil && modeConfig != nil {
+			log.Printf("[MODE-CONFIG] Loaded from DEFAULTS for mode %s (user has no cache config)", modeStr)
+			return modeConfig
+		}
 	}
 
 	return nil

@@ -887,6 +887,15 @@ func main() {
 			logger.Info("Redis not available - position state will use JSON file fallback only")
 		}
 
+		// Story 6.6: Create SettingsCacheService for cache-only settings reads during trading
+		var settingsCache *cache.SettingsCacheService
+		if cacheService != nil && cacheService.IsHealthy() {
+			settingsCache = cache.NewSettingsCacheService(cacheService, repo, logger)
+			logger.Info("SettingsCacheService initialized for cache-first settings reads")
+		} else {
+			logger.Info("Redis not available - settings cache will be nil (legacy mode)")
+		}
+
 		userAutopilotManager = autopilot.NewUserAutopilotManager(
 			repo,
 			futuresAutopilotController.GetGinieAnalyzer(),
@@ -895,6 +904,7 @@ func main() {
 			llmConfig,
 			userAutopilotLogger,
 			positionStateRepo, // May be nil if Redis unavailable
+			settingsCache,     // Story 6.6: May be nil if Redis unavailable
 		)
 
 		// Set manager on FuturesController for access in handlers

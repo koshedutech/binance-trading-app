@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -2113,4 +2114,176 @@ func getOppositeSide(side string) string {
 		return "SELL"
 	}
 	return "BUY"
+}
+
+// ==================== TIMEZONE HELPERS ====================
+// Timezone handling for PnL calculations based on system TZ
+
+var (
+	cachedTimezone *time.Location
+	timezoneString string
+	timezoneOffset int
+	tzOnce         sync.Once
+)
+
+// getSystemTimezone returns the system timezone from TZ environment variable
+func getSystemTimezone() *time.Location {
+	tzOnce.Do(func() {
+		tz := os.Getenv("TZ")
+		if tz != "" {
+			loc, err := time.LoadLocation(tz)
+			if err == nil {
+				cachedTimezone = loc
+				// Calculate offset and string representation
+				now := time.Now().In(loc)
+				_, offset := now.Zone()
+				timezoneOffset = offset / 3600
+				if timezoneOffset >= 0 {
+					timezoneString = fmt.Sprintf("GMT+%d", timezoneOffset)
+				} else {
+					timezoneString = fmt.Sprintf("GMT%d", timezoneOffset)
+				}
+				log.Printf("[TIMEZONE] Using system timezone: %s (%s)", tz, timezoneString)
+				return
+			}
+			log.Printf("[TIMEZONE] Failed to load timezone %s: %v, using UTC", tz, err)
+		}
+		cachedTimezone = time.UTC
+		timezoneString = "UTC"
+		timezoneOffset = 0
+	})
+	return cachedTimezone
+}
+
+// getStartOfDayInSystemTimezone returns the start of the current day in system timezone as Unix milliseconds
+func getStartOfDayInSystemTimezone() int64 {
+	loc := getSystemTimezone()
+	now := time.Now().In(loc)
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	return startOfDay.UnixMilli()
+}
+
+// getWeekStartInSystemTimezone returns the start of the week (Thursday) in system timezone
+// Binance resets weekly PnL on Thursday 00:00 UTC, we adjust for local timezone
+func getWeekStartInSystemTimezone() (int64, string, string) {
+	loc := getSystemTimezone()
+	now := time.Now().In(loc)
+
+	// Find the most recent Thursday (Binance weekly reset day)
+	daysFromThursday := int(now.Weekday()) - int(time.Thursday)
+	if daysFromThursday < 0 {
+		daysFromThursday += 7
+	}
+
+	weekStart := time.Date(now.Year(), now.Month(), now.Day()-daysFromThursday, 0, 0, 0, 0, loc)
+	weekEnd := weekStart.AddDate(0, 0, 6)
+
+	weekStartStr := weekStart.Format("Jan 2")
+	weekEndStr := weekEnd.Format("Jan 2")
+
+	return weekStart.UnixMilli(), weekStartStr, weekEndStr
+}
+
+// getTimeUntilMidnightInSystemTimezone returns seconds until midnight in system timezone
+func getTimeUntilMidnightInSystemTimezone() int64 {
+	loc := getSystemTimezone()
+	now := time.Now().In(loc)
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, loc)
+	return int64(midnight.Sub(now).Seconds())
+}
+
+// handleGetPnLSummary returns Binance PnL with timezone info and countdown to reset
+// Includes breakdown: realized PnL, commission fees (maker/taker), and funding fees
+// GET /api/futures/pnl-summary
+func (s *Server) handleGetPnLSummary(c *gin.Context) {
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "no_api_keys",
+			"message": "Please configure your Binance API keys in Settings",
+		})
+		return
+	}
+
+	// Ensure timezone is initialized
+	_ = getSystemTimezone()
+
+	// Get time boundaries
+	startOfDayMs := getStartOfDayInSystemTimezone()
+	weekStartMs, weekStartDate, weekEndDate := getWeekStartInSystemTimezone()
+	secondsUntilReset := getTimeUntilMidnightInSystemTimezone()
+
+	// Fetch all income types from Binance (empty string = all types)
+	allRecords, err := futuresClient.GetIncomeHistory("", weekStartMs, 0, 1000)
+	if err != nil {
+		log.Printf("[PNL-SUMMARY] Error fetching income history: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "fetch_failed",
+			"message": "Failed to fetch income history from Binance",
+		})
+		return
+	}
+
+	// Calculate values by income type for daily and weekly
+	var dailyPnL, dailyCommission, dailyFunding float64
+	var weeklyPnL, weeklyCommission, weeklyFunding float64
+	var dailyTradeCount, weeklyTradeCount int
+
+	for _, record := range allRecords {
+		isToday := record.Time >= startOfDayMs
+
+		switch record.IncomeType {
+		case "REALIZED_PNL":
+			weeklyPnL += record.Income
+			weeklyTradeCount++
+			if isToday {
+				dailyPnL += record.Income
+				dailyTradeCount++
+			}
+		case "COMMISSION":
+			// Commission is negative (fee paid), we store as positive for display
+			weeklyCommission += -record.Income
+			if isToday {
+				dailyCommission += -record.Income
+			}
+		case "FUNDING_FEE":
+			// Funding fee can be positive (received) or negative (paid)
+			// We store as paid amount (positive = paid, negative = received)
+			weeklyFunding += -record.Income
+			if isToday {
+				dailyFunding += -record.Income
+			}
+		}
+	}
+
+	// Format reset countdown
+	hours := secondsUntilReset / 3600
+	minutes := (secondsUntilReset % 3600) / 60
+	resetCountdown := fmt.Sprintf("%dh %dm", hours, minutes)
+
+	c.JSON(http.StatusOK, gin.H{
+		// Daily breakdown
+		"daily_pnl":         dailyPnL,
+		"daily_commission":  dailyCommission,
+		"daily_funding":     dailyFunding,
+		"daily_trade_count": dailyTradeCount,
+		"reset_countdown":   resetCountdown,
+		"seconds_to_reset":  secondsUntilReset,
+
+		// Weekly breakdown
+		"weekly_pnl":         weeklyPnL,
+		"weekly_commission":  weeklyCommission,
+		"weekly_funding":     weeklyFunding,
+		"weekly_trade_count": weeklyTradeCount,
+		"week_start_date":    weekStartDate,
+		"week_end_date":      weekEndDate,
+		"week_range":         fmt.Sprintf("%s - %s", weekStartDate, weekEndDate),
+
+		// Timezone info
+		"timezone":        timezoneString,
+		"timezone_offset": timezoneOffset,
+
+		// Fetch timestamp
+		"fetched_at": time.Now().In(getSystemTimezone()).Format(time.RFC3339),
+	})
 }

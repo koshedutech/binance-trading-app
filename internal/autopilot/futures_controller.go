@@ -575,6 +575,9 @@ type FuturesController struct {
 
 	// Instance control for active/standby coordination (Story 9.6)
 	instanceControl *InstanceControl
+
+	// Story 6.6: Cache-only settings reads (uses interface to avoid circular import)
+	settingsCache SettingsCacheReader
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -702,7 +705,8 @@ func NewFuturesController(
 	// Initialize Ginie autopilot (autonomous multi-mode trading)
 	// Empty userID = legacy shared mode (uses settings file for PnL)
 	// nil positionStateRepo = fall back to JSON file for position state (no Redis in legacy mode)
-	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "", nil)
+	// nil settingsCache = legacy mode uses in-memory defaults (no cache in legacy mode)
+	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "", nil, nil)
 
 	// Load persisted PnL stats
 	ginieAuto.LoadPnLStats()
@@ -1136,6 +1140,13 @@ func (fc *FuturesController) GetInstanceControl() *InstanceControl {
 	return fc.instanceControl
 }
 
+// SetSettingsCache sets the settings cache service for cache-only reads (Story 6.6)
+func (fc *FuturesController) SetSettingsCache(cache SettingsCacheReader) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.settingsCache = cache
+}
+
 // StartGinieAutopilot starts the Ginie autonomous trading
 func (fc *FuturesController) StartGinieAutopilot() error {
 	if fc.ginieAutopilot == nil {
@@ -1426,13 +1437,21 @@ func (fc *FuturesController) SetRiskLevel(level string) error {
 	oldLevel := fc.currentRiskLevel
 	fc.currentRiskLevel = level
 
-	// Get mode config from database - DB-first approach
+	// Story 6.6: Cache-first approach for mode config
 	ctx := context.Background()
-	sm := GetSettingsManager()
-	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, level)
+	var modeConfig *ModeFullConfig
+	var err error
 
-	// Database-first approach: Load all parameters from mode config
-	// Apply database config if available
+	// If cache available, use cache-first pattern
+	if fc.settingsCache != nil {
+		modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, level)
+	} else {
+		// Fallback to DB for legacy mode
+		sm := GetSettingsManager()
+		modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, level)
+	}
+
+	// Apply config if available
 	if err == nil && modeConfig != nil {
 		loadedFromDB := false
 		logFields := map[string]interface{}{
@@ -2721,9 +2740,8 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 				"tp_price", decision.TakeProfit,
 				"sl_price", decision.StopLoss)
 		} else {
-			// Get SLTP settings from database mode config
+			// Story 6.6: Cache-first approach for SLTP settings
 			ctx := context.Background()
-			sm := GetSettingsManager()
 			currentMode := fc.currentRiskLevel
 			if currentMode == "" {
 				currentMode = "moderate"
@@ -2733,7 +2751,16 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 			tpROEPercent := fc.config.TakeProfitPercent
 			slROEPercent := fc.config.StopLossPercent
 
-			modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			// If cache available, use cache-first pattern
+			var modeConfig *ModeFullConfig
+			var err error
+			if fc.settingsCache != nil {
+				modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
+			} else {
+				// Fallback to DB for legacy mode
+				sm := GetSettingsManager()
+				modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			}
 			if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 				if modeConfig.SLTP.TakeProfitPercent > 0 {
 					tpROEPercent = modeConfig.SLTP.TakeProfitPercent
@@ -2933,9 +2960,8 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		fc.mu.Lock()
 		tradeSide := map[string]string{"open_long": "LONG", "open_short": "SHORT"}[decision.Action]
 
-		// Get SLTP settings from database mode config
+		// Story 6.6: Cache-first approach for SLTP settings
 		ctx := context.Background()
-		sm := GetSettingsManager()
 		currentMode := fc.currentRiskLevel
 		if currentMode == "" {
 			currentMode = "moderate"
@@ -2946,7 +2972,16 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		tpPercent2 := fc.config.TakeProfitPercent2
 		slPercent := fc.config.StopLossPercent
 
-		modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+		// If cache available, use cache-first pattern
+		var modeConfig *ModeFullConfig
+		var err error
+		if fc.settingsCache != nil {
+			modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
+		} else {
+			// Fallback to DB for legacy mode
+			sm := GetSettingsManager()
+			modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+		}
 		if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 			if modeConfig.SLTP.TakeProfitPercent > 0 {
 				tpPercent1 = modeConfig.SLTP.TakeProfitPercent
@@ -3084,9 +3119,8 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 	}
 
 
-	// Get SLTP settings from database mode config
+	// Story 6.6: Cache-first approach for SLTP settings
 	ctx := context.Background()
-	sm := GetSettingsManager()
 	currentMode := fc.currentRiskLevel
 	if currentMode == "" {
 		currentMode = "moderate"
@@ -3097,8 +3131,17 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 	tpPercent2 := fc.config.TakeProfitPercent2
 	slPercent := fc.config.StopLossPercent
 
-	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
-	if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
+	// If cache available, use cache-first pattern
+	var modeConfig *ModeFullConfig
+	var cacheErr error
+	if fc.settingsCache != nil {
+		modeConfig, cacheErr = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
+	} else {
+		// Fallback to DB for legacy mode
+		sm := GetSettingsManager()
+		modeConfig, cacheErr = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+	}
+	if cacheErr == nil && modeConfig != nil && modeConfig.SLTP != nil {
 		if modeConfig.SLTP.TakeProfitPercent > 0 {
 			tpPercent1 = modeConfig.SLTP.TakeProfitPercent
 			tpPercent2 = modeConfig.SLTP.TakeProfitPercent
@@ -4306,18 +4349,26 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 			bigcandleDir = v.Direction
 			bigcandleConf = v.Confidence
 		}
-		// Use mode config for confluence threshold
+		// Story 6.6: Cache-first approach for confluence threshold
 		// Default threshold is 0.5 (50%) - conservative fallback
 		confluenceThreshold := 0.5
 		if fc.ownerUserID != "" && fc.repo != nil {
 			ctx := context.Background()
-			sm := GetSettingsManager()
 			// Use current risk level to get mode config
 			currentMode := fc.currentRiskLevel
 			if currentMode == "" {
 				currentMode = "moderate"
 			}
-			modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			// If cache available, use cache-first pattern
+			var modeConfig *ModeFullConfig
+			var err error
+			if fc.settingsCache != nil {
+				modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
+			} else {
+				// Fallback to DB for legacy mode
+				sm := GetSettingsManager()
+				modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			}
 			if err == nil && modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
 				confluenceThreshold = modeConfig.Confidence.MinConfidence / 100.0 // Convert percent to decimal
 			}
@@ -4334,25 +4385,41 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 	// Get current price for the decision
 	currentPrice, _ := fc.futuresClient.GetFuturesCurrentPrice(decision.Symbol)
 
-	// Determine risk level based on confidence
-	// Use mode config thresholds if available
+	// Story 6.6: Cache-first approach for risk level thresholds
 	conservativeThreshold := 0.8
 	aggressiveThreshold := 0.6
 
 	if fc.ownerUserID != "" && fc.repo != nil {
 		ctx := context.Background()
-		sm := GetSettingsManager()
 
-		// Get conservative mode threshold
-		conservativeCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "conservative")
-		if err == nil && conservativeCfg != nil && conservativeCfg.Confidence != nil && conservativeCfg.Confidence.MinConfidence > 0 {
-			conservativeThreshold = conservativeCfg.Confidence.MinConfidence / 100.0
-		}
+		// If cache available, use cache-first pattern
+		if fc.settingsCache != nil {
+			// Get conservative mode threshold
+			conservativeCfg, err := fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, "conservative")
+			if err == nil && conservativeCfg != nil && conservativeCfg.Confidence != nil && conservativeCfg.Confidence.MinConfidence > 0 {
+				conservativeThreshold = conservativeCfg.Confidence.MinConfidence / 100.0
+			}
 
-		// Get aggressive mode threshold
-		aggressiveCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "aggressive")
-		if err == nil && aggressiveCfg != nil && aggressiveCfg.Confidence != nil && aggressiveCfg.Confidence.MinConfidence > 0 {
-			aggressiveThreshold = aggressiveCfg.Confidence.MinConfidence / 100.0
+			// Get aggressive mode threshold
+			aggressiveCfg, err := fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, "aggressive")
+			if err == nil && aggressiveCfg != nil && aggressiveCfg.Confidence != nil && aggressiveCfg.Confidence.MinConfidence > 0 {
+				aggressiveThreshold = aggressiveCfg.Confidence.MinConfidence / 100.0
+			}
+		} else {
+			// Fallback to DB for legacy mode
+			sm := GetSettingsManager()
+
+			// Get conservative mode threshold
+			conservativeCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "conservative")
+			if err == nil && conservativeCfg != nil && conservativeCfg.Confidence != nil && conservativeCfg.Confidence.MinConfidence > 0 {
+				conservativeThreshold = conservativeCfg.Confidence.MinConfidence / 100.0
+			}
+
+			// Get aggressive mode threshold
+			aggressiveCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "aggressive")
+			if err == nil && aggressiveCfg != nil && aggressiveCfg.Confidence != nil && aggressiveCfg.Confidence.MinConfidence > 0 {
+				aggressiveThreshold = aggressiveCfg.Confidence.MinConfidence / 100.0
+			}
 		}
 	}
 
@@ -4545,6 +4612,7 @@ func (fc *FuturesController) isPriceImproved(pos *FuturesAutopilotPosition, curr
 }
 
 // getAveragingConfidenceThreshold gets the minimum confidence threshold for averaging from database mode config
+// Story 6.6: Cache-first approach
 func (fc *FuturesController) getAveragingConfidenceThreshold() float64 {
 	// Default threshold: 0.5 (50%) - conservative fallback
 	defaultThreshold := 0.5
@@ -4554,7 +4622,6 @@ func (fc *FuturesController) getAveragingConfidenceThreshold() float64 {
 	}
 
 	ctx := context.Background()
-	sm := GetSettingsManager()
 
 	// Use current risk level to get mode config
 	currentMode := fc.currentRiskLevel
@@ -4562,7 +4629,16 @@ func (fc *FuturesController) getAveragingConfidenceThreshold() float64 {
 		currentMode = "moderate"
 	}
 
-	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+	// If cache available, use cache-first pattern
+	var modeConfig *ModeFullConfig
+	var err error
+	if fc.settingsCache != nil {
+		modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
+	} else {
+		// Fallback to DB for legacy mode
+		sm := GetSettingsManager()
+		modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+	}
 	if err != nil || modeConfig == nil || modeConfig.Averaging == nil {
 		// Fallback to confidence threshold if averaging config not available
 		if err == nil && modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {

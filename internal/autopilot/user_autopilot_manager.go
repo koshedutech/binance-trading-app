@@ -58,6 +58,7 @@ type UserAutopilotManager struct {
 	// Shared components (read-only, safe to share)
 	repo              *database.Repository
 	positionStateRepo *database.RedisPositionStateRepository // Shared Redis position state
+	settingsCache     SettingsCacheReader                    // Story 6.6: Cache-only settings reads
 	ginieAnalyzer     *GinieAnalyzer
 	logger            *logging.Logger
 
@@ -83,6 +84,7 @@ type UserAutopilotManager struct {
 
 // NewUserAutopilotManager creates a new multi-user autopilot manager
 // positionStateRepo can be nil (position state will fall back to JSON file only)
+// settingsCache is required for cache-only settings reads during trading (Story 6.6)
 func NewUserAutopilotManager(
 	repo *database.Repository,
 	ginieAnalyzer *GinieAnalyzer,
@@ -91,10 +93,12 @@ func NewUserAutopilotManager(
 	llmConfig *llm.AnalyzerConfig,
 	logger *logging.Logger,
 	positionStateRepo *database.RedisPositionStateRepository,
+	settingsCache SettingsCacheReader,
 ) *UserAutopilotManager {
 	mgr := &UserAutopilotManager{
 		repo:               repo,
 		positionStateRepo:  positionStateRepo,
+		settingsCache:      settingsCache,
 		ginieAnalyzer:      ginieAnalyzer,
 		clientFactory:      clientFactory,
 		apiKeyService:      apiKeyService,
@@ -221,6 +225,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	// Create per-user GinieAutopilot instance with userID for multi-tenant PnL isolation
 	// Pass shared Redis position state repository for cross-instance state sharing
+	// Story 6.6: Pass settingsCache for cache-only settings reads during trading
 	autopilot := NewGinieAutopilot(
 		m.ginieAnalyzer,
 		futuresClient,
@@ -228,6 +233,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.repo,
 		userID,
 		m.positionStateRepo, // Shared Redis position state (may be nil)
+		m.settingsCache,     // Story 6.6: Cache-only settings reads
 	)
 
 	// Set the LLM analyzer if we have one

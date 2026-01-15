@@ -169,6 +169,24 @@ func (cs *CacheService) Get(ctx context.Context, key string) (string, error) {
 	return result, nil
 }
 
+// MGet retrieves multiple keys atomically.
+func (cs *CacheService) MGet(ctx context.Context, keys ...string) ([]interface{}, error) {
+	cs.checkHealth(ctx)
+
+	if !cs.IsHealthy() {
+		return nil, fmt.Errorf("redis unavailable (circuit breaker open)")
+	}
+
+	result, err := cs.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		cs.recordFailure()
+		return nil, fmt.Errorf("redis mget failed: %w", err)
+	}
+
+	cs.recordSuccess()
+	return result, nil
+}
+
 // Set stores a value in cache with TTL.
 func (cs *CacheService) Set(ctx context.Context, key string, value interface{}, ttl time.Duration) error {
 	cs.checkHealth(ctx)
@@ -264,6 +282,31 @@ func (cs *CacheService) IncrementDailySequence(ctx context.Context, userID, date
 	// Set TTL on first increment (val == 1)
 	if val == 1 {
 		cs.client.Expire(ctx, key, DefaultSequenceTTL)
+	}
+
+	cs.recordSuccess()
+	return val, nil
+}
+
+// GetCurrentSequence returns the current sequence value for a user on a given date.
+// Used for monitoring - doesn't increment the sequence.
+func (cs *CacheService) GetCurrentSequence(ctx context.Context, userID, dateKey string) (int64, error) {
+	cs.checkHealth(ctx)
+
+	if !cs.IsHealthy() {
+		return 0, fmt.Errorf("redis unavailable (circuit breaker open)")
+	}
+
+	key := fmt.Sprintf(PrefixDailySequence, userID, dateKey)
+
+	val, err := cs.client.Get(ctx, key).Int64()
+	if err != nil {
+		if err == redis.Nil {
+			// Key not found - no sequences generated yet for this date
+			return 0, nil
+		}
+		cs.recordFailure()
+		return 0, fmt.Errorf("redis get sequence failed: %w", err)
 	}
 
 	cs.recordSuccess()

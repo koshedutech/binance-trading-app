@@ -11,6 +11,8 @@ import {
   Power,
   Wifi,
   WifiOff,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import {
   useInstanceStatus,

@@ -1,0 +1,168 @@
+# Sprint Status Tracking File
+# generated: 2026-01-15
+# project: binance-trading-app
+# tracking_system: file-system
+# story_location: _bmad-output/stories
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Mark epic as 'in-progress' when starting work on its first story
+# - SM typically creates next story ONLY after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then Dev runs code-review (fresh context, ideally different LLM)
+
+generated: 2026-01-15
+project: binance-trading-app
+tracking_system: file-system
+story_location: "_bmad-output/stories"
+
+development_status:
+  # ============================================================================
+  # EPIC 1: Authentication & User Management Refactoring
+  # ============================================================================
+  epic-1: backlog
+  1-1-verify-existing-auth-flow-works: backlog
+  1-2-default-route-to-login-page: backlog
+  1-3-admin-user-system-settings: backlog
+  1-4-email-verification-simplified-password: backlog
+  1-5-bypass-subscription-tier-enforcement: backlog
+  1-6-per-user-binance-api-key-storage: backlog
+  1-7-per-user-ai-api-key-storage: backlog
+  1-8-create-combined-settings-ui-page: backlog
+  1-9-integration-testing-validation: backlog
+  epic-1-retrospective: optional
+
+  # ============================================================================
+  # EPIC 2: Ginie Multi-Mode Trading System
+  # ============================================================================
+  epic-2: backlog
+  2-1-ultra-fast-mode-complete-entry-integration: backlog
+  2-2-scalp-mode-verification-enhanced-logging: backlog
+  2-3-swing-mode-baseline-verification: backlog
+  2-4-position-mode-verification-enhanced-logging: backlog
+  2-5-mode-orchestration-integration-testing: backlog
+  2-6-roi-based-sl-tp-selection-ui-bug-fix: backlog
+  2-7-mode-specific-circuit-breaker-confidence-timeframe-size: backlog
+  2-8-llm-adaptive-ai-decision-engine: backlog
+  epic-2-retrospective: optional
+
+  # ============================================================================
+  # EPIC 3: Authentication Session Lifecycle & Multi-User Isolation
+  # ============================================================================
+  epic-3: backlog
+  3-1-logout-stops-all-user-processes: backlog
+  3-2-event-driven-auth-state-management: backlog
+  3-3-remove-all-fallback-mechanisms: backlog
+  3-4-pre-login-api-isolation: backlog
+  3-5-multi-user-isolation-testing: backlog
+  3-6-integration-testing-validation: backlog
+  epic-3-retrospective: optional
+
+  # ============================================================================
+  # EPIC 4: Database-First Mode Configuration System - COMPLETE
+  # ============================================================================
+  epic-4: done
+  4-5-apply-per-mode-confidence-to-trade-decisions: done
+  4-6-remove-hardcoded-confidence-values: done
+  4-11-db-first-mode-enabled-status: done
+  4-12-position-optimizer-db-migration: done
+  4-13-default-settings-json-foundation: done
+  4-14-new-user-load-defaults: done
+  4-15-admin-settings-sync: done
+  4-16-settings-comparison-risk-display: done
+  4-17-comprehensive-reset-functionality: done
+  4-x-frontend-ui-updates: done
+  epic-4-retrospective: optional
+
+  # ============================================================================
+  # EPIC 5: Ginie Autopilot Database Wiring & UI Stability - COMPLETE
+  # ============================================================================
+  epic-5: done
+  5-1-fix-ginie-panel-loading-error-handling: done
+  5-2-wire-scalp-reentry-config-to-database: done
+  5-3-wire-global-circuit-breaker-to-database: done
+  epic-5-retrospective: optional
+
+  # ============================================================================
+  # EPIC 6: Redis Caching Infrastructure - COMPLETE
+  # ============================================================================
+  epic-6: done
+  6-1-redis-infrastructure-setup: done
+  6-2-complete-user-settings-cache: done
+  6-4-admin-defaults-cache-sync: done
+  6-5-cache-first-read-pattern-apis: done
+  6-6-ginie-engine-cache-only-reads: done
+  epic-6-retrospective: optional
+
+  # ============================================================================
+  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - IN PROGRESS (7/10 done)
+  # ============================================================================
+  epic-7: in-progress
+  7-1-client-order-id-generation: done          # internal/orders/client_order_id.go
+  7-2-daily-sequence-storage-in-redis: done     # cache_service.go:IncrementDailySequence
+  7-3-order-chain-tracking: ready-for-dev       # NOT IMPLEMENTED
+  7-4-parse-client-order-id-from-binance-responses: ready-for-dev  # NOT IMPLEMENTED
+  7-5-trade-lifecycle-tab-ui: done              # TradeLifecycleEvents.tsx
+  7-6-user-timezone-settings: ready-for-dev     # NOT IMPLEMENTED
+  7-7-hedge-order-suffixes: done                # OrderTypeHedge = "H"
+  7-8-redis-fallback-for-sequence-generation: done  # GenerateFallback() method
+  7-9-backend-api-for-trade-lifecycle-tab: done # handlers_trade_lifecycle.go
+  7-10-edge-case-test-suite: done               # client_order_id_test.go
+  epic-7-retrospective: optional
+
+  # ============================================================================
+  # EPIC 8: Daily Settlement & Mode Analytics
+  # ============================================================================
+  epic-8: backlog
+  8-0-user-timezone-database-migration: ready-for-dev
+  8-1-eod-snapshot-of-open-positions: ready-for-dev
+  8-2-daily-pnl-aggregation-by-mode: ready-for-dev
+  8-3-daily-summary-storage: ready-for-dev
+  8-4-handle-open-positions-in-daily-pnl: ready-for-dev
+  8-5-admin-dashboard-for-daily-summaries: ready-for-dev
+  8-6-historical-reports-with-date-range-queries: ready-for-dev
+  8-7-capital-utilization-tracking: ready-for-dev
+  8-8-settlement-failure-recovery: ready-for-dev
+  8-9-settlement-monitoring-alerts: ready-for-dev
+  8-10-data-quality-validation: ready-for-dev
+  epic-8-retrospective: optional
+
+  # ============================================================================
+  # EPIC 9: Remove FuturesController and Consolidate to GinieAutopilot
+  # ============================================================================
+  epic-9: in-progress
+  9-1-configurable-trading-parameters: done
+  9-2-entry-signal-condition-fixes: done
+  9-3-adx-blocking-condition: done
+  9-4-settings-consolidation-single-source: done
+  9-5-enhanced-trend-validation-filters: done
+  9-6-shared-redis-active-standby: done
+  9-7-production-release-management: done
+  9-8-redis-order-timeout-tracker: done
+  9-9-position-optimization-refactoring: done
+  epic-9-retrospective: optional
+
+  # ============================================================================
+  # EPIC 10: Position Management & Optimization
+  # ============================================================================
+  epic-10: backlog
+  10-1-position-management-efficiency-exit-system: ready-for-dev
+  10-2-position-analytics-dashboard: backlog
+  epic-10-retrospective: optional

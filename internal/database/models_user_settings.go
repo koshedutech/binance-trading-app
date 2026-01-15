@@ -78,6 +78,36 @@ func DefaultUserLLMConfig() *UserLLMConfig {
 	}
 }
 
+// ====== GLOBAL TRADING ======
+
+// UserGlobalTrading represents per-user global trading configuration
+type UserGlobalTrading struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+
+	// Risk Management
+	RiskLevel        string  `json:"risk_level"`         // low, medium, high, aggressive
+	MaxUSDAllocation float64 `json:"max_usd_allocation"` // Maximum USD to allocate for trading
+
+	// Profit Reinvestment
+	ProfitReinvestPercent   float64 `json:"profit_reinvest_percent"`    // % of profits to reinvest
+	ProfitReinvestRiskLevel string  `json:"profit_reinvest_risk_level"` // Risk level for reinvested profits
+
+	// Timestamps
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// DefaultUserGlobalTrading returns default global trading config values
+func DefaultUserGlobalTrading() *UserGlobalTrading {
+	return &UserGlobalTrading{
+		RiskLevel:               "medium",
+		MaxUSDAllocation:        1000.0,
+		ProfitReinvestPercent:   50.0,
+		ProfitReinvestRiskLevel: "medium",
+	}
+}
+
 // ====== CAPITAL ALLOCATION ======
 
 // UserCapitalAllocation represents per-user capital allocation across trading modes

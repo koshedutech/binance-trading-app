@@ -28,14 +28,14 @@
   "profit_reinvest_risk_level": "aggressive",
   "ginie_dry_run_mode": false,
   "ginie_auto_start": true,
-  "ginie_auto_start_user_id": "d5695b57-8b8f-4871-b579-b480b211404c",
+  "ginie_auto_start_user_id": "694890c6-50bc-469d-8446-649833ef0438",
   "ginie_max_positions": 10,
   "ginie_total_pnl": 0,
   "ginie_daily_pnl": 0,
   "ginie_total_trades": 0,
   "ginie_winning_trades": 0,
   "ginie_daily_trades": 0,
-  "ginie_pnl_last_update": "2026-01-14",
+  "ginie_pnl_last_update": "2026-01-15",
   "auto_mode_enabled": false,
   "auto_mode_max_positions": 5,
   "auto_mode_max_leverage": 10,
@@ -81,7 +81,7 @@
   "ultra_fast_today_trades": 0,
   "ultra_fast_max_daily_trades": 0,
   "ultra_fast_daily_pnl": 0,
-  "ultra_fast_total_pnl": -194.86005826000016,
+  "ultra_fast_total_pnl": -120.61822208000015,
   "ultra_fast_win_rate": 0,
   "ultra_fast_last_update": "",
   "ultra_fast_min_profit_usd": 1,
@@ -632,7 +632,8 @@
         "enabled": true,
         "start_after_minutes": 10,
         "min_loss_percent": 1,
-        "check_interval_secs": 30
+        "check_interval_secs": 30,
+        "close_min_hold_mins": 0
       },
       "position_optimization": {
         "enabled": true,
@@ -1268,7 +1269,8 @@
         "enabled": true,
         "start_after_minutes": 2,
         "min_loss_percent": 0.5,
-        "check_interval_secs": 15
+        "check_interval_secs": 15,
+        "close_min_hold_mins": 0
       },
       "position_optimization": {
         "enabled": true,

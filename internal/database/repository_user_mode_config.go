@@ -284,6 +284,55 @@ func (r *Repository) GetAllUserModeConfigsWithEnabled(ctx context.Context, userI
 }
 
 // =====================================================
+// PARTIAL UPDATE OPERATIONS (Story 6.2)
+// =====================================================
+
+// UpdateUserModeConfigGroup updates a specific group within a mode's config JSON
+// This performs a JSON merge: reads existing config, updates the group, writes back
+// Used by SettingsCacheService for granular cache updates
+func (r *Repository) UpdateUserModeConfigGroup(ctx context.Context, userID, modeName, groupKey string, groupData []byte) error {
+	// 1. Get existing config
+	configJSON, err := r.GetUserModeConfig(ctx, userID, modeName)
+	if err != nil {
+		return fmt.Errorf("failed to get existing config: %w", err)
+	}
+
+	if configJSON == nil {
+		return fmt.Errorf("mode config %s not found for user %s", modeName, userID)
+	}
+
+	// 2. Parse into map for dynamic merging
+	var config map[string]interface{}
+	if err := json.Unmarshal(configJSON, &config); err != nil {
+		return fmt.Errorf("failed to parse existing config: %w", err)
+	}
+
+	// 3. Parse group data
+	var groupValue interface{}
+	if err := json.Unmarshal(groupData, &groupValue); err != nil {
+		return fmt.Errorf("failed to parse group data: %w", err)
+	}
+
+	// 4. Update the field (groupKey maps directly to JSON field name)
+	config[groupKey] = groupValue
+
+	// 5. Marshal back
+	updatedJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal updated config: %w", err)
+	}
+
+	// 6. Get enabled status from config
+	enabled := false
+	if e, ok := config["enabled"].(bool); ok {
+		enabled = e
+	}
+
+	// 7. Save back
+	return r.SaveUserModeConfig(ctx, userID, modeName, enabled, updatedJSON)
+}
+
+// =====================================================
 // SCALP REENTRY CONFIGURATION CRUD OPERATIONS
 // =====================================================
 

@@ -33,8 +33,9 @@ type GinieAnalyzer struct {
 	settings      *AutopilotSettings // Settings for trend timeframes and divergence detection
 
 	// Database-first architecture
-	repo   *database.Repository // Database repository for user settings
-	userID string               // User ID for multi-tenant configuration
+	repo          *database.Repository // Database repository for user settings
+	userID        string               // User ID for multi-tenant configuration
+	settingsCache ModeConfigCache      // Story 6.6: Cache-only settings reads
 
 	// LLM client for AI-based coin selection
 	llmClient *llm.Client
@@ -145,6 +146,11 @@ func (g *GinieAnalyzer) SetUserID(userID string) {
 	if g.logger != nil {
 		g.logger.Info("Ginie analyzer user ID updated", "user_id", userID)
 	}
+}
+
+// SetSettingsCache sets the settings cache service for cache-only reads (Story 6.6)
+func (g *GinieAnalyzer) SetSettingsCache(cache ModeConfigCache) {
+	g.settingsCache = cache
 }
 
 // RefreshSettings reloads settings from SettingsManager
@@ -1789,8 +1795,29 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	ctx := context.Background()
 	sm := GetSettingsManager()
 
-	// Try to load from database first
-	if g.repo != nil && g.userID != "" {
+	// Story 6.6: Cache-first pattern for mode config loading
+	if g.settingsCache != nil && g.userID != "" {
+		// Use cache-first pattern (Story 6.6)
+		dbModeConfig, err := g.settingsCache.GetModeConfig(ctx, g.userID, modeKey)
+		if err == nil && dbModeConfig != nil {
+			modeConfig = dbModeConfig
+			if g.logger != nil {
+				g.logger.Debug("Loaded mode config from cache",
+					"symbol", symbol,
+					"mode", modeKey,
+					"source", "cache")
+			}
+		} else {
+			// Log cache load failure but continue with defaults
+			if g.logger != nil {
+				g.logger.Debug("Mode config not found in cache, using defaults",
+					"symbol", symbol,
+					"mode", modeKey,
+					"error", err)
+			}
+		}
+	} else if g.repo != nil && g.userID != "" {
+		// Fallback to DB for legacy mode (no cache available)
 		dbModeConfig, err := sm.GetUserModeConfigFromDB(ctx, g.repo, g.userID, modeKey)
 		if err == nil && dbModeConfig != nil {
 			modeConfig = dbModeConfig

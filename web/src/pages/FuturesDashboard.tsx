@@ -7,6 +7,7 @@ import FuturesPositionsTable from '../components/FuturesPositionsTable';
 import FuturesOrdersHistory from '../components/FuturesOrdersHistory';
 import GiniePanel from '../components/GiniePanel';
 import InstanceControlPanel from '../components/InstanceControlPanel';
+import CollapsibleCard from '../components/CollapsibleCard';
 import PanicButton from '../components/PanicButton';
 import NewsDashboard from '../components/NewsDashboard';
 import TradeSourceStatsPanel from '../components/TradeSourceStatsPanel';
@@ -28,6 +29,10 @@ import {
   Brain,
   Percent,
   Sparkles,
+  Server,
+  Layers,
+  Shield,
+  ShoppingCart,
 } from 'lucide-react';
 
 export default function FuturesDashboard() {

@@ -14,6 +14,13 @@ import (
 	"binance-trading-bot/internal/database"
 )
 
+// ModeConfigCache defines the interface for cache-first mode config reads (Story 6.6)
+// This interface allows the cache package to be injected without creating import cycles
+type ModeConfigCache interface {
+	// GetModeConfig retrieves full mode configuration from cache
+	GetModeConfig(ctx context.Context, userID, mode string) (*ModeFullConfig, error)
+}
+
 // SymbolPerformanceCategory represents a symbol's performance tier
 type SymbolPerformanceCategory string
 
