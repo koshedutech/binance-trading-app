@@ -414,10 +414,11 @@ type ModeReversalConfig struct {
 // ModeEarlyWarningConfig holds mode-specific early warning settings (Story 9.4 Phase 4)
 // These settings override global early_warning when defined per mode
 type ModeEarlyWarningConfig struct {
-	Enabled           bool    `json:"enabled"`             // Enable early warning for this mode
-	StartAfterMinutes int     `json:"start_after_minutes"` // Start monitoring after N minutes
-	MinLossPercent    float64 `json:"min_loss_percent"`    // Minimum loss % to trigger warning
-	CheckIntervalSecs int     `json:"check_interval_secs"` // Check interval in seconds
+	Enabled           bool    `json:"enabled"`              // Enable early warning for this mode
+	StartAfterMinutes float64 `json:"start_after_minutes"`  // Start monitoring after N minutes (supports decimal)
+	MinLossPercent    float64 `json:"min_loss_percent"`     // Minimum loss % to trigger warning
+	CheckIntervalSecs int     `json:"check_interval_secs"`  // Check interval in seconds
+	CloseMinHoldMins  float64 `json:"close_min_hold_mins"`  // Min hold time before close_now allowed (supports decimal)
 }
 
 // ModeFullConfig holds ALL settings for a single trading mode

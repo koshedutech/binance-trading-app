@@ -722,6 +722,7 @@ func (s *Server) setupRoutes() {
 
 			// Load Defaults endpoints (Story 4.14)
 			futures.POST("/ginie/modes/:mode/load-defaults", s.handleLoadModeDefaults)
+			futures.POST("/ginie/modes/:mode/groups/:group/reset", s.handleResetModeGroup) // Reset specific group within a mode
 			futures.POST("/ginie/modes/load-defaults", s.handleLoadAllModeDefaults)
 			futures.GET("/ginie/default-settings", s.handleGetAllDefaultSettings) // Get all defaults from default-settings.json (Story 9.4)
 
@@ -731,6 +732,11 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ginie/capital-allocation/load-defaults", s.handleLoadCapitalAllocationDefaults)
 			futures.POST("/ginie/hedge-mode/load-defaults", s.handleLoadHedgeDefaults)
 			futures.POST("/ginie/safety-settings/load-defaults", s.handleLoadSafetySettingsDefaults)
+			futures.POST("/ginie/position-optimization/load-defaults", s.handleLoadPositionOptimizationDefaults)
+
+			// Batch Reset endpoints (reset multiple settings at once)
+			futures.POST("/ginie/modes/reset-all", s.handleResetAllModes)
+			futures.POST("/ginie/other-settings/reset-all", s.handleResetAllOtherSettings)
 
 			// Safety Settings CRUD endpoints (Story 9.4)
 			futures.GET("/ginie/safety-settings", s.handleGetUserSafetySettings)

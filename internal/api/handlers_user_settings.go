@@ -139,16 +139,7 @@ func (s *Server) handleGetSettingsComparison(c *gin.Context) {
 		}
 	}
 
-	// Compare early warning settings
-	earlyWarningDiffs := s.compareEarlyWarning(userSettings.EarlyWarning, defaults.EarlyWarning, defaults.SettingsRiskIndex)
-	if len(earlyWarningDiffs) > 0 {
-		response.Groups["early_warning"] = DifferenceGroup{
-			GroupName:   "early_warning",
-			DisplayName: "Early Warning System",
-			ChangeCount: len(earlyWarningDiffs),
-			Differences: earlyWarningDiffs,
-		}
-	}
+	// Note: Global early_warning comparison removed - early_warning is now per-mode only
 
 	// Compare capital allocation settings
 	capAllocDiffs := s.compareCapitalAllocation(userSettings.CapitalAllocation, defaults.CapitalAllocation, defaults.SettingsRiskIndex)
@@ -238,8 +229,7 @@ func (s *Server) handleResetSingleSetting(c *gin.Context) {
 	case "llm_config":
 		err = s.resetLLMConfigSetting(ctx, userID, parts[1:], defaults)
 
-	case "early_warning":
-		err = s.resetEarlyWarningSetting(ctx, userID, parts[1:], defaults)
+	// Note: Global early_warning reset removed - early_warning is now per-mode only
 
 	case "capital_allocation":
 		err = s.resetCapitalAllocationSetting(ctx, userID, parts[1:], defaults)
@@ -682,29 +672,8 @@ func (s *Server) compareLLMConfig(
 	return diffs
 }
 
-// compareEarlyWarning compares early warning settings
-func (s *Server) compareEarlyWarning(
-	user autopilot.EarlyWarningDefaults,
-	defaults autopilot.EarlyWarningDefaults,
-	riskIndex autopilot.SettingsRiskIndex,
-) []Difference {
-	var diffs []Difference
-	prefix := "early_warning"
-
-	if user.Enabled != defaults.Enabled {
-		riskLevel, impact, recommendation := s.getRiskInfo(prefix+".enabled", riskIndex, nil)
-		diffs = append(diffs, Difference{
-			Path:           prefix + ".enabled",
-			Current:        user.Enabled,
-			Default:        defaults.Enabled,
-			RiskLevel:      riskLevel,
-			Impact:         impact,
-			Recommendation: recommendation,
-		})
-	}
-
-	return diffs
-}
+// Note: compareEarlyWarning removed - early_warning is now per-mode only
+// Per-mode early_warning comparison happens within compareModePositionOptimization
 
 // compareCapitalAllocation compares capital allocation settings
 func (s *Server) compareCapitalAllocation(
@@ -952,10 +921,7 @@ func (s *Server) resetLLMConfigSetting(ctx context.Context, userID string, subPa
 	return fmt.Errorf("LLM config settings reset not yet implemented")
 }
 
-func (s *Server) resetEarlyWarningSetting(ctx context.Context, userID string, subPath []string, defaults *autopilot.DefaultSettingsFile) error {
-	// TODO: Implement when early warning settings are stored per-user
-	return fmt.Errorf("early warning settings reset not yet implemented")
-}
+// Note: resetEarlyWarningSetting removed - early_warning is now per-mode only
 
 func (s *Server) resetCapitalAllocationSetting(ctx context.Context, userID string, subPath []string, defaults *autopilot.DefaultSettingsFile) error {
 	// TODO: Implement when capital allocation settings are stored per-user
@@ -974,6 +940,7 @@ func (s *Server) loadUserSettings(ctx context.Context, userID string) (*autopilo
 	}
 
 	// Create a copy to populate with user settings
+	// NOTE: Global EarlyWarning removed - early warning is now per-mode only (in mode configs)
 	userSettings := &autopilot.DefaultSettingsFile{
 		Metadata:             defaults.Metadata,
 		GlobalTrading:        defaults.GlobalTrading,
@@ -981,7 +948,6 @@ func (s *Server) loadUserSettings(ctx context.Context, userID string) (*autopilo
 		PositionOptimization: defaults.PositionOptimization,
 		CircuitBreaker:       defaults.CircuitBreaker,
 		LLMConfig:            defaults.LLMConfig,
-		EarlyWarning:         defaults.EarlyWarning,
 		CapitalAllocation:    defaults.CapitalAllocation,
 		SettingsRiskIndex:    defaults.SettingsRiskIndex,
 	}

@@ -228,9 +228,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 30,
-        "min_loss_percent": 3,
-        "check_interval_secs": 120
+        "start_after_minutes": 10,
+        "min_loss_percent": 1.0,
+        "check_interval_secs": 120,
+        "close_min_hold_mins": 30
       },
       "position_optimization": {
         "enabled": true,
@@ -496,9 +497,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 10,
-        "min_loss_percent": 1,
-        "check_interval_secs": 30
+        "start_after_minutes": 1,
+        "min_loss_percent": 0.3,
+        "check_interval_secs": 30,
+        "close_min_hold_mins": 2
       },
       "position_optimization": {
         "enabled": true,
@@ -764,9 +766,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 15,
-        "min_loss_percent": 2,
-        "check_interval_secs": 60
+        "start_after_minutes": 5,
+        "min_loss_percent": 0.5,
+        "check_interval_secs": 60,
+        "close_min_hold_mins": 10
       },
       "position_optimization": {
         "enabled": true,
@@ -1032,9 +1035,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 2,
-        "min_loss_percent": 0.5,
-        "check_interval_secs": 15
+        "start_after_minutes": 0.5,
+        "min_loss_percent": 0.2,
+        "check_interval_secs": 15,
+        "close_min_hold_mins": 1
       },
       "position_optimization": {
         "enabled": true,
@@ -1148,21 +1152,6 @@
         "recommendation": "Keep enabled for AI-assisted decision making"
       }
     }
-  },
-  "early_warning": {
-    "enabled": false,
-    "start_after_minutes": 0,
-    "check_interval_secs": 0,
-    "only_underwater": false,
-    "min_loss_percent": 0,
-    "close_on_reversal": false,
-    "tighten_sl_on_warning": false,
-    "min_confidence": 0,
-    "max_llm_calls_per_pos": 0,
-    "close_min_hold_mins": 0,
-    "close_min_confidence": 0,
-    "close_require_consecutive": 0,
-    "close_sl_proximity_pct": 0
   },
   "capital_allocation": {
     "ultra_fast_percent": 0,

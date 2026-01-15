@@ -25,11 +25,11 @@ type DefaultSettingsFile struct {
 	PositionOptimization PositionOptimizationDefaults   `json:"position_optimization"`
 	CircuitBreaker       CircuitBreakerDefaults         `json:"circuit_breaker"`
 	LLMConfig            LLMConfigDefaults              `json:"llm_config"`
-	EarlyWarning         EarlyWarningDefaults           `json:"early_warning"`
 	CapitalAllocation    CapitalAllocationDefaults      `json:"capital_allocation"`
 	ScalpReentry         *PositionOptimizationConfig            `json:"scalp_reentry_config,omitempty"`
 	SafetySettings       *SafetySettingsAllModes        `json:"safety_settings,omitempty"`
 	SettingsRiskIndex    SettingsRiskIndex              `json:"_settings_risk_index"`
+	// NOTE: Global EarlyWarning removed - early warning is now per-mode only (see ModeEarlyWarningConfig)
 }
 
 // SafetySettingsAllModes contains safety settings for all trading modes

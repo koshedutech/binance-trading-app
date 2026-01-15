@@ -2040,6 +2040,14 @@ class FuturesAPIService {
   }
 
   /**
+   * Reset a specific group within a mode to defaults
+   */
+  async resetModeGroup(mode: string, group: string): Promise<ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/modes/${mode}/groups/${group}/reset`);
+    return data;
+  }
+
+  /**
    * Load default configuration for circuit breaker (preview or apply)
    */
   async loadCircuitBreakerDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
@@ -2110,6 +2118,88 @@ class FuturesAPIService {
    */
   async getAllDefaultSettings(): Promise<{ success: boolean; defaults: Record<string, unknown> }> {
     const { data } = await this.client.get('/ginie/default-settings');
+    return data;
+  }
+
+  // ==================== SETTINGS COMPARISON APIs ====================
+
+  /**
+   * Reset all 4 trading modes to defaults
+   */
+  async resetAllModes(): Promise<ConfigResetResult> {
+    const { data } = await this.client.post('/ginie/modes/load-defaults');
+    return data;
+  }
+
+  /**
+   * Get circuit breaker comparison (preview mode)
+   */
+  async getCircuitBreakerComparison(): Promise<ConfigResetPreview> {
+    const { data } = await this.client.post('/ginie/circuit-breaker/load-defaults?preview=true');
+    return data;
+  }
+
+  /**
+   * Get LLM config comparison (preview mode)
+   */
+  async getLLMConfigComparison(): Promise<ConfigResetPreview> {
+    const { data } = await this.client.post('/ginie/llm-config/load-defaults?preview=true');
+    return data;
+  }
+
+  /**
+   * Get capital allocation comparison (preview mode)
+   */
+  async getCapitalAllocationComparison(): Promise<ConfigResetPreview> {
+    const { data } = await this.client.post('/ginie/capital-allocation/load-defaults?preview=true');
+    return data;
+  }
+
+  /**
+   * Get position optimization comparison (global - preview mode)
+   */
+  async getPositionOptimizationComparison(): Promise<ConfigResetPreview> {
+    const { data } = await this.client.post('/ginie/position-optimization/load-defaults?preview=true');
+    return data;
+  }
+
+  /**
+   * Reset all non-mode settings to defaults
+   */
+  async resetAllOtherSettings(): Promise<ConfigResetResult> {
+    // This calls multiple endpoints to reset all non-mode settings
+    const results = await Promise.all([
+      this.loadCircuitBreakerDefaults(false),
+      this.loadLLMConfigDefaults(false),
+      this.loadCapitalAllocationDefaults(false),
+    ]);
+    return {
+      success: true,
+      config_type: 'all_other',
+      changes_applied: results.length,
+      message: 'All other settings reset'
+    };
+  }
+
+  /**
+   * Admin: Save mode config changes to defaults
+   */
+  async adminSaveModeConfig(mode: string, config: any): Promise<{ success: boolean }> {
+    // Backend expects { edited_values: {...} } format
+    const { data } = await this.client.post(`/admin/defaults/mode_${mode}`, {
+      edited_values: config,
+    });
+    return data;
+  }
+
+  /**
+   * Admin: Save other setting changes to defaults
+   */
+  async adminSaveOtherSetting(settingType: string, config: any): Promise<{ success: boolean }> {
+    // Backend expects { edited_values: {...} } format
+    const { data } = await this.client.post(`/admin/defaults/${settingType}`, {
+      edited_values: config,
+    });
     return data;
   }
 }
@@ -2197,12 +2287,23 @@ export interface SettingDiff {
   recommendation?: string;
 }
 
+// FieldComparison represents a single field with current vs default comparison
+export interface FieldComparison {
+  path: string;
+  current: any;
+  default: any;
+  match: boolean;
+  risk_level?: 'high' | 'medium' | 'low';
+}
+
 export interface ConfigResetPreview {
   preview: boolean;
   config_type: string;
   all_match: boolean;
   total_changes: number;
   differences: SettingDiff[];
+  // ALL fields with current vs default comparison (not just differences)
+  all_values?: FieldComparison[];
   // Admin-specific fields (when is_admin is true, default_value contains all defaults)
   is_admin?: boolean;
   default_value?: any;
@@ -4253,6 +4354,13 @@ export async function loadModeDefaults(mode: string, preview: boolean = true): P
 }
 
 /**
+ * Reset a specific group within a mode to defaults
+ */
+export async function resetModeGroup(mode: string, group: string): Promise<ConfigResetResult> {
+  return futuresApi.resetModeGroup(mode, group);
+}
+
+/**
  * Load default configuration for circuit breaker (preview or apply)
  */
 export async function loadCircuitBreakerDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
@@ -4315,6 +4423,64 @@ export async function loadSafetySettingsDefaults(preview: boolean = true): Promi
  */
 export async function getAllDefaultSettings(): Promise<{ success: boolean; defaults: Record<string, unknown> }> {
   return futuresApi.getAllDefaultSettings();
+}
+
+// ==================== SETTINGS COMPARISON WRAPPER FUNCTIONS ====================
+
+/**
+ * Reset all 4 trading modes to defaults
+ */
+export async function resetAllModes(): Promise<ConfigResetResult> {
+  return futuresApi.resetAllModes();
+}
+
+/**
+ * Get circuit breaker comparison (preview mode)
+ */
+export async function getCircuitBreakerComparison(): Promise<ConfigResetPreview> {
+  return futuresApi.getCircuitBreakerComparison();
+}
+
+/**
+ * Get LLM config comparison (preview mode)
+ */
+export async function getLLMConfigComparison(): Promise<ConfigResetPreview> {
+  return futuresApi.getLLMConfigComparison();
+}
+
+/**
+ * Get capital allocation comparison (preview mode)
+ */
+export async function getCapitalAllocationComparison(): Promise<ConfigResetPreview> {
+  return futuresApi.getCapitalAllocationComparison();
+}
+
+/**
+ * Get position optimization comparison (global - preview mode)
+ */
+export async function getPositionOptimizationComparison(): Promise<ConfigResetPreview> {
+  return futuresApi.getPositionOptimizationComparison();
+}
+
+/**
+ * Reset all non-mode settings to defaults
+ */
+export async function resetAllOtherSettings(): Promise<ConfigResetResult> {
+  return futuresApi.resetAllOtherSettings();
+}
+
+/**
+ * Admin: Save mode config changes to defaults
+ */
+export async function adminSaveModeConfig(mode: string, config: any): Promise<{ success: boolean }> {
+  return futuresApi.adminSaveModeConfig(mode, config);
+}
+
+/**
+ * Admin: Save other setting changes to defaults
+ */
+export async function adminSaveOtherSetting(settingType: string, config: any): Promise<{ success: boolean }> {
+  return futuresApi.adminSaveOtherSetting(settingType, config);
 }
 
 // ==================== ADMIN DEFAULTS APIs ====================

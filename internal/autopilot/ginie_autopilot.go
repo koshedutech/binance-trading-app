@@ -7236,8 +7236,8 @@ func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 func (ga *GinieAutopilot) getEarlyWarningConfig(mode GinieTradingMode) *ModeEarlyWarningConfig {
 	// 1. Try mode-specific config from ModeFullConfig
 	if modeConfig := ga.getModeConfig(mode); modeConfig != nil && modeConfig.EarlyWarning != nil {
-		log.Printf("[EARLY-WARNING] Using mode-specific config for %s: StartAfter=%d min, MinLoss=%.2f%%, Interval=%d sec",
-			mode, modeConfig.EarlyWarning.StartAfterMinutes, modeConfig.EarlyWarning.MinLossPercent, modeConfig.EarlyWarning.CheckIntervalSecs)
+		log.Printf("[EARLY-WARNING] Using mode-specific config for %s: StartAfter=%.1f min, MinLoss=%.2f%%, CloseMinHold=%.1f min",
+			mode, modeConfig.EarlyWarning.StartAfterMinutes, modeConfig.EarlyWarning.MinLossPercent, modeConfig.EarlyWarning.CloseMinHoldMins)
 		return modeConfig.EarlyWarning
 	}
 
@@ -7252,20 +7252,59 @@ func (ga *GinieAutopilot) getEarlyWarningConfig(mode GinieTradingMode) *ModeEarl
 				mode, settings.EarlyWarningStartAfterMinutes, settings.EarlyWarningMinLossPercent)
 			return &ModeEarlyWarningConfig{
 				Enabled:           settings.EarlyWarningEnabled,
-				StartAfterMinutes: settings.EarlyWarningStartAfterMinutes,
+				StartAfterMinutes: float64(settings.EarlyWarningStartAfterMinutes),
 				MinLossPercent:    settings.EarlyWarningMinLossPercent,
 				CheckIntervalSecs: settings.EarlyWarningCheckIntervalSecs,
+				CloseMinHoldMins:  float64(settings.EarlyWarningCloseMinHoldMins),
 			}
 		}
 	}
 
-	// 3. Fall back to code defaults
+	// 3. Fall back to mode-specific code defaults
+	// These defaults match the values in default-settings.json for each mode
 	log.Printf("[EARLY-WARNING] Using CODE DEFAULTS for mode %s", mode)
-	return &ModeEarlyWarningConfig{
-		Enabled:           true,
-		StartAfterMinutes: 10,
-		MinLossPercent:    1.0,
-		CheckIntervalSecs: 30,
+	switch mode {
+	case GinieModeUltraFast:
+		return &ModeEarlyWarningConfig{
+			Enabled:           true,
+			StartAfterMinutes: 0.5,
+			MinLossPercent:    0.2,
+			CheckIntervalSecs: 15,
+			CloseMinHoldMins:  1,
+		}
+	case GinieModeScalp:
+		return &ModeEarlyWarningConfig{
+			Enabled:           true,
+			StartAfterMinutes: 1,
+			MinLossPercent:    0.3,
+			CheckIntervalSecs: 30,
+			CloseMinHoldMins:  2,
+		}
+	case GinieModeSwing:
+		return &ModeEarlyWarningConfig{
+			Enabled:           true,
+			StartAfterMinutes: 5,
+			MinLossPercent:    0.5,
+			CheckIntervalSecs: 60,
+			CloseMinHoldMins:  10,
+		}
+	case GinieModePosition:
+		return &ModeEarlyWarningConfig{
+			Enabled:           true,
+			StartAfterMinutes: 10,
+			MinLossPercent:    1.0,
+			CheckIntervalSecs: 120,
+			CloseMinHoldMins:  30,
+		}
+	default:
+		// Generic default
+		return &ModeEarlyWarningConfig{
+			Enabled:           true,
+			StartAfterMinutes: 5,
+			MinLossPercent:    0.5,
+			CheckIntervalSecs: 30,
+			CloseMinHoldMins:  5,
+		}
 	}
 }
 
@@ -11079,14 +11118,31 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 	}
 	ga.mu.RUnlock()
 
-	startAfter := time.Duration(settings.EarlyWarningStartAfterMinutes) * time.Minute
-	minLossPercent := settings.EarlyWarningMinLossPercent
-	minConfidence := settings.EarlyWarningMinConfidence
+	// Global settings for fallback values
+	globalMinConfidence := settings.EarlyWarningMinConfidence
 
 	for _, pos := range positionsToCheck {
 		// [Story 9.9] REMOVED: Early warning skip for scalp_reentry mode
 		// All positions now go through early warning regardless of position optimization status
 		// Position optimization is a feature, not a mode - original mode rules still apply
+
+		// Get mode-specific early warning config (falls back to global if not defined)
+		modeEWConfig := ga.getEarlyWarningConfig(pos.Mode)
+		if modeEWConfig == nil || !modeEWConfig.Enabled {
+			continue
+		}
+
+		// Use mode-specific settings with global fallback
+		startAfterMinutes := modeEWConfig.StartAfterMinutes
+		if startAfterMinutes <= 0 {
+			startAfterMinutes = float64(settings.EarlyWarningStartAfterMinutes)
+		}
+		startAfter := time.Duration(startAfterMinutes * float64(time.Minute))
+
+		minLossPercent := modeEWConfig.MinLossPercent
+		if minLossPercent <= 0 {
+			minLossPercent = settings.EarlyWarningMinLossPercent
+		}
 
 		// Skip if position too new
 		if time.Since(pos.EntryTime) < startAfter {
@@ -11118,7 +11174,14 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 			continue
 		}
 
-		log.Printf("[EARLY-WARNING] %s: Position at %.2f%% loss, analyzing MTF data...", pos.Symbol, pnlPercent)
+		log.Printf("[EARLY-WARNING] %s [%s]: Position at %.2f%% loss (threshold: %.2f%%), analyzing MTF data...",
+			pos.Symbol, pos.Mode, pnlPercent, minLossPercent)
+
+		// Use mode-specific or global minConfidence for LLM analysis threshold
+		minConfidence := globalMinConfidence
+		if minConfidence <= 0 {
+			minConfidence = 0.7 // Default
+		}
 
 		// Fetch multi-timeframe klines in parallel
 		klines1m, err1 := ga.futuresClient.GetFuturesKlines(pos.Symbol, "1m", 30)
@@ -11191,14 +11254,19 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 				// These safeguards prevent premature position closes that could miss profitable recoveries
 
 				// Safeguard 1: Minimum hold time before close_now is allowed
-				minHoldMins := settings.EarlyWarningCloseMinHoldMins
+				// Use mode-specific CloseMinHoldMins if available, otherwise fall back to global setting
+				minHoldMins := modeEWConfig.CloseMinHoldMins
+				if minHoldMins <= 0 {
+					// Fall back to global setting
+					minHoldMins = float64(settings.EarlyWarningCloseMinHoldMins)
+				}
 				if minHoldMins <= 0 {
 					minHoldMins = 5 // Default 5 minutes
 				}
 				holdDuration := time.Since(pos.EntryTime)
-				if holdDuration < time.Duration(minHoldMins)*time.Minute {
-					log.Printf("[EARLY-WARNING] %s: BLOCKED close_now - position too new (held %v, need %d mins)",
-						pos.Symbol, holdDuration.Round(time.Second), minHoldMins)
+				if holdDuration < time.Duration(minHoldMins*float64(time.Minute)) {
+					log.Printf("[EARLY-WARNING] %s [%s]: BLOCKED close_now - position too new (held %v, need %.1f mins)",
+						pos.Symbol, pos.Mode, holdDuration.Round(time.Second), minHoldMins)
 					ga.earlyWarningCounter[pos.Symbol] = 0 // Reset counter
 					continue
 				}

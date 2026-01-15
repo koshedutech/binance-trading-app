@@ -4,6 +4,7 @@ import (
 	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -183,6 +184,198 @@ func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, diff)
+}
+
+// handleResetModeGroup resets only a specific group within a mode to defaults
+// POST /api/futures/ginie/modes/:mode/groups/:group/reset
+func (s *Server) handleResetModeGroup(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	mode := c.Param("mode")
+	group := c.Param("group")
+
+	if mode == "" || group == "" {
+		errorResponse(c, http.StatusBadRequest, "Mode and group are required")
+		return
+	}
+
+	// Validate mode name
+	validModes := []string{"ultra_fast", "scalp", "swing", "position"}
+	isValid := false
+	for _, m := range validModes {
+		if m == mode {
+			isValid = true
+			break
+		}
+	}
+	if !isValid {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid mode: %s", mode))
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get default mode config from default-settings.json
+	defaultMode, err := autopilot.GetDefaultModeFullConfig(mode)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load default settings: "+err.Error())
+		return
+	}
+
+	// Get current user's mode config from DB
+	sm := autopilot.GetSettingsManager()
+	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings: "+err.Error())
+		return
+	}
+	if currentMode == nil {
+		errorResponse(c, http.StatusNotFound, fmt.Sprintf("Mode config not found: %s", mode))
+		return
+	}
+
+	// Reset only the specific group
+	changesApplied := resetModeGroupToDefaults(currentMode, defaultMode, group)
+
+	// Save updated config to database
+	configJSON, marshalErr := json.Marshal(currentMode)
+	if marshalErr != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to serialize config: "+marshalErr.Error())
+		return
+	}
+
+	if saveErr := s.repo.SaveUserModeConfig(ctx, userID, mode, currentMode.Enabled, configJSON); saveErr != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+saveErr.Error())
+		return
+	}
+
+	// Trigger config reload
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+		}
+	}
+
+	c.JSON(http.StatusOK, ConfigResetResult{
+		Success:        true,
+		ConfigType:     fmt.Sprintf("%s.%s", mode, group),
+		ChangesApplied: changesApplied,
+		Message:        fmt.Sprintf("%s %s group reset to defaults", mode, group),
+	})
+}
+
+// resetModeGroupToDefaults resets a specific group within a mode config
+func resetModeGroupToDefaults(current, defaults *autopilot.ModeFullConfig, group string) int {
+	changesApplied := 0
+
+	switch group {
+	case "enabled":
+		if current.Enabled != defaults.Enabled {
+			current.Enabled = defaults.Enabled
+			changesApplied++
+		}
+	case "confidence":
+		if defaults.Confidence != nil {
+			current.Confidence = defaults.Confidence
+			changesApplied++
+		}
+	case "size":
+		if defaults.Size != nil {
+			current.Size = defaults.Size
+			changesApplied++
+		}
+	case "sltp":
+		if defaults.SLTP != nil {
+			current.SLTP = defaults.SLTP
+			changesApplied++
+		}
+	case "circuit_breaker":
+		if defaults.CircuitBreaker != nil {
+			current.CircuitBreaker = defaults.CircuitBreaker
+			changesApplied++
+		}
+	case "timeframe":
+		if defaults.Timeframe != nil {
+			current.Timeframe = defaults.Timeframe
+			changesApplied++
+		}
+	case "entry":
+		if defaults.Entry != nil {
+			current.Entry = defaults.Entry
+			changesApplied++
+		}
+	case "averaging":
+		if defaults.Averaging != nil {
+			current.Averaging = defaults.Averaging
+			changesApplied++
+		}
+	case "hedge":
+		if defaults.Hedge != nil {
+			current.Hedge = defaults.Hedge
+			changesApplied++
+		}
+	case "risk":
+		if defaults.Risk != nil {
+			current.Risk = defaults.Risk
+			changesApplied++
+		}
+	case "stale_release":
+		if defaults.StaleRelease != nil {
+			current.StaleRelease = defaults.StaleRelease
+			changesApplied++
+		}
+	case "assignment":
+		if defaults.Assignment != nil {
+			current.Assignment = defaults.Assignment
+			changesApplied++
+		}
+	case "mtf":
+		if defaults.MTF != nil {
+			current.MTF = defaults.MTF
+			changesApplied++
+		}
+	case "dynamic_ai_exit":
+		if defaults.DynamicAIExit != nil {
+			current.DynamicAIExit = defaults.DynamicAIExit
+			changesApplied++
+		}
+	case "reversal":
+		if defaults.Reversal != nil {
+			current.Reversal = defaults.Reversal
+			changesApplied++
+		}
+	case "funding_rate":
+		if defaults.FundingRate != nil {
+			current.FundingRate = defaults.FundingRate
+			changesApplied++
+		}
+	case "trend_divergence":
+		if defaults.TrendDivergence != nil {
+			current.TrendDivergence = defaults.TrendDivergence
+			changesApplied++
+		}
+	case "position_optimization":
+		if defaults.PositionOptimization != nil {
+			current.PositionOptimization = defaults.PositionOptimization
+			changesApplied++
+		}
+	case "trend_filters":
+		if defaults.TrendFilters != nil {
+			current.TrendFilters = defaults.TrendFilters
+			changesApplied++
+		}
+	case "early_warning":
+		if defaults.EarlyWarning != nil {
+			current.EarlyWarning = defaults.EarlyWarning
+			changesApplied++
+		}
+	}
+
+	return changesApplied
 }
 
 // buildAllValuesFromDefaults creates AllValues list from default config only (for admin view)
@@ -612,6 +805,7 @@ func compareModeConfigs(modeName string, current, defaultCfg *autopilot.ModeFull
 	compareSections("sltp", current.SLTP, defaultCfg.SLTP, response)
 	compareSections("circuit_breaker", current.CircuitBreaker, defaultCfg.CircuitBreaker, response)
 	compareSections("timeframe", current.Timeframe, defaultCfg.Timeframe, response)
+	compareSections("entry", current.Entry, defaultCfg.Entry, response) // Entry order settings
 	compareSections("averaging", current.Averaging, defaultCfg.Averaging, response)
 	compareSections("hedge", current.Hedge, defaultCfg.Hedge, response)
 	compareSections("risk", current.Risk, defaultCfg.Risk, response)
@@ -625,6 +819,9 @@ func compareModeConfigs(modeName string, current, defaultCfg *autopilot.ModeFull
 
 	// Compare position_optimization (Story 9.9 - TP1/TP2/TP3, DCA, Reentry, Hedging, etc.)
 	compareSections("position_optimization", current.PositionOptimization, defaultCfg.PositionOptimization, response)
+
+	// Compare early_warning (Mode-specific early warning - Story 9.4 Phase 4)
+	compareSections("early_warning", current.EarlyWarning, defaultCfg.EarlyWarning, response)
 
 	// Compare trend_filters sub-sections (Story 9.5)
 	// Each sub-filter (btc_trend_check, price_vs_ema, vwap_filter, candlestick_alignment) is compared separately
@@ -2452,4 +2649,614 @@ func (s *Server) handleUpdateUserSafetySettings(c *gin.Context) {
 		"settings": req,
 		"message":  fmt.Sprintf("%s safety settings updated", mode),
 	})
+}
+
+// ====== POSITION OPTIMIZATION LOAD DEFAULTS HANDLER ======
+// Dedicated endpoint for position optimization (scalp_reentry) settings
+// POST /api/futures/ginie/position-optimization/load-defaults?preview=true
+
+// handleLoadPositionOptimizationDefaults resets position optimization (scalp_reentry) to default values
+// POST /api/futures/ginie/position-optimization/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
+func (s *Server) handleLoadPositionOptimizationDefaults(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	preview := c.Query("preview") == "true"
+	isAdmin := auth.IsAdmin(c)
+
+	// Reuse the internal handler for scalp_reentry
+	s.handleLoadScalpReentryDefaultsInternal(c, userID, preview, isAdmin)
+}
+
+// ====== BATCH RESET HANDLERS ======
+// These handlers allow resetting multiple config sections at once
+
+// BatchResetResult represents the response for batch reset operations
+type BatchResetResult struct {
+	Success        bool                   `json:"success"`
+	ConfigType     string                 `json:"config_type"`
+	ChangesApplied int                    `json:"changes_applied"`
+	Results        map[string]interface{} `json:"results"`
+	Message        string                 `json:"message"`
+}
+
+// handleResetAllModes resets all 4 trading modes to defaults
+// POST /api/futures/ginie/modes/reset-all?preview=true
+func (s *Server) handleResetAllModes(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	preview := c.Query("preview") == "true"
+	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
+
+	// Get all default mode configs from default-settings.json
+	defaultModes, err := autopilot.GetAllDefaultModeFullConfigs()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load default settings: "+err.Error())
+		return
+	}
+
+	modeNames := []string{"ultra_fast", "scalp", "swing", "position"}
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly
+	if isAdmin && preview {
+		allDefaultsMap := make(map[string]interface{})
+		for _, modeName := range modeNames {
+			if defaultModes[modeName] != nil {
+				allDefaultsMap[modeName] = defaultModes[modeName]
+			}
+		}
+
+		response := &AllModesDiffResponse{
+			Preview:      true,
+			ConfigType:   "all_modes",
+			IsAdmin:      true,
+			AllMatch:     true,
+			TotalChanges: 0,
+			Modes:        make(map[string]*ModeDiffResponse),
+			DefaultValue: allDefaultsMap,
+		}
+
+		for _, modeName := range modeNames {
+			defaultMode := defaultModes[modeName]
+			if defaultMode != nil {
+				response.Modes[modeName] = &ModeDiffResponse{
+					Preview:      true,
+					Mode:         modeName,
+					ConfigType:   modeName,
+					IsAdmin:      true,
+					AllMatch:     true,
+					TotalChanges: 0,
+					Differences:  []SettingDifference{},
+					AllValues:    buildAllValuesFromDefaults(modeName, defaultMode),
+					DefaultValue: defaultMode,
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// REGULAR USER: Compare user's DB settings vs defaults
+	sm := autopilot.GetSettingsManager()
+	response := &AllModesDiffResponse{
+		Preview: preview,
+		Modes:   make(map[string]*ModeDiffResponse),
+		IsAdmin: isAdmin,
+	}
+
+	totalChanges := 0
+	allMatch := true
+
+	for _, modeName := range modeNames {
+		currentMode, dbErr := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, modeName)
+		if dbErr != nil {
+			continue
+		}
+
+		defaultMode := defaultModes[modeName]
+		if currentMode != nil && defaultMode != nil {
+			diff := compareModeConfigs(modeName, currentMode, defaultMode)
+			diff.IsAdmin = isAdmin
+			response.Modes[modeName] = diff
+			totalChanges += diff.TotalChanges
+			if !diff.AllMatch {
+				allMatch = false
+			}
+		}
+	}
+
+	response.TotalChanges = totalChanges
+	response.AllMatch = allMatch
+	response.ConfigType = "all_modes"
+
+	if preview {
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// Apply defaults to all modes
+	modesApplied := 0
+	for _, modeName := range modeNames {
+		defaultMode := defaultModes[modeName]
+		if defaultMode == nil {
+			continue
+		}
+
+		configJSON, marshalErr := json.Marshal(defaultMode)
+		if marshalErr != nil {
+			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to serialize %s config: %v", modeName, marshalErr))
+			return
+		}
+
+		if saveErr := s.repo.SaveUserModeConfig(ctx, userID, modeName, defaultMode.Enabled, configJSON); saveErr != nil {
+			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to save %s settings: %v", modeName, saveErr))
+			return
+		}
+		modesApplied++
+	}
+
+	// Trigger immediate config reload
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[DEFAULTS-RESET] Triggered config reload for all modes for user %s", userID)
+		}
+	}
+
+	c.JSON(http.StatusOK, BatchResetResult{
+		Success:        true,
+		ConfigType:     "all_modes",
+		ChangesApplied: totalChanges,
+		Results: map[string]interface{}{
+			"modes_reset": modesApplied,
+		},
+		Message: fmt.Sprintf("All %d trading modes reset to defaults (%d changes applied)", modesApplied, totalChanges),
+	})
+}
+
+// handleResetAllOtherSettings resets all "other settings" (non-mode settings) to defaults
+// POST /api/futures/ginie/other-settings/reset-all?preview=true
+// Resets: circuit_breaker, llm_config, capital_allocation, position_optimization
+func (s *Server) handleResetAllOtherSettings(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	preview := c.Query("preview") == "true"
+	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
+
+	// Load defaults from default-settings.json
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to load defaults: "+err.Error())
+		return
+	}
+
+	// Response structure for preview
+	type OtherSettingsPreview struct {
+		Preview      bool                              `json:"preview"`
+		ConfigType   string                            `json:"config_type"`
+		TotalChanges int                               `json:"total_changes"`
+		AllMatch     bool                              `json:"all_match"`
+		Sections     map[string]*ConfigResetPreview    `json:"sections"`
+		IsAdmin      bool                              `json:"is_admin"`
+		DefaultValue map[string]interface{}            `json:"default_value,omitempty"`
+	}
+
+	response := &OtherSettingsPreview{
+		Preview:    preview,
+		ConfigType: "other_settings",
+		Sections:   make(map[string]*ConfigResetPreview),
+		IsAdmin:    isAdmin,
+	}
+
+	totalChanges := 0
+	allMatch := true
+
+	// ===== 1. Circuit Breaker =====
+	cbPreview := s.buildCircuitBreakerPreview(ctx, userID, defaults, isAdmin)
+	response.Sections["circuit_breaker"] = cbPreview
+	totalChanges += cbPreview.TotalChanges
+	if !cbPreview.AllMatch {
+		allMatch = false
+	}
+
+	// ===== 2. LLM Config =====
+	llmPreview := s.buildLLMConfigPreview(ctx, userID, defaults, isAdmin)
+	response.Sections["llm_config"] = llmPreview
+	totalChanges += llmPreview.TotalChanges
+	if !llmPreview.AllMatch {
+		allMatch = false
+	}
+
+	// ===== 3. Capital Allocation =====
+	caPreview := s.buildCapitalAllocationPreview(ctx, userID, defaults, isAdmin)
+	response.Sections["capital_allocation"] = caPreview
+	totalChanges += caPreview.TotalChanges
+	if !caPreview.AllMatch {
+		allMatch = false
+	}
+
+	// ===== 4. Position Optimization (scalp_reentry) =====
+	poPreview := s.buildPositionOptimizationPreview(ctx, userID, isAdmin)
+	response.Sections["position_optimization"] = poPreview
+	totalChanges += poPreview.TotalChanges
+	if !poPreview.AllMatch {
+		allMatch = false
+	}
+
+	response.TotalChanges = totalChanges
+	response.AllMatch = allMatch
+
+	// ADMIN preview - add default values for editing
+	if isAdmin && preview {
+		defaultConfig, _ := autopilot.GetDefaultPositionOptimizationConfig()
+		response.DefaultValue = map[string]interface{}{
+			"circuit_breaker":       defaults.CircuitBreaker.Global,
+			"llm_config":            defaults.LLMConfig.Global,
+			"capital_allocation":    defaults.CapitalAllocation,
+			"position_optimization": defaultConfig,
+		}
+	}
+
+	if preview {
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	// ===== Apply all defaults =====
+	results := make(map[string]interface{})
+
+	// 1. Reset Circuit Breaker
+	if err := s.applyCircuitBreakerDefaults(ctx, userID, defaults); err != nil {
+		results["circuit_breaker"] = map[string]interface{}{"success": false, "error": err.Error()}
+	} else {
+		results["circuit_breaker"] = map[string]interface{}{"success": true, "changes": cbPreview.TotalChanges}
+	}
+
+	// 2. Reset LLM Config
+	if err := s.applyLLMConfigDefaults(ctx, userID, defaults); err != nil {
+		results["llm_config"] = map[string]interface{}{"success": false, "error": err.Error()}
+	} else {
+		results["llm_config"] = map[string]interface{}{"success": true, "changes": llmPreview.TotalChanges}
+	}
+
+	// 3. Reset Capital Allocation
+	if err := s.applyCapitalAllocationDefaults(ctx, userID, defaults); err != nil {
+		results["capital_allocation"] = map[string]interface{}{"success": false, "error": err.Error()}
+	} else {
+		results["capital_allocation"] = map[string]interface{}{"success": true, "changes": caPreview.TotalChanges}
+	}
+
+	// 4. Reset Position Optimization
+	if err := s.applyPositionOptimizationDefaults(ctx, userID); err != nil {
+		results["position_optimization"] = map[string]interface{}{"success": false, "error": err.Error()}
+	} else {
+		results["position_optimization"] = map[string]interface{}{"success": true, "changes": poPreview.TotalChanges}
+	}
+
+	// Trigger immediate config reload
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[DEFAULTS-RESET] Triggered config reload for all other settings for user %s", userID)
+		}
+	}
+
+	c.JSON(http.StatusOK, BatchResetResult{
+		Success:        true,
+		ConfigType:     "other_settings",
+		ChangesApplied: totalChanges,
+		Results:        results,
+		Message:        fmt.Sprintf("All other settings reset to defaults (%d changes applied)", totalChanges),
+	})
+}
+
+// ===== Helper functions for building previews =====
+
+func (s *Server) buildCircuitBreakerPreview(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile, isAdmin bool) *ConfigResetPreview {
+	preview := &ConfigResetPreview{
+		Preview:     true,
+		ConfigType:  "circuit_breaker",
+		IsAdmin:     isAdmin,
+		Differences: []SettingDifference{},
+		AllValues:   []FieldComparison{},
+	}
+
+	if isAdmin {
+		preview.AllValues = []FieldComparison{
+			{Path: "circuit_breaker.enabled", Current: defaults.CircuitBreaker.Global.Enabled, Default: defaults.CircuitBreaker.Global.Enabled, Match: true},
+			{Path: "circuit_breaker.max_loss_per_hour", Current: defaults.CircuitBreaker.Global.MaxLossPerHour, Default: defaults.CircuitBreaker.Global.MaxLossPerHour, Match: true},
+			{Path: "circuit_breaker.max_daily_loss", Current: defaults.CircuitBreaker.Global.MaxDailyLoss, Default: defaults.CircuitBreaker.Global.MaxDailyLoss, Match: true},
+			{Path: "circuit_breaker.max_consecutive_losses", Current: defaults.CircuitBreaker.Global.MaxConsecutiveLosses, Default: defaults.CircuitBreaker.Global.MaxConsecutiveLosses, Match: true},
+			{Path: "circuit_breaker.cooldown_minutes", Current: defaults.CircuitBreaker.Global.CooldownMinutes, Default: defaults.CircuitBreaker.Global.CooldownMinutes, Match: true},
+		}
+		preview.AllMatch = true
+		preview.DefaultValue = defaults.CircuitBreaker.Global
+		return preview
+	}
+
+	currentCB, _ := s.repo.GetUserGlobalCircuitBreaker(ctx, userID)
+	if currentCB == nil {
+		currentCB = &database.UserGlobalCircuitBreaker{
+			UserID:               userID,
+			MaxLossPerHour:       100.0,
+			MaxDailyLoss:         300.0,
+			MaxConsecutiveLosses: 3,
+			CooldownMinutes:      30,
+		}
+	}
+
+	addField := func(path string, current, defaultVal interface{}) {
+		match := reflect.DeepEqual(current, defaultVal)
+		preview.AllValues = append(preview.AllValues, FieldComparison{
+			Path:    path,
+			Current: current,
+			Default: defaultVal,
+			Match:   match,
+		})
+		if !match {
+			preview.Differences = append(preview.Differences, SettingDifference{
+				Path:      path,
+				Current:   current,
+				Default:   defaultVal,
+				RiskLevel: "high",
+			})
+		}
+	}
+
+	addField("circuit_breaker.max_loss_per_hour", currentCB.MaxLossPerHour, defaults.CircuitBreaker.Global.MaxLossPerHour)
+	addField("circuit_breaker.max_daily_loss", currentCB.MaxDailyLoss, defaults.CircuitBreaker.Global.MaxDailyLoss)
+	addField("circuit_breaker.max_consecutive_losses", currentCB.MaxConsecutiveLosses, defaults.CircuitBreaker.Global.MaxConsecutiveLosses)
+	addField("circuit_breaker.cooldown_minutes", currentCB.CooldownMinutes, defaults.CircuitBreaker.Global.CooldownMinutes)
+
+	preview.TotalChanges = len(preview.Differences)
+	preview.AllMatch = len(preview.Differences) == 0
+	return preview
+}
+
+func (s *Server) buildLLMConfigPreview(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile, isAdmin bool) *ConfigResetPreview {
+	preview := &ConfigResetPreview{
+		Preview:     true,
+		ConfigType:  "llm_config",
+		IsAdmin:     isAdmin,
+		Differences: []SettingDifference{},
+		AllValues:   []FieldComparison{},
+	}
+
+	if isAdmin {
+		preview.AllValues = []FieldComparison{
+			{Path: "llm_config.provider", Current: defaults.LLMConfig.Global.Provider, Default: defaults.LLMConfig.Global.Provider, Match: true},
+			{Path: "llm_config.model", Current: defaults.LLMConfig.Global.Model, Default: defaults.LLMConfig.Global.Model, Match: true},
+			{Path: "llm_config.timeout_ms", Current: defaults.LLMConfig.Global.TimeoutMS, Default: defaults.LLMConfig.Global.TimeoutMS, Match: true},
+			{Path: "llm_config.retry_count", Current: defaults.LLMConfig.Global.RetryCount, Default: defaults.LLMConfig.Global.RetryCount, Match: true},
+		}
+		preview.AllMatch = true
+		preview.DefaultValue = defaults.LLMConfig.Global
+		return preview
+	}
+
+	currentLLM, _ := s.repo.GetUserLLMConfig(ctx, userID)
+	if currentLLM == nil {
+		currentLLM = database.DefaultUserLLMConfig()
+		currentLLM.UserID = userID
+	}
+
+	addField := func(path string, current, defaultVal interface{}) {
+		match := reflect.DeepEqual(current, defaultVal)
+		preview.AllValues = append(preview.AllValues, FieldComparison{
+			Path:    path,
+			Current: current,
+			Default: defaultVal,
+			Match:   match,
+		})
+		if !match {
+			preview.Differences = append(preview.Differences, SettingDifference{
+				Path:      path,
+				Current:   current,
+				Default:   defaultVal,
+				RiskLevel: "low",
+			})
+		}
+	}
+
+	addField("llm_config.provider", currentLLM.Provider, defaults.LLMConfig.Global.Provider)
+	addField("llm_config.model", currentLLM.Model, defaults.LLMConfig.Global.Model)
+	addField("llm_config.timeout_ms", currentLLM.TimeoutMs, defaults.LLMConfig.Global.TimeoutMS)
+	addField("llm_config.retry_count", currentLLM.RetryCount, defaults.LLMConfig.Global.RetryCount)
+
+	preview.TotalChanges = len(preview.Differences)
+	preview.AllMatch = len(preview.Differences) == 0
+	return preview
+}
+
+func (s *Server) buildCapitalAllocationPreview(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile, isAdmin bool) *ConfigResetPreview {
+	preview := &ConfigResetPreview{
+		Preview:     true,
+		ConfigType:  "capital_allocation",
+		IsAdmin:     isAdmin,
+		Differences: []SettingDifference{},
+		AllValues:   []FieldComparison{},
+	}
+
+	jsonAlloc := defaults.CapitalAllocation
+
+	if isAdmin {
+		preview.AllValues = []FieldComparison{
+			{Path: "ultra_fast_percent", Current: jsonAlloc.UltraFastPercent, Default: jsonAlloc.UltraFastPercent, Match: true},
+			{Path: "scalp_percent", Current: jsonAlloc.ScalpPercent, Default: jsonAlloc.ScalpPercent, Match: true},
+			{Path: "swing_percent", Current: jsonAlloc.SwingPercent, Default: jsonAlloc.SwingPercent, Match: true},
+			{Path: "position_percent", Current: jsonAlloc.PositionPercent, Default: jsonAlloc.PositionPercent, Match: true},
+			{Path: "allow_dynamic_rebalance", Current: jsonAlloc.AllowDynamicRebalance, Default: jsonAlloc.AllowDynamicRebalance, Match: true},
+			{Path: "rebalance_threshold_pct", Current: jsonAlloc.RebalanceThresholdPct, Default: jsonAlloc.RebalanceThresholdPct, Match: true},
+		}
+		preview.AllMatch = true
+		preview.DefaultValue = map[string]interface{}{
+			"ultra_fast_percent":      jsonAlloc.UltraFastPercent,
+			"scalp_percent":           jsonAlloc.ScalpPercent,
+			"swing_percent":           jsonAlloc.SwingPercent,
+			"position_percent":        jsonAlloc.PositionPercent,
+			"allow_dynamic_rebalance": jsonAlloc.AllowDynamicRebalance,
+			"rebalance_threshold_pct": jsonAlloc.RebalanceThresholdPct,
+		}
+		return preview
+	}
+
+	currentAlloc, _ := s.repo.GetUserCapitalAllocation(ctx, userID)
+	if currentAlloc == nil {
+		currentAlloc = database.DefaultUserCapitalAllocation()
+		currentAlloc.UserID = userID
+	}
+
+	addField := func(path string, current, defaultVal interface{}) {
+		match := reflect.DeepEqual(current, defaultVal)
+		preview.AllValues = append(preview.AllValues, FieldComparison{
+			Path:    path,
+			Current: current,
+			Default: defaultVal,
+			Match:   match,
+		})
+		if !match {
+			preview.Differences = append(preview.Differences, SettingDifference{
+				Path:      path,
+				Current:   current,
+				Default:   defaultVal,
+				RiskLevel: "medium",
+			})
+		}
+	}
+
+	addField("capital_allocation.ultra_fast_percent", currentAlloc.UltraFastPercent, jsonAlloc.UltraFastPercent)
+	addField("capital_allocation.scalp_percent", currentAlloc.ScalpPercent, jsonAlloc.ScalpPercent)
+	addField("capital_allocation.swing_percent", currentAlloc.SwingPercent, jsonAlloc.SwingPercent)
+	addField("capital_allocation.position_percent", currentAlloc.PositionPercent, jsonAlloc.PositionPercent)
+	addField("capital_allocation.allow_dynamic_rebalance", currentAlloc.AllowDynamicRebalance, jsonAlloc.AllowDynamicRebalance)
+	addField("capital_allocation.rebalance_threshold_pct", currentAlloc.RebalanceThresholdPct, jsonAlloc.RebalanceThresholdPct)
+
+	preview.TotalChanges = len(preview.Differences)
+	preview.AllMatch = len(preview.Differences) == 0
+	return preview
+}
+
+func (s *Server) buildPositionOptimizationPreview(ctx context.Context, userID string, isAdmin bool) *ConfigResetPreview {
+	preview := &ConfigResetPreview{
+		Preview:     true,
+		ConfigType:  "position_optimization",
+		IsAdmin:     isAdmin,
+		Differences: []SettingDifference{},
+		AllValues:   []FieldComparison{},
+	}
+
+	defaultConfig, err := autopilot.GetDefaultPositionOptimizationConfig()
+	if err != nil {
+		return preview
+	}
+
+	if isAdmin {
+		addDefaultFields("position_optimization", reflect.ValueOf(defaultConfig).Elem(), &preview.AllValues)
+		preview.AllMatch = true
+		preview.DefaultValue = defaultConfig
+		return preview
+	}
+
+	currentConfigJSON, _ := s.repo.GetUserScalpReentryConfig(ctx, userID)
+	var currentConfig autopilot.PositionOptimizationConfig
+	if currentConfigJSON != nil {
+		json.Unmarshal(currentConfigJSON, &currentConfig)
+	}
+
+	diff := compareScalpReentryConfigs(&currentConfig, defaultConfig)
+	preview.Differences = diff.Differences
+	preview.AllValues = diff.AllValues
+	preview.TotalChanges = diff.TotalChanges
+	preview.AllMatch = diff.AllMatch
+	return preview
+}
+
+// ===== Helper functions for applying defaults =====
+
+func (s *Server) applyCircuitBreakerDefaults(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile) error {
+	currentCB, _ := s.repo.GetUserGlobalCircuitBreaker(ctx, userID)
+	if currentCB == nil {
+		currentCB = &database.UserGlobalCircuitBreaker{UserID: userID}
+	}
+
+	updatedCB := &database.UserGlobalCircuitBreaker{
+		UserID:               userID,
+		Enabled:              currentCB.Enabled, // Preserve enabled state
+		MaxLossPerHour:       defaults.CircuitBreaker.Global.MaxLossPerHour,
+		MaxDailyLoss:         defaults.CircuitBreaker.Global.MaxDailyLoss,
+		MaxConsecutiveLosses: defaults.CircuitBreaker.Global.MaxConsecutiveLosses,
+		CooldownMinutes:      defaults.CircuitBreaker.Global.CooldownMinutes,
+		MaxTradesPerMinute:   defaults.CircuitBreaker.Global.MaxTradesPerMinute,
+		MaxDailyTrades:       defaults.CircuitBreaker.Global.MaxDailyTrades,
+	}
+
+	return s.repo.SaveUserGlobalCircuitBreaker(ctx, updatedCB)
+}
+
+func (s *Server) applyLLMConfigDefaults(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile) error {
+	currentLLM, _ := s.repo.GetUserLLMConfig(ctx, userID)
+	if currentLLM == nil {
+		currentLLM = &database.UserLLMConfig{UserID: userID}
+	}
+
+	updatedLLM := &database.UserLLMConfig{
+		UserID:           userID,
+		Enabled:          currentLLM.Enabled, // Preserve enabled state
+		Provider:         defaults.LLMConfig.Global.Provider,
+		Model:            defaults.LLMConfig.Global.Model,
+		FallbackProvider: currentLLM.FallbackProvider, // Preserve fallback
+		FallbackModel:    currentLLM.FallbackModel,    // Preserve fallback
+		TimeoutMs:        defaults.LLMConfig.Global.TimeoutMS,
+		RetryCount:       defaults.LLMConfig.Global.RetryCount,
+		CacheDurationSec: defaults.LLMConfig.Global.CacheDurationSec,
+	}
+
+	return s.repo.SaveUserLLMConfig(ctx, updatedLLM)
+}
+
+func (s *Server) applyCapitalAllocationDefaults(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile) error {
+	currentAlloc, _ := s.repo.GetUserCapitalAllocation(ctx, userID)
+	if currentAlloc == nil {
+		currentAlloc = database.DefaultUserCapitalAllocation()
+		currentAlloc.UserID = userID
+	}
+
+	jsonAlloc := defaults.CapitalAllocation
+	currentAlloc.UltraFastPercent = jsonAlloc.UltraFastPercent
+	currentAlloc.ScalpPercent = jsonAlloc.ScalpPercent
+	currentAlloc.SwingPercent = jsonAlloc.SwingPercent
+	currentAlloc.PositionPercent = jsonAlloc.PositionPercent
+	currentAlloc.AllowDynamicRebalance = jsonAlloc.AllowDynamicRebalance
+	currentAlloc.RebalanceThresholdPct = jsonAlloc.RebalanceThresholdPct
+
+	return s.repo.SaveUserCapitalAllocation(ctx, currentAlloc)
+}
+
+func (s *Server) applyPositionOptimizationDefaults(ctx context.Context, userID string) error {
+	defaultConfig, err := autopilot.GetDefaultPositionOptimizationConfig()
+	if err != nil {
+		return err
+	}
+
+	configJSON, err := json.Marshal(defaultConfig)
+	if err != nil {
+		return err
+	}
+
+	return s.repo.SaveUserScalpReentryConfig(ctx, userID, configJSON)
 }

@@ -118,12 +118,6 @@ func (s *AdminSyncService) SyncAdminSettingToDefaults(ctx context.Context, group
 		} else {
 			return fmt.Errorf("invalid data type for llm_config")
 		}
-	case "early_warning":
-		if val, ok := data.(EarlyWarningDefaults); ok {
-			defaults.EarlyWarning = val
-		} else {
-			return fmt.Errorf("invalid data type for early_warning")
-		}
 	case "capital_allocation":
 		if val, ok := data.(CapitalAllocationDefaults); ok {
 			defaults.CapitalAllocation = val
@@ -264,23 +258,7 @@ func (s *AdminSyncService) SyncAllAdminDefaultsFromDB(ctx context.Context, repo 
 		log.Printf("[ADMIN-SYNC] Synced LLM config")
 	}
 
-	// 5. Load early warning from user_early_warning
-	earlyWarning, err := repo.GetUserEarlyWarning(ctx, AdminUserID)
-	if err != nil {
-		log.Printf("[ADMIN-SYNC] Warning: Failed to get admin early warning: %v", err)
-	} else if earlyWarning != nil {
-		defaults.EarlyWarning = EarlyWarningDefaults{
-			Enabled:           earlyWarning.Enabled,
-			StartAfterMinutes: earlyWarning.StartAfterMinutes,
-			CheckIntervalSecs: earlyWarning.CheckIntervalSecs,
-			OnlyUnderwater:    earlyWarning.OnlyUnderwater,
-			MinLossPercent:    earlyWarning.MinLossPercent,
-			CloseOnReversal:   earlyWarning.CloseOnReversal,
-		}
-		log.Printf("[ADMIN-SYNC] Synced early warning")
-	}
-
-	// 6. Load Ginie settings from user_ginie_settings
+	// 5. Load Ginie settings from user_ginie_settings
 	ginieSettings, err := repo.GetUserGinieSettings(ctx, AdminUserID)
 	if err != nil {
 		log.Printf("[ADMIN-SYNC] Warning: Failed to get admin Ginie settings: %v", err)
@@ -302,7 +280,7 @@ func (s *AdminSyncService) SyncAllAdminDefaultsFromDB(ctx context.Context, repo 
 	}
 
 	log.Printf("[ADMIN-SYNC] Full sync from database completed successfully")
-	log.Printf("[ADMIN-SYNC] Synced: %d mode configs, capital allocation, circuit breaker, LLM config, early warning", len(defaults.ModeConfigs))
+	log.Printf("[ADMIN-SYNC] Synced: %d mode configs, capital allocation, circuit breaker, LLM config", len(defaults.ModeConfigs))
 	return nil
 }
 
