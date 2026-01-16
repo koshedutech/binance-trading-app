@@ -91,6 +91,11 @@ export default function AutopilotRulesPanel() {
     max_daily_trades: 100,
   });
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   useEffect(() => {
     fetchStatus();
     const interval = setInterval(fetchStatus, 15000); // Reduced from 5s to 15s to avoid rate limits
@@ -422,11 +427,12 @@ export default function AutopilotRulesPanel() {
                   <label className="block text-xs text-gray-400 mb-1">Max Hourly Loss (%)</label>
                   <input
                     type="number"
-                    min="0.5"
+                    min="0"
                     max="20"
                     step="0.5"
                     value={editConfig.max_loss_per_hour}
                     onChange={(e) => setEditConfig({ ...editConfig, max_loss_per_hour: parseFloat(e.target.value) || 0 })}
+                    onFocus={handleInputFocus}
                     className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:border-primary-500 focus:outline-none"
                   />
                 </div>
@@ -434,11 +440,12 @@ export default function AutopilotRulesPanel() {
                   <label className="block text-xs text-gray-400 mb-1">Max Daily Loss (%)</label>
                   <input
                     type="number"
-                    min="1"
+                    min="0"
                     max="50"
                     step="0.5"
                     value={editConfig.max_daily_loss}
                     onChange={(e) => setEditConfig({ ...editConfig, max_daily_loss: parseFloat(e.target.value) || 0 })}
+                    onFocus={handleInputFocus}
                     className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:border-primary-500 focus:outline-none"
                   />
                 </div>
@@ -446,11 +453,12 @@ export default function AutopilotRulesPanel() {
                   <label className="block text-xs text-gray-400 mb-1">Max Consecutive Losses</label>
                   <input
                     type="number"
-                    min="1"
+                    min="0"
                     max="20"
                     step="1"
                     value={editConfig.max_consecutive_losses}
                     onChange={(e) => setEditConfig({ ...editConfig, max_consecutive_losses: parseInt(e.target.value) || 0 })}
+                    onFocus={handleInputFocus}
                     className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:border-primary-500 focus:outline-none"
                   />
                 </div>
@@ -458,11 +466,12 @@ export default function AutopilotRulesPanel() {
                   <label className="block text-xs text-gray-400 mb-1">Cooldown (minutes)</label>
                   <input
                     type="number"
-                    min="5"
+                    min="0"
                     max="120"
                     step="5"
                     value={editConfig.cooldown_minutes}
                     onChange={(e) => setEditConfig({ ...editConfig, cooldown_minutes: parseInt(e.target.value) || 0 })}
+                    onFocus={handleInputFocus}
                     className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:border-primary-500 focus:outline-none"
                   />
                 </div>
@@ -470,11 +479,12 @@ export default function AutopilotRulesPanel() {
                   <label className="block text-xs text-gray-400 mb-1">Max Daily Trades</label>
                   <input
                     type="number"
-                    min="10"
+                    min="0"
                     max="500"
                     step="10"
                     value={editConfig.max_daily_trades}
                     onChange={(e) => setEditConfig({ ...editConfig, max_daily_trades: parseInt(e.target.value) || 0 })}
+                    onFocus={handleInputFocus}
                     className="w-full px-3 py-2 bg-gray-900 border border-gray-700 rounded text-white text-sm focus:border-primary-500 focus:outline-none"
                   />
                 </div>

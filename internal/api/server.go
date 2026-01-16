@@ -18,6 +18,7 @@ import (
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/license"
+	"binance-trading-bot/internal/settlement"
 	"binance-trading-bot/internal/vault"
 
 	"github.com/gin-contrib/cors"
@@ -90,6 +91,9 @@ type Server struct {
 
 	// Story 6.4: Admin defaults cache service for settings comparison
 	adminDefaultsCacheService *cache.AdminDefaultsCacheService
+
+	// Epic 8: Settlement service for daily P&L and analytics
+	settlementService *settlement.SettlementService
 }
 
 // ServerConfig holds server configuration
@@ -884,6 +888,14 @@ func (s *Server) setupRoutes() {
 
 		// Admin defaults editing (Story 9.4)
 		admin.POST("/defaults/:configType", s.handleAdminSaveDefaults)
+
+		// Settlement management (Epic 8 Stories 8.5, 8.8, 8.9, 8.10)
+		admin.GET("/daily-summaries/all", s.handleAdminDailySummariesGin)
+		admin.GET("/daily-summaries/export", s.handleAdminExportCSVGin)
+		admin.GET("/settlements/status", s.handleAdminSettlementStatusGin)
+		admin.POST("/settlements/retry/:user_id/:date", s.handleAdminSettlementRetryGin)
+		admin.GET("/settlements/review-queue", s.handleAdminReviewQueueGin)
+		admin.POST("/settlements/approve/:id", s.handleAdminApproveSummaryGin)
 	}
 
 	// WebSocket endpoints
@@ -1064,4 +1076,15 @@ func (s *Server) SetAdminDefaultsCacheService(svc *cache.AdminDefaultsCacheServi
 // GetAdminDefaultsCacheService returns the admin defaults cache service
 func (s *Server) GetAdminDefaultsCacheService() *cache.AdminDefaultsCacheService {
 	return s.adminDefaultsCacheService
+}
+
+// SetSettlementService sets the settlement service for daily P&L analytics
+// Epic 8: Daily Settlement & Mode Analytics
+func (s *Server) SetSettlementService(svc *settlement.SettlementService) {
+	s.settlementService = svc
+}
+
+// GetSettlementService returns the settlement service
+func (s *Server) GetSettlementService() *settlement.SettlementService {
+	return s.settlementService
 }

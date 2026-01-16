@@ -34,6 +34,7 @@ import (
 	"binance-trading-bot/internal/scalping"
 	"binance-trading-bot/internal/scanner"
 	"binance-trading-bot/internal/screener"
+	"binance-trading-bot/internal/settlement"
 	"binance-trading-bot/internal/strategy"
 	"binance-trading-bot/internal/vault"
 )
@@ -858,6 +859,11 @@ func main() {
 		}
 	}
 
+	// Epic 8: Initialize Settlement Service for daily P&L and analytics
+	// Uses repository for database operations and clientFactory for Binance API access
+	settlementService := settlement.NewSettlementService(repo, clientFactory)
+	logger.Info("Settlement service initialized for daily P&L analytics")
+
 	// Initialize UserAutopilotManager for multi-user simultaneous trading
 	// This enables each user to have their own independent autopilot instance
 	// Note: clientFactory is optional - manager can use apiKeyService directly from database
@@ -1005,6 +1011,12 @@ func main() {
 	if adminDefaultsCache != nil {
 		server.SetAdminDefaultsCacheService(adminDefaultsCache)
 		logger.Info("AdminDefaultsCacheService set on API server for settings comparison")
+	}
+
+	// Epic 8: Set the SettlementService on the server for daily P&L analytics
+	if settlementService != nil {
+		server.SetSettlementService(settlementService)
+		logger.Info("SettlementService set on API server for daily P&L analytics")
 	}
 
 	// Wire up WebSocket broadcast callbacks for User Data Stream updates

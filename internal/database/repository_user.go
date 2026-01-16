@@ -1642,3 +1642,83 @@ func (r *Repository) GetTimezonePresets(ctx context.Context) ([]TimezonePreset, 
 
 	return presets, nil
 }
+
+// =====================================================
+// USER SETTLEMENT TRACKING OPERATIONS (Story 8.0)
+// =====================================================
+
+// GetUsersForSettlementCheck returns all users with their timezone and last settlement date.
+// NOTE: This returns ALL users - the caller must filter based on each user's timezone to
+// determine who actually needs settlement. Users need settlement if:
+// 1. LastSettlementDate is nil (never settled), OR
+// 2. LastSettlementDate < current date in the user's timezone
+// Results are ordered by last_settlement_date ASC (NULLs first) for efficient processing.
+func (r *Repository) GetUsersForSettlementCheck(ctx context.Context) ([]User, error) {
+	query := `
+		SELECT id, email, COALESCE(timezone, 'Asia/Kolkata') as timezone, last_settlement_date
+		FROM users
+		ORDER BY last_settlement_date ASC NULLS FIRST
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users needing settlement: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		var lastSettlementDate *time.Time
+		err := rows.Scan(&u.ID, &u.Email, &u.Timezone, &lastSettlementDate)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan user for settlement: %w", err)
+		}
+		if lastSettlementDate != nil {
+			u.LastSettlementDate = lastSettlementDate
+		}
+		users = append(users, u)
+	}
+
+	// Check for errors during iteration (Go best practice)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating users for settlement: %w", err)
+	}
+
+	return users, nil
+}
+
+// UpdateLastSettlementDate updates the last settlement date for a user
+// The date should be the settlement date in the user's timezone
+func (r *Repository) UpdateLastSettlementDate(ctx context.Context, userID string, date time.Time) error {
+	query := `UPDATE users SET last_settlement_date = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+
+	result, err := r.db.Pool.Exec(ctx, query, userID, date)
+	if err != nil {
+		return fmt.Errorf("failed to update last settlement date: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("user not found: %s", userID)
+	}
+
+	return nil
+}
+
+// GetUserLastSettlementDate retrieves the last settlement date for a user
+// Returns nil if user has never been settled
+func (r *Repository) GetUserLastSettlementDate(ctx context.Context, userID string) (*time.Time, error) {
+	query := `SELECT last_settlement_date FROM users WHERE id = $1`
+
+	var lastSettlementDate *time.Time
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&lastSettlementDate)
+
+	if err == pgx.ErrNoRows {
+		return nil, fmt.Errorf("user not found: %s", userID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get last settlement date: %w", err)
+	}
+
+	return lastSettlementDate, nil
+}

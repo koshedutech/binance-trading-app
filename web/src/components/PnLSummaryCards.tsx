@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { apiService } from '../services/api';
 import { formatUSD } from '../services/futuresApi';
-import { RefreshCw, Clock, Calendar, TrendingUp, TrendingDown, DollarSign, Activity, Coins } from 'lucide-react';
+import { Clock, Calendar, TrendingUp, DollarSign, Activity, Coins, ArrowRight } from 'lucide-react';
 
 interface PnLSummaryData {
   // Daily breakdown
@@ -102,158 +102,140 @@ export default function PnLSummaryCards() {
 
   if (!pnlData) return null;
 
-  // Calculate net PnL
+  // Calculate net PnL (Gross PnL minus all fees)
+  // Note: daily_pnl is realized PnL from trades, commission and funding are costs
   const dailyNetPnl = pnlData.daily_pnl - pnlData.daily_commission - pnlData.daily_funding;
   const weeklyNetPnl = pnlData.weekly_pnl - pnlData.weekly_commission - pnlData.weekly_funding;
   const dailyTotalFees = pnlData.daily_commission + pnlData.daily_funding;
   const weeklyTotalFees = pnlData.weekly_commission + pnlData.weekly_funding;
 
   return (
-    <div className="grid grid-cols-2 gap-4 mb-4">
-      {/* Daily PnL Card */}
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+      {/* Daily Net PNL Card */}
       <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gray-900/50">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gradient-to-r from-green-900/30 to-gray-800">
           <div className="flex items-center gap-2">
             <DollarSign className="w-5 h-5 text-green-400" />
-            <span className="font-semibold text-white">Daily PnL</span>
+            <span className="font-bold text-white">Daily Net PNL</span>
           </div>
-          <div className="flex items-center gap-2 text-xs text-gray-400">
-            <Clock className="w-3.5 h-3.5" />
-            <span>Resets in {countdown}</span>
+          <div className="flex items-center gap-1 text-xs text-gray-400 bg-gray-900/50 px-2 py-1 rounded">
+            <Clock className="w-3 h-3" />
+            <span>{pnlData.timezone}</span>
           </div>
         </div>
+
         <div className="p-4">
-          {/* Net PnL - Large Display */}
-          <div className="text-center mb-4">
-            <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Net PnL</div>
-            <div className={`text-3xl font-bold ${dailyNetPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          {/* Net PnL - Large Bold Display */}
+          <div className="text-center mb-3">
+            <div className={`text-4xl font-extrabold ${dailyNetPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
               {dailyNetPnl >= 0 ? '+' : ''}{formatUSD(dailyNetPnl)}
             </div>
           </div>
 
-          {/* Breakdown Grid */}
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            {/* Gross PnL */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="flex items-center gap-1 text-xs text-gray-500 mb-1">
-                <TrendingUp className="w-3 h-3" />
-                Gross PnL
-              </div>
-              <div className={`font-semibold ${pnlData.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {formatUSD(pnlData.daily_pnl)}
-              </div>
-            </div>
+          {/* Calculation Formula: Profit - Fees */}
+          <div className="flex items-center justify-center gap-2 text-sm mb-4 bg-gray-900/50 rounded-lg py-2 px-3">
+            <span className={`font-semibold ${pnlData.daily_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {formatUSD(pnlData.daily_pnl)}
+            </span>
+            <span className="text-gray-500">−</span>
+            <span className="font-semibold text-yellow-400">{formatUSD(dailyTotalFees)}</span>
+            <span className="text-gray-500 text-xs">(profit − fees)</span>
+          </div>
 
-            {/* Total Fees */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="flex items-center gap-1 text-xs text-gray-500 mb-1">
-                <Coins className="w-3 h-3" />
-                Total Fees
-              </div>
-              <div className="font-semibold text-yellow-400">
-                -{formatUSD(dailyTotalFees)}
-              </div>
-            </div>
-
-            {/* Commission */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="text-xs text-gray-500 mb-1">Commission</div>
-              <div className="font-semibold text-orange-400">
+          {/* Fee Breakdown Row */}
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            {/* Trading Fees (Commission) */}
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Trading Fees</div>
+              <div className="text-lg font-bold text-yellow-400">
                 -{formatUSD(pnlData.daily_commission)}
               </div>
             </div>
-
             {/* Funding Fees */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="text-xs text-gray-500 mb-1">Funding Fees</div>
-              <div className={`font-semibold ${pnlData.daily_funding >= 0 ? 'text-orange-400' : 'text-green-400'}`}>
-                {pnlData.daily_funding >= 0 ? '-' : '+'}{formatUSD(Math.abs(pnlData.daily_funding))}
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Funding Fees</div>
+              <div className={`text-lg font-bold ${pnlData.daily_funding > 0 ? 'text-red-400' : pnlData.daily_funding < 0 ? 'text-green-400' : 'text-gray-400'}`}>
+                {pnlData.daily_funding > 0 ? '-' : pnlData.daily_funding < 0 ? '+' : ''}{formatUSD(Math.abs(pnlData.daily_funding))}
               </div>
             </div>
           </div>
 
-          {/* Trade Count & Timezone */}
-          <div className="mt-3 pt-3 border-t border-gray-700 flex items-center justify-between text-xs">
-            <div className="flex items-center gap-1 text-gray-400">
+          {/* Reset Countdown & Trades */}
+          <div className="flex items-center justify-between pt-3 border-t border-gray-700">
+            <div className="flex items-center gap-1 text-xs text-gray-400">
               <Activity className="w-3 h-3" />
-              <span>{pnlData.daily_trade_count} trades</span>
+              <span>{pnlData.daily_trade_count} trades today</span>
             </div>
-            <div className="text-gray-500">
-              {pnlData.timezone}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">Resets in</span>
+              <span className="font-mono font-bold text-blue-400 bg-blue-900/30 px-2 py-0.5 rounded text-sm">
+                {countdown}
+              </span>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Weekly PnL Card */}
+      {/* Weekly Net PNL Card */}
       <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gray-900/50">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gradient-to-r from-blue-900/30 to-gray-800">
           <div className="flex items-center gap-2">
             <Calendar className="w-5 h-5 text-blue-400" />
-            <span className="font-semibold text-white">Weekly PnL</span>
+            <span className="font-bold text-white">Weekly Net PNL</span>
           </div>
-          <div className="flex items-center gap-1 text-xs text-gray-400">
-            <span>{pnlData.week_range}</span>
+          <div className="flex items-center gap-1 text-xs text-gray-400 bg-gray-900/50 px-2 py-1 rounded">
+            <span>7 Days</span>
           </div>
         </div>
+
         <div className="p-4">
-          {/* Net PnL - Large Display */}
-          <div className="text-center mb-4">
-            <div className="text-xs text-gray-500 uppercase tracking-wide mb-1">Net PnL</div>
-            <div className={`text-3xl font-bold ${weeklyNetPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+          {/* Net PnL - Large Bold Display */}
+          <div className="text-center mb-3">
+            <div className={`text-4xl font-extrabold ${weeklyNetPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
               {weeklyNetPnl >= 0 ? '+' : ''}{formatUSD(weeklyNetPnl)}
             </div>
           </div>
 
-          {/* Breakdown Grid */}
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            {/* Gross PnL */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="flex items-center gap-1 text-xs text-gray-500 mb-1">
-                <TrendingUp className="w-3 h-3" />
-                Gross PnL
-              </div>
-              <div className={`font-semibold ${pnlData.weekly_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                {formatUSD(pnlData.weekly_pnl)}
-              </div>
-            </div>
+          {/* Calculation Formula: Profit - Fees */}
+          <div className="flex items-center justify-center gap-2 text-sm mb-4 bg-gray-900/50 rounded-lg py-2 px-3">
+            <span className={`font-semibold ${pnlData.weekly_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {formatUSD(pnlData.weekly_pnl)}
+            </span>
+            <span className="text-gray-500">−</span>
+            <span className="font-semibold text-yellow-400">{formatUSD(weeklyTotalFees)}</span>
+            <span className="text-gray-500 text-xs">(profit − fees)</span>
+          </div>
 
-            {/* Total Fees */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="flex items-center gap-1 text-xs text-gray-500 mb-1">
-                <Coins className="w-3 h-3" />
-                Total Fees
-              </div>
-              <div className="font-semibold text-yellow-400">
-                -{formatUSD(weeklyTotalFees)}
-              </div>
-            </div>
-
-            {/* Commission */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="text-xs text-gray-500 mb-1">Commission</div>
-              <div className="font-semibold text-orange-400">
+          {/* Fee Breakdown Row */}
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            {/* Trading Fees (Commission) */}
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Trading Fees</div>
+              <div className="text-lg font-bold text-yellow-400">
                 -{formatUSD(pnlData.weekly_commission)}
               </div>
             </div>
-
             {/* Funding Fees */}
-            <div className="bg-gray-900 rounded p-2">
-              <div className="text-xs text-gray-500 mb-1">Funding Fees</div>
-              <div className={`font-semibold ${pnlData.weekly_funding >= 0 ? 'text-orange-400' : 'text-green-400'}`}>
-                {pnlData.weekly_funding >= 0 ? '-' : '+'}{formatUSD(Math.abs(pnlData.weekly_funding))}
+            <div className="bg-gray-900 rounded-lg p-3">
+              <div className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">Funding Fees</div>
+              <div className={`text-lg font-bold ${pnlData.weekly_funding > 0 ? 'text-red-400' : pnlData.weekly_funding < 0 ? 'text-green-400' : 'text-gray-400'}`}>
+                {pnlData.weekly_funding > 0 ? '-' : pnlData.weekly_funding < 0 ? '+' : ''}{formatUSD(Math.abs(pnlData.weekly_funding))}
               </div>
             </div>
           </div>
 
-          {/* Trade Count & Date Range */}
-          <div className="mt-3 pt-3 border-t border-gray-700 flex items-center justify-between text-xs">
-            <div className="flex items-center gap-1 text-gray-400">
+          {/* Date Range & Trades */}
+          <div className="flex items-center justify-between pt-3 border-t border-gray-700">
+            <div className="flex items-center gap-1 text-xs text-gray-400">
               <Activity className="w-3 h-3" />
               <span>{pnlData.weekly_trade_count} trades</span>
             </div>
-            <div className="text-gray-500">
-              {pnlData.week_start_date} - {pnlData.week_end_date}
+            <div className="flex items-center gap-1 text-sm text-purple-400">
+              <span>{pnlData.week_start_date}</span>
+              <ArrowRight className="w-3 h-3 text-gray-500" />
+              <span>{pnlData.week_end_date}</span>
             </div>
           </div>
         </div>

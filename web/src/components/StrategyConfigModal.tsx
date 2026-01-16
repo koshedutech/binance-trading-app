@@ -65,6 +65,11 @@ export default function StrategyConfigModal({ isOpen, onClose, onSaved }: Props)
     take_profit_percent: 5.0,
   });
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   useEffect(() => {
     if (isOpen) {
       fetchConfigs();
@@ -334,10 +339,11 @@ export default function StrategyConfigModal({ isOpen, onClose, onSaved }: Props)
                   <input
                     type="number"
                     step="0.01"
-                    min="0.01"
+                    min="0"
                     max="1"
                     value={formData.position_size}
                     onChange={(e) => setFormData({ ...formData, position_size: parseFloat(e.target.value) })}
+                    onFocus={handleInputFocus}
                     required
                     className="w-full bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-primary-500"
                   />
@@ -351,9 +357,10 @@ export default function StrategyConfigModal({ isOpen, onClose, onSaved }: Props)
                   <input
                     type="number"
                     step="0.1"
-                    min="0.1"
+                    min="0"
                     value={formData.stop_loss_percent}
                     onChange={(e) => setFormData({ ...formData, stop_loss_percent: parseFloat(e.target.value) })}
+                    onFocus={handleInputFocus}
                     required
                     className="w-full bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-primary-500"
                   />
@@ -364,9 +371,10 @@ export default function StrategyConfigModal({ isOpen, onClose, onSaved }: Props)
                   <input
                     type="number"
                     step="0.1"
-                    min="0.1"
+                    min="0"
                     value={formData.take_profit_percent}
                     onChange={(e) => setFormData({ ...formData, take_profit_percent: parseFloat(e.target.value) })}
+                    onFocus={handleInputFocus}
                     required
                     className="w-full bg-dark-700 border border-dark-600 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-primary-500"
                   />

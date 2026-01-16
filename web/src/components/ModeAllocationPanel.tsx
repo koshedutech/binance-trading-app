@@ -68,6 +68,11 @@ export default function ModeAllocationPanel() {
     position_percent: 15,
   });
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   // Reset Dialog state
   const [resetDialog, setResetDialog] = useState<{
     open: boolean;
@@ -476,6 +481,7 @@ export default function ModeAllocationPanel() {
                       step="0.1"
                       value={inputs[key as keyof AllocationConfig]}
                       onChange={(e) => handleInputChange(key as keyof AllocationConfig, e.target.value)}
+                      onFocus={handleInputFocus}
                       className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white"
                     />
                     <span className="text-gray-400 w-8">%</span>

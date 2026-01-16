@@ -15,6 +15,7 @@ import TradingModeToggle from '../components/TradingModeToggle';
 import ModeAllocationPanel from '../components/ModeAllocationPanel';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import { TradeLifecycleTab } from '../components/TradeLifecycle';
+import PnLSummaryCards from '../components/PnLSummaryCards';
 import { formatUSD, formatPercent, getPositionColor } from '../services/futuresApi';
 import { wsService } from '../services/websocket';
 import {
@@ -334,6 +335,9 @@ export default function FuturesDashboard() {
           </div>
         </div>
       </div>
+
+      {/* Daily & Weekly PnL Summary Cards */}
+      <PnLSummaryCards />
 
       {/* News Dashboard */}
       <div className="mb-4">

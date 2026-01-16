@@ -63,6 +63,11 @@ const EnhancedStrategyBuilder: React.FC = () => {
     { value: '1d', label: '1 Day' },
   ];
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   // Handle template selection
   const handleSelectTemplate = useCallback((template: StrategyTemplate) => {
     setStrategyName(template.name);
@@ -340,8 +345,9 @@ const EnhancedStrategyBuilder: React.FC = () => {
                           type="number"
                           value={positionSize}
                           onChange={(e) => setPositionSize(parseFloat(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white"
-                          min="0.1"
+                          min="0"
                           max="100"
                           step="0.1"
                         />
@@ -353,8 +359,9 @@ const EnhancedStrategyBuilder: React.FC = () => {
                           type="number"
                           value={stopLossPercent}
                           onChange={(e) => setStopLossPercent(parseFloat(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white"
-                          min="0.1"
+                          min="0"
                           max="50"
                           step="0.1"
                         />
@@ -366,8 +373,9 @@ const EnhancedStrategyBuilder: React.FC = () => {
                           type="number"
                           value={takeProfitPercent}
                           onChange={(e) => setTakeProfitPercent(parseFloat(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white"
-                          min="0.1"
+                          min="0"
                           max="100"
                           step="0.1"
                         />

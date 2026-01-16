@@ -88,6 +88,11 @@ const Settings: React.FC = () => {
   const [isLoadingTimezone, setIsLoadingTimezone] = useState(false);
   const [isUpdatingTimezone, setIsUpdatingTimezone] = useState(false);
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   // Update URL when tab changes
   const changeTab = (tab: TabType) => {
     setActiveTab(tab);
@@ -200,8 +205,8 @@ const Settings: React.FC = () => {
     const balance = parseFloat(paperBalanceInput);
 
     // Client-side validation
-    if (isNaN(balance) || balance < 10 || balance > 1000000) {
-      setMessage({ type: 'error', text: 'Balance must be between $10 and $1,000,000' });
+    if (isNaN(balance) || balance < 0 || balance > 1000000) {
+      setMessage({ type: 'error', text: 'Balance must be between $0 and $1,000,000' });
       return;
     }
 
@@ -764,13 +769,14 @@ const Settings: React.FC = () => {
                         <input
                           id="paperBalanceInput"
                           type="number"
-                          min="10"
+                          min="0"
                           max="1000000"
                           step="0.01"
                           value={paperBalanceInput}
                           onChange={(e) => setPaperBalanceInput(e.target.value)}
+                          onFocus={handleInputFocus}
                           className="w-full pl-7 pr-4 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-yellow-500 focus:border-transparent"
-                          placeholder="Enter amount (10 - 1,000,000)"
+                          placeholder="Enter amount (0 - 1,000,000)"
                         />
                       </div>
                       <button
@@ -789,7 +795,7 @@ const Settings: React.FC = () => {
                       </button>
                     </div>
                     <p className="text-xs text-gray-400 mt-1">
-                      Enter a value between $10.00 and $1,000,000.00
+                      Enter a value between $0.00 and $1,000,000.00
                     </p>
                   </div>
 

@@ -219,6 +219,11 @@ export default function FuturesAutopilotPanel() {
   const [isEditing, setIsEditing] = useState(false);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   const fetchStatus = async () => {
     try {
       const data = await futuresApi.getAutopilotStatus();
@@ -1058,9 +1063,10 @@ export default function FuturesAutopilotPanel() {
                 type="number"
                 value={defaultLeverage}
                 onChange={(e) => setDefaultLeverage(e.target.value)}
+                onFocus={handleInputFocus}
                 className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-purple-500"
                 placeholder="5"
-                min="1"
+                min="0"
                 max={maxLeverage}
                 step="1"
               />
@@ -1089,6 +1095,7 @@ export default function FuturesAutopilotPanel() {
                 type="number"
                 value={maxAllocation}
                 onChange={(e) => setMaxAllocation(e.target.value)}
+                onFocus={handleInputFocus}
                 className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-purple-500"
                 placeholder="2500"
                 min="0"
@@ -1118,6 +1125,7 @@ export default function FuturesAutopilotPanel() {
                 type="number"
                 value={profitReinvestPercent}
                 onChange={(e) => setProfitReinvestPercent(e.target.value)}
+                onFocus={handleInputFocus}
                 className="w-20 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-purple-500"
                 placeholder="50"
                 min="0"
@@ -1160,11 +1168,11 @@ export default function FuturesAutopilotPanel() {
                   type="number"
                   value={takeProfitPercent}
                   onChange={(e) => setTakeProfitPercent(e.target.value)}
-                  onFocus={() => setIsEditing(true)}
+                  onFocus={(e) => { setIsEditing(true); e.target.select(); }}
                   onBlur={() => setIsEditing(false)}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-green-500"
                   placeholder="2"
-                  min="0.1"
+                  min="0"
                   max="100"
                   step="0.1"
                 />
@@ -1175,11 +1183,11 @@ export default function FuturesAutopilotPanel() {
                   type="number"
                   value={stopLossPercent}
                   onChange={(e) => setStopLossPercent(e.target.value)}
-                  onFocus={() => setIsEditing(true)}
+                  onFocus={(e) => { setIsEditing(true); e.target.select(); }}
                   onBlur={() => setIsEditing(false)}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-red-500"
                   placeholder="1"
-                  min="0.1"
+                  min="0"
                   max="100"
                   step="0.1"
                 />
@@ -1208,9 +1216,10 @@ export default function FuturesAutopilotPanel() {
                 type="number"
                 value={minConfidence}
                 onChange={(e) => setMinConfidence(e.target.value)}
+                onFocus={handleInputFocus}
                 className="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-purple-500"
                 placeholder="65"
-                min="1"
+                min="0"
                 max="100"
                 step="1"
               />
@@ -1738,8 +1747,9 @@ export default function FuturesAutopilotPanel() {
                     type="number"
                     value={cbConfig.max_loss_per_hour}
                     onChange={(e) => setCbConfig({...cbConfig, max_loss_per_hour: parseFloat(e.target.value) || 0})}
+                    onFocus={handleInputFocus}
                     className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-purple-500"
-                    min="0.1"
+                    min="0"
                     step="0.5"
                   />
                 </div>
@@ -1749,8 +1759,9 @@ export default function FuturesAutopilotPanel() {
                     type="number"
                     value={cbConfig.max_daily_loss}
                     onChange={(e) => setCbConfig({...cbConfig, max_daily_loss: parseFloat(e.target.value) || 0})}
+                    onFocus={handleInputFocus}
                     className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-purple-500"
-                    min="0.1"
+                    min="0"
                     step="0.5"
                   />
                 </div>
@@ -1760,8 +1771,9 @@ export default function FuturesAutopilotPanel() {
                     type="number"
                     value={cbConfig.max_consecutive_losses}
                     onChange={(e) => setCbConfig({...cbConfig, max_consecutive_losses: parseInt(e.target.value) || 0})}
+                    onFocus={handleInputFocus}
                     className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-purple-500"
-                    min="1"
+                    min="0"
                     step="1"
                   />
                 </div>
@@ -1771,8 +1783,9 @@ export default function FuturesAutopilotPanel() {
                     type="number"
                     value={cbConfig.cooldown_minutes}
                     onChange={(e) => setCbConfig({...cbConfig, cooldown_minutes: parseInt(e.target.value) || 0})}
+                    onFocus={handleInputFocus}
                     className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-purple-500"
-                    min="1"
+                    min="0"
                     step="5"
                   />
                 </div>
@@ -1782,8 +1795,9 @@ export default function FuturesAutopilotPanel() {
                     type="number"
                     value={cbConfig.max_daily_trades}
                     onChange={(e) => setCbConfig({...cbConfig, max_daily_trades: parseInt(e.target.value) || 0})}
+                    onFocus={handleInputFocus}
                     className="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none focus:border-purple-500"
-                    min="1"
+                    min="0"
                     step="10"
                   />
                 </div>

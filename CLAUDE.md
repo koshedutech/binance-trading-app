@@ -97,6 +97,39 @@ Default admin credentials:
 
 ---
 
+## Settings Lifecycle Rule (MANDATORY)
+
+**Any new user-configurable setting MUST follow the complete lifecycle:**
+
+```
+default-settings.json → Database → Redis Cache → API → Frontend
+```
+
+**Quick Reference:**
+1. Add to `default-settings.json`
+2. Add to Go struct (`settings.go` or `models_user.go`)
+3. Database migration (if new column)
+4. Update cache extract/merge in `settings_cache_service.go`
+5. Update admin defaults cache
+6. API handler with write-through pattern
+7. Frontend component with settings comparison
+
+**Full documentation:** `_bmad/bmm/data/settings-lifecycle-rule.md`
+
+**Key Files:**
+| Layer | File |
+|-------|------|
+| Source | `default-settings.json` |
+| Cache | `internal/cache/settings_cache_service.go` |
+| Cache | `internal/cache/admin_defaults_cache.go` |
+| DB | `internal/database/repository_user_mode_config.go` |
+| Init | `internal/database/user_initialization.go` |
+| API | `internal/api/handlers_settings.go` |
+
+**Redis Keys (per user):** 88 keys (80 mode + 4 global + 4 safety)
+
+---
+
 ## Summary
 
 > **After ANY code change, run `./scripts/docker-dev.sh`**

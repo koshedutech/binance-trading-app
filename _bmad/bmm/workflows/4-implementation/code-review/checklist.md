@@ -13,6 +13,14 @@
 - [ ] Tests identified and mapped to ACs; gaps noted
 - [ ] Code quality review performed on changed files
 - [ ] Security review performed on changed files and dependencies
+- [ ] **Settings Lifecycle Rule** verified (if story adds user settings)
+  - [ ] Field in `default-settings.json`
+  - [ ] Go struct updated with JSON tags
+  - [ ] Cache extract/merge functions updated
+  - [ ] Admin defaults cache includes field
+  - [ ] New user initialization includes field
+  - [ ] API handlers use write-through pattern
+  - [ ] Frontend settings comparison displays field
 - [ ] Outcome decided (Approve/Changes Requested/Blocked)
 - [ ] Review notes appended under "Senior Developer Review (AI)"
 - [ ] Change Log updated with review entry

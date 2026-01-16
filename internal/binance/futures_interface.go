@@ -107,11 +107,20 @@ type FuturesClient interface {
 	// GetTradeHistory retrieves trade history for a symbol
 	GetTradeHistory(symbol string, limit int) ([]FuturesTrade, error)
 
+	// GetTradeHistoryByDateRange retrieves trade history for a specific symbol and date range.
+	// Note: Binance API requires symbol parameter; behavior with empty string is undefined.
+	// startTime/endTime in milliseconds, 0 to ignore
+	GetTradeHistoryByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesTrade, error)
+
 	// GetFundingFeeHistory retrieves funding fee payment history
 	GetFundingFeeHistory(symbol string, limit int) ([]FundingFeeRecord, error)
 
 	// GetAllOrders retrieves all orders (filled, canceled, etc.) for a symbol
 	GetAllOrders(symbol string, limit int) ([]FuturesOrder, error)
+
+	// GetAllOrdersByDateRange retrieves all orders for a date range
+	// startTime/endTime in milliseconds, 0 to ignore
+	GetAllOrdersByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesOrder, error)
 
 	// GetIncomeHistory retrieves income history (realized PnL, funding fees, commissions, etc.)
 	// incomeType can be: REALIZED_PNL, FUNDING_FEE, COMMISSION, etc. Empty string for all types.

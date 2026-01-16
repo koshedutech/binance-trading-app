@@ -134,20 +134,41 @@ development_status:
   epic-7-retrospective: optional
 
   # ============================================================================
-  # EPIC 8: Daily Settlement & Mode Analytics
+  # EPIC 8: Daily Settlement & Mode Analytics - COMPLETE & QA VERIFIED
+  # Implementation Complete: 2026-01-16
+  # QA Verified: 2026-01-16
+  # Total Points: 24 (all stories done)
+  #
+  # Backend Implementation Summary:
+  #   - migrations/031_daily_mode_summaries.sql (Story 8.3)
+  #   - internal/database/repository_daily_summaries.go (Stories 8.3-8.6)
+  #   - internal/settlement/service.go (Stories 8.3-8.4)
+  #   - internal/settlement/capital_tracker.go (Story 8.7)
+  #   - internal/settlement/error_handling.go (Story 8.8)
+  #   - internal/settlement/monitoring.go (Story 8.9)
+  #   - internal/settlement/validation.go (Story 8.10)
+  #   - internal/api/handlers_settlements.go (Stories 8.5-8.6, 8.8-8.10)
+  #   - internal/cache/cache_service.go - Added sorted set ops (Story 8.7)
+  #   - internal/api/server.go - Settlement routes (Story 8.5)
+  #   - main.go - Settlement service wiring
+  #
+  # QA Code Review (2026-01-16):
+  #   - 15 issues found (2 CRITICAL, 3 HIGH, 7 MEDIUM, 3 LOW)
+  #   - All CRITICAL, HIGH, MEDIUM issues fixed
+  #   - Build verified: PASSED
   # ============================================================================
-  epic-8: backlog
-  8-0-user-timezone-database-migration: ready-for-dev
-  8-1-eod-snapshot-of-open-positions: ready-for-dev
-  8-2-daily-pnl-aggregation-by-mode: ready-for-dev
-  8-3-daily-summary-storage: ready-for-dev
-  8-4-handle-open-positions-in-daily-pnl: ready-for-dev
-  8-5-admin-dashboard-for-daily-summaries: ready-for-dev
-  8-6-historical-reports-with-date-range-queries: ready-for-dev
-  8-7-capital-utilization-tracking: ready-for-dev
-  8-8-settlement-failure-recovery: ready-for-dev
-  8-9-settlement-monitoring-alerts: ready-for-dev
-  8-10-data-quality-validation: ready-for-dev
+  epic-8: done  # QA VERIFIED 2026-01-16
+  8-0-settlement-date-tracking-migration: done  # 1 point - migration 029 complete
+  8-1-eod-snapshot-of-open-positions: done      # 5 points - CODE REVIEW PASSED 2026-01-16
+  8-2-daily-pnl-aggregation-by-mode: done       # 3 points - pnl_aggregator.go complete
+  8-3-daily-summary-storage: done               # 2 points - migration 031, repository, service
+  8-4-handle-open-positions-in-daily-pnl: done  # 2 points - unrealized P&L change calculation
+  8-5-admin-dashboard-for-daily-summaries: done # 3 points - admin API handlers
+  8-6-historical-reports-with-date-range-queries: done  # 2 points - DATE_TRUNC aggregation
+  8-7-capital-utilization-tracking: done        # 2 points - Redis sorted sets, capital_tracker.go
+  8-8-settlement-failure-recovery: done         # 2 points - exponential backoff retry
+  8-9-settlement-monitoring-alerts: done        # 1 point - background monitor, email alerts
+  8-10-data-quality-validation: done            # 1 point - validation rules, review queue
   epic-8-retrospective: optional
 
   # ============================================================================
@@ -172,3 +193,49 @@ development_status:
   10-1-position-management-efficiency-exit-system: ready-for-dev
   10-2-position-analytics-dashboard: backlog
   epic-10-retrospective: optional
+
+  # ============================================================================
+  # EPIC 11: Position Decision Engine
+  # Created: 2026-01-15
+  # Total Stories: 27
+  # Description: Replace multiplicative scoring with additive system,
+  #   market regime detection, multi-strategy framework, calibration layer
+  # Dependencies: Epic 6 (Redis), Epic 10 (Position Management)
+  # ============================================================================
+  epic-11: backlog
+  # Part A: Infrastructure (P0)
+  11-1-redis-state-management: backlog
+  11-2-delta-update-processor: backlog
+  11-3-websocket-state-sync: backlog
+  # Part B: Market Regime Detection (P1)
+  11-4-market-regime-classifier: backlog
+  11-5-regime-transition-handler: backlog
+  # Part C: Multi-Strategy Framework (P1)
+  11-6-strategy-registry: backlog
+  11-7-strategy-selector: backlog
+  # Part D: Strategy Implementations
+  11-8-trend-following-strategy: backlog      # P1 - Refined existing
+  11-9-mean-reversion-strategy: backlog       # P2
+  11-10-breakout-strategy: backlog            # P2
+  11-11-range-trading-strategy: backlog       # P2
+  # Part E: Configurable Indicators
+  11-12-indicator-segment-framework: backlog  # P1
+  11-13-indicator-calculation-engine: backlog # P1
+  11-14-indicator-performance-tracker: backlog # P2
+  # Part F: Scoring & Decision
+  11-15-additive-score-calculator: backlog    # P0 - Core formula change
+  11-16-enhanced-llm-context: backlog         # P1
+  11-17-calibration-layer: backlog            # P1
+  11-18-blocking-reason-tracker: backlog      # P0
+  # Part G: Execution & Tracking
+  11-19-decision-output-interface: backlog    # P1
+  11-20-actor-tracking-system: backlog        # P1
+  11-21-position-card-ui: backlog             # P2
+  11-22-performance-dashboard: backlog        # P2
+  # Part H: Settings & Calibration Management
+  11-23-decision-engine-settings-structure: backlog  # P0 - FOLLOWS SETTINGS LIFECYCLE
+  11-24-decision-engine-settings-ui: backlog  # P1
+  11-25-calibration-data-storage: backlog     # P1
+  11-26-calibration-data-lifecycle: backlog   # P1
+  11-27-calibration-display-ui: backlog       # P2
+  epic-11-retrospective: optional

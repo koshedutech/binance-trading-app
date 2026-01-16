@@ -691,6 +691,34 @@ func (c *FuturesMockClient) GetTradeHistory(symbol string, limit int) ([]Futures
 	return filtered, nil
 }
 
+func (c *FuturesMockClient) GetTradeHistoryByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesTrade, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	filtered := make([]FuturesTrade, 0)
+	for _, trade := range c.trades {
+		// Filter by symbol
+		if symbol != "" && trade.Symbol != symbol {
+			continue
+		}
+		// Filter by time range
+		if startTime > 0 && trade.Time < startTime {
+			continue
+		}
+		if endTime > 0 && trade.Time > endTime {
+			continue
+		}
+		filtered = append(filtered, trade)
+	}
+
+	// Return last N trades
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+	}
+
+	return filtered, nil
+}
+
 func (c *FuturesMockClient) GetFundingFeeHistory(symbol string, limit int) ([]FundingFeeRecord, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -723,6 +751,34 @@ func (c *FuturesMockClient) GetAllOrders(symbol string, limit int) ([]FuturesOrd
 
 	// Return last N orders
 	if len(orders) > limit {
+		orders = orders[len(orders)-limit:]
+	}
+
+	return orders, nil
+}
+
+func (c *FuturesMockClient) GetAllOrdersByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesOrder, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	orders := make([]FuturesOrder, 0)
+	for _, order := range c.orders {
+		// Filter by symbol
+		if symbol != "" && order.Symbol != symbol {
+			continue
+		}
+		// Filter by time range
+		if startTime > 0 && order.Time < startTime {
+			continue
+		}
+		if endTime > 0 && order.Time > endTime {
+			continue
+		}
+		orders = append(orders, *order)
+	}
+
+	// Return last N orders
+	if limit > 0 && len(orders) > limit {
 		orders = orders[len(orders)-limit:]
 	}
 

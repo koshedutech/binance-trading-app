@@ -442,6 +442,11 @@ export default function GiniePanel() {
     }
   };
 
+  // Auto-select content on focus for easier value replacement (Story UX improvement)
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   // Reset circuit breaker for a specific mode
   const handleResetModeCB = async (mode: string) => {
     setResettingModeCB(mode);
@@ -1841,9 +1846,10 @@ export default function GiniePanel() {
                   <label className="text-[10px] text-gray-400" title="Maximum loss in USD per hour. Catches rapid losing streaks quickly.">Max Loss/Hour ($)</label>
                   <input
                     type="number"
+                    min="0"
                     value={cbConfig.max_loss_per_hour}
                     onChange={(e) => setCBConfig({ ...cbConfig, max_loss_per_hour: Number(e.target.value) })}
-                    onFocus={() => setIsEditingCBConfig(true)}
+                    onFocus={(e) => { setIsEditingCBConfig(true); e.target.select(); }}
                     onBlur={() => setIsEditingCBConfig(false)}
                     className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
@@ -1852,9 +1858,10 @@ export default function GiniePanel() {
                   <label className="text-[10px] text-gray-400" title="Maximum loss in USD allowed per day before circuit breaker triggers.">Max Daily Loss ($)</label>
                   <input
                     type="number"
+                    min="0"
                     value={cbConfig.max_daily_loss}
                     onChange={(e) => setCBConfig({ ...cbConfig, max_daily_loss: Number(e.target.value) })}
-                    onFocus={() => setIsEditingCBConfig(true)}
+                    onFocus={(e) => { setIsEditingCBConfig(true); e.target.select(); }}
                     onBlur={() => setIsEditingCBConfig(false)}
                     className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
@@ -1863,9 +1870,10 @@ export default function GiniePanel() {
                   <label className="text-[10px] text-gray-400" title="Number of consecutive losing trades before pause. Prevents revenge trading.">Max Consecutive Losses</label>
                   <input
                     type="number"
+                    min="0"
                     value={cbConfig.max_consecutive_losses}
                     onChange={(e) => setCBConfig({ ...cbConfig, max_consecutive_losses: Number(e.target.value) })}
-                    onFocus={() => setIsEditingCBConfig(true)}
+                    onFocus={(e) => { setIsEditingCBConfig(true); e.target.select(); }}
                     onBlur={() => setIsEditingCBConfig(false)}
                     className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
@@ -1874,9 +1882,10 @@ export default function GiniePanel() {
                   <label className="text-[10px] text-gray-400" title="How long to pause trading after circuit breaker triggers. Allows market conditions to change.">Cooldown (minutes)</label>
                   <input
                     type="number"
+                    min="0"
                     value={cbConfig.cooldown_minutes}
                     onChange={(e) => setCBConfig({ ...cbConfig, cooldown_minutes: Number(e.target.value) })}
-                    onFocus={() => setIsEditingCBConfig(true)}
+                    onFocus={(e) => { setIsEditingCBConfig(true); e.target.select(); }}
                     onBlur={() => setIsEditingCBConfig(false)}
                     className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   />
@@ -2160,6 +2169,7 @@ export default function GiniePanel() {
                             step="5"
                             value={modeConfigs[selectedModeConfig]?.confidence?.min_confidence || 50}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'confidence.min_confidence', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2175,6 +2185,7 @@ export default function GiniePanel() {
                             step="5"
                             value={modeConfigs[selectedModeConfig]?.confidence?.high_confidence || 75}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'confidence.high_confidence', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2190,6 +2201,7 @@ export default function GiniePanel() {
                             step="5"
                             value={modeConfigs[selectedModeConfig]?.confidence?.ultra_confidence || 90}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'confidence.ultra_confidence', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2237,11 +2249,12 @@ export default function GiniePanel() {
                           <span className="text-[10px] text-gray-500">$</span>
                           <input
                             type="number"
-                            min="5"
+                            min="0"
                             max="100"
                             step="5"
                             value={modeConfigs[selectedModeConfig]?.size?.auto_size_min_cover_fee ?? 15}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'size.auto_size_min_cover_fee', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                           />
                           <span className="text-[10px] text-gray-500">min size</span>
@@ -2254,11 +2267,12 @@ export default function GiniePanel() {
                             <span className="text-[10px] text-gray-500">$</span>
                             <input
                               type="number"
-                              min="10"
+                              min="0"
                               max="10000"
                               step="50"
                               value={modeConfigs[selectedModeConfig]?.size?.base_size_usd || 100}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.base_size_usd', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                           </div>
@@ -2269,11 +2283,12 @@ export default function GiniePanel() {
                             <span className="text-[10px] text-gray-500">$</span>
                             <input
                               type="number"
-                              min="10"
+                              min="0"
                               max="50000"
                               step="50"
                               value={modeConfigs[selectedModeConfig]?.size?.max_size_usd || 500}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.max_size_usd', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                           </div>
@@ -2284,10 +2299,11 @@ export default function GiniePanel() {
                           <label className="block text-[10px] text-gray-400 mb-1" title="Maximum concurrent positions allowed for this mode. New trades are blocked when limit is reached.">Max Positions</label>
                           <input
                             type="number"
-                            min="1"
+                            min="0"
                             max="20"
                             value={modeConfigs[selectedModeConfig]?.size?.max_positions || 3}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'size.max_positions', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                         </div>
@@ -2296,10 +2312,11 @@ export default function GiniePanel() {
                           <div className="flex items-center gap-1">
                             <input
                               type="number"
-                              min="1"
+                              min="0"
                               max="125"
                               value={modeConfigs[selectedModeConfig]?.size?.leverage || 5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.leverage', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">x</span>
@@ -2310,11 +2327,12 @@ export default function GiniePanel() {
                           <div className="flex items-center gap-1">
                             <input
                               type="number"
-                              min="1"
+                              min="0"
                               max="5"
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.size?.size_multiplier_hi || 1.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.size_multiplier_hi', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">x</span>
@@ -2330,11 +2348,12 @@ export default function GiniePanel() {
                             <span className="text-gray-500 text-[10px]" title="Only use this percentage of available balance. 0.90 = use 90%, leaving 10% buffer for fees and slippage.">Safety Margin</span>
                             <input
                               type="number"
-                              min="0.5"
+                              min="0"
                               max="1"
                               step="0.05"
                               value={modeConfigs[selectedModeConfig]?.size?.safety_margin ?? 0.9}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.safety_margin', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
                             />
                           </div>
@@ -2342,11 +2361,12 @@ export default function GiniePanel() {
                             <span className="text-gray-500 text-[10px]" title="Minimum account balance required to trade. Trading is blocked if balance falls below this threshold.">Min Balance $</span>
                             <input
                               type="number"
-                              min="10"
+                              min="0"
                               max="500"
                               step="10"
                               value={modeConfigs[selectedModeConfig]?.size?.min_balance_usd ?? 50}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.min_balance_usd', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
                             />
                           </div>
@@ -2354,11 +2374,12 @@ export default function GiniePanel() {
                             <span className="text-gray-500 text-[10px]" title="Minimum position size. Trades smaller than this are rejected to avoid high fee percentage impact.">Min Pos Size $</span>
                             <input
                               type="number"
-                              min="5"
+                              min="0"
                               max="100"
                               step="5"
                               value={modeConfigs[selectedModeConfig]?.size?.min_position_size_usd ?? 10}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.min_position_size_usd', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
                             />
                           </div>
@@ -2371,6 +2392,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.size?.confidence_multiplier_base ?? 0.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.confidence_multiplier_base', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
                             />
                           </div>
@@ -2383,6 +2405,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.size?.confidence_multiplier_scale ?? 0.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'size.confidence_multiplier_scale', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-16 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px]"
                             />
                           </div>
@@ -2435,11 +2458,12 @@ export default function GiniePanel() {
                           <div className="flex items-center gap-1">
                             <input
                               type="number"
-                              min="10"
+                              min="0"
                               max="100"
                               step="5"
                               value={modeConfigs[selectedModeConfig]?.sltp?.isolated_margin_percent || 50}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.isolated_margin_percent', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-12 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">%</span>
@@ -2528,6 +2552,7 @@ export default function GiniePanel() {
                                 max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 100 : 10}
                                 value={modeConfigs[selectedModeConfig]?.sltp?.min_profit_to_trail_pct || 0.5}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.min_profit_to_trail_pct', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-purple-600/50 rounded text-white text-xs"
                               />
                             </div>
@@ -2542,6 +2567,7 @@ export default function GiniePanel() {
                                 max={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 100 : 10}
                                 value={modeConfigs[selectedModeConfig]?.sltp?.min_sl_distance_from_zero || 0.5}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.min_sl_distance_from_zero', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-purple-600/50 rounded text-white text-xs"
                               />
                             </div>
@@ -2579,6 +2605,7 @@ export default function GiniePanel() {
                                 onChange={(e) => updateModeConfig(selectedModeConfig,
                                   modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'sltp.roi_stop_loss_percent' : 'sltp.stop_loss_percent',
                                   Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className={`w-full px-1 py-1 bg-gray-700 border rounded text-xs ${
                                   modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
                                     ? 'border-red-600/50 text-red-400'
@@ -2606,6 +2633,7 @@ export default function GiniePanel() {
                                 onChange={(e) => updateModeConfig(selectedModeConfig,
                                   modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 'sltp.roi_take_profit_percent' : 'sltp.take_profit_percent',
                                   Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className={`w-full px-1 py-1 bg-gray-700 border rounded text-xs ${
                                   modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp
                                     ? 'border-green-600/50 text-green-400'
@@ -2647,6 +2675,7 @@ export default function GiniePanel() {
                                 step={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 1 : 0.1}
                                 value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_percent || 1.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_percent', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                             </div>
@@ -2663,6 +2692,7 @@ export default function GiniePanel() {
                                 step={modeConfigs[selectedModeConfig]?.sltp?.use_roi_based_sltp ? 1 : 0.5}
                                 value={modeConfigs[selectedModeConfig]?.sltp?.trailing_stop_activation || 1.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_stop_activation', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                             </div>
@@ -2675,6 +2705,7 @@ export default function GiniePanel() {
                                 placeholder="0 = use %"
                                 value={modeConfigs[selectedModeConfig]?.sltp?.trailing_activation_price || 0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.trailing_activation_price', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                             </div>
@@ -2697,6 +2728,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.sltp?.atr_sl_multiplier ?? 1.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_sl_multiplier', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                           </div>
@@ -2709,6 +2741,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.sltp?.atr_tp_multiplier ?? 3.0}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_tp_multiplier', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                           </div>
@@ -2726,6 +2759,7 @@ export default function GiniePanel() {
                                 step="0.1"
                                 value={modeConfigs[selectedModeConfig]?.sltp?.atr_sl_min ?? 0.5}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_sl_min', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                               <span className="text-[10px] text-gray-500">%</span>
@@ -2741,6 +2775,7 @@ export default function GiniePanel() {
                                 step="0.1"
                                 value={modeConfigs[selectedModeConfig]?.sltp?.atr_sl_max ?? 5.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_sl_max', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                               <span className="text-[10px] text-gray-500">%</span>
@@ -2760,6 +2795,7 @@ export default function GiniePanel() {
                                 step="0.5"
                                 value={modeConfigs[selectedModeConfig]?.sltp?.atr_tp_min ?? 1.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_tp_min', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                               <span className="text-[10px] text-gray-500">%</span>
@@ -2775,6 +2811,7 @@ export default function GiniePanel() {
                                 step="0.5"
                                 value={modeConfigs[selectedModeConfig]?.sltp?.atr_tp_max ?? 15.0}
                                 onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_tp_max', Number(e.target.value))}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                               />
                               <span className="text-[10px] text-gray-500">%</span>
@@ -2793,6 +2830,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.sltp?.llm_weight ?? 0.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.llm_weight', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                           </div>
@@ -2805,6 +2843,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.sltp?.atr_weight ?? 0.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'sltp.atr_weight', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                           </div>
@@ -2827,6 +2866,7 @@ export default function GiniePanel() {
                                   levels[0] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
@@ -2843,6 +2883,7 @@ export default function GiniePanel() {
                                   levels[1] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
@@ -2859,6 +2900,7 @@ export default function GiniePanel() {
                                   levels[2] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
@@ -2875,6 +2917,7 @@ export default function GiniePanel() {
                                   levels[3] = Number(e.target.value);
                                   updateModeConfig(selectedModeConfig, 'sltp.tp_gain_levels', levels);
                                 }}
+                                onFocus={handleInputFocus}
                                 className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center"
                               />
                             </div>
@@ -2922,6 +2965,7 @@ export default function GiniePanel() {
                             step="0.5"
                             value={modeConfigs[selectedModeConfig]?.risk?.max_drawdown_percent || 10}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.max_drawdown_percent', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2939,6 +2983,7 @@ export default function GiniePanel() {
                             step="0.5"
                             value={modeConfigs[selectedModeConfig]?.risk?.daily_loss_limit_percent || 3}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.daily_loss_limit_percent', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2956,6 +3001,7 @@ export default function GiniePanel() {
                             step="1"
                             value={modeConfigs[selectedModeConfig]?.risk?.weekly_loss_limit_percent || 10}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.weekly_loss_limit_percent', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2973,6 +3019,7 @@ export default function GiniePanel() {
                             step="0.5"
                             value={modeConfigs[selectedModeConfig]?.risk?.max_portfolio_risk_percent || 2}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.max_portfolio_risk_percent', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                           <span className="text-[10px] text-gray-500">%</span>
@@ -2989,6 +3036,7 @@ export default function GiniePanel() {
                           step="0.1"
                           value={modeConfigs[selectedModeConfig]?.risk?.correlation_penalty || 0.5}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'risk.correlation_penalty', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3058,11 +3106,12 @@ export default function GiniePanel() {
                         <span className="text-[10px] text-gray-400" title="Minimum number of timeframes that must agree on trend direction. E.g., 2 = at least 2 of 4 must align.">Min Aligned Timeframes</span>
                         <input
                           type="number"
-                          min="1"
+                          min="0"
                           max="4"
                           step="1"
                           value={modeConfigs[selectedModeConfig]?.trend_divergence?.min_aligned_timeframes || 2}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.min_aligned_timeframes', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3077,6 +3126,7 @@ export default function GiniePanel() {
                           step="5"
                           value={modeConfigs[selectedModeConfig]?.trend_divergence?.adx_threshold || 25}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.adx_threshold', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3091,6 +3141,7 @@ export default function GiniePanel() {
                           step="0.1"
                           value={modeConfigs[selectedModeConfig]?.trend_divergence?.counter_trend_penalty || 0.5}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'trend_divergence.counter_trend_penalty', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3175,6 +3226,7 @@ export default function GiniePanel() {
                               step="0.0001"
                               value={modeConfigs[selectedModeConfig]?.funding_rate?.max_funding_rate ?? 0.001}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.max_funding_rate', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.max_funding_rate ?? 0.001) * 100).toFixed(2)}%)</span>
@@ -3186,11 +3238,12 @@ export default function GiniePanel() {
                           <label className="block text-[10px] text-gray-400 mb-1" title="Minutes before funding to block new positions. E.g., 30 = don't open new positions within 30 min of funding.">Block Time</label>
                           <input
                             type="number"
-                            min="1"
+                            min="0"
                             max="120"
                             step="1"
                             value={modeConfigs[selectedModeConfig]?.funding_rate?.block_time_minutes ?? 30}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.block_time_minutes', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                         </div>
@@ -3200,11 +3253,12 @@ export default function GiniePanel() {
                           <label className="block text-[10px] text-gray-400 mb-1" title="Minutes before funding to consider exiting positions with minimal profit. Avoids paying high funding fees.">Exit Time</label>
                           <input
                             type="number"
-                            min="1"
+                            min="0"
                             max="60"
                             step="1"
                             value={modeConfigs[selectedModeConfig]?.funding_rate?.exit_time_minutes ?? 10}
                             onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.exit_time_minutes', Number(e.target.value))}
+                            onFocus={handleInputFocus}
                             className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                           />
                         </div>
@@ -3220,6 +3274,7 @@ export default function GiniePanel() {
                               step="1"
                               value={(modeConfigs[selectedModeConfig]?.funding_rate?.fee_threshold_percent ?? 0.3) * 100}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.fee_threshold_percent', Number(e.target.value) / 100)}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">%</span>
@@ -3237,6 +3292,7 @@ export default function GiniePanel() {
                               step="0.0001"
                               value={modeConfigs[selectedModeConfig]?.funding_rate?.extreme_funding_rate ?? 0.003}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.extreme_funding_rate', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.extreme_funding_rate ?? 0.003) * 100).toFixed(2)}%)</span>
@@ -3254,6 +3310,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.funding_rate?.high_rate_reduction ?? 0.5}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.high_rate_reduction', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.high_rate_reduction ?? 0.5) * 100).toFixed(0)}%)</span>
@@ -3271,6 +3328,7 @@ export default function GiniePanel() {
                               step="0.1"
                               value={modeConfigs[selectedModeConfig]?.funding_rate?.elevated_rate_reduction ?? 0.75}
                               onChange={(e) => updateModeConfig(selectedModeConfig, 'funding_rate.elevated_rate_reduction', Number(e.target.value))}
+                              onFocus={handleInputFocus}
                               className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                             />
                             <span className="text-[10px] text-gray-500">({((modeConfigs[selectedModeConfig]?.funding_rate?.elevated_rate_reduction ?? 0.75) * 100).toFixed(0)}%)</span>
@@ -3316,6 +3374,7 @@ export default function GiniePanel() {
                           max="10"
                           value={modeConfigs[selectedModeConfig]?.averaging?.max_averages ?? 2}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.max_averages', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3330,6 +3389,7 @@ export default function GiniePanel() {
                           step="0.5"
                           value={modeConfigs[selectedModeConfig]?.averaging?.average_up_profit_percent ?? 1.0}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.average_up_profit_percent', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3344,6 +3404,7 @@ export default function GiniePanel() {
                           step="0.5"
                           value={modeConfigs[selectedModeConfig]?.averaging?.average_down_loss_percent ?? -1.0}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.average_down_loss_percent', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3353,11 +3414,12 @@ export default function GiniePanel() {
                         <span className="text-[10px] text-gray-400" title="Size of each add as percentage of original position. 50 = each add is half the original size.">Add Size %</span>
                         <input
                           type="number"
-                          min="10"
+                          min="0"
                           max="100"
                           step="10"
                           value={modeConfigs[selectedModeConfig]?.averaging?.add_size_percent ?? 50}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.add_size_percent', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3372,6 +3434,7 @@ export default function GiniePanel() {
                           step="5"
                           value={modeConfigs[selectedModeConfig]?.averaging?.min_confidence_for_average ?? 70}
                           onChange={(e) => updateModeConfig(selectedModeConfig, 'averaging.min_confidence_for_average', Number(e.target.value))}
+                          onFocus={handleInputFocus}
                           className="w-16 px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                         />
                       </div>
@@ -3433,11 +3496,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="First take profit level percentage">TP1 %</label>
                                 <input
                                   type="number"
-                                  min="0.1"
+                                  min="0"
                                   max="5"
                                   step="0.05"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.tp1_percent ?? 0.35}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp1_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3445,11 +3509,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Second take profit level percentage">TP2 %</label>
                                 <input
                                   type="number"
-                                  min="0.2"
+                                  min="0"
                                   max="10"
                                   step="0.1"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.tp2_percent ?? 0.7}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp2_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3457,11 +3522,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Third take profit level percentage">TP3 %</label>
                                 <input
                                   type="number"
-                                  min="0.5"
+                                  min="0"
                                   max="15"
                                   step="0.1"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.tp3_percent ?? 1.0}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp3_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3471,11 +3537,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Percentage to sell at TP1">Sell at TP1 %</label>
                                 <input
                                   type="number"
-                                  min="10"
+                                  min="0"
                                   max="50"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.tp1_sell_percent ?? 30}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp1_sell_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3483,11 +3550,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Percentage to sell at TP2">Sell at TP2 %</label>
                                 <input
                                   type="number"
-                                  min="20"
+                                  min="0"
                                   max="80"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.tp2_sell_percent ?? 50}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp2_sell_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3495,11 +3563,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Percentage to sell at TP3">Sell at TP3 %</label>
                                 <input
                                   type="number"
-                                  min="50"
+                                  min="0"
                                   max="100"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.tp3_sell_percent ?? 80}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.tp3_sell_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3514,11 +3583,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of sold quantity to rebuy">Rebuy %</label>
                                 <input
                                   type="number"
-                                  min="25"
+                                  min="0"
                                   max="100"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_percent ?? 50}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3531,6 +3601,7 @@ export default function GiniePanel() {
                                   step="0.01"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_price_buffer ?? 0.05}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_price_buffer', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3538,11 +3609,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Maximum re-entry attempts">Max Attempts</label>
                                 <input
                                   type="number"
-                                  min="1"
+                                  min="0"
                                   max="5"
                                   step="1"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.max_reentry_attempts ?? 1}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_reentry_attempts', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3550,11 +3622,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Timeout for re-entry in seconds">Timeout (sec)</label>
                                 <input
                                   type="number"
-                                  min="60"
+                                  min="0"
                                   max="900"
                                   step="30"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.reentry_timeout_sec ?? 300}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.reentry_timeout_sec', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3578,11 +3651,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Trailing stop % from peak for remaining position">Final Trail %</label>
                                 <input
                                   type="number"
-                                  min="1"
+                                  min="0"
                                   max="15"
                                   step="0.5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.final_trailing_percent ?? 5}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.final_trailing_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3590,11 +3664,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Minimum % to hold for final trailing">Min Hold %</label>
                                 <input
                                   type="number"
-                                  min="10"
+                                  min="0"
                                   max="40"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.final_hold_min_percent ?? 20}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.final_hold_min_percent', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3602,11 +3677,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Max loss % of accumulated profit before exit">Max Loss %</label>
                                 <input
                                   type="number"
-                                  min="20"
+                                  min="0"
                                   max="70"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.dynamic_sl_max_loss_pct ?? 40}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.dynamic_sl_max_loss_pct', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3614,11 +3690,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of profit to protect">Protect %</label>
                                 <input
                                   type="number"
-                                  min="30"
+                                  min="0"
                                   max="80"
                                   step="5"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.dynamic_sl_protect_pct ?? 60}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.dynamic_sl_protect_pct', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3660,11 +3737,12 @@ export default function GiniePanel() {
                                 <label className="block text-[10px] text-gray-400 mb-1">AI Min Confidence</label>
                                 <input
                                   type="number"
-                                  min="0.3"
+                                  min="0"
                                   max="0.9"
                                   step="0.05"
                                   value={modeConfigs[selectedModeConfig]?.position_optimization?.ai_min_confidence ?? 0.65}
                                   onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.ai_min_confidence', Number(e.target.value))}
+                                  onFocus={handleInputFocus}
                                   className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                 />
                               </div>
@@ -3715,11 +3793,12 @@ export default function GiniePanel() {
                                     <label className="block text-[10px] text-gray-400 mb-1" title="Maximum hedge chain depth">Max Chain Depth</label>
                                     <input
                                       type="number"
-                                      min="1"
+                                      min="0"
                                       max="5"
                                       step="1"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.max_hedge_chain_depth ?? 2}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_hedge_chain_depth', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                     />
                                   </div>
@@ -3727,11 +3806,12 @@ export default function GiniePanel() {
                                     <label className="block text-[10px] text-gray-400 mb-1" title="Maximum position size as multiple of original">Max Position X</label>
                                     <input
                                       type="number"
-                                      min="1"
+                                      min="0"
                                       max="10"
                                       step="0.5"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.max_position_multiple ?? 3}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_position_multiple', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                     />
                                   </div>
@@ -3739,11 +3819,12 @@ export default function GiniePanel() {
                                     <label className="block text-[10px] text-gray-400 mb-1" title="Combined ROI % to exit all positions">Combined Exit ROI %</label>
                                     <input
                                       type="number"
-                                      min="0.5"
+                                      min="0"
                                       max="10"
                                       step="0.5"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.combined_roi_exit_pct ?? 2}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.combined_roi_exit_pct', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                     />
                                   </div>
@@ -3751,11 +3832,12 @@ export default function GiniePanel() {
                                     <label className="block text-[10px] text-gray-400 mb-1" title="ATR multiplier for wide stop loss">Wide SL ATR X</label>
                                     <input
                                       type="number"
-                                      min="1"
+                                      min="0"
                                       max="5"
                                       step="0.5"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.wide_sl_atr_multiplier ?? 2.5}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.wide_sl_atr_multiplier', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                     />
                                   </div>
@@ -3811,11 +3893,12 @@ export default function GiniePanel() {
                                       <label className="block text-[10px] text-gray-400 mb-1">Rally ADX Threshold</label>
                                       <input
                                         type="number"
-                                        min="15"
+                                        min="0"
                                         max="50"
                                         step="1"
                                         value={modeConfigs[selectedModeConfig]?.position_optimization?.rally_adx_threshold ?? 25}
                                         onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.rally_adx_threshold', Number(e.target.value))}
+                                        onFocus={handleInputFocus}
                                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                       />
                                     </div>
@@ -3823,11 +3906,12 @@ export default function GiniePanel() {
                                       <label className="block text-[10px] text-gray-400 mb-1">Rally Move %</label>
                                       <input
                                         type="number"
-                                        min="1"
+                                        min="0"
                                         max="10"
                                         step="0.5"
                                         value={modeConfigs[selectedModeConfig]?.position_optimization?.rally_sustained_move_pct ?? 3}
                                         onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.rally_sustained_move_pct', Number(e.target.value))}
+                                        onFocus={handleInputFocus}
                                         className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                       />
                                     </div>
@@ -3846,20 +3930,22 @@ export default function GiniePanel() {
                                     <div className="text-gray-400">TP1</div>
                                     <input
                                       type="number"
-                                      min="0.1"
+                                      min="0"
                                       max="2"
                                       step="0.1"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp1_percent ?? 0.4}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp1_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
                                     />
                                     <input
                                       type="number"
-                                      min="10"
+                                      min="0"
                                       max="100"
                                       step="10"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp1_add_percent ?? 30}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp1_add_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
                                     />
                                     <div></div>
@@ -3867,20 +3953,22 @@ export default function GiniePanel() {
                                     <div className="text-gray-400">TP2</div>
                                     <input
                                       type="number"
-                                      min="0.3"
+                                      min="0"
                                       max="3"
                                       step="0.1"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp2_percent ?? 0.7}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp2_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
                                     />
                                     <input
                                       type="number"
-                                      min="10"
+                                      min="0"
                                       max="100"
                                       step="10"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp2_add_percent ?? 50}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp2_add_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
                                     />
                                     <div></div>
@@ -3888,20 +3976,22 @@ export default function GiniePanel() {
                                     <div className="text-gray-400">TP3</div>
                                     <input
                                       type="number"
-                                      min="0.5"
+                                      min="0"
                                       max="5"
                                       step="0.1"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp3_percent ?? 1.0}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp3_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
                                     />
                                     <input
                                       type="number"
-                                      min="10"
+                                      min="0"
                                       max="100"
                                       step="10"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.neg_tp3_add_percent ?? 80}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.neg_tp3_add_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[9px]"
                                     />
                                     <div></div>
@@ -3914,11 +4004,12 @@ export default function GiniePanel() {
                                     <label className="block text-[10px] text-gray-400 mb-1" title="Percentage of profit to protect">Profit Protect %</label>
                                     <input
                                       type="number"
-                                      min="20"
+                                      min="0"
                                       max="80"
                                       step="5"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.profit_protection_percent ?? 50}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.profit_protection_percent', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                     />
                                   </div>
@@ -3926,11 +4017,12 @@ export default function GiniePanel() {
                                     <label className="block text-[10px] text-gray-400 mb-1" title="Max loss of earned profit before exit">Max Profit Loss %</label>
                                     <input
                                       type="number"
-                                      min="20"
+                                      min="0"
                                       max="80"
                                       step="5"
                                       value={modeConfigs[selectedModeConfig]?.position_optimization?.max_loss_of_earned_profit ?? 50}
                                       onChange={(e) => updateModeConfig(selectedModeConfig, 'position_optimization.max_loss_of_earned_profit', Number(e.target.value))}
+                                      onFocus={handleInputFocus}
                                       className="w-full px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                                     />
                                   </div>
@@ -4461,11 +4553,12 @@ export default function GiniePanel() {
                     <label className="block text-[10px] text-gray-400 mb-1" title="Maximum time to wait for AI response in milliseconds. Trades skip AI analysis if timeout exceeded. 10000=10 seconds.">Timeout (ms)</label>
                     <input
                       type="number"
-                      min="1000"
+                      min="0"
                       max="30000"
                       step="1000"
                       value={llmConfig?.timeout_ms || 10000}
                       onChange={(e) => handleUpdateLLMConfig({ timeout_ms: Number(e.target.value) })}
+                      onFocus={handleInputFocus}
                       className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -4478,6 +4571,7 @@ export default function GiniePanel() {
                       step="60"
                       value={llmConfig?.cache_duration_sec || 300}
                       onChange={(e) => handleUpdateLLMConfig({ cache_duration_sec: Number(e.target.value) })}
+                      onFocus={handleInputFocus}
                       className="w-full px-1 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                     />
                   </div>
@@ -4562,6 +4656,7 @@ export default function GiniePanel() {
                         onChange={(e) => handleUpdateModeLLMSettings(selectedLLMMode, {
                           min_llm_confidence: Number(e.target.value) / 100
                         })}
+                        onFocus={handleInputFocus}
                         className="w-14 px-1 py-0.5 bg-gray-700 border border-gray-600 rounded text-white text-[10px] text-center"
                       />
                     </div>

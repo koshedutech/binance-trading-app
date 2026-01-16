@@ -344,6 +344,11 @@ function HedgingTab({
   const [manualSymbol, setManualSymbol] = useState('');
   const [manualPercent, setManualPercent] = useState(50);
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   if (!status) {
     return <div className="text-center text-gray-400 py-8">Loading hedging status...</div>;
   }
@@ -485,7 +490,8 @@ function HedgingTab({
             type="number"
             value={manualPercent}
             onChange={(e) => setManualPercent(Number(e.target.value))}
-            min={10}
+            onFocus={handleInputFocus}
+            min={0}
             max={100}
             step={10}
             className="w-20 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-sm"

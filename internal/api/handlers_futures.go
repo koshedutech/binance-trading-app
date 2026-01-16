@@ -1229,10 +1229,15 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		return
 	}
 
-	// Calculate time boundaries for daily PnL
+	// Calculate time boundaries for daily PnL (UTC-based)
 	now := time.Now().UTC()
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	startOfDayMs := startOfDay.UnixMilli()
+	endOfDay := startOfDay.Add(24 * time.Hour)
+
+	// Weekly boundaries (last 7 days from start of today)
+	startOfWeek := startOfDay.AddDate(0, 0, -6) // 7 days including today
+	startOfWeekMs := startOfWeek.UnixMilli()
 
 	// For total PnL, fetch last 7 days (matches Binance UI default view)
 	sevenDaysAgo := now.AddDate(0, 0, -7)
@@ -1262,14 +1267,30 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		}
 	}
 
+	// Get commission (trading fees) history
+	var allCommissions []binance.IncomeRecord
+	commissionRecords, err := futuresClient.GetIncomeHistory("COMMISSION", startTimeMs, 0, 1000)
+	if err == nil {
+		allCommissions = commissionRecords
+	}
+
 	// Calculate PnL metrics from income records
 	var totalRealizedPnl float64
 	var dailyRealizedPnl float64
 	var totalFundingFees float64
+	var dailyFundingFees float64
+	var weeklyFundingFees float64
+	var totalCommission float64
+	var dailyCommission float64
+	var weeklyCommission float64
+	var weeklyRealizedPnl float64
 	var winningTrades, losingTrades int
 	var dailyWins, dailyLosses, dailyTrades int
+	var weeklyWins, weeklyLosses, weeklyTrades int
 	var largestWin, largestLoss float64
 	var totalWin, totalLoss float64
+	var dailyWin, dailyLoss float64
+	var weeklyWin, weeklyLoss float64
 	var lastTradeTime int64
 
 	// Process income records
@@ -1291,14 +1312,29 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 			}
 		}
 
+		// Weekly stats
+		if record.Time >= startOfWeekMs {
+			weeklyRealizedPnl += record.Income
+			weeklyTrades++
+			if record.Income > 0 {
+				weeklyWins++
+				weeklyWin += record.Income
+			} else if record.Income < 0 {
+				weeklyLosses++
+				weeklyLoss += record.Income
+			}
+		}
+
 		// Daily stats
 		if record.Time >= startOfDayMs {
 			dailyRealizedPnl += record.Income
 			dailyTrades++
 			if record.Income > 0 {
 				dailyWins++
+				dailyWin += record.Income
 			} else if record.Income < 0 {
 				dailyLosses++
+				dailyLoss += record.Income
 			}
 		}
 
@@ -1308,9 +1344,26 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		}
 	}
 
-	// Calculate funding fees
+	// Calculate funding fees (total, daily, weekly)
 	for _, fee := range allFundingFees {
 		totalFundingFees += fee.Income
+		if fee.Time >= startOfDayMs {
+			dailyFundingFees += fee.Income
+		}
+		if fee.Time >= startOfWeekMs {
+			weeklyFundingFees += fee.Income
+		}
+	}
+
+	// Calculate commissions (total, daily, weekly)
+	for _, comm := range allCommissions {
+		totalCommission += comm.Income // Note: commission is negative
+		if comm.Time >= startOfDayMs {
+			dailyCommission += comm.Income
+		}
+		if comm.Time >= startOfWeekMs {
+			weeklyCommission += comm.Income
+		}
 	}
 
 	// Calculate derived metrics
@@ -1366,6 +1419,23 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		lastTradeTimeStr = time.UnixMilli(lastTradeTime).Format(time.RFC3339)
 	}
 
+	// Calculate weekly win rate
+	var weeklyWinRate float64
+	if weeklyTrades > 0 {
+		weeklyWinRate = float64(weeklyWins) / float64(weeklyTrades) * 100
+	}
+
+	// Calculate gross profit (wins only, before accounting for losses and fees)
+	// Daily gross = sum of winning trades today
+	// Daily total fees = commission (trading fees) + funding fees (negative values)
+	dailyTotalFees := -dailyCommission + (-dailyFundingFees) // Convert to positive for display
+	weeklyTotalFees := -weeklyCommission + (-weeklyFundingFees)
+
+	// Net PnL = Gross Profit - Gross Loss - Fees
+	// Since dailyRealizedPnl already includes wins and losses, the net is:
+	// dailyNetPnl = dailyRealizedPnl (which is sum of all trades)
+	// But for breakdown: dailyGrossProfit = dailyWin, dailyGrossLoss = dailyLoss
+
 	metrics := map[string]interface{}{
 		"totalTrades":        totalTrades,
 		"winningTrades":      winningTrades,
@@ -1374,6 +1444,7 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		"totalRealizedPnl":   totalRealizedPnl,    // From Binance Income API (last 7 days)
 		"totalUnrealizedPnl": totalUnrealizedPnl,
 		"totalFundingFees":   totalFundingFees,
+		"totalCommission":    totalCommission, // Trading fees (negative)
 		"averagePnl":         averagePnl,
 		"averageWin":         averageWin,
 		"averageLoss":        averageLoss,
@@ -1383,13 +1454,39 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		"averageLeverage":    avgLeverage,
 		"openPositions":      openPositions,
 		"openOrders":         openOrderCount,
-		// Daily stats
-		"dailyRealizedPnl": dailyRealizedPnl,     // From Binance Income API (today only)
+
+		// Daily stats (detailed breakdown for Daily Net PNL card)
+		"dailyRealizedPnl": dailyRealizedPnl, // Net PnL from trades (today only)
+		"dailyGrossProfit": dailyWin,         // Sum of winning trades
+		"dailyGrossLoss":   dailyLoss,        // Sum of losing trades (negative)
+		"dailyCommission":  dailyCommission,  // Trading fees (negative)
+		"dailyFundingFees": dailyFundingFees, // Funding fees (can be + or -)
+		"dailyTotalFees":   dailyTotalFees,   // Total fees as positive number
 		"dailyTrades":      dailyTrades,
 		"dailyWins":        dailyWins,
 		"dailyLosses":      dailyLosses,
 		"dailyWinRate":     dailyWinRate,
-		"lastTradeTime":    lastTradeTimeStr,
+
+		// Weekly stats (detailed breakdown for Weekly Net PNL card)
+		"weeklyRealizedPnl": weeklyRealizedPnl, // Net PnL from trades (last 7 days)
+		"weeklyGrossProfit": weeklyWin,         // Sum of winning trades
+		"weeklyGrossLoss":   weeklyLoss,        // Sum of losing trades (negative)
+		"weeklyCommission":  weeklyCommission,  // Trading fees (negative)
+		"weeklyFundingFees": weeklyFundingFees, // Funding fees (can be + or -)
+		"weeklyTotalFees":   weeklyTotalFees,   // Total fees as positive number
+		"weeklyTrades":      weeklyTrades,
+		"weeklyWins":        weeklyWins,
+		"weeklyLosses":      weeklyLosses,
+		"weeklyWinRate":     weeklyWinRate,
+
+		// Time boundaries (for countdown timers and period display)
+		"dailyResetTime":    endOfDay.UnixMilli(),                   // Next daily reset (UTC midnight)
+		"weeklyStartDate":   startOfWeek.Format("2006-01-02"),       // Week start date
+		"weeklyEndDate":     startOfDay.Format("2006-01-02"),        // Week end date (today)
+		"serverTimeUTC":     now.UnixMilli(),                        // Current server time
+		"timezoneOffset":    0,                                      // UTC offset (0 for UTC-based calculation)
+
+		"lastTradeTime": lastTradeTimeStr,
 	}
 
 	// Cache the metrics

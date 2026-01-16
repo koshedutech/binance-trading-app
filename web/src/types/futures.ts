@@ -331,6 +331,7 @@ export interface FuturesTradingMetrics {
   totalRealizedPnl: number;
   totalUnrealizedPnl: number;
   totalFundingFees: number;
+  totalCommission: number; // Trading fees (negative)
   averagePnl: number;
   averageWin: number;
   averageLoss: number;
@@ -340,12 +341,38 @@ export interface FuturesTradingMetrics {
   averageLeverage: number;
   openPositions: number;
   openOrders: number;
-  // Daily stats
-  dailyRealizedPnl: number;
+
+  // Daily stats (detailed breakdown for Daily Net PNL card)
+  dailyRealizedPnl: number;  // Net PnL from trades (today only)
+  dailyGrossProfit: number;  // Sum of winning trades
+  dailyGrossLoss: number;    // Sum of losing trades (negative)
+  dailyCommission: number;   // Trading fees (negative)
+  dailyFundingFees: number;  // Funding fees (can be + or -)
+  dailyTotalFees: number;    // Total fees as positive number
   dailyTrades: number;
   dailyWins: number;
   dailyLosses: number;
   dailyWinRate: number;
+
+  // Weekly stats (detailed breakdown for Weekly Net PNL card)
+  weeklyRealizedPnl: number;  // Net PnL from trades (last 7 days)
+  weeklyGrossProfit: number;  // Sum of winning trades
+  weeklyGrossLoss: number;    // Sum of losing trades (negative)
+  weeklyCommission: number;   // Trading fees (negative)
+  weeklyFundingFees: number;  // Funding fees (can be + or -)
+  weeklyTotalFees: number;    // Total fees as positive number
+  weeklyTrades: number;
+  weeklyWins: number;
+  weeklyLosses: number;
+  weeklyWinRate: number;
+
+  // Time boundaries (for countdown timers and period display)
+  dailyResetTime: number;     // Next daily reset (UTC midnight) in milliseconds
+  weeklyStartDate: string;    // Week start date (YYYY-MM-DD)
+  weeklyEndDate: string;      // Week end date (YYYY-MM-DD)
+  serverTimeUTC: number;      // Current server time in milliseconds
+  timezoneOffset: number;     // UTC offset (0 for UTC-based calculation)
+
   lastTradeTime?: string;
 }
 

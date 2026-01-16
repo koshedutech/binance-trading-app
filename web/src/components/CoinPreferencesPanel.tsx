@@ -61,6 +61,11 @@ export default function CoinPreferencesPanel() {
   // Expanded sections
   const [showAllocations, setShowAllocations] = useState(false);
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   const fetchData = async () => {
     try {
       setLoading(true);
@@ -384,6 +389,7 @@ export default function CoinPreferencesPanel() {
                   ...current,
                   allocation_percent: parseFloat(e.target.value) || 0,
                 })}
+                onFocus={handleInputFocus}
                 className="flex-1 bg-gray-600 text-white text-sm rounded px-2 py-1"
               />
             </div>
@@ -398,6 +404,7 @@ export default function CoinPreferencesPanel() {
                   ...current,
                   max_positions: parseInt(e.target.value) || 0,
                 })}
+                onFocus={handleInputFocus}
                 className="flex-1 bg-gray-600 text-white text-sm rounded px-2 py-1"
               />
             </div>
@@ -738,6 +745,7 @@ export default function CoinPreferencesPanel() {
                         max="10"
                         value={eff.priority}
                         onChange={(e) => handlePriorityChange(coin.symbol, parseInt(e.target.value) || 0, eff.enabled)}
+                        onFocus={handleInputFocus}
                         className="w-14 text-center bg-gray-700 text-white text-sm rounded px-1 py-0.5 border border-gray-600"
                       />
                     </td>

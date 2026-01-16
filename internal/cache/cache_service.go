@@ -332,6 +332,79 @@ func (cs *CacheService) SetJSON(ctx context.Context, key string, value interface
 	return cs.Set(ctx, key, value, ttl)
 }
 
+// --- Sorted Set Operations (Epic 8: Capital Tracking) ---
+
+// ZAdd adds a member to a sorted set with the given score.
+func (cs *CacheService) ZAdd(ctx context.Context, key string, score float64, member string) error {
+	if !cs.healthy {
+		cs.checkHealth(ctx)
+		if !cs.healthy {
+			return fmt.Errorf("redis unavailable")
+		}
+	}
+
+	z := redis.Z{Score: score, Member: member}
+	if err := cs.client.ZAdd(ctx, key, z).Err(); err != nil {
+		cs.recordFailure()
+		return fmt.Errorf("ZAdd failed: %w", err)
+	}
+
+	cs.recordSuccess()
+	return nil
+}
+
+// ZScoreMember represents a sorted set member with its score
+type ZScoreMember struct {
+	Member string
+	Score  float64
+}
+
+// ZRangeWithScores retrieves members from a sorted set with their scores.
+func (cs *CacheService) ZRangeWithScores(ctx context.Context, key string, start, stop int64) ([]ZScoreMember, error) {
+	if !cs.healthy {
+		cs.checkHealth(ctx)
+		if !cs.healthy {
+			return nil, fmt.Errorf("redis unavailable")
+		}
+	}
+
+	result, err := cs.client.ZRangeWithScores(ctx, key, start, stop).Result()
+	if err != nil {
+		cs.recordFailure()
+		return nil, fmt.Errorf("ZRangeWithScores failed: %w", err)
+	}
+
+	cs.recordSuccess()
+
+	members := make([]ZScoreMember, len(result))
+	for i, z := range result {
+		members[i] = ZScoreMember{
+			Member: z.Member.(string),
+			Score:  z.Score,
+		}
+	}
+
+	return members, nil
+}
+
+// Expire sets a TTL on a key.
+func (cs *CacheService) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	if !cs.healthy {
+		cs.checkHealth(ctx)
+		if !cs.healthy {
+			return fmt.Errorf("redis unavailable")
+		}
+	}
+
+	if err := cs.client.Expire(ctx, key, ttl).Err(); err != nil {
+		cs.recordFailure()
+		return fmt.Errorf("Expire failed: %w", err)
+	}
+
+	cs.recordSuccess()
+	return nil
+}
+
 // Close closes the Redis connection.
 func (cs *CacheService) Close() error {
 	if cs.client != nil {

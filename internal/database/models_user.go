@@ -53,6 +53,8 @@ type User struct {
 	ReferredBy            *string            `json:"referred_by,omitempty"`
 	IsAdmin               bool               `json:"is_admin"`
 	LastLoginAt           *time.Time         `json:"last_login_at,omitempty"`
+	Timezone              string             `json:"timezone,omitempty"`              // User's timezone (default: Asia/Kolkata)
+	LastSettlementDate    *time.Time         `json:"last_settlement_date,omitempty"`  // Last date settlement was completed
 	CreatedAt             time.Time          `json:"created_at"`
 	UpdatedAt             time.Time          `json:"updated_at"`
 }

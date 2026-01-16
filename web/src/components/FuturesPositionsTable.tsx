@@ -64,6 +64,11 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
   const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   // Fetch trading mode
   useEffect(() => {
     const fetchTradingMode = async () => {
@@ -459,6 +464,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                         type="number"
                         value={tpValue}
                         onChange={(e) => setTpValue(e.target.value)}
+                        onFocus={handleInputFocus}
                         placeholder="TP price"
                         className="w-20 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs text-center"
                         step="0.01"
@@ -488,6 +494,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                         type="number"
                         value={slValue}
                         onChange={(e) => setSlValue(e.target.value)}
+                        onFocus={handleInputFocus}
                         placeholder="SL price"
                         className="w-20 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs text-center"
                         step="0.01"
@@ -536,6 +543,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                           type="number"
                           value={roiValue}
                           onChange={(e) => setRoiValue(e.target.value)}
+                          onFocus={handleInputFocus}
                           placeholder="ROI %"
                           className="w-20 px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs text-center"
                           step="0.1"

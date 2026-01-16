@@ -117,6 +117,11 @@ export default function FuturesTradingPanel() {
   const [showLeverageModal, setShowLeverageModal] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   useEffect(() => {
     fetchAccountSettings(selectedSymbol);
     fetchTradingMode();
@@ -344,7 +349,9 @@ export default function FuturesTradingPanel() {
               type="number"
               value={orderForm.price}
               onChange={(e) => updateOrderForm({ price: e.target.value })}
+              onFocus={handleInputFocus}
               placeholder={currentPrice ? formatPrice(currentPrice) : '0.00'}
+              min="0"
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-right pr-16 focus:border-yellow-500 focus:outline-none"
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">USDT</span>
@@ -361,7 +368,9 @@ export default function FuturesTradingPanel() {
               type="number"
               value={orderForm.stopPrice}
               onChange={(e) => updateOrderForm({ stopPrice: e.target.value })}
+              onFocus={handleInputFocus}
               placeholder="0.00"
+              min="0"
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-right pr-16 focus:border-yellow-500 focus:outline-none"
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">USDT</span>
@@ -407,7 +416,9 @@ export default function FuturesTradingPanel() {
               type="number"
               value={orderForm.quantity}
               onChange={(e) => updateOrderForm({ quantity: e.target.value })}
+              onFocus={handleInputFocus}
               placeholder="0.000"
+              min="0"
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-right pr-16 focus:border-yellow-500 focus:outline-none"
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">
@@ -421,7 +432,9 @@ export default function FuturesTradingPanel() {
               type="number"
               value={orderForm.usdAmount}
               onChange={(e) => updateOrderForm({ usdAmount: e.target.value })}
+              onFocus={handleInputFocus}
               placeholder="0.00"
+              min="0"
               className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-right pr-16 focus:border-green-500 focus:outline-none"
             />
             <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">
@@ -510,6 +523,7 @@ export default function FuturesTradingPanel() {
                   type="number"
                   value={orderForm.takeProfitPercent}
                   onChange={(e) => updateOrderForm({ takeProfitPercent: e.target.value })}
+                  onFocus={handleInputFocus}
                   placeholder="2"
                   step="0.1"
                   min="0"
@@ -529,6 +543,7 @@ export default function FuturesTradingPanel() {
                   type="number"
                   value={orderForm.stopLossPercent}
                   onChange={(e) => updateOrderForm({ stopLossPercent: e.target.value })}
+                  onFocus={handleInputFocus}
                   placeholder="1"
                   step="0.1"
                   min="0"
@@ -551,7 +566,9 @@ export default function FuturesTradingPanel() {
                 type="number"
                 value={orderForm.takeProfit}
                 onChange={(e) => updateOrderForm({ takeProfit: e.target.value })}
+                onFocus={handleInputFocus}
                 placeholder="TP Price"
+                min="0"
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-right text-sm focus:border-green-500 focus:outline-none"
               />
             </div>
@@ -560,7 +577,9 @@ export default function FuturesTradingPanel() {
                 type="number"
                 value={orderForm.stopLoss}
                 onChange={(e) => updateOrderForm({ stopLoss: e.target.value })}
+                onFocus={handleInputFocus}
                 placeholder="SL Price"
+                min="0"
                 className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-right text-sm focus:border-red-500 focus:outline-none"
               />
             </div>

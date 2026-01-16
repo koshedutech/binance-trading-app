@@ -105,6 +105,11 @@ const ConditionRow: React.FC<{
 }> = ({ condition, onUpdate, onRemove, onDuplicate, index }) => {
   const [showAdvanced, setShowAdvanced] = useState(false);
 
+  // Auto-select content on focus for easier value replacement
+  const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
+    e.target.select();
+  };
+
   const updateLeftOperand = (updates: Partial<AdvancedCondition['leftOperand']>) => {
     onUpdate({ leftOperand: { ...condition.leftOperand, ...updates } });
   };
@@ -193,6 +198,7 @@ const ConditionRow: React.FC<{
                   max="100"
                   value={condition.leftOperand.offset || 0}
                   onChange={(e) => updateLeftOperand({ offset: parseInt(e.target.value) })}
+                  onFocus={handleInputFocus}
                   className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                 />
               </div>
@@ -206,6 +212,7 @@ const ConditionRow: React.FC<{
                   max="100"
                   value={condition.rightOperand.offset || 0}
                   onChange={(e) => updateRightOperand({ offset: parseInt(e.target.value) })}
+                  onFocus={handleInputFocus}
                   className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                 />
               </div>
@@ -257,6 +264,7 @@ const ConditionRow: React.FC<{
                   type="number"
                   value={condition.leftOperand.params?.period || 14}
                   onChange={(e) => updateLeftOperand({ params: { ...condition.leftOperand.params, period: parseInt(e.target.value) } })}
+                  onFocus={handleInputFocus}
                   className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   placeholder="Period"
                 />
@@ -329,6 +337,7 @@ const ConditionRow: React.FC<{
                 type="number"
                 value={condition.rightOperand.value || 0}
                 onChange={(e) => updateRightOperand({ value: parseFloat(e.target.value) })}
+                onFocus={handleInputFocus}
                 step="0.01"
                 className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                 placeholder="Value"
@@ -338,6 +347,7 @@ const ConditionRow: React.FC<{
                   type="number"
                   value={condition.rightOperand.value2 || 0}
                   onChange={(e) => updateRightOperand({ value2: parseFloat(e.target.value) })}
+                  onFocus={handleInputFocus}
                   step="0.01"
                   className="w-full px-2 py-1.5 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   placeholder="Value 2"
@@ -368,6 +378,7 @@ const ConditionRow: React.FC<{
                   type="number"
                   value={condition.rightOperand.params?.period || 14}
                   onChange={(e) => updateRightOperand({ params: { ...condition.rightOperand.params, period: parseInt(e.target.value) } })}
+                  onFocus={handleInputFocus}
                   className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs"
                   placeholder="Period"
                 />

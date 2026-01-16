@@ -565,12 +565,20 @@ func (c *CachedFuturesClient) GetTradeHistory(symbol string, limit int) ([]Futur
 	return c.client.GetTradeHistory(symbol, limit)
 }
 
+func (c *CachedFuturesClient) GetTradeHistoryByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesTrade, error) {
+	return c.client.GetTradeHistoryByDateRange(symbol, startTime, endTime, limit)
+}
+
 func (c *CachedFuturesClient) GetFundingFeeHistory(symbol string, limit int) ([]FundingFeeRecord, error) {
 	return c.client.GetFundingFeeHistory(symbol, limit)
 }
 
 func (c *CachedFuturesClient) GetAllOrders(symbol string, limit int) ([]FuturesOrder, error) {
 	return c.client.GetAllOrders(symbol, limit)
+}
+
+func (c *CachedFuturesClient) GetAllOrdersByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesOrder, error) {
+	return c.client.GetAllOrdersByDateRange(symbol, startTime, endTime, limit)
 }
 
 func (c *CachedFuturesClient) GetIncomeHistory(incomeType string, startTime, endTime int64, limit int) ([]IncomeRecord, error) {

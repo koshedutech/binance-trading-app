@@ -782,6 +782,41 @@ func (c *FuturesClientImpl) GetTradeHistory(symbol string, limit int) ([]Futures
 	return trades, nil
 }
 
+// GetTradeHistoryByDateRange retrieves trade history for a date range
+// symbol: trading pair (required by Binance API)
+// startTime/endTime: Unix milliseconds, 0 to ignore
+// limit: Max 1000 records
+func (c *FuturesClientImpl) GetTradeHistoryByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesTrade, error) {
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+
+	if symbol != "" {
+		params["symbol"] = symbol
+	}
+	if startTime > 0 {
+		params["startTime"] = strconv.FormatInt(startTime, 10)
+	}
+	if endTime > 0 {
+		params["endTime"] = strconv.FormatInt(endTime, 10)
+	}
+	if limit > 0 {
+		params["limit"] = strconv.Itoa(limit)
+	}
+
+	resp, err := c.signedGet("/fapi/v1/userTrades", params)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching trade history by date range: %w", err)
+	}
+
+	var trades []FuturesTrade
+	if err := json.Unmarshal(resp, &trades); err != nil {
+		return nil, fmt.Errorf("error parsing trade history: %w", err)
+	}
+
+	return trades, nil
+}
+
 // GetFundingFeeHistory retrieves funding fee payment history
 func (c *FuturesClientImpl) GetFundingFeeHistory(symbol string, limit int) ([]FundingFeeRecord, error) {
 	params := map[string]string{
@@ -826,6 +861,41 @@ func (c *FuturesClientImpl) GetAllOrders(symbol string, limit int) ([]FuturesOrd
 	resp, err := c.signedGet("/fapi/v1/allOrders", params)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching all orders: %w", err)
+	}
+
+	var orders []FuturesOrder
+	if err := json.Unmarshal(resp, &orders); err != nil {
+		return nil, fmt.Errorf("error parsing all orders: %w", err)
+	}
+
+	return orders, nil
+}
+
+// GetAllOrdersByDateRange retrieves all orders for a date range
+// symbol: trading pair (required by Binance API for allOrders)
+// startTime/endTime: Unix milliseconds, 0 to ignore
+// limit: Max 1000 records
+func (c *FuturesClientImpl) GetAllOrdersByDateRange(symbol string, startTime, endTime int64, limit int) ([]FuturesOrder, error) {
+	params := map[string]string{
+		"timestamp": strconv.FormatInt(time.Now().UnixMilli(), 10),
+	}
+
+	if symbol != "" {
+		params["symbol"] = symbol
+	}
+	if startTime > 0 {
+		params["startTime"] = strconv.FormatInt(startTime, 10)
+	}
+	if endTime > 0 {
+		params["endTime"] = strconv.FormatInt(endTime, 10)
+	}
+	if limit > 0 {
+		params["limit"] = strconv.Itoa(limit)
+	}
+
+	resp, err := c.signedGet("/fapi/v1/allOrders", params)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching all orders by date range: %w", err)
 	}
 
 	var orders []FuturesOrder
