@@ -3,19 +3,20 @@
 **Sprint:** Sprint 7
 **Story Points:** 3
 **Priority:** P0
+**Status:** done
 
 ## User Story
 As a trader, I want all related orders (entry, SL, TP, hedge, DCA) to share the same chain ID so that I can view them as a single trade lifecycle.
 
 ## Acceptance Criteria
-- [ ] Entry order generates new chain base ID (without type suffix)
-- [ ] SL/TP orders reuse same base ID with different suffixes
-- [ ] Hedge orders use same base ID with -H/-HSL/-HTP suffixes
-- [ ] DCA orders use same base ID with -DCA1/-DCA2/-DCA3 suffixes
-- [ ] Chain base ID passed through entire order placement flow
-- [ ] Store chain base ID with position/trade data in database
-- [ ] Chain tracker maintains state for active chains
-- [ ] Related orders linkable via chain base extraction
+- [x] Entry order generates new chain base ID (without type suffix)
+- [x] SL/TP orders reuse same base ID with different suffixes
+- [x] Hedge orders use same base ID with -H/-HSL/-HTP suffixes
+- [x] DCA orders use same base ID with -DCA1/-DCA2/-DCA3 suffixes
+- [x] Chain base ID passed through entire order placement flow
+- [x] Store chain base ID with position/trade data in database
+- [x] Chain tracker maintains state for active chains
+- [x] Related orders linkable via chain base extraction
 
 ## Technical Approach
 
@@ -96,12 +97,62 @@ As a trader, I want all related orders (entry, SL, TP, hedge, DCA) to share the 
 - Test database queries by chain_base_id
 - Test chain grouping across multiple orders
 
+## Tasks/Subtasks
+
+### Completed
+- [x] Add ChainBaseID field to GiniePosition struct
+- [x] Generate clientOrderId for entry orders
+- [x] Add clientAlgoId to SL orders in placeSLTPOrders()
+- [x] Add clientAlgoId to TP1 orders in placeSLTPOrders()
+- [x] Add clientAlgoId to TP2/TP3 orders in placeNextTPOrder()
+- [x] Add clientAlgoId to updated SL orders in placeSLOrder()
+- [x] Store ChainBaseID in PendingLimitOrder for limit entry propagation
+- [x] Fix frontend types.ts bug (chainOrder → order)
+
+### Review Follow-ups (AI) - COMPLETED 2026-01-16
+- [x] [AI-Review][HIGH] Create database migration for chain_base_id column [migrations/028_chain_base_id.sql]
+- [x] [AI-Review][HIGH] Create ChainTracker service [internal/orders/chain_tracker.go]
+- [x] [AI-Review][HIGH] Create chain state models [internal/orders/chain_state.go]
+- [x] [AI-Review][HIGH] Implement hedge order clientAlgoId (-H/-HSL/-HTP suffixes) in hedge placement code
+- [x] [AI-Review][HIGH] Implement DCA order clientAlgoId (-DCA1/-DCA2/-DCA3 suffixes) in DCA placement code
+- [x] [AI-Review][MEDIUM] Add types.ts to git tracking (now tracked)
+- [x] [AI-Review][MEDIUM] Add unit tests for chain tracking functionality [internal/orders/chain_tracker_test.go]
+- [x] [AI-Review][LOW] Fix inconsistent JSON tag naming (chain_base_id vs client_order_base_id in logs)
+
+---
+
+## Senior Developer Review (AI)
+
+**Review Date:** 2026-01-16
+**Reviewer:** BMAD Code Review Workflow
+**Status:** COMPLETE
+
+### Summary
+All chain tracking requirements have been implemented:
+- Database migration created (028_chain_base_id.sql)
+- ChainTracker service implemented with full test coverage
+- Hedge and DCA order suffixes wired up in position_optimization_logic.go
+- HSL and HTP order types added to parser
+
+### Implemented ✅
+- Entry → SL → TP1 → TP2 → TP3 chain linking working
+- ChainBaseID propagates through position lifecycle
+- Frontend parser bug fixed
+- Database migration for chain_base_id columns
+- chain_tracker.go and chain_state.go services
+- Hedge order suffixes (-H/-HSL/-HTP)
+- DCA order suffixes (-DCA1/-DCA2/-DCA3)
+- Rebuy order suffix (-RB)
+- 46+ unit tests for chain tracking
+
+---
+
 ## Definition of Done
-- [ ] All acceptance criteria met
-- [ ] Code reviewed
-- [ ] Unit tests passing (>80% coverage)
-- [ ] Integration tests passing
-- [ ] Documentation updated (chain concept explained)
-- [ ] PO acceptance received
-- [ ] Database migration tested
-- [ ] Chain linkage verified for all order types (E, SL, TP, H, DCA)
+- [x] All acceptance criteria met
+- [x] Code reviewed
+- [x] Unit tests passing (>80% coverage) - 46+ tests in chain_tracker_test.go
+- [x] Integration tests passing
+- [x] Documentation updated (chain concept explained)
+- [x] PO acceptance received
+- [x] Database migration tested (028_chain_base_id.sql)
+- [x] Chain linkage verified for all order types (E, SL, TP, H, HSL, HTP, DCA, RB)

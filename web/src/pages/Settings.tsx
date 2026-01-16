@@ -75,11 +75,67 @@ const Settings: React.FC = () => {
   const [isUpdatingBalance, setIsUpdatingBalance] = useState(false);
   const [isSyncingBalance, setIsSyncingBalance] = useState(false);
 
+  // Timezone state (Story 7.6)
+  interface TimezonePreset {
+    id: number;
+    display_name: string;
+    tz_identifier: string;
+    gmt_offset: string;
+    is_default: boolean;
+  }
+  const [userTimezone, setUserTimezone] = useState<string>('Asia/Kolkata');
+  const [timezonePresets, setTimezonePresets] = useState<TimezonePreset[]>([]);
+  const [isLoadingTimezone, setIsLoadingTimezone] = useState(false);
+  const [isUpdatingTimezone, setIsUpdatingTimezone] = useState(false);
+
   // Update URL when tab changes
   const changeTab = (tab: TabType) => {
     setActiveTab(tab);
     setSearchParams({ tab });
     setMessage(null);
+  };
+
+  // Load timezone when Profile tab is active (Story 7.6)
+  useEffect(() => {
+    if (activeTab === 'profile') {
+      fetchUserTimezone();
+      fetchTimezonePresets();
+    }
+  }, [activeTab]);
+
+  const fetchUserTimezone = async () => {
+    try {
+      setIsLoadingTimezone(true);
+      const response = await apiService.getUserTimezone();
+      setUserTimezone(response.timezone || 'Asia/Kolkata');
+    } catch (error) {
+      console.error('Failed to fetch timezone:', error);
+    } finally {
+      setIsLoadingTimezone(false);
+    }
+  };
+
+  const fetchTimezonePresets = async () => {
+    try {
+      const presets = await apiService.getTimezonePresets();
+      setTimezonePresets(presets);
+    } catch (error) {
+      console.error('Failed to fetch timezone presets:', error);
+    }
+  };
+
+  const handleTimezoneChange = async (newTimezone: string) => {
+    try {
+      setIsUpdatingTimezone(true);
+      await apiService.updateUserTimezone(newTimezone);
+      setUserTimezone(newTimezone);
+      setMessage({ type: 'success', text: 'Timezone updated successfully' });
+    } catch (error) {
+      console.error('Failed to update timezone:', error);
+      setMessage({ type: 'error', text: 'Failed to update timezone' });
+    } finally {
+      setIsUpdatingTimezone(false);
+    }
   };
 
   // Load API keys, IP address, and status when Binance tab is active
@@ -495,6 +551,52 @@ const Settings: React.FC = () => {
                   {isSubmittingProfile ? 'Updating...' : 'Update Profile'}
                 </button>
               </form>
+            </div>
+
+            {/* Timezone Settings (Story 7.6) */}
+            <div className="bg-dark-800 rounded-lg border border-dark-700 p-6">
+              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Globe className="w-5 h-5 text-primary-400" />
+                Timezone Settings
+              </h2>
+              <p className="text-sm text-gray-400 mb-4">
+                Your timezone is used for date formatting in order IDs and the Trade Lifecycle tab.
+              </p>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="timezone" className="block text-sm font-medium text-gray-300 mb-2">
+                    Select Timezone
+                  </label>
+                  <select
+                    id="timezone"
+                    value={userTimezone}
+                    onChange={(e) => handleTimezoneChange(e.target.value)}
+                    disabled={isLoadingTimezone || isUpdatingTimezone}
+                    className="w-full px-4 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50"
+                  >
+                    {timezonePresets.length > 0 ? (
+                      timezonePresets.map((preset) => (
+                        <option key={preset.tz_identifier} value={preset.tz_identifier}>
+                          {preset.display_name} ({preset.gmt_offset})
+                        </option>
+                      ))
+                    ) : (
+                      <>
+                        <option value="Asia/Kolkata">India Standard Time (IST) (+05:30)</option>
+                        <option value="Asia/Phnom_Penh">Indochina Time (ICT) (+07:00)</option>
+                        <option value="UTC">Coordinated Universal Time (UTC) (+00:00)</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2 text-sm text-gray-400">
+                  {isLoadingTimezone && <RefreshCw className="w-4 h-4 animate-spin" />}
+                  {isUpdatingTimezone && <span>Updating...</span>}
+                  {!isLoadingTimezone && !isUpdatingTimezone && (
+                    <span>Current timezone: <span className="text-white font-medium">{userTimezone}</span></span>
+                  )}
+                </div>
+              </div>
             </div>
 
             {/* Change Password */}

@@ -14,7 +14,9 @@ import TradeSourceStatsPanel from '../components/TradeSourceStatsPanel';
 import TradingModeToggle from '../components/TradingModeToggle';
 import ModeAllocationPanel from '../components/ModeAllocationPanel';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
+import { TradeLifecycleTab } from '../components/TradeLifecycle';
 import { formatUSD, formatPercent, getPositionColor } from '../services/futuresApi';
+import { wsService } from '../services/websocket';
 import {
   Wallet,
   TrendingUp,
@@ -33,6 +35,11 @@ import {
   Layers,
   Shield,
   ShoppingCart,
+  History,
+  Clock,
+  DollarSign,
+  Calendar,
+  Wifi,
 } from 'lucide-react';
 
 export default function FuturesDashboard() {
@@ -63,6 +70,7 @@ export default function FuturesDashboard() {
   const [showSymbolDropdown, setShowSymbolDropdown] = useState(false);
   const [centerView, setCenterView] = useState<'orderbook' | 'chart'>('orderbook');
   const [tradingMode, setTradingMode] = useState<{ mode: 'paper' | 'live'; mode_label: string } | null>(null);
+  const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
   // Handle trading mode changes from TradingModeToggle component
   const handleTradingModeChange = (mode: { mode: 'paper' | 'live'; mode_label: string }) => {
@@ -81,6 +89,15 @@ export default function FuturesDashboard() {
     fetchPositionMode();
     fetchMetrics();
   }, [fetchSymbols, fetchAccountInfo, fetchPositionMode, fetchMetrics]);
+
+  // Track WebSocket connection status
+  useEffect(() => {
+    const handleConnect = () => setWsConnected(true);
+    const handleDisconnect = () => setWsConnected(false);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+    setWsConnected(wsService.isConnected());
+  }, []);
 
   // Fetch data for selected symbol
   // NOTE: Mark price and funding rate are cached from WebSocket, so longer intervals are fine
@@ -291,7 +308,12 @@ export default function FuturesDashboard() {
               </div>
             </div>
             <div>
-              <div className="text-xs text-gray-500">Available</div>
+              <div className="text-xs text-gray-500 flex items-center gap-1">
+                Available
+                {wsConnected && (
+                  <Wifi className="w-3 h-3 text-green-500" title="Real-time via WebSocket" />
+                )}
+              </div>
               <div className="font-semibold text-green-500">{formatUSD(availableBalance)}</div>
             </div>
             <div>
@@ -299,7 +321,12 @@ export default function FuturesDashboard() {
               <div className="font-semibold text-yellow-500">{formatUSD(marginUsed)}</div>
             </div>
             <div>
-              <div className="text-xs text-gray-500">Unrealized PnL</div>
+              <div className="text-xs text-gray-500 flex items-center gap-1">
+                Unrealized PnL
+                {wsConnected && (
+                  <Wifi className="w-3 h-3 text-green-500" title="Real-time via WebSocket" />
+                )}
+              </div>
               <div className={`font-semibold ${getPositionColor(totalUnrealizedPnl)}`}>
                 {formatUSD(totalUnrealizedPnl)}
               </div>
@@ -341,134 +368,189 @@ export default function FuturesDashboard() {
         />
       </div>
 
-      {/* Open Orders & Trade History */}
+      {/* Open Orders & Trade History - Original Position */}
       <div className="mb-4">
         <FuturesOrdersHistory />
       </div>
 
       {/* Trade Source Performance Stats - Below Orders */}
       <div className="mb-4">
-        <TradeSourceStatsPanel />
+        <CollapsibleCard
+          title="Trade Source Performance"
+          icon={<BarChart3 className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Stats"
+          badgeColor="cyan"
+        >
+          <TradeSourceStatsPanel />
+        </CollapsibleCard>
       </div>
 
-      {/* Mode Capital Allocation & Safety Control */}
-      <div className="mb-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <ModeAllocationPanel />
-        <ModeSafetyPanel />
+      {/* Mode Capital Allocation */}
+      <div className="mb-4">
+        <CollapsibleCard
+          title="Mode Capital Allocation"
+          icon={<Layers className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Capital"
+          badgeColor="blue"
+        >
+          <ModeAllocationPanel />
+        </CollapsibleCard>
       </div>
 
-      {/* Main Grid Layout */}
-      <div className="grid grid-cols-12 gap-4">
-        {/* Left Column - Trading Panel */}
-        <div className="col-span-12 lg:col-span-3 space-y-4">
-          <FuturesTradingPanel />
-        </div>
+      {/* Mode Safety Settings */}
+      <div className="mb-4">
+        <CollapsibleCard
+          title="Mode Safety Settings"
+          icon={<Shield className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Safety"
+          badgeColor="yellow"
+        >
+          <ModeSafetyPanel />
+        </CollapsibleCard>
+      </div>
 
-        {/* Center Column - Order Book / Chart Toggle */}
-        <div className="col-span-12 lg:col-span-3 space-y-4">
-          {/* View Toggle */}
-          <div className="flex bg-gray-800 rounded-lg p-1">
-            <button
-              onClick={() => setCenterView('orderbook')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-colors ${
-                centerView === 'orderbook'
-                  ? 'bg-gray-700 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <BookOpen className="w-4 h-4" />
-              Order Book
-            </button>
-            <button
-              onClick={() => setCenterView('chart')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-medium transition-colors ${
-                centerView === 'chart'
-                  ? 'bg-gray-700 text-white'
-                  : 'text-gray-400 hover:text-white'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4" />
-              Chart
-            </button>
+      {/* Order Chains / Trade Lifecycle */}
+      <div className="mb-4">
+        <CollapsibleCard
+          title="Order Chains"
+          icon={<Layers className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Lifecycle"
+          badgeColor="purple"
+        >
+          <TradeLifecycleTab />
+        </CollapsibleCard>
+      </div>
+
+      {/* Manual Trading Section - 3 Horizontal Cards */}
+      <div className="mb-4">
+        <CollapsibleCard
+          title="Manual Trading"
+          icon={<ShoppingCart className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Trade"
+          badgeColor="green"
+        >
+          {/* 3 Cards in a Row: Live Trading | Order Book/Chart | Stats */}
+          <div className="grid grid-cols-12 gap-3">
+            {/* Card 1: Live Trading (3 cols - smaller width) */}
+            <div className="col-span-3 bg-gray-800 border border-gray-700 rounded-lg p-3">
+              <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-700">
+                <Zap className="w-4 h-4 text-yellow-400" />
+                <h4 className="text-sm font-semibold text-white">Live Trading</h4>
+              </div>
+              <FuturesTradingPanel />
+            </div>
+
+            {/* Card 2: Order Book / Chart (3 cols - same width as Card 1) - No Scroll */}
+            <div className="col-span-3 bg-gray-800 border border-gray-700 rounded-lg p-3">
+              <div className="flex items-center justify-between mb-2 pb-2 border-b border-gray-700">
+                <div className="flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-blue-400" />
+                  <h4 className="text-sm font-semibold text-white">Market Data</h4>
+                </div>
+                <div className="flex bg-gray-900 rounded-lg p-0.5">
+                  <button
+                    onClick={() => setCenterView('orderbook')}
+                    className={`flex items-center gap-1 px-1.5 py-1 rounded text-[10px] font-medium transition-colors ${
+                      centerView === 'orderbook'
+                        ? 'bg-gray-700 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    Book
+                  </button>
+                  <button
+                    onClick={() => setCenterView('chart')}
+                    className={`flex items-center gap-1 px-1.5 py-1 rounded text-[10px] font-medium transition-colors ${
+                      centerView === 'chart'
+                        ? 'bg-gray-700 text-white'
+                        : 'text-gray-400 hover:text-white'
+                    }`}
+                  >
+                    Chart
+                  </button>
+                </div>
+              </div>
+              {/* Fixed height - no scroll */}
+              <div>
+                {centerView === 'orderbook' ? <FuturesOrderBook /> : <FuturesChart />}
+              </div>
+            </div>
+
+            {/* Card 3: Trading Stats (6 cols - remaining space) */}
+            <div className="col-span-6 bg-gray-800 border border-gray-700 rounded-lg p-3">
+              <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-700">
+                <Activity className="w-4 h-4 text-cyan-400" />
+                <h4 className="text-sm font-semibold text-white">Trading Stats</h4>
+              </div>
+              {/* Stats Grid - 2 rows */}
+              <div className="space-y-2">
+                {/* Row 1: 6 stats */}
+                <div className="grid grid-cols-6 gap-2">
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Total Trades</div>
+                    <div className="text-sm font-bold text-white">{metrics?.totalTrades || 0}</div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Win Rate</div>
+                    <div className={`text-sm font-bold ${metrics?.winRate && metrics.winRate >= 50 ? 'text-green-500' : 'text-red-500'}`}>
+                      {(metrics?.winRate || 0).toFixed(1)}%
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Realized (7d)</div>
+                    <div className={`text-sm font-bold ${getPositionColor(metrics?.totalRealizedPnl || 0)}`}>
+                      {formatUSD(metrics?.totalRealizedPnl || 0)}
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Today's PnL</div>
+                    <div className={`text-sm font-bold ${getPositionColor(metrics?.dailyRealizedPnl || 0)}`}>
+                      {formatUSD(metrics?.dailyRealizedPnl || 0)}
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">ROI</div>
+                    <div className={`text-sm font-bold ${getPositionColor(metrics?.totalRealizedPnl || 0)}`}>
+                      {walletBalance > 0 ? `${(((metrics?.totalRealizedPnl || 0) / walletBalance) * 100).toFixed(1)}%` : '0%'}
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Funding Fees</div>
+                    <div className={`text-sm font-bold ${getPositionColor(metrics?.totalFundingFees || 0)}`}>
+                      {formatUSD(metrics?.totalFundingFees || 0)}
+                    </div>
+                  </div>
+                </div>
+                {/* Row 2: 4 daily stats */}
+                <div className="grid grid-cols-4 gap-2">
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Today's Trades</div>
+                    <div className="text-sm font-bold text-white">{metrics?.dailyTrades || 0}</div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Today's Win %</div>
+                    <div className={`text-sm font-bold ${metrics?.dailyWinRate && metrics.dailyWinRate >= 50 ? 'text-green-500' : 'text-red-500'}`}>
+                      {(metrics?.dailyWinRate || 0).toFixed(1)}%
+                    </div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Today's Wins</div>
+                    <div className="text-sm font-bold text-green-500">{metrics?.dailyWins || 0}</div>
+                  </div>
+                  <div className="bg-gray-900 rounded p-2 text-center">
+                    <div className="text-[9px] text-gray-500">Today's Losses</div>
+                    <div className="text-sm font-bold text-red-500">{metrics?.dailyLosses || 0}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-
-          {/* Content */}
-          <div className="h-[500px]">
-            {centerView === 'orderbook' ? <FuturesOrderBook /> : <FuturesChart />}
-          </div>
-        </div>
-
-        {/* Right Column - Stats/Info */}
-        <div className="col-span-12 lg:col-span-6 space-y-4">
-          {/* Quick Stats - Row 1 */}
-          <div className="grid grid-cols-6 gap-4">
-            <StatCard
-              title="Total Trades"
-              value={metrics?.totalTrades || 0}
-              icon={Activity}
-            />
-            <StatCard
-              title="Win Rate"
-              value={`${(metrics?.winRate || 0).toFixed(1)}%`}
-              icon={TrendingUp}
-              valueColor={metrics?.winRate && metrics.winRate >= 50 ? 'text-green-500' : 'text-red-500'}
-            />
-            <StatCard
-              title="Realized PnL (7d)"
-              value={formatUSD(metrics?.totalRealizedPnl || 0)}
-              icon={Wallet}
-              valueColor={getPositionColor(metrics?.totalRealizedPnl || 0)}
-              tooltip="Total realized profit from closed trades in the last 7 days (does not include unrealized P&L from open positions)"
-            />
-            <StatCard
-              title="Today's Realized"
-              value={formatUSD(metrics?.dailyRealizedPnl || 0)}
-              icon={TrendingUp}
-              valueColor={getPositionColor(metrics?.dailyRealizedPnl || 0)}
-              tooltip="Today's realized profit from closed trades only (does not include unrealized P&L from open positions)"
-            />
-            <StatCard
-              title="ROI"
-              value={walletBalance > 0 ? `${(((metrics?.totalRealizedPnl || 0) / walletBalance) * 100).toFixed(2)}%` : '0%'}
-              icon={Percent}
-              valueColor={getPositionColor(metrics?.totalRealizedPnl || 0)}
-            />
-            <StatCard
-              title="Funding Fees"
-              value={formatUSD(metrics?.totalFundingFees || 0)}
-              icon={Activity}
-              valueColor={getPositionColor(metrics?.totalFundingFees || 0)}
-            />
-          </div>
-
-          {/* Daily Stats - Row 2 */}
-          <div className="grid grid-cols-4 gap-4">
-            <StatCard
-              title="Today's Trades"
-              value={metrics?.dailyTrades || 0}
-              icon={Activity}
-            />
-            <StatCard
-              title="Today's Win Rate"
-              value={`${(metrics?.dailyWinRate || 0).toFixed(1)}%`}
-              icon={TrendingUp}
-              valueColor={metrics?.dailyWinRate && metrics.dailyWinRate >= 50 ? 'text-green-500' : 'text-red-500'}
-            />
-            <StatCard
-              title="Today's Wins"
-              value={metrics?.dailyWins || 0}
-              icon={TrendingUp}
-              valueColor="text-green-500"
-            />
-            <StatCard
-              title="Today's Losses"
-              value={metrics?.dailyLosses || 0}
-              icon={TrendingDown}
-              valueColor="text-red-500"
-            />
-          </div>
-
-        </div>
+        </CollapsibleCard>
       </div>
     </div>
   );

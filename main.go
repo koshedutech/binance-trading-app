@@ -862,6 +862,10 @@ func main() {
 	// This enables each user to have their own independent autopilot instance
 	// Note: clientFactory is optional - manager can use apiKeyService directly from database
 	var userAutopilotManager *autopilot.UserAutopilotManager
+	// Story 6.5: Declare settingsCache outside the block so it's accessible for API server wiring
+	var settingsCache *cache.SettingsCacheService
+	// Story 6.4: Declare adminDefaultsCache outside the block so it's accessible for API server wiring
+	var adminDefaultsCache *cache.AdminDefaultsCacheService
 	if futuresAutopilotController != nil {
 		// Create LLM config for per-user AI analyzers
 		llmConfig := llm.DefaultAnalyzerConfig()
@@ -888,12 +892,19 @@ func main() {
 		}
 
 		// Story 6.6: Create SettingsCacheService for cache-only settings reads during trading
-		var settingsCache *cache.SettingsCacheService
 		if cacheService != nil && cacheService.IsHealthy() {
 			settingsCache = cache.NewSettingsCacheService(cacheService, repo, logger)
 			logger.Info("SettingsCacheService initialized for cache-first settings reads")
 		} else {
 			logger.Info("Redis not available - settings cache will be nil (legacy mode)")
+		}
+
+		// Story 6.4: Create AdminDefaultsCacheService for admin defaults caching and sync
+		if cacheService != nil && cacheService.IsHealthy() {
+			adminDefaultsCache = cache.NewAdminDefaultsCacheService(cacheService, logger)
+			// Wire to AdminSyncService for cache invalidation on admin settings sync
+			autopilot.GetAdminSyncService().SetCacheInvalidator(adminDefaultsCache)
+			logger.Info("AdminDefaultsCacheService initialized and wired to AdminSyncService")
 		}
 
 		userAutopilotManager = autopilot.NewUserAutopilotManager(
@@ -911,6 +922,14 @@ func main() {
 		futuresAutopilotController.SetUserAutopilotManager(userAutopilotManager)
 
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
+	}
+
+	// Story 6.4: Wire DefaultsCopierAdapter to auth service for new user registration
+	// This ensures new users get admin-configured defaults copied to their Redis cache
+	if authService != nil && adminDefaultsCache != nil && settingsCache != nil {
+		defaultsCopier := cache.NewDefaultsCopierAdapter(adminDefaultsCache, settingsCache)
+		authService.SetDefaultsCopier(defaultsCopier)
+		logger.Info("DefaultsCopierAdapter wired to auth service for new user defaults")
 	}
 
 	// Subscribe to user logout events for cleanup (after all components are initialized)
@@ -974,6 +993,30 @@ func main() {
 	if userAutopilotManager != nil {
 		server.SetUserAutopilotManager(userAutopilotManager)
 		logger.Info("UserAutopilotManager set on API server")
+	}
+
+	// Story 6.5: Set the SettingsCacheService on the server for cache-first API pattern
+	if settingsCache != nil {
+		server.SetSettingsCacheService(settingsCache)
+		logger.Info("SettingsCacheService set on API server for cache-first reads")
+	}
+
+	// Story 6.4: Set the AdminDefaultsCacheService on the server for settings comparison
+	if adminDefaultsCache != nil {
+		server.SetAdminDefaultsCacheService(adminDefaultsCache)
+		logger.Info("AdminDefaultsCacheService set on API server for settings comparison")
+	}
+
+	// Wire up WebSocket broadcast callbacks for User Data Stream updates
+	// This enables real-time position, order, balance, and trade updates to the frontend
+	if futuresAutopilotController != nil {
+		futuresAutopilotController.SetWebSocketCallbacks(
+			api.BroadcastUserBalanceUpdate,
+			api.BroadcastUserPositionUpdate,
+			api.BroadcastUserOrderUpdate,
+			api.BroadcastUserTradeUpdate,
+		)
+		logger.Info("WebSocket broadcast callbacks wired to FuturesController")
 	}
 
 	// Start web server in a goroutine

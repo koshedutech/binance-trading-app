@@ -28,9 +28,17 @@ var (
 	syncMutex sync.Mutex // Prevent concurrent writes to default-settings.json
 )
 
+// AdminCacheInvalidator is an interface for invalidating admin defaults cache
+// Story 6.4: This allows AdminSyncService to invalidate cache without circular dependency
+type AdminCacheInvalidator interface {
+	InvalidateAdminDefaults(ctx context.Context) error
+	LoadAdminDefaults(ctx context.Context) error
+}
+
 // AdminSyncService handles syncing admin settings to default-settings.json
 type AdminSyncService struct {
-	mu sync.Mutex
+	mu             sync.Mutex
+	cacheInvalidator AdminCacheInvalidator // Story 6.4: Cache invalidation on sync
 }
 
 // GetAdminSyncService returns the singleton admin sync service
@@ -42,6 +50,15 @@ func GetAdminSyncService() *AdminSyncService {
 		adminSyncService = &AdminSyncService{}
 	})
 	return adminSyncService
+}
+
+// SetCacheInvalidator sets the cache invalidator for admin defaults
+// Story 6.4: Called from main.go after creating AdminDefaultsCacheService
+func (s *AdminSyncService) SetCacheInvalidator(invalidator AdminCacheInvalidator) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cacheInvalidator = invalidator
+	log.Printf("[ADMIN-SYNC] Cache invalidator set for admin defaults")
 }
 
 // IsAdminUser checks if the given email is the admin user
@@ -346,6 +363,20 @@ func (s *AdminSyncService) saveDefaultSettings(defaults *DefaultSettingsFile) er
 	// Force reload of singleton to pick up new settings
 	if err := ReloadDefaultSettings(); err != nil {
 		log.Printf("[ADMIN-SYNC] Warning: Failed to reload defaults after save: %v", err)
+	}
+
+	// Story 6.4: Invalidate and reload admin defaults cache
+	if s.cacheInvalidator != nil {
+		ctx := context.Background()
+		if err := s.cacheInvalidator.InvalidateAdminDefaults(ctx); err != nil {
+			log.Printf("[ADMIN-SYNC] Warning: Failed to invalidate admin cache: %v", err)
+		}
+		// Reload cache with new values
+		if err := s.cacheInvalidator.LoadAdminDefaults(ctx); err != nil {
+			log.Printf("[ADMIN-SYNC] Warning: Failed to reload admin cache: %v", err)
+		} else {
+			log.Printf("[ADMIN-SYNC] Admin defaults cache invalidated and reloaded")
+		}
 	}
 
 	return nil

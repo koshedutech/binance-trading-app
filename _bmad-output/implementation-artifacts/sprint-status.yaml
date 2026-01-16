@@ -101,9 +101,15 @@ development_status:
   epic-5-retrospective: optional
 
   # ============================================================================
-  # EPIC 6: Redis Caching Infrastructure - COMPLETE
+  # EPIC 6: Redis Caching Infrastructure - COMPLETE & QA VERIFIED
+  # QA Verified: 2026-01-15
+  # QA Notes: All stories verified with fixes applied for:
+  #   - 6.2: 88-key architecture (global_trading + safety keys)
+  #   - 6.4: Admin defaults wiring (InvalidateAdminDefaults, CopyDefaultsToNewUser, Settings Comparison)
+  #   - 6.5: Cache-first pattern (mode configs, circuit breaker, capital allocation)
+  #   - 6.6: Ginie integration (cache warm-up, direct DB calls replaced)
   # ============================================================================
-  epic-6: done
+  epic-6: done  # QA VERIFIED 2026-01-15
   6-1-redis-infrastructure-setup: done
   6-2-complete-user-settings-cache: done
   6-4-admin-defaults-cache-sync: done
@@ -112,15 +118,15 @@ development_status:
   epic-6-retrospective: optional
 
   # ============================================================================
-  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - IN PROGRESS (7/10 done)
+  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - COMPLETE (10/10 done)
   # ============================================================================
-  epic-7: in-progress
+  epic-7: done
   7-1-client-order-id-generation: done          # internal/orders/client_order_id.go
   7-2-daily-sequence-storage-in-redis: done     # cache_service.go:IncrementDailySequence
-  7-3-order-chain-tracking: ready-for-dev       # NOT IMPLEMENTED
-  7-4-parse-client-order-id-from-binance-responses: ready-for-dev  # NOT IMPLEMENTED
+  7-3-order-chain-tracking: done                 # All chain tracking complete: DB migration, ChainTracker, H/HSL/HTP/DCA suffixes, tests
+  7-4-parse-client-order-id-from-binance-responses: done  # Parser exists + frontend bug fixed
   7-5-trade-lifecycle-tab-ui: done              # TradeLifecycleEvents.tsx
-  7-6-user-timezone-settings: ready-for-dev     # NOT IMPLEMENTED
+  7-6-user-timezone-settings: done              # Migration, API, frontend selector implemented
   7-7-hedge-order-suffixes: done                # OrderTypeHedge = "H"
   7-8-redis-fallback-for-sequence-generation: done  # GenerateFallback() method
   7-9-backend-api-for-trade-lifecycle-tab: done # handlers_trade_lifecycle.go

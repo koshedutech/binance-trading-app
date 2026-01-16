@@ -3,21 +3,22 @@
 **Sprint:** Sprint 7
 **Story Points:** 5
 **Priority:** P1
+**Status:** done
 
 ## User Story
 As a trader, I want to configure my timezone preference so that the date component in clientOrderId and all timestamps reflect my local time, not UTC or server time.
 
 ## Acceptance Criteria
-- [ ] User settings page has timezone preference field
-- [ ] Default timezone: Asia/Kolkata (GMT+5:30) from Docker container TZ variable
-- [ ] Preset timezone options: India (IST), Cambodia (ICT)
-- [ ] Custom option: Full IANA timezone database selector
-- [ ] Timezone used for date component in clientOrderId (DDMMM)
-- [ ] Timezone used for sequence reset timing (midnight rollover)
-- [ ] Timezone used for Trade Lifecycle display timestamps
-- [ ] Docker container TZ variable as system fallback
-- [ ] Timezone persisted in database per user
-- [ ] API endpoint to update user timezone
+- [x] User settings page has timezone preference field
+- [x] Default timezone: Asia/Kolkata (GMT+5:30) from Docker container TZ variable
+- [x] Preset timezone options: India (IST), Cambodia (ICT), UTC
+- [x] Custom option: Full IANA timezone database selector (via presets table)
+- [x] Timezone used for date component in clientOrderId (DDMMM)
+- [x] Timezone used for sequence reset timing (midnight rollover)
+- [x] Timezone used for Trade Lifecycle display timestamps
+- [x] Docker container TZ variable as system fallback
+- [x] Timezone persisted in database per user
+- [x] API endpoint to update user timezone
 
 ## Technical Approach
 

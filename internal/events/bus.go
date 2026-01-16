@@ -25,8 +25,9 @@ const (
 	EventBotStopped        EventType = "BOT_STOPPED"
 	EventError             EventType = "ERROR"
 	EventTradingModeChanged EventType = "TRADING_MODE_CHANGED"
-	EventAutopilotToggled   EventType = "AUTOPILOT_TOGGLED"
-	EventUserLogout         EventType = "USER_LOGOUT"
+	EventAutopilotToggled EventType = "AUTOPILOT_TOGGLED"
+	EventUserLogout       EventType = "USER_LOGOUT"
+	EventBalanceUpdate    EventType = "BALANCE_UPDATE"
 )
 
 // Event represents a system event

@@ -1192,14 +1192,15 @@ type LLMReversalConfirmation struct {
 
 // PendingLimitOrder tracks unfilled LIMIT orders for reversal entries
 type PendingLimitOrder struct {
-	OrderID      int64       `json:"order_id"`
-	Symbol       string      `json:"symbol"`
-	Side         string      `json:"side"`         // "BUY" or "SELL"
-	PositionSide string      `json:"position_side"` // "LONG" or "SHORT"
-	Price        float64     `json:"price"`
-	Quantity     float64     `json:"quantity"`
-	PlacedAt     time.Time   `json:"placed_at"`
-	TimeoutAt    time.Time   `json:"timeout_at"`
-	Source       string      `json:"source"`       // "reversal_entry"
-	Mode         GinieTradingMode `json:"mode"`
+	OrderID           int64            `json:"order_id"`
+	Symbol            string           `json:"symbol"`
+	Side              string           `json:"side"`               // "BUY" or "SELL"
+	PositionSide      string           `json:"position_side"`      // "LONG" or "SHORT"
+	Price             float64          `json:"price"`
+	Quantity          float64          `json:"quantity"`
+	PlacedAt          time.Time        `json:"placed_at"`
+	TimeoutAt         time.Time        `json:"timeout_at"`
+	Source            string           `json:"source"`             // "reversal_entry"
+	Mode              GinieTradingMode `json:"mode"`
+	ChainBaseID string `json:"chain_base_id,omitempty"` // Epic 7: Base ID for linking related orders
 }

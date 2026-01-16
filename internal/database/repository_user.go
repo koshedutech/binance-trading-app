@@ -1567,3 +1567,78 @@ func (r *Repository) UpdateUserSavedCoins(ctx context.Context, userID string, co
 
 	return nil
 }
+
+// =====================================================
+// USER TIMEZONE OPERATIONS (Story 7.6)
+// =====================================================
+
+// TimezonePreset represents a timezone preset option
+type TimezonePreset struct {
+	ID           int       `json:"id"`
+	DisplayName  string    `json:"display_name"`
+	TzIdentifier string    `json:"tz_identifier"`
+	GmtOffset    string    `json:"gmt_offset"`
+	IsDefault    bool      `json:"is_default"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// GetUserTimezone retrieves the timezone setting for a user
+func (r *Repository) GetUserTimezone(ctx context.Context, userID string) (string, error) {
+	query := `SELECT COALESCE(timezone, 'Asia/Kolkata') FROM users WHERE id = $1`
+
+	var timezone string
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&timezone)
+
+	if err == pgx.ErrNoRows {
+		// User not found, return default
+		return "Asia/Kolkata", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to get user timezone: %w", err)
+	}
+
+	return timezone, nil
+}
+
+// UpdateUserTimezone updates the timezone setting for a user
+func (r *Repository) UpdateUserTimezone(ctx context.Context, userID, timezone string) error {
+	query := `UPDATE users SET timezone = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+
+	result, err := r.db.Pool.Exec(ctx, query, userID, timezone)
+	if err != nil {
+		return fmt.Errorf("failed to update user timezone: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("user not found")
+	}
+
+	return nil
+}
+
+// GetTimezonePresets retrieves all available timezone presets
+func (r *Repository) GetTimezonePresets(ctx context.Context) ([]TimezonePreset, error) {
+	query := `
+		SELECT id, display_name, tz_identifier, gmt_offset, is_default, created_at
+		FROM timezone_presets
+		ORDER BY gmt_offset ASC, display_name ASC
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query timezone presets: %w", err)
+	}
+	defer rows.Close()
+
+	var presets []TimezonePreset
+	for rows.Next() {
+		var p TimezonePreset
+		err := rows.Scan(&p.ID, &p.DisplayName, &p.TzIdentifier, &p.GmtOffset, &p.IsDefault, &p.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan timezone preset: %w", err)
+		}
+		presets = append(presets, p)
+	}
+
+	return presets, nil
+}

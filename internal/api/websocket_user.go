@@ -350,6 +350,21 @@ func BroadcastUserOrderUpdate(userID string, order map[string]interface{}) {
 	userWSHub.BroadcastToUser(userID, event)
 }
 
+// BroadcastUserBalanceUpdate broadcasts a balance update to a specific user
+func BroadcastUserBalanceUpdate(userID string, balance map[string]interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventBalanceUpdate,
+		Timestamp: time.Now(),
+		Data:      balance,
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
 // GetUserWSHub returns the global user WebSocket hub
 func GetUserWSHub() *UserWSHub {
 	return userWSHub

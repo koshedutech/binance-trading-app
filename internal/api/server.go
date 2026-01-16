@@ -14,6 +14,7 @@ import (
 	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/billing"
+	"binance-trading-bot/internal/cache"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/license"
@@ -83,6 +84,12 @@ type Server struct {
 
 	// Multi-user autopilot manager (per-user autopilot instances)
 	userAutopilotManager *autopilot.UserAutopilotManager
+
+	// Story 6.5: Settings cache service for cache-first API pattern
+	settingsCacheService *cache.SettingsCacheService
+
+	// Story 6.4: Admin defaults cache service for settings comparison
+	adminDefaultsCacheService *cache.AdminDefaultsCacheService
 }
 
 // ServerConfig holds server configuration
@@ -419,6 +426,11 @@ func (s *Server) setupRoutes() {
 			// Global Circuit Breaker endpoints (Story 5.3)
 			user.GET("/global-circuit-breaker", s.handleGetGlobalCircuitBreaker)
 			user.PUT("/global-circuit-breaker", s.handleUpdateGlobalCircuitBreaker)
+
+			// Timezone endpoints (Story 7.6)
+			user.GET("/timezone", s.handleGetUserTimezone)
+			user.PUT("/timezone", s.handleUpdateUserTimezone)
+			user.GET("/timezone/presets", s.handleGetTimezonePresets)
 		}
 
 		// Billing endpoints (requires auth)
@@ -1030,4 +1042,26 @@ func (s *Server) SetUserAutopilotManager(mgr *autopilot.UserAutopilotManager) {
 // GetUserAutopilotManager returns the multi-user autopilot manager
 func (s *Server) GetUserAutopilotManager() *autopilot.UserAutopilotManager {
 	return s.userAutopilotManager
+}
+
+// SetSettingsCacheService sets the settings cache service for cache-first API pattern
+// Story 6.5: Cache-First Read Pattern APIs
+func (s *Server) SetSettingsCacheService(svc *cache.SettingsCacheService) {
+	s.settingsCacheService = svc
+}
+
+// GetSettingsCacheService returns the settings cache service
+func (s *Server) GetSettingsCacheService() *cache.SettingsCacheService {
+	return s.settingsCacheService
+}
+
+// SetAdminDefaultsCacheService sets the admin defaults cache service for settings comparison
+// Story 6.4: Cache-first settings comparison
+func (s *Server) SetAdminDefaultsCacheService(svc *cache.AdminDefaultsCacheService) {
+	s.adminDefaultsCacheService = svc
+}
+
+// GetAdminDefaultsCacheService returns the admin defaults cache service
+func (s *Server) GetAdminDefaultsCacheService() *cache.AdminDefaultsCacheService {
+	return s.adminDefaultsCacheService
 }

@@ -578,6 +578,12 @@ type FuturesController struct {
 
 	// Story 6.6: Cache-only settings reads (uses interface to avoid circular import)
 	settingsCache SettingsCacheReader
+
+	// WebSocket broadcast callbacks (set by api package to avoid import cycle)
+	onBalanceUpdate  func(userID string, balance map[string]interface{})
+	onPositionUpdate func(userID string, positions []map[string]interface{})
+	onOrderUpdate    func(userID string, order map[string]interface{})
+	onTradeUpdate    func(userID string, trade map[string]interface{})
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -706,7 +712,8 @@ func NewFuturesController(
 	// Empty userID = legacy shared mode (uses settings file for PnL)
 	// nil positionStateRepo = fall back to JSON file for position state (no Redis in legacy mode)
 	// nil settingsCache = legacy mode uses in-memory defaults (no cache in legacy mode)
-	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "", nil, nil)
+	// nil clientOrderIdGen = no clientOrderId tracking in legacy mode
+	ginieAuto := NewGinieAutopilot(ginieAn, futuresClient, logger, repo, "", nil, nil, nil)
 
 	// Load persisted PnL stats
 	ginieAuto.LoadPnLStats()
@@ -1200,6 +1207,23 @@ func (fc *FuturesController) SetOwnerUserID(userID string) {
 	// if fc.ginieAutopilot != nil {
 	// 	fc.ginieAutopilot.SetUserID(userID)
 	// }
+}
+
+// SetWebSocketCallbacks sets the WebSocket broadcast callbacks
+// This is called by the api package to enable real-time updates to the frontend
+func (fc *FuturesController) SetWebSocketCallbacks(
+	onBalance func(userID string, balance map[string]interface{}),
+	onPosition func(userID string, positions []map[string]interface{}),
+	onOrder func(userID string, order map[string]interface{}),
+	onTrade func(userID string, trade map[string]interface{}),
+) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.onBalanceUpdate = onBalance
+	fc.onPositionUpdate = onPosition
+	fc.onOrderUpdate = onOrder
+	fc.onTradeUpdate = onTrade
+	fc.logger.Info("WebSocket broadcast callbacks configured")
 }
 
 // SetDryRun sets dry run mode and propagates to Ginie
@@ -5284,6 +5308,20 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 				"side", existingPos.Side,
 				"entry_price", existingPos.EntryPrice)
 			delete(fc.activePositions, positionKey)
+
+			// Broadcast position closed to frontend via callback
+			if fc.ownerUserID != "" && fc.onPositionUpdate != nil {
+				fc.onPositionUpdate(fc.ownerUserID, []map[string]interface{}{
+					{
+						"symbol":         symbol,
+						"position_amt":   0.0,
+						"side":           existingPos.Side,
+						"entry_price":    existingPos.EntryPrice,
+						"unrealized_pnl": 0.0,
+						"status":         "CLOSED",
+					},
+				})
+			}
 		}
 		return
 	}
@@ -5326,6 +5364,21 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 			EntryCount: 1,
 		}
 	}
+
+	// Broadcast position update to frontend via callback
+	if fc.ownerUserID != "" && fc.onPositionUpdate != nil {
+		fc.onPositionUpdate(fc.ownerUserID, []map[string]interface{}{
+			{
+				"symbol":         symbol,
+				"position_amt":   positionAmt,
+				"side":           side,
+				"entry_price":    update.EntryPrice,
+				"unrealized_pnl": update.UnrealizedPnL,
+				"leverage":       fc.config.DefaultLeverage,
+				"status":         "OPEN",
+			},
+		})
+	}
 }
 
 // HandleStreamOrderUpdate processes real-time order updates from User Data Stream
@@ -5344,6 +5397,21 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			"type", order.OrderType,
 			"side", order.Side,
 			"qty", order.OriginalQuantity)
+
+		// Broadcast new order to frontend via callback
+		if fc.ownerUserID != "" && fc.onOrderUpdate != nil {
+			fc.onOrderUpdate(fc.ownerUserID, map[string]interface{}{
+				"symbol":         order.Symbol,
+				"order_id":       order.OrderId,
+				"client_id":      order.ClientOrderId,
+				"type":           order.OrderType,
+				"side":           order.Side,
+				"quantity":       order.OriginalQuantity,
+				"price":          order.OriginalPrice,
+				"status":         order.OrderStatus,
+				"execution_type": order.ExecutionType,
+			})
+		}
 
 	case "TRADE":
 		fc.logger.Info("Stream: Order filled",
@@ -5386,11 +5454,43 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			}
 		}
 
+		// Broadcast trade execution to frontend via callback
+		if fc.ownerUserID != "" && fc.onTradeUpdate != nil {
+			fc.onTradeUpdate(fc.ownerUserID, map[string]interface{}{
+				"symbol":           order.Symbol,
+				"order_id":         order.OrderId,
+				"type":             order.OrderType,
+				"side":             order.Side,
+				"filled_qty":       order.LastFilledQty,
+				"filled_price":     order.LastFilledPrice,
+				"cumulative_qty":   order.CumulativeFilledQty,
+				"average_price":    order.AveragePrice,
+				"realized_pnl":     order.RealizedProfit,
+				"commission":       order.Commission,
+				"commission_asset": order.CommissionAsset,
+				"is_maker":         order.IsMakerSide,
+				"status":           order.OrderStatus,
+				"execution_type":   order.ExecutionType,
+			})
+		}
+
 	case "CANCELED", "EXPIRED":
 		fc.logger.Debug("Stream: Order cancelled/expired",
 			"symbol", order.Symbol,
 			"type", order.OrderType,
 			"status", order.OrderStatus)
+
+		// Broadcast order cancellation to frontend via callback
+		if fc.ownerUserID != "" && fc.onOrderUpdate != nil {
+			fc.onOrderUpdate(fc.ownerUserID, map[string]interface{}{
+				"symbol":         order.Symbol,
+				"order_id":       order.OrderId,
+				"type":           order.OrderType,
+				"side":           order.Side,
+				"status":         order.OrderStatus,
+				"execution_type": order.ExecutionType,
+			})
+		}
 	}
 }
 
@@ -5400,12 +5500,22 @@ func (fc *FuturesController) HandleStreamAccountUpdate(update *binance.AccountUp
 		return
 	}
 
-	// Log balance changes
+	// Log balance changes and broadcast to frontend via callback
 	for _, balance := range update.AccountUpdate.Balances {
 		if balance.Asset == "USDT" && balance.BalanceChange != 0 {
 			fc.logger.Info("Stream: USDT balance changed",
 				"wallet_balance", balance.WalletBalance,
 				"change", balance.BalanceChange)
+
+			// Broadcast to frontend WebSocket via callback
+			if fc.ownerUserID != "" && fc.onBalanceUpdate != nil {
+				fc.onBalanceUpdate(fc.ownerUserID, map[string]interface{}{
+					"asset":          balance.Asset,
+					"wallet_balance": balance.WalletBalance,
+					"cross_balance":  balance.CrossWalletBalance,
+					"change":         balance.BalanceChange,
+				})
+			}
 		}
 	}
 }

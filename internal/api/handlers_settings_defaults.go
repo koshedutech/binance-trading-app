@@ -1559,11 +1559,29 @@ func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 	}
 	jsonAlloc := defaults.CapitalAllocation
 
-	// REGULAR USER: Get current settings from DB for comparison
-	currentAlloc, err := s.repo.GetUserCapitalAllocation(ctx, userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load user capital allocation: %v", err)})
-		return
+	// REGULAR USER: Get current settings (cache-first, fallback to DB)
+	// Story 6.5: Cache-first pattern
+	var currentAlloc *database.UserCapitalAllocation
+	if s.settingsCacheService != nil {
+		currentAlloc, err = s.settingsCacheService.GetCapitalAllocation(ctx, userID)
+		if err != nil {
+			if IsCacheUnavailableError(err) {
+				RespondCacheUnavailable(c, "get_capital_allocation")
+				return
+			}
+			// Other cache error - fallback to DB
+			log.Printf("[CAPITAL-ALLOCATION] Cache error for user %s: %v, falling back to DB", userID, err)
+			currentAlloc = nil
+		}
+	}
+
+	// Fallback to direct DB if cache miss or cache not available
+	if currentAlloc == nil {
+		currentAlloc, err = s.repo.GetUserCapitalAllocation(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load user capital allocation: %v", err)})
+			return
+		}
 	}
 
 	// If no config exists, use database defaults for comparison
@@ -1658,9 +1676,18 @@ func (s *Server) handleLoadCapitalAllocationDefaults(c *gin.Context) {
 	currentAlloc.AllowDynamicRebalance = jsonAlloc.AllowDynamicRebalance
 	currentAlloc.RebalanceThresholdPct = jsonAlloc.RebalanceThresholdPct
 
-	if err := s.repo.SaveUserCapitalAllocation(ctx, currentAlloc); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save capital allocation: %v", err)})
-		return
+	// Story 6.5: Use cache service for write-through pattern
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateCapitalAllocation(ctx, userID, currentAlloc); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save capital allocation: %v", err)})
+			return
+		}
+	} else {
+		// Fallback to direct DB write if cache service not available
+		if err := s.repo.SaveUserCapitalAllocation(ctx, currentAlloc); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save capital allocation: %v", err)})
+			return
+		}
 	}
 
 	// Trigger immediate config reload in running autopilot
@@ -3115,7 +3142,14 @@ func (s *Server) buildCapitalAllocationPreview(ctx context.Context, userID strin
 		return preview
 	}
 
-	currentAlloc, _ := s.repo.GetUserCapitalAllocation(ctx, userID)
+	// Story 6.5: Cache-first pattern (with silent fallback to DB for preview)
+	var currentAlloc *database.UserCapitalAllocation
+	if s.settingsCacheService != nil {
+		currentAlloc, _ = s.settingsCacheService.GetCapitalAllocation(ctx, userID)
+	}
+	if currentAlloc == nil {
+		currentAlloc, _ = s.repo.GetUserCapitalAllocation(ctx, userID)
+	}
 	if currentAlloc == nil {
 		currentAlloc = database.DefaultUserCapitalAllocation()
 		currentAlloc.UserID = userID
@@ -3230,7 +3264,14 @@ func (s *Server) applyLLMConfigDefaults(ctx context.Context, userID string, defa
 }
 
 func (s *Server) applyCapitalAllocationDefaults(ctx context.Context, userID string, defaults *autopilot.DefaultSettingsFile) error {
-	currentAlloc, _ := s.repo.GetUserCapitalAllocation(ctx, userID)
+	// Story 6.5: Cache-first pattern (with silent fallback to DB)
+	var currentAlloc *database.UserCapitalAllocation
+	if s.settingsCacheService != nil {
+		currentAlloc, _ = s.settingsCacheService.GetCapitalAllocation(ctx, userID)
+	}
+	if currentAlloc == nil {
+		currentAlloc, _ = s.repo.GetUserCapitalAllocation(ctx, userID)
+	}
 	if currentAlloc == nil {
 		currentAlloc = database.DefaultUserCapitalAllocation()
 		currentAlloc.UserID = userID
@@ -3244,6 +3285,10 @@ func (s *Server) applyCapitalAllocationDefaults(ctx context.Context, userID stri
 	currentAlloc.AllowDynamicRebalance = jsonAlloc.AllowDynamicRebalance
 	currentAlloc.RebalanceThresholdPct = jsonAlloc.RebalanceThresholdPct
 
+	// Story 6.5: Use cache service for write-through pattern
+	if s.settingsCacheService != nil {
+		return s.settingsCacheService.UpdateCapitalAllocation(ctx, userID, currentAlloc)
+	}
 	return s.repo.SaveUserCapitalAllocation(ctx, currentAlloc)
 }
 

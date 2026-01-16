@@ -10,10 +10,13 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
-
-	"binance-trading-bot/internal/cache"
 )
+
+// fallbackCounter ensures unique fallback IDs even if crypto/rand fails
+// and multiple goroutines call at the same nanosecond
+var fallbackCounter uint64
 
 const (
 	// MaxClientOrderIDLength is the maximum length allowed by Binance
@@ -35,18 +38,30 @@ var (
 	ErrEmptyUserID          = errors.New("user ID cannot be empty")
 )
 
+// SequenceProvider provides atomic daily sequence numbers for clientOrderId generation.
+// This interface breaks the import cycle: orders package doesn't need to import cache.
+// cache.CacheService implements this interface.
+type SequenceProvider interface {
+	// IncrementDailySequence atomically increments and returns the daily sequence for a user.
+	// dateKey is in YYYYMMDD format (e.g., "20260115")
+	IncrementDailySequence(ctx context.Context, userID, dateKey string) (int64, error)
+	// IsHealthy returns whether the sequence provider is available
+	IsHealthy() bool
+}
+
 // ClientOrderIdGenerator generates structured client order IDs for Binance futures.
 // Format: [MODE]-[DDMMM]-[NNNNN]-[TYPE] (e.g., "SCA-15JAN-00001-E")
 // Fallback format: [MODE]-FALLBACK-[8CHAR]-[TYPE] (e.g., "SCA-FALLBACK-a3f7c2e9-E")
 type ClientOrderIdGenerator struct {
-	cacheService *cache.CacheService
-	userID       string
-	timezone     *time.Location
+	sequenceProvider SequenceProvider
+	userID           string
+	timezone         *time.Location
 }
 
 // NewClientOrderIdGenerator creates a new ClientOrderIdGenerator.
+// sequenceProvider can be nil (will always use fallback IDs).
 // If timezone is nil, defaults to Asia/Kolkata.
-func NewClientOrderIdGenerator(cacheService *cache.CacheService, userID string, timezone *time.Location) (*ClientOrderIdGenerator, error) {
+func NewClientOrderIdGenerator(sequenceProvider SequenceProvider, userID string, timezone *time.Location) (*ClientOrderIdGenerator, error) {
 	if userID == "" {
 		return nil, ErrEmptyUserID
 	}
@@ -62,9 +77,9 @@ func NewClientOrderIdGenerator(cacheService *cache.CacheService, userID string, 
 	}
 
 	return &ClientOrderIdGenerator{
-		cacheService: cacheService,
-		userID:       userID,
-		timezone:     timezone,
+		sequenceProvider: sequenceProvider,
+		userID:           userID,
+		timezone:         timezone,
 	}, nil
 }
 
@@ -88,28 +103,39 @@ func (g *ClientOrderIdGenerator) Generate(ctx context.Context, mode TradingMode,
 	now := time.Now().In(g.timezone)
 	dateStr := strings.ToUpper(now.Format("02Jan")) // "15JAN"
 
-	// Try to get sequence from Redis
-	if g.cacheService != nil {
+	// Try to get sequence from sequence provider (Redis)
+	if g.sequenceProvider != nil && g.sequenceProvider.IsHealthy() {
 		dateKey := now.Format("20060102") // "20260115" for Redis key
-		seq, err := g.cacheService.IncrementDailySequence(ctx, g.userID, dateKey)
+		seq, err := g.sequenceProvider.IncrementDailySequence(ctx, g.userID, dateKey)
 		if err == nil {
+			// Check for sequence overflow (max 99999 for 5-digit format)
+			if seq > 99999 {
+				log.Printf("[ClientOrderIdGenerator] Sequence overflow (%d > 99999), using fallback ID", seq)
+				fullID, baseID := g.GenerateFallback(mode, orderType)
+				return fullID, baseID, nil
+			}
+
 			// Successfully got sequence from Redis
 			modeCode := getModeCode(mode)
 			baseID := fmt.Sprintf("%s-%s-%05d", modeCode, dateStr, seq)
 			fullID := fmt.Sprintf("%s-%s", baseID, orderType)
 
-			// Validate length
+			// Validate length (should never trigger with valid seq, but safety check)
 			if len(fullID) > MaxClientOrderIDLength {
-				return "", "", fmt.Errorf("%w: generated ID '%s' is %d characters", ErrClientOrderIDTooLong, fullID, len(fullID))
+				log.Printf("[ClientOrderIdGenerator] Generated ID too long, using fallback")
+				fallbackFullID, fallbackBaseID := g.GenerateFallback(mode, orderType)
+				return fallbackFullID, fallbackBaseID, nil
 			}
 
 			return fullID, baseID, nil
 		}
 
-		// Redis failed, log and use fallback
-		log.Printf("[ClientOrderIdGenerator] Redis unavailable for sequence generation, using fallback: %v", err)
+		// Sequence provider failed, log and use fallback
+		log.Printf("[ClientOrderIdGenerator] Sequence provider error, using fallback: %v", err)
+	} else if g.sequenceProvider == nil {
+		log.Printf("[ClientOrderIdGenerator] SequenceProvider is nil, using fallback ID generation")
 	} else {
-		log.Printf("[ClientOrderIdGenerator] CacheService is nil, using fallback ID generation")
+		log.Printf("[ClientOrderIdGenerator] SequenceProvider unhealthy, using fallback ID generation")
 	}
 
 	// Use fallback when Redis is unavailable
@@ -248,7 +274,7 @@ func validateOrderType(orderType OrderType) error {
 	switch orderType {
 	case OrderTypeEntry, OrderTypeTP1, OrderTypeTP2, OrderTypeTP3,
 		OrderTypeRebuy, OrderTypeDCA1, OrderTypeDCA2, OrderTypeDCA3,
-		OrderTypeHedge, OrderTypeSL:
+		OrderTypeHedge, OrderTypeHedgeSL, OrderTypeHedgeTP, OrderTypeSL:
 		return nil
 	default:
 		return fmt.Errorf("%w: '%s'", ErrInvalidOrderType, orderType)
@@ -261,8 +287,11 @@ func generateShortUniqueID() string {
 	b := make([]byte, 4) // 4 bytes = 8 hex characters
 	_, err := rand.Read(b)
 	if err != nil {
-		// Fallback to timestamp-based if crypto/rand fails
-		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+		// Fallback to timestamp + atomic counter if crypto/rand fails
+		// This ensures uniqueness even if called at the same nanosecond
+		counter := atomic.AddUint64(&fallbackCounter, 1)
+		combined := (uint64(time.Now().UnixNano()) << 16) | (counter & 0xFFFF)
+		return fmt.Sprintf("%08x", combined&0xFFFFFFFF)
 	}
 	return hex.EncodeToString(b)
 }

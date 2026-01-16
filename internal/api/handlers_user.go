@@ -414,6 +414,96 @@ func cleanIPAddress(ip string) string {
 	return ip
 }
 
+// =====================================================
+// USER TIMEZONE HANDLERS (Story 7.6)
+// =====================================================
+
+// handleGetUserTimezone returns the user's current timezone setting
+func (s *Server) handleGetUserTimezone(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	timezone, err := s.repo.GetUserTimezone(ctx, userID)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "failed to get timezone")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"timezone": timezone,
+	})
+}
+
+// handleUpdateUserTimezone updates the user's timezone setting
+func (s *Server) handleUpdateUserTimezone(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Timezone string `json:"timezone" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "timezone is required")
+		return
+	}
+
+	// Validate timezone format (basic validation)
+	if len(req.Timezone) < 3 || len(req.Timezone) > 50 {
+		errorResponse(c, http.StatusBadRequest, "invalid timezone format")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	if err := s.repo.UpdateUserTimezone(ctx, userID, req.Timezone); err != nil {
+		if err.Error() == "user not found" {
+			errorResponse(c, http.StatusNotFound, "user not found")
+			return
+		}
+		errorResponse(c, http.StatusInternalServerError, "failed to update timezone")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"message":  "timezone updated successfully",
+		"timezone": req.Timezone,
+	})
+}
+
+// handleGetTimezonePresets returns all available timezone presets
+func (s *Server) handleGetTimezonePresets(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	presets, err := s.repo.GetTimezonePresets(ctx)
+	if err != nil {
+		errorResponse(c, http.StatusInternalServerError, "failed to get timezone presets")
+		return
+	}
+
+	// If no presets found (table might not exist yet), return defaults
+	if len(presets) == 0 {
+		presets = []database.TimezonePreset{
+			{ID: 1, DisplayName: "India Standard Time (IST)", TzIdentifier: "Asia/Kolkata", GmtOffset: "+05:30", IsDefault: true},
+			{ID: 2, DisplayName: "Indochina Time (ICT)", TzIdentifier: "Asia/Phnom_Penh", GmtOffset: "+07:00", IsDefault: false},
+			{ID: 3, DisplayName: "Coordinated Universal Time (UTC)", TzIdentifier: "UTC", GmtOffset: "+00:00", IsDefault: false},
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"presets": presets,
+	})
+}
+
 // handleGetUserAPIStatus returns user-specific API connection status
 func (s *Server) handleGetUserAPIStatus(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)

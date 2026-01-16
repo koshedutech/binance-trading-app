@@ -794,3 +794,32 @@ func (s *AdminDefaultsCacheService) mergeGroupIntoConfig(config *autopilot.ModeF
 	}
 	return err
 }
+
+// ============================================================================
+// DEFAULTS COPIER ADAPTER (Story 6.4)
+// ============================================================================
+
+// DefaultsCopierAdapter wraps AdminDefaultsCacheService and SettingsCacheService
+// to implement the DefaultsCopier interface required by auth.Service
+type DefaultsCopierAdapter struct {
+	adminDefaultsCache *AdminDefaultsCacheService
+	settingsCache      *SettingsCacheService
+}
+
+// NewDefaultsCopierAdapter creates a new adapter for copying defaults to new users
+func NewDefaultsCopierAdapter(adminDefaultsCache *AdminDefaultsCacheService, settingsCache *SettingsCacheService) *DefaultsCopierAdapter {
+	return &DefaultsCopierAdapter{
+		adminDefaultsCache: adminDefaultsCache,
+		settingsCache:      settingsCache,
+	}
+}
+
+// CopyDefaultsToNewUser implements the auth.DefaultsCopier interface
+// This delegates to AdminDefaultsCacheService.CopyDefaultsToNewUser
+func (a *DefaultsCopierAdapter) CopyDefaultsToNewUser(ctx context.Context, userID string) error {
+	if a.adminDefaultsCache == nil || a.settingsCache == nil {
+		// Cache not available - skip silently (defaults already saved to DB)
+		return nil
+	}
+	return a.adminDefaultsCache.CopyDefaultsToNewUser(ctx, a.settingsCache, userID)
+}

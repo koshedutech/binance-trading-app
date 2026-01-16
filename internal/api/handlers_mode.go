@@ -236,11 +236,30 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 	}
 
 	// Regular user: Save to DATABASE
-	// 1. Load current allocation from database (or use defaults)
-	currentAllocation, err := s.repo.GetUserCapitalAllocation(ctx, userID)
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to load current allocation: "+err.Error())
-		return
+	// Story 6.5: Cache-first pattern - try cache, fallback to DB
+	// 1. Load current allocation from cache (or database fallback)
+	var currentAllocation *database.UserCapitalAllocation
+	var err error
+	if s.settingsCacheService != nil {
+		currentAllocation, err = s.settingsCacheService.GetCapitalAllocation(ctx, userID)
+		if err != nil {
+			if IsCacheUnavailableError(err) {
+				RespondCacheUnavailable(c, "get_capital_allocation")
+				return
+			}
+			// Other cache error - fallback to DB
+			log.Printf("[MODE-ALLOCATION] Cache error for user %s: %v, falling back to DB", userID, err)
+			currentAllocation = nil
+		}
+	}
+
+	// Fallback to direct DB if cache miss or cache not available
+	if currentAllocation == nil {
+		currentAllocation, err = s.repo.GetUserCapitalAllocation(ctx, userID)
+		if err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to load current allocation: "+err.Error())
+			return
+		}
 	}
 
 	// Use defaults if not found
@@ -255,10 +274,19 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 	currentAllocation.SwingPercent = req.SwingPercent
 	currentAllocation.PositionPercent = req.PositionPercent
 
-	// 3. Save to DATABASE first
-	if err := s.repo.SaveUserCapitalAllocation(ctx, currentAllocation); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to save allocation: "+err.Error())
-		return
+	// 3. Save with write-through (DB first, then cache)
+	// Story 6.5: Use cache service for write-through pattern
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateCapitalAllocation(ctx, userID, currentAllocation); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to save allocation: "+err.Error())
+			return
+		}
+	} else {
+		// Fallback to direct DB write if cache service not available
+		if err := s.repo.SaveUserCapitalAllocation(ctx, currentAllocation); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to save allocation: "+err.Error())
+			return
+		}
 	}
 
 	// 4. Update in-memory settings for immediate use (optional - for backward compatibility)

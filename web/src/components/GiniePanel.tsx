@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from 'react';
 import { futuresApi, formatUSD, GinieStatus, GinieCoinScan, GinieAutopilotStatus, GiniePosition, GinieTradeResult, GinieCircuitBreakerStatus, MarketMoversResponse, GinieDiagnostics, GinieSignalLog, GinieSignalStats, ModeFullConfig, LLMConfig, ModeLLMSettings, AdaptiveAIConfig, AdaptiveRecommendation, ModeStatistics, LLMCallDiagnostics, ScanSourceConfig, ScanPreview, PriceActionAnalysis, FairValueGap, OrderBlock, ChartPatternAnalysis, HeadAndShouldersPattern, DoubleTopBottomPattern, TrianglePattern, WedgePattern, FlagPennantPattern, ModeCircuitBreakerStatusResponse, ModeCircuitBreakerStatusItem, ScalpReentryConfig, StuckPositionAlert, loadModeDefaults, loadCircuitBreakerDefaults, loadLLMConfigDefaults, loadCapitalAllocationDefaults, SettingDiff, ConfigResetPreview, TradeConditionsResponse, TradeCondition, PendingOrdersResponse, PendingOrderInfo, saveAdminDefaults } from '../services/futuresApi';
 import { apiService } from '../services/api';
-import { useFuturesStore, selectActivePositions } from '../store/futuresStore';
+import { useFuturesStore, selectActivePositions, selectTotalUnrealizedPnl, selectAvailableBalance } from '../store/futuresStore';
+import { wsService } from '../services/websocket';
 import { useAuth } from '../contexts/AuthContext';
 import type { FuturesPosition } from '../types/futures';
 import {
@@ -10,13 +11,14 @@ import {
   Trash2, AlertOctagon, ToggleLeft, ToggleRight, Settings, Activity, Download,
   TrendingUp, TrendingDown, BarChart2, Flame, Stethoscope, AlertTriangle, Info, Eye, Radio,
   ListChecks, AlertCircle, Brain, Lightbulb, Check, X, Gauge, Coins, Star, Layers, Box,
-  Triangle, Flag, Repeat, RotateCcw, Pause, Pin, ArrowLeftRight
+  Triangle, Flag, Repeat, RotateCcw, Pause, Pin, ArrowLeftRight, Wifi
 } from 'lucide-react';
 import SymbolPerformancePanel from './SymbolPerformancePanel';
 import { ProtectionHealthPanel } from './ProtectionHealthPanel';
 import ScalpReentryMonitor from './ScalpReentryMonitor';
 import HedgeModeMonitor from './HedgeModeMonitor';
 import ResetConfirmDialog from './ResetConfirmDialog';
+import { CollapsibleSection } from './CollapsibleCard';
 
 // Error classification helper
 interface ErrorClassification {
@@ -152,6 +154,10 @@ export default function GiniePanel() {
   // Fetch real-time Binance positions for accurate price data
   const { fetchPositions } = useFuturesStore();
   const binancePositions = useFuturesStore(selectActivePositions);
+  const totalUnrealizedPnl = useFuturesStore(selectTotalUnrealizedPnl);
+  // Real-time available balance from WebSocket-synced store
+  const wsAvailableBalance = useFuturesStore(selectAvailableBalance);
+  const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
   const [status, setStatus] = useState<GinieStatus | null>(null);
   const [autopilotStatus, setAutopilotStatus] = useState<GinieAutopilotStatus | null>(null);
@@ -328,6 +334,22 @@ export default function GiniePanel() {
   });
   // Key to force dialog remount on each open (ensures fresh state)
   const [dialogKey, setDialogKey] = useState(0);
+
+  // PnL Summary state (with fees breakdown)
+  const [pnlSummary, setPnlSummary] = useState<{
+    daily_pnl: number;
+    daily_commission: number;
+    daily_funding: number;
+    daily_trade_count: number;
+    weekly_pnl: number;
+    weekly_commission: number;
+    weekly_funding: number;
+    weekly_trade_count: number;
+    timezone: string;
+    seconds_until_daily_reset: number;
+    week_start: string;
+    week_end: string;
+  } | null>(null);
 
   // Loading timeout tracking
   const [loadingWarning, setLoadingWarning] = useState(false);
@@ -619,6 +641,36 @@ export default function GiniePanel() {
     }
   };
 
+  // Track WebSocket connection status and subscribe to real-time updates
+  useEffect(() => {
+    const handleConnect = () => setWsConnected(true);
+    const handleDisconnect = () => setWsConnected(false);
+
+    // Subscribe to position updates to refresh data
+    const handlePositionUpdate = () => {
+      // Refresh autopilot status when positions change
+      fetchAutopilotStatus(false);
+    };
+
+    // Subscribe to balance updates
+    const handleBalanceUpdate = () => {
+      // Refresh autopilot status when balance changes
+      fetchAutopilotStatus(false);
+    };
+
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+    wsService.subscribe('BALANCE_UPDATE', handleBalanceUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+    // Set initial state
+    setWsConnected(wsService.isConnected());
+
+    return () => {
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('BALANCE_UPDATE', handleBalanceUpdate);
+    };
+  }, []);
+
   // Detect loading timeouts
   useEffect(() => {
     if (!status && !statusError) {
@@ -830,6 +882,21 @@ export default function GiniePanel() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signalFilter]);
+
+  // Fetch PnL summary with fees breakdown every 60 seconds
+  useEffect(() => {
+    const fetchPnlSummary = async () => {
+      try {
+        const response = await futuresApi.get('/pnl-summary');
+        setPnlSummary(response.data);
+      } catch (err) {
+        console.error('Failed to fetch PnL summary:', err);
+      }
+    };
+    fetchPnlSummary();
+    const interval = setInterval(fetchPnlSummary, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleToggle = async () => {
     if (!status) return;
@@ -4728,9 +4795,14 @@ export default function GiniePanel() {
           </div>
         </div>
         <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Available</div>
+          <div className="text-xs text-gray-400 flex items-center justify-center gap-1">
+            Available
+            {wsConnected && wsAvailableBalance > 0 && (
+              <Wifi className="w-3 h-3 text-green-500" title="Real-time via WebSocket" />
+            )}
+          </div>
           <div className="text-lg font-bold text-blue-400">
-            {formatUSD(autopilotStatus?.available_balance ?? 0)}
+            {formatUSD(wsAvailableBalance > 0 ? wsAvailableBalance : (autopilotStatus?.available_balance ?? 0))}
           </div>
         </div>
         <div className="bg-gray-700/50 rounded p-2 text-center">
@@ -4740,16 +4812,50 @@ export default function GiniePanel() {
           </div>
         </div>
         <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Daily PnL</div>
-          <div className={`text-lg font-bold ${(autopilotStatus?.stats?.daily_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {formatUSD(autopilotStatus?.stats?.daily_pnl ?? 0)}
-          </div>
+          <div className="text-xs text-gray-400">Daily Net PnL</div>
+          {(() => {
+            const grossPnl = pnlSummary?.daily_pnl ?? autopilotStatus?.stats?.daily_pnl ?? 0;
+            const commission = pnlSummary?.daily_commission ?? 0;
+            const funding = pnlSummary?.daily_funding ?? 0;
+            const netPnl = grossPnl - commission - funding;
+            const totalFees = commission + funding;
+            const tradeCount = pnlSummary?.daily_trade_count ?? 0;
+            return (
+              <>
+                <div className={`text-lg font-bold ${netPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {formatUSD(netPnl)}
+                </div>
+                {pnlSummary && (
+                  <div className="text-[10px] text-gray-500">
+                    {formatUSD(grossPnl)} - {formatUSD(totalFees)} fees | {tradeCount} trades
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
         <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Total PnL</div>
-          <div className={`text-lg font-bold ${(autopilotStatus?.stats?.total_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {formatUSD(autopilotStatus?.stats?.total_pnl ?? 0)}
-          </div>
+          <div className="text-xs text-gray-400">Weekly Net PnL</div>
+          {(() => {
+            const grossPnl = pnlSummary?.weekly_pnl ?? autopilotStatus?.stats?.total_pnl ?? 0;
+            const commission = pnlSummary?.weekly_commission ?? 0;
+            const funding = pnlSummary?.weekly_funding ?? 0;
+            const netPnl = grossPnl - commission - funding;
+            const totalFees = commission + funding;
+            const tradeCount = pnlSummary?.weekly_trade_count ?? 0;
+            return (
+              <>
+                <div className={`text-lg font-bold ${netPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {formatUSD(netPnl)}
+                </div>
+                {pnlSummary && (
+                  <div className="text-[10px] text-gray-500">
+                    {formatUSD(grossPnl)} - {formatUSD(totalFees)} fees | {tradeCount} trades
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
       )}
@@ -5221,7 +5327,7 @@ export default function GiniePanel() {
                 {showScans ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
               </button>
               {showScans && (
-                <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                <div className="space-y-1.5 max-h-80 overflow-y-auto">
                   {coinScans.map((scan) => {
                     // Find matching decision for this coin
                     const matchingDecision = status?.recent_decisions?.find(d => d.symbol === scan.symbol);
@@ -6054,7 +6160,7 @@ export default function GiniePanel() {
 
       {/* Diagnostics Tab */}
       {activeTab === 'diagnostics' && (
-        <div className="space-y-2 max-h-60 overflow-y-auto">
+        <div className="space-y-2 max-h-96 overflow-y-auto">
           {diagnosticsError ? (
             <ErrorDisplay
               error={diagnosticsError}
@@ -6083,6 +6189,11 @@ export default function GiniePanel() {
               <div className="text-sm font-bold text-white">
                 {diagnostics?.positions?.open_count ?? 0}/{diagnostics?.positions?.max_allowed ?? 0}
               </div>
+              {binancePositions.length > 0 && (
+                <div className={`text-[10px] font-medium ${totalUnrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {totalUnrealizedPnl >= 0 ? '+' : ''}{formatUSD(totalUnrealizedPnl)}
+                </div>
+              )}
             </div>
             <div className={`p-2 rounded text-center ${diagnostics?.circuit_breaker?.state === 'open' ? 'bg-red-900/30 border border-red-800' : 'bg-gray-700/50'}`}>
               <div className="text-[10px] text-gray-400">Circuit</div>
@@ -6098,6 +6209,33 @@ export default function GiniePanel() {
             </div>
           </div>
 
+          {/* Open Positions List */}
+          {binancePositions.length > 0 && (
+            <div className="bg-gray-700/30 rounded p-2">
+              <div className="text-[10px] text-gray-400 mb-1">Open Positions</div>
+              <div className="flex flex-wrap gap-1">
+                {binancePositions.map((pos) => {
+                  const pnl = parseFloat(pos.unrealizedPnl) || 0;
+                  const isLong = pos.positionSide === 'LONG' || parseFloat(pos.positionAmt) > 0;
+                  return (
+                    <div
+                      key={`${pos.symbol}-${pos.positionSide}`}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-800 rounded text-[10px]"
+                    >
+                      <span className={isLong ? 'text-green-400' : 'text-red-400'}>
+                        {isLong ? 'L' : 'S'}
+                      </span>
+                      <span className="text-gray-300">{pos.symbol.replace('USDT', '')}</span>
+                      <span className={pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                        {pnl >= 0 ? '+' : ''}{formatUSD(pnl)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Can't Trade Reason */}
           {!diagnostics?.can_trade && diagnostics?.can_trade_reason && (
             <div className="p-2 bg-red-900/20 border border-red-800/50 rounded text-xs text-red-400 flex items-center gap-2">
@@ -6108,12 +6246,14 @@ export default function GiniePanel() {
 
           {/* Issues Summary */}
           {diagnostics?.issues && diagnostics.issues.length > 0 && (
-            <div className="space-y-1.5">
-              <div className="text-xs text-gray-400 flex items-center gap-1">
-                <AlertTriangle className="w-3.5 h-3.5" />
-                Issues ({diagnostics.issues.length})
-              </div>
-              <div className="space-y-1 max-h-20 overflow-y-auto">
+            <CollapsibleSection
+              title="Issues"
+              defaultExpanded={true}
+              icon={<AlertTriangle className="w-3 h-3" />}
+              badge={`${diagnostics.issues.length}`}
+              badgeColor="red"
+            >
+              <div className="space-y-1">
                 {diagnostics.issues.map((issue, idx) => (
                   <div
                     key={idx}
@@ -6136,222 +6276,238 @@ export default function GiniePanel() {
                   </div>
                 ))}
               </div>
-            </div>
+            </CollapsibleSection>
           )}
 
           {/* Scanning & LLM Status */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-gray-700/30 rounded p-2">
-              <div className="flex items-center gap-1 mb-1 text-xs text-gray-400">
-                <Eye className="w-3.5 h-3.5" /> Scanning
-              </div>
-              <div className="text-[10px] space-y-0.5">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Last Scan</span>
-                  <span className="text-white">
-                    {diagnostics?.scanning?.last_scan_time && diagnostics.scanning.last_scan_time !== '0001-01-01T00:00:00Z'
-                      ? new Date(diagnostics.scanning.last_scan_time).toLocaleTimeString()
-                      : 'Never'}
-                  </span>
+          <CollapsibleSection
+            title="Scanning & LLM Status"
+            defaultExpanded={false}
+            icon={<Stethoscope className="w-3 h-3" />}
+          >
+            <div className="grid grid-cols-2 gap-2">
+              <div className="bg-gray-700/30 rounded p-2">
+                <div className="flex items-center gap-1 mb-1 text-xs text-gray-400">
+                  <Eye className="w-3.5 h-3.5" /> Scanning
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Watchlist</span>
-                  <span className="text-white">{diagnostics?.scanning?.symbols_in_watchlist ?? 0} symbols</span>
-                </div>
-                <div className="flex gap-1 mt-1">
-                  {diagnostics?.scanning?.scalp_enabled && <span className="px-1 bg-yellow-900/30 text-yellow-400 rounded text-[9px]">SCALP</span>}
-                  {diagnostics?.scanning?.swing_enabled && <span className="px-1 bg-blue-900/30 text-blue-400 rounded text-[9px]">SWING</span>}
-                  {diagnostics?.scanning?.position_enabled && <span className="px-1 bg-purple-900/30 text-purple-400 rounded text-[9px]">POS</span>}
-                </div>
-              </div>
-            </div>
-            <div className="bg-gray-700/30 rounded p-2">
-              <div className="flex items-center gap-1 mb-1 text-xs text-gray-400">
-                <Radio className="w-3.5 h-3.5" /> LLM
-              </div>
-              <div className="text-[10px] space-y-0.5">
-                <div className="flex justify-between items-center">
-                  <span className="text-gray-500">Status</span>
-                  {diagnostics?.llm_status?.connected ? (
-                    <span className="flex items-center gap-1 text-green-400">
-                      <CheckCircle className="w-3 h-3" /> Connected
+                <div className="text-[10px] space-y-0.5">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Last Scan</span>
+                    <span className="text-white">
+                      {diagnostics?.scanning?.last_scan_time && diagnostics.scanning.last_scan_time !== '0001-01-01T00:00:00Z'
+                        ? new Date(diagnostics.scanning.last_scan_time).toLocaleTimeString()
+                        : 'Never'}
                     </span>
-                  ) : (
-                    <span className="flex items-center gap-1 text-red-400">
-                      <XCircle className="w-3 h-3" /> Disconnected
-                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Watchlist</span>
+                    <span className="text-white">{diagnostics?.scanning?.symbols_in_watchlist ?? 0} symbols</span>
+                  </div>
+                  <div className="flex gap-1 mt-1">
+                    {diagnostics?.scanning?.scalp_enabled && <span className="px-1 bg-yellow-900/30 text-yellow-400 rounded text-[9px]">SCALP</span>}
+                    {diagnostics?.scanning?.swing_enabled && <span className="px-1 bg-blue-900/30 text-blue-400 rounded text-[9px]">SWING</span>}
+                    {diagnostics?.scanning?.position_enabled && <span className="px-1 bg-purple-900/30 text-purple-400 rounded text-[9px]">POS</span>}
+                  </div>
+                </div>
+              </div>
+              <div className="bg-gray-700/30 rounded p-2">
+                <div className="flex items-center gap-1 mb-1 text-xs text-gray-400">
+                  <Radio className="w-3.5 h-3.5" /> LLM
+                </div>
+                <div className="text-[10px] space-y-0.5">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-500">Status</span>
+                    {diagnostics?.llm_status?.connected ? (
+                      <span className="flex items-center gap-1 text-green-400">
+                        <CheckCircle className="w-3 h-3" /> Connected
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-red-400">
+                        <XCircle className="w-3 h-3" /> Disconnected
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Provider</span>
+                    <span className="text-white">{diagnostics?.llm_status?.provider || 'N/A'}</span>
+                  </div>
+                  {/* Kill Switch Status */}
+                  {(diagnostics?.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
+                    <div className="mt-1 pt-1 border-t border-gray-600">
+                      <button
+                        onClick={() => setShowLLMKillSwitch(!showLLMKillSwitch)}
+                        className="flex items-center gap-1 text-red-400 hover:text-red-300 w-full"
+                      >
+                        <AlertOctagon className="w-3 h-3" />
+                        <span>{diagnostics.llm_status.disabled_symbols.length} kill switch{diagnostics.llm_status.disabled_symbols.length > 1 ? 'es' : ''} active</span>
+                        {showLLMKillSwitch ? <ChevronUp className="w-3 h-3 ml-auto" /> : <ChevronDown className="w-3 h-3 ml-auto" />}
+                      </button>
+                      {showLLMKillSwitch && (
+                        <div className="mt-1 space-y-1">
+                          {diagnostics.llm_status.disabled_symbols.map((symbol) => (
+                            <div key={symbol} className="flex items-center justify-between bg-gray-800/50 px-1.5 py-0.5 rounded">
+                              <span className="text-white font-mono text-[9px]">{symbol}</span>
+                              <button
+                                onClick={() => resetLLMKillSwitch(symbol)}
+                                disabled={resettingKillSwitch === symbol}
+                                className="text-[9px] bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 px-1.5 py-0.5 rounded flex items-center gap-0.5 disabled:opacity-50"
+                              >
+                                <RefreshCw className={`w-2.5 h-2.5 ${resettingKillSwitch === symbol ? 'animate-spin' : ''}`} />
+                                Reset
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={resetAllLLMKillSwitches}
+                            disabled={resettingKillSwitch === 'all'}
+                            className="w-full text-[9px] bg-red-500/20 text-red-400 hover:bg-red-500/30 px-1.5 py-0.5 rounded flex items-center justify-center gap-0.5 disabled:opacity-50 mt-1"
+                          >
+                            <RefreshCw className={`w-2.5 h-2.5 ${resettingKillSwitch === 'all' ? 'animate-spin' : ''}`} />
+                            Reset All
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Provider</span>
-                  <span className="text-white">{diagnostics?.llm_status?.provider || 'N/A'}</span>
-                </div>
-                {/* Kill Switch Status */}
-                {(diagnostics?.llm_status?.disabled_symbols?.length ?? 0) > 0 && (
-                  <div className="mt-1 pt-1 border-t border-gray-600">
-                    <button
-                      onClick={() => setShowLLMKillSwitch(!showLLMKillSwitch)}
-                      className="flex items-center gap-1 text-red-400 hover:text-red-300 w-full"
-                    >
-                      <AlertOctagon className="w-3 h-3" />
-                      <span>{diagnostics.llm_status.disabled_symbols.length} kill switch{diagnostics.llm_status.disabled_symbols.length > 1 ? 'es' : ''} active</span>
-                      {showLLMKillSwitch ? <ChevronUp className="w-3 h-3 ml-auto" /> : <ChevronDown className="w-3 h-3 ml-auto" />}
-                    </button>
-                    {showLLMKillSwitch && (
-                      <div className="mt-1 space-y-1">
-                        {diagnostics.llm_status.disabled_symbols.map((symbol) => (
-                          <div key={symbol} className="flex items-center justify-between bg-gray-800/50 px-1.5 py-0.5 rounded">
-                            <span className="text-white font-mono text-[9px]">{symbol}</span>
-                            <button
-                              onClick={() => resetLLMKillSwitch(symbol)}
-                              disabled={resettingKillSwitch === symbol}
-                              className="text-[9px] bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 px-1.5 py-0.5 rounded flex items-center gap-0.5 disabled:opacity-50"
-                            >
-                              <RefreshCw className={`w-2.5 h-2.5 ${resettingKillSwitch === symbol ? 'animate-spin' : ''}`} />
-                              Reset
-                            </button>
-                          </div>
-                        ))}
-                        <button
-                          onClick={resetAllLLMKillSwitches}
-                          disabled={resettingKillSwitch === 'all'}
-                          className="w-full text-[9px] bg-red-500/20 text-red-400 hover:bg-red-500/30 px-1.5 py-0.5 rounded flex items-center justify-center gap-0.5 disabled:opacity-50 mt-1"
-                        >
-                          <RefreshCw className={`w-2.5 h-2.5 ${resettingKillSwitch === 'all' ? 'animate-spin' : ''}`} />
-                          Reset All
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             </div>
-          </div>
+          </CollapsibleSection>
 
           {/* Signal Logs Section */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-xs text-gray-400 flex items-center gap-1">
-                <Activity className="w-3.5 h-3.5" /> Signal Logs
-                {signalHold && <span className="text-yellow-400 text-[9px] ml-1">(HELD)</span>}
-              </div>
-              <div className="flex gap-1 items-center">
-                {/* Hold/Pin button */}
-                <button
-                  onClick={() => setSignalHold(!signalHold)}
-                  className={`px-1.5 py-0.5 text-[10px] rounded transition-colors flex items-center gap-0.5 ${
-                    signalHold
-                      ? 'bg-yellow-900/50 text-yellow-400'
-                      : 'bg-gray-700 text-gray-400 hover:text-white'
-                  }`}
-                  title={signalHold ? 'Resume auto-refresh' : 'Hold/pause auto-refresh'}
-                >
-                  {signalHold ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-                  {signalHold ? 'Resume' : 'Hold'}
-                </button>
-                {/* Manual refresh button - only shown when held */}
-                {signalHold && (
+          <CollapsibleSection
+            title="Signal Logs"
+            defaultExpanded={true}
+            icon={<Radio className="w-3 h-3" />}
+            badge={`${signalLogs.length}`}
+            badgeColor="cyan"
+          >
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs text-gray-400 flex items-center gap-1">
+                  {signalHold && <span className="text-yellow-400 text-[9px]">(HELD)</span>}
+                </div>
+                <div className="flex gap-1 items-center">
+                  {/* Hold/Pin button */}
                   <button
-                    onClick={() => fetchSignalLogs(signalFilter)}
-                    className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
-                    title="Manual refresh"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                  </button>
-                )}
-                {/* Filter buttons */}
-                {(['all', 'executed', 'rejected'] as const).map((filter) => (
-                  <button
-                    key={filter}
-                    onClick={() => setSignalFilter(filter)}
-                    className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
-                      signalFilter === filter
-                        ? filter === 'executed' ? 'bg-green-900/50 text-green-400'
-                          : filter === 'rejected' ? 'bg-red-900/50 text-red-400'
-                          : 'bg-cyan-900/50 text-cyan-400'
+                    onClick={() => setSignalHold(!signalHold)}
+                    className={`px-1.5 py-0.5 text-[10px] rounded transition-colors flex items-center gap-0.5 ${
+                      signalHold
+                        ? 'bg-yellow-900/50 text-yellow-400'
                         : 'bg-gray-700 text-gray-400 hover:text-white'
                     }`}
+                    title={signalHold ? 'Resume auto-refresh' : 'Hold/pause auto-refresh'}
                   >
-                    {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                    {signalHold ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                    {signalHold ? 'Resume' : 'Hold'}
                   </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Execution Rate Bar */}
-            {signalStats && signalStats.total > 0 && (
-              <div className="flex items-center gap-2 mb-2 text-[10px]">
-                <span className="text-gray-400">Rate:</span>
-                <div className="flex-1 bg-gray-600 rounded-full h-1.5">
-                  <div className="bg-green-500 h-1.5 rounded-full" style={{ width: `${signalStats.execution_rate}%` }} />
-                </div>
-                <span className="text-white font-medium">{signalStats.execution_rate.toFixed(0)}%</span>
-              </div>
-            )}
-
-            {/* Signal List */}
-            <div className="space-y-1 max-h-24 overflow-y-auto">
-              {signalLogs.length === 0 ? (
-                <p className="text-center text-gray-500 py-4 text-xs">No signals yet</p>
-              ) : (
-                signalLogs.slice(0, 20).map((signal, idx) => (
-                  <div key={signal.id || idx} className="bg-gray-700/30 rounded p-1.5">
-                    <div
-                      className="flex items-center justify-between cursor-pointer"
-                      onClick={() => setExpandedSignal(expandedSignal === (signal.id || `${idx}`) ? null : (signal.id || `${idx}`))}
+                  {/* Manual refresh button - only shown when held */}
+                  {signalHold && (
+                    <button
+                      onClick={() => fetchSignalLogs(signalFilter)}
+                      className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
+                      title="Manual refresh"
                     >
-                      <div className="flex items-center gap-1.5">
-                        <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
-                          signal.status === 'executed' ? 'bg-green-900/50 text-green-400' :
-                          signal.status === 'rejected' ? 'bg-red-900/50 text-red-400' :
-                          'bg-yellow-900/50 text-yellow-400'
-                        }`}>
-                          {signal.status.toUpperCase()}
-                        </span>
-                        <span className="text-white text-xs font-medium">{signal.symbol?.replace('USDT', '')}</span>
-                        <span className={`text-[10px] ${signal.direction === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
-                          {signal.direction}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 text-[10px]">
-                        <span className="text-gray-400">{signal.confidence?.toFixed(0)}%</span>
-                        {expandedSignal === (signal.id || `${idx}`) ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                      </div>
-                    </div>
+                      <RefreshCw className="w-3 h-3" />
+                    </button>
+                  )}
+                  {/* Filter buttons */}
+                  {(['all', 'executed', 'rejected'] as const).map((filter) => (
+                    <button
+                      key={filter}
+                      onClick={() => setSignalFilter(filter)}
+                      className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                        signalFilter === filter
+                          ? filter === 'executed' ? 'bg-green-900/50 text-green-400'
+                            : filter === 'rejected' ? 'bg-red-900/50 text-red-400'
+                            : 'bg-cyan-900/50 text-cyan-400'
+                          : 'bg-gray-700 text-gray-400 hover:text-white'
+                      }`}
+                    >
+                      {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-                    {expandedSignal === (signal.id || `${idx}`) && (
-                      <div className="mt-2 pt-2 border-t border-gray-600 grid grid-cols-3 gap-2 text-[10px]">
-                        <div>
-                          <span className="text-gray-500">Entry:</span>
-                          <span className="text-white ml-1">${signal.entry_price?.toFixed(4)}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-500">SL:</span>
-                          <span className="text-red-400 ml-1">${signal.stop_loss?.toFixed(4)}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-500">R:R:</span>
-                          <span className="text-white ml-1">{signal.risk_reward?.toFixed(2)}</span>
-                        </div>
-                        {signal.rejection_reason && (
-                          <div className="col-span-3 text-red-400">
-                            Reason: {signal.rejection_reason}
-                          </div>
-                        )}
-                      </div>
-                    )}
+              {/* Execution Rate Bar */}
+              {signalStats && signalStats.total > 0 && (
+                <div className="flex items-center gap-2 mb-2 text-[10px]">
+                  <span className="text-gray-400">Rate:</span>
+                  <div className="flex-1 bg-gray-600 rounded-full h-1.5">
+                    <div className="bg-green-500 h-1.5 rounded-full" style={{ width: `${signalStats.execution_rate}%` }} />
                   </div>
-                ))
+                  <span className="text-white font-medium">{signalStats.execution_rate.toFixed(0)}%</span>
+                </div>
               )}
+
+              {/* Signal List */}
+              <div className="space-y-1">
+                {signalLogs.length === 0 ? (
+                  <p className="text-center text-gray-500 py-4 text-xs">No signals yet</p>
+                ) : (
+                  signalLogs.slice(0, 20).map((signal, idx) => (
+                    <div key={signal.id || idx} className="bg-gray-700/30 rounded p-1.5">
+                      <div
+                        className="flex items-center justify-between cursor-pointer"
+                        onClick={() => setExpandedSignal(expandedSignal === (signal.id || `${idx}`) ? null : (signal.id || `${idx}`))}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className={`px-1 py-0.5 rounded text-[9px] font-medium ${
+                            signal.status === 'executed' ? 'bg-green-900/50 text-green-400' :
+                            signal.status === 'rejected' ? 'bg-red-900/50 text-red-400' :
+                            'bg-yellow-900/50 text-yellow-400'
+                          }`}>
+                            {signal.status.toUpperCase()}
+                          </span>
+                          <span className="text-white text-xs font-medium">{signal.symbol?.replace('USDT', '')}</span>
+                          <span className={`text-[10px] ${signal.direction === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>
+                            {signal.direction}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <span className="text-gray-400">{signal.confidence?.toFixed(0)}%</span>
+                          {expandedSignal === (signal.id || `${idx}`) ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                        </div>
+                      </div>
+
+                      {expandedSignal === (signal.id || `${idx}`) && (
+                        <div className="mt-2 pt-2 border-t border-gray-600 grid grid-cols-3 gap-2 text-[10px]">
+                          <div>
+                            <span className="text-gray-500">Entry:</span>
+                            <span className="text-white ml-1">${signal.entry_price?.toFixed(4)}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">SL:</span>
+                            <span className="text-red-400 ml-1">${signal.stop_loss?.toFixed(4)}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">R:R:</span>
+                            <span className="text-white ml-1">{signal.risk_reward?.toFixed(2)}</span>
+                          </div>
+                          {signal.rejection_reason && (
+                            <div className="col-span-3 text-red-400">
+                              Reason: {signal.rejection_reason}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
-          </div>
+          </CollapsibleSection>
 
           {/* Trading Conditions Checklist */}
-          <div className="mt-4 pt-4 border-t border-gray-700">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-xs text-gray-400 flex items-center gap-1">
-                <ListChecks className="w-3.5 h-3.5" /> Trading Conditions
-              </div>
+          <CollapsibleSection
+            title="Trading Conditions"
+            defaultExpanded={false}
+            icon={<ListChecks className="w-3 h-3" />}
+            badge={tradeConditions ? (tradeConditions.all_passed ? 'OK' : `${tradeConditions.blocking_count}`) : undefined}
+            badgeColor={tradeConditions?.all_passed ? 'green' : 'red'}
+          >
+            <div className="flex justify-end mb-2">
               <button
                 onClick={fetchTradeConditions}
                 className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
@@ -6383,7 +6539,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Individual conditions */}
-                <div className="space-y-0.5 max-h-32 overflow-y-auto">
+                <div className="space-y-0.5">
                   {tradeConditions.conditions.map((condition, idx) => (
                     <div
                       key={idx}
@@ -6411,14 +6567,17 @@ export default function GiniePanel() {
             ) : (
               <p className="text-center text-gray-500 py-2 text-xs">Loading conditions...</p>
             )}
-          </div>
+          </CollapsibleSection>
 
           {/* Pending Limit Orders */}
-          <div className="mt-4 pt-4 border-t border-gray-700">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-xs text-gray-400 flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5" /> Pending Limit Orders
-              </div>
+          <CollapsibleSection
+            title="Pending Limit Orders"
+            defaultExpanded={false}
+            icon={<Clock className="w-3 h-3" />}
+            badge={pendingOrders && pendingOrders.count > 0 ? `${pendingOrders.count}` : undefined}
+            badgeColor="yellow"
+          >
+            <div className="flex justify-end mb-2">
               <button
                 onClick={fetchPendingOrders}
                 className="px-1.5 py-0.5 text-[10px] rounded bg-gray-700 text-gray-400 hover:text-white flex items-center gap-0.5"
@@ -6437,7 +6596,7 @@ export default function GiniePanel() {
                 </div>
 
                 {/* Pending orders list */}
-                <div className="space-y-1 max-h-32 overflow-y-auto">
+                <div className="space-y-1">
                   {pendingOrders.pending_orders.map((order, idx) => (
                     <div key={order.order_id || idx} className="bg-gray-700/30 rounded p-1.5 text-[10px]">
                       <div className="flex items-center justify-between">
@@ -6470,20 +6629,20 @@ export default function GiniePanel() {
             ) : (
               <p className="text-center text-gray-500 py-2 text-xs">No pending limit orders</p>
             )}
-          </div>
+          </CollapsibleSection>
 
           {/* LLM Switches Tracking */}
-          <div className="mt-4 pt-4 border-t border-gray-700">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-xs text-gray-400 flex items-center gap-1">
-                <Sparkles className="w-3.5 h-3.5" /> LLM Switches
-              </div>
-            </div>
-
+          <CollapsibleSection
+            title="LLM Switches"
+            defaultExpanded={false}
+            icon={<Brain className="w-3 h-3" />}
+            badge={llmSwitches.length > 0 ? `${llmSwitches.length}` : undefined}
+            badgeColor="purple"
+          >
             {llmSwitches.length === 0 ? (
               <p className="text-center text-gray-500 py-2 text-xs">No LLM switches recorded</p>
             ) : (
-              <div className="space-y-1 max-h-24 overflow-y-auto">
+              <div className="space-y-1">
                 {llmSwitches.slice(-20).reverse().map((sw, idx) => (
                   <div key={idx} className="bg-gray-700/30 rounded p-1.5 text-xs">
                     <div className="flex items-center justify-between">
@@ -6502,7 +6661,7 @@ export default function GiniePanel() {
                 ))}
               </div>
             )}
-          </div>
+          </CollapsibleSection>
             </>
           )}
         </div>

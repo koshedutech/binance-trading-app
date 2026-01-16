@@ -950,6 +950,7 @@ func (s *Server) handleUpdateGinieCircuitBreakerConfig(c *gin.Context) {
 
 // handleGetGlobalCircuitBreaker returns user's global circuit breaker config
 // GET /api/user/global-circuit-breaker
+// Story 6.5: Cache-First Read Pattern - Uses cache when available, falls back to DB
 func (s *Server) handleGetGlobalCircuitBreaker(c *gin.Context) {
 	userID := s.getUserID(c)
 	if userID == "" {
@@ -957,11 +958,31 @@ func (s *Server) handleGetGlobalCircuitBreaker(c *gin.Context) {
 		return
 	}
 
-	config, err := s.repo.GetUserGlobalCircuitBreaker(c.Request.Context(), userID)
-	if err != nil {
-		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to get config for user %s: %v", userID, err)
-		errorResponse(c, http.StatusInternalServerError, "Failed to get global circuit breaker config")
-		return
+	var config *database.UserGlobalCircuitBreaker
+	var err error
+
+	// Story 6.5: Cache-first pattern - try cache, fallback to DB
+	if s.settingsCacheService != nil {
+		config, err = s.settingsCacheService.GetCircuitBreaker(c.Request.Context(), userID)
+		if err != nil {
+			if IsCacheUnavailableError(err) {
+				// Cache unavailable - return 503
+				RespondCacheUnavailable(c, "get_circuit_breaker")
+				return
+			}
+			// Other cache error - fallback to DB
+			log.Printf("[GLOBAL-CIRCUIT-BREAKER] Cache error for user %s: %v, falling back to DB", userID, err)
+		}
+	}
+
+	// Fallback to direct DB if cache miss or cache not available
+	if config == nil {
+		config, err = s.repo.GetUserGlobalCircuitBreaker(c.Request.Context(), userID)
+		if err != nil {
+			log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to get config for user %s: %v", userID, err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to get global circuit breaker config")
+			return
+		}
 	}
 
 	// If no config exists, return defaults
@@ -1046,11 +1067,20 @@ func (s *Server) handleUpdateGlobalCircuitBreaker(c *gin.Context) {
 		MaxDailyTrades:       req.MaxDailyTrades,
 	}
 
-	// Save to database
-	if err := s.repo.SaveUserGlobalCircuitBreaker(ctx, config); err != nil {
-		log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save config for user %s: %v", userID, err)
-		errorResponse(c, http.StatusInternalServerError, "Failed to save global circuit breaker config")
-		return
+	// Story 6.5: Write-through pattern - use cache service if available (handles DB + cache)
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateCircuitBreaker(ctx, userID, config); err != nil {
+			log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save config via cache for user %s: %v", userID, err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save global circuit breaker config")
+			return
+		}
+	} else {
+		// Fallback: direct DB save when cache not available
+		if err := s.repo.SaveUserGlobalCircuitBreaker(ctx, config); err != nil {
+			log.Printf("[GLOBAL-CIRCUIT-BREAKER] Failed to save config for user %s: %v", userID, err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to save global circuit breaker config")
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1849,10 +1879,8 @@ func mergeWithDefaults(userCfg, defaultCfg *autopilot.ModeFullConfig) *autopilot
 
 // handleGetModeConfigs returns all 4 mode configurations (ultrafast, scalp, swing, position)
 // GET /api/futures/ginie/mode-configs
-// DATABASE ONLY: Reads from database for authenticated user. No JSON fallback for existing users.
+// Story 6.5: Cache-First Read Pattern - Uses cache when available, falls back to DB
 func (s *Server) handleGetModeConfigs(c *gin.Context) {
-	log.Println("[MODE-CONFIG] Getting all mode configurations (DATABASE ONLY)")
-
 	// Get userID from context (JWT auth)
 	userID, exists := c.Get("user_id")
 	if !exists {
@@ -1862,29 +1890,71 @@ func (s *Server) handleGetModeConfigs(c *gin.Context) {
 	}
 	userIDStr := userID.(string)
 
-	// DATABASE ONLY: Get configs from database for this user - NO JSON FALLBACK
+	ctx := c.Request.Context()
 	sm := autopilot.GetSettingsManager()
-	ctx := context.Background()
-	dbConfigs, err := sm.GetAllUserModeConfigsFromDB(ctx, s.repo, userIDStr)
-	if err != nil {
-		log.Printf("[MODE-CONFIG] ERROR: Failed to get DB configs for user %s: %v", userIDStr, err)
-		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode configs from database: %v", err))
-		return
+	source := "database"
+	modeConfigs := make(map[string]*autopilot.ModeFullConfig)
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+
+	// Story 6.5: Cache-first pattern - try cache for each mode
+	if s.settingsCacheService != nil {
+		cacheHits := 0
+		for _, mode := range modes {
+			config, err := s.settingsCacheService.GetModeConfig(ctx, userIDStr, mode)
+			if err != nil {
+				if IsCacheUnavailableError(err) {
+					// Cache unavailable - return 503
+					RespondCacheUnavailable(c, "get_mode_configs")
+					return
+				}
+				// Other cache error - will fallback to DB for this mode
+				log.Printf("[MODE-CONFIG] Cache error for user %s mode %s: %v", userIDStr, mode, err)
+			} else if config != nil {
+				modeConfigs[mode] = config
+				cacheHits++
+			}
+		}
+		if cacheHits == len(modes) {
+			source = "cache"
+		} else if cacheHits > 0 {
+			source = "cache+database"
+		}
+	}
+
+	// Fallback to direct DB for any modes not in cache
+	if len(modeConfigs) < len(modes) {
+		dbConfigs, err := sm.GetAllUserModeConfigsFromDB(ctx, s.repo, userIDStr)
+		if err != nil {
+			log.Printf("[MODE-CONFIG] ERROR: Failed to get DB configs for user %s: %v", userIDStr, err)
+			// If we have some from cache, use those and log warning
+			if len(modeConfigs) > 0 {
+				log.Printf("[MODE-CONFIG] WARNING: Using partial cache data for user %s due to DB error", userIDStr)
+			} else {
+				errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode configs from database: %v", err))
+				return
+			}
+		} else {
+			// Merge DB configs with cache configs (cache takes priority)
+			for mode, dbCfg := range dbConfigs {
+				if _, exists := modeConfigs[mode]; !exists {
+					modeConfigs[mode] = dbCfg
+				}
+			}
+		}
 	}
 
 	// Ensure all modes are present AND merge with defaults for missing nested configs
-	// This handles cases where user's DB config doesn't have new fields like position_optimization
+	// This handles cases where user's config doesn't have new fields like position_optimization
 	defaultConfigs := autopilot.DefaultModeConfigs()
 	mergedConfigs := make(map[string]*autopilot.ModeFullConfig)
 	for mode, defaultCfg := range defaultConfigs {
-		if dbCfg, ok := dbConfigs[mode]; ok {
+		if cfg, ok := modeConfigs[mode]; ok {
 			// Merge with defaults to fill in any missing nested configs
-			mergedConfig := mergeWithDefaults(dbCfg, defaultCfg)
+			mergedConfig := mergeWithDefaults(cfg, defaultCfg)
 			mergedConfigs[mode] = mergedConfig
-			log.Printf("[MODE-CONFIG] %s: loaded from DB (enabled=%v)", mode, mergedConfig.Enabled)
 		} else {
-			// This should only happen for new users or incomplete DB setup
-			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s in DB - using default (this may indicate incomplete initialization)", userIDStr, mode)
+			// This should only happen for new users or incomplete setup
+			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - using default (may indicate incomplete initialization)", userIDStr, mode)
 			mergedConfigs[mode] = defaultCfg
 		}
 	}
@@ -1892,19 +1962,18 @@ func (s *Server) handleGetModeConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success":      true,
 		"mode_configs": mergedConfigs,
-		"valid_modes":  []string{"ultra_fast", "scalp", "swing", "position"},
-		"source":       "database",
+		"valid_modes":  modes,
+		"source":       source,
 	})
 }
 
 // handleGetModeConfig returns configuration for a specific mode
 // GET /api/futures/ginie/mode-config/:mode
-// DATABASE ONLY: Reads from database for authenticated user. No JSON fallback for existing users.
+// Story 6.5: Cache-First Read Pattern - Uses cache when available, falls back to DB
 // NOTE: scalp_reentry is NOT a trading mode - it's an optimization feature for scalp mode.
 // Use /ginie/scalp-reentry-config for scalp_reentry optimization settings.
 func (s *Server) handleGetModeConfig(c *gin.Context) {
 	mode := c.Param("mode")
-	log.Printf("[MODE-CONFIG] Getting configuration for mode: %s (DATABASE ONLY)", mode)
 
 	// Validate mode name - only 4 trading modes exist
 	// Note: scalp_reentry is NOT a mode, it's an optimization for scalp mode
@@ -1930,40 +1999,62 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 	}
 	userIDStr := userID.(string)
 
-	// DATABASE ONLY: Get config from database for this user - NO JSON FALLBACK
+	ctx := c.Request.Context()
 	sm := autopilot.GetSettingsManager()
-	ctx := context.Background()
-	config, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, mode)
-	if err != nil {
-		log.Printf("[MODE-CONFIG] ERROR: Failed to get DB config for user %s mode %s: %v", userIDStr, mode, err)
+	var config *autopilot.ModeFullConfig
+	var err error
+	source := "database"
 
-		// Check if this is old format data that needs migration
-		if strings.Contains(err.Error(), "OLD_FORMAT_DETECTED") {
-			errorResponse(c, http.StatusUpgradeRequired, "Your mode configuration uses an outdated format. Please reset this mode to defaults via the UI to update to the new format.")
-			return
-		}
-
-		// Check if this is a missing mode (user not initialized) vs database error
-		if strings.Contains(err.Error(), "no mode config found") || err.Error() == "mode config not found" {
-			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - incomplete initialization, using default", userIDStr, mode)
-			// Only in this specific case, use default to fill the gap
-			defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
-			if defaultErr != nil {
-				errorResponse(c, http.StatusBadRequest, defaultErr.Error())
+	// Story 6.5: Cache-first pattern - try cache, fallback to DB
+	if s.settingsCacheService != nil {
+		config, err = s.settingsCacheService.GetModeConfig(ctx, userIDStr, mode)
+		if err != nil {
+			if IsCacheUnavailableError(err) {
+				// Cache unavailable - return 503
+				RespondCacheUnavailable(c, "get_mode_config_"+mode)
 				return
 			}
-			c.JSON(http.StatusOK, gin.H{
-				"success": true,
-				"mode":    mode,
-				"config":  defaultConfig,
-				"source":  "default_fallback_initialization_incomplete",
-			})
+			// Other cache error - fallback to DB
+			log.Printf("[MODE-CONFIG] Cache error for user %s mode %s: %v, falling back to DB", userIDStr, mode, err)
+		} else if config != nil {
+			source = "cache"
+		}
+	}
+
+	// Fallback to direct DB if cache miss or cache not available
+	if config == nil {
+		config, err = sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, mode)
+		if err != nil {
+			log.Printf("[MODE-CONFIG] ERROR: Failed to get DB config for user %s mode %s: %v", userIDStr, mode, err)
+
+			// Check if this is old format data that needs migration
+			if strings.Contains(err.Error(), "OLD_FORMAT_DETECTED") {
+				errorResponse(c, http.StatusUpgradeRequired, "Your mode configuration uses an outdated format. Please reset this mode to defaults via the UI to update to the new format.")
+				return
+			}
+
+			// Check if this is a missing mode (user not initialized) vs database error
+			if strings.Contains(err.Error(), "no mode config found") || err.Error() == "mode config not found" {
+				log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - incomplete initialization, using default", userIDStr, mode)
+				// Only in this specific case, use default to fill the gap
+				defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
+				if defaultErr != nil {
+					errorResponse(c, http.StatusBadRequest, defaultErr.Error())
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{
+					"success": true,
+					"mode":    mode,
+					"config":  defaultConfig,
+					"source":  "default_fallback_initialization_incomplete",
+				})
+				return
+			}
+
+			// For other errors, return error response
+			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode config from database: %v", err))
 			return
 		}
-
-		// For other errors, return error response
-		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode config from database: %v", err))
-		return
 	}
 
 	// Merge with defaults to fill in any nil nested configs (e.g., position_optimization)
@@ -1972,12 +2063,12 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 		config = mergeWithDefaults(config, defaultConfig)
 	}
 
-	log.Printf("[MODE-CONFIG] Loaded %s from DB for user %s (enabled=%v)", mode, userIDStr, config.Enabled)
+	log.Printf("[MODE-CONFIG] Loaded %s from %s for user %s (enabled=%v)", mode, source, userIDStr, config.Enabled)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"mode":    mode,
 		"config":  config,
-		"source":  "database",
+		"source":  source,
 	})
 }
 

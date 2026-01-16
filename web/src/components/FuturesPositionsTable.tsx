@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useFuturesStore, selectActivePositions, selectTotalUnrealizedPnl } from '../store/futuresStore';
 import { futuresApi } from '../services/futuresApi';
 import {
@@ -25,8 +25,10 @@ import {
   AlertCircle,
   Brain,
   User,
+  Wifi,
 } from 'lucide-react';
 import { apiService } from '../services/api';
+import { wsService } from '../services/websocket';
 import type { FuturesOrder } from '../types/futures';
 
 interface PositionOrders {
@@ -60,6 +62,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   const [savingROI, setSavingROI] = useState(false);
   const [tradingMode, setTradingMode] = useState<'live' | 'paper' | null>(null);
   const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
+  const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
   // Fetch trading mode
   useEffect(() => {
@@ -97,6 +100,26 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     // Positions must use REST API - 30s interval to reduce API calls
     const interval = setInterval(fetchPositions, 30000);
     return () => clearInterval(interval);
+  }, [fetchPositions]);
+
+  // WebSocket subscription for real-time position updates
+  useEffect(() => {
+    const handleConnect = () => setWsConnected(true);
+    const handleDisconnect = () => setWsConnected(false);
+
+    const handlePositionUpdate = () => {
+      // Refresh positions when WebSocket update received
+      fetchPositions();
+    };
+
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+    setWsConnected(wsService.isConnected());
+
+    return () => {
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+    };
   }, [fetchPositions]);
 
   // Fetch Ginie positions to get custom ROI values
@@ -252,6 +275,9 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
         <div className="flex items-center gap-3">
           <span className="font-semibold">Positions</span>
+          {wsConnected && (
+            <Wifi className="w-3 h-3 text-green-500" title="Real-time updates via WebSocket" />
+          )}
           <span className="text-sm text-gray-400">({activePositions.length})</span>
         </div>
         <div className="flex items-center gap-4">

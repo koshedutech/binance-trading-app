@@ -6,6 +6,7 @@ import (
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/logging"
+	"binance-trading-bot/internal/orders"
 	"context"
 	"fmt"
 	"log"
@@ -223,6 +224,28 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		}
 	}
 
+	// Epic 7: Create per-user ClientOrderIdGenerator for trade lifecycle tracking
+	// settingsCache implements orders.SequenceProvider interface
+	var clientOrderIdGen *orders.ClientOrderIdGenerator
+	if m.settingsCache != nil {
+		// Story 7.6: Load user's timezone preference for clientOrderId date formatting
+		var userTimezone *time.Location
+		if tzStr, err := m.repo.GetUserTimezone(ctx, userID); err == nil && tzStr != "" {
+			if loc, err := time.LoadLocation(tzStr); err == nil {
+				userTimezone = loc
+				m.logger.Info("Using user timezone for ClientOrderIdGenerator", "user_id", userID, "timezone", tzStr)
+			}
+		}
+		gen, err := orders.NewClientOrderIdGenerator(m.settingsCache, userID, userTimezone)
+		if err != nil {
+			m.logger.Warn("Failed to create ClientOrderIdGenerator, orders will not have custom clientOrderId",
+				"user_id", userID, "error", err)
+		} else {
+			clientOrderIdGen = gen
+			m.logger.Info("Created ClientOrderIdGenerator for user", "user_id", userID)
+		}
+	}
+
 	// Create per-user GinieAutopilot instance with userID for multi-tenant PnL isolation
 	// Pass shared Redis position state repository for cross-instance state sharing
 	// Story 6.6: Pass settingsCache for cache-only settings reads during trading
@@ -234,6 +257,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		userID,
 		m.positionStateRepo, // Shared Redis position state (may be nil)
 		m.settingsCache,     // Story 6.6: Cache-only settings reads
+		clientOrderIdGen,    // Epic 7: Client order ID generator (may be nil)
 	)
 
 	// Set the LLM analyzer if we have one

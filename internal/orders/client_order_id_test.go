@@ -261,7 +261,7 @@ func TestAllOrderTypesFunction(t *testing.T) {
 	expectedTypes := []OrderType{
 		OrderTypeEntry, OrderTypeTP1, OrderTypeTP2, OrderTypeTP3,
 		OrderTypeRebuy, OrderTypeDCA1, OrderTypeDCA2, OrderTypeDCA3,
-		OrderTypeHedge, OrderTypeSL,
+		OrderTypeHedge, OrderTypeHedgeSL, OrderTypeHedgeTP, OrderTypeSL,
 	}
 
 	if len(types) != len(expectedTypes) {
@@ -356,7 +356,7 @@ func TestValidateClientOrderID(t *testing.T) {
 		{"Exactly 36 chars", "ULT-FALLBACK-12345678-DCA3__________", false}, // 36 chars
 		{"Over 36 chars", "ULT-FALLBACK-12345678-DCA3-EXTRA-STUFF", true},   // 38 chars - should fail
 		{"Empty string", "", true},                                          // Empty should fail
-		{"Single char", "A", false},
+		{"Single char", "A", true},                                          // Single char should fail (requires 3+ parts)
 	}
 
 	for _, tc := range testCases {

@@ -254,6 +254,7 @@ class FuturesAPIService {
     }>;
     algo_orders: Array<{
       algoId: number;
+      clientAlgoId: string;
       symbol: string;
       side: string;
       positionSide: string;

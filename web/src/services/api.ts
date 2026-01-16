@@ -621,6 +621,29 @@ class APIService {
     await this.client.post('/user/change-password', passwordData);
   }
 
+  // ==================== User Timezone (Story 7.6) ====================
+
+  async getUserTimezone(): Promise<{ success: boolean; timezone: string }> {
+    const { data } = await this.client.get('/user/timezone');
+    return data;
+  }
+
+  async updateUserTimezone(timezone: string): Promise<{ success: boolean; message: string; timezone: string }> {
+    const { data } = await this.client.put('/user/timezone', { timezone });
+    return data;
+  }
+
+  async getTimezonePresets(): Promise<Array<{
+    id: number;
+    display_name: string;
+    tz_identifier: string;
+    gmt_offset: string;
+    is_default: boolean;
+  }>> {
+    const { data } = await this.client.get('/user/timezone/presets');
+    return data.presets || [];
+  }
+
   // ==================== API Keys Endpoints ====================
 
   async getAPIKeys(): Promise<Array<{

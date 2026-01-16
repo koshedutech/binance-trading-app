@@ -54,6 +54,7 @@ type ResetSingleSettingRequest struct {
 
 // handleGetSettingsComparison compares user settings vs defaults and returns ONLY differences
 // GET /api/user/settings/comparison
+// Story 6.4: Uses AdminDefaultsCacheService for cache-first default settings loading
 func (s *Server) handleGetSettingsComparison(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -62,8 +63,21 @@ func (s *Server) handleGetSettingsComparison(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Load default settings from file
-	defaults, err := autopilot.LoadDefaultSettings()
+	// Story 6.4: Load default settings from cache (with file fallback)
+	var defaults *autopilot.DefaultSettingsFile
+	var err error
+
+	if s.adminDefaultsCacheService != nil && s.adminDefaultsCacheService.IsHealthy() {
+		defaults, err = s.adminDefaultsCacheService.GetAllAdminDefaults(ctx)
+		if err != nil {
+			log.Printf("[SETTINGS-COMPARISON] Cache unavailable, falling back to file: %v", err)
+			defaults, err = autopilot.LoadDefaultSettings()
+		}
+	} else {
+		// Fallback to direct file load if cache not available
+		defaults, err = autopilot.LoadDefaultSettings()
+	}
+
 	if err != nil {
 		log.Printf("[SETTINGS-COMPARISON] Failed to load defaults: %v", err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to load default settings")
@@ -174,6 +188,7 @@ func (s *Server) handleGetSettingsComparison(c *gin.Context) {
 
 // handleResetSingleSetting resets a single setting to default value
 // POST /api/user/settings/reset
+// Story 6.4: Uses AdminDefaultsCacheService for cache-first default settings loading
 func (s *Server) handleResetSingleSetting(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -193,8 +208,20 @@ func (s *Server) handleResetSingleSetting(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Load defaults
-	defaults, err := autopilot.LoadDefaultSettings()
+	// Story 6.4: Load defaults from cache (with file fallback)
+	var defaults *autopilot.DefaultSettingsFile
+	var err error
+
+	if s.adminDefaultsCacheService != nil && s.adminDefaultsCacheService.IsHealthy() {
+		defaults, err = s.adminDefaultsCacheService.GetAllAdminDefaults(ctx)
+		if err != nil {
+			log.Printf("[SETTINGS-RESET] Cache unavailable, falling back to file: %v", err)
+			defaults, err = autopilot.LoadDefaultSettings()
+		}
+	} else {
+		defaults, err = autopilot.LoadDefaultSettings()
+	}
+
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load default settings")
 		return
@@ -932,9 +959,22 @@ func (s *Server) resetCapitalAllocationSetting(ctx context.Context, userID strin
 
 // loadUserSettings loads all settings for a user from database
 // Falls back to defaults if user has not customized a setting
+// Story 6.4: Accepts pre-loaded defaults to avoid redundant cache/file reads
 func (s *Server) loadUserSettings(ctx context.Context, userID string) (*autopilot.DefaultSettingsFile, error) {
-	// Load defaults as baseline
-	defaults, err := autopilot.LoadDefaultSettings()
+	// Load defaults from cache or file as baseline
+	var defaults *autopilot.DefaultSettingsFile
+	var err error
+
+	if s.adminDefaultsCacheService != nil && s.adminDefaultsCacheService.IsHealthy() {
+		defaults, err = s.adminDefaultsCacheService.GetAllAdminDefaults(ctx)
+		if err != nil {
+			log.Printf("[SETTINGS-LOADER] Cache unavailable, falling back to file: %v", err)
+			defaults, err = autopilot.LoadDefaultSettings()
+		}
+	} else {
+		defaults, err = autopilot.LoadDefaultSettings()
+	}
+
 	if err != nil {
 		return nil, err
 	}

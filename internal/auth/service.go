@@ -18,6 +18,11 @@ type EmailService interface {
 	SendVerificationEmail(ctx context.Context, to, code string) error
 }
 
+// DefaultsCopier interface for copying admin defaults to new users (Story 6.4)
+type DefaultsCopier interface {
+	CopyDefaultsToNewUser(ctx context.Context, userID string) error
+}
+
 // Service handles authentication operations
 type Service struct {
 	repo            *database.Repository
@@ -25,6 +30,7 @@ type Service struct {
 	passwordManager *PasswordManager
 	emailService    EmailService
 	eventBus        EventBus
+	defaultsCopier  DefaultsCopier
 	config          Config
 }
 
@@ -64,6 +70,11 @@ func NewServiceWithEmail(repo *database.Repository, config Config, emailService 
 // GetJWTManager returns the JWT manager for use in middleware
 func (s *Service) GetJWTManager() *JWTManager {
 	return s.jwtManager
+}
+
+// SetDefaultsCopier sets the defaults copier for new user registration (Story 6.4)
+func (s *Service) SetDefaultsCopier(copier DefaultsCopier) {
+	s.defaultsCopier = copier
 }
 
 // Register creates a new user account
@@ -160,6 +171,14 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*database.
 	// Initialize all default settings from default-settings.json (Story 4.14)
 	if err := s.initializeNewUserDefaults(ctx, user.ID); err != nil {
 		log.Printf("Warning: failed to initialize default settings for user %s: %v", user.ID, err)
+	}
+
+	// Story 6.4: Copy admin defaults to new user's cache
+	// This ensures new users get admin-configured defaults in their Redis cache
+	if s.defaultsCopier != nil {
+		if err := s.defaultsCopier.CopyDefaultsToNewUser(ctx, user.ID); err != nil {
+			log.Printf("Warning: failed to copy admin defaults to cache for user %s: %v", user.ID, err)
+		}
 	}
 
 	// Send verification email if required

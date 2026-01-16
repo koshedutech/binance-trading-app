@@ -155,6 +155,7 @@ export default function InstanceControlPanel() {
 
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   // Handle take control action
   const handleTakeControl = async () => {
@@ -232,22 +233,53 @@ export default function InstanceControlPanel() {
   return (
     <>
       <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden mb-4">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+        {/* Header - Clickable to toggle expand/collapse */}
+        <div
+          className={`flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-750 transition-colors ${isExpanded ? 'border-b border-gray-700' : ''}`}
+          onClick={() => setIsExpanded(!isExpanded)}
+        >
           <div className="flex items-center gap-2">
             <Server className="w-5 h-5 text-primary-500" />
             <span className="font-semibold text-white">Instance Control</span>
+            {/* Compact summary when collapsed */}
+            {!isExpanded && (
+              <div className="flex items-center gap-3 ml-3">
+                <span className="text-sm text-gray-400">{formatInstanceId(instanceId)}</span>
+                {isActive ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-500/20 text-green-500 rounded-full text-xs font-medium">
+                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+                    ACTIVE
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-600/50 text-gray-300 rounded-full text-xs font-medium">
+                    <span className="w-1.5 h-1.5 bg-gray-500 rounded-full" />
+                    STANDBY
+                  </span>
+                )}
+              </div>
+            )}
           </div>
-          <button
-            onClick={refetch}
-            className="p-1.5 hover:bg-gray-700 rounded transition-colors"
-            title="Refresh status"
-          >
-            <RefreshCw className={`w-4 h-4 text-gray-400 ${isLoading ? 'animate-spin' : ''}`} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                refetch();
+              }}
+              className="p-1.5 hover:bg-gray-700 rounded transition-colors"
+              title="Refresh status"
+            >
+              <RefreshCw className={`w-4 h-4 text-gray-400 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+            {isExpanded ? (
+              <ChevronUp className="w-5 h-5 text-gray-400" />
+            ) : (
+              <ChevronDown className="w-5 h-5 text-gray-400" />
+            )}
+          </div>
         </div>
 
-        {/* Content */}
+        {/* Content - Only shown when expanded */}
+        {isExpanded && (
         <div className="p-4">
           {/* Instance info row */}
           <div className="grid grid-cols-2 gap-4 mb-4">
@@ -369,6 +401,7 @@ export default function InstanceControlPanel() {
             </div>
           )}
         </div>
+        )}
       </div>
 
       {/* Confirmation Dialog */}

@@ -30,8 +30,9 @@ func NewSettingsCacheService(cache *CacheService, repo *database.Repository, log
 // LOAD OPERATIONS (On User Login)
 // ============================================================================
 
-// LoadUserSettings loads ALL user settings (83 keys) on login
+// LoadUserSettings loads ALL user settings (88 keys) on login
 // This MUST succeed for user to trade - returns error if Redis unavailable
+// Key breakdown: 80 mode keys + 4 global keys + 4 safety keys = 88 total
 func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID string) error {
 	if !s.cache.IsHealthy() {
 		return ErrCacheUnavailable
@@ -39,16 +40,21 @@ func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID stri
 
 	var errs []error
 
-	// Load mode settings (80 keys)
+	// Load mode settings (80 keys = 4 modes x 20 groups)
 	for _, mode := range TradingModes {
 		if err := s.loadModeToCache(ctx, userID, mode); err != nil {
 			errs = append(errs, fmt.Errorf("mode %s: %w", mode, err))
 		}
 	}
 
-	// Load cross-mode settings (3 keys)
-	if err := s.loadCrossModeSettings(ctx, userID); err != nil {
-		errs = append(errs, fmt.Errorf("cross-mode: %w", err))
+	// Load global settings (4 keys: circuit_breaker, llm_config, capital_allocation, global_trading)
+	if err := s.loadGlobalSettings(ctx, userID); err != nil {
+		errs = append(errs, fmt.Errorf("global: %w", err))
+	}
+
+	// Load safety settings (4 keys: one per mode)
+	if err := s.loadSafetySettings(ctx, userID); err != nil {
+		errs = append(errs, fmt.Errorf("safety: %w", err))
 	}
 
 	if len(errs) > 0 {
@@ -93,8 +99,9 @@ func (s *SettingsCacheService) loadModeToCache(ctx context.Context, userID, mode
 	return nil
 }
 
-// loadCrossModeSettings loads circuit breaker, LLM config, and capital allocation
-func (s *SettingsCacheService) loadCrossModeSettings(ctx context.Context, userID string) error {
+// loadGlobalSettings loads all 4 global settings (circuit_breaker, llm_config, capital_allocation, global_trading)
+// Story 6.2: Part of 88-key architecture
+func (s *SettingsCacheService) loadGlobalSettings(ctx context.Context, userID string) error {
 	// Circuit Breaker
 	if cb, err := s.repo.GetUserGlobalCircuitBreaker(ctx, userID); err == nil && cb != nil {
 		key := fmt.Sprintf("user:%s:circuit_breaker", userID)
@@ -116,6 +123,26 @@ func (s *SettingsCacheService) loadCrossModeSettings(ctx context.Context, userID
 		s.cache.Set(ctx, key, string(data), 0)
 	}
 
+	// Global Trading (Story 6.2 fix: was missing from 88-key load)
+	if gt, err := s.repo.GetUserGlobalTrading(ctx, userID); err == nil && gt != nil {
+		key := fmt.Sprintf("user:%s:global_trading", userID)
+		data, _ := json.Marshal(gt)
+		s.cache.Set(ctx, key, string(data), 0)
+	}
+
+	return nil
+}
+
+// loadSafetySettings loads all 4 safety settings (one per mode)
+// Story 6.2: Part of 88-key architecture
+func (s *SettingsCacheService) loadSafetySettings(ctx context.Context, userID string) error {
+	for _, mode := range TradingModes {
+		if safety, err := s.repo.GetUserSafetySettings(ctx, userID, mode); err == nil && safety != nil {
+			key := fmt.Sprintf("user:%s:safety:%s", userID, mode)
+			data, _ := json.Marshal(safety)
+			s.cache.Set(ctx, key, string(data), 0)
+		}
+	}
 	return nil
 }
 
@@ -591,14 +618,25 @@ func (s *SettingsCacheService) InvalidateCrossModeSetting(ctx context.Context, u
 	return s.cache.Delete(ctx, key)
 }
 
-// InvalidateAllUserSettings removes ALL user settings from cache (83 keys)
+// InvalidateAllUserSettings removes ALL user settings from cache (88 keys)
+// Story 6.2: 80 mode keys + 4 global keys + 4 safety keys = 88 total
 func (s *SettingsCacheService) InvalidateAllUserSettings(ctx context.Context, userID string) error {
+	// Invalidate mode settings (80 keys)
 	if err := s.InvalidateAllModes(ctx, userID); err != nil {
 		s.logger.Warn("Failed to invalidate mode settings", "error", err)
 	}
 
+	// Invalidate global settings (4 keys)
 	for _, setting := range CrossModeSettings {
 		s.InvalidateCrossModeSetting(ctx, userID, setting)
+	}
+
+	// Invalidate global_trading (Story 6.2 fix)
+	s.InvalidateCrossModeSetting(ctx, userID, "global_trading")
+
+	// Invalidate safety settings (4 keys)
+	if err := s.InvalidateAllSafetySettings(ctx, userID); err != nil {
+		s.logger.Warn("Failed to invalidate safety settings", "error", err)
 	}
 
 	return nil
@@ -958,4 +996,16 @@ func (s *SettingsCacheService) InvalidateSafetySettings(ctx context.Context, use
 func (s *SettingsCacheService) InvalidateAllSafetySettings(ctx context.Context, userID string) error {
 	pattern := fmt.Sprintf("user:%s:safety:*", userID)
 	return s.cache.DeletePattern(ctx, pattern)
+}
+
+// ============================================================================
+// SEQUENCE PROVIDER (Epic 7: Client Order ID Generation)
+// Implements orders.SequenceProvider interface for atomic daily sequence numbers
+// ============================================================================
+
+// IncrementDailySequence atomically increments and returns the daily sequence for a user.
+// dateKey is in YYYYMMDD format (e.g., "20260115")
+// Delegates to underlying CacheService.
+func (s *SettingsCacheService) IncrementDailySequence(ctx context.Context, userID, dateKey string) (int64, error) {
+	return s.cache.IncrementDailySequence(ctx, userID, dateKey)
 }

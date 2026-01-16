@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/orders"
 )
 
 // ============ POSITION OPTIMIZATION CORE LOGIC ============
@@ -1074,16 +1075,21 @@ func (g *GinieAutopilot) executeReentryOrder(pos *GiniePosition, qty float64, pr
 	}
 	limitPrice = roundPrice(pos.Symbol, limitPrice)
 
+	// Epic 7: Generate clientOrderId for rebuy/re-entry order to link with entry order chain
+	rebuyClientOrderId := g.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeRebuy)
+
 	order := &FuturesOrder{
-		Symbol:       pos.Symbol,
-		Side:         orderSide,
-		PositionSide: positionSide,
-		Type:         "LIMIT",
-		Quantity:     qty,
-		Price:        limitPrice,
+		Symbol:        pos.Symbol,
+		Side:          orderSide,
+		PositionSide:  positionSide,
+		Type:          "LIMIT",
+		Quantity:      qty,
+		Price:         limitPrice,
+		ClientOrderId: rebuyClientOrderId,
 	}
 
-	log.Printf("[POSITION-OPT] %s: Placing LIMIT re-entry order at %.8f (current: %.8f)", pos.Symbol, limitPrice, price)
+	log.Printf("[POSITION-OPT] %s: Placing LIMIT re-entry order at %.8f (current: %.8f), clientOrderId=%s",
+		pos.Symbol, limitPrice, price, rebuyClientOrderId)
 
 	return g.placeOrderWithID(order)
 }
@@ -1306,11 +1312,12 @@ func (g *GinieAutopilot) placeOrderWithID(order *FuturesOrder) (int64, error) {
 
 	// Build order params with validated values
 	orderParams := binance.FuturesOrderParams{
-		Symbol:       order.Symbol,
-		Side:         order.Side,
-		PositionSide: effectivePositionSide,
-		Type:         binance.FuturesOrderType(order.Type),
-		Quantity:     roundedQty,
+		Symbol:           order.Symbol,
+		Side:             order.Side,
+		PositionSide:     effectivePositionSide,
+		Type:             binance.FuturesOrderType(order.Type),
+		Quantity:         roundedQty,
+		NewClientOrderId: order.ClientOrderId, // Epic 7: Link order to entry order chain
 	}
 
 	// Add price for limit orders (use rounded price)
@@ -1319,8 +1326,8 @@ func (g *GinieAutopilot) placeOrderWithID(order *FuturesOrder) (int64, error) {
 		orderParams.TimeInForce = binance.TimeInForceGTC
 	}
 
-	log.Printf("[SCALP-ORDER] %s: Placing %s %s order: qty=%.8f (was %.8f), side=%s, positionSide=%s",
-		order.Symbol, order.Type, order.Side, roundedQty, order.Quantity, order.Side, effectivePositionSide)
+	log.Printf("[SCALP-ORDER] %s: Placing %s %s order: qty=%.8f (was %.8f), side=%s, positionSide=%s, clientOrderId=%s",
+		order.Symbol, order.Type, order.Side, roundedQty, order.Quantity, order.Side, effectivePositionSide, order.ClientOrderId)
 
 	// Place the order
 	result, err := g.futuresClient.PlaceFuturesOrder(orderParams)
@@ -1425,13 +1432,14 @@ func (g *GinieAutopilot) updatePositionStopLoss(pos *GiniePosition, newSL float6
 
 // FuturesOrder represents a futures order
 type FuturesOrder struct {
-	Symbol       string
-	Side         string
-	PositionSide string
-	Type         string
-	Quantity     float64
-	Price        float64
-	StopPrice    float64
+	Symbol         string
+	Side           string
+	PositionSide   string
+	Type           string
+	Quantity       float64
+	Price          float64
+	StopPrice      float64
+	ClientOrderId  string // Epic 7: Link order to entry order chain
 }
 
 // ============ HEDGE MODE FUNCTIONS ============
@@ -1607,15 +1615,30 @@ func (g *GinieAutopilot) executeDCA(pos *GiniePosition, addQty float64, price fl
 	orderSide := GetSideForPositionSide(pos.Side)
 	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(pos.Side))
 
+	// Epic 7: Generate clientOrderId for DCA order to link with entry order chain
+	// Use DCA level to determine order type suffix (DCA1, DCA2, DCA3)
+	var dcaOrderType orders.OrderType
+	switch level {
+	case 1:
+		dcaOrderType = orders.OrderTypeDCA1
+	case 2:
+		dcaOrderType = orders.OrderTypeDCA2
+	default:
+		dcaOrderType = orders.OrderTypeDCA3
+	}
+	dcaClientOrderId := g.generateRelatedClientOrderId(pos.ChainBaseID, dcaOrderType)
+
 	orderParams := binance.FuturesOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         orderSide,
-		PositionSide: effectivePositionSide,
-		Type:         binance.FuturesOrderTypeMarket,
-		Quantity:     addQty,
+		Symbol:           pos.Symbol,
+		Side:             orderSide,
+		PositionSide:     effectivePositionSide,
+		Type:             binance.FuturesOrderTypeMarket,
+		Quantity:         addQty,
+		NewClientOrderId: dcaClientOrderId,
 	}
 
-	log.Printf("[DCA] %s: Placing %s order for %.4f qty at ~%.8f", pos.Symbol, orderSide, addQty, price)
+	log.Printf("[DCA] %s: Placing %s order for %.4f qty at ~%.8f, clientOrderId=%s",
+		pos.Symbol, orderSide, addQty, price, dcaClientOrderId)
 
 	order, err := g.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
@@ -1665,16 +1688,20 @@ func (g *GinieAutopilot) openHedgePosition(pos *GiniePosition, qty float64, pric
 	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hedgeSide))
 	roundedQty := g.roundQuantity(pos.Symbol, qty)
 
+	// Epic 7: Generate clientOrderId for hedge entry order to link with entry order chain
+	hedgeClientOrderId := g.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeHedge)
+
 	orderParams := binance.FuturesOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         orderSide,
-		PositionSide: effectivePositionSide,
-		Type:         binance.FuturesOrderTypeMarket,
-		Quantity:     roundedQty,
+		Symbol:           pos.Symbol,
+		Side:             orderSide,
+		PositionSide:     effectivePositionSide,
+		Type:             binance.FuturesOrderTypeMarket,
+		Quantity:         roundedQty,
+		NewClientOrderId: hedgeClientOrderId,
 	}
 
-	log.Printf("[HEDGE] %s: Opening %s hedge position: %s %.4f @ ~%.8f from %s",
-		pos.Symbol, hedgeSide, orderSide, roundedQty, price, source)
+	log.Printf("[HEDGE] %s: Opening %s hedge position: %s %.4f @ ~%.8f from %s, clientOrderId=%s",
+		pos.Symbol, hedgeSide, orderSide, roundedQty, price, source, hedgeClientOrderId)
 
 	order, err := g.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
@@ -1729,16 +1756,20 @@ func (g *GinieAutopilot) addToHedge(pos *GiniePosition, addQty float64, price fl
 	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hm.HedgeSide))
 	roundedQty := g.roundQuantity(pos.Symbol, addQty)
 
+	// Epic 7: Generate clientOrderId for hedge add order to link with entry order chain
+	hedgeClientOrderId := g.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeHedge)
+
 	orderParams := binance.FuturesOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         orderSide,
-		PositionSide: effectivePositionSide,
-		Type:         binance.FuturesOrderTypeMarket,
-		Quantity:     roundedQty,
+		Symbol:           pos.Symbol,
+		Side:             orderSide,
+		PositionSide:     effectivePositionSide,
+		Type:             binance.FuturesOrderTypeMarket,
+		Quantity:         roundedQty,
+		NewClientOrderId: hedgeClientOrderId,
 	}
 
-	log.Printf("[HEDGE] %s: Adding to %s hedge: %s %.4f @ ~%.8f from %s",
-		pos.Symbol, hm.HedgeSide, orderSide, roundedQty, price, source)
+	log.Printf("[HEDGE] %s: Adding to %s hedge: %s %.4f @ ~%.8f from %s, clientOrderId=%s",
+		pos.Symbol, hm.HedgeSide, orderSide, roundedQty, price, source, hedgeClientOrderId)
 
 	order, err := g.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
@@ -2105,19 +2136,23 @@ func (g *GinieAutopilot) executeHedgeTPSell(pos *GiniePosition, tpLevel int, cur
 	closeSide := GetCloseSideForPositionSide(hm.HedgeSide)
 	effectivePositionSide := g.getEffectivePositionSide(binance.PositionSide(hm.HedgeSide))
 
+	// Epic 7: Generate clientOrderId for hedge TP order to link with entry order chain
+	hedgeTPClientOrderId := g.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeHedgeTP)
+
 	// CRITICAL: Must set ReduceOnly=true to close position
 	// Without this, Binance returns -2022 "ReduceOnly Order is rejected"
 	orderParams := binance.FuturesOrderParams{
-		Symbol:       pos.Symbol,
-		Side:         closeSide,
-		PositionSide: effectivePositionSide,
-		Type:         binance.FuturesOrderTypeMarket,
-		Quantity:     sellQty,
-		ReduceOnly:   true,
+		Symbol:           pos.Symbol,
+		Side:             closeSide,
+		PositionSide:     effectivePositionSide,
+		Type:             binance.FuturesOrderTypeMarket,
+		Quantity:         sellQty,
+		ReduceOnly:       true,
+		NewClientOrderId: hedgeTPClientOrderId,
 	}
 
-	log.Printf("[HEDGE-TP] %s: Hedge TP%d hit - selling %.4f @ %.8f, PnL=%.4f",
-		pos.Symbol, tpLevel, sellQty, currentPrice, pnl)
+	log.Printf("[HEDGE-TP] %s: Hedge TP%d hit - selling %.4f @ %.8f, PnL=%.4f, clientOrderId=%s",
+		pos.Symbol, tpLevel, sellQty, currentPrice, pnl, hedgeTPClientOrderId)
 
 	_, err := g.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
@@ -2256,6 +2291,9 @@ func (g *GinieAutopilot) placeHedgeProtectedSL(pos *GiniePosition, slPrice float
 	roundedQty := g.roundQuantity(pos.Symbol, hm.HedgeRemainingQty)
 	roundedSL := roundPriceForSL(pos.Symbol, slPrice, hm.HedgeSide)
 
+	// Epic 7: Generate clientAlgoId for hedge SL order to link with entry order chain
+	hedgeSLClientOrderId := g.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeHedgeSL)
+
 	slParams := binance.AlgoOrderParams{
 		Symbol:       pos.Symbol,
 		Side:         closeSide,
@@ -2264,10 +2302,11 @@ func (g *GinieAutopilot) placeHedgeProtectedSL(pos *GiniePosition, slPrice float
 		Quantity:     roundedQty,
 		TriggerPrice: roundedSL,
 		WorkingType:  binance.WorkingTypeMarkPrice,
+		ClientAlgoId: hedgeSLClientOrderId,
 	}
 
-	log.Printf("[HEDGE-PROTECT-SL] %s: Placing protected SL for %s hedge at %.8f, qty=%.4f",
-		pos.Symbol, hm.HedgeSide, roundedSL, roundedQty)
+	log.Printf("[HEDGE-PROTECT-SL] %s: Placing protected SL for %s hedge at %.8f, qty=%.4f, clientAlgoId=%s",
+		pos.Symbol, hm.HedgeSide, roundedSL, roundedQty, hedgeSLClientOrderId)
 
 	slOrder, err := g.futuresClient.PlaceAlgoOrder(slParams)
 	if err != nil {
@@ -2275,8 +2314,8 @@ func (g *GinieAutopilot) placeHedgeProtectedSL(pos *GiniePosition, slPrice float
 		return fmt.Errorf("failed to place hedge protected SL: %w", err)
 	}
 
-	hm.AddDebugLog(fmt.Sprintf("Protected SL placed for hedge: algoId=%d, trigger=%.8f", slOrder.AlgoId, roundedSL))
-	log.Printf("[HEDGE-PROTECT-SL] %s: Protected SL placed, algoId=%d", pos.Symbol, slOrder.AlgoId)
+	hm.AddDebugLog(fmt.Sprintf("Protected SL placed for hedge: algoId=%d, trigger=%.8f, clientAlgoId=%s", slOrder.AlgoId, roundedSL, hedgeSLClientOrderId))
+	log.Printf("[HEDGE-PROTECT-SL] %s: Protected SL placed, algoId=%d, clientAlgoId=%s", pos.Symbol, slOrder.AlgoId, hedgeSLClientOrderId)
 
 	return nil
 }

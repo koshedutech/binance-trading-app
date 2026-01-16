@@ -6,6 +6,7 @@ import (
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/logging"
+	"binance-trading-bot/internal/orders"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,13 @@ type SettingsCacheReader interface {
 	GetCircuitBreaker(ctx context.Context, userID string) (*database.UserGlobalCircuitBreaker, error)
 	// GetCapitalAllocation returns the capital allocation config from cache
 	GetCapitalAllocation(ctx context.Context, userID string) (*database.UserCapitalAllocation, error)
+	// IncrementDailySequence atomically increments and returns the daily sequence for a user.
+	// Used by Epic 7 for clientOrderId generation.
+	IncrementDailySequence(ctx context.Context, userID, dateKey string) (int64, error)
+	// IsHealthy returns whether the cache is available
+	IsHealthy() bool
+	// LoadUserSettings pre-loads all user settings into cache for warm-up
+	LoadUserSettings(ctx context.Context, userID string) error
 }
 
 // ==================== TRADING FEE CONSTANTS ====================
@@ -655,8 +663,10 @@ type GiniePosition struct {
 	DecisionReport *GinieDecisionReport `json:"decision_report,omitempty"`
 	FuturesTradeID int64                `json:"futures_trade_id,omitempty"` // Database trade ID for lifecycle events
 
-	// Client Order ID Chain (Epic 7: Trade Lifecycle Tracking)
-	ClientOrderBaseID string `json:"client_order_base_id,omitempty"` // Base ID for linking related orders (e.g., "SCA-15JAN-00001")
+	// Epic 7: Client Order ID Chain Tracking
+	// Base ID for linking related orders (Entry, SL, TP, DCA) in the same chain
+	// Example: "SCA-15JAN-00001" - used with GenerateRelated() for SL/TP orders
+	ChainBaseID string `json:"chain_base_id,omitempty"`
 
 	// Fee Tracking (actual fees from Binance API/WebSocket)
 	EntryFeeUSD   float64 `json:"entry_fee_usd,omitempty"`   // Actual entry fee in USD
@@ -1025,6 +1035,7 @@ type GinieAutopilot struct {
 	positionStateRepo *database.RedisPositionStateRepository // Redis-based position state storage
 	eventLogger       *TradeEventLogger                      // Trade lifecycle event logging
 	userID            string                                 // User ID for multi-tenant PnL isolation
+	clientOrderIdGen  *orders.ClientOrderIdGenerator         // Epic 7: Client order ID generator
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -1151,9 +1162,98 @@ type GinieAutopilot struct {
 	orderTracker *database.RedisOrderTracker
 }
 
+// generateClientOrderId generates a new client order ID for an entry order.
+// Returns (fullID, baseID) or empty strings if generator is nil or fails.
+// The baseID should be stored in pos.ChainBaseID for related orders (SL/TP/DCA).
+func (ga *GinieAutopilot) generateClientOrderId(mode GinieTradingMode) (string, string) {
+	if ga.clientOrderIdGen == nil {
+		return "", ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Convert GinieTradingMode to orders.TradingMode
+	tradingMode := orders.ModeFromString(string(mode))
+
+	fullID, baseID, err := ga.clientOrderIdGen.Generate(ctx, tradingMode, orders.OrderTypeEntry)
+	if err != nil {
+		ga.logger.Warn("Failed to generate clientOrderId, proceeding without it",
+			"mode", mode,
+			"error", err)
+		return "", ""
+	}
+
+	ga.logger.Debug("Generated clientOrderId for entry",
+		"mode", mode,
+		"fullID", fullID,
+		"baseID", baseID)
+
+	return fullID, baseID
+}
+
+// generateRelatedClientOrderId generates a client order ID for a related order (SL, TP, DCA).
+// Uses the baseID from the original entry order to link the orders together.
+// Returns empty string if baseID is empty or generation fails.
+func (ga *GinieAutopilot) generateRelatedClientOrderId(baseID string, orderType orders.OrderType) string {
+	if ga.clientOrderIdGen == nil || baseID == "" {
+		return ""
+	}
+
+	fullID, err := ga.clientOrderIdGen.GenerateRelated(baseID, orderType)
+	if err != nil {
+		ga.logger.Warn("Failed to generate related clientOrderId, proceeding without it",
+			"baseID", baseID,
+			"orderType", orderType,
+			"error", err)
+		return ""
+	}
+
+	ga.logger.Debug("Generated related clientOrderId",
+		"baseID", baseID,
+		"orderType", orderType,
+		"fullID", fullID)
+
+	return fullID
+}
+
+// mapModeToOrders converts GinieTradingMode to orders.TradingMode for clientOrderId generation
+func mapModeToOrders(mode GinieTradingMode) orders.TradingMode {
+	switch mode {
+	case GinieModeScalp:
+		return orders.ModeScalp
+	case GinieModeSwing:
+		return orders.ModeSwing
+	case GinieModePosition:
+		return orders.ModePosition
+	case GinieModeUltraFast:
+		return orders.ModeUltraFast
+	default:
+		return orders.ModeScalp // Default to scalp for unknown modes
+	}
+}
+
+// extractChainBaseFromFullID extracts the chain base ID from a full clientOrderId
+// e.g., "SCA-16JAN-00001-E" -> "SCA-16JAN-00001"
+func extractChainBaseFromFullID(fullID string) string {
+	if fullID == "" {
+		return ""
+	}
+	// Find the last hyphen and remove the order type suffix
+	lastHyphen := len(fullID) - 1
+	for lastHyphen >= 0 && fullID[lastHyphen] != '-' {
+		lastHyphen--
+	}
+	if lastHyphen > 0 {
+		return fullID[:lastHyphen]
+	}
+	return fullID
+}
+
 // NewGinieAutopilot creates a new Ginie autonomous trading system
 // redisClient can be nil (position state will fall back to JSON file only)
 // settingsCache is required for cache-only settings reads during trading (Story 6.6)
+// clientOrderIdGen can be nil (will log warning and place orders without clientOrderId)
 func NewGinieAutopilot(
 	analyzer *GinieAnalyzer,
 	futuresClient binance.FuturesClient,
@@ -1162,6 +1262,7 @@ func NewGinieAutopilot(
 	userID string,
 	positionStateRepo *database.RedisPositionStateRepository,
 	settingsCache SettingsCacheReader,
+	clientOrderIdGen *orders.ClientOrderIdGenerator,
 ) *GinieAutopilot {
 	config := DefaultGinieAutopilotConfig()
 
@@ -1210,6 +1311,7 @@ func NewGinieAutopilot(
 		positionStateRepo:    positionStateRepo, // Redis-based position state (may be nil)
 		eventLogger:          NewTradeEventLogger(repo.GetDB()),
 		userID:               userID,
+		clientOrderIdGen:     clientOrderIdGen, // Epic 7: Client order ID generator (may be nil)
 		circuitBreaker:       circuit.NewCircuitBreaker(cbConfig),
 		currentRiskLevel:     config.RiskLevel,
 		stopChan:             make(chan struct{}),
@@ -1738,20 +1840,29 @@ func (ga *GinieAutopilot) SetRiskLevel(level string) error {
 		defaultLeverage = 10
 	}
 
-	// Try to load from database - user_capital_allocation table has mode-specific max USD values
+	// Story 6.6 fix: Use cache-first pattern for capital allocation reads during trading
+	// Try to load from cache (preferred) or database as fallback
 	// For risk level, we use the mode-specific max USD values as a proxy
-	// NOTE: MinConfidenceToTrade should come from user_mode_configs, but for backward compatibility
-	// we keep the risk-level-based confidence thresholds
-	if ga.repo != nil && ga.userID != "" {
-		if allocationConfig, err := ga.repo.GetUserCapitalAllocation(ctx, ga.userID); err == nil && allocationConfig != nil {
-			// Use mode-specific max USD from database (pick the largest as representative for this risk level)
+	if ga.settingsCache != nil && ga.userID != "" {
+		// Cache-first: Use settingsCache.GetCapitalAllocation
+		if allocationConfig, err := ga.settingsCache.GetCapitalAllocation(ctx, ga.userID); err == nil && allocationConfig != nil {
+			// Use mode-specific max USD from cache (pick the largest as representative for this risk level)
 			maxFromDB := allocationConfig.MaxScalpUSDPerPosition // Use scalp as baseline
 			if maxFromDB > 0 {
 				maxUSD = maxFromDB
-				log.Printf("[GINIE-RISK] Loaded MaxUSDPerPosition from database for user %s: $%.2f", ga.userID, maxUSD)
+				log.Printf("[GINIE-RISK] Loaded MaxUSDPerPosition from cache for user %s: $%.2f", ga.userID, maxUSD)
 			}
-		} else if err != nil {
-			log.Printf("[GINIE-RISK] Failed to load capital allocation from database for user %s: %v (using defaults)", ga.userID, err)
+		} else if err != nil && !isCacheUnavailableError(err) {
+			log.Printf("[GINIE-RISK] Failed to load capital allocation from cache for user %s: %v (using defaults)", ga.userID, err)
+		}
+	} else if ga.repo != nil && ga.userID != "" {
+		// Fallback: Direct DB access (legacy mode when cache not available)
+		if allocationConfig, err := ga.repo.GetUserCapitalAllocation(ctx, ga.userID); err == nil && allocationConfig != nil {
+			maxFromDB := allocationConfig.MaxScalpUSDPerPosition
+			if maxFromDB > 0 {
+				maxUSD = maxFromDB
+				log.Printf("[GINIE-RISK] Loaded MaxUSDPerPosition from database for user %s: $%.2f (cache unavailable)", ga.userID, maxUSD)
+			}
 		}
 	}
 
@@ -2057,6 +2168,25 @@ func (ga *GinieAutopilot) Start() error {
 	ga.running = true
 	ga.config.Enabled = true // Set enabled flag to reflect running state
 	ga.stopChan = make(chan struct{})
+
+	// Story 6.6: Cache warm-up on Ginie startup
+	// Load all user settings into cache before trading starts
+	if ga.settingsCache != nil && ga.userID != "" {
+		ctx := context.Background()
+		if err := ga.settingsCache.LoadUserSettings(ctx, ga.userID); err != nil {
+			if isCacheUnavailableError(err) {
+				ga.logger.Error("Ginie startup: cache unavailable - trading will use cache-first pattern with auto-populate",
+					"userID", ga.userID, "error", err)
+				// Don't block startup - cache will auto-populate on first read
+			} else {
+				ga.logger.Warn("Ginie startup: failed to warm up cache - will auto-populate on demand",
+					"userID", ga.userID, "error", err)
+			}
+		} else {
+			ga.logger.Info("Ginie startup: settings cache warmed up successfully", "userID", ga.userID)
+		}
+	}
+
 	ga.logger.Info("Starting Ginie Autopilot",
 		"dry_run", ga.config.DryRun,
 		"max_positions", ga.config.MaxPositions,
@@ -4766,6 +4896,17 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	actualPrice := price
 	actualQty := quantity
 
+	// Epic 7: Generate clientOrderId for entry order tracking
+	// This must be generated BEFORE any order is placed so all entry types use the same baseID
+	entryClientOrderId, clientOrderBaseID := ga.generateClientOrderId(decision.SelectedMode)
+	if entryClientOrderId != "" {
+		ga.logger.Info("Generated clientOrderId for entry",
+			"symbol", symbol,
+			"mode", decision.SelectedMode,
+			"clientOrderId", entryClientOrderId,
+			"baseID", clientOrderBaseID)
+	}
+
 	if !ga.config.DryRun {
 		// Set leverage first
 		_, err = ga.futuresClient.SetLeverage(symbol, leverage)
@@ -4786,15 +4927,16 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			// Round limit price to symbol precision
 			limitPrice = roundPrice(symbol, limitPrice)
 
-			// Place LIMIT order
+			// Place LIMIT order with clientOrderId (Epic 7)
 			limitOrderParams := binance.FuturesOrderParams{
-				Symbol:       symbol,
-				Side:         side,
-				PositionSide: effectivePositionSide,
-				Type:         binance.FuturesOrderTypeLimit,
-				Quantity:     quantity,
-				Price:        limitPrice,
-				TimeInForce:  "GTC", // Good Till Cancel
+				Symbol:           symbol,
+				Side:             side,
+				PositionSide:     effectivePositionSide,
+				Type:             binance.FuturesOrderTypeLimit,
+				Quantity:         quantity,
+				Price:            limitPrice,
+				TimeInForce:      "GTC", // Good Till Cancel
+				NewClientOrderId: entryClientOrderId,
 			}
 
 			limitOrder, err := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
@@ -4804,18 +4946,20 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			}
 
 			// Track pending LIMIT order with 120-second timeout (in-memory)
+			// Store clientOrderBaseID for related orders when position is created
 			timeoutAt := time.Now().Add(120 * time.Second)
 			ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
-				OrderID:      limitOrder.OrderId,
-				Symbol:       symbol,
-				Side:         side,
-				PositionSide: string(effectivePositionSide),
-				Price:        limitPrice,
-				Quantity:     quantity,
-				PlacedAt:     time.Now(),
-				TimeoutAt:    timeoutAt,
-				Source:       "reversal",
-				Mode:         decision.SelectedMode,
+				OrderID:           limitOrder.OrderId,
+				Symbol:            symbol,
+				Side:              side,
+				PositionSide:      string(effectivePositionSide),
+				Price:             limitPrice,
+				Quantity:          quantity,
+				PlacedAt:          time.Now(),
+				TimeoutAt:         timeoutAt,
+				Source:            "reversal",
+				Mode:              decision.SelectedMode,
+				ChainBaseID: clientOrderBaseID, // Epic 7: Store for position creation
 			}
 
 			// Also track in Redis for cross-instance visibility and timeout
@@ -4863,12 +5007,14 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				"error", priceErr.Error())
 
 			// Fallback to MARKET order if we can't get prev candle price
+			// Include clientOrderId (Epic 7) for trade tracking
 			orderParams := binance.FuturesOrderParams{
-				Symbol:       symbol,
-				Side:         side,
-				PositionSide: effectivePositionSide,
-				Type:         binance.FuturesOrderTypeMarket,
-				Quantity:     quantity,
+				Symbol:           symbol,
+				Side:             side,
+				PositionSide:     effectivePositionSide,
+				Type:             binance.FuturesOrderTypeMarket,
+				Quantity:         quantity,
+				NewClientOrderId: entryClientOrderId,
 			}
 
 			order, err := ga.futuresClient.PlaceFuturesOrder(orderParams)
@@ -4907,15 +5053,16 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				}
 			}
 
-			// Place LIMIT order at previous candle extreme
+			// Place LIMIT order at previous candle extreme with clientOrderId (Epic 7)
 			limitOrderParams := binance.FuturesOrderParams{
-				Symbol:       symbol,
-				Side:         side,
-				PositionSide: effectivePositionSide,
-				Type:         binance.FuturesOrderTypeLimit,
-				Quantity:     quantity,
-				Price:        limitEntryPrice,
-				TimeInForce:  "GTC", // Good Till Cancel
+				Symbol:           symbol,
+				Side:             side,
+				PositionSide:     effectivePositionSide,
+				Type:             binance.FuturesOrderTypeLimit,
+				Quantity:         quantity,
+				Price:            limitEntryPrice,
+				TimeInForce:      "GTC", // Good Till Cancel
+				NewClientOrderId: entryClientOrderId,
 			}
 
 			limitOrder, err := ga.futuresClient.PlaceFuturesOrder(limitOrderParams)
@@ -4927,18 +5074,20 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				return false, fmt.Sprintf("limit_order_failed: %v", err)
 			} else {
 				// Track pending LIMIT order with timeout (in-memory)
+				// Store clientOrderBaseID for related orders when position is created
 				timeoutAt := time.Now().Add(time.Duration(limitTimeoutSec) * time.Second)
 				ga.pendingLimitOrders[symbol] = &PendingLimitOrder{
-					OrderID:      limitOrder.OrderId,
-					Symbol:       symbol,
-					Side:         side,
-					PositionSide: string(effectivePositionSide),
-					Price:        limitEntryPrice,
-					Quantity:     quantity,
-					PlacedAt:     time.Now(),
-					TimeoutAt:    timeoutAt,
-					Source:       "prev_candle_entry",
-					Mode:         decision.SelectedMode,
+					OrderID:           limitOrder.OrderId,
+					Symbol:            symbol,
+					Side:              side,
+					PositionSide:      string(effectivePositionSide),
+					Price:             limitEntryPrice,
+					Quantity:          quantity,
+					PlacedAt:          time.Now(),
+					TimeoutAt:         timeoutAt,
+					Source:            "prev_candle_entry",
+					Mode:              decision.SelectedMode,
+					ChainBaseID: clientOrderBaseID, // Epic 7: Store for position creation
 				}
 
 				// Also track in Redis for cross-instance visibility and timeout
@@ -4996,6 +5145,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 		DecisionReport:        decision,
 		Source:                "ai",                  // AI-based trade
 		Protection:            NewProtectionStatus(), // Initialize bulletproof protection tracking
+		ChainBaseID:     clientOrderBaseID,     // Epic 7: Store for linking SL/TP/DCA orders
 		// === 3-LEVEL STAGED ENTRY TRACKING ===
 		StagedEntryActive:    stagedEntryActive,
 		StagedEntryLevel:     1, // First level
@@ -6396,6 +6546,22 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 	}
 	limitPrice = roundPriceForTP(pos.Symbol, limitPrice, pos.Side) // Round limit price properly
 
+	// Epic 7: Generate clientOrderId for next TP order to link with entry order chain
+	// Map nextTPIndex (0-based) to order type: 1->TP2, 2->TP3, etc.
+	tpOrderType := orders.OrderTypeTP1 // Default fallback
+	switch nextTPIndex {
+	case 1:
+		tpOrderType = orders.OrderTypeTP2
+	case 2:
+		tpOrderType = orders.OrderTypeTP3
+	default:
+		// For TP4+, use TP3 as the marker (rare case)
+		if nextTPIndex >= 3 {
+			tpOrderType = orders.OrderTypeTP3
+		}
+	}
+	tpClientOrderId := ga.generateRelatedClientOrderId(pos.ChainBaseID, tpOrderType)
+
 	var tpParams binance.AlgoOrderParams
 	if isFinalTPLevel {
 		// Final TP level - close entire remaining position
@@ -6411,8 +6577,9 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 			Type:          binance.FuturesOrderTypeTakeProfit, // LIMIT order
 			ClosePosition: true,                               // Close entire remaining position
 			TriggerPrice:  roundedTPPrice,
-			Price:         limitPrice, // Limit execution price
+			Price:         limitPrice,       // Limit execution price
 			WorkingType:   binance.WorkingTypeMarkPrice,
+			ClientAlgoId:  tpClientOrderId, // Epic 7: Link TP to entry order chain
 		}
 	} else {
 		// Intermediate TP level - use calculated quantity
@@ -6423,8 +6590,9 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 			Type:         binance.FuturesOrderTypeTakeProfit, // LIMIT order
 			Quantity:     tpQty,
 			TriggerPrice: roundedTPPrice,
-			Price:        limitPrice, // Limit execution price
+			Price:        limitPrice,       // Limit execution price
 			WorkingType:  binance.WorkingTypeMarkPrice,
+			ClientAlgoId: tpClientOrderId, // Epic 7: Link TP to entry order chain
 		}
 	}
 
@@ -6444,6 +6612,8 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 					"algo_id", tpOrder.AlgoId,
 					"trigger_price", roundedTPPrice,
 					"close_position", true,
+					"client_order_id", tpClientOrderId,
+					"chain_base_id", pos.ChainBaseID,
 					"attempt", attempt)
 			} else {
 				ga.logger.Info("Next take profit order placed",
@@ -6452,6 +6622,8 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 					"algo_id", tpOrder.AlgoId,
 					"trigger_price", roundedTPPrice,
 					"quantity", tpQty,
+					"client_order_id", tpClientOrderId,
+					"chain_base_id", pos.ChainBaseID,
 					"attempt", attempt)
 			}
 			tpOrderPlaced = true
@@ -6539,6 +6711,9 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 	// Round SL price with directional rounding to ensure trigger protects capital
 	roundedSL := roundPriceForSL(pos.Symbol, pos.StopLoss, pos.Side)
 
+	// Epic 7: Generate clientOrderId for updated SL order to link with entry order chain
+	slClientOrderId := ga.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeSL)
+
 	// CRITICAL FIX: Use ClosePosition=true instead of specifying quantity
 	// This ensures Binance closes the ENTIRE position on the exchange, avoiding residual quantity issues
 	// caused by rounding mismatches between internal tracking and actual exchange position
@@ -6550,6 +6725,7 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 		ClosePosition: true, // Close entire position - no quantity needed
 		TriggerPrice:  roundedSL,
 		WorkingType:   binance.WorkingTypeMarkPrice,
+		ClientAlgoId:  slClientOrderId, // Epic 7: Link SL to entry order chain
 	}
 
 	// Place SL with retry logic - CRITICAL for position protection
@@ -6566,6 +6742,8 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 				"new_algo_id", slOrder.AlgoId,
 				"trigger_price", roundedSL,
 				"close_position", true,
+				"client_order_id", slClientOrderId,
+				"chain_base_id", pos.ChainBaseID,
 				"attempt", attempt)
 			slOrderPlaced = true
 			break
@@ -9373,6 +9551,22 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 		return
 	}
 
+	// Epic 7: Generate ChainBaseID for synced/legacy positions that don't have one
+	// This ensures all SL/TP orders are trackable in the Trade Lifecycle tab
+	if pos.ChainBaseID == "" && ga.clientOrderIdGen != nil {
+		mode := mapModeToOrders(pos.Mode)
+		_, baseID, err := ga.clientOrderIdGen.Generate(context.Background(), mode, orders.OrderTypeEntry)
+		if err == nil && baseID != "" {
+			pos.ChainBaseID = baseID
+			ga.logger.Info("Generated ChainBaseID for legacy position",
+				"symbol", pos.Symbol,
+				"chain_base_id", pos.ChainBaseID)
+		}
+	}
+
+	// Epic 7: Generate clientOrderId for SL order to link with entry order chain
+	slClientOrderId := ga.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeSL)
+
 	// Place Stop Loss order using Algo Order API (STOP_MARKET requires Algo API)
 	// Note: Don't set ReduceOnly - in Hedge mode, positionSide determines direction
 	slParams := binance.AlgoOrderParams{
@@ -9383,6 +9577,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 		Quantity:     roundedQty,
 		TriggerPrice: roundedSL,
 		WorkingType:  binance.WorkingTypeMarkPrice,
+		ClientAlgoId: slClientOrderId, // Epic 7: Link SL to entry order chain
 	}
 
 	// Place SL with retry logic - CRITICAL for position protection
@@ -9398,6 +9593,8 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 				"symbol", pos.Symbol,
 				"algo_id", slOrder.AlgoId,
 				"trigger_price", roundedSL,
+				"client_order_id", slClientOrderId,
+				"chain_base_id", pos.ChainBaseID,
 				"attempt", attempt)
 			slOrderPlaced = true
 			break
@@ -9528,6 +9725,9 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 				}
 				limitPrice = roundPriceForTP(pos.Symbol, limitPrice, pos.Side)
 
+				// Epic 7: Generate clientOrderId for TP1 order to link with entry order chain
+				tp1ClientOrderId := ga.generateRelatedClientOrderId(pos.ChainBaseID, orders.OrderTypeTP1)
+
 				tpParams := binance.AlgoOrderParams{
 					Symbol:       pos.Symbol,
 					Side:         closeSide,
@@ -9537,6 +9737,7 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 					TriggerPrice: roundedTP1,
 					Price:        limitPrice, // Limit execution price
 					WorkingType:  binance.WorkingTypeMarkPrice,
+					ClientAlgoId: tp1ClientOrderId, // Epic 7: Link TP1 to entry order chain
 				}
 
 				// Place TP with retry logic - CRITICAL for profit protection
@@ -9554,6 +9755,8 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 							"algo_id", tpOrder.AlgoId,
 							"trigger_price", roundedTP1,
 							"quantity", tp1Qty,
+							"client_order_id", tp1ClientOrderId,
+							"chain_base_id", pos.ChainBaseID,
 							"attempt", attempt)
 						tpOrderPlaced = true
 						break
@@ -17582,6 +17785,7 @@ func (ga *GinieAutopilot) createPositionFromLimitFill(pending *PendingLimitOrder
 		TrailingActivationPct: trailingActivation,
 		Source:                "reversal", // Mark as reversal entry
 		Protection:            NewProtectionStatus(),
+		ChainBaseID:     pending.ChainBaseID, // Epic 7: Carry forward from pending order
 	}
 
 	ga.positions[pending.Symbol] = position
@@ -17592,7 +17796,8 @@ func (ga *GinieAutopilot) createPositionFromLimitFill(pending *PendingLimitOrder
 		"side", side,
 		"entry_price", fillPrice,
 		"quantity", fillQty,
-		"stop_loss", stopLoss)
+		"stop_loss", stopLoss,
+		"chain_base_id", pending.ChainBaseID)
 }
 
 // getDefaultSLPercent returns default SL percentage for a mode

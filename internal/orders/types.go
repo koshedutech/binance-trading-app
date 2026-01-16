@@ -57,7 +57,9 @@ const (
 	OrderTypeDCA3 OrderType = "DCA3" // DCA at NEG-TP3 (-1.0%)
 
 	// Hedge order (optional feature)
-	OrderTypeHedge OrderType = "H" // Hedge entry (opposite side)
+	OrderTypeHedge   OrderType = "H"    // Hedge entry (opposite side)
+	OrderTypeHedgeSL OrderType = "HSL"  // Hedge Stop Loss order
+	OrderTypeHedgeTP OrderType = "HTP"  // Hedge Take Profit order
 
 	// Stop Loss order
 	OrderTypeSL OrderType = "SL" // Stop Loss order
@@ -70,7 +72,7 @@ func AllOrderTypes() []OrderType {
 		OrderTypeTP1, OrderTypeTP2, OrderTypeTP3,
 		OrderTypeRebuy,
 		OrderTypeDCA1, OrderTypeDCA2, OrderTypeDCA3,
-		OrderTypeHedge,
+		OrderTypeHedge, OrderTypeHedgeSL, OrderTypeHedgeTP,
 		OrderTypeSL,
 	}
 }
