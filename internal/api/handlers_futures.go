@@ -1229,9 +1229,14 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		return
 	}
 
-	// Calculate time boundaries for daily PnL (UTC-based)
-	now := time.Now().UTC()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// Get user's timezone from settings (auth middleware uses "user_id")
+	userID := c.GetString("user_id")
+	ctx := c.Request.Context()
+	userLoc, tzName, tzOffset := s.getUserTimezone(ctx, userID)
+
+	// Calculate time boundaries for daily PnL (user's timezone)
+	now := time.Now().In(userLoc)
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, userLoc)
 	startOfDayMs := startOfDay.UnixMilli()
 	endOfDay := startOfDay.Add(24 * time.Hour)
 
@@ -1480,11 +1485,12 @@ func (s *Server) handleGetFuturesMetrics(c *gin.Context) {
 		"weeklyWinRate":     weeklyWinRate,
 
 		// Time boundaries (for countdown timers and period display)
-		"dailyResetTime":    endOfDay.UnixMilli(),                   // Next daily reset (UTC midnight)
-		"weeklyStartDate":   startOfWeek.Format("2006-01-02"),       // Week start date
-		"weeklyEndDate":     startOfDay.Format("2006-01-02"),        // Week end date (today)
-		"serverTimeUTC":     now.UnixMilli(),                        // Current server time
-		"timezoneOffset":    0,                                      // UTC offset (0 for UTC-based calculation)
+		"dailyResetTime":    endOfDay.UnixMilli(),             // Next daily reset (user's timezone midnight)
+		"weeklyStartDate":   startOfWeek.Format("2006-01-02"), // Week start date
+		"weeklyEndDate":     startOfDay.Format("2006-01-02"),  // Week end date (today)
+		"serverTimeUTC":     time.Now().UTC().UnixMilli(),     // Current server time in UTC
+		"timezone":          tzName,                           // User's timezone identifier
+		"timezoneOffset":    tzOffset,                         // User's timezone offset (e.g., "+05:30")
 
 		"lastTradeTime": lastTradeTimeStr,
 	}
@@ -1548,9 +1554,14 @@ func (s *Server) GetBinancePnLForAutopilot(ga *autopilot.GinieAutopilot) (dailyP
 		return s.GetCachedDailyPnL()
 	}
 
-	// Calculate time boundaries
-	now := time.Now().UTC()
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// Get user's timezone for accurate daily PnL calculation
+	userID := ga.GetUserID()
+	ctx := context.Background()
+	userLoc, _, _ := s.getUserTimezone(ctx, userID)
+
+	// Calculate time boundaries using user's timezone
+	now := time.Now().In(userLoc)
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, userLoc)
 	startOfDayMs := startOfDay.UnixMilli()
 
 	// For "total" PnL, fetch last 7 days (matches Binance UI default view)
@@ -2291,27 +2302,47 @@ func getTimeUntilMidnightInSystemTimezone() int64 {
 
 // =====================================================
 // PER-USER TIMEZONE FUNCTIONS
-// Story: User timezone in global_trading settings
+// Story: User timezone from user_global_trading table
 // =====================================================
 
-// getUserTimezone loads the user's timezone from global_trading settings
+// getUserTimezone loads the user's timezone from user_global_trading settings
 // Falls back to UTC if not set or on error
 func (s *Server) getUserTimezone(ctx context.Context, userID string) (*time.Location, string, string) {
 	// Default values
 	tzName := "UTC"
 	tzOffset := "+00:00"
+	found := false
 
-	// Try to get user's timezone from global_trading settings
+	// Try to get user's timezone from cache first
 	if s.settingsCacheService != nil {
 		globalTrading, err := s.settingsCacheService.GetGlobalTrading(ctx, userID)
-		if err == nil && globalTrading != nil {
-			if globalTrading.Timezone != "" {
-				tzName = globalTrading.Timezone
-			}
+		if err == nil && globalTrading != nil && globalTrading.Timezone != "" {
+			tzName = globalTrading.Timezone
 			if globalTrading.TimezoneOffset != "" {
 				tzOffset = globalTrading.TimezoneOffset
 			}
+			found = true
+			log.Printf("[USER-TIMEZONE] Loaded from cache: user=%s, tz=%s, offset=%s", userID, tzName, tzOffset)
 		}
+	}
+
+	// Fallback to direct DB query if cache didn't have the data
+	if !found && s.repo != nil {
+		globalTrading, err := s.repo.GetUserGlobalTrading(ctx, userID)
+		if err == nil && globalTrading != nil && globalTrading.Timezone != "" {
+			tzName = globalTrading.Timezone
+			if globalTrading.TimezoneOffset != "" {
+				tzOffset = globalTrading.TimezoneOffset
+			}
+			found = true
+			log.Printf("[USER-TIMEZONE] Loaded from DB: user=%s, tz=%s, offset=%s", userID, tzName, tzOffset)
+		} else if err != nil {
+			log.Printf("[USER-TIMEZONE] DB query failed for user %s: %v", userID, err)
+		}
+	}
+
+	if !found {
+		log.Printf("[USER-TIMEZONE] No timezone found for user %s, using UTC", userID)
 	}
 
 	// Load the timezone location
@@ -2370,11 +2401,13 @@ func (s *Server) handleGetPnLSummary(c *gin.Context) {
 		return
 	}
 
-	// Get user ID for per-user timezone
-	userID := c.GetString("userID")
+	// Get user ID for per-user timezone (auth middleware uses "user_id")
+	userID := c.GetString("user_id")
+	log.Printf("[PNL-SUMMARY] Request from userID=%s", userID)
 
 	// Get user's timezone from global_trading settings
 	userLoc, userTzName, userTzOffset := s.getUserTimezone(c.Request.Context(), userID)
+	log.Printf("[PNL-SUMMARY] Timezone for user %s: tz=%s, offset=%s", userID, userTzName, userTzOffset)
 
 	// Get time boundaries using user's timezone
 	startOfDayMs := getStartOfDayForUser(userLoc)

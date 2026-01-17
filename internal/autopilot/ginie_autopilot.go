@@ -1792,6 +1792,13 @@ func (ga *GinieAutopilot) SetUserID(userID string) {
 	}
 }
 
+// GetUserID returns the user ID for this autopilot instance
+func (ga *GinieAutopilot) GetUserID() string {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return ga.userID
+}
+
 // getEffectivePositionSide determines the correct position side based on Binance account's position mode
 // Returns PositionSideBoth for ONE_WAY mode, or the provided positionSide for HEDGE mode
 func (ga *GinieAutopilot) getEffectivePositionSide(positionSide binance.PositionSide) binance.PositionSide {

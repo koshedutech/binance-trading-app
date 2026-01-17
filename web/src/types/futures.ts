@@ -367,11 +367,12 @@ export interface FuturesTradingMetrics {
   weeklyWinRate: number;
 
   // Time boundaries (for countdown timers and period display)
-  dailyResetTime: number;     // Next daily reset (UTC midnight) in milliseconds
+  dailyResetTime: number;     // Next daily reset (user's timezone midnight) in milliseconds
   weeklyStartDate: string;    // Week start date (YYYY-MM-DD)
   weeklyEndDate: string;      // Week end date (YYYY-MM-DD)
   serverTimeUTC: number;      // Current server time in milliseconds
-  timezoneOffset: number;     // UTC offset (0 for UTC-based calculation)
+  timezone: string;           // User's timezone identifier (e.g., "Asia/Kolkata")
+  timezoneOffset: string;     // User's timezone offset (e.g., "+05:30")
 
   lastTradeTime?: string;
 }
