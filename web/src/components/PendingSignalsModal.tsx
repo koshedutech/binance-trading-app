@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { X, CheckCircle, XCircle, TrendingUp, TrendingDown } from 'lucide-react';
 import { apiService } from '../services/api';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent } from '../types';
 
 interface PendingSignal {
   id: number;
@@ -27,16 +30,10 @@ export default function PendingSignalsModal({ isOpen, onClose }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (isOpen) {
-      fetchPendingSignals();
-      // Poll for new signals every 5 seconds while modal is open
-      const interval = setInterval(fetchPendingSignals, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [isOpen]);
+  // Generate unique key for fallback manager registration
+  const fallbackKey = useRef(`pending-signals-modal-${Date.now()}`).current;
 
-  const fetchPendingSignals = async () => {
+  const fetchPendingSignals = useCallback(async () => {
     try {
       const signals = await apiService.getPendingSignals();
       setPendingSignals(signals);
@@ -44,7 +41,48 @@ export default function PendingSignalsModal({ isOpen, onClose }: Props) {
       console.error('Failed to fetch pending signals:', err);
       setError('Failed to load pending signals');
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    // Handle signal updates via WebSocket
+    const handleSignalUpdate = (_event: WSEvent) => {
+      // Refresh the full list when any signal changes
+      fetchPendingSignals();
+    };
+
+    // Handle WebSocket connection changes
+    const handleConnect = () => {
+      // Refresh data when reconnecting to ensure consistency
+      fetchPendingSignals();
+    };
+
+    const handleDisconnect = () => {
+      // Fallback polling is handled by fallbackManager in App.tsx
+    };
+
+    // Subscribe to signal events
+    wsService.subscribe('SIGNAL_UPDATE', handleSignalUpdate);
+    wsService.subscribe('SIGNAL_GENERATED', handleSignalUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction(fallbackKey, fetchPendingSignals);
+
+    // Initial fetch
+    fetchPendingSignals();
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('SIGNAL_UPDATE', handleSignalUpdate);
+      wsService.unsubscribe('SIGNAL_GENERATED', handleSignalUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction(fallbackKey);
+    };
+  }, [isOpen, fetchPendingSignals, fallbackKey]);
 
   const handleConfirm = async (id: number) => {
     setLoading(true);

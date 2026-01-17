@@ -8,7 +8,6 @@ const ACCESS_TOKEN_KEY = 'access_token';
 class WebSocketService {
   private ws: WebSocket | null = null;
   private baseUrl: string;
-  private reconnectInterval = 5000;
   private reconnectTimer: number | null = null;
   private isConnecting = false;
   private eventCallbacks: Map<string, EventCallback[]> = new Map();
@@ -16,11 +15,28 @@ class WebSocketService {
   private onDisconnectCallbacks: ConnectionCallback[] = [];
   private useAuthenticatedEndpoint = true;
 
+  // Exponential backoff settings
+  private reconnectAttempts = 0;
+  private readonly initialReconnectDelay = 1000; // 1 second
+  private readonly maxReconnectDelay = 30000; // 30 seconds max
+
   constructor() {
     // Determine WebSocket URL based on current location
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.host;
     this.baseUrl = `${protocol}//${host}`;
+  }
+
+  /**
+   * Calculate reconnect delay using exponential backoff
+   * Delay = min(initialDelay * 2^attempts, maxDelay)
+   */
+  private getReconnectDelay(): number {
+    const delay = Math.min(
+      this.initialReconnectDelay * Math.pow(2, this.reconnectAttempts),
+      this.maxReconnectDelay
+    );
+    return delay;
   }
 
   /**
@@ -64,6 +80,7 @@ class WebSocketService {
       this.ws.onopen = () => {
         console.log('WebSocket connected');
         this.isConnecting = false;
+        this.reconnectAttempts = 0; // Reset backoff on successful connection
         this.clearReconnectTimer();
         this.onConnectCallbacks.forEach((cb) => cb());
       };
@@ -128,8 +145,22 @@ class WebSocketService {
     this.onConnectCallbacks.push(callback);
   }
 
+  offConnect(callback: ConnectionCallback): void {
+    const index = this.onConnectCallbacks.indexOf(callback);
+    if (index > -1) {
+      this.onConnectCallbacks.splice(index, 1);
+    }
+  }
+
   onDisconnect(callback: ConnectionCallback): void {
     this.onDisconnectCallbacks.push(callback);
+  }
+
+  offDisconnect(callback: ConnectionCallback): void {
+    const index = this.onDisconnectCallbacks.indexOf(callback);
+    if (index > -1) {
+      this.onDisconnectCallbacks.splice(index, 1);
+    }
   }
 
   isConnected(): boolean {
@@ -155,11 +186,21 @@ class WebSocketService {
       return;
     }
 
-    console.log(`Reconnecting in ${this.reconnectInterval / 1000} seconds...`);
+    const delay = this.getReconnectDelay();
+    this.reconnectAttempts++;
+    console.log(`[WebSocket] Reconnect attempt ${this.reconnectAttempts}, waiting ${delay / 1000}s (exponential backoff)`);
+
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, this.reconnectInterval);
+    }, delay);
+  }
+
+  /**
+   * Get current reconnect attempts (for status display)
+   */
+  getReconnectAttempts(): number {
+    return this.reconnectAttempts;
   }
 
   private clearReconnectTimer(): void {

@@ -5,6 +5,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"binance-trading-bot/internal/events"
 )
 
 // BreakerState represents the circuit breaker state
@@ -58,6 +60,7 @@ type CircuitBreaker struct {
 	mu                sync.RWMutex
 	onTrip            func(reason string)
 	onReset           func()
+	userID            string // UserID for WebSocket broadcasts
 }
 
 // NewCircuitBreaker creates a new circuit breaker
@@ -156,11 +159,11 @@ func (cb *CircuitBreaker) RecordTrade(pnlPercent float64) {
 	}
 
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
 
 	// Validate PnL value to prevent NaN/Inf from breaking the circuit breaker
 	if math.IsNaN(pnlPercent) || math.IsInf(pnlPercent, 0) {
 		// Log warning but don't process invalid values
+		cb.mu.Unlock()
 		return
 	}
 
@@ -170,6 +173,7 @@ func (cb *CircuitBreaker) RecordTrade(pnlPercent float64) {
 	cb.tradesLastMinute++
 	cb.dailyTrades++
 
+	var recoveredFromHalfOpen bool
 	if pnlPercent < 0 {
 		// Losing trade
 		cb.consecutiveLosses++
@@ -182,14 +186,29 @@ func (cb *CircuitBreaker) RecordTrade(pnlPercent float64) {
 		// If in half-open state and we had a winner, close the breaker
 		if cb.state == StateHalfOpen {
 			cb.state = StateClosed
+			recoveredFromHalfOpen = true
 			if cb.onReset != nil {
 				go cb.onReset()
 			}
 		}
 	}
 
+	userID := cb.userID
+	cb.mu.Unlock()
+
+	// Broadcast circuit breaker recovery to WebSocket clients
+	if recoveredFromHalfOpen && userID != "" {
+		events.BroadcastCircuitBreaker(userID, map[string]interface{}{
+			"state":  string(StateClosed),
+			"action": "recovered",
+			"reason": "winning_trade_after_cooldown",
+		})
+	}
+
 	// Check if we need to trip the breaker
+	cb.mu.Lock()
 	cb.checkAndTrip()
+	cb.mu.Unlock()
 }
 
 // checkAndTrip checks conditions and trips if needed
@@ -217,6 +236,19 @@ func (cb *CircuitBreaker) trip(reason string) {
 
 	if cb.onTrip != nil {
 		go cb.onTrip(reason)
+	}
+
+	// Broadcast circuit breaker trip to WebSocket clients
+	if cb.userID != "" {
+		events.BroadcastCircuitBreaker(cb.userID, map[string]interface{}{
+			"state":             string(StateOpen),
+			"action":            "tripped",
+			"reason":            reason,
+			"consecutiveLosses": cb.consecutiveLosses,
+			"hourlyLoss":        cb.hourlyLoss,
+			"dailyLoss":         cb.dailyLoss,
+			"lastTripTime":      cb.lastTripTime,
+		})
 	}
 }
 
@@ -247,14 +279,24 @@ func (cb *CircuitBreaker) resetCountersIfNeeded() {
 // ForceReset manually resets the circuit breaker
 func (cb *CircuitBreaker) ForceReset() {
 	cb.mu.Lock()
-	defer cb.mu.Unlock()
-
 	cb.state = StateClosed
 	cb.consecutiveLosses = 0
 	cb.tripReason = ""
+	userID := cb.userID
+	cb.mu.Unlock()
 
 	if cb.onReset != nil {
 		go cb.onReset()
+	}
+
+	// Broadcast circuit breaker reset to WebSocket clients
+	if userID != "" {
+		events.BroadcastCircuitBreaker(userID, map[string]interface{}{
+			"state":             string(StateClosed),
+			"action":            "reset",
+			"reason":            "manual_reset",
+			"consecutiveLosses": 0,
+		})
 	}
 }
 
@@ -324,4 +366,11 @@ func (cb *CircuitBreaker) SetEnabled(enabled bool) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 	cb.config.Enabled = enabled
+}
+
+// SetUserID sets the user ID for WebSocket broadcasts
+func (cb *CircuitBreaker) SetUserID(userID string) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.userID = userID
 }

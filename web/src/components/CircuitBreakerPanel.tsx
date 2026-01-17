@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { futuresApi } from '../services/futuresApi';
-import { Shield, Settings, AlertTriangle, RefreshCw, TrendingDown, Activity, Clock, Target, Check, Save, X, RotateCcw } from 'lucide-react';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent } from '../types';
+import { Shield, Settings, AlertTriangle, RefreshCw, TrendingDown, Activity, Clock, Target, Check, Save, X, RotateCcw, Wifi, WifiOff } from 'lucide-react';
 import { useFuturesStore } from '../store/futuresStore';
 
 interface CircuitBreakerStatus {
@@ -35,6 +38,9 @@ export default function CircuitBreakerPanel() {
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // WebSocket connection state
+  const [wsConnected, setWsConnected] = useState(wsService.isConnected());
+
   // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
   const tradingMode = useFuturesStore((state) => state.tradingMode);
   // String inputs for proper text field behavior (allows clearing and typing)
@@ -46,7 +52,7 @@ export default function CircuitBreakerPanel() {
     max_daily_trades: '',
   });
 
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async () => {
     try {
       const status = await futuresApi.getCircuitBreakerStatus();
       setCircuitStatus(status);
@@ -63,20 +69,54 @@ export default function CircuitBreakerPanel() {
     } catch (err) {
       console.error('Failed to fetch circuit breaker status:', err);
     }
-  };
-
-  useEffect(() => {
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 15000);
-    return () => clearInterval(interval);
   }, []);
+
+  // WebSocket subscription for real-time circuit breaker updates
+  useEffect(() => {
+    const handleConnect = () => {
+      setWsConnected(true);
+      // Fetch latest status on connect (sync after reconnection)
+      fetchStatus();
+    };
+
+    const handleDisconnect = () => {
+      setWsConnected(false);
+    };
+
+    const handleCircuitBreakerUpdate = (event: WSEvent) => {
+      // Update local state from WebSocket payload
+      // The payload contains real-time circuit breaker state
+      console.log('CircuitBreakerPanel: Received CIRCUIT_BREAKER_UPDATE', event.data);
+      // Fetch full status to get complete config data
+      fetchStatus();
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('CIRCUIT_BREAKER_UPDATE', handleCircuitBreakerUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction('circuit-breaker', fetchStatus);
+
+    // Initial fetch
+    fetchStatus();
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('CIRCUIT_BREAKER_UPDATE', handleCircuitBreakerUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction('circuit-breaker');
+    };
+  }, [fetchStatus]);
 
   // CRITICAL: Refresh circuit breaker status when trading mode changes (paper <-> live)
   // This ensures daily_loss, hourly_loss display correct mode-specific values
   useEffect(() => {
     console.log('CircuitBreakerPanel: Trading mode changed to', tradingMode.mode, '- refreshing');
     fetchStatus();
-  }, [tradingMode.dryRun]);
+  }, [tradingMode.dryRun, fetchStatus]);
 
   const handleReset = async () => {
     setIsResetting(true);
@@ -232,6 +272,12 @@ export default function CircuitBreakerPanel() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {/* WebSocket connection indicator */}
+          {wsConnected ? (
+            <Wifi className="w-4 h-4 text-green-500" title="WebSocket connected - Real-time updates" />
+          ) : (
+            <WifiOff className="w-4 h-4 text-yellow-500" title="WebSocket disconnected - Using 60s fallback polling" />
+          )}
           {!isEditing && (
             <button
               onClick={() => setIsEditing(true)}

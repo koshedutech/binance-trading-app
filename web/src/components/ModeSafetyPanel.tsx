@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
-import { Shield, AlertTriangle, Pause, Play, TrendingUp, Activity, BarChart3, RefreshCw, AlertCircle } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
+import { Shield, AlertTriangle, Pause, Play, TrendingUp, Activity, BarChart3, RefreshCw, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 import { futuresApi } from '../services/futuresApi';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent } from '../types';
 import { useFuturesStore } from '../store/futuresStore';
 
 interface ModeStatus {
@@ -28,6 +31,9 @@ export default function ModeSafetyPanel() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
 
+  // WebSocket connection state
+  const [wsConnected, setWsConnected] = useState(wsService.isConnected());
+
   // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
   const tradingMode = useFuturesStore((state) => state.tradingMode);
 
@@ -45,7 +51,7 @@ export default function ModeSafetyPanel() {
     position: 'from-green-500 to-emerald-500',
   };
 
-  const fetchSafetyStatus = async () => {
+  const fetchSafetyStatus = useCallback(async () => {
     setLoading(true);
     try {
       const data: ModeSafetyStatus = await futuresApi.getModeSafetyStatus();
@@ -58,19 +64,52 @@ export default function ModeSafetyPanel() {
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchSafetyStatus();
-    const interval = setInterval(fetchSafetyStatus, 5000);
-    return () => clearInterval(interval);
   }, []);
+
+  // WebSocket subscription for real-time mode status updates
+  useEffect(() => {
+    const handleConnect = () => {
+      setWsConnected(true);
+      // Fetch latest status on connect (sync after reconnection)
+      fetchSafetyStatus();
+    };
+
+    const handleDisconnect = () => {
+      setWsConnected(false);
+    };
+
+    const handleModeStatusUpdate = (event: WSEvent) => {
+      // Update local state from WebSocket payload
+      console.log('ModeSafetyPanel: Received MODE_STATUS_UPDATE', event.data);
+      // Fetch full status to get complete mode data
+      fetchSafetyStatus();
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('MODE_STATUS_UPDATE', handleModeStatusUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction('mode-safety', fetchSafetyStatus);
+
+    // Initial fetch
+    fetchSafetyStatus();
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('MODE_STATUS_UPDATE', handleModeStatusUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction('mode-safety');
+    };
+  }, [fetchSafetyStatus]);
 
   // CRITICAL: Refresh safety status when trading mode changes (paper <-> live)
   useEffect(() => {
     console.log('ModeSafetyPanel: Trading mode changed to', tradingMode.mode, '- refreshing');
     fetchSafetyStatus();
-  }, [tradingMode.dryRun]);
+  }, [tradingMode.dryRun, fetchSafetyStatus]);
 
   const handleResumeMode = async (mode: string) => {
     try {
@@ -217,13 +256,21 @@ export default function ModeSafetyPanel() {
             <p className="text-gray-400 text-sm">Monitor and manage trading safety across modes</p>
           </div>
         </div>
-        <button
-          onClick={fetchSafetyStatus}
-          disabled={loading}
-          className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-gray-200 transition"
-        >
-          <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
+        <div className="flex items-center gap-2">
+          {/* WebSocket connection indicator */}
+          {wsConnected ? (
+            <Wifi className="w-5 h-5 text-green-500" title="WebSocket connected - Real-time updates" />
+          ) : (
+            <WifiOff className="w-5 h-5 text-yellow-500" title="WebSocket disconnected - Using 60s fallback polling" />
+          )}
+          <button
+            onClick={fetchSafetyStatus}
+            disabled={loading}
+            className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-gray-200 transition"
+          >
+            <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
       </div>
 
       {error && (

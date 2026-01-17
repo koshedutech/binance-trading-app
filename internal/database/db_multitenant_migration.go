@@ -416,6 +416,26 @@ func (db *DB) RunMultiTenantMigrations(ctx context.Context) error {
 		`DROP TRIGGER IF EXISTS update_user_ai_keys_updated_at ON user_ai_keys`,
 		`CREATE TRIGGER update_user_ai_keys_updated_at BEFORE UPDATE ON user_ai_keys
 		FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()`,
+
+		// =====================================================
+		// USER TIMEZONE & SETTLEMENT DATE COLUMNS
+		// =====================================================
+
+		// Add timezone column to users table (for daily settlement calculations)
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Kolkata'`,
+
+		// Add last_settlement_date column to users table (for daily P&L tracking)
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_settlement_date TIMESTAMP`,
+
+		// =====================================================
+		// USER GLOBAL TRADING TIMEZONE COLUMNS
+		// =====================================================
+
+		// Add timezone to user_global_trading (IANA timezone name)
+		`ALTER TABLE user_global_trading ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'UTC'`,
+
+		// Add timezone_offset to user_global_trading (UTC offset like +05:30)
+		`ALTER TABLE user_global_trading ADD COLUMN IF NOT EXISTS timezone_offset VARCHAR(10) DEFAULT '+00:00'`,
 	}
 
 	for i, migration := range migrations {

@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { Brain, TrendingUp, TrendingDown, Minus, Activity, BarChart3, MessageSquare, Zap, RefreshCw } from 'lucide-react';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent } from '../types';
 
 interface AIDecision {
   id: number;
@@ -100,7 +103,10 @@ export default function AISignalsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'buy' | 'sell' | 'hold'>('all');
 
-  const fetchData = async () => {
+  // Generate unique key for fallback manager registration
+  const fallbackKey = useRef(`ai-signals-panel-${Date.now()}`).current;
+
+  const fetchData = useCallback(async () => {
     try {
       setLoading(true);
       const token = localStorage.getItem('access_token');
@@ -134,13 +140,46 @@ export default function AISignalsPanel() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    // Handle signal updates via WebSocket
+    const handleSignalUpdate = (_event: WSEvent) => {
+      // Refresh the full list when any signal changes
+      fetchData();
+    };
+
+    // Handle WebSocket connection changes
+    const handleConnect = () => {
+      // Refresh data when reconnecting to ensure consistency
+      fetchData();
+    };
+
+    const handleDisconnect = () => {
+      // Fallback polling is handled by fallbackManager
+    };
+
+    // Subscribe to signal events
+    wsService.subscribe('SIGNAL_UPDATE', handleSignalUpdate);
+    wsService.subscribe('SIGNAL_GENERATED', handleSignalUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction(fallbackKey, fetchData);
+
+    // Initial fetch
     fetchData();
-    const interval = setInterval(fetchData, 20000); // Reduced from 10s to 20s
-    return () => clearInterval(interval);
-  }, []);
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('SIGNAL_UPDATE', handleSignalUpdate);
+      wsService.unsubscribe('SIGNAL_GENERATED', handleSignalUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction(fallbackKey);
+    };
+  }, [fetchData, fallbackKey]);
 
   const filteredDecisions = decisions.filter(d => {
     if (filter === 'all') return true;

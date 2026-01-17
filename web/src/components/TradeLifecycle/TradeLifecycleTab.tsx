@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Layers,
   RefreshCw,
   AlertTriangle,
-  History,
   BarChart3,
   Activity,
   TrendingUp,
@@ -12,6 +11,9 @@ import {
   Shield,
 } from 'lucide-react';
 import { futuresApi } from '../../services/futuresApi';
+import { wsService } from '../../services/websocket';
+import { fallbackManager } from '../../services/fallbackPollingManager';
+import { ConnectionStatus } from '../ConnectionStatus';
 import ChainCard from './ChainCard';
 import ChainFilters from './ChainFilters';
 import {
@@ -22,16 +24,19 @@ import {
   parseClientOrderId,
   TradingModeCode,
 } from './types';
+import type { WSEvent } from '../../types';
 
 interface TradeLifecycleTabProps {
   autoRefresh?: boolean;
-  refreshInterval?: number;
 }
+
+const FALLBACK_KEY = 'tradeLifecycleTab';
 
 export default function TradeLifecycleTab({
   autoRefresh = true,
-  refreshInterval = 30000,
 }: TradeLifecycleTabProps) {
+  // Ref to prevent concurrent fetch calls (race condition protection)
+  const fetchInFlightRef = useRef(false);
   const [chains, setChains] = useState<OrderChain[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +48,14 @@ export default function TradeLifecycleTab({
   });
 
   // Fetch open orders and group into chains (memoized for useEffect dependency)
+  // Uses fetchInFlightRef to prevent race conditions from concurrent calls
   const fetchOrders = useCallback(async () => {
+    // Prevent concurrent fetch calls (race condition protection)
+    if (fetchInFlightRef.current) {
+      return;
+    }
+    fetchInFlightRef.current = true;
+
     try {
       // Fetch ALL orders (regular + algo) from Binance via our API
       const response = await futuresApi.getAllOrders();
@@ -120,16 +132,51 @@ export default function TradeLifecycleTab({
       setError(err instanceof Error ? err.message : 'Failed to fetch orders');
     } finally {
       setLoading(false);
+      fetchInFlightRef.current = false;
     }
   }, []); // No dependencies - uses only stable setters and external API
 
+  // Initial fetch
   useEffect(() => {
     fetchOrders();
-    if (autoRefresh) {
-      const interval = setInterval(fetchOrders, refreshInterval);
-      return () => clearInterval(interval);
-    }
-  }, [autoRefresh, refreshInterval, fetchOrders]);
+  }, [fetchOrders]);
+
+  // WebSocket subscription for real-time chain/order updates
+  // Uses centralized fallbackManager for disconnect recovery (Story 12.9 pattern)
+  useEffect(() => {
+    if (!autoRefresh) return;
+
+    const handleChainUpdate = (event: WSEvent) => {
+      // On chain update, refresh the full chains list
+      // This ensures we have consistent state with all related orders
+      fetchOrders();
+    };
+
+    const handleOrderUpdate = (event: WSEvent) => {
+      // On order update, refresh chains as order state affects chain status
+      fetchOrders();
+    };
+
+    const handleConnect = () => {
+      // Refresh data on reconnect to sync any missed events
+      fetchOrders();
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('CHAIN_UPDATE', handleChainUpdate);
+    wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
+    wsService.onConnect(handleConnect);
+
+    // Register with fallbackManager for centralized fallback polling
+    fallbackManager.registerFetchFunction(FALLBACK_KEY, fetchOrders);
+
+    return () => {
+      wsService.unsubscribe('CHAIN_UPDATE', handleChainUpdate);
+      wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
+      wsService.offConnect(handleConnect);
+      fallbackManager.unregisterFetchFunction(FALLBACK_KEY);
+    };
+  }, [autoRefresh, fetchOrders]);
 
   // Get unique symbols for filter
   const symbols = useMemo(() => {
@@ -222,6 +269,7 @@ export default function TradeLifecycleTab({
           <div className="flex items-center gap-3">
             <Layers className="w-5 h-5 text-purple-400" />
             <h3 className="text-lg font-semibold text-gray-200">Order Chains</h3>
+            <ConnectionStatus />
             <span className="text-sm text-gray-500">
               ({filteredChains.length} chain{filteredChains.length !== 1 ? 's' : ''})
             </span>

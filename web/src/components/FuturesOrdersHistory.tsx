@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { futuresApi, formatUSD, formatPrice, formatQuantity, getPositionColor } from '../services/futuresApi';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
 import { formatDistanceToNow } from 'date-fns';
 import {
   FileText,
@@ -104,13 +106,15 @@ export default function FuturesOrdersHistory() {
   const [aiDecisions, setAIDecisions] = useState<AIDecisionFromAPI[]>([]);
   const [limit, setLimit] = useState(20);
 
-  const fetchOrders = async () => {
+  const fallbackKey = useRef(`ordersHistory-${Date.now()}`);
+
+  const fetchOrders = useCallback(async () => {
     setLoading(true);
     try {
       const response = await futuresApi.getAllOrders();
       // Sort by time descending (newest first)
-      const sortedRegular = (response.regular_orders || []).sort((a, b) => b.time - a.time);
-      const sortedAlgo = (response.algo_orders || []).sort((a, b) => b.createTime - a.createTime);
+      const sortedRegular = (response.regular_orders || []).sort((a: RegularOrder, b: RegularOrder) => b.time - a.time);
+      const sortedAlgo = (response.algo_orders || []).sort((a: AlgoOrder, b: AlgoOrder) => b.createTime - a.createTime);
       setRegularOrders(sortedRegular);
       setAlgoOrders(sortedAlgo);
     } catch (err) {
@@ -118,23 +122,23 @@ export default function FuturesOrdersHistory() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const fetchTrades = async () => {
+  const fetchTrades = useCallback(async () => {
     setLoading(true);
     try {
       const response = await futuresApi.getAccountTrades(undefined, limit);
       // Sort by time descending (newest first)
-      const sortedTrades = (response.trades || []).sort((a, b) => b.time - a.time);
+      const sortedTrades = (response.trades || []).sort((a: AccountTrade, b: AccountTrade) => b.time - a.time);
       setTrades(sortedTrades);
     } catch (err) {
       console.error('Failed to fetch trades:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [limit]);
 
-  const fetchAIDecisions = async () => {
+  const fetchAIDecisions = useCallback(async () => {
     setLoading(true);
     try {
       // Get AI decisions directly from database
@@ -145,8 +149,9 @@ export default function FuturesOrdersHistory() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [limit]);
 
+  // Fetch data when tab changes
   useEffect(() => {
     if (activeTab === 'orders') {
       fetchOrders();
@@ -155,11 +160,54 @@ export default function FuturesOrdersHistory() {
     } else if (activeTab === 'ai_trades') {
       fetchAIDecisions();
     }
-  }, [activeTab, limit]);
+  }, [activeTab, limit, fetchOrders, fetchTrades, fetchAIDecisions]);
 
-  // Auto-refresh every 30 seconds
+  // WebSocket + fallback pattern (replaces 30s polling)
   useEffect(() => {
-    const interval = setInterval(() => {
+    // Handler for WebSocket events
+    const handleOrderEvent = () => {
+      if (activeTab === 'orders') {
+        fetchOrders();
+      }
+    };
+
+    const handleTradeEvent = () => {
+      if (activeTab === 'history') {
+        fetchTrades();
+      } else if (activeTab === 'ai_trades') {
+        fetchAIDecisions();
+      }
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('ORDER_PLACED', handleOrderEvent);
+    wsService.subscribe('ORDER_CANCELLED', handleOrderEvent);
+    wsService.subscribe('TRADE_CLOSED', handleTradeEvent);
+    wsService.subscribe('SIGNAL_GENERATED', handleTradeEvent);
+
+    // Register fallback for when WebSocket is disconnected
+    const key = fallbackKey.current;
+    fallbackManager.registerFetchFunction(key, async () => {
+      try {
+        if (activeTab === 'orders') {
+          const response = await futuresApi.getAllOrders();
+          const sortedRegular = (response.regular_orders || []).sort((a: RegularOrder, b: RegularOrder) => b.time - a.time);
+          const sortedAlgo = (response.algo_orders || []).sort((a: AlgoOrder, b: AlgoOrder) => b.createTime - a.createTime);
+          setRegularOrders(sortedRegular);
+          setAlgoOrders(sortedAlgo);
+        } else if (activeTab === 'history') {
+          const response = await futuresApi.getAccountTrades(undefined, limit);
+          const sortedTrades = (response.trades || []).sort((a: AccountTrade, b: AccountTrade) => b.time - a.time);
+          setTrades(sortedTrades);
+        } else if (activeTab === 'ai_trades') {
+          const response = await futuresApi.getAIDecisions(limit);
+          setAIDecisions(response.data || []);
+        }
+      } catch (e) { /* ignore fallback errors */ }
+    });
+
+    // Refresh on reconnect
+    const handleConnect = () => {
       if (activeTab === 'orders') {
         fetchOrders();
       } else if (activeTab === 'history') {
@@ -167,9 +215,18 @@ export default function FuturesOrdersHistory() {
       } else if (activeTab === 'ai_trades') {
         fetchAIDecisions();
       }
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [activeTab]);
+    };
+    wsService.onConnect(handleConnect);
+
+    return () => {
+      wsService.unsubscribe('ORDER_PLACED', handleOrderEvent);
+      wsService.unsubscribe('ORDER_CANCELLED', handleOrderEvent);
+      wsService.unsubscribe('TRADE_CLOSED', handleTradeEvent);
+      wsService.unsubscribe('SIGNAL_GENERATED', handleTradeEvent);
+      wsService.offConnect(handleConnect);
+      fallbackManager.unregisterFetchFunction(key);
+    };
+  }, [activeTab, limit, fetchOrders, fetchTrades, fetchAIDecisions]);
 
   const handleCancelOrder = async (symbol: string, orderId: number) => {
     if (window.confirm('Cancel this order?')) {

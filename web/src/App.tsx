@@ -5,6 +5,8 @@ import { useFuturesStore } from './store/futuresStore';
 import { apiService } from './services/api';
 import { wsService } from './services/websocket';
 import { futuresApi } from './services/futuresApi';
+import { fallbackManager } from './services/fallbackPollingManager';
+import { setSyncingState } from './hooks/useWebSocketStatus';
 import { AuthProvider, useAuth, ProtectedRoute } from './contexts/AuthContext';
 import Dashboard from './pages/Dashboard';
 // Temporarily disabled due to @xyflow/react type export issues
@@ -113,16 +115,59 @@ function AppContent() {
     // Connect to WebSocket
     wsService.connect();
 
-    // WebSocket event handlers
-    wsService.onConnect(() => {
-      console.log('Connected to WebSocket');
-      setWSConnected(true);
+    // Register critical fetch functions with fallback manager
+    fallbackManager.registerFetchFunction('positions', async () => {
+      try {
+        const positions = await apiService.getPositions();
+        setPositions(positions);
+      } catch (e) { /* ignore errors during fallback */ }
+    });
+    fallbackManager.registerFetchFunction('orders', async () => {
+      try {
+        const orders = await apiService.getActiveOrders();
+        setActiveOrders(orders);
+      } catch (e) { /* ignore errors during fallback */ }
+    });
+    fallbackManager.registerFetchFunction('signals', async () => {
+      try {
+        const signals = await apiService.getSignals(20);
+        setRecentSignals(signals);
+      } catch (e) { /* ignore errors during fallback */ }
+    });
+    fallbackManager.registerFetchFunction('metrics', async () => {
+      try {
+        const metrics = await apiService.getMetrics();
+        setMetrics(metrics);
+      } catch (e) { /* ignore errors during fallback */ }
     });
 
-    wsService.onDisconnect(() => {
+    // WebSocket event handlers with fallback management
+    const handleWsConnect = async () => {
+      console.log('Connected to WebSocket');
+      setWSConnected(true);
+
+      // Stop fallback polling
+      fallbackManager.stop();
+
+      // Sync all data on reconnect
+      setSyncingState(true);
+      try {
+        await fallbackManager.syncAll();
+      } finally {
+        setSyncingState(false);
+      }
+    };
+
+    const handleWsDisconnect = () => {
       console.log('Disconnected from WebSocket');
       setWSConnected(false);
-    });
+
+      // Start fallback polling
+      fallbackManager.start();
+    };
+
+    wsService.onConnect(handleWsConnect);
+    wsService.onDisconnect(handleWsDisconnect);
 
     // Subscribe to WebSocket events
     wsService.subscribe('POSITION_UPDATE', (event) => {
@@ -197,34 +242,20 @@ function AppContent() {
     // Initialize
     initializeData();
 
-    // Set up polling for data that doesn't come through WebSocket
-    const pollInterval = setInterval(async () => {
-      try {
-        const [positions, orders, signals, screener, metrics] = await Promise.all([
-          apiService.getPositions(),
-          apiService.getActiveOrders(),
-          apiService.getSignals(20),
-          apiService.getScreenerResults(20),
-          apiService.getMetrics(),
-        ]);
-        setPositions(positions);
-        setActiveOrders(orders);
-        setRecentSignals(signals);
-        setScreenerResults(screener);
-        setMetrics(metrics);
-      } catch (error: any) {
-        // Don't log auth errors (expected when not logged in)
-        if (error?.response?.status !== 401 && error?.response?.status !== 403) {
-          console.error('Polling error:', error);
-        }
-      }
-    }, 15000); // Poll every 15 seconds (reduced from 1s to avoid rate limits)
+    // NOTE: No setInterval polling needed here anymore.
+    // WebSocket provides real-time updates via subscriptions above.
+    // FallbackPollingManager (60s) handles disconnection scenarios.
+    // This reduces API load by ~90% compared to the old 15s polling.
 
     // Cleanup - reset all state when user logs out
     // CRITICAL: Reset ALL state to prevent data leakage between users
     return () => {
-      clearInterval(pollInterval);
-      wsService.reset();  // Clear all WebSocket callbacks first - prevents cross-user data leakage
+      // Remove specific callbacks first
+      wsService.offConnect(handleWsConnect);
+      wsService.offDisconnect(handleWsDisconnect);
+      // Clear fallback manager registrations
+      fallbackManager.clearAllFetchFunctions();
+      wsService.reset();  // Clear all WebSocket callbacks - prevents cross-user data leakage
       wsService.disconnect();
       resetState();  // Reset main store
       useFuturesStore.getState().resetState();  // Reset futures store - CRITICAL for multi-user isolation

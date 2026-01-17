@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Brain,
   CheckCircle,
@@ -12,6 +12,9 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import { futuresApi } from '../services/futuresApi';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent, GinieStatusPayload } from '../types';
 
 interface Decision {
   timestamp: string;
@@ -33,7 +36,10 @@ export default function AITradeStatusPanel() {
   const [expanded, setExpanded] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  const fetchDecisions = async () => {
+  // Generate unique key for fallback manager registration
+  const fallbackKey = useRef(`ai-trade-status-panel-${Date.now()}`).current;
+
+  const fetchDecisions = useCallback(async () => {
     try {
       const data = await futuresApi.getRecentDecisions();
       setDecisions(data.decisions || []);
@@ -44,16 +50,61 @@ export default function AITradeStatusPanel() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
+  // Story 12.8: WebSocket subscription for real-time updates + centralized fallback
   useEffect(() => {
+    // Handle signal updates via WebSocket
+    const handleSignalUpdate = (_event: WSEvent) => {
+      // Refresh the full list when any signal changes
+      if (autoRefresh) {
+        fetchDecisions();
+      }
+    };
+
+    // Handle Ginie status updates (for decision execution feedback)
+    const handleGinieStatusUpdate = (event: WSEvent) => {
+      const status = event.data.status as GinieStatusPayload;
+      if (status && autoRefresh) {
+        fetchDecisions();
+      }
+    };
+
+    // Handle WebSocket connection changes
+    const handleConnect = () => {
+      // Refresh data when reconnecting to ensure consistency
+      if (autoRefresh) {
+        fetchDecisions();
+      }
+    };
+
+    const handleDisconnect = () => {
+      // Fallback polling is handled by fallbackManager
+    };
+
+    // Subscribe to signal events (Story 12.8 pattern)
+    wsService.subscribe('SIGNAL_UPDATE', handleSignalUpdate);
+    wsService.subscribe('SIGNAL_GENERATED', handleSignalUpdate);
+    wsService.subscribe('GINIE_STATUS_UPDATE', handleGinieStatusUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction(fallbackKey, fetchDecisions);
+
+    // Initial fetch
     fetchDecisions();
 
-    if (autoRefresh) {
-      const interval = setInterval(fetchDecisions, 5000); // Refresh every 5 seconds
-      return () => clearInterval(interval);
-    }
-  }, [autoRefresh]);
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('SIGNAL_UPDATE', handleSignalUpdate);
+      wsService.unsubscribe('SIGNAL_GENERATED', handleSignalUpdate);
+      wsService.unsubscribe('GINIE_STATUS_UPDATE', handleGinieStatusUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction(fallbackKey);
+    };
+  }, [autoRefresh, fetchDecisions, fallbackKey]);
 
   const formatTime = (timestamp: string) => {
     const date = new Date(timestamp);

@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { History, TrendingUp, TrendingDown, Brain, RefreshCw, Filter, ChevronDown, ChevronRight, Zap, MessageSquare, BarChart3, Sparkles, Activity } from 'lucide-react';
 import { apiService } from '../services/api';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
 import { formatDistanceToNow } from 'date-fns';
 
 interface AIDecision {
@@ -139,7 +141,9 @@ export default function TradeHistory() {
     });
   };
 
-  const fetchTrades = async () => {
+  const fallbackKey = useRef(`tradeHistory-${Date.now()}`);
+
+  const fetchTrades = useCallback(async () => {
     setLoading(true);
     try {
       // Include AI decision data for autopilot trades
@@ -150,14 +154,40 @@ export default function TradeHistory() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [limit]);
 
   useEffect(() => {
+    // Initial fetch
     fetchTrades();
-    // Refresh every 30 seconds (reduced from 10s to avoid rate limits)
-    const interval = setInterval(fetchTrades, 30000);
-    return () => clearInterval(interval);
-  }, [limit]);
+
+    // WebSocket: refresh on trade close events
+    const handleTradeEvent = () => {
+      fetchTrades();
+    };
+
+    wsService.subscribe('TRADE_CLOSED', handleTradeEvent);
+
+    // Register fallback for when WebSocket is disconnected
+    const key = fallbackKey.current;
+    fallbackManager.registerFetchFunction(key, async () => {
+      try {
+        const data = await apiService.getPositionHistory(limit, 0, true);
+        setTrades(data);
+      } catch (e) { /* ignore fallback errors */ }
+    });
+
+    // Refresh on reconnect
+    const handleConnect = () => {
+      fetchTrades();
+    };
+    wsService.onConnect(handleConnect);
+
+    return () => {
+      wsService.unsubscribe('TRADE_CLOSED', handleTradeEvent);
+      wsService.offConnect(handleConnect);
+      fallbackManager.unregisterFetchFunction(key);
+    };
+  }, [fetchTrades, limit]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {

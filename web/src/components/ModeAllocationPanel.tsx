@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
-import { DollarSign, Zap, TrendingUp, Shield, Clock, Edit2, Save, X, AlertCircle, RefreshCw, RotateCcw } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
+import { DollarSign, Zap, TrendingUp, Shield, Clock, Edit2, Save, X, AlertCircle, RefreshCw, RotateCcw, Wifi, WifiOff } from 'lucide-react';
 import { futuresApi, formatUSD, loadCapitalAllocationDefaults, ConfigResetPreview, SettingDiff, saveAdminDefaults } from '../services/futuresApi';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent } from '../types';
 import ResetConfirmDialog from './ResetConfirmDialog';
 import { useFuturesStore } from '../store/futuresStore';
 import { useAuth } from '../contexts/AuthContext';
@@ -46,6 +49,9 @@ export default function ModeAllocationPanel() {
   const [showEdit, setShowEdit] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+
+  // WebSocket connection state
+  const [wsConnected, setWsConnected] = useState(wsService.isConnected());
 
   // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
   const tradingMode = useFuturesStore((state) => state.tradingMode);
@@ -124,7 +130,7 @@ export default function ModeAllocationPanel() {
     position: 'from-green-500 to-emerald-500',
   };
 
-  const fetchAllocations = async () => {
+  const fetchAllocations = useCallback(async () => {
     setLoading(true);
     try {
       const data: ModeAllocations = await futuresApi.getModeAllocations();
@@ -154,19 +160,52 @@ export default function ModeAllocationPanel() {
     } finally {
       setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    fetchAllocations();
-    const interval = setInterval(fetchAllocations, 5000);
-    return () => clearInterval(interval);
   }, []);
+
+  // WebSocket subscription for real-time mode status updates
+  useEffect(() => {
+    const handleConnect = () => {
+      setWsConnected(true);
+      // Fetch latest status on connect (sync after reconnection)
+      fetchAllocations();
+    };
+
+    const handleDisconnect = () => {
+      setWsConnected(false);
+    };
+
+    const handleModeStatusUpdate = (event: WSEvent) => {
+      // Update local state from WebSocket payload
+      console.log('ModeAllocationPanel: Received MODE_STATUS_UPDATE', event.data);
+      // Fetch full allocations to get complete data
+      fetchAllocations();
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('MODE_STATUS_UPDATE', handleModeStatusUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction('mode-allocation', fetchAllocations);
+
+    // Initial fetch
+    fetchAllocations();
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('MODE_STATUS_UPDATE', handleModeStatusUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction('mode-allocation');
+    };
+  }, [fetchAllocations]);
 
   // CRITICAL: Refresh allocations when trading mode changes (paper <-> live)
   useEffect(() => {
     console.log('ModeAllocationPanel: Trading mode changed to', tradingMode.mode, '- refreshing');
     fetchAllocations();
-  }, [tradingMode.dryRun]);
+  }, [tradingMode.dryRun, fetchAllocations]);
 
   // Define save handlers outside of the state update to ensure they're always available
   const handleAdminSaveDefaults = async (values: Record<string, any>) => {
@@ -413,7 +452,13 @@ export default function ModeAllocationPanel() {
             <p className="text-gray-400 text-sm">Manage capital distribution across trading modes</p>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {/* WebSocket connection indicator */}
+          {wsConnected ? (
+            <Wifi className="w-5 h-5 text-green-500" title="WebSocket connected - Real-time updates" />
+          ) : (
+            <WifiOff className="w-5 h-5 text-yellow-500" title="WebSocket disconnected - Using 60s fallback polling" />
+          )}
           <button
             onClick={fetchAllocations}
             disabled={loading}

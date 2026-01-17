@@ -5,6 +5,7 @@ import (
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
 	"context"
@@ -28,6 +29,22 @@ func isCacheUnavailableError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "cache unavailable")
+}
+
+// isSettingsCacheValid checks if a SettingsCacheReader interface is valid (non-nil and not containing a nil pointer)
+func isSettingsCacheValid(cache SettingsCacheReader) (valid bool) {
+	if cache == nil {
+		return false
+	}
+	// Use IsHealthy to check if the underlying cache is available
+	// This handles the case where interface contains a nil pointer
+	defer func() {
+		if r := recover(); r != nil {
+			// If IsHealthy panics, the cache is not valid
+			valid = false
+		}
+	}()
+	return cache.IsHealthy()
 }
 
 // SettingsCacheReader defines the interface for reading settings from cache
@@ -1279,7 +1296,7 @@ func NewGinieAutopilot(
 	}
 
 	// Story 6.6: Load from cache-first (no direct DB during trading)
-	if settingsCache != nil && userID != "" {
+	if isSettingsCacheValid(settingsCache) && userID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
@@ -1365,7 +1382,7 @@ func NewGinieAutopilot(
 	// CACHE-FIRST: Load mode enable/disable from cache (populated from DB on login)
 	// NO FALLBACKS TO HARDCODED DEFAULTS - if cache doesn't have config, log error
 	// User initialization should have created these records and LoadUserSettings cached them
-	if ga.settingsCache != nil {
+	if isSettingsCacheValid(ga.settingsCache) {
 		if ultraFastConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, "ultra_fast"); err == nil && ultraFastConfig != nil {
 			ga.config.EnableUltraFastMode = ultraFastConfig.Enabled
 			log.Printf("[GINIE-INIT] Ultra-fast mode enabled from CACHE: %v", ultraFastConfig.Enabled)
@@ -1529,7 +1546,7 @@ func (ga *GinieAutopilot) isModeEnabled(mode GinieTradingMode) bool {
 
 	// Read from cache for real-time mode status (same as main scan loop)
 	// This ensures toggling a mode in UI takes effect immediately
-	if ga.settingsCache != nil && ga.userID != "" {
+	if isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
 		ctx := context.Background()
 		modeConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, modeKey)
 		if err != nil {
@@ -1843,7 +1860,7 @@ func (ga *GinieAutopilot) SetRiskLevel(level string) error {
 	// Story 6.6 fix: Use cache-first pattern for capital allocation reads during trading
 	// Try to load from cache (preferred) or database as fallback
 	// For risk level, we use the mode-specific max USD values as a proxy
-	if ga.settingsCache != nil && ga.userID != "" {
+	if isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
 		// Cache-first: Use settingsCache.GetCapitalAllocation
 		if allocationConfig, err := ga.settingsCache.GetCapitalAllocation(ctx, ga.userID); err == nil && allocationConfig != nil {
 			// Use mode-specific max USD from cache (pick the largest as representative for this risk level)
@@ -2171,7 +2188,7 @@ func (ga *GinieAutopilot) Start() error {
 
 	// Story 6.6: Cache warm-up on Ginie startup
 	// Load all user settings into cache before trading starts
-	if ga.settingsCache != nil && ga.userID != "" {
+	if isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
 		ctx := context.Background()
 		if err := ga.settingsCache.LoadUserSettings(ctx, ga.userID); err != nil {
 			if isCacheUnavailableError(err) {
@@ -2320,6 +2337,24 @@ func (ga *GinieAutopilot) Start() error {
 	}
 
 	ga.logger.Info("Ginie Autopilot started - initialization tasks running in background")
+
+	// Broadcast Ginie status change to WebSocket clients
+	if ga.userID != "" {
+		events.BroadcastGinieStatus(ga.userID, map[string]interface{}{
+			"running":  true,
+			"enabled":  true,
+			"dryRun":   ga.config.DryRun,
+			"action":   "started",
+			"userID":   ga.userID,
+			"modes": map[string]bool{
+				"scalp":     ga.config.EnableScalpMode,
+				"swing":     ga.config.EnableSwingMode,
+				"position":  ga.config.EnablePositionMode,
+				"ultraFast": ga.config.EnableUltraFastMode,
+			},
+		})
+	}
+
 	return nil
 }
 
@@ -2348,6 +2383,17 @@ func (ga *GinieAutopilot) Stop() error {
 	}()
 
 	ga.logger.Info("Ginie Autopilot stop initiated - cleanup running in background")
+
+	// Broadcast Ginie status change to WebSocket clients
+	if ga.userID != "" {
+		events.BroadcastGinieStatus(ga.userID, map[string]interface{}{
+			"running": false,
+			"enabled": false,
+			"action":  "stopped",
+			"userID":  ga.userID,
+		})
+	}
+
 	return nil
 }
 
@@ -6243,6 +6289,25 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 	// Persist PnL stats
 	go ga.SavePnLStats()
 
+	// Broadcast P&L update to WebSocket clients (partial close)
+	if ga.userID != "" {
+		events.BroadcastPnL(ga.userID, map[string]interface{}{
+			"symbol":       pos.Symbol,
+			"pnl":          pnl,
+			"pnlPercent":   tpConfig.GainPct,
+			"reason":       fmt.Sprintf("TP%d hit (%.0f%%)", tpLevel, tpConfig.Percent),
+			"side":         pos.Side,
+			"mode":         string(pos.Mode),
+			"action":       "partial_close",
+			"tpLevel":      tpLevel,
+			"dailyPnL":     ga.dailyPnL,
+			"totalPnL":     ga.totalPnL,
+			"entryPrice":   pos.EntryPrice,
+			"exitPrice":    currentPrice,
+			"quantity":     closeQty,
+		})
+	}
+
 	// Record to circuit breaker (if enabled) - uses PERCENTAGE not USD
 	if ga.config.CircuitBreakerEnabled && ga.circuitBreaker != nil {
 		ga.circuitBreaker.RecordTrade(pnlPercent)
@@ -7000,6 +7065,24 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	// Persist PnL stats
 	go ga.SavePnLStats()
 
+	// Broadcast P&L update to WebSocket clients (full close)
+	if ga.userID != "" {
+		events.BroadcastPnL(ga.userID, map[string]interface{}{
+			"symbol":       symbol,
+			"pnl":          totalPnL,
+			"pnlPercent":   pnlPercent,
+			"reason":       reason,
+			"side":         pos.Side,
+			"mode":         string(pos.Mode),
+			"action":       "position_closed",
+			"dailyPnL":     ga.dailyPnL,
+			"totalPnL":     ga.totalPnL,
+			"entryPrice":   pos.EntryPrice,
+			"exitPrice":    currentPrice,
+			"quantity":     pos.RemainingQty,
+		})
+	}
+
 	// Record to circuit breaker (if enabled) - uses PERCENTAGE not USD
 	if ga.config.CircuitBreakerEnabled && ga.circuitBreaker != nil {
 		ga.circuitBreaker.RecordTrade(pnlPercent)
@@ -7441,7 +7524,7 @@ func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 	modeStr := string(mode)
 
 	// CACHE-FIRST: Try to load user-specific config from cache
-	if ga.settingsCache != nil && ga.userID != "" {
+	if isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
 		ctx := context.Background()
 		modeConfig, err := ga.settingsCache.GetModeConfig(ctx, ga.userID, modeStr)
 		if err != nil {

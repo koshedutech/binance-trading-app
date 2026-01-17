@@ -1,7 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts';
 import { TrendingUp, TrendingDown, DollarSign, Target, AlertTriangle } from 'lucide-react';
 import { useFuturesStore } from '../store/futuresStore';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import { useWebSocketStatus } from '../hooks/useWebSocketStatus';
+import type { PnLPayload, WSEvent } from '../types';
 
 interface PnLData {
   timestamp: string;
@@ -35,7 +39,7 @@ interface PnLDashboardProps {
   initialBalance?: number;
 }
 
-const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initialBalance }) => {
+const PnLDashboard: React.FC<PnLDashboardProps> = ({ initialBalance }) => {
   const [equityCurve, setEquityCurve] = useState<PnLData[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [riskMetrics, setRiskMetrics] = useState<RiskMetrics | null>(null);
@@ -47,20 +51,11 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initia
   // CRITICAL: Subscribe to trading mode changes to refresh mode-specific data (paper vs live)
   const tradingMode = useFuturesStore((state) => state.tradingMode);
 
-  // Fetch initial data
-  useEffect(() => {
-    fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 30000); // Reduced from 5s to 30s to avoid rate limits
-    return () => clearInterval(interval);
-  }, []);
+  // WebSocket connection status from hook (Story 12.9 pattern)
+  const { isConnected } = useWebSocketStatus();
 
-  // CRITICAL: Refresh PnL data when trading mode changes (paper <-> live)
-  useEffect(() => {
-    console.log('PnLDashboard: Trading mode changed to', tradingMode.mode, '- refreshing');
-    fetchDashboardData();
-  }, [tradingMode.dryRun]);
-
-  const fetchDashboardData = async () => {
+  // Fetch function for dashboard data (used by fallbackManager)
+  const fetchDashboardData = useCallback(async () => {
     try {
       // Fetch positions
       const positionsRes = await fetch('/api/positions');
@@ -86,40 +81,25 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initia
       if (historyRes.ok) {
         const historyData = await historyRes.json();
         if (historyData && historyData.length > 0) {
-          const curve = buildEquityCurve(historyData);
+          const curve = buildEquityCurve(historyData, initialBalance);
           setEquityCurve(curve);
-          calculateMetrics(historyData);
+          calculateMetrics(historyData, initialBalance);
         }
       }
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
     }
-  };
+  }, [initialBalance]);
 
-  const buildEquityCurve = (trades: any[]): PnLData[] => {
-    // Use initialBalance prop, or first trade's balance, or 0
-    const startingBalance = initialBalance ?? trades[0]?.cumulativeBalance ?? 0;
-    let equity = startingBalance;
-    return trades.map((trade) => {
-      const pnl = trade.pnl || 0;
-      equity += pnl;
-      return {
-        timestamp: new Date(trade.exit_time || trade.entry_time).toLocaleTimeString(),
-        equity,
-        dailyPnL: pnl,
-        totalPnL: equity - startingBalance,
-      };
-    });
-  };
-
-  const calculateMetrics = (trades: any[]) => {
+  // Helper function to calculate metrics (moved outside useCallback for reuse)
+  const calculateMetrics = (trades: any[], startBalance?: number) => {
     if (trades.length === 0) return;
 
     const wins = trades.filter(t => (t.pnl || 0) > 0).length;
     setWinRate((wins / trades.length) * 100);
 
     // Calculate max drawdown
-    const startingBalance = initialBalance ?? trades[0]?.cumulativeBalance ?? 0;
+    const startingBalance = startBalance ?? trades[0]?.cumulativeBalance ?? 0;
     let peak = startingBalance;
     let maxDD = 0;
     let equity = startingBalance;
@@ -133,6 +113,63 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initia
 
     setMaxDrawdown(maxDD);
   };
+
+  // Helper function to build equity curve
+  const buildEquityCurve = (trades: any[], startBalance?: number): PnLData[] => {
+    const startingBalance = startBalance ?? trades[0]?.cumulativeBalance ?? 0;
+    let equity = startingBalance;
+    return trades.map((trade) => {
+      const pnl = trade.pnl || 0;
+      equity += pnl;
+      return {
+        timestamp: new Date(trade.exit_time || trade.entry_time).toLocaleTimeString(),
+        equity,
+        dailyPnL: pnl,
+        totalPnL: equity - startingBalance,
+      };
+    });
+  };
+
+  // WebSocket subscription for real-time P&L updates (Story 12.9 pattern)
+  useEffect(() => {
+    const handlePnLUpdate = (event: WSEvent) => {
+      const pnl = event.data.pnl as PnLPayload;
+      if (pnl) {
+        setTotalPnL(pnl.unrealizedPnL ?? 0);
+        setDailyPnL(pnl.dailyPnL ?? 0);
+        if (pnl.winRate !== undefined) {
+          setWinRate(pnl.winRate);
+        }
+      }
+    };
+
+    // Register with fallback manager for centralized disconnect handling
+    fallbackManager.registerFetchFunction('pnl-dashboard', fetchDashboardData);
+
+    // Subscribe to PNL_UPDATE events
+    wsService.subscribe('PNL_UPDATE', handlePnLUpdate);
+
+    // Refresh on reconnect (Story 12.9 pattern)
+    const handleConnect = () => {
+      fetchDashboardData();
+    };
+    wsService.onConnect(handleConnect);
+
+    // Initial data fetch
+    fetchDashboardData();
+
+    return () => {
+      wsService.unsubscribe('PNL_UPDATE', handlePnLUpdate);
+      wsService.offConnect(handleConnect);
+      fallbackManager.unregisterFetchFunction('pnl-dashboard');
+    };
+  }, [fetchDashboardData]);
+
+  // CRITICAL: Refresh PnL data when trading mode changes (paper <-> live)
+  useEffect(() => {
+    console.log('PnLDashboard: Trading mode changed to', tradingMode.mode, '- refreshing');
+    fetchDashboardData();
+  }, [tradingMode.dryRun, fetchDashboardData]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -316,8 +353,8 @@ const PnLDashboard: React.FC<PnLDashboardProps> = ({ wsConnected = false, initia
 
       {/* Connection Status */}
       <div className="flex items-center justify-end space-x-2 text-sm">
-        <div className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-green-400' : 'bg-red-400'}`} />
-        <span className="text-gray-400">{wsConnected ? 'Live' : 'Polling'}</span>
+        <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-red-400'}`} />
+        <span className="text-gray-400">{isConnected ? 'Live' : 'Polling'}</span>
       </div>
     </div>
   );

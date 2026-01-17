@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   History,
   ChevronDown,
@@ -16,8 +16,14 @@ import {
   BarChart3,
   Zap,
   Filter,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { futuresApi, TradeLifecycleEvent, TradeLifecycleSummary } from '../services/futuresApi';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import { useWebSocketStatus } from '../hooks/useWebSocketStatus';
+import type { WSEvent, LifecycleEventPayload } from '../types';
 import { formatDistanceToNow, format } from 'date-fns';
 
 // Event type configuration with icons, colors, and labels
@@ -98,8 +104,7 @@ interface Props {
   limit?: number;
   showSummary?: boolean;
   compact?: boolean;
-  autoRefresh?: boolean;
-  refreshInterval?: number;
+  autoRefresh?: boolean; // If false, disables fallback polling
 }
 
 export default function TradeLifecycleEvents({
@@ -108,7 +113,6 @@ export default function TradeLifecycleEvents({
   showSummary = true,
   compact = false,
   autoRefresh = true,
-  refreshInterval = 30000,
 }: Props) {
   const [events, setEvents] = useState<TradeLifecycleEvent[]>([]);
   const [summary, setSummary] = useState<TradeLifecycleSummary | null>(null);
@@ -116,6 +120,12 @@ export default function TradeLifecycleEvents({
   const [error, setError] = useState<string | null>(null);
   const [expandedEvents, setExpandedEvents] = useState<Set<number>>(new Set());
   const [filterType, setFilterType] = useState<string>('all');
+
+  // Use centralized WebSocket status hook for connection state
+  const { isConnected: wsConnected } = useWebSocketStatus();
+
+  // Generate unique key for fallback manager registration
+  const fallbackKey = useRef(`lifecycle-events-${tradeId || 'all'}-${Date.now()}`).current;
 
   const toggleEvent = (id: number) => {
     setExpandedEvents((prev) => {
@@ -129,7 +139,7 @@ export default function TradeLifecycleEvents({
     });
   };
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       if (tradeId) {
         // Fetch events for specific trade
@@ -153,15 +163,85 @@ export default function TradeLifecycleEvents({
     } finally {
       setLoading(false);
     }
-  };
+  }, [tradeId, limit, showSummary]);
 
-  useEffect(() => {
-    fetchData();
-    if (autoRefresh) {
-      const interval = setInterval(fetchData, refreshInterval);
-      return () => clearInterval(interval);
+  // Convert WebSocket LifecycleEventPayload to TradeLifecycleEvent format
+  const convertPayloadToEvent = useCallback((payload: LifecycleEventPayload): TradeLifecycleEvent => {
+    return {
+      id: Date.now(), // Temporary ID until we fetch from server
+      futures_trade_id: parseInt(payload.tradeId, 10) || 0,
+      event_type: payload.eventType,
+      source: payload.mode || 'system',
+      timestamp: payload.timestamp,
+      reason: payload.details?.reason,
+      old_value: payload.details?.old_value,
+      new_value: payload.details?.new_value,
+      trigger_price: payload.details?.trigger_price,
+      tp_level: payload.details?.tp_level,
+      quantity_closed: payload.details?.quantity_closed,
+      pnl_realized: payload.details?.pnl_realized,
+      pnl_percent: payload.details?.pnl_percent,
+      sl_revision_count: payload.details?.sl_revision_count,
+      mode: payload.mode,
+      conditions_met: payload.details?.conditions_met,
+      details: payload.details,
+    };
+  }, []);
+
+  // Handle incoming WebSocket lifecycle events
+  const handleLifecycleEvent = useCallback((event: WSEvent) => {
+    const payload = event.data as LifecycleEventPayload;
+
+    // If filtering by tradeId, only accept events for that trade
+    if (tradeId && parseInt(payload.tradeId, 10) !== tradeId) {
+      return;
     }
-  }, [tradeId, limit, autoRefresh, refreshInterval]);
+
+    const newEvent = convertPayloadToEvent(payload);
+
+    // Prepend new event to list (most recent first), keep last 100
+    setEvents(prev => [newEvent, ...prev].slice(0, 100));
+  }, [tradeId, convertPayloadToEvent]);
+
+  // Initial data fetch and WebSocket subscription
+  useEffect(() => {
+    // Fetch initial data
+    fetchData();
+
+    // Subscribe to WebSocket lifecycle events
+    wsService.subscribe('LIFECYCLE_EVENT', handleLifecycleEvent);
+
+    // Register with fallback manager for disconnect fallback (60s polling)
+    if (autoRefresh) {
+      fallbackManager.registerFetchFunction(fallbackKey, async () => {
+        try {
+          if (tradeId) {
+            const eventsRes = await futuresApi.getTradeLifecycleEvents(tradeId);
+            setEvents(eventsRes.events || []);
+          } else {
+            const res = await futuresApi.getRecentTradeLifecycleEvents(limit);
+            setEvents(res.events || []);
+          }
+        } catch (e) {
+          console.warn('[TradeLifecycleEvents] Fallback fetch failed:', e);
+        }
+      });
+    }
+
+    // Handle WebSocket reconnection - refresh data to ensure consistency
+    const handleConnect = () => {
+      fetchData();
+    };
+
+    wsService.onConnect(handleConnect);
+
+    // Cleanup - properly remove all handlers to prevent memory leaks
+    return () => {
+      wsService.unsubscribe('LIFECYCLE_EVENT', handleLifecycleEvent);
+      wsService.offConnect(handleConnect);
+      fallbackManager.unregisterFetchFunction(fallbackKey);
+    };
+  }, [tradeId, limit, autoRefresh, handleLifecycleEvent, fallbackKey, fetchData]);
 
   // Filter events by type
   const filteredEvents = filterType === 'all'
@@ -419,6 +499,28 @@ export default function TradeLifecycleEvents({
               </select>
             </div>
           )}
+
+          {/* WebSocket connection status */}
+          <div
+            className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium ${
+              wsConnected
+                ? 'bg-green-500/20 text-green-400 border border-green-500/30'
+                : 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+            }`}
+            title={wsConnected ? 'Real-time updates active' : 'Fallback polling (60s)'}
+          >
+            {wsConnected ? (
+              <>
+                <Wifi className="w-3.5 h-3.5" />
+                <span>Live</span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="w-3.5 h-3.5" />
+                <span>Polling</span>
+              </>
+            )}
+          </div>
 
           {/* Refresh button */}
           <button

@@ -1,0 +1,137 @@
+name: story-complete-cycle
+description: "Master orchestrator: Full story/epic lifecycle with intelligent context management and multi-agent delegation"
+author: "BMad"
+
+# Critical variables from config
+config_source: "{project-root}/_bmad/bmm/config.yaml"
+output_folder: "{config_source}:output_folder"
+user_name: "{config_source}:user_name"
+communication_language: "{config_source}:communication_language"
+user_skill_level: "{config_source}:user_skill_level"
+document_output_language: "{config_source}:document_output_language"
+implementation_artifacts: "{config_source}:implementation_artifacts"
+planning_artifacts: "{config_source}:planning_artifacts"
+date: system-generated
+
+# Workflow components
+installed_path: "{project-root}/_bmad/bmm/workflows/4-implementation/story-complete-cycle"
+instructions: "{installed_path}/instructions.xml"
+validation: "{installed_path}/checklist.md"
+
+# Variables
+variables:
+  sprint_status: "{implementation_artifacts}/sprint-status.yaml"
+  story_dir: "{implementation_artifacts}"
+  epics_location: "{planning_artifacts}"
+  project_context: "**/project-context.md"
+  max_review_attempts: 3
+
+  # Epic Mode Variables
+  epic_path: ""           # Optional: specific epic file to process
+  epic_number: ""         # Optional: epic number (e.g., "12" for epic-12)
+  mode: "auto"            # auto | story | epic
+
+  # Context Management
+  context_budget: "large"  # small (~3 stories) | medium (~5 stories) | large (~8 stories) | unlimited
+  stories_per_batch: 0     # 0 = auto-estimate based on complexity
+
+  # Multi-Agent Settings
+  use_sub_agents: true     # Delegate heavy work to sub-agents
+  parallel_agents: false   # Run independent agents in parallel (experimental)
+
+# Sub-workflow paths for orchestration (full lifecycle)
+sub_workflows:
+  # Phase 1: Story Creation & Planning
+  create_story: "{project-root}/_bmad/bmm/workflows/4-implementation/create-story/workflow.yaml"
+  sprint_planning: "{project-root}/_bmad/bmm/workflows/4-implementation/sprint-planning/workflow.yaml"
+
+  # Phase 2: Validation (Story Review)
+  check_readiness: "{project-root}/_bmad/bmm/workflows/3-solutioning/check-implementation-readiness/workflow.md"
+
+  # Phase 3: Implementation
+  dev_story: "{project-root}/_bmad/bmm/workflows/4-implementation/dev-story/workflow.yaml"
+
+  # Phase 4: Review & QA
+  code_review: "{project-root}/_bmad/bmm/workflows/4-implementation/code-review/workflow.yaml"
+  testarch_trace: "{project-root}/_bmad/bmm/workflows/testarch/trace/workflow.yaml"
+
+# Execution configuration
+execution_hints:
+  interactive: false      # Fully automated (no pauses)
+  autonomous: true        # Proceed without user input unless blocked
+  iterative: true         # Support retry loops
+  delegate_heavy_work: true  # Use sub-agents for implementation
+
+# Context Estimation Guide
+# Orchestrator consumes minimal context (coordination only)
+# Sub-agents consume context for actual implementation
+# Estimates based on typical story complexity:
+context_estimation:
+  orchestrator_overhead: 5000      # Tokens for orchestrator state
+  story_metadata: 2000             # Tokens per story for tracking
+  small_story: 15000               # Simple stories (1-2 tasks)
+  medium_story: 30000              # Average stories (3-5 tasks)
+  large_story: 50000               # Complex stories (6+ tasks)
+
+  # With sub-agent delegation, orchestrator can handle:
+  # - Small stories: 8-10 per session
+  # - Medium stories: 5-7 per session
+  # - Large stories: 3-4 per session
+  # - Mixed: ~5-6 per session (recommended default)
+
+# Workflow modes
+modes:
+  story:
+    description: "Process single story through complete cycle"
+    input: "story_path"
+
+  epic:
+    description: "Process entire epic - all stories from start to done"
+    input: "epic_path or epic_number"
+    features:
+      - "Context-aware batching"
+      - "Multi-agent delegation"
+      - "Progress tracking"
+      - "Session continuation support"
+
+  auto:
+    description: "Auto-detect mode based on input"
+    logic: "If epic_path/epic_number provided → epic mode, else → story mode"
+
+# Workflow phases summary (applies to each story in epic mode)
+phases:
+  - name: "Sprint Planning"
+    workflow: "sprint-planning"
+    description: "Ensure sprint-status.yaml exists and tracks story"
+    delegated: false  # Orchestrator handles
+
+  - name: "Story Discovery"
+    workflow: "create-story"
+    description: "Find or create story from epic"
+    delegated: false  # Orchestrator handles
+
+  - name: "Story Validation"
+    workflow: "check-implementation-readiness"
+    description: "Validate story is complete and ready for development"
+    delegated: true   # Sub-agent handles
+
+  - name: "Implementation"
+    workflow: "dev-story"
+    description: "Implement tasks, write tests, validate ACs"
+    delegated: true   # Sub-agent handles (heavy work)
+
+  - name: "Code Review"
+    workflow: "code-review"
+    description: "Adversarial review with auto-fix loop (max 3 attempts)"
+    delegated: true   # Sub-agent handles
+
+  - name: "QA Traceability"
+    workflow: "testarch-trace"
+    description: "Requirements traceability with strict PASS gate"
+    delegated: true   # Sub-agent handles
+
+  - name: "Completion"
+    description: "Mark story as done, update sprint status"
+    delegated: false  # Orchestrator handles
+
+standalone: true

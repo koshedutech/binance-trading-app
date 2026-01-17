@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"binance-trading-bot/internal/events"
 )
 
 // ChainTracker errors
@@ -35,6 +37,12 @@ func NewChainTracker() *ChainTracker {
 // CreateChain creates a new order chain on entry order placement.
 // Returns error if a chain with the same baseID already exists.
 func (ct *ChainTracker) CreateChain(baseID, symbol string, mode TradingMode, direction Direction) (*ChainState, error) {
+	return ct.CreateChainWithUser(baseID, symbol, mode, direction, "")
+}
+
+// CreateChainWithUser creates a new order chain with user tracking for WebSocket broadcasts.
+// Returns error if a chain with the same baseID already exists.
+func (ct *ChainTracker) CreateChainWithUser(baseID, symbol string, mode TradingMode, direction Direction, userID string) (*ChainState, error) {
 	if baseID == "" {
 		return nil, ErrEmptyBaseID
 	}
@@ -52,12 +60,38 @@ func (ct *ChainTracker) CreateChain(baseID, symbol string, mode TradingMode, dir
 
 	// Create new chain state
 	chain := NewChainState(baseID, symbol, mode, direction)
+	chain.UserID = userID
 
 	// Mark entry order as pending by default
 	chain.MarkOrderPending(OrderTypeEntry)
 
 	ct.chains[baseID] = chain
+
+	// Broadcast chain creation to WebSocket clients
+	if userID != "" {
+		ct.broadcastChainUpdate(chain)
+	}
+
 	return chain, nil
+}
+
+// broadcastChainUpdate broadcasts a chain state update via WebSocket (via events package callback)
+func (ct *ChainTracker) broadcastChainUpdate(chain *ChainState) {
+	if chain == nil || chain.UserID == "" {
+		return
+	}
+
+	events.BroadcastChainUpdate(chain.UserID, map[string]interface{}{
+		"baseId":        chain.BaseID,
+		"symbol":        chain.Symbol,
+		"mode":          string(chain.Mode),
+		"direction":     string(chain.Direction),
+		"status":        string(chain.Status),
+		"createdAt":     chain.CreatedAt,
+		"updatedAt":     chain.UpdatedAt,
+		"filledOrders":  chain.FilledOrders,
+		"pendingOrders": chain.PendingOrders,
+	})
 }
 
 // UpdateChainStatus updates the status of an existing chain.
@@ -73,15 +107,19 @@ func (ct *ChainTracker) UpdateChainStatus(baseID string, status ChainStatus) err
 	}
 
 	ct.mu.Lock()
-	defer ct.mu.Unlock()
-
 	chain, exists := ct.chains[baseID]
 	if !exists {
+		ct.mu.Unlock()
 		return ErrChainNotFound
 	}
 
 	chain.Status = status
 	chain.UpdatedAt = time.Now()
+	ct.mu.Unlock()
+
+	// Broadcast chain status update to WebSocket clients
+	ct.broadcastChainUpdate(chain)
+
 	return nil
 }
 
@@ -166,10 +204,9 @@ func (ct *ChainTracker) MarkOrderFilled(baseID string, orderType OrderType) erro
 	}
 
 	ct.mu.Lock()
-	defer ct.mu.Unlock()
-
 	chain, exists := ct.chains[baseID]
 	if !exists {
+		ct.mu.Unlock()
 		return ErrChainNotFound
 	}
 
@@ -179,6 +216,10 @@ func (ct *ChainTracker) MarkOrderFilled(baseID string, orderType OrderType) erro
 	if orderType == OrderTypeEntry && chain.Status == ChainStatusActive {
 		// Entry filled, chain is now truly active
 	}
+	ct.mu.Unlock()
+
+	// Broadcast chain update to WebSocket clients
+	ct.broadcastChainUpdate(chain)
 
 	return nil
 }

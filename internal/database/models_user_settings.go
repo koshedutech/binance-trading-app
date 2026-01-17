@@ -93,6 +93,10 @@ type UserGlobalTrading struct {
 	ProfitReinvestPercent   float64 `json:"profit_reinvest_percent"`    // % of profits to reinvest
 	ProfitReinvestRiskLevel string  `json:"profit_reinvest_risk_level"` // Risk level for reinvested profits
 
+	// Timezone Settings
+	Timezone       string `json:"timezone"`        // IANA timezone name (e.g., "Asia/Kolkata", "UTC")
+	TimezoneOffset string `json:"timezone_offset"` // UTC offset (e.g., "+05:30", "-05:00")
+
 	// Timestamps
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -105,6 +109,8 @@ func DefaultUserGlobalTrading() *UserGlobalTrading {
 		MaxUSDAllocation:        1000.0,
 		ProfitReinvestPercent:   50.0,
 		ProfitReinvestRiskLevel: "medium",
+		Timezone:                "UTC",
+		TimezoneOffset:          "+00:00",
 	}
 }
 

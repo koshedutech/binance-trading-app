@@ -1,0 +1,655 @@
+<workflow>
+  <critical>The workflow execution engine is governed by: {project-root}/_bmad/core/tasks/workflow.xml</critical>
+  <critical>You MUST have already loaded and processed: {installed_path}/workflow.yaml</critical>
+  <critical>Communicate all responses in {communication_language} and language MUST be tailored to {user_skill_level}</critical>
+  <critical>Generate all documents in {document_output_language}</critical>
+
+  <critical>MASTER ORCHESTRATOR - Supports both STORY MODE and EPIC MODE</critical>
+  <critical>EPIC MODE: Process entire epic with intelligent context management and multi-agent delegation</critical>
+  <critical>STORY MODE: Process single story through complete lifecycle</critical>
+  <critical>DELEGATION PATTERN: Spawn sub-agents for heavy work (dev-story, code-review, testarch-trace)</critical>
+  <critical>CONTEXT PRESERVATION: Orchestrator stays lightweight - only coordination, no implementation</critical>
+
+  <!-- ========================================== -->
+  <!-- PHASE 0: MODE DETECTION & INITIALIZATION   -->
+  <!-- ========================================== -->
+
+  <step n="1" goal="Detect mode and initialize orchestrator">
+    <action>Load config from {{config_source}}</action>
+    <action>Set {{review_attempt}} = 0</action>
+    <action>Set {{stories_completed}} = 0</action>
+    <action>Set {{stories_failed}} = 0</action>
+    <action>Set {{current_story_index}} = 0</action>
+
+    <output>===== STORY COMPLETE CYCLE - MASTER ORCHESTRATOR =====</output>
+
+    <!-- Mode Detection -->
+    <check if="{{epic_path}} is provided OR {{epic_number}} is provided">
+      <action>Set {{mode}} = "epic"</action>
+      <output>Mode: EPIC - Processing entire epic through complete cycle</output>
+      <goto step="2">Epic initialization</goto>
+    </check>
+
+    <check if="{{story_path}} is provided">
+      <action>Set {{mode}} = "story"</action>
+      <output>Mode: STORY - Processing single story through complete cycle</output>
+      <goto step="5">Story mode - sprint planning check</goto>
+    </check>
+
+    <check if="no specific input provided">
+      <action>Set {{mode}} = "auto"</action>
+      <output>Mode: AUTO - Will discover next available work</output>
+      <goto step="5">Auto-discover from sprint status</goto>
+    </check>
+  </step>
+
+  <!-- ========================================== -->
+  <!-- EPIC MODE: INITIALIZATION & ANALYSIS       -->
+  <!-- ========================================== -->
+
+  <step n="2" goal="Load epic and analyze stories">
+    <action>Set {{workflow_phase}} = "epic-analysis"</action>
+
+    <output>===== EPIC MODE: INITIALIZATION =====</output>
+
+    <!-- Resolve epic file path -->
+    <check if="{{epic_number}} is provided">
+      <action>Set {{epic_path}} = {{epics_location}}/epic-{{epic_number}}*.md</action>
+      <action>Find matching epic file</action>
+    </check>
+
+    <action>Read COMPLETE epic file at {{epic_path}}</action>
+    <action if="epic file not found">HALT: "Epic file not found: {{epic_path}}"</action>
+
+    <!-- Extract epic metadata -->
+    <action>Extract {{epic_title}} from epic file</action>
+    <action>Extract {{epic_number}} from filename or metadata</action>
+
+    <!-- Count and categorize stories -->
+    <action>Parse all stories in the epic file</action>
+    <action>For each story, extract:
+      - story_key (e.g., "12-1-websocket-events")
+      - story_title
+      - task_count (number of tasks/subtasks)
+      - complexity = small (1-2 tasks) | medium (3-5 tasks) | large (6+ tasks)
+    </action>
+
+    <action>Set {{total_stories}} = count of stories in epic</action>
+    <action>Set {{small_stories}} = count where complexity = small</action>
+    <action>Set {{medium_stories}} = count where complexity = medium</action>
+    <action>Set {{large_stories}} = count where complexity = large</action>
+
+    <output>**Epic Analysis Complete**
+
+      **Epic:** {{epic_number}} - {{epic_title}}
+      **Total Stories:** {{total_stories}}
+
+      **Complexity Breakdown:**
+      - Small (1-2 tasks): {{small_stories}}
+      - Medium (3-5 tasks): {{medium_stories}}
+      - Large (6+ tasks): {{large_stories}}
+    </output>
+
+    <goto step="3">Context estimation</goto>
+  </step>
+
+  <step n="3" goal="Estimate context budget and recommend batch size">
+    <action>Set {{workflow_phase}} = "context-estimation"</action>
+
+    <output>===== CONTEXT ESTIMATION =====</output>
+
+    <!-- Calculate estimated context consumption -->
+    <action>Calculate {{estimated_tokens}} =
+      ({{small_stories}} * 15000) +
+      ({{medium_stories}} * 30000) +
+      ({{large_stories}} * 50000)
+    </action>
+
+    <!-- With sub-agent delegation, orchestrator only needs tracking overhead -->
+    <action>Calculate {{orchestrator_tokens}} =
+      5000 + ({{total_stories}} * 2000)  <!-- Base + per-story metadata -->
+    </action>
+
+    <!-- Determine recommended batch size based on context_budget setting -->
+    <check if="{{context_budget}} == 'small'">
+      <action>Set {{recommended_stories}} = min(3, {{total_stories}})</action>
+    </check>
+    <check if="{{context_budget}} == 'medium'">
+      <action>Set {{recommended_stories}} = min(5, {{total_stories}})</action>
+    </check>
+    <check if="{{context_budget}} == 'large'">
+      <action>Set {{recommended_stories}} = min(8, {{total_stories}})</action>
+    </check>
+    <check if="{{context_budget}} == 'unlimited'">
+      <action>Set {{recommended_stories}} = {{total_stories}}</action>
+    </check>
+
+    <!-- Adjust based on complexity mix -->
+    <check if="{{large_stories}} > ({{total_stories}} / 2)">
+      <action>Reduce {{recommended_stories}} by 2 (heavy stories consume more)</action>
+    </check>
+
+    <!-- Override if user specified batch size -->
+    <check if="{{stories_per_batch}} > 0">
+      <action>Set {{recommended_stories}} = {{stories_per_batch}}</action>
+    </check>
+
+    <output>**Context Budget Analysis**
+
+      **Delegation Strategy:** Sub-agents handle heavy work
+      **Orchestrator Overhead:** ~{{orchestrator_tokens}} tokens (minimal)
+
+      **Recommendation:**
+      - Stories this session: **{{recommended_stories}}** of {{total_stories}}
+      - Context budget: {{context_budget}}
+
+      **Why this number?**
+      - Orchestrator stays lightweight (coordination only)
+      - Sub-agents spawned for: dev-story, code-review, testarch-trace
+      - Each sub-agent gets fresh context for its work
+      - Orchestrator tracks progress and handles transitions
+
+      {{#if recommended_stories lt total_stories}}
+      **Note:** Remaining stories can be processed in follow-up sessions.
+      Run `story-complete-cycle epic={{epic_number}}` to continue.
+      {{/if}}
+    </output>
+
+    <goto step="4">Build story queue</goto>
+  </step>
+
+  <step n="4" goal="Build story queue and check sprint status">
+    <action>Set {{workflow_phase}} = "queue-building"</action>
+
+    <output>===== BUILDING STORY QUEUE =====</output>
+
+    <!-- Ensure sprint-status.yaml exists -->
+    <check if="{{sprint_status}} file does NOT exist">
+      <output>Sprint status not found - creating via sprint-planning...</output>
+      <invoke-workflow path="{{sub_workflows.sprint_planning}}">
+        <param>epics_location: {{epics_location}}</param>
+      </invoke-workflow>
+    </check>
+
+    <!-- Load sprint status to get current story states -->
+    <action>Load {{sprint_status}} file</action>
+    <action>For each story in epic, get current status from sprint-status.yaml</action>
+
+    <!-- Build prioritized queue (skip already done stories) -->
+    <action>Create {{story_queue}} = []</action>
+    <action>For each story in epic (in order):
+      - Skip if status = "done"
+      - Add to queue with priority:
+        1. in-progress (resume first)
+        2. review (complete review cycle)
+        3. ready-for-dev (start implementation)
+        4. draft (needs validation)
+        5. not-started (needs creation)
+    </action>
+
+    <action>Set {{queue_size}} = min({{recommended_stories}}, length of {{story_queue}})</action>
+    <action>Trim {{story_queue}} to first {{queue_size}} entries</action>
+
+    <output>**Story Queue Built**
+
+      **Processing Order ({{queue_size}} stories):**
+      {{#each story_queue}}
+      {{index}}. {{story_key}} - {{status}} ({{complexity}})
+      {{/each}}
+
+      **Already Done:** {{done_count}} stories
+      **Remaining After This Session:** {{remaining_count}} stories
+    </output>
+
+    <check if="{{queue_size}} == 0">
+      <output>**Epic Complete!** All stories are done.
+
+        Run `retrospective` to review the completed epic.
+      </output>
+      <action>Exit workflow - epic fully completed</action>
+    </check>
+
+    <goto step="6">Process story queue</goto>
+  </step>
+
+  <!-- ========================================== -->
+  <!-- STORY MODE: SINGLE STORY PROCESSING        -->
+  <!-- ========================================== -->
+
+  <step n="5" goal="Story mode - ensure sprint planning and find story">
+    <action>Set {{workflow_phase}} = "story-discovery"</action>
+
+    <output>===== STORY MODE: INITIALIZATION =====</output>
+
+    <!-- Ensure sprint-status.yaml exists -->
+    <check if="{{sprint_status}} file does NOT exist">
+      <output>Sprint status not found - creating...</output>
+      <invoke-workflow path="{{sub_workflows.sprint_planning}}">
+        <param>epics_location: {{epics_location}}</param>
+      </invoke-workflow>
+    </check>
+
+    <!-- Find story to process -->
+    <check if="{{story_path}} is provided">
+      <action>Read story file</action>
+      <action>Extract {{story_key}} from filename</action>
+      <action>Extract {{story_status}} from Status section</action>
+      <action>Add to {{story_queue}} as single entry</action>
+      <action>Set {{queue_size}} = 1</action>
+    </check>
+
+    <check if="{{story_path}} is NOT provided">
+      <action>Load {{sprint_status}} file</action>
+      <action>Find first story with status: in-progress > review > ready-for-dev > draft</action>
+
+      <check if="story found">
+        <action>Set {{story_key}} and {{story_path}}</action>
+        <action>Add to {{story_queue}} as single entry</action>
+        <action>Set {{queue_size}} = 1</action>
+      </check>
+
+      <check if="no story found">
+        <output>HALT: No stories available to process
+
+          Options:
+          - Run with epic parameter to create stories from epic
+          - Run create-story to manually create next story
+        </output>
+        <action>HALT - no work available</action>
+      </check>
+    </check>
+
+    <goto step="6">Process story</goto>
+  </step>
+
+  <!-- ========================================== -->
+  <!-- MAIN PROCESSING LOOP                       -->
+  <!-- ========================================== -->
+
+  <step n="6" goal="Process story queue - main orchestration loop">
+    <action>Set {{workflow_phase}} = "processing"</action>
+
+    <output>===== PROCESSING STORY {{current_story_index + 1}} of {{queue_size}} =====</output>
+
+    <!-- Get current story from queue -->
+    <action>Set {{current_story}} = {{story_queue}}[{{current_story_index}}]</action>
+    <action>Set {{story_key}} = {{current_story}}.story_key</action>
+    <action>Set {{story_path}} = {{story_dir}}/story-{{story_key}}.md</action>
+    <action>Set {{story_status}} = {{current_story}}.status</action>
+
+    <output>**Current Story:** {{story_key}}
+      **Status:** {{story_status}}
+      **Path:** {{story_path}}
+    </output>
+
+    <!-- Route based on current status -->
+    <check if="{{story_status}} == 'done'">
+      <output>Story already done - skipping</output>
+      <goto step="14">Next story</goto>
+    </check>
+
+    <check if="{{story_status}} == 'not-started' OR story file does not exist">
+      <goto step="7">Create story</goto>
+    </check>
+
+    <check if="{{story_status}} == 'draft'">
+      <goto step="8">Validate story</goto>
+    </check>
+
+    <check if="{{story_status}} == 'ready-for-dev'">
+      <goto step="10">Implement story</goto>
+    </check>
+
+    <check if="{{story_status}} == 'in-progress'">
+      <goto step="10">Resume implementation</goto>
+    </check>
+
+    <check if="{{story_status}} == 'review'">
+      <goto step="11">Code review</goto>
+    </check>
+  </step>
+
+  <!-- ========================================== -->
+  <!-- STORY LIFECYCLE PHASES                     -->
+  <!-- ========================================== -->
+
+  <step n="7" goal="Create story from epic">
+    <action>Set {{workflow_phase}} = "creating-story"</action>
+
+    <output>--- Creating Story: {{story_key}} ---</output>
+
+    <!-- Delegate to sub-agent for story creation -->
+    <check if="{{use_sub_agents}} == true">
+      <action>Spawn sub-agent with Task tool:
+        - Type: general-purpose
+        - Prompt: "Run create-story workflow for story {{story_key}} from epic {{epic_path}}.
+                   Output the created story file path when done."
+        - Wait for completion
+      </action>
+      <action>Capture {{story_path}} from sub-agent result</action>
+    </check>
+
+    <check if="{{use_sub_agents}} == false">
+      <invoke-workflow path="{{sub_workflows.create_story}}">
+        <param>story_key: {{story_key}}</param>
+        <param>epic_path: {{epic_path}}</param>
+      </invoke-workflow>
+    </check>
+
+    <!-- Update sprint status -->
+    <action>Update sprint-status.yaml: {{story_key}} = "draft"</action>
+    <action>Set {{story_status}} = "draft"</action>
+
+    <goto step="8">Validate story</goto>
+  </step>
+
+  <step n="8" goal="Validate story - SM review">
+    <action>Set {{workflow_phase}} = "validating"</action>
+
+    <output>--- Validating Story: {{story_key}} ---</output>
+
+    <!-- Delegate validation to sub-agent -->
+    <check if="{{use_sub_agents}} == true">
+      <action>Spawn sub-agent with Task tool:
+        - Type: general-purpose
+        - Prompt: "Validate story at {{story_path}} for implementation readiness.
+                   Check: required sections present, ACs testable, tasks clear.
+                   Return: PASS, PASS_WITH_NOTES, or FAIL with issues."
+        - Wait for completion
+      </action>
+      <action>Capture {{validation_result}} from sub-agent</action>
+    </check>
+
+    <check if="{{use_sub_agents}} == false">
+      <invoke-workflow path="{{sub_workflows.check_readiness}}">
+        <param>story_path: {{story_path}}</param>
+        <param>scope: story</param>
+      </invoke-workflow>
+    </check>
+
+    <check if="{{validation_result}} == 'FAIL'">
+      <output>STORY VALIDATION FAILED: {{story_key}}
+
+        Issues: {{validation_issues}}
+
+        Marking as blocked and continuing to next story.
+      </output>
+      <action>Increment {{stories_failed}}</action>
+      <goto step="14">Next story</goto>
+    </check>
+
+    <goto step="9">Mark ready for dev</goto>
+  </step>
+
+  <step n="9" goal="Mark story ready for development">
+    <action>Set {{workflow_phase}} = "marking-ready"</action>
+
+    <output>--- Marking Ready: {{story_key}} ---</output>
+
+    <!-- Update story file -->
+    <action>Read story file at {{story_path}}</action>
+    <action>Update Status section to "ready-for-dev"</action>
+    <action>Add Change Log entry: "Validated and ready for development ({{date}})"</action>
+    <action>Save story file</action>
+
+    <!-- Update sprint status -->
+    <action>Update sprint-status.yaml: {{story_key}} = "ready-for-dev"</action>
+
+    <goto step="10">Implement</goto>
+  </step>
+
+  <step n="10" goal="Implement story - delegate to sub-agent">
+    <action>Set {{workflow_phase}} = "implementing"</action>
+
+    <output>--- Implementing Story: {{story_key}} ---
+
+      **DELEGATING TO SUB-AGENT** (preserving orchestrator context)
+    </output>
+
+    <!-- CRITICAL: Delegate heavy implementation work to sub-agent -->
+    <action>Spawn sub-agent with Task tool:
+      - Type: general-purpose
+      - Prompt: "Execute dev-story workflow for {{story_path}}.
+                 Implement all tasks, write tests, validate ACs.
+                 Follow red-green-refactor cycle.
+                 Update story file with progress.
+                 Return: 'completed' when story status is 'review', or 'HALT: reason' if blocked."
+      - Wait for completion
+    </action>
+
+    <action>Capture {{dev_result}} from sub-agent</action>
+
+    <check if="{{dev_result}} contains 'HALT'">
+      <output>IMPLEMENTATION FAILED: {{story_key}}
+
+        Error: {{dev_result}}
+
+        Marking as blocked and continuing to next story.
+      </output>
+      <action>Increment {{stories_failed}}</action>
+      <goto step="14">Next story</goto>
+    </check>
+
+    <output>Implementation complete for {{story_key}}</output>
+    <goto step="11">Code review</goto>
+  </step>
+
+  <step n="11" goal="Code review - delegate to sub-agent with retry loop">
+    <action>Set {{workflow_phase}} = "reviewing"</action>
+    <action>Set {{review_attempt}} = 0</action>
+
+    <anchor id="review_loop" />
+
+    <action>Increment {{review_attempt}}</action>
+
+    <output>--- Code Review: {{story_key}} (Attempt {{review_attempt}}/{{max_review_attempts}}) ---
+
+      **DELEGATING TO SUB-AGENT**
+    </output>
+
+    <!-- Delegate code review to sub-agent -->
+    <action>Spawn sub-agent with Task tool:
+      - Type: general-purpose
+      - Prompt: "Execute adversarial code-review workflow for {{story_path}}.
+                 Find 3-10 issues minimum. Auto-fix HIGH and MEDIUM issues.
+                 Return: 'Approve' if all issues fixed,
+                         'Changes Requested: [list]' if issues remain,
+                         'Blocked: [reason]' if critical blocker."
+      - Wait for completion
+    </action>
+
+    <action>Capture {{review_outcome}} from sub-agent</action>
+
+    <check if="{{review_outcome}} == 'Approve'">
+      <output>Code review PASSED for {{story_key}}</output>
+      <goto step="12">QA trace</goto>
+    </check>
+
+    <check if="{{review_outcome}} starts with 'Changes Requested'">
+      <check if="{{review_attempt}} lt {{max_review_attempts}}">
+        <output>Issues found - spawning fix agent then re-reviewing...</output>
+
+        <!-- Spawn agent to fix issues -->
+        <action>Spawn sub-agent with Task tool:
+          - Type: general-purpose
+          - Prompt: "Fix these code review issues for {{story_path}}:
+                     {{review_issues}}
+                     Run tests after fixing. Return 'fixed' when done."
+          - Wait for completion
+        </action>
+
+        <goto anchor="review_loop">Re-review</goto>
+      </check>
+
+      <check if="{{review_attempt}} >= {{max_review_attempts}}">
+        <output>CODE REVIEW FAILED after {{max_review_attempts}} attempts: {{story_key}}
+
+          Remaining issues: {{review_issues}}
+
+          Marking as blocked and continuing to next story.
+        </output>
+        <action>Increment {{stories_failed}}</action>
+        <goto step="14">Next story</goto>
+      </check>
+    </check>
+
+    <check if="{{review_outcome}} starts with 'Blocked'">
+      <output>CODE REVIEW BLOCKED: {{story_key}}
+
+        Reason: {{review_outcome}}
+
+        Marking as blocked and continuing to next story.
+      </output>
+      <action>Increment {{stories_failed}}</action>
+      <goto step="14">Next story</goto>
+    </check>
+  </step>
+
+  <step n="12" goal="QA traceability - strict gate">
+    <action>Set {{workflow_phase}} = "qa-tracing"</action>
+
+    <output>--- QA Trace: {{story_key}} ---
+
+      **DELEGATING TO SUB-AGENT**
+      **STRICT GATE: Only PASS completes story**
+    </output>
+
+    <!-- Delegate QA trace to sub-agent -->
+    <action>Spawn sub-agent with Task tool:
+      - Type: general-purpose
+      - Prompt: "Execute testarch-trace workflow for {{story_path}}.
+                 Generate traceability matrix.
+                 Gate type: story, Decision mode: deterministic.
+                 Return: 'PASS', 'CONCERNS: [list]', 'FAIL: [list]', or 'WAIVED: [reason]'"
+      - Wait for completion
+    </action>
+
+    <action>Capture {{qa_result}} from sub-agent</action>
+
+    <check if="{{qa_result}} == 'PASS'">
+      <output>QA gate PASSED for {{story_key}}</output>
+      <goto step="13">Mark done</goto>
+    </check>
+
+    <check if="{{qa_result}} != 'PASS'">
+      <output>QA GATE NOT PASSED: {{story_key}}
+
+        Result: {{qa_result}}
+
+        **Strict gate enforced** - story cannot be marked done.
+        Marking as blocked and continuing to next story.
+      </output>
+      <action>Increment {{stories_failed}}</action>
+      <goto step="14">Next story</goto>
+    </check>
+  </step>
+
+  <step n="13" goal="Mark story as done">
+    <action>Set {{workflow_phase}} = "completing"</action>
+
+    <output>--- Completing Story: {{story_key}} ---</output>
+
+    <!-- Update story file -->
+    <action>Read story file at {{story_path}}</action>
+    <action>Update Status section to "done"</action>
+    <action>Add Change Log entry: "Story completed - all gates passed ({{date}})"</action>
+    <action>Save story file</action>
+
+    <!-- Update sprint status -->
+    <action>Update sprint-status.yaml: {{story_key}} = "done"</action>
+
+    <action>Increment {{stories_completed}}</action>
+
+    <output>**STORY COMPLETE:** {{story_key}}
+
+      Stories completed this session: {{stories_completed}}/{{queue_size}}
+    </output>
+
+    <goto step="14">Next story</goto>
+  </step>
+
+  <!-- ========================================== -->
+  <!-- LOOP CONTROL                               -->
+  <!-- ========================================== -->
+
+  <step n="14" goal="Move to next story or complete">
+    <action>Increment {{current_story_index}}</action>
+
+    <check if="{{current_story_index}} lt {{queue_size}}">
+      <output>--- Moving to next story ({{current_story_index + 1}}/{{queue_size}}) ---</output>
+      <goto step="6">Process next story</goto>
+    </check>
+
+    <check if="{{current_story_index}} >= {{queue_size}}">
+      <goto step="15">Session summary</goto>
+    </check>
+  </step>
+
+  <!-- ========================================== -->
+  <!-- SESSION SUMMARY                            -->
+  <!-- ========================================== -->
+
+  <step n="15" goal="Session summary and next steps">
+    <action>Set {{workflow_phase}} = "completed"</action>
+
+    <output>===== SESSION COMPLETE =====
+
+      **Mode:** {{mode}}
+      {{#if mode == 'epic'}}**Epic:** {{epic_number}} - {{epic_title}}{{/if}}
+
+      **Results:**
+      - Stories Processed: {{queue_size}}
+      - Completed: {{stories_completed}}
+      - Failed/Blocked: {{stories_failed}}
+
+      **Success Rate:** {{(stories_completed / queue_size) * 100}}%
+    </output>
+
+    <!-- Epic mode: show remaining work -->
+    <check if="{{mode}} == 'epic'">
+      <action>Load sprint-status.yaml</action>
+      <action>Count remaining stories for epic {{epic_number}}</action>
+
+      <check if="{{remaining_stories}} > 0">
+        <output>**Epic Progress:**
+          - Total Stories: {{total_stories}}
+          - Completed: {{epic_done_count}}
+          - Remaining: {{remaining_stories}}
+
+          **To Continue:**
+          Run `story-complete-cycle epic={{epic_number}}` to process remaining stories.
+        </output>
+      </check>
+
+      <check if="{{remaining_stories}} == 0">
+        <output>**EPIC COMPLETE!** All {{total_stories}} stories are done.
+
+          **Next Steps:**
+          - Run `retrospective epic={{epic_number}}` to review the epic
+          - Run `sprint-planning` to plan the next sprint
+        </output>
+      </check>
+    </check>
+
+    <!-- Story mode summary -->
+    <check if="{{mode}} == 'story'">
+      <output>**Story Status:** {{#if stories_completed > 0}}Done{{else}}Blocked{{/if}}
+
+        **Next Steps:**
+        - Run `story-complete-cycle` to process the next story
+        - Run `sprint-status` to see overall progress
+      </output>
+    </check>
+
+    <!-- Failed stories guidance -->
+    <check if="{{stories_failed}} > 0">
+      <output>**Attention Required:**
+        {{stories_failed}} stories were blocked. Review:
+        {{#each failed_stories}}
+        - {{story_key}}: {{failure_reason}}
+        {{/each}}
+      </output>
+    </check>
+  </step>
+
+</workflow>

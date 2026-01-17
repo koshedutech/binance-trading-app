@@ -20,6 +20,8 @@ func (r *Repository) GetUserGlobalTrading(ctx context.Context, userID string) (*
 	query := `
 		SELECT id, user_id, risk_level, max_usd_allocation,
 			profit_reinvest_percent, profit_reinvest_risk_level,
+			COALESCE(timezone, 'UTC') as timezone,
+			COALESCE(timezone_offset, '+00:00') as timezone_offset,
 			created_at, updated_at
 		FROM user_global_trading
 		WHERE user_id = $1
@@ -33,6 +35,8 @@ func (r *Repository) GetUserGlobalTrading(ctx context.Context, userID string) (*
 		&config.MaxUSDAllocation,
 		&config.ProfitReinvestPercent,
 		&config.ProfitReinvestRiskLevel,
+		&config.Timezone,
+		&config.TimezoneOffset,
 		&config.CreatedAt,
 		&config.UpdatedAt,
 	)
@@ -53,13 +57,16 @@ func (r *Repository) SaveUserGlobalTrading(ctx context.Context, config *UserGlob
 	query := `
 		INSERT INTO user_global_trading (
 			user_id, risk_level, max_usd_allocation,
-			profit_reinvest_percent, profit_reinvest_risk_level
-		) VALUES ($1, $2, $3, $4, $5)
+			profit_reinvest_percent, profit_reinvest_risk_level,
+			timezone, timezone_offset
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (user_id) DO UPDATE SET
 			risk_level = EXCLUDED.risk_level,
 			max_usd_allocation = EXCLUDED.max_usd_allocation,
 			profit_reinvest_percent = EXCLUDED.profit_reinvest_percent,
 			profit_reinvest_risk_level = EXCLUDED.profit_reinvest_risk_level,
+			timezone = EXCLUDED.timezone,
+			timezone_offset = EXCLUDED.timezone_offset,
 			updated_at = CURRENT_TIMESTAMP
 	`
 
@@ -69,6 +76,8 @@ func (r *Repository) SaveUserGlobalTrading(ctx context.Context, config *UserGlob
 		config.MaxUSDAllocation,
 		config.ProfitReinvestPercent,
 		config.ProfitReinvestRiskLevel,
+		config.Timezone,
+		config.TimezoneOffset,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to save user global trading: %w", err)

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"binance-trading-bot/internal/events"
 )
 
 // CreateTradeLifecycleEvent inserts a new trade lifecycle event
@@ -66,6 +68,29 @@ func (db *DB) CreateTradeLifecycleEvent(ctx context.Context, event *TradeLifecyc
 	}
 
 	event.CreatedAt = now
+
+	// Broadcast lifecycle event to WebSocket clients (via events package callback)
+	if event.UserID != nil && *event.UserID != "" {
+		events.BroadcastLifecycleEvent(*event.UserID, map[string]interface{}{
+			"id":              event.ID,
+			"futuresTradeId":  event.FuturesTradeID,
+			"eventType":       event.EventType,
+			"eventSubtype":    event.EventSubtype,
+			"timestamp":       event.Timestamp,
+			"triggerPrice":    event.TriggerPrice,
+			"oldValue":        event.OldValue,
+			"newValue":        event.NewValue,
+			"mode":            event.Mode,
+			"source":          event.Source,
+			"tpLevel":         event.TPLevel,
+			"quantityClosed":  event.QuantityClosed,
+			"pnlRealized":     event.PnLRealized,
+			"pnlPercent":      event.PnLPercent,
+			"slRevisionCount": event.SLRevisionCount,
+			"reason":          event.Reason,
+		})
+	}
+
 	return nil
 }
 

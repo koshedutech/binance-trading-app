@@ -212,7 +212,7 @@ func (s *Server) handleGetActiveOrders(c *gin.Context) {
 
 	if s.authEnabled {
 		userID := s.getUserID(c)
-		log.Printf("[DEBUG] Using user-scoped query, userID=%d", userID)
+		log.Printf("[DEBUG] Using user-scoped query, userID=%s", userID)
 		orders, err = s.repo.GetActiveOrdersForUser(ctx, userID)
 	} else {
 		log.Printf("[DEBUG] Using non-scoped query")

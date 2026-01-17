@@ -2289,6 +2289,74 @@ func getTimeUntilMidnightInSystemTimezone() int64 {
 	return int64(midnight.Sub(now).Seconds())
 }
 
+// =====================================================
+// PER-USER TIMEZONE FUNCTIONS
+// Story: User timezone in global_trading settings
+// =====================================================
+
+// getUserTimezone loads the user's timezone from global_trading settings
+// Falls back to UTC if not set or on error
+func (s *Server) getUserTimezone(ctx context.Context, userID string) (*time.Location, string, string) {
+	// Default values
+	tzName := "UTC"
+	tzOffset := "+00:00"
+
+	// Try to get user's timezone from global_trading settings
+	if s.settingsCacheService != nil {
+		globalTrading, err := s.settingsCacheService.GetGlobalTrading(ctx, userID)
+		if err == nil && globalTrading != nil {
+			if globalTrading.Timezone != "" {
+				tzName = globalTrading.Timezone
+			}
+			if globalTrading.TimezoneOffset != "" {
+				tzOffset = globalTrading.TimezoneOffset
+			}
+		}
+	}
+
+	// Load the timezone location
+	loc, err := time.LoadLocation(tzName)
+	if err != nil {
+		log.Printf("[USER-TIMEZONE] Failed to load timezone %s for user %s: %v, using UTC", tzName, userID, err)
+		return time.UTC, "UTC", "+00:00"
+	}
+
+	return loc, tzName, tzOffset
+}
+
+// getStartOfDayForUser returns the start of the current day in user's timezone as Unix milliseconds
+func getStartOfDayForUser(loc *time.Location) int64 {
+	now := time.Now().In(loc)
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	return startOfDay.UnixMilli()
+}
+
+// getWeekStartForUser returns the start of the week (Thursday) in user's timezone
+func getWeekStartForUser(loc *time.Location) (int64, string, string) {
+	now := time.Now().In(loc)
+
+	// Find the most recent Thursday (Binance weekly reset day)
+	daysFromThursday := int(now.Weekday()) - int(time.Thursday)
+	if daysFromThursday < 0 {
+		daysFromThursday += 7
+	}
+
+	weekStart := time.Date(now.Year(), now.Month(), now.Day()-daysFromThursday, 0, 0, 0, 0, loc)
+	weekEnd := weekStart.AddDate(0, 0, 6)
+
+	weekStartStr := weekStart.Format("Jan 2")
+	weekEndStr := weekEnd.Format("Jan 2")
+
+	return weekStart.UnixMilli(), weekStartStr, weekEndStr
+}
+
+// getTimeUntilMidnightForUser returns seconds until midnight in user's timezone
+func getTimeUntilMidnightForUser(loc *time.Location) int64 {
+	now := time.Now().In(loc)
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, loc)
+	return int64(midnight.Sub(now).Seconds())
+}
+
 // handleGetPnLSummary returns Binance PnL with timezone info and countdown to reset
 // Includes breakdown: realized PnL, commission fees (maker/taker), and funding fees
 // GET /api/futures/pnl-summary
@@ -2302,13 +2370,16 @@ func (s *Server) handleGetPnLSummary(c *gin.Context) {
 		return
 	}
 
-	// Ensure timezone is initialized
-	_ = getSystemTimezone()
+	// Get user ID for per-user timezone
+	userID := c.GetString("userID")
 
-	// Get time boundaries
-	startOfDayMs := getStartOfDayInSystemTimezone()
-	weekStartMs, weekStartDate, weekEndDate := getWeekStartInSystemTimezone()
-	secondsUntilReset := getTimeUntilMidnightInSystemTimezone()
+	// Get user's timezone from global_trading settings
+	userLoc, userTzName, userTzOffset := s.getUserTimezone(c.Request.Context(), userID)
+
+	// Get time boundaries using user's timezone
+	startOfDayMs := getStartOfDayForUser(userLoc)
+	weekStartMs, weekStartDate, weekEndDate := getWeekStartForUser(userLoc)
+	secondsUntilReset := getTimeUntilMidnightForUser(userLoc)
 
 	// Fetch all income types from Binance (empty string = all types)
 	allRecords, err := futuresClient.GetIncomeHistory("", weekStartMs, 0, 1000)
@@ -2376,11 +2447,11 @@ func (s *Server) handleGetPnLSummary(c *gin.Context) {
 		"week_end_date":      weekEndDate,
 		"week_range":         fmt.Sprintf("%s - %s", weekStartDate, weekEndDate),
 
-		// Timezone info
-		"timezone":        timezoneString,
-		"timezone_offset": timezoneOffset,
+		// Timezone info (from user's global_trading settings)
+		"timezone":        userTzName,
+		"timezone_offset": userTzOffset,
 
 		// Fetch timestamp
-		"fetched_at": time.Now().In(getSystemTimezone()).Format(time.RFC3339),
+		"fetched_at": time.Now().In(userLoc).Format(time.RFC3339),
 	})
 }

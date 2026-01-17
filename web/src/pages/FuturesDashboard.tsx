@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
-import { useFuturesStore, selectAvailableBalance, selectTotalMarginUsed, selectTotalUnrealizedPnl } from '../store/futuresStore';
+import { useEffect, useState, useCallback } from 'react';
+import { useFuturesStore, selectTotalUnrealizedPnl } from '../store/futuresStore';
+import { wsService } from '../services/websocket';
+import type { WSEvent } from '../types';
 import FuturesTradingPanel from '../components/FuturesTradingPanel';
 import FuturesOrderBook from '../components/FuturesOrderBook';
 import FuturesChart from '../components/FuturesChart';
@@ -15,13 +17,9 @@ import TradingModeToggle from '../components/TradingModeToggle';
 import ModeAllocationPanel from '../components/ModeAllocationPanel';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import { TradeLifecycleTab } from '../components/TradeLifecycle';
-import PnLSummaryCards from '../components/PnLSummaryCards';
-import { formatUSD, formatPercent, getPositionColor } from '../services/futuresApi';
-import { wsService } from '../services/websocket';
+import AccountStatsCard from '../components/AccountStatsCard';
+import { formatUSD, getPositionColor } from '../services/futuresApi';
 import {
-  Wallet,
-  TrendingUp,
-  TrendingDown,
   Activity,
   ChevronDown,
   RefreshCw,
@@ -30,16 +28,12 @@ import {
   BookOpen,
   Zap,
   Brain,
-  Percent,
   Sparkles,
-  Server,
   Layers,
   Shield,
   ShoppingCart,
-  History,
-  Clock,
-  DollarSign,
-  Calendar,
+  Wallet,
+  TrendingUp,
   Wifi,
 } from 'lucide-react';
 
@@ -64,14 +58,11 @@ export default function FuturesDashboard() {
     isLoading,
   } = useFuturesStore();
 
-  const availableBalance = useFuturesStore(selectAvailableBalance);
-  const marginUsed = useFuturesStore(selectTotalMarginUsed);
   const totalUnrealizedPnl = useFuturesStore(selectTotalUnrealizedPnl);
-
+  const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
   const [showSymbolDropdown, setShowSymbolDropdown] = useState(false);
   const [centerView, setCenterView] = useState<'orderbook' | 'chart'>('orderbook');
   const [tradingMode, setTradingMode] = useState<{ mode: 'paper' | 'live'; mode_label: string } | null>(null);
-  const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
   // Handle trading mode changes from TradingModeToggle component
   const handleTradingModeChange = (mode: { mode: 'paper' | 'live'; mode_label: string }) => {
@@ -90,15 +81,6 @@ export default function FuturesDashboard() {
     fetchPositionMode();
     fetchMetrics();
   }, [fetchSymbols, fetchAccountInfo, fetchPositionMode, fetchMetrics]);
-
-  // Track WebSocket connection status
-  useEffect(() => {
-    const handleConnect = () => setWsConnected(true);
-    const handleDisconnect = () => setWsConnected(false);
-    wsService.onConnect(handleConnect);
-    wsService.onDisconnect(handleDisconnect);
-    setWsConnected(wsService.isConnected());
-  }, []);
 
   // Fetch data for selected symbol
   // NOTE: Mark price and funding rate are cached from WebSocket, so longer intervals are fine
@@ -122,16 +104,39 @@ export default function FuturesDashboard() {
     };
   }, [selectedSymbol, fetchMarkPrice, fetchFundingRate]);
 
-  // Periodic account/position/metrics refresh - 10 seconds for near real-time wallet sync
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetchAccountInfo();
-      fetchPositions();
-      fetchMetrics();
-    }, 10000); // Refresh every 10 seconds for near real-time updates
+  // NOTE: Account/position/metrics updates are now handled by:
+  // - FuturesPositionsTable: subscribes to POSITION_UPDATE, BALANCE_UPDATE
+  // - GiniePanel: subscribes to GINIE_STATUS_UPDATE, POSITION_UPDATE, BALANCE_UPDATE
+  // - AccountStatsCard: subscribes to BALANCE_UPDATE, POSITION_UPDATE
+  // - FallbackPollingManager (60s) handles disconnection scenarios
+  // No separate polling needed here - child components handle their own data.
 
-    return () => clearInterval(interval);
-  }, [fetchAccountInfo, fetchPositions, fetchMetrics]);
+  // WebSocket subscription for real-time balance updates in header
+  useEffect(() => {
+    const handleBalanceUpdate = (event: WSEvent) => {
+      // Trigger refetch for balance updates
+      fetchAccountInfo();
+    };
+
+    const handlePositionUpdate = (event: WSEvent) => {
+      // Position updates affect unrealized PnL which affects margin balance
+      fetchPositions();
+    };
+
+    wsService.subscribe('BALANCE_UPDATE', handleBalanceUpdate);
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+
+    // Track connection status
+    const handleConnect = () => setWsConnected(true);
+    const handleDisconnect = () => setWsConnected(false);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    return () => {
+      wsService.unsubscribe('BALANCE_UPDATE', handleBalanceUpdate);
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+    };
+  }, [fetchAccountInfo, fetchPositions]);
 
   // Safely parse values that may come as strings from API
   const safeNum = (val: number | string | null | undefined): number => {
@@ -141,11 +146,8 @@ export default function FuturesDashboard() {
   };
 
   const walletBalance = safeNum(accountInfo?.total_wallet_balance);
-  // CRITICAL: Calculate margin balance from wallet + unrealized PnL (from positions table)
-  // This ensures consistency with the positions table which is the source of truth
   const marginBalance = walletBalance + totalUnrealizedPnl;
   const currentPrice = safeNum(markPrice?.markPrice);
-  const priceChange24h = 0; // Would come from ticker data
   const currentFundingRate = safeNum(fundingRate?.fundingRate);
   const nextFundingTime = safeNum(fundingRate?.nextFundingTime);
 
@@ -220,11 +222,12 @@ export default function FuturesDashboard() {
         </div>
       </div>
 
-      {/* Account Summary Bar */}
-      <div className="mb-4 bg-gray-800 rounded-lg p-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          {/* Symbol Selector */}
+      {/* Symbol & Price Bar */}
+      <div className="mb-4 bg-gray-800 rounded-lg p-3">
+        <div className="flex items-center justify-between">
+          {/* Left side: Symbol, Price, Funding */}
           <div className="flex items-center gap-4">
+            {/* Symbol Selector */}
             <div className="relative">
               <button
                 onClick={() => setShowSymbolDropdown(!showSymbolDropdown)}
@@ -261,16 +264,8 @@ export default function FuturesDashboard() {
             </div>
 
             {/* Price Info */}
-            <div className="flex items-center gap-3">
-              <div className="text-2xl font-bold">
-                {currentPrice > 0 ? formatUSD(currentPrice) : '-'}
-              </div>
-              {priceChange24h !== 0 && (
-                <div className={`flex items-center gap-1 ${priceChange24h >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                  {priceChange24h >= 0 ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
-                  {formatPercent(priceChange24h)}
-                </div>
-              )}
+            <div className="text-2xl font-bold">
+              {currentPrice > 0 ? formatUSD(currentPrice) : '-'}
             </div>
 
             {/* Funding Rate */}
@@ -287,57 +282,34 @@ export default function FuturesDashboard() {
             </div>
           </div>
 
-          {/* Account Stats */}
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2">
+          {/* Right side: Wallet & Margin Balance */}
+          <div className="flex items-center gap-4">
+            {/* Wallet Balance */}
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-700/50 rounded-lg border border-gray-600">
               <Wallet className="w-4 h-4 text-gray-400" />
-              <div>
-                <div className="text-xs text-gray-500">Wallet Balance</div>
-                <div className="font-semibold">{formatUSD(walletBalance)}</div>
+              <div className="flex flex-col">
+                <span className="text-[10px] text-gray-500 leading-none">Wallet</span>
+                <span className="text-sm font-bold text-white">{formatUSD(walletBalance)}</span>
               </div>
+              {wsConnected && <Wifi className="w-3 h-3 text-green-500" title="Real-time" />}
             </div>
-            <div>
-              <div className="text-xs text-gray-500">Margin Balance</div>
-              <div className={`font-semibold ${
-                marginBalance > walletBalance
-                  ? 'text-green-500'
-                  : marginBalance < walletBalance
-                  ? 'text-red-500'
-                  : 'text-white'
-              }`}>
-                {formatUSD(marginBalance)}
+
+            {/* Margin Balance */}
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-700/50 rounded-lg border border-gray-600">
+              <TrendingUp className="w-4 h-4 text-gray-400" />
+              <div className="flex flex-col">
+                <span className="text-[10px] text-gray-500 leading-none">Margin</span>
+                <span className={`text-sm font-bold ${
+                  marginBalance > walletBalance ? 'text-green-500' : marginBalance < walletBalance ? 'text-red-500' : 'text-white'
+                }`}>
+                  {formatUSD(marginBalance)}
+                </span>
               </div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500 flex items-center gap-1">
-                Available
-                {wsConnected && (
-                  <Wifi className="w-3 h-3 text-green-500" title="Real-time via WebSocket" />
-                )}
-              </div>
-              <div className="font-semibold text-green-500">{formatUSD(availableBalance)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500">Margin Used</div>
-              <div className="font-semibold text-yellow-500">{formatUSD(marginUsed)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-gray-500 flex items-center gap-1">
-                Unrealized PnL
-                {wsConnected && (
-                  <Wifi className="w-3 h-3 text-green-500" title="Real-time via WebSocket" />
-                )}
-              </div>
-              <div className={`font-semibold ${getPositionColor(totalUnrealizedPnl)}`}>
-                {formatUSD(totalUnrealizedPnl)}
-              </div>
+              {wsConnected && <Wifi className="w-3 h-3 text-green-500" title="Real-time" />}
             </div>
           </div>
         </div>
       </div>
-
-      {/* Daily & Weekly PnL Summary Cards */}
-      <PnLSummaryCards />
 
       {/* News Dashboard */}
       <div className="mb-4">
@@ -362,6 +334,11 @@ export default function FuturesDashboard() {
         <GiniePanel />
       </div>
 
+      {/* Account Summary & P&L - Collapsible Stats Card */}
+      <div className="mb-4">
+        <AccountStatsCard />
+      </div>
+
       {/* Positions Table */}
       <div className="mb-4">
         <FuturesPositionsTable
@@ -372,7 +349,20 @@ export default function FuturesDashboard() {
         />
       </div>
 
-      {/* Open Orders & Trade History - Original Position */}
+      {/* Order Chains / Trade Lifecycle - Between Positions and Orders */}
+      <div className="mb-4">
+        <CollapsibleCard
+          title="Order Chains"
+          icon={<Layers className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Lifecycle"
+          badgeColor="purple"
+        >
+          <TradeLifecycleTab />
+        </CollapsibleCard>
+      </div>
+
+      {/* Open Orders & Trade History */}
       <div className="mb-4">
         <FuturesOrdersHistory />
       </div>
@@ -413,19 +403,6 @@ export default function FuturesDashboard() {
           badgeColor="yellow"
         >
           <ModeSafetyPanel />
-        </CollapsibleCard>
-      </div>
-
-      {/* Order Chains / Trade Lifecycle */}
-      <div className="mb-4">
-        <CollapsibleCard
-          title="Order Chains"
-          icon={<Layers className="w-4 h-4" />}
-          defaultExpanded={false}
-          badge="Lifecycle"
-          badgeColor="purple"
-        >
-          <TradeLifecycleTab />
         </CollapsibleCard>
       </div>
 

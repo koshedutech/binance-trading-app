@@ -10,6 +10,7 @@ export default function VerifyEmail() {
   const [loading, setLoading] = useState(false);
   const [resendCooldown, setResendCooldown] = useState(0);
   const [successMessage, setSuccessMessage] = useState('');
+  const [initialSendDone, setInitialSendDone] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   // Redirect if already verified
@@ -18,6 +19,42 @@ export default function VerifyEmail() {
       navigate('/');
     }
   }, [user, navigate]);
+
+  // Auto-send verification code on page load (only once)
+  useEffect(() => {
+    const sendInitialCode = async () => {
+      if (initialSendDone || !user || user.email_verified) return;
+
+      setInitialSendDone(true);
+      setLoading(true);
+
+      try {
+        const response = await fetch('/api/auth/resend-verification', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+          },
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+          setSuccessMessage('Verification code sent to your email!');
+          setResendCooldown(60);
+        } else if (data.error !== 'ALREADY_VERIFIED') {
+          // Only show error if it's not "already verified"
+          console.log('Initial verification send:', data.message || 'Code sent');
+        }
+      } catch (err) {
+        console.log('Initial verification send failed, user can click Resend');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    sendInitialCode();
+  }, [user, initialSendDone]);
 
   // Handle resend cooldown timer
   useEffect(() => {

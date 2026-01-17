@@ -67,11 +67,14 @@ type DefaultMetadata struct {
 
 // GlobalTradingDefaults holds global trading settings
 type GlobalTradingDefaults struct {
-	RiskLevel              string              `json:"risk_level"`
-	MaxUSDAllocation       float64             `json:"max_usd_allocation"`
-	ProfitReinvestPercent  float64             `json:"profit_reinvest_percent"`
-	ProfitReinvestRiskLevel string             `json:"profit_reinvest_risk_level"`
-	RiskInfo               map[string]RiskInfo `json:"_risk_info"`
+	RiskLevel               string              `json:"risk_level"`
+	MaxUSDAllocation        float64             `json:"max_usd_allocation"`
+	ProfitReinvestPercent   float64             `json:"profit_reinvest_percent"`
+	ProfitReinvestRiskLevel string              `json:"profit_reinvest_risk_level"`
+	Timezone                string              `json:"timezone"`
+	TimezoneOffset          string              `json:"timezone_offset"`
+	RiskInfo                map[string]RiskInfo `json:"_risk_info"`
+	TimezoneInfo            map[string]RiskInfo `json:"_timezone_info"`
 }
 
 // PositionOptimizationDefaults holds position optimization settings

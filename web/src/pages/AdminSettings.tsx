@@ -470,7 +470,7 @@ const AdminSettings: React.FC = () => {
                       value={smtpConfig.host}
                       onChange={(e) => setSmtpConfig({ ...smtpConfig, host: e.target.value })}
                       className="w-full px-4 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-                      placeholder="smtp.example.com"
+                      placeholder="smtp.gmail.com"
                       required
                     />
                   </div>

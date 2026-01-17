@@ -28,6 +28,16 @@ const (
 	EventAutopilotToggled EventType = "AUTOPILOT_TOGGLED"
 	EventUserLogout       EventType = "USER_LOGOUT"
 	EventBalanceUpdate    EventType = "BALANCE_UPDATE"
+
+	// Epic 12: WebSocket Real-Time Data Migration - New Event Types
+	EventChainUpdate         EventType = "CHAIN_UPDATE"
+	EventLifecycleEvent      EventType = "LIFECYCLE_EVENT"
+	EventGinieStatusUpdate   EventType = "GINIE_STATUS_UPDATE"
+	EventCircuitBreakerUpdate EventType = "CIRCUIT_BREAKER_UPDATE"
+	EventPnLUpdate           EventType = "PNL_UPDATE"
+	EventModeStatusUpdate    EventType = "MODE_STATUS_UPDATE"
+	EventSystemStatusUpdate  EventType = "SYSTEM_STATUS_UPDATE"
+	EventSignalUpdate        EventType = "SIGNAL_UPDATE"
 )
 
 // Event represents a system event
@@ -200,4 +210,121 @@ func (eb *EventBus) PublishUserLogout(userID string) {
 			"user_id": userID,
 		},
 	})
+}
+
+// ============================================================================
+// Epic 12: WebSocket Broadcast Callbacks
+// These allow packages like database and orders to broadcast events without
+// directly importing the api package, avoiding import cycles.
+// ============================================================================
+
+// BroadcastFunc is a callback function for broadcasting events to specific users
+type BroadcastFunc func(userID string, data interface{})
+
+// Global broadcast callbacks - wired up by api package at startup
+var (
+	broadcastLifecycleEvent  BroadcastFunc
+	broadcastChainUpdate     BroadcastFunc
+	broadcastCircuitBreaker  BroadcastFunc
+	broadcastPnL             BroadcastFunc
+	broadcastGinieStatus     BroadcastFunc
+	broadcastModeStatus      BroadcastFunc
+	broadcastSystemStatus    BroadcastFunc
+	broadcastSignalUpdate    BroadcastFunc
+)
+
+// SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
+func SetBroadcastLifecycleEvent(fn BroadcastFunc) {
+	broadcastLifecycleEvent = fn
+}
+
+// SetBroadcastChainUpdate sets the callback for chain update broadcasts
+func SetBroadcastChainUpdate(fn BroadcastFunc) {
+	broadcastChainUpdate = fn
+}
+
+// SetBroadcastCircuitBreaker sets the callback for circuit breaker broadcasts
+func SetBroadcastCircuitBreaker(fn BroadcastFunc) {
+	broadcastCircuitBreaker = fn
+}
+
+// SetBroadcastPnL sets the callback for P&L broadcasts
+func SetBroadcastPnL(fn BroadcastFunc) {
+	broadcastPnL = fn
+}
+
+// SetBroadcastGinieStatus sets the callback for Ginie status broadcasts
+func SetBroadcastGinieStatus(fn BroadcastFunc) {
+	broadcastGinieStatus = fn
+}
+
+// SetBroadcastModeStatus sets the callback for mode status broadcasts
+func SetBroadcastModeStatus(fn BroadcastFunc) {
+	broadcastModeStatus = fn
+}
+
+// SetBroadcastSystemStatus sets the callback for system status broadcasts
+func SetBroadcastSystemStatus(fn BroadcastFunc) {
+	broadcastSystemStatus = fn
+}
+
+// SetBroadcastSignalUpdate sets the callback for signal update broadcasts
+func SetBroadcastSignalUpdate(fn BroadcastFunc) {
+	broadcastSignalUpdate = fn
+}
+
+// BroadcastLifecycleEvent broadcasts a lifecycle event to a user
+func BroadcastLifecycleEvent(userID string, data interface{}) {
+	if broadcastLifecycleEvent != nil && userID != "" {
+		go broadcastLifecycleEvent(userID, data)
+	}
+}
+
+// BroadcastChainUpdate broadcasts a chain update to a user
+func BroadcastChainUpdate(userID string, data interface{}) {
+	if broadcastChainUpdate != nil && userID != "" {
+		go broadcastChainUpdate(userID, data)
+	}
+}
+
+// BroadcastCircuitBreaker broadcasts circuit breaker state to a user
+func BroadcastCircuitBreaker(userID string, data interface{}) {
+	if broadcastCircuitBreaker != nil && userID != "" {
+		go broadcastCircuitBreaker(userID, data)
+	}
+}
+
+// BroadcastPnL broadcasts P&L updates to a user
+func BroadcastPnL(userID string, data interface{}) {
+	if broadcastPnL != nil && userID != "" {
+		go broadcastPnL(userID, data)
+	}
+}
+
+// BroadcastGinieStatus broadcasts Ginie status to a user
+func BroadcastGinieStatus(userID string, data interface{}) {
+	if broadcastGinieStatus != nil && userID != "" {
+		go broadcastGinieStatus(userID, data)
+	}
+}
+
+// BroadcastModeStatus broadcasts mode status to a user
+func BroadcastModeStatus(userID string, data interface{}) {
+	if broadcastModeStatus != nil && userID != "" {
+		go broadcastModeStatus(userID, data)
+	}
+}
+
+// BroadcastSystemStatus broadcasts system status to a user
+func BroadcastSystemStatus(userID string, data interface{}) {
+	if broadcastSystemStatus != nil && userID != "" {
+		go broadcastSystemStatus(userID, data)
+	}
+}
+
+// BroadcastSignalUpdate broadcasts signal update to a user
+func BroadcastSignalUpdate(userID string, data interface{}) {
+	if broadcastSignalUpdate != nil && userID != "" {
+		go broadcastSignalUpdate(userID, data)
+	}
 }

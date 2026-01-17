@@ -87,6 +87,55 @@ See `docs/production-releases.md` for full documentation.
 
 ---
 
+## CRITICAL: Docker Volume Protection (MANDATORY)
+
+**Docker volumes contain REAL USER DATA (accounts, settings, API keys, trade history). NEVER remove volumes without explicit written permission.**
+
+### Rules - NO EXCEPTIONS
+
+1. **NEVER remove Docker volumes** - even with `dangerouslySkipPermissions: true`
+2. **This applies to ALL environments** - Development AND Production
+3. **Volume removal destroys:**
+   - User accounts and authentication data
+   - All configured settings (trading modes, limits, etc.)
+   - API keys (Binance, AI providers)
+   - Trade history and P&L records
+   - All database data
+
+### Before ANY Volume Operation
+
+If you believe volume removal is necessary, you MUST:
+
+1. **STOP and ASK the user first** - Never proceed automatically
+2. **STATE the specific reason** - Explain exactly why removal seems necessary
+3. **PROPOSE alternatives first** - Database fixes, migrations, manual corrections
+4. **WAIT for WRITTEN permission** - User must TYPE explicit confirmation like:
+   - "I confirm volume removal for [reason]"
+   - A simple "yes" or clicking confirm is NOT sufficient
+
+### Preferred Solutions (Instead of Volume Removal)
+
+| Problem | Solution |
+|---------|----------|
+| Database schema issues | Write migration scripts |
+| Corrupted data | Fix with SQL UPDATE/DELETE |
+| Settings conflicts | Reset specific settings via API/SQL |
+| Container won't start | Check logs, fix code, NOT volume |
+| Migration failures | Debug migration, add missing columns |
+
+### Example Dialogue
+
+```
+Claude: I've identified the issue - there's a missing column in the users table.
+
+WRONG: "Let me remove the volume to fix this."
+RIGHT: "I'll create a migration to add the missing column. This preserves all your data."
+```
+
+**WARNING**: Violating this rule causes irreversible data loss. The user will need to recreate accounts, re-enter all API keys, and lose all historical data.
+
+---
+
 ## Authentication
 
 Default admin credentials:

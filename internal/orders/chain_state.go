@@ -37,6 +37,9 @@ type ChainState struct {
 	// BaseID is the chain identifier (e.g., "SCA-15JAN-00001")
 	BaseID string `json:"baseId"`
 
+	// UserID is the user who owns this chain (for multi-tenant support)
+	UserID string `json:"userId,omitempty"`
+
 	// Symbol is the trading pair (e.g., "BTCUSDT")
 	Symbol string `json:"symbol"`
 

@@ -5,6 +5,7 @@ import { useFuturesStore, selectActivePositions, selectTotalUnrealizedPnl, selec
 import { wsService } from '../services/websocket';
 import { useAuth } from '../contexts/AuthContext';
 import type { FuturesPosition } from '../types/futures';
+import type { WSEvent, GinieStatusPayload } from '../types';
 import {
   Sparkles, Power, PowerOff, RefreshCw, Shield, CheckCircle, XCircle,
   ChevronDown, ChevronUp, Zap, Clock, BarChart3, Play, Square, Target,
@@ -193,6 +194,8 @@ export default function GiniePanel() {
   const [signalHold, setSignalHold] = useState(false);
   // useRef to track current filter without causing useEffect restarts
   const signalFilterRef = useRef<'all' | 'executed' | 'rejected'>('all');
+  // Ref for WebSocket fallback polling interval
+  const ginieFallbackRef = useRef<NodeJS.Timeout | null>(null);
   // Trade conditions checklist state
   const [tradeConditions, setTradeConditions] = useState<TradeConditionsResponse | null>(null);
   // Pending limit orders state
@@ -673,6 +676,8 @@ export default function GiniePanel() {
     return () => {
       wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('BALANCE_UPDATE', handleBalanceUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
     };
   }, []);
 
@@ -833,6 +838,7 @@ export default function GiniePanel() {
   };
 
   useEffect(() => {
+    // Initial data fetch on mount
     fetchTradingMode(); // Fetch trading mode first - critical for UI state
     fetchStatus();
     fetchAutopilotStatus(true); // Initialize settings on first load
@@ -851,20 +857,53 @@ export default function GiniePanel() {
     fetchScalpReentryConfig(); // Fetch scalp re-entry configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
     fetchPositions(); // Fetch real-time Binance positions for accurate pricing
-    const interval = setInterval(() => {
+
+    // WebSocket handler for Ginie status updates (Story 12.5)
+    const handleGinieStatusUpdate = (event: WSEvent) => {
+      const status = event.data.status as GinieStatusPayload;
+      if (status) {
+        // WebSocket provides partial data; refresh full status from API for consistency
+        fetchStatus();
+        fetchAutopilotStatus(false);
+        fetchCircuitBreaker();
+        fetchModeCBStatus();
+        fetchPositions();
+        // Refresh tab-specific data based on current tab
+        if (activeTab === 'diagnostics') {
+          fetchDiagnostics();
+          if (!signalHold) {
+            fetchSignalLogs();
+          }
+          fetchTradeConditions();
+          fetchPendingOrders();
+        }
+        if (activeTab === 'performance' || activeTab === 'history') {
+          fetchPerformanceMetrics();
+          fetchTradeHistory();
+        }
+        if (activeTab === 'movers') {
+          fetchMarketMovers();
+        }
+      }
+    };
+
+    // Subscribe to Ginie status WebSocket events
+    wsService.subscribe('GINIE_STATUS_UPDATE', handleGinieStatusUpdate);
+
+    // Fallback polling function (used when WebSocket disconnected)
+    const refreshGinieStatus = () => {
       fetchStatus();
-      fetchAutopilotStatus(false); // Don't overwrite user input on subsequent fetches
+      fetchAutopilotStatus(false);
       fetchCircuitBreaker();
-      fetchModeCBStatus(); // Fetch per-mode circuit breaker status
-      fetchPositions(); // Fetch real-time Binance positions
+      fetchModeCBStatus();
+      fetchPositions();
       if (activeTab === 'diagnostics') {
         fetchDiagnostics();
-        // Only auto-refresh signals if not held
         if (!signalHold) {
           fetchSignalLogs();
         }
-        fetchTradeConditions(); // Auto-refresh trade conditions
-        fetchPendingOrders(); // Auto-refresh pending orders
+        fetchTradeConditions();
+        fetchPendingOrders();
       }
       if (activeTab === 'performance' || activeTab === 'history') {
         fetchPerformanceMetrics();
@@ -873,8 +912,41 @@ export default function GiniePanel() {
       if (activeTab === 'movers') {
         fetchMarketMovers();
       }
-    }, 10000);
-    return () => clearInterval(interval);
+    };
+
+    // Fallback: 60s polling only when WebSocket disconnected
+    const startFallback = () => {
+      if (!ginieFallbackRef.current) {
+        ginieFallbackRef.current = setInterval(refreshGinieStatus, 60000);
+      }
+    };
+
+    const stopFallback = () => {
+      if (ginieFallbackRef.current) {
+        clearInterval(ginieFallbackRef.current);
+        ginieFallbackRef.current = null;
+      }
+      // Refresh on reconnect to get latest data
+      refreshGinieStatus();
+    };
+
+    wsService.onDisconnect(startFallback);
+    wsService.onConnect(stopFallback);
+
+    // Start fallback if WebSocket not connected initially
+    if (!wsService.isConnected()) {
+      startFallback();
+    }
+
+    return () => {
+      wsService.unsubscribe('GINIE_STATUS_UPDATE', handleGinieStatusUpdate);
+      wsService.offConnect(stopFallback);
+      wsService.offDisconnect(startFallback);
+      if (ginieFallbackRef.current) {
+        clearInterval(ginieFallbackRef.current);
+        ginieFallbackRef.current = null;
+      }
+    };
   }, [activeTab, fetchPositions, signalHold]);
 
   // Update ref when filter changes and trigger a single fetch
@@ -893,7 +965,24 @@ export default function GiniePanel() {
     const fetchPnlSummary = async () => {
       try {
         const response = await futuresApi.get('/pnl-summary');
-        setPnlSummary(response.data);
+        // Map backend field names to frontend expected names
+        const data = response.data;
+        setPnlSummary({
+          daily_pnl: data.daily_pnl ?? 0,
+          daily_commission: data.daily_commission ?? 0,
+          daily_funding: data.daily_funding ?? 0,
+          daily_trade_count: data.daily_trade_count ?? 0,
+          weekly_pnl: data.weekly_pnl ?? 0,
+          weekly_commission: data.weekly_commission ?? 0,
+          weekly_funding: data.weekly_funding ?? 0,
+          weekly_trade_count: data.weekly_trade_count ?? 0,
+          timezone: data.timezone ?? 'UTC',
+          // Backend returns seconds_to_reset, frontend expects seconds_until_daily_reset
+          seconds_until_daily_reset: data.seconds_to_reset ?? 0,
+          // Backend returns week_start_date/week_end_date, frontend expects week_start/week_end
+          week_start: data.week_start_date ?? '',
+          week_end: data.week_end_date ?? '',
+        });
       } catch (err) {
         console.error('Failed to fetch PnL summary:', err);
       }
@@ -1545,6 +1634,25 @@ export default function GiniePanel() {
             )}
           </div>
         )}
+      </div>
+    );
+  }
+
+  // Handle "starting up" status from backend (during initialization)
+  if ((status as any).starting_up) {
+    return (
+      <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div className="flex items-center gap-2 mb-3">
+          <Sparkles className="w-5 h-5 text-purple-400" />
+          <h3 className="text-lg font-semibold text-white">Ginie AI</h3>
+        </div>
+        <div className="text-gray-400 text-sm">
+          <div className="flex items-center gap-2 mb-2">
+            <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
+            <span>{(status as any).status_message || 'Ginie is starting up...'}</span>
+          </div>
+          <p className="text-xs text-gray-500">Please wait while the system initializes.</p>
+        </div>
       </div>
     );
   }
@@ -4880,81 +4988,6 @@ export default function GiniePanel() {
         </div>
       )}
 
-      {/* Stats Grid */}
-      {!autopilotError && autopilotStatus && (
-        <div className="grid grid-cols-4 gap-3 mb-4">
-        <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Positions</div>
-          <div className="text-lg font-bold text-white">
-            {autopilotStatus?.stats?.active_positions ?? 0}/{autopilotStatus?.stats?.max_positions ?? status.max_positions}
-          </div>
-        </div>
-        <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400 flex items-center justify-center gap-1">
-            Available
-            {wsConnected && wsAvailableBalance > 0 && (
-              <Wifi className="w-3 h-3 text-green-500" title="Real-time via WebSocket" />
-            )}
-          </div>
-          <div className="text-lg font-bold text-blue-400">
-            {formatUSD(wsAvailableBalance > 0 ? wsAvailableBalance : (autopilotStatus?.available_balance ?? 0))}
-          </div>
-        </div>
-        <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Unrealized</div>
-          <div className={`text-lg font-bold ${(autopilotStatus?.stats?.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {formatUSD(autopilotStatus?.stats?.unrealized_pnl ?? 0)}
-          </div>
-        </div>
-        <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Daily Net PnL</div>
-          {(() => {
-            const grossPnl = pnlSummary?.daily_pnl ?? autopilotStatus?.stats?.daily_pnl ?? 0;
-            const commission = pnlSummary?.daily_commission ?? 0;
-            const funding = pnlSummary?.daily_funding ?? 0;
-            const netPnl = grossPnl - commission - funding;
-            const totalFees = commission + funding;
-            const tradeCount = pnlSummary?.daily_trade_count ?? 0;
-            return (
-              <>
-                <div className={`text-lg font-bold ${netPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {formatUSD(netPnl)}
-                </div>
-                {pnlSummary && (
-                  <div className="text-[10px] text-gray-500">
-                    {formatUSD(grossPnl)} - {formatUSD(totalFees)} fees | {tradeCount} trades
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
-        <div className="bg-gray-700/50 rounded p-2 text-center">
-          <div className="text-xs text-gray-400">Weekly Net PnL</div>
-          {(() => {
-            const grossPnl = pnlSummary?.weekly_pnl ?? autopilotStatus?.stats?.total_pnl ?? 0;
-            const commission = pnlSummary?.weekly_commission ?? 0;
-            const funding = pnlSummary?.weekly_funding ?? 0;
-            const netPnl = grossPnl - commission - funding;
-            const totalFees = commission + funding;
-            const tradeCount = pnlSummary?.weekly_trade_count ?? 0;
-            return (
-              <>
-                <div className={`text-lg font-bold ${netPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {formatUSD(netPnl)}
-                </div>
-                {pnlSummary && (
-                  <div className="text-[10px] text-gray-500">
-                    {formatUSD(grossPnl)} - {formatUSD(totalFees)} fees | {tradeCount} trades
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
-      </div>
-      )}
-
       {/* Coin Sources Configuration */}
       <div className="bg-gray-800/50 rounded-lg border border-gray-700 mb-3">
         <button
@@ -6272,23 +6305,12 @@ export default function GiniePanel() {
           ) : (
             <>
           {/* Quick Status Cards */}
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             <div className={`p-2 rounded text-center ${diagnostics?.can_trade ? 'bg-green-900/30 border border-green-800' : 'bg-red-900/30 border border-red-800'}`}>
               <div className="text-[10px] text-gray-400">Can Trade</div>
               <div className={`text-sm font-bold ${diagnostics?.can_trade ? 'text-green-400' : 'text-red-400'}`}>
                 {diagnostics?.can_trade ? 'YES' : 'NO'}
               </div>
-            </div>
-            <div className="bg-gray-700/50 p-2 rounded text-center">
-              <div className="text-[10px] text-gray-400">Positions</div>
-              <div className="text-sm font-bold text-white">
-                {diagnostics?.positions?.open_count ?? 0}/{diagnostics?.positions?.max_allowed ?? 0}
-              </div>
-              {binancePositions.length > 0 && (
-                <div className={`text-[10px] font-medium ${totalUnrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {totalUnrealizedPnl >= 0 ? '+' : ''}{formatUSD(totalUnrealizedPnl)}
-                </div>
-              )}
             </div>
             <div className={`p-2 rounded text-center ${diagnostics?.circuit_breaker?.state === 'open' ? 'bg-red-900/30 border border-red-800' : 'bg-gray-700/50'}`}>
               <div className="text-[10px] text-gray-400">Circuit</div>

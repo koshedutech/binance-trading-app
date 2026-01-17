@@ -23,7 +23,7 @@ interface AIKey {
   created_at: string;
 }
 
-type TabType = 'profile' | 'binance' | 'ai';
+type TabType = 'profile' | 'binance' | 'ai' | 'timezone';
 
 const Settings: React.FC = () => {
   const { user, refreshUser } = useAuth();
@@ -100,9 +100,9 @@ const Settings: React.FC = () => {
     setMessage(null);
   };
 
-  // Load timezone when Profile tab is active (Story 7.6)
+  // Load timezone when Timezone tab is active
   useEffect(() => {
-    if (activeTab === 'profile') {
+    if (activeTab === 'timezone') {
       fetchUserTimezone();
       fetchTimezonePresets();
     }
@@ -485,6 +485,17 @@ const Settings: React.FC = () => {
           <Brain className="w-4 h-4" />
           AI API Keys
         </button>
+        <button
+          onClick={() => changeTab('timezone')}
+          className={`flex items-center gap-2 px-4 py-3 font-medium transition-colors border-b-2 ${
+            activeTab === 'timezone'
+              ? 'text-primary-500 border-primary-500'
+              : 'text-gray-400 border-transparent hover:text-gray-300'
+          }`}
+        >
+          <Globe className="w-4 h-4" />
+          Timezone
+        </button>
       </div>
 
       {/* Message Alert */}
@@ -556,52 +567,6 @@ const Settings: React.FC = () => {
                   {isSubmittingProfile ? 'Updating...' : 'Update Profile'}
                 </button>
               </form>
-            </div>
-
-            {/* Timezone Settings (Story 7.6) */}
-            <div className="bg-dark-800 rounded-lg border border-dark-700 p-6">
-              <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                <Globe className="w-5 h-5 text-primary-400" />
-                Timezone Settings
-              </h2>
-              <p className="text-sm text-gray-400 mb-4">
-                Your timezone is used for date formatting in order IDs and the Trade Lifecycle tab.
-              </p>
-              <div className="space-y-4">
-                <div>
-                  <label htmlFor="timezone" className="block text-sm font-medium text-gray-300 mb-2">
-                    Select Timezone
-                  </label>
-                  <select
-                    id="timezone"
-                    value={userTimezone}
-                    onChange={(e) => handleTimezoneChange(e.target.value)}
-                    disabled={isLoadingTimezone || isUpdatingTimezone}
-                    className="w-full px-4 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50"
-                  >
-                    {timezonePresets.length > 0 ? (
-                      timezonePresets.map((preset) => (
-                        <option key={preset.tz_identifier} value={preset.tz_identifier}>
-                          {preset.display_name} ({preset.gmt_offset})
-                        </option>
-                      ))
-                    ) : (
-                      <>
-                        <option value="Asia/Kolkata">India Standard Time (IST) (+05:30)</option>
-                        <option value="Asia/Phnom_Penh">Indochina Time (ICT) (+07:00)</option>
-                        <option value="UTC">Coordinated Universal Time (UTC) (+00:00)</option>
-                      </>
-                    )}
-                  </select>
-                </div>
-                <div className="flex items-center gap-2 text-sm text-gray-400">
-                  {isLoadingTimezone && <RefreshCw className="w-4 h-4 animate-spin" />}
-                  {isUpdatingTimezone && <span>Updating...</span>}
-                  {!isLoadingTimezone && !isUpdatingTimezone && (
-                    <span>Current timezone: <span className="text-white font-medium">{userTimezone}</span></span>
-                  )}
-                </div>
-              </div>
             </div>
 
             {/* Change Password */}
@@ -1167,6 +1132,117 @@ const Settings: React.FC = () => {
                   ))}
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Timezone Tab */}
+        {activeTab === 'timezone' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-semibold text-white">Timezone Settings</h2>
+                <p className="text-gray-400">Configure your timezone for date formatting and P&L calculations</p>
+              </div>
+            </div>
+
+            {/* Timezone Info Box */}
+            <div className="p-4 bg-blue-900/20 border border-blue-500/50 rounded-lg">
+              <div className="flex items-start gap-3">
+                <Globe className="w-5 h-5 text-blue-400 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-blue-400 font-semibold mb-1">About Timezone Settings</h3>
+                  <p className="text-gray-300 text-sm">
+                    Your timezone is used for:
+                  </p>
+                  <ul className="list-disc list-inside text-gray-300 text-sm mt-2 space-y-1">
+                    <li>Date formatting in order IDs and client order references</li>
+                    <li>Daily P&L reset calculations</li>
+                    <li>Trade Lifecycle timestamps display</li>
+                    <li>Settlement date calculations</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            {/* Timezone Selection Card */}
+            <div className="bg-dark-800 rounded-lg border border-dark-700 p-6">
+              <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <Globe className="w-5 h-5 text-primary-400" />
+                Select Your Timezone
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="timezone" className="block text-sm font-medium text-gray-300 mb-2">
+                    Timezone
+                  </label>
+                  <select
+                    id="timezone"
+                    value={userTimezone}
+                    onChange={(e) => handleTimezoneChange(e.target.value)}
+                    disabled={isLoadingTimezone || isUpdatingTimezone}
+                    className="w-full px-4 py-3 bg-dark-700 border border-dark-600 rounded-lg text-white text-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50"
+                  >
+                    {timezonePresets.length > 0 ? (
+                      timezonePresets.map((preset) => (
+                        <option key={preset.tz_identifier} value={preset.tz_identifier}>
+                          {preset.display_name} ({preset.gmt_offset})
+                        </option>
+                      ))
+                    ) : (
+                      <>
+                        <option value="Asia/Kolkata">India Standard Time (IST) (+05:30)</option>
+                        <option value="Asia/Phnom_Penh">Indochina Time (ICT) (+07:00)</option>
+                        <option value="UTC">Coordinated Universal Time (UTC) (+00:00)</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+
+                {/* Current Timezone Display */}
+                <div className="flex items-center justify-between p-4 bg-dark-700 rounded-lg">
+                  <div className="flex items-center gap-3">
+                    {isLoadingTimezone ? (
+                      <>
+                        <RefreshCw className="w-5 h-5 text-primary-400 animate-spin" />
+                        <span className="text-gray-400">Loading timezone...</span>
+                      </>
+                    ) : isUpdatingTimezone ? (
+                      <>
+                        <RefreshCw className="w-5 h-5 text-primary-400 animate-spin" />
+                        <span className="text-primary-400">Updating timezone...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Globe className="w-5 h-5 text-green-400" />
+                        <div>
+                          <span className="text-gray-400 text-sm">Current timezone:</span>
+                          <span className="text-white font-semibold ml-2 text-lg">{userTimezone}</span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  {!isLoadingTimezone && !isUpdatingTimezone && (
+                    <span className="px-3 py-1 bg-green-900/30 text-green-400 text-sm rounded-full">
+                      Active
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Timezone Note */}
+            <div className="p-4 bg-yellow-900/20 border border-yellow-500/50 rounded-lg">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-yellow-400 mt-0.5" />
+                <div>
+                  <h3 className="text-yellow-400 font-medium">Important Note</h3>
+                  <p className="text-yellow-200/70 text-sm mt-1">
+                    Changing your timezone will affect how dates and times are displayed across the application.
+                    Your daily P&L will reset at midnight in your selected timezone.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         )}

@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { CheckCircle2, XCircle } from 'lucide-react';
 import SignalCard from './SignalCard';
 import { apiService } from '../services/api';
-import type { EnhancedPendingSignal } from '../types';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { EnhancedPendingSignal, WSEvent } from '../types';
 
 export default function EnhancedSignalsPanel() {
   const [activeTab, setActiveTab] = useState<'confirmed' | 'rejected'>('confirmed');
@@ -10,7 +12,10 @@ export default function EnhancedSignalsPanel() {
   const [rejectedSignals, setRejectedSignals] = useState<EnhancedPendingSignal[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchSignals = async () => {
+  // Generate unique key for fallback manager registration
+  const fallbackKey = useRef(`enhanced-signals-panel-${Date.now()}`).current;
+
+  const fetchSignals = useCallback(async () => {
     try {
       const [confirmed, rejected] = await Promise.all([
         apiService.getPendingSignalsByStatus('CONFIRMED', 50),
@@ -23,13 +28,46 @@ export default function EnhancedSignalsPanel() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    // Handle signal updates via WebSocket
+    const handleSignalUpdate = (_event: WSEvent) => {
+      // Refresh the full list when any signal changes
+      fetchSignals();
+    };
+
+    // Handle WebSocket connection changes
+    const handleConnect = () => {
+      // Refresh data when reconnecting to ensure consistency
+      fetchSignals();
+    };
+
+    const handleDisconnect = () => {
+      // Fallback polling is handled by fallbackManager
+    };
+
+    // Subscribe to signal events
+    wsService.subscribe('SIGNAL_UPDATE', handleSignalUpdate);
+    wsService.subscribe('SIGNAL_GENERATED', handleSignalUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction(fallbackKey, fetchSignals);
+
+    // Initial fetch
     fetchSignals();
-    const interval = setInterval(fetchSignals, 15000); // Reduced from 5s to 15s to avoid rate limits
-    return () => clearInterval(interval);
-  }, []);
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('SIGNAL_UPDATE', handleSignalUpdate);
+      wsService.unsubscribe('SIGNAL_GENERATED', handleSignalUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction(fallbackKey);
+    };
+  }, [fetchSignals, fallbackKey]);
 
   const handleExecute = async (signal: EnhancedPendingSignal) => {
     try {

@@ -1,7 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import { apiService } from '../services/api';
 import { formatUSD } from '../services/futuresApi';
-import { Clock, Calendar, TrendingUp, DollarSign, Activity, Coins, ArrowRight } from 'lucide-react';
+import { Clock, Calendar, DollarSign, Activity, ArrowRight } from 'lucide-react';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { PnLPayload, WSEvent } from '../types';
 
 interface PnLSummaryData {
   // Daily breakdown
@@ -44,12 +47,38 @@ export default function PnLSummaryCards() {
     }
   }, []);
 
-  // Initial fetch
+  // WebSocket subscription for real-time P&L updates (Story 12.9 pattern)
   useEffect(() => {
+    const handlePnLUpdate = (event: WSEvent) => {
+      const pnl = event.data.pnl as PnLPayload;
+      if (pnl) {
+        // Update daily P&L from WebSocket data
+        // Note: WebSocket provides summary, we still need API for detailed breakdown
+        // Trigger a refresh to get full data including fees
+        fetchPnlSummary();
+      }
+    };
+
+    // Register with fallback manager for centralized disconnect handling
+    fallbackManager.registerFetchFunction('pnl-summary', fetchPnlSummary);
+
+    // Subscribe to PNL_UPDATE events
+    wsService.subscribe('PNL_UPDATE', handlePnLUpdate);
+
+    // Refresh on reconnect (Story 12.9 pattern)
+    const handleConnect = () => {
+      fetchPnlSummary();
+    };
+    wsService.onConnect(handleConnect);
+
+    // Initial fetch
     fetchPnlSummary();
-    // Refresh every 60 seconds
-    const interval = setInterval(fetchPnlSummary, 60000);
-    return () => clearInterval(interval);
+
+    return () => {
+      wsService.unsubscribe('PNL_UPDATE', handlePnLUpdate);
+      wsService.offConnect(handleConnect);
+      fallbackManager.unregisterFetchFunction('pnl-summary');
+    };
   }, [fetchPnlSummary]);
 
   // Countdown timer

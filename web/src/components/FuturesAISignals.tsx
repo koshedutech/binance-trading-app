@@ -1,6 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import { Brain, TrendingUp, TrendingDown, Minus, RefreshCw, Zap, AlertTriangle } from 'lucide-react';
+import { wsService } from '../services/websocket';
+import { fallbackManager } from '../services/fallbackPollingManager';
+import type { WSEvent } from '../types';
 
 interface FuturesAIDecision {
   symbol: string;
@@ -55,8 +58,17 @@ export default function FuturesAISignals() {
   const [decisions, setDecisions] = useState<FuturesAIDecision[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const decisionsRef = useRef<FuturesAIDecision[]>([]);
 
-  const fetchDecisions = async () => {
+  // Generate unique key for fallback manager registration
+  const fallbackKey = useRef(`futures-ai-signals-${Date.now()}`).current;
+
+  // Keep ref in sync with state for use in callbacks
+  useEffect(() => {
+    decisionsRef.current = decisions;
+  }, [decisions]);
+
+  const fetchDecisions = useCallback(async () => {
     try {
       const token = localStorage.getItem('access_token');
       const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
@@ -85,19 +97,52 @@ export default function FuturesAISignals() {
     } catch (err) {
       console.error('Failed to fetch AI decisions:', err);
       // Don't show error for background fetches
-      if (decisions.length === 0) {
+      if (decisionsRef.current.length === 0) {
         setError('No AI signals available');
       }
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    // Handle signal updates via WebSocket
+    const handleSignalUpdate = (_event: WSEvent) => {
+      // Refresh the full list when any signal changes
+      fetchDecisions();
+    };
+
+    // Handle WebSocket connection changes
+    const handleConnect = () => {
+      // Refresh data when reconnecting to ensure consistency
+      fetchDecisions();
+    };
+
+    const handleDisconnect = () => {
+      // Fallback polling is handled by fallbackManager
+    };
+
+    // Subscribe to signal events
+    wsService.subscribe('SIGNAL_UPDATE', handleSignalUpdate);
+    wsService.subscribe('SIGNAL_GENERATED', handleSignalUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Register with fallback manager for centralized 60s polling when disconnected
+    fallbackManager.registerFetchFunction(fallbackKey, fetchDecisions);
+
+    // Initial fetch
     fetchDecisions();
-    const interval = setInterval(fetchDecisions, 20000); // Reduced from 10s to 20s
-    return () => clearInterval(interval);
-  }, []);
+
+    // Cleanup: remove all listeners and unregister from fallback manager
+    return () => {
+      wsService.unsubscribe('SIGNAL_UPDATE', handleSignalUpdate);
+      wsService.unsubscribe('SIGNAL_GENERATED', handleSignalUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+      fallbackManager.unregisterFetchFunction(fallbackKey);
+    };
+  }, [fetchDecisions, fallbackKey]);
 
   return (
     <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">

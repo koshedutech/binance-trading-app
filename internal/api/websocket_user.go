@@ -243,7 +243,35 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 	// Start the hub
 	go userWSHub.Run()
 
-	log.Println("User-aware WebSocket hub initialized")
+	// Wire up broadcast callbacks from events package to break import cycles
+	// Other packages (database, orders, circuit) use events.Broadcast* functions
+	// which delegate to the api package functions via these callbacks
+	events.SetBroadcastLifecycleEvent(func(userID string, data interface{}) {
+		BroadcastLifecycleEvent(userID, data)
+	})
+	events.SetBroadcastChainUpdate(func(userID string, data interface{}) {
+		BroadcastChainUpdate(userID, data)
+	})
+	events.SetBroadcastCircuitBreaker(func(userID string, data interface{}) {
+		BroadcastCircuitBreaker(userID, data)
+	})
+	events.SetBroadcastPnL(func(userID string, data interface{}) {
+		BroadcastPnL(userID, data)
+	})
+	events.SetBroadcastGinieStatus(func(userID string, data interface{}) {
+		BroadcastGinieStatus(userID, data)
+	})
+	events.SetBroadcastModeStatus(func(userID string, data interface{}) {
+		BroadcastModeStatus(userID, data)
+	})
+	events.SetBroadcastSystemStatus(func(userID string, data interface{}) {
+		BroadcastSystemStatus(userID, data)
+	})
+	events.SetBroadcastSignalUpdate(func(userID string, data interface{}) {
+		BroadcastSignalUpdate(userID, data)
+	})
+
+	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
 	return userWSHub
 }
@@ -368,6 +396,146 @@ func BroadcastUserBalanceUpdate(userID string, balance map[string]interface{}) {
 // GetUserWSHub returns the global user WebSocket hub
 func GetUserWSHub() *UserWSHub {
 	return userWSHub
+}
+
+// ============================================================================
+// Epic 12: WebSocket Real-Time Data Migration - New Broadcast Functions
+// ============================================================================
+
+// BroadcastChainUpdate broadcasts an order chain update to a specific user
+func BroadcastChainUpdate(userID string, chain interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventChainUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"chain": chain,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastLifecycleEvent broadcasts a trade lifecycle event to a specific user
+func BroadcastLifecycleEvent(userID string, lifecycleEvent interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventLifecycleEvent,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"event": lifecycleEvent,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastGinieStatus broadcasts Ginie autopilot status to a specific user
+func BroadcastGinieStatus(userID string, status interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventGinieStatusUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"status": status,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastCircuitBreaker broadcasts circuit breaker state to a specific user
+func BroadcastCircuitBreaker(userID string, state interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventCircuitBreakerUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"state": state,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastPnL broadcasts P&L update to a specific user
+func BroadcastPnL(userID string, pnl interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventPnLUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"pnl": pnl,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastModeStatus broadcasts mode status update to a specific user
+func BroadcastModeStatus(userID string, status interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventModeStatusUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"status": status,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastSystemStatus broadcasts system status update to a specific user
+func BroadcastSystemStatus(userID string, status interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventSystemStatusUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"status": status,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastSignalUpdate broadcasts a signal update to a specific user
+func BroadcastSignalUpdate(userID string, signal interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventSignalUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"signal": signal,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
 }
 
 // AuthenticatedWSHandler creates a WebSocket handler that requires authentication

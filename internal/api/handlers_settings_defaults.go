@@ -164,6 +164,13 @@ func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 			return
 		}
 
+		// CRITICAL: Invalidate cache AFTER successful DB write to prevent stale reads
+		if s.settingsCacheService != nil {
+			if err := s.settingsCacheService.InvalidateMode(ctx, userID, mode); err != nil {
+				log.Printf("[DEFAULTS-RESET] Warning: failed to invalidate cache for user %s mode %s: %v", userID, mode, err)
+			}
+		}
+
 		// Trigger immediate config reload in running autopilot
 		if s.userAutopilotManager != nil {
 			instance := s.userAutopilotManager.GetInstance(userID)
@@ -250,6 +257,13 @@ func (s *Server) handleResetModeGroup(c *gin.Context) {
 	if saveErr := s.repo.SaveUserModeConfig(ctx, userID, mode, currentMode.Enabled, configJSON); saveErr != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+saveErr.Error())
 		return
+	}
+
+	// CRITICAL: Invalidate cache AFTER successful DB write to prevent stale reads
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateMode(ctx, userID, mode); err != nil {
+			log.Printf("[DEFAULTS-RESET] Warning: failed to invalidate cache for user %s mode %s: %v", userID, mode, err)
+		}
 	}
 
 	// Trigger config reload
@@ -565,6 +579,13 @@ func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 				return
 			}
 			modesApplied++
+		}
+
+		// CRITICAL: Invalidate ALL mode caches after reset to prevent stale reads
+		if s.settingsCacheService != nil {
+			if err := s.settingsCacheService.InvalidateAllModes(ctx, userID); err != nil {
+				log.Printf("[DEFAULTS-RESET] Warning: failed to invalidate all mode caches for user %s: %v", userID, err)
+			}
 		}
 
 		// Trigger immediate config reload in running autopilot
@@ -2137,6 +2158,13 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 		changesApplied++
 	}
 
+	// CRITICAL: Invalidate ALL mode caches after reset to prevent stale reads
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateAllModes(ctx, userID); err != nil {
+			log.Printf("[DEFAULTS-RESET] Warning: failed to invalidate all mode caches for user %s: %v", userID, err)
+		}
+	}
+
 	// Trigger immediate config reload in running autopilot
 	if s.userAutopilotManager != nil {
 		instance := s.userAutopilotManager.GetInstance(userID)
@@ -2829,6 +2857,13 @@ func (s *Server) handleResetAllModes(c *gin.Context) {
 			return
 		}
 		modesApplied++
+	}
+
+	// CRITICAL: Invalidate ALL mode caches after reset to prevent stale reads
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateAllModes(ctx, userID); err != nil {
+			log.Printf("[DEFAULTS-RESET] Warning: failed to invalidate all mode caches for user %s: %v", userID, err)
+		}
 	}
 
 	// Trigger immediate config reload

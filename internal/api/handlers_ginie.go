@@ -25,13 +25,33 @@ import (
 func (s *Server) handleGetGinieStatus(c *gin.Context) {
 	controller := s.getFuturesAutopilot()
 	if controller == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Futures controller not initialized")
+		// Return a "starting up" status instead of error - controller not ready yet
+		c.JSON(http.StatusOK, gin.H{
+			"enabled":          false,
+			"starting_up":      true,
+			"status_message":   "Ginie is starting up, please wait...",
+			"active_positions": 0,
+			"max_positions":    0,
+			"daily_trades":     0,
+			"daily_pnl":        0,
+			"win_rate":         0,
+		})
 		return
 	}
 
 	ginie := controller.GetGinieAnalyzer()
 	if ginie == nil {
-		errorResponse(c, http.StatusServiceUnavailable, "Ginie analyzer not initialized")
+		// Return a "starting up" status instead of error - analyzer not ready yet
+		c.JSON(http.StatusOK, gin.H{
+			"enabled":          false,
+			"starting_up":      true,
+			"status_message":   "Ginie analyzer is initializing...",
+			"active_positions": 0,
+			"max_positions":    0,
+			"daily_trades":     0,
+			"daily_pnl":        0,
+			"win_rate":         0,
+		})
 		return
 	}
 
@@ -2146,6 +2166,17 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 
 	log.Printf("[MODE-CONFIG] Saved %s config to database for user %s (enabled=%v)", mode, userIDStr, config.Enabled)
 
+	// CRITICAL: Invalidate cache AFTER successful DB write to prevent stale reads
+	// This ensures the next read fetches fresh data from DB and repopulates cache
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateMode(ctx, userIDStr, mode); err != nil {
+			log.Printf("[MODE-CONFIG] Warning: failed to invalidate cache for user %s mode %s: %v", userIDStr, mode, err)
+			// Don't fail - DB has the truth, cache will be repopulated on next read
+		} else {
+			log.Printf("[MODE-CONFIG] Cache invalidated for user %s mode %s", userIDStr, mode)
+		}
+	}
+
 	// Also update in-memory settings for backwards compatibility
 	sm := autopilot.GetSettingsManager()
 	if err := sm.UpdateModeConfig(mode, &config); err != nil {
@@ -2208,6 +2239,17 @@ func (s *Server) handleToggleModeEnabled(c *gin.Context) {
 	log.Printf("[MODE-TOGGLE] %s mode %s for user %s (immediate effect)", mode,
 		map[bool]string{true: "ENABLED", false: "DISABLED"}[req.Enabled], userIDStr)
 
+	// CRITICAL: Invalidate cache AFTER successful DB write to prevent stale reads
+	// Only invalidate the "enabled" group since that's all we changed
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateModeGroup(ctx, userIDStr, mode, "enabled"); err != nil {
+			log.Printf("[MODE-TOGGLE] Warning: failed to invalidate cache for user %s mode %s: %v", userIDStr, mode, err)
+			// Don't fail - DB has the truth, cache will be repopulated on next read
+		} else {
+			log.Printf("[MODE-TOGGLE] Cache invalidated for user %s mode %s enabled group", userIDStr, mode)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"mode":    mode,
@@ -2223,14 +2265,26 @@ func (s *Server) handleResetModeConfigs(c *gin.Context) {
 	userID := s.getUserID(c)
 	log.Printf("[MODE-CONFIG] Resetting all mode configurations to defaults for user %s", userID)
 
+	ctx := c.Request.Context()
+
 	// Use the new per-user restore function
-	if err := s.repo.RestoreUserDefaultSettings(c.Request.Context(), userID); err != nil {
+	if err := s.repo.RestoreUserDefaultSettings(ctx, userID); err != nil {
 		log.Printf("[MODE-CONFIG] Failed to restore defaults for user %s: %v", userID, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to reset mode configs: "+err.Error())
 		return
 	}
 
 	log.Printf("[MODE-CONFIG] Successfully reset all mode configurations to defaults for user %s", userID)
+
+	// CRITICAL: Invalidate ALL mode caches after reset to prevent stale reads
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateAllModes(ctx, userID); err != nil {
+			log.Printf("[MODE-CONFIG] Warning: failed to invalidate all mode caches for user %s: %v", userID, err)
+			// Don't fail - DB has the truth, cache will be repopulated on next read
+		} else {
+			log.Printf("[MODE-CONFIG] All mode caches invalidated for user %s", userID)
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

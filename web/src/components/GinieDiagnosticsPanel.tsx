@@ -9,6 +9,8 @@ import {
   PendingOrdersResponse,
 } from '../services/futuresApi';
 import { useFuturesStore } from '../store/futuresStore';
+import { wsService } from '../services/websocket';
+import type { WSEvent, GinieStatusPayload } from '../types';
 import {
   Activity,
   AlertTriangle,
@@ -66,6 +68,9 @@ export default function GinieDiagnosticsPanel() {
   // Ref to track hold state for interval callback
   const holdSignalsRef = useRef(holdSignals);
   holdSignalsRef.current = holdSignals;
+
+  // Ref for WebSocket fallback polling interval
+  const fallbackRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchDiagnostics = async () => {
     try {
@@ -148,11 +153,56 @@ export default function GinieDiagnosticsPanel() {
     }
   };
 
-  // Initial fetch and interval setup (independent of filter changes)
+  // Initial fetch and WebSocket subscription (Story 12.5 - replace polling with WebSocket)
   useEffect(() => {
+    // Initial data fetch
     refreshAll(true);
-    const interval = setInterval(() => refreshAll(false), 10000); // Refresh every 10s
-    return () => clearInterval(interval);
+
+    // WebSocket handler for Ginie status updates
+    const handleGinieStatusUpdate = (event: WSEvent) => {
+      const status = event.data.status as GinieStatusPayload;
+      if (status) {
+        // Refresh diagnostics data when status changes
+        refreshAll(false);
+      }
+    };
+
+    // Subscribe to Ginie status WebSocket events
+    wsService.subscribe('GINIE_STATUS_UPDATE', handleGinieStatusUpdate);
+
+    // Fallback: 60s polling only when WebSocket disconnected
+    const startFallback = () => {
+      if (!fallbackRef.current) {
+        fallbackRef.current = setInterval(() => refreshAll(false), 60000);
+      }
+    };
+
+    const stopFallback = () => {
+      if (fallbackRef.current) {
+        clearInterval(fallbackRef.current);
+        fallbackRef.current = null;
+      }
+      // Refresh on reconnect to get latest data
+      refreshAll(false);
+    };
+
+    wsService.onDisconnect(startFallback);
+    wsService.onConnect(stopFallback);
+
+    // Start fallback if WebSocket not connected initially
+    if (!wsService.isConnected()) {
+      startFallback();
+    }
+
+    return () => {
+      wsService.unsubscribe('GINIE_STATUS_UPDATE', handleGinieStatusUpdate);
+      wsService.offConnect(stopFallback);
+      wsService.offDisconnect(startFallback);
+      if (fallbackRef.current) {
+        clearInterval(fallbackRef.current);
+        fallbackRef.current = null;
+      }
+    };
   }, []); // Empty dependency array - only runs once on mount
 
   // CRITICAL: Refresh all diagnostics when trading mode changes (paper <-> live)

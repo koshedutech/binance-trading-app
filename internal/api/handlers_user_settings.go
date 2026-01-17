@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"binance-trading-bot/internal/autopilot"
+	"binance-trading-bot/internal/database"
 
 	"github.com/gin-gonic/gin"
 )
@@ -599,6 +600,28 @@ func (s *Server) compareGlobalTrading(
 		})
 	}
 
+	if user.Timezone != defaults.Timezone {
+		diffs = append(diffs, Difference{
+			Path:           prefix + ".timezone",
+			Current:        user.Timezone,
+			Default:        defaults.Timezone,
+			RiskLevel:      "low",
+			Impact:         "Display preferences only",
+			Recommendation: "Set to your local timezone for accurate P&L display",
+		})
+	}
+
+	if user.TimezoneOffset != defaults.TimezoneOffset {
+		diffs = append(diffs, Difference{
+			Path:           prefix + ".timezone_offset",
+			Current:        user.TimezoneOffset,
+			Default:        defaults.TimezoneOffset,
+			RiskLevel:      "low",
+			Impact:         "Display preferences only",
+			Recommendation: "UTC offset for countdown and date display",
+		})
+	}
+
 	return diffs
 }
 
@@ -868,7 +891,19 @@ func (s *Server) resetModeConfigSetting(
 		return err
 	}
 
-	return s.repo.SaveUserModeConfig(ctx, userID, modeName, userConfig.Enabled, updatedJSON)
+	if err := s.repo.SaveUserModeConfig(ctx, userID, modeName, userConfig.Enabled, updatedJSON); err != nil {
+		return err
+	}
+
+	// CRITICAL: Invalidate cache AFTER successful DB write to prevent stale reads
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateMode(ctx, userID, modeName); err != nil {
+			log.Printf("[SETTINGS-RESET] Warning: failed to invalidate cache for user %s mode %s: %v", userID, modeName, err)
+			// Don't fail - DB has the truth, cache will be repopulated on next read
+		}
+	}
+
+	return nil
 }
 
 // resetModeConfigField resets a specific field in mode config
@@ -927,10 +962,58 @@ func (s *Server) resetModeConfigField(
 	return nil
 }
 
-// Placeholder reset functions for other setting groups
+// resetGlobalTradingSetting resets specific global trading settings to default
 func (s *Server) resetGlobalTradingSetting(ctx context.Context, userID string, subPath []string, defaults *autopilot.DefaultSettingsFile) error {
-	// TODO: Implement when global trading settings are stored per-user
-	return fmt.Errorf("global trading settings reset not yet implemented")
+	// Get current settings
+	current, err := s.repo.GetUserGlobalTrading(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("failed to get current global trading settings: %w", err)
+	}
+	if current == nil {
+		current = database.DefaultUserGlobalTrading()
+		current.UserID = userID
+	}
+
+	// If no subpath, reset all global trading settings
+	if len(subPath) == 0 {
+		current.RiskLevel = defaults.GlobalTrading.RiskLevel
+		current.MaxUSDAllocation = defaults.GlobalTrading.MaxUSDAllocation
+		current.ProfitReinvestPercent = defaults.GlobalTrading.ProfitReinvestPercent
+		current.ProfitReinvestRiskLevel = defaults.GlobalTrading.ProfitReinvestRiskLevel
+		current.Timezone = defaults.GlobalTrading.Timezone
+		current.TimezoneOffset = defaults.GlobalTrading.TimezoneOffset
+	} else {
+		// Reset specific field
+		field := subPath[0]
+		switch field {
+		case "risk_level":
+			current.RiskLevel = defaults.GlobalTrading.RiskLevel
+		case "max_usd_allocation":
+			current.MaxUSDAllocation = defaults.GlobalTrading.MaxUSDAllocation
+		case "profit_reinvest_percent":
+			current.ProfitReinvestPercent = defaults.GlobalTrading.ProfitReinvestPercent
+		case "profit_reinvest_risk_level":
+			current.ProfitReinvestRiskLevel = defaults.GlobalTrading.ProfitReinvestRiskLevel
+		case "timezone":
+			current.Timezone = defaults.GlobalTrading.Timezone
+		case "timezone_offset":
+			current.TimezoneOffset = defaults.GlobalTrading.TimezoneOffset
+		default:
+			return fmt.Errorf("unknown global trading field: %s", field)
+		}
+	}
+
+	// Save updated settings
+	if err := s.repo.SaveUserGlobalTrading(ctx, current); err != nil {
+		return fmt.Errorf("failed to save global trading settings: %w", err)
+	}
+
+	// Update cache
+	if s.settingsCacheService != nil {
+		s.settingsCacheService.UpdateGlobalTrading(ctx, userID, current)
+	}
+
+	return nil
 }
 
 func (s *Server) resetCircuitBreakerSetting(ctx context.Context, userID string, subPath []string, defaults *autopilot.DefaultSettingsFile) error {

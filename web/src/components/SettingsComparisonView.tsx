@@ -1135,10 +1135,10 @@ export default function SettingsComparisonView({
             rawData: preview.default_value,
           });
         } else {
-          // User view - use all_values if available
+          // User view - use all_values if available, fallback to differences, or empty array
           const allFields =
             preview.all_values ||
-            preview.differences.map((d) => ({
+            (preview.differences || []).map((d) => ({
               path: d.path,
               current: d.current,
               default: d.default,
@@ -1160,20 +1160,17 @@ export default function SettingsComparisonView({
           });
         }
       } catch (err: any) {
-        // Handle mode not configured
-        if (err?.response?.status === 404) {
-          results.push({
-            mode,
-            modeName: MODE_DISPLAY_NAMES[mode] || mode,
-            allMatch: false,
-            totalChanges: -1,
-            totalFields: 0,
-            groups: [],
-            configNotFound: true,
-          });
-        } else {
-          throw err;
-        }
+        console.error(`[SettingsComparison] Error loading mode ${mode} defaults:`, err);
+        // Handle all errors gracefully - mark as "not configured" rather than failing entirely
+        results.push({
+          mode,
+          modeName: MODE_DISPLAY_NAMES[mode] || mode,
+          allMatch: false,
+          totalChanges: -1,
+          totalFields: 0,
+          groups: [],
+          configNotFound: true,
+        });
       }
     }
 
@@ -1188,7 +1185,7 @@ export default function SettingsComparisonView({
       const preview = (await loadCircuitBreakerDefaults(true)) as ConfigResetPreview;
       const allFields =
         preview.all_values ||
-        preview.differences.map((d) => ({
+        (preview.differences || []).map((d) => ({
           path: d.path,
           current: d.current,
           default: d.default,
@@ -1208,18 +1205,18 @@ export default function SettingsComparisonView({
         rawData: preview,
       });
     } catch (err: any) {
-      if (err?.response?.status === 404) {
-        results.push({
-          settingType: 'circuit_breaker',
-          settingName: 'Circuit Breaker (Global)',
-          icon: <Shield className="w-6 h-6 text-red-400" />,
-          allMatch: false,
-          totalChanges: -1,
-          totalFields: 0,
-          fields: [],
-          configNotFound: true,
-        });
-      }
+      console.error('[SettingsComparison] Error loading circuit breaker defaults:', err);
+      // Handle 404 as "not configured", other errors as partial failure
+      results.push({
+        settingType: 'circuit_breaker',
+        settingName: 'Circuit Breaker (Global)',
+        icon: <Shield className="w-6 h-6 text-red-400" />,
+        allMatch: false,
+        totalChanges: -1,
+        totalFields: 0,
+        fields: [],
+        configNotFound: true,
+      });
     }
 
     // LLM Config
@@ -1227,7 +1224,7 @@ export default function SettingsComparisonView({
       const preview = (await loadLLMConfigDefaults(true)) as ConfigResetPreview;
       const allFields =
         preview.all_values ||
-        preview.differences.map((d) => ({
+        (preview.differences || []).map((d) => ({
           path: d.path,
           current: d.current,
           default: d.default,
@@ -1247,18 +1244,18 @@ export default function SettingsComparisonView({
         rawData: preview,
       });
     } catch (err: any) {
-      if (err?.response?.status === 404) {
-        results.push({
-          settingType: 'llm_config',
-          settingName: 'LLM Config',
-          icon: <Brain className="w-6 h-6 text-purple-400" />,
-          allMatch: false,
-          totalChanges: -1,
-          totalFields: 0,
-          fields: [],
-          configNotFound: true,
-        });
-      }
+      console.error('[SettingsComparison] Error loading LLM config defaults:', err);
+      // Handle 404 as "not configured", other errors as partial failure
+      results.push({
+        settingType: 'llm_config',
+        settingName: 'LLM Config',
+        icon: <Brain className="w-6 h-6 text-purple-400" />,
+        allMatch: false,
+        totalChanges: -1,
+        totalFields: 0,
+        fields: [],
+        configNotFound: true,
+      });
     }
 
     // Capital Allocation
@@ -1266,7 +1263,7 @@ export default function SettingsComparisonView({
       const preview = (await loadCapitalAllocationDefaults(true)) as ConfigResetPreview;
       const allFields =
         preview.all_values ||
-        preview.differences.map((d) => ({
+        (preview.differences || []).map((d) => ({
           path: d.path,
           current: d.current,
           default: d.default,
@@ -1286,18 +1283,18 @@ export default function SettingsComparisonView({
         rawData: preview,
       });
     } catch (err: any) {
-      if (err?.response?.status === 404) {
-        results.push({
-          settingType: 'capital_allocation',
-          settingName: 'Capital Allocation',
-          icon: <Wallet className="w-6 h-6 text-green-400" />,
-          allMatch: false,
-          totalChanges: -1,
-          totalFields: 0,
-          fields: [],
-          configNotFound: true,
-        });
-      }
+      console.error('[SettingsComparison] Error loading capital allocation defaults:', err);
+      // Handle 404 as "not configured", other errors as partial failure
+      results.push({
+        settingType: 'capital_allocation',
+        settingName: 'Capital Allocation',
+        icon: <Wallet className="w-6 h-6 text-green-400" />,
+        allMatch: false,
+        totalChanges: -1,
+        totalFields: 0,
+        fields: [],
+        configNotFound: true,
+      });
     }
 
     return results;

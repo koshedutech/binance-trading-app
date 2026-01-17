@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { useAuth, TIER_INFO } from '../contexts/AuthContext';
 import { PositionsHeader } from './PositionsHeader';
 import APIHealthIndicator from './APIHealthIndicator';
+import { ConnectionStatus } from './ConnectionStatus';
 
 // Tier badge colors
 const tierColors: Record<string, { bg: string; text: string }> = {
@@ -150,8 +151,13 @@ export default function Header() {
           </div>
 
           <div className="flex items-center space-x-4">
-            {/* API Health Status - only show when logged in */}
-            {user && <APIHealthIndicator />}
+            {/* Connection and API Health Status - only show when logged in */}
+            {user && (
+              <>
+                <ConnectionStatus />
+                <APIHealthIndicator />
+              </>
+            )}
 
             {botStatus && (
               <div className="flex items-center space-x-2">

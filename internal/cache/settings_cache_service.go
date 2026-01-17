@@ -481,7 +481,7 @@ func (s *SettingsCacheService) GetCapitalAllocation(ctx context.Context, userID 
 	return cap, nil
 }
 
-// UpdateCapitalAllocation updates with write-through (DB first)
+// UpdateCapitalAllocation updates with write-through (DB first, then invalidate cache)
 func (s *SettingsCacheService) UpdateCapitalAllocation(ctx context.Context, userID string, cap *database.UserCapitalAllocation) error {
 	cap.UserID = userID
 	if err := s.repo.SaveUserCapitalAllocation(ctx, cap); err != nil {
@@ -490,8 +490,16 @@ func (s *SettingsCacheService) UpdateCapitalAllocation(ctx context.Context, user
 
 	key := fmt.Sprintf("user:%s:capital_allocation", userID)
 	if s.cache.IsHealthy() {
+		// CRITICAL: Delete old cache entry first to ensure stale data is removed
+		if err := s.cache.Delete(ctx, key); err != nil {
+			s.logger.Warn("[SETTINGS-CACHE] Failed to invalidate cache key %s: %v", key, err)
+		}
+		// Set new value with error logging
 		data, _ := json.Marshal(cap)
-		s.cache.Set(ctx, key, string(data), 0)
+		if err := s.cache.Set(ctx, key, string(data), 0); err != nil {
+			s.logger.Warn("[SETTINGS-CACHE] Failed to update cache key %s: %v", key, err)
+			// Don't fail - DB is source of truth, cache will be repopulated on next read
+		}
 	}
 
 	return nil
@@ -855,8 +863,12 @@ func (s *SettingsCacheService) GetAllUserSettings(ctx context.Context, userID st
 	// Global Trading
 	if globalTrading, err := s.GetGlobalTrading(ctx, userID); err == nil && globalTrading != nil {
 		settings.GlobalTrading = autopilot.GlobalTradingDefaults{
-			RiskLevel:        globalTrading.RiskLevel,
-			MaxUSDAllocation: globalTrading.MaxUSDAllocation,
+			RiskLevel:               globalTrading.RiskLevel,
+			MaxUSDAllocation:        globalTrading.MaxUSDAllocation,
+			ProfitReinvestPercent:   globalTrading.ProfitReinvestPercent,
+			ProfitReinvestRiskLevel: globalTrading.ProfitReinvestRiskLevel,
+			Timezone:                globalTrading.Timezone,
+			TimezoneOffset:          globalTrading.TimezoneOffset,
 		}
 	}
 

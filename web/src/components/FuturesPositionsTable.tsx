@@ -26,10 +26,12 @@ import {
   Brain,
   User,
   Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { wsService } from '../services/websocket';
-import type { FuturesOrder } from '../types/futures';
+import type { FuturesOrder, FuturesPosition } from '../types/futures';
+import type { WSEvent } from '../types';
 
 interface PositionOrders {
   take_profit_orders: FuturesOrder[];
@@ -46,6 +48,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     fetchPositions,
     closePosition,
     isLoading,
+    updatePositions,
   } = useFuturesStore();
 
   const activePositions = useFuturesStore(selectActivePositions);
@@ -100,58 +103,80 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   // State for custom ROI from Ginie positions
   const [roiFromGinie, setRoiFromGinie] = useState<Record<string, number | null>>({});
 
+  // WebSocket-driven position updates
+  // Note: Fallback polling is handled centrally by FallbackPollingManager in App.tsx (Story 12.9)
   useEffect(() => {
-    fetchPositions();
-    // Positions must use REST API - 30s interval to reduce API calls
-    const interval = setInterval(fetchPositions, 30000);
-    return () => clearInterval(interval);
-  }, [fetchPositions]);
-
-  // WebSocket subscription for real-time position updates
-  useEffect(() => {
-    const handleConnect = () => setWsConnected(true);
-    const handleDisconnect = () => setWsConnected(false);
-
-    const handlePositionUpdate = () => {
-      // Refresh positions when WebSocket update received
-      fetchPositions();
-    };
-
-    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
-    wsService.onConnect(handleConnect);
-    wsService.onDisconnect(handleDisconnect);
-    setWsConnected(wsService.isConnected());
-
-    return () => {
-      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
-    };
-  }, [fetchPositions]);
-
-  // Fetch Ginie positions to get custom ROI values
-  useEffect(() => {
-    const fetchGinieROI = async () => {
-      try {
-        const data = await futuresApi.getGinieAutopilotPositions();
-        const roiMap: Record<string, number | null> = {};
-        if (data.positions && Array.isArray(data.positions)) {
-          for (const pos of data.positions) {
-            if ((pos as any).custom_roi_percent !== undefined) {
-              roiMap[pos.symbol] = (pos as any).custom_roi_percent;
-            }
-          }
-        }
-        setRoiFromGinie(roiMap);
-      } catch (err) {
-        console.error('Error fetching Ginie ROI:', err);
+    const handlePositionUpdate = (event: WSEvent) => {
+      // Directly use positions from WebSocket event data
+      const positions = event.data?.positions as FuturesPosition[] | undefined;
+      if (positions && Array.isArray(positions)) {
+        updatePositions(positions);
       }
     };
 
-    fetchGinieROI();
-    const interval = setInterval(fetchGinieROI, 30000);
-    return () => clearInterval(interval);
+    const handleOrderUpdate = () => {
+      // ORDER_UPDATE triggers position orders refresh to update TP/SL display
+      // The actual order data is handled by the centralized FallbackPollingManager
+      // This just triggers a refresh of position-specific orders (TP/SL/Trailing)
+    };
+
+    const handleConnect = () => {
+      setWsConnected(true);
+      // Data sync on reconnect is handled by FallbackPollingManager.syncAll() in App.tsx
+      fetchPositions();
+    };
+
+    const handleDisconnect = () => {
+      setWsConnected(false);
+      // Fallback polling is handled by FallbackPollingManager in App.tsx
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+    wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Initialize connection state
+    setWsConnected(wsService.isConnected());
+
+    // Initial fetch on mount
+    fetchPositions();
+
+    return () => {
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+    };
+  }, [fetchPositions, updatePositions]);
+
+  // Fetch Ginie positions to get custom ROI values - triggered by position updates
+  const fetchGinieROI = useCallback(async () => {
+    try {
+      const data = await futuresApi.getGinieAutopilotPositions();
+      const roiMap: Record<string, number | null> = {};
+      if (data.positions && Array.isArray(data.positions)) {
+        for (const pos of data.positions) {
+          if ((pos as any).custom_roi_percent !== undefined) {
+            roiMap[pos.symbol] = (pos as any).custom_roi_percent;
+          }
+        }
+      }
+      setRoiFromGinie(roiMap);
+    } catch (err) {
+      console.error('Error fetching Ginie ROI:', err);
+    }
   }, []);
 
-  // Fetch orders for each position
+  // Fetch Ginie ROI when positions change (triggered by WebSocket updates)
+  useEffect(() => {
+    if (activePositions.length > 0) {
+      fetchGinieROI();
+    }
+  }, [activePositions, fetchGinieROI]);
+
+  // Fetch orders for each position - triggered by position updates (via WebSocket)
   useEffect(() => {
     const fetchOrders = async () => {
       const orders: Record<string, PositionOrders> = {};
@@ -172,8 +197,6 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
 
     if (activePositions.length > 0) {
       fetchOrders();
-      const interval = setInterval(fetchOrders, 30000); // Reduced from 10s to 30s to avoid rate limits
-      return () => clearInterval(interval);
     }
   }, [activePositions]);
 
@@ -280,8 +303,10 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
         <div className="flex items-center gap-3">
           <span className="font-semibold">Positions</span>
-          {wsConnected && (
+          {wsConnected ? (
             <Wifi className="w-3 h-3 text-green-500" title="Real-time updates via WebSocket" />
+          ) : (
+            <WifiOff className="w-3 h-3 text-yellow-500" title="WebSocket disconnected - using 60s fallback polling" />
           )}
           <span className="text-sm text-gray-400">({activePositions.length})</span>
         </div>

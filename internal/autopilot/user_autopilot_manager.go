@@ -227,7 +227,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// Epic 7: Create per-user ClientOrderIdGenerator for trade lifecycle tracking
 	// settingsCache implements orders.SequenceProvider interface
 	var clientOrderIdGen *orders.ClientOrderIdGenerator
-	if m.settingsCache != nil {
+	if isSettingsCacheValid(m.settingsCache) {
 		// Story 7.6: Load user's timezone preference for clientOrderId date formatting
 		var userTimezone *time.Location
 		if tzStr, err := m.repo.GetUserTimezone(ctx, userID); err == nil && tzStr != "" {

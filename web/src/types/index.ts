@@ -184,6 +184,116 @@ export interface WSEvent {
   data: Record<string, any>;
 }
 
+// ============================================================================
+// Epic 12: WebSocket Real-Time Data Migration - Payload Interfaces
+// ============================================================================
+
+// Chain Update Payload - sent when order chain state changes
+export interface ChainUpdatePayload {
+  chainId: string;
+  orders: Order[];
+  status: 'active' | 'partial' | 'completed' | 'cancelled';
+  symbol: string;
+  mode: string;
+  entryOrderId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Lifecycle Event Payload - sent when trade lifecycle event is logged
+export interface LifecycleEventPayload {
+  tradeId: string;
+  chainId: string;
+  eventType: string;
+  symbol: string;
+  side: string;
+  mode: string;
+  details: Record<string, any>;
+  timestamp: string;
+}
+
+// Ginie Status Payload - sent when autopilot status changes
+export interface GinieStatusPayload {
+  isRunning: boolean;
+  currentMode: string;
+  activePositions: number;
+  lastSignalTime: string | null;
+  dailyPnL: number;
+  status: 'idle' | 'scanning' | 'trading' | 'paused' | 'error';
+  message?: string;
+}
+
+// Circuit Breaker Payload - sent when circuit breaker triggers/resets
+export interface CircuitBreakerPayload {
+  isTriggered: boolean;
+  triggerReason: string | null;
+  triggeredAt: string | null;
+  cooldownEnds: string | null;
+  dailyLossPercent?: number;
+  maxAllowedLossPercent?: number;
+}
+
+// PnL Payload - sent when P&L is recalculated
+export interface PnLPayload {
+  totalPnL: number;
+  dailyPnL: number;
+  unrealizedPnL: number;
+  realizedPnL: number;
+  todayTrades: number;
+  winRate: number;
+}
+
+// Mode Status Payload - sent when trading mode status changes
+export interface ModeStatusPayload {
+  mode: string;
+  enabled: boolean;
+  activePositions: number;
+  dailyPnL: number;
+  status: 'active' | 'paused' | 'disabled';
+}
+
+// System Status Payload - sent when system health changes
+export interface SystemStatusPayload {
+  binanceConnected: boolean;
+  databaseConnected: boolean;
+  redisConnected: boolean;
+  websocketClients: number;
+  uptime: number;
+  lastHealthCheck: string;
+}
+
+// Signal Update Payload - sent when AI generates a signal
+export interface SignalUpdatePayload {
+  id: string;
+  symbol: string;
+  direction: 'LONG' | 'SHORT';
+  mode: string;
+  confidence: number;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number[];
+  generatedAt: string;
+  expiresAt: string;
+  status: 'pending' | 'executed' | 'expired' | 'cancelled';
+}
+
+// WebSocket Event Types for Epic 12
+export type WebSocketEventType =
+  | 'CONNECTED'
+  | 'POSITION_UPDATE'
+  | 'ORDER_UPDATE'
+  | 'BALANCE_UPDATE'
+  | 'TRADE_UPDATE'
+  | 'SIGNAL_GENERATED'
+  | 'CHAIN_UPDATE'
+  | 'LIFECYCLE_EVENT'
+  | 'GINIE_STATUS_UPDATE'
+  | 'CIRCUIT_BREAKER_UPDATE'
+  | 'PNL_UPDATE'
+  | 'MODE_STATUS_UPDATE'
+  | 'SYSTEM_STATUS_UPDATE'
+  | 'SIGNAL_UPDATE';
+
 // Chart Data
 export interface CandleData {
   time: number;
