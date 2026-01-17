@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/orders"
 
 	"github.com/gin-gonic/gin"
 )
@@ -688,6 +690,344 @@ func (s *Server) handleGetAllFuturesOrders(c *gin.Context) {
 		"total_algo":     len(algoOrders),
 	})
 }
+
+// ==================== ORDER CHAINS WITH STATE ====================
+// Story 7.14: Order Chain Backend Integration
+
+// OrderChainWithState represents an order chain with associated position state and modification counts
+type OrderChainWithState struct {
+	ChainID            string                 `json:"chain_id"`
+	ModeCode           string                 `json:"mode_code"`
+	Symbol             string                 `json:"symbol"`
+	PositionSide       string                 `json:"position_side"`
+	Orders             []ChainOrderInfo       `json:"orders"`
+	PositionState      *PositionStateInfo     `json:"position_state,omitempty"`
+	ModificationCounts map[string]int         `json:"modification_counts"`
+	Status             string                 `json:"status"` // active, partial, closed
+	TotalValue         float64                `json:"total_value"`
+	FilledValue        float64                `json:"filled_value"`
+	CreatedAt          int64                  `json:"created_at"`
+	UpdatedAt          int64                  `json:"updated_at"`
+}
+
+// ChainOrderInfo represents order info within a chain
+type ChainOrderInfo struct {
+	OrderID       int64   `json:"order_id"`
+	ClientOrderID string  `json:"client_order_id"`
+	OrderType     string  `json:"order_type"` // E, SL, TP1, TP2, etc.
+	Symbol        string  `json:"symbol"`
+	Side          string  `json:"side"`
+	Type          string  `json:"type"` // MARKET, LIMIT, STOP_MARKET
+	Status        string  `json:"status"`
+	Price         float64 `json:"price"`
+	StopPrice     float64 `json:"stop_price,omitempty"`
+	Quantity      float64 `json:"quantity"`
+	ExecutedQty   float64 `json:"executed_qty"`
+	AvgPrice      float64 `json:"avg_price,omitempty"`
+	Time          int64   `json:"time"`
+	UpdateTime    int64   `json:"update_time"`
+	IsAlgo        bool    `json:"is_algo"` // True if this is an algo/conditional order
+}
+
+// PositionStateInfo represents position state info for API response
+type PositionStateInfo struct {
+	ID                 int64   `json:"id"`
+	ChainID            string  `json:"chain_id"`
+	Symbol             string  `json:"symbol"`
+	EntryOrderID       int64   `json:"entry_order_id"`
+	EntryClientOrderID string  `json:"entry_client_order_id"`
+	EntrySide          string  `json:"entry_side"` // BUY or SELL
+	EntryPrice         float64 `json:"entry_price"`
+	EntryQuantity      float64 `json:"entry_quantity"`
+	EntryValue         float64 `json:"entry_value"`
+	EntryFees          float64 `json:"entry_fees"`
+	EntryFilledAt      string  `json:"entry_filled_at"` // ISO 8601
+	Status             string  `json:"status"`          // ACTIVE, PARTIAL, CLOSED
+	RemainingQuantity  float64 `json:"remaining_quantity"`
+	RealizedPnL        float64 `json:"realized_pnl"`
+	CreatedAt          string  `json:"created_at"` // ISO 8601
+	UpdatedAt          string  `json:"updated_at"` // ISO 8601
+	ClosedAt           string  `json:"closed_at,omitempty"` // ISO 8601
+}
+
+// handleGetOrderChainsWithState returns order chains with position states and modification counts
+// Story 7.14: Order Chain Backend Integration
+// GET /api/futures/order-chains
+func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	// Parse query filters
+	symbolFilter := c.Query("symbol")
+	modeFilter := c.Query("mode")
+	statusFilter := c.Query("status") // active, partial, closed
+
+	// 1. Get regular open orders from Binance
+	regularOrders, err := futuresClient.GetOpenOrders(symbolFilter)
+	if err != nil {
+		regularOrders = []binance.FuturesOrder{}
+	}
+
+	// 2. Get algo/conditional orders (TP/SL orders)
+	algoOrders, err := futuresClient.GetOpenAlgoOrders(symbolFilter)
+	if err != nil {
+		algoOrders = []binance.AlgoOrder{}
+	}
+
+	// 3. Group orders by chain ID
+	chains := make(map[string]*OrderChainWithState)
+	chainIDs := make([]string, 0)
+
+	// Process regular orders
+	for _, order := range regularOrders {
+		chainID := parseChainIDFromClientOrderID(order.ClientOrderId)
+		if chainID == "" {
+			continue // Skip orders without our format
+		}
+
+		// Apply mode filter
+		if modeFilter != "" {
+			modeCode := extractModeCodeFromChainID(chainID)
+			if modeCode != strings.ToUpper(modeFilter) {
+				continue
+			}
+		}
+
+		if chains[chainID] == nil {
+			chains[chainID] = &OrderChainWithState{
+				ChainID:            chainID,
+				ModeCode:           extractModeCodeFromChainID(chainID),
+				Symbol:             order.Symbol,
+				PositionSide:       order.PositionSide,
+				Orders:             []ChainOrderInfo{},
+				ModificationCounts: make(map[string]int),
+				Status:             "active",
+				CreatedAt:          order.Time,
+				UpdatedAt:          order.UpdateTime,
+			}
+			chainIDs = append(chainIDs, chainID)
+		}
+
+		orderType := extractOrderTypeFromClientOrderID(order.ClientOrderId)
+		chains[chainID].Orders = append(chains[chainID].Orders, ChainOrderInfo{
+			OrderID:       order.OrderId,
+			ClientOrderID: order.ClientOrderId,
+			OrderType:     orderType,
+			Symbol:        order.Symbol,
+			Side:          order.Side,
+			Type:          order.Type,
+			Status:        order.Status,
+			Price:         order.Price,
+			StopPrice:     order.StopPrice,
+			Quantity:      order.OrigQty,
+			ExecutedQty:   order.ExecutedQty,
+			AvgPrice:      order.AvgPrice,
+			Time:          order.Time,
+			UpdateTime:    order.UpdateTime,
+			IsAlgo:        false,
+		})
+
+		// Update timestamps
+		if order.UpdateTime > chains[chainID].UpdatedAt {
+			chains[chainID].UpdatedAt = order.UpdateTime
+		}
+		if order.Time < chains[chainID].CreatedAt || chains[chainID].CreatedAt == 0 {
+			chains[chainID].CreatedAt = order.Time
+		}
+	}
+
+	// Process algo orders (TP/SL orders)
+	for _, order := range algoOrders {
+		chainID := parseChainIDFromClientOrderID(order.ClientAlgoId)
+		if chainID == "" {
+			continue
+		}
+
+		// Apply mode filter
+		if modeFilter != "" {
+			modeCode := extractModeCodeFromChainID(chainID)
+			if modeCode != strings.ToUpper(modeFilter) {
+				continue
+			}
+		}
+
+		if chains[chainID] == nil {
+			chains[chainID] = &OrderChainWithState{
+				ChainID:            chainID,
+				ModeCode:           extractModeCodeFromChainID(chainID),
+				Symbol:             order.Symbol,
+				PositionSide:       order.PositionSide,
+				Orders:             []ChainOrderInfo{},
+				ModificationCounts: make(map[string]int),
+				Status:             "active",
+				CreatedAt:          order.CreateTime,
+				UpdatedAt:          order.UpdateTime,
+			}
+			chainIDs = append(chainIDs, chainID)
+		}
+
+		orderType := extractOrderTypeFromClientOrderID(order.ClientAlgoId)
+		chains[chainID].Orders = append(chains[chainID].Orders, ChainOrderInfo{
+			OrderID:       order.AlgoId,
+			ClientOrderID: order.ClientAlgoId,
+			OrderType:     orderType,
+			Symbol:        order.Symbol,
+			Side:          order.Side,
+			Type:          order.OrderType,
+			Status:        order.AlgoStatus,
+			Price:         order.TriggerPrice,
+			StopPrice:     order.TriggerPrice,
+			Quantity:      order.Quantity,
+			ExecutedQty:   order.ExecutedQty,
+			Time:          order.CreateTime,
+			UpdateTime:    order.UpdateTime,
+			IsAlgo:        true,
+		})
+
+		// Update timestamps
+		if order.UpdateTime > chains[chainID].UpdatedAt {
+			chains[chainID].UpdatedAt = order.UpdateTime
+		}
+		if order.CreateTime < chains[chainID].CreatedAt || chains[chainID].CreatedAt == 0 {
+			chains[chainID].CreatedAt = order.CreateTime
+		}
+	}
+
+	// 4. Fetch position states for all chain IDs
+	userIDInt, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+	positionStates, err := s.repo.GetDB().GetPositionStatesByChainIDs(ctx, userIDInt, chainIDs)
+	if err != nil {
+		log.Printf("[ORDER-CHAINS] Error fetching position states: %v", err)
+		positionStates = make(map[string]*orders.PositionState)
+	}
+
+	// 5. Fetch modification counts for all chain IDs (with user_id filter for security)
+	modCounts, err := s.repo.GetDB().GetModificationCountsByChainIDs(ctx, userIDInt, chainIDs)
+	if err != nil {
+		log.Printf("[ORDER-CHAINS] Error fetching modification counts: %v", err)
+		modCounts = make(map[string]map[string]int)
+	}
+
+	// 6. Merge position states and modification counts into chains
+	for chainID, chain := range chains {
+		// Add position state
+		if posState, exists := positionStates[chainID]; exists && posState != nil {
+			chain.PositionState = &PositionStateInfo{
+				ID:                 posState.ID,
+				ChainID:            posState.ChainID,
+				Symbol:             posState.Symbol,
+				EntryOrderID:       posState.EntryOrderID,
+				EntryClientOrderID: posState.EntryClientOrderID,
+				EntrySide:          posState.EntrySide,
+				EntryPrice:         posState.EntryPrice,
+				EntryQuantity:      posState.EntryQuantity,
+				EntryValue:         posState.EntryValue,
+				EntryFees:          posState.EntryFees,
+				EntryFilledAt:      posState.EntryFilledAt.Format(time.RFC3339),
+				Status:             posState.Status,
+				RemainingQuantity:  posState.RemainingQuantity,
+				RealizedPnL:        posState.RealizedPnL,
+				CreatedAt:          posState.CreatedAt.Format(time.RFC3339),
+				UpdatedAt:          posState.UpdatedAt.Format(time.RFC3339),
+			}
+			if posState.ClosedAt != nil {
+				chain.PositionState.ClosedAt = posState.ClosedAt.Format(time.RFC3339)
+			}
+
+			// Update chain status based on position state
+			chain.Status = strings.ToLower(posState.Status)
+			chain.TotalValue = posState.EntryValue
+			chain.FilledValue = posState.EntryValue
+		}
+
+		// Add modification counts
+		if counts, exists := modCounts[chainID]; exists {
+			chain.ModificationCounts = counts
+		}
+	}
+
+	// 7. Apply status filter
+	if statusFilter != "" {
+		filteredChains := make(map[string]*OrderChainWithState)
+		for chainID, chain := range chains {
+			if strings.EqualFold(chain.Status, statusFilter) {
+				filteredChains[chainID] = chain
+			}
+		}
+		chains = filteredChains
+	}
+
+	// 8. Convert map to slice for response
+	result := make([]*OrderChainWithState, 0, len(chains))
+	for _, chain := range chains {
+		result = append(result, chain)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"chains":      result,
+		"total":       len(result),
+		"chain_count": len(result),
+	})
+}
+
+// parseChainIDFromClientOrderID extracts the chain ID from a client order ID
+// Example: "SCA-06JAN-00001-TP1" -> "SCA-06JAN-00001"
+func parseChainIDFromClientOrderID(clientOrderID string) string {
+	if clientOrderID == "" {
+		return ""
+	}
+	parts := strings.Split(clientOrderID, "-")
+	if len(parts) < 4 {
+		return ""
+	}
+	// Join first 3 parts for normal IDs: MODE-DATE-SEQ
+	// For fallback IDs: MODE-FALLBACK-UUID (3 parts)
+	if parts[1] == "FALLBACK" && len(parts) >= 3 {
+		return strings.Join(parts[:3], "-")
+	}
+	if len(parts) >= 3 {
+		return strings.Join(parts[:3], "-")
+	}
+	return ""
+}
+
+// extractModeCodeFromChainID extracts the mode code from a chain ID
+// Example: "SCA-06JAN-00001" -> "SCA"
+func extractModeCodeFromChainID(chainID string) string {
+	parts := strings.Split(chainID, "-")
+	if len(parts) >= 1 {
+		return parts[0]
+	}
+	return ""
+}
+
+// extractOrderTypeFromClientOrderID extracts the order type from a client order ID
+// Example: "SCA-06JAN-00001-TP1" -> "TP1"
+func extractOrderTypeFromClientOrderID(clientOrderID string) string {
+	if clientOrderID == "" {
+		return ""
+	}
+	parts := strings.Split(clientOrderID, "-")
+	if len(parts) >= 4 {
+		return parts[len(parts)-1]
+	}
+	return ""
+}
+
+// ==================== END ORDER CHAINS WITH STATE ====================
 
 // handleCloseFuturesPosition closes a futures position
 func (s *Server) handleCloseFuturesPosition(c *gin.Context) {
@@ -2355,25 +2695,23 @@ func (s *Server) getUserTimezone(ctx context.Context, userID string) (*time.Loca
 	return loc, tzName, tzOffset
 }
 
-// getStartOfDayForUser returns the start of the current day in user's timezone as Unix milliseconds
+// getStartOfDayForUser returns the start of the current day in UTC as Unix milliseconds
+// Binance uses UTC 00:00 as the daily reset time for PnL calculations
 func getStartOfDayForUser(loc *time.Location) int64 {
-	now := time.Now().In(loc)
-	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	// Use UTC for Binance PnL calculations (daily reset at 00:00 UTC)
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	return startOfDay.UnixMilli()
 }
 
-// getWeekStartForUser returns the start of the week (Thursday) in user's timezone
+// getWeekStartForUser returns the start of the last 7 days (rolling week) in UTC
+// Binance PnL Analysis shows "7 days" as the last 7 days, not a fixed Thursday-Wednesday week
 func getWeekStartForUser(loc *time.Location) (int64, string, string) {
-	now := time.Now().In(loc)
+	now := time.Now().UTC()
 
-	// Find the most recent Thursday (Binance weekly reset day)
-	daysFromThursday := int(now.Weekday()) - int(time.Thursday)
-	if daysFromThursday < 0 {
-		daysFromThursday += 7
-	}
-
-	weekStart := time.Date(now.Year(), now.Month(), now.Day()-daysFromThursday, 0, 0, 0, 0, loc)
-	weekEnd := weekStart.AddDate(0, 0, 6)
+	// Last 7 days: today is the end, 6 days ago is the start (7 days total including today)
+	weekStart := time.Date(now.Year(), now.Month(), now.Day()-6, 0, 0, 0, 0, time.UTC)
+	weekEnd := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, time.UTC)
 
 	weekStartStr := weekStart.Format("Jan 2")
 	weekEndStr := weekEnd.Format("Jan 2")
@@ -2381,10 +2719,10 @@ func getWeekStartForUser(loc *time.Location) (int64, string, string) {
 	return weekStart.UnixMilli(), weekStartStr, weekEndStr
 }
 
-// getTimeUntilMidnightForUser returns seconds until midnight in user's timezone
+// getTimeUntilMidnightForUser returns seconds until UTC midnight (Binance daily reset)
 func getTimeUntilMidnightForUser(loc *time.Location) int64 {
-	now := time.Now().In(loc)
-	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, loc)
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
 	return int64(midnight.Sub(now).Seconds())
 }
 
@@ -2409,69 +2747,204 @@ func (s *Server) handleGetPnLSummary(c *gin.Context) {
 	userLoc, userTzName, userTzOffset := s.getUserTimezone(c.Request.Context(), userID)
 	log.Printf("[PNL-SUMMARY] Timezone for user %s: tz=%s, offset=%s", userID, userTzName, userTzOffset)
 
-	// Get time boundaries using user's timezone
-	startOfDayMs := getStartOfDayForUser(userLoc)
-	weekStartMs, weekStartDate, weekEndDate := getWeekStartForUser(userLoc)
+	// Get time boundaries (UTC-based to match Binance)
+	_, weekStartDate, weekEndDate := getWeekStartForUser(userLoc)
 	secondsUntilReset := getTimeUntilMidnightForUser(userLoc)
 
-	// Fetch all income types from Binance (empty string = all types)
-	allRecords, err := futuresClient.GetIncomeHistory("", weekStartMs, 0, 1000)
-	if err != nil {
-		log.Printf("[PNL-SUMMARY] Error fetching income history: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "fetch_failed",
-			"message": "Failed to fetch income history from Binance",
-		})
-		return
+	log.Printf("[PNL-SUMMARY] Week range: %s - %s", weekStartDate, weekEndDate)
+
+	// Calculate per-day PnL breakdown for the last 7 days (calendar view)
+	// Query each day separately to handle high-volume trading that exceeds 1000 records
+	// This approach ensures accurate data for each day regardless of total trade volume
+	nowUTC := time.Now().UTC()
+
+	// Structure to hold each day's data
+	type DayData struct {
+		Date       string  `json:"date"`
+		Day        int     `json:"day"`
+		DayName    string  `json:"day_name"`
+		PnL        float64 `json:"pnl"`
+		Commission float64 `json:"commission"`
+		Rebate     float64 `json:"rebate"`  // Commission rebates (BNB discount, etc.)
+		Funding    float64 `json:"funding"` // Net funding: positive = paid, negative = received
+		Other      float64 `json:"other"`   // Any other income types
+		NetPnL     float64 `json:"net_pnl"`
+		TradeCount int     `json:"trade_count"`
+		IsProfit   bool    `json:"is_profit"`
+		IsToday    bool    `json:"is_today"`
 	}
 
-	// Calculate values by income type for daily and weekly
-	var dailyPnL, dailyCommission, dailyFunding float64
-	var weeklyPnL, weeklyCommission, weeklyFunding float64
-	var dailyTradeCount, weeklyTradeCount int
+	dailyData := make([]DayData, 7)
 
-	for _, record := range allRecords {
-		isToday := record.Time >= startOfDayMs
+	for i := 0; i < 7; i++ {
+		// Day index: 0 = 6 days ago, 6 = today
+		dayOffset := 6 - i
+		dayStart := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day()-dayOffset, 0, 0, 0, 0, time.UTC)
+		dayEnd := dayStart.Add(24 * time.Hour)
+		dayStartMs := dayStart.UnixMilli()
+		// CRITICAL: Binance API includes records AT endTime (inclusive)
+		// Subtract 1ms to make it exclusive - records at 00:00:00 belong to next day
+		dayEndMs := dayEnd.UnixMilli() - 1
 
-		switch record.IncomeType {
-		case "REALIZED_PNL":
-			weeklyPnL += record.Income
-			weeklyTradeCount++
-			if isToday {
-				dailyPnL += record.Income
-				dailyTradeCount++
-			}
-		case "COMMISSION":
-			// Commission is negative (fee paid), we store as positive for display
-			weeklyCommission += -record.Income
-			if isToday {
-				dailyCommission += -record.Income
-			}
-		case "FUNDING_FEE":
-			// Funding fee can be positive (received) or negative (paid)
-			// We store as paid amount (positive = paid, negative = received)
-			weeklyFunding += -record.Income
-			if isToday {
-				dailyFunding += -record.Income
+		// Add small delay between API calls to avoid rate limits (except first call)
+		if i > 0 {
+			time.Sleep(150 * time.Millisecond)
+		}
+
+		// Query this specific day's records from Binance
+		// Using startTime and endTime ensures we get all records for this day
+		dayRecords, dayErr := futuresClient.GetIncomeHistory("", dayStartMs, dayEndMs, 1000)
+		if dayErr != nil {
+			log.Printf("[PNL-SUMMARY] Error fetching day %s records: %v", dayStart.Format("2006-01-02"), dayErr)
+		}
+
+		// Log boundary timestamps for debugging
+		if len(dayRecords) > 0 {
+			firstRec := dayRecords[0]
+			lastRec := dayRecords[len(dayRecords)-1]
+			firstTime := time.UnixMilli(firstRec.Time).UTC()
+			lastTime := time.UnixMilli(lastRec.Time).UTC()
+			log.Printf("[PNL-BOUNDARY] Day %s: count=%d, first=%s (type=%s, %.8f), last=%s (type=%s, %.8f)",
+				dayStart.Format("2006-01-02"), len(dayRecords),
+				firstTime.Format("2006-01-02 15:04:05"), firstRec.IncomeType, firstRec.Income,
+				lastTime.Format("2006-01-02 15:04:05"), lastRec.IncomeType, lastRec.Income)
+		}
+
+		// Sum PnL for this specific day - track ALL income types
+		var dayPnL, dayCommission float64
+		var dayFundingReceived, dayFundingPaid float64 // Track separately
+		var dayRebate float64                          // Commission rebates (BNB discount, API rebate, etc.)
+		var dayOther float64                           // Any other income types
+		var dayTradeCount int
+		otherTypes := make(map[string]float64) // Track unknown types
+
+		for _, record := range dayRecords {
+			switch record.IncomeType {
+			case "REALIZED_PNL":
+				dayPnL += record.Income
+				dayTradeCount++
+			case "COMMISSION":
+				// Commission is negative (fee paid), store as positive for display
+				dayCommission += -record.Income
+			case "FUNDING_FEE":
+				// Funding fee: positive income = received, negative income = paid
+				if record.Income > 0 {
+					dayFundingReceived += record.Income // We received funding
+				} else {
+					dayFundingPaid += -record.Income // We paid funding (make positive)
+				}
+			case "COMMISSION_REBATE", "API_REBATE", "REFERRAL_KICKBACK":
+				// Rebates are positive (money back to us)
+				dayRebate += record.Income
+			default:
+				// Track any other income types we might be missing
+				dayOther += record.Income
+				otherTypes[record.IncomeType] += record.Income
 			}
 		}
+
+		// Log any unknown income types
+		if len(otherTypes) > 0 {
+			log.Printf("[PNL-SUMMARY] Day %s has OTHER income types: %v", dayStart.Format("2006-01-02"), otherTypes)
+		}
+
+		// Net funding fee: how much we paid net (positive = net paid, negative = net received)
+		dayNetFunding := dayFundingPaid - dayFundingReceived
+
+		// Net PnL = Realized PnL - Commission + Rebates - Net Funding + Other
+		// Rebates add to profit (we get money back)
+		// Other income types are added directly (could be positive or negative)
+		rawNetPnL := dayPnL - dayCommission + dayRebate - dayNetFunding + dayOther
+
+		// Truncate final net PnL to 2 decimal places (matches Binance display)
+		// Binance calculates with full precision but truncates for display
+		netPnL := math.Trunc(rawNetPnL*100) / 100
+
+		// Log raw vs truncated for verification
+		log.Printf("[PNL-DEBUG] Day %s: RAW=%.8f, TRUNC=%.2f", dayStart.Format("2006-01-02"), rawNetPnL, netPnL)
+
+		dailyData[i] = DayData{
+			Date:       dayStart.Format("2006-01-02"),
+			Day:        dayStart.Day(),
+			DayName:    dayStart.Format("Mon"),
+			PnL:        dayPnL,
+			Commission: dayCommission,
+			Rebate:     dayRebate,
+			Funding:    dayNetFunding,
+			Other:      dayOther,
+			NetPnL:     netPnL,
+			TradeCount: dayTradeCount,
+			IsProfit:   netPnL >= 0,
+			IsToday:    dayOffset == 0,
+		}
+
+		// Log with precision for debugging
+		log.Printf("[PNL-SUMMARY] Day %s [records=%d]: pnl=$%.2f, comm=$%.2f, fund=$%.2f, NET=$%.2f, trades=%d",
+			dayStart.Format("2006-01-02"), len(dayRecords), dayPnL, dayCommission, dayNetFunding, netPnL, dayTradeCount)
 	}
+
+	// Calculate weekly totals from sum of all 7 daily breakdowns
+	// This ensures weekly total matches the sum of the calendar days shown
+	var weeklyPnL, weeklyCommission, weeklyFunding, weeklyNetPnL float64
+	var weeklyTradeCount int
+
+	for _, day := range dailyData {
+		weeklyPnL += day.PnL
+		weeklyCommission += day.Commission
+		weeklyFunding += day.Funding
+		weeklyNetPnL += day.NetPnL
+		weeklyTradeCount += day.TradeCount
+	}
+
+	// Today's data is the last element (index 6)
+	todayData := dailyData[6]
+	dailyPnL := todayData.PnL
+	dailyCommission := todayData.Commission
+	dailyFunding := todayData.Funding
+	dailyTradeCount := todayData.TradeCount
+
+	// Convert to gin.H for JSON response
+	dailyBreakdown := make([]gin.H, 7)
+	for i, day := range dailyData {
+		dailyBreakdown[i] = gin.H{
+			"date":        day.Date,
+			"day":         day.Day,
+			"day_name":    day.DayName,
+			"pnl":         day.PnL,
+			"commission":  day.Commission,
+			"rebate":      day.Rebate,
+			"funding":     day.Funding,
+			"other":       day.Other,
+			"net_pnl":     day.NetPnL,
+			"trade_count": day.TradeCount,
+			"is_profit":   day.IsProfit,
+			"is_today":    day.IsToday,
+		}
+	}
+
+	log.Printf("[PNL-SUMMARY] Results: daily_net=$%.4f (trades=%d), weekly_net=$%.4f (trades=%d)",
+		todayData.NetPnL, dailyTradeCount, weeklyNetPnL, weeklyTradeCount)
 
 	// Format reset countdown
 	hours := secondsUntilReset / 3600
 	minutes := (secondsUntilReset % 3600) / 60
 	resetCountdown := fmt.Sprintf("%dh %dm", hours, minutes)
 
+	// Calculate when UTC midnight is in user's local time (for display)
+	utcMidnight := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day()+1, 0, 0, 0, 0, time.UTC)
+	resetTimeLocal := utcMidnight.In(userLoc).Format("15:04")
+
 	c.JSON(http.StatusOK, gin.H{
-		// Daily breakdown
+		// Daily breakdown (UTC-based, matches Binance)
 		"daily_pnl":         dailyPnL,
 		"daily_commission":  dailyCommission,
 		"daily_funding":     dailyFunding,
 		"daily_trade_count": dailyTradeCount,
 		"reset_countdown":   resetCountdown,
 		"seconds_to_reset":  secondsUntilReset,
+		"reset_time_local":  resetTimeLocal, // When daily reset happens in user's timezone
 
-		// Weekly breakdown
+		// Weekly breakdown (last 7 days rolling, UTC-based)
 		"weekly_pnl":         weeklyPnL,
 		"weekly_commission":  weeklyCommission,
 		"weekly_funding":     weeklyFunding,
@@ -2480,11 +2953,133 @@ func (s *Server) handleGetPnLSummary(c *gin.Context) {
 		"week_end_date":      weekEndDate,
 		"week_range":         fmt.Sprintf("%s - %s", weekStartDate, weekEndDate),
 
-		// Timezone info (from user's global_trading settings)
-		"timezone":        userTzName,
+		// Per-day breakdown for calendar view (7 boxes)
+		"daily_breakdown": dailyBreakdown,
+
+		// Timezone info
+		"pnl_timezone":    "UTC",       // PnL calculations use UTC to match Binance
+		"timezone":        userTzName,  // User's display timezone
 		"timezone_offset": userTzOffset,
 
 		// Fetch timestamp
 		"fetched_at": time.Now().In(userLoc).Format(time.RFC3339),
+	})
+}
+
+// handleTestDailyPnLFromTrades tests daily PnL calculation using userTrades endpoint
+// This is a test endpoint to verify real-time PnL from trades vs Income History
+// GET /api/futures/test-daily-pnl
+func (s *Server) handleTestDailyPnLFromTrades(c *gin.Context) {
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no_api_keys"})
+		return
+	}
+
+	// Calculate today's UTC boundaries (Binance uses UTC)
+	now := time.Now().UTC()
+	startOfDayUTC := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	startOfDayMs := startOfDayUTC.UnixMilli()
+
+	log.Printf("[TEST-DAILY-PNL] Testing trades-based PnL calculation")
+	log.Printf("[TEST-DAILY-PNL] Today UTC: %s, startOfDayMs: %d", startOfDayUTC.Format(time.RFC3339), startOfDayMs)
+
+	// Get symbols that have been traded recently - check positions first
+	positions, err := futuresClient.GetPositions()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get positions", "details": err.Error()})
+		return
+	}
+
+	// Collect symbols with non-zero positions or recent activity
+	symbolsToCheck := make(map[string]bool)
+	for _, pos := range positions {
+		if pos.PositionAmt != 0 || pos.UnrealizedProfit != 0 {
+			symbolsToCheck[pos.Symbol] = true
+		}
+	}
+
+	// Also check common symbols if no positions found
+	if len(symbolsToCheck) == 0 {
+		// Add recently traded symbol from logs
+		symbolsToCheck["AAVEUSDT"] = true
+	}
+
+	log.Printf("[TEST-DAILY-PNL] Checking symbols: %v", symbolsToCheck)
+
+	// Query trades for each symbol
+	var totalDailyPnL float64
+	var totalCommission float64
+	var tradeCount int
+	var tradeDetails []map[string]interface{}
+
+	for symbol := range symbolsToCheck {
+		trades, err := futuresClient.GetTradeHistoryByDateRange(symbol, startOfDayMs, 0, 1000)
+		if err != nil {
+			log.Printf("[TEST-DAILY-PNL] Error fetching trades for %s: %v", symbol, err)
+			continue
+		}
+
+		for _, trade := range trades {
+			// Only count trades from today (double-check)
+			if trade.Time >= startOfDayMs {
+				totalDailyPnL += trade.RealizedPnl
+				totalCommission += trade.Commission
+				tradeCount++
+
+				// Log each trade for debugging
+				if trade.RealizedPnl != 0 {
+					tradeDetails = append(tradeDetails, map[string]interface{}{
+						"symbol":      trade.Symbol,
+						"side":        trade.Side,
+						"qty":         trade.Qty,
+						"price":       trade.Price,
+						"realizedPnl": trade.RealizedPnl,
+						"commission":  trade.Commission,
+						"time":        time.UnixMilli(trade.Time).UTC().Format(time.RFC3339),
+					})
+				}
+			}
+		}
+	}
+
+	// Also get Income History for comparison
+	incomeRecords, _ := futuresClient.GetIncomeHistory("REALIZED_PNL", startOfDayMs, 0, 1000)
+	var incomeHistoryPnL float64
+	for _, record := range incomeRecords {
+		if record.Time >= startOfDayMs {
+			incomeHistoryPnL += record.Income
+		}
+	}
+
+	log.Printf("[TEST-DAILY-PNL] Results: trades_pnl=$%.4f, income_history_pnl=$%.4f, trade_count=%d",
+		totalDailyPnL, incomeHistoryPnL, tradeCount)
+
+	c.JSON(http.StatusOK, gin.H{
+		"test_name": "Daily PnL from User Trades vs Income History",
+		"date_utc":  startOfDayUTC.Format("2006-01-02"),
+		"current_utc": now.Format(time.RFC3339),
+
+		// From userTrades endpoint (real-time)
+		"trades_based": gin.H{
+			"daily_pnl":        totalDailyPnL,
+			"daily_commission": totalCommission,
+			"net_pnl":          totalDailyPnL - totalCommission,
+			"trade_count":      tradeCount,
+			"source":           "/fapi/v1/userTrades",
+		},
+
+		// From income history endpoint (may have delay)
+		"income_history_based": gin.H{
+			"daily_pnl":     incomeHistoryPnL,
+			"record_count":  len(incomeRecords),
+			"source":        "/fapi/v1/income",
+		},
+
+		// Difference
+		"difference": totalDailyPnL - incomeHistoryPnL,
+
+		// Trade details for verification
+		"trade_details": tradeDetails,
 	})
 }

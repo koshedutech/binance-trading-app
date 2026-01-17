@@ -15,12 +15,14 @@ import {
   Wallet,
   Target,
   FileText,
+  Globe,
 } from 'lucide-react';
 import {
   loadModeDefaults,
   loadCircuitBreakerDefaults,
   loadLLMConfigDefaults,
   loadCapitalAllocationDefaults,
+  loadGlobalTradingDefaults,
   ConfigResetPreview,
   FieldComparison,
 } from '../services/futuresApi';
@@ -74,6 +76,7 @@ interface SettingsComparisonViewProps {
   onResetCircuitBreaker?: () => void;
   onResetLLMConfig?: () => void;
   onResetCapitalAllocation?: () => void;
+  onResetGlobalTrading?: () => void;
   // Admin save handlers
   onSaveMode?: (mode: string, data: any) => void;
   onSaveOtherSetting?: (settingType: string, data: any) => void;
@@ -417,6 +420,7 @@ function SectionHeader({
 const DROPDOWN_OPTIONS: Record<string, string[]> = {
   margin_type: ['ISOLATED', 'CROSS'],
   risk_level: ['conservative', 'moderate', 'aggressive'],
+  profit_reinvest_risk_level: ['conservative', 'moderate', 'aggressive'],
   volatility_min: ['low', 'medium', 'high'],
   volatility_max: ['low', 'medium', 'high'],
   trend_timeframe: ['1m', '5m', '15m', '30m', '1h', '4h', '1d'],
@@ -429,10 +433,20 @@ const DROPDOWN_OPTIONS: Record<string, string[]> = {
   trailing_activation_mode: ['percent', 'atr', 'price'],
 };
 
+// Timezone presets matching Settings page (combined timezone + offset)
+const TIMEZONE_PRESETS = [
+  { tz_identifier: 'UTC', display_name: 'Coordinated Universal Time (UTC)', gmt_offset: '+00:00' },
+  { tz_identifier: 'Asia/Kolkata', display_name: 'India Standard Time (IST)', gmt_offset: '+05:30' },
+  { tz_identifier: 'Asia/Phnom_Penh', display_name: 'Indochina Time (ICT)', gmt_offset: '+07:00' },
+];
+
 // Detect field type from value and field name
-function getFieldType(fieldName: string, value: any): 'boolean' | 'dropdown' | 'number' | 'text' {
+function getFieldType(fieldName: string, value: any): 'boolean' | 'dropdown' | 'timezone' | 'number' | 'text' {
   // Boolean fields
   if (typeof value === 'boolean') return 'boolean';
+
+  // Special timezone field (combined dropdown)
+  if (fieldName === 'timezone') return 'timezone';
 
   // Check if field has dropdown options
   if (DROPDOWN_OPTIONS[fieldName]) return 'dropdown';
@@ -516,6 +530,26 @@ function AdminInput({
           {DROPDOWN_OPTIONS[fieldName].map((opt) => (
             <option key={opt} value={opt}>
               {opt}
+            </option>
+          ))}
+        </select>
+        {isEdited && <span className="text-xs text-orange-400">*</span>}
+      </div>
+    );
+  }
+
+  // Timezone - Combined dropdown matching Settings page
+  if (fieldType === 'timezone') {
+    return (
+      <div className="flex items-center gap-2">
+        <select
+          value={String(value)}
+          onChange={(e) => onChange(e.target.value)}
+          className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-white text-xs font-mono focus:border-blue-500 focus:outline-none min-w-[280px]"
+        >
+          {TIMEZONE_PRESETS.map((preset) => (
+            <option key={preset.tz_identifier} value={preset.tz_identifier}>
+              {preset.display_name} ({preset.gmt_offset})
             </option>
           ))}
         </select>
@@ -1059,6 +1093,7 @@ export default function SettingsComparisonView({
   onResetCircuitBreaker,
   onResetLLMConfig,
   onResetCapitalAllocation,
+  onResetGlobalTrading,
   // Admin save handlers
   onSaveMode,
   onSaveOtherSetting,
@@ -1297,6 +1332,48 @@ export default function SettingsComparisonView({
       });
     }
 
+    // Global Trading (includes timezone)
+    try {
+      console.log('[SettingsComparison] Loading global trading defaults...');
+      const preview = (await loadGlobalTradingDefaults(true)) as ConfigResetPreview;
+      console.log('[SettingsComparison] Global trading preview:', preview);
+      const allFields =
+        preview.all_values ||
+        (preview.differences || []).map((d) => ({
+          path: d.path,
+          current: d.current,
+          default: d.default,
+          match: false,
+          risk_level: d.risk_level,
+        }));
+      console.log('[SettingsComparison] Global trading allFields:', allFields.length);
+
+      results.push({
+        settingType: 'global_trading',
+        settingName: 'Global Trading & Timezone',
+        icon: <Globe className="w-6 h-6 text-blue-400" />,
+        allMatch: preview.all_match,
+        totalChanges: preview.total_changes,
+        totalFields: allFields.length,
+        fields: allFields,
+        isAdmin: preview.is_admin,
+        rawData: preview,
+      });
+    } catch (err: any) {
+      console.error('[SettingsComparison] Error loading global trading defaults:', err);
+      console.error('[SettingsComparison] Error details:', err?.response?.data || err?.message);
+      results.push({
+        settingType: 'global_trading',
+        settingName: 'Global Trading & Timezone',
+        icon: <Globe className="w-6 h-6 text-blue-400" />,
+        allMatch: false,
+        totalChanges: -1,
+        totalFields: 0,
+        fields: [],
+        configNotFound: true,
+      });
+    }
+
     return results;
   }, []);
 
@@ -1468,6 +1545,28 @@ export default function SettingsComparisonView({
   const handleOtherFieldChange = (settingType: string, path: string, value: any) => {
     const originalValue = originalOtherValues[settingType]?.[path];
 
+    // Special handling for timezone - auto-update timezone_offset based on selection
+    // path format: "global_trading.timezone" or just "timezone"
+    const fieldName = path.split('.').pop() || path;
+    if (settingType === 'global_trading' && fieldName === 'timezone') {
+      // Find the matching preset to get the offset
+      const preset = TIMEZONE_PRESETS.find(p => p.tz_identifier === value);
+      const newOffset = preset?.gmt_offset || '+00:00';
+
+      // Build the offset path to match the field path format
+      const offsetPath = path.replace('timezone', 'timezone_offset');
+
+      setEditedOtherValues((prev) => ({
+        ...prev,
+        [settingType]: {
+          ...(prev[settingType] || {}),
+          [path]: value,
+          [offsetPath]: newOffset,
+        },
+      }));
+      return;
+    }
+
     // If value equals original, remove from edited (it's not really changed)
     if (valuesAreEqual(value, originalValue)) {
       setEditedOtherValues((prev) => {
@@ -1633,8 +1732,8 @@ export default function SettingsComparisonView({
         icon={<Settings className="w-6 h-6 text-purple-400" />}
         isExpanded={expandedSections.has('other')}
         onToggle={() => toggleSection('other')}
-        allMatch={otherStats.allMatch}
-        totalItems={otherSettings.filter((s) => !s.configNotFound).length}
+        allMatch={otherStats.allMatch && otherStats.notConfigured === 0}
+        totalItems={otherSettings.length}
         matchingItems={otherStats.upToDate}
         resetButton={
           onResetAllOther && !otherStats.allMatch ? (
@@ -1669,12 +1768,17 @@ export default function SettingsComparisonView({
                   ? onResetLLMConfig
                   : setting.settingType === 'capital_allocation'
                   ? onResetCapitalAllocation
+                  : setting.settingType === 'global_trading'
+                  ? onResetGlobalTrading
                   : undefined;
+
+              // Show all global_trading fields including timezone (same pattern as other fields)
+              const displaySetting = setting;
 
               return (
                 <OtherSettingCard
                   key={setting.settingType}
-                  setting={setting}
+                  setting={displaySetting}
                   isAdmin={isAdmin}
                   isExpanded={expandedOtherSettings.has(setting.settingType)}
                   onToggleExpand={() => toggleOtherSettingExpanded(setting.settingType)}

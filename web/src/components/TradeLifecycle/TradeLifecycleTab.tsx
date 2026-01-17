@@ -1,3 +1,5 @@
+// Story 7.15: Order Chain Tree Structure UI
+// Updated to use getOrderChainsWithState API for position state and modification counts
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Layers,
@@ -10,7 +12,7 @@ import {
   Target,
   Shield,
 } from 'lucide-react';
-import { futuresApi } from '../../services/futuresApi';
+import { futuresApi, OrderChainWithState, PositionStateInfo } from '../../services/futuresApi';
 import { wsService } from '../../services/websocket';
 import { fallbackManager } from '../../services/fallbackPollingManager';
 import { ConnectionStatus } from '../ConnectionStatus';
@@ -23,6 +25,7 @@ import {
   groupOrdersIntoChains,
   parseClientOrderId,
   TradingModeCode,
+  PositionState,
 } from './types';
 import type { WSEvent } from '../../types';
 
@@ -47,7 +50,95 @@ export default function TradeLifecycleTab({
     side: 'all',
   });
 
-  // Fetch open orders and group into chains (memoized for useEffect dependency)
+  // Helper: Convert API PositionStateInfo to frontend PositionState
+  const mapPositionState = (state: PositionStateInfo): PositionState => ({
+    id: state.id,
+    chainId: state.chain_id,
+    symbol: state.symbol,
+    entryOrderId: state.entry_order_id,
+    entryClientOrderId: state.entry_client_order_id,
+    entrySide: state.entry_side,
+    entryPrice: state.entry_price,
+    entryQuantity: state.entry_quantity,
+    entryValue: state.entry_value,
+    entryFees: state.entry_fees,
+    entryFilledAt: state.entry_filled_at,
+    status: state.status,
+    remainingQuantity: state.remaining_quantity,
+    realizedPnl: state.realized_pnl,
+    createdAt: state.created_at,
+    updatedAt: state.updated_at,
+    closedAt: state.closed_at,
+  });
+
+  // Helper: Convert API OrderChainWithState to frontend OrderChain
+  const mapOrderChainWithState = (apiChain: OrderChainWithState): OrderChain => {
+    // Transform orders from API format to ChainOrder format
+    const chainOrders: ChainOrder[] = apiChain.orders.map(order => {
+      const parsed = parseClientOrderId(order.client_order_id);
+      return {
+        orderId: order.order_id,
+        clientOrderId: order.client_order_id,
+        symbol: order.symbol,
+        side: order.side as 'BUY' | 'SELL',
+        positionSide: apiChain.position_side as 'LONG' | 'SHORT' | 'BOTH',
+        type: order.type,
+        status: order.status,
+        price: order.price,
+        avgPrice: order.avg_price || 0,
+        origQty: order.quantity,
+        executedQty: order.executed_qty,
+        stopPrice: order.stop_price || 0,
+        time: order.time,
+        updateTime: order.update_time,
+        orderType: parsed.orderType,
+        parsed,
+      };
+    });
+
+    // Parse chain ID for mode code, date, etc.
+    const firstParsed = chainOrders.length > 0 ? chainOrders[0].parsed : null;
+
+    // Group orders by type
+    const entryOrder = chainOrders.find(o => o.orderType === 'E') || null;
+    const tpOrders = chainOrders.filter(o => o.orderType && ['TP1', 'TP2', 'TP3'].includes(o.orderType));
+    const slOrder = chainOrders.find(o => o.orderType === 'SL') || null;
+    const dcaOrders = chainOrders.filter(o => o.orderType && ['DCA1', 'DCA2', 'DCA3'].includes(o.orderType));
+    const rebuyOrder = chainOrders.find(o => o.orderType === 'RB') || null;
+    const hedgeOrder = chainOrders.find(o => o.orderType === 'H') || null;
+    const hedgeSLOrder = chainOrders.find(o => o.orderType === 'HSL') || null;
+    const hedgeTPOrder = chainOrders.find(o => o.orderType === 'HTP') || null;
+
+    return {
+      chainId: apiChain.chain_id,
+      modeCode: (apiChain.mode_code as TradingModeCode) || null,
+      dateStr: firstParsed?.dateStr || null,
+      sequence: firstParsed?.sequence || null,
+      symbol: apiChain.symbol,
+      side: entryOrder?.side as 'BUY' | 'SELL' || null,
+      positionSide: (apiChain.position_side as 'LONG' | 'SHORT' | 'BOTH') || null,
+      orders: chainOrders,
+      entryOrder,
+      tpOrders,
+      slOrder,
+      dcaOrders,
+      rebuyOrder,
+      hedgeOrder,
+      hedgeSLOrder,
+      hedgeTPOrder,
+      status: apiChain.status as 'active' | 'partial' | 'completed' | 'cancelled',
+      totalValue: apiChain.total_value,
+      filledValue: apiChain.filled_value,
+      createdAt: apiChain.created_at,
+      updatedAt: apiChain.updated_at,
+      isFallback: false,
+      // Story 7.15: Position state and modification counts from new API
+      positionState: apiChain.position_state ? mapPositionState(apiChain.position_state) : undefined,
+      modificationCounts: apiChain.modification_counts || undefined,
+    };
+  };
+
+  // Fetch order chains with state (Story 7.15: Use new API endpoint)
   // Uses fetchInFlightRef to prevent race conditions from concurrent calls
   const fetchOrders = useCallback(async () => {
     // Prevent concurrent fetch calls (race condition protection)
@@ -57,75 +148,118 @@ export default function TradeLifecycleTab({
     fetchInFlightRef.current = true;
 
     try {
-      // Fetch ALL orders (regular + algo) from Binance via our API
-      const response = await futuresApi.getAllOrders();
+      // Story 7.15: Use new getOrderChainsWithState API
+      const response = await futuresApi.getOrderChainsWithState();
 
-      if (!response) {
-        setChains([]);
+      if (!response || !response.chains) {
+        // Fallback to old API if new endpoint fails or returns empty
+        const fallbackResponse = await futuresApi.getAllOrders();
+        if (!fallbackResponse) {
+          setChains([]);
+          setError(null);
+          return;
+        }
+
+        // Original transformation logic for fallback
+        const chainOrders: ChainOrder[] = [];
+
+        // Define type for legacy API order format (regular orders)
+        interface LegacyRegularOrder {
+          orderId: number;
+          clientOrderId?: string;
+          symbol: string;
+          side: 'BUY' | 'SELL';
+          positionSide?: 'LONG' | 'SHORT' | 'BOTH';
+          type: string;
+          status: string;
+          price?: string | number;
+          avgPrice?: string | number;
+          origQty?: string | number;
+          executedQty?: string | number;
+          stopPrice?: string | number;
+          time?: number;
+          updateTime?: number;
+        }
+
+        // Define type for legacy API algo order format
+        interface LegacyAlgoOrder {
+          algoId: number;
+          clientAlgoId?: string;
+          symbol: string;
+          side: string;
+          positionSide?: string;
+          orderType?: string;
+          algoType?: string;
+          algoStatus?: string;
+          price?: string | number;
+          quantity?: string | number;
+          executedQty?: string | number;
+          triggerPrice?: string | number;
+          createTime?: number;
+          updateTime?: number;
+        }
+
+        if (fallbackResponse.regular_orders && Array.isArray(fallbackResponse.regular_orders)) {
+          (fallbackResponse.regular_orders as LegacyRegularOrder[])
+            .filter((order) => order.clientOrderId)
+            .forEach((order) => {
+              const parsed = parseClientOrderId(order.clientOrderId!);
+              chainOrders.push({
+                orderId: order.orderId,
+                clientOrderId: order.clientOrderId!,
+                symbol: order.symbol,
+                side: order.side,
+                positionSide: order.positionSide || 'BOTH',
+                type: order.type,
+                status: order.status,
+                price: parseFloat(String(order.price || 0)) || 0,
+                avgPrice: parseFloat(String(order.avgPrice || 0)) || 0,
+                origQty: parseFloat(String(order.origQty || 0)) || 0,
+                executedQty: parseFloat(String(order.executedQty || 0)) || 0,
+                stopPrice: parseFloat(String(order.stopPrice || 0)) || 0,
+                time: order.time || Date.now(),
+                updateTime: order.updateTime || Date.now(),
+                orderType: parsed.orderType,
+                parsed,
+              });
+            });
+        }
+
+        if (fallbackResponse.algo_orders && Array.isArray(fallbackResponse.algo_orders)) {
+          (fallbackResponse.algo_orders as LegacyAlgoOrder[])
+            .filter((order) => order.clientAlgoId)
+            .forEach((order) => {
+              const parsed = parseClientOrderId(order.clientAlgoId!);
+              chainOrders.push({
+                orderId: order.algoId || 0,
+                clientOrderId: order.clientAlgoId!,
+                symbol: order.symbol,
+                side: (order.side === 'BUY' || order.side === 'SELL' ? order.side : 'BUY') as 'BUY' | 'SELL',
+                positionSide: ((order.positionSide === 'LONG' || order.positionSide === 'SHORT' || order.positionSide === 'BOTH') ? order.positionSide : 'BOTH') as 'LONG' | 'SHORT' | 'BOTH',
+                type: order.orderType || order.algoType || 'UNKNOWN',
+                status: order.algoStatus || 'NEW',
+                price: parseFloat(String(order.price || 0)) || 0,
+                avgPrice: 0,
+                origQty: parseFloat(String(order.quantity || 0)) || 0,
+                executedQty: parseFloat(String(order.executedQty || 0)) || 0,
+                stopPrice: parseFloat(String(order.triggerPrice || 0)) || 0,
+                time: order.createTime || Date.now(),
+                updateTime: order.updateTime || Date.now(),
+                orderType: parsed.orderType,
+                parsed,
+              });
+            });
+        }
+
+        const grouped = groupOrdersIntoChains(chainOrders);
+        setChains(grouped);
         setError(null);
         return;
       }
 
-      const chainOrders: ChainOrder[] = [];
-
-      // Transform regular orders to ChainOrder format
-      if (response.regular_orders && Array.isArray(response.regular_orders)) {
-        response.regular_orders
-          .filter((order: any) => order.clientOrderId) // Only orders with clientOrderId
-          .forEach((order: any) => {
-            const parsed = parseClientOrderId(order.clientOrderId);
-            chainOrders.push({
-              orderId: order.orderId,
-              clientOrderId: order.clientOrderId,
-              symbol: order.symbol,
-              side: order.side,
-              positionSide: order.positionSide || 'BOTH',
-              type: order.type,
-              status: order.status,
-              price: parseFloat(order.price) || 0,
-              avgPrice: parseFloat(order.avgPrice) || 0,
-              origQty: parseFloat(order.origQty) || 0,
-              executedQty: parseFloat(order.executedQty) || 0,
-              stopPrice: parseFloat(order.stopPrice) || 0,
-              time: order.time || Date.now(),
-              updateTime: order.updateTime || Date.now(),
-              orderType: parsed.orderType,
-              parsed,
-            });
-          });
-      }
-
-      // Transform algo orders (SL/TP) to ChainOrder format
-      // Algo orders use clientAlgoId instead of clientOrderId
-      if (response.algo_orders && Array.isArray(response.algo_orders)) {
-        response.algo_orders
-          .filter((order: any) => order.clientAlgoId) // Only orders with clientAlgoId
-          .forEach((order: any) => {
-            const parsed = parseClientOrderId(order.clientAlgoId);
-            chainOrders.push({
-              orderId: order.algoId, // Use algoId as orderId for algo orders
-              clientOrderId: order.clientAlgoId, // Store clientAlgoId in clientOrderId field
-              symbol: order.symbol,
-              side: order.side,
-              positionSide: order.positionSide || 'BOTH',
-              type: order.orderType || order.algoType, // Use orderType or algoType (STOP_MARKET, TAKE_PROFIT, etc.)
-              status: order.algoStatus || 'NEW', // Use algoStatus
-              price: parseFloat(order.price) || 0,
-              avgPrice: 0, // Algo orders don't have avgPrice
-              origQty: parseFloat(order.quantity) || 0,
-              executedQty: parseFloat(order.executedQty) || 0,
-              stopPrice: parseFloat(order.triggerPrice) || 0, // Use triggerPrice as stopPrice
-              time: order.createTime || Date.now(),
-              updateTime: order.updateTime || Date.now(),
-              orderType: parsed.orderType,
-              parsed,
-            });
-          });
-      }
-
-      // Group into chains
-      const grouped = groupOrdersIntoChains(chainOrders);
-      setChains(grouped);
+      // Story 7.15: Map new API response to OrderChain format
+      const mappedChains = response.chains.map(mapOrderChainWithState);
+      setChains(mappedChains);
       setError(null);
     } catch (err) {
       console.error('Failed to fetch orders:', err);

@@ -18,6 +18,8 @@ import ModeAllocationPanel from '../components/ModeAllocationPanel';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import { TradeLifecycleTab } from '../components/TradeLifecycle';
 import AccountStatsCard from '../components/AccountStatsCard';
+import PnLSummaryCard from '../components/PnLSummaryCard';
+import PositionOptimizationMonitor from '../components/PositionOptimizationMonitor';
 import { formatUSD, getPositionColor } from '../services/futuresApi';
 import {
   Activity,
@@ -83,15 +85,14 @@ export default function FuturesDashboard() {
   }, [fetchSymbols, fetchAccountInfo, fetchPositionMode, fetchMetrics]);
 
   // Fetch data for selected symbol
-  // NOTE: Mark price and funding rate are cached from WebSocket, so longer intervals are fine
   useEffect(() => {
     fetchMarkPrice(selectedSymbol);
     fetchFundingRate(selectedSymbol);
 
-    // Mark price: 60s (WebSocket updates cache in real-time)
+    // Mark price: 5s for responsive price display (like Binance app)
     const markPriceInterval = setInterval(() => {
       fetchMarkPrice(selectedSymbol);
-    }, 60000);
+    }, 5000);
 
     // Funding rate: 5 minutes (only changes every 8 hours, cached for 5 min)
     const fundingInterval = setInterval(() => {
@@ -104,14 +105,23 @@ export default function FuturesDashboard() {
     };
   }, [selectedSymbol, fetchMarkPrice, fetchFundingRate]);
 
-  // NOTE: Account/position/metrics updates are now handled by:
-  // - FuturesPositionsTable: subscribes to POSITION_UPDATE, BALANCE_UPDATE
-  // - GiniePanel: subscribes to GINIE_STATUS_UPDATE, POSITION_UPDATE, BALANCE_UPDATE
-  // - AccountStatsCard: subscribes to BALANCE_UPDATE, POSITION_UPDATE
-  // - FallbackPollingManager (60s) handles disconnection scenarios
-  // No separate polling needed here - child components handle their own data.
+  // Periodic polling for real-time data updates (like Binance app)
+  // NOTE: Binance User Data Stream only sends events on actual changes (trades, orders)
+  // It does NOT continuously push price updates or unrealized PnL.
+  // We poll every 5 seconds for responsive updates similar to Binance's own app.
+  useEffect(() => {
+    // Poll every 5 seconds for positions and account info (Binance uses 1-3s internally)
+    const pollingInterval = setInterval(() => {
+      fetchPositions();
+      fetchAccountInfo();
+    }, 5000);
 
-  // WebSocket subscription for real-time balance updates in header
+    return () => {
+      clearInterval(pollingInterval);
+    };
+  }, [fetchPositions, fetchAccountInfo]);
+
+  // WebSocket subscription for immediate updates on actual events
   useEffect(() => {
     const handleBalanceUpdate = (event: WSEvent) => {
       // Trigger refetch for balance updates
@@ -334,9 +344,19 @@ export default function FuturesDashboard() {
         <GiniePanel />
       </div>
 
-      {/* Account Summary & P&L - Collapsible Stats Card */}
+      {/* Account Summary - Collapsible Stats Card */}
       <div className="mb-4">
         <AccountStatsCard />
+      </div>
+
+      {/* P&L Summary - Daily & Weekly */}
+      <div className="mb-4">
+        <PnLSummaryCard />
+      </div>
+
+      {/* Position Optimization Monitor - Before Positions */}
+      <div className="mb-4">
+        <PositionOptimizationMonitor />
       </div>
 
       {/* Positions Table */}

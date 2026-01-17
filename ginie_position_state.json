@@ -1,20 +1,20 @@
 {
   "positions": {
-    "ICPUSDT": {
-      "symbol": "ICPUSDT",
+    "ARBUSDT": {
+      "symbol": "ARBUSDT",
       "side": "LONG",
       "mode": "scalp",
       "current_tp_level": 0,
       "scalp_reentry": {
         "enabled": true,
         "current_cycle": 0,
-        "cycles": [],
+        "cycles": null,
         "accumulated_profit": 0,
         "tp_level_unlocked": 0,
         "next_tp_blocked": false,
-        "original_entry_price": 4.23,
-        "current_breakeven": 4.23,
-        "remaining_quantity": 47,
+        "original_entry_price": 0.2197,
+        "current_breakeven": 0.2197,
+        "remaining_quantity": 227,
         "dynamic_sl_active": false,
         "dynamic_sl_price": 0,
         "protected_profit": 0,
@@ -24,24 +24,21 @@
         "final_trailing_peak": 0,
         "final_trailing_percent": 0,
         "final_trailing_active": false,
-        "reentry_percent": 0.5,
-        "reentry_price_buffer": 0.0005,
+        "reentry_percent": 0,
+        "reentry_price_buffer": 0,
         "total_cycles_completed": 0,
         "total_reentries": 0,
         "successful_reentries": 0,
         "skipped_reentries": 0,
         "total_cycle_pnl": 0,
-        "started_at": "2026-01-16T17:33:58.342996501Z",
-        "last_update": "2026-01-16T17:33:58.343052808Z",
-        "debug_log": [
-          "17:33:58: [Story 9.9] Initialized position_optimization for ICPUSDT LONG @ 4.23000000 (mode: scalp, TP1=0.4%, TP2=0.7%, TP3=1.0%)"
-        ],
+        "started_at": "0001-01-01T00:00:00Z",
+        "last_update": "0001-01-01T00:00:00Z",
         "needs_manual_intervention": false,
         "manual_intervention_reason": "",
         "manual_intervention_alert_at": ""
       },
-      "saved_at": "2026-01-16T17:33:58.343852307Z"
+      "saved_at": "2026-01-17T20:03:06.591855843Z"
     }
   },
-  "updated_at": "2026-01-16T17:33:58.343835905Z"
+  "updated_at": "2026-01-17T20:03:06.572626641Z"
 }

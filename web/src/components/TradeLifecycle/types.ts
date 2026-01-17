@@ -1,8 +1,10 @@
 // Trade Lifecycle Tab - Types for Order Chain Visualization
 // Epic 7: Client Order ID & Trade Lifecycle Tracking
+// Story 7.15: Added PositionState and tree structure types
 
 // Order type suffixes used in client order IDs
-export type OrderTypeSuffix = 'E' | 'TP1' | 'TP2' | 'TP3' | 'RB' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'SL';
+// POSITION is a virtual type representing an active position (not a Binance order type)
+export type OrderTypeSuffix = 'E' | 'TP1' | 'TP2' | 'TP3' | 'RB' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'SL' | 'POSITION';
 
 // Trading mode codes
 export type TradingModeCode = 'ULT' | 'SCA' | 'SWI' | 'POS';
@@ -18,6 +20,7 @@ export const MODE_DISPLAY_NAMES: Record<TradingModeCode, string> = {
 // Order type display configuration
 export const ORDER_TYPE_CONFIG: Record<OrderTypeSuffix, { label: string; color: string; bgColor: string; description: string }> = {
   E: { label: 'Entry', color: 'text-green-400', bgColor: 'bg-green-500/20', description: 'Initial entry order' },
+  POSITION: { label: 'Position', color: 'text-purple-400', bgColor: 'bg-purple-500/20', description: 'Active position from filled entry' },
   TP1: { label: 'TP1', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit Level 1' },
   TP2: { label: 'TP2', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit Level 2' },
   TP3: { label: 'TP3', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit Level 3' },
@@ -63,6 +66,28 @@ export interface ChainOrder {
   parsed: ParsedClientOrderId;
 }
 
+// Position state from backend (Story 7.11)
+// Tracks entry order details after it fills, so entry remains visible in chain
+export interface PositionState {
+  id: number;
+  chainId: string;
+  symbol: string;
+  entryOrderId: number;
+  entryClientOrderId: string;
+  entrySide: 'BUY' | 'SELL';
+  entryPrice: number;
+  entryQuantity: number;
+  entryValue: number;
+  entryFees: number;
+  entryFilledAt: string; // ISO 8601
+  status: 'ACTIVE' | 'PARTIAL' | 'CLOSED';
+  remainingQuantity: number;
+  realizedPnl: number;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+  closedAt?: string; // ISO 8601
+}
+
 // Order chain (group of related orders)
 export interface OrderChain {
   chainId: string;
@@ -88,6 +113,9 @@ export interface OrderChain {
   createdAt: number;
   updatedAt: number;
   isFallback: boolean;
+  // Story 7.15: Position state and modification counts from backend
+  positionState?: PositionState;
+  modificationCounts?: Record<string, number>; // e.g., {"SL": 3, "TP1": 2}
 }
 
 // Filter options for chains

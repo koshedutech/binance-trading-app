@@ -118,7 +118,15 @@ development_status:
   epic-6-retrospective: optional
 
   # ============================================================================
-  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - COMPLETE (10/10 done)
+  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - COMPLETE (15/15 done)
+  # Original 10 stories + 5 NEW stories for lifecycle enhancement
+  # All Stories Completed: 2026-01-17
+  #   - 7.11: Position State Tracking - DONE
+  #   - 7.12: Order Modification Event Log - DONE
+  #   - 7.13: Tree Structure UI for Modification History - DONE
+  #   - 7.14: Order Chain Backend Integration - DONE (CODE REVIEW + QA PASSED)
+  #   - 7.15: Order Chain Tree Structure UI - DONE (CODE REVIEW + QA CONCERNS)
+  # QA Note: 7.15 has P2 gaps (timezone, mobile) for follow-up stories
   # ============================================================================
   epic-7: done
   7-1-client-order-id-generation: done          # internal/orders/client_order_id.go
@@ -131,6 +139,13 @@ development_status:
   7-8-redis-fallback-for-sequence-generation: done  # GenerateFallback() method
   7-9-backend-api-for-trade-lifecycle-tab: done # handlers_trade_lifecycle.go
   7-10-edge-case-test-suite: done               # client_order_id_test.go
+  # NEW STORIES - Added 2026-01-17 for Order Lifecycle Enhancement
+  7-11-position-state-tracking: done            # Backend complete 2026-01-17 (frontend pending)
+  7-12-order-modification-event-log: done          # QA PASSED 2026-01-17 - SL/TP modification history
+  7-13-tree-structure-ui-modification-history: done  # QA CONCERNS 2026-01-17 - Tree UI (no auto tests)
+  # NEW STORIES - Added 2026-01-17 for Order Chain Integration Fixes
+  7-14-order-chain-backend-integration: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-17
+  7-15-order-chain-tree-structure-ui: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-17
   epic-7-retrospective: optional
 
   # ============================================================================

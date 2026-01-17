@@ -270,6 +270,12 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 	events.SetBroadcastSignalUpdate(func(userID string, data interface{}) {
 		BroadcastSignalUpdate(userID, data)
 	})
+	events.SetBroadcastPositionUpdate(func(userID string, data interface{}) {
+		// Convert interface{} to []map[string]interface{} for position update
+		if positions, ok := data.([]map[string]interface{}); ok {
+			BroadcastUserPositionUpdate(userID, positions)
+		}
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 

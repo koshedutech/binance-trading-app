@@ -66,8 +66,8 @@ func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID stri
 
 // loadModeToCache loads a single mode's settings into granular cache keys
 func (s *SettingsCacheService) loadModeToCache(ctx context.Context, userID, mode string) error {
-	// Get full mode config from database
-	configJSON, err := s.repo.GetUserModeConfig(ctx, userID, mode)
+	// Get full mode config from database INCLUDING the enabled column (source of truth)
+	enabled, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userID, mode)
 	if err != nil {
 		return fmt.Errorf("failed to get mode config: %w", err)
 	}
@@ -83,13 +83,23 @@ func (s *SettingsCacheService) loadModeToCache(ctx context.Context, userID, mode
 
 	// Extract and cache each group
 	for _, group := range SettingGroups {
-		groupData := s.extractGroupFromConfig(&config, group.Key)
-		if groupData == nil {
-			continue
+		var groupData interface{}
+		var groupJSON []byte
+
+		// CRITICAL: For "enabled" group, use the database COLUMN value (source of truth)
+		// not config.Enabled from JSON (which may be stale after toggle)
+		if group.Key == "enabled" {
+			groupData = map[string]interface{}{"enabled": enabled}
+			groupJSON, _ = json.Marshal(groupData)
+		} else {
+			groupData = s.extractGroupFromConfig(&config, group.Key)
+			if groupData == nil {
+				continue
+			}
+			groupJSON, _ = json.Marshal(groupData)
 		}
 
 		key := fmt.Sprintf("user:%s:mode:%s:%s", userID, mode, group.Key)
-		groupJSON, _ := json.Marshal(groupData)
 
 		if err := s.cache.Set(ctx, key, string(groupJSON), 0); err != nil {
 			s.logger.Debug("Failed to cache group", "key", key, "error", err)
@@ -182,7 +192,10 @@ func (s *SettingsCacheService) GetModeGroup(ctx context.Context, userID, mode, g
 
 // populateModeGroupFromDB loads a single group from DB into cache
 func (s *SettingsCacheService) populateModeGroupFromDB(ctx context.Context, userID, mode, group string) error {
-	configJSON, err := s.repo.GetUserModeConfig(ctx, userID, mode)
+	// Use GetUserModeConfigWithEnabled to get BOTH the enabled column AND config_json
+	// The enabled column is the source of truth for mode enabled status (updated by toggle)
+	// The config_json contains all other settings
+	enabled, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userID, mode)
 	if err != nil {
 		return fmt.Errorf("failed to get mode config from DB: %w", err)
 	}
@@ -195,6 +208,16 @@ func (s *SettingsCacheService) populateModeGroupFromDB(ctx context.Context, user
 		return fmt.Errorf("failed to parse mode config: %w", err)
 	}
 
+	// CRITICAL FIX: For the "enabled" group, use the database COLUMN value (source of truth)
+	// not the config.Enabled from JSON (which may be stale after toggle)
+	if group == "enabled" {
+		groupData := map[string]interface{}{"enabled": enabled}
+		key := fmt.Sprintf("user:%s:mode:%s:%s", userID, mode, group)
+		groupJSON, _ := json.Marshal(groupData)
+		return s.cache.Set(ctx, key, string(groupJSON), 0)
+	}
+
+	// For all other groups, extract from config_json as before
 	groupData := s.extractGroupFromConfig(&config, group)
 	if groupData == nil {
 		return ErrSettingNotFound

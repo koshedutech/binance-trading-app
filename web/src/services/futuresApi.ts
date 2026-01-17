@@ -282,6 +282,20 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== ORDER CHAINS WITH STATE ====================
+  // Story 7.14: Order Chain Backend Integration
+
+  async getOrderChainsWithState(filters?: {
+    symbol?: string;
+    mode?: string;
+    status?: 'active' | 'partial' | 'closed';
+  }): Promise<OrderChainsWithStateResponse> {
+    const { data } = await this.client.get<OrderChainsWithStateResponse>('/order-chains', {
+      params: filters,
+    });
+    return data;
+  }
+
   // ==================== MARKET DATA ====================
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
@@ -1144,6 +1158,43 @@ class FuturesAPIService {
     best_short: GinieDecisionReport | null;
   }> {
     const { data } = await this.client.post('/ginie/analyze-all');
+    return data;
+  }
+
+  // ==================== P&L SUMMARY ====================
+
+  async getPnLSummary(): Promise<{
+    daily_pnl: number;
+    daily_commission: number;
+    daily_funding: number;
+    daily_trade_count: number;
+    reset_countdown: string;
+    seconds_to_reset: number;
+    weekly_pnl: number;
+    weekly_commission: number;
+    weekly_funding: number;
+    weekly_trade_count: number;
+    week_start_date: string;
+    week_end_date: string;
+    week_range: string;
+    daily_breakdown: Array<{
+      date: string;
+      day: number;
+      day_name: string;
+      pnl: number;
+      commission: number;
+      funding: number;
+      net_pnl: number;
+      trade_count: number;
+      is_profit: boolean;
+      is_today: boolean;
+    }>;
+    timezone: string;
+    timezone_offset: string;
+    fetched_at: string;
+  }> {
+    // Use longer timeout for this endpoint since it makes 7+ Binance API calls
+    const { data } = await this.client.get('/pnl-summary', { timeout: 120000 });
     return data;
   }
 
@@ -2073,6 +2124,42 @@ class FuturesAPIService {
   }
 
   /**
+   * Load default configuration for global trading (preview or apply)
+   * Includes: risk_level, max_usd_allocation, profit_reinvest_percent, timezone, timezone_offset
+   */
+  async loadGlobalTradingDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+    const { data } = await this.client.post(`/ginie/global-trading/load-defaults${preview ? '?preview=true' : ''}`);
+    return data;
+  }
+
+  /**
+   * Update global trading settings
+   * @param settings - Object with fields to update (timezone, timezone_offset, risk_level, etc.)
+   */
+  async updateGlobalTrading(settings: {
+    timezone?: string;
+    timezone_offset?: string;
+    risk_level?: string;
+    max_usd_allocation?: number;
+    profit_reinvest_percent?: number;
+    profit_reinvest_risk_level?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    settings: {
+      timezone: string;
+      timezone_offset: string;
+      risk_level: string;
+      max_usd_allocation: number;
+      profit_reinvest_percent: number;
+      profit_reinvest_risk_level: string;
+    };
+  }> {
+    const { data } = await this.client.put('/ginie/global-trading', settings);
+    return data;
+  }
+
+  /**
    * Load default configuration for all modes (preview or apply)
    */
   async loadAllModesDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
@@ -2157,6 +2244,15 @@ class FuturesAPIService {
   }
 
   /**
+   * Get global trading comparison (preview mode)
+   * Includes: risk_level, max_usd_allocation, profit settings, timezone
+   */
+  async getGlobalTradingComparison(): Promise<ConfigResetPreview> {
+    const { data } = await this.client.post('/ginie/global-trading/load-defaults?preview=true');
+    return data;
+  }
+
+  /**
    * Get position optimization comparison (global - preview mode)
    */
   async getPositionOptimizationComparison(): Promise<ConfigResetPreview> {
@@ -2173,6 +2269,7 @@ class FuturesAPIService {
       this.loadCircuitBreakerDefaults(false),
       this.loadLLMConfigDefaults(false),
       this.loadCapitalAllocationDefaults(false),
+      this.loadGlobalTradingDefaults(false),
     ]);
     return {
       success: true,
@@ -2195,12 +2292,49 @@ class FuturesAPIService {
 
   /**
    * Admin: Save other setting changes to defaults
+   * Note: Uses absolute path because admin routes are at /api/admin, not /api/futures/admin
    */
   async adminSaveOtherSetting(settingType: string, config: any): Promise<{ success: boolean }> {
     // Backend expects { edited_values: {...} } format
-    const { data } = await this.client.post(`/admin/defaults/${settingType}`, {
+    // Use axios directly with absolute path since admin routes are not under /futures
+    const token = localStorage.getItem('access_token');
+    const { data } = await axios.post(`/api/admin/defaults/${settingType}`, {
       edited_values: config,
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': token ? `Bearer ${token}` : '',
+      },
     });
+    return data;
+  }
+
+  // ==================== ORDER MODIFICATION HISTORY (Story 7.13) ====================
+
+  /**
+   * Get modification history for a specific order type within a chain
+   * Story 7.13: Tree Structure UI for Modification History
+   * @param chainId - The chain ID (e.g., "ULT-17JAN-00001")
+   * @param orderType - The order type ("SL", "TP1", "TP2", etc.)
+   * @returns Modification events and summary statistics
+   */
+  async getModificationHistory(chainId: string, orderType: string): Promise<ModificationHistoryResponse> {
+    const { data } = await this.client.get(`/trade-lifecycle/${chainId}/modifications`, {
+      params: { orderType }
+    });
+    return data;
+  }
+
+  /**
+   * Get modification history for all order types in a chain
+   * Returns modification events grouped by order type
+   */
+  async getChainModificationHistory(chainId: string): Promise<{
+    chainId: string;
+    modifications: Record<string, ModificationHistoryResponse>;
+    totalModifications: number;
+  }> {
+    const { data } = await this.client.get(`/trade-lifecycle/${chainId}/all-modifications`);
     return data;
   }
 }
@@ -3511,6 +3645,7 @@ export interface ScanDiagnostics {
   seconds_since_last_scan: number;
   symbols_in_watchlist: number;
   symbols_scanned_last_cycle: number;
+  ultra_fast_enabled: boolean;
   scalp_enabled: boolean;
   swing_enabled: boolean;
   position_enabled: boolean;
@@ -4165,6 +4300,128 @@ export interface SLRevisionCountResponse {
   sl_revisions: number;
 }
 
+// ==================== MODIFICATION HISTORY TYPES (Story 7.13) ====================
+
+export type ModificationEventType = 'PLACED' | 'MODIFIED' | 'CANCELLED' | 'FILLED';
+export type ModificationSource = 'LLM_AUTO' | 'USER_MANUAL' | 'TRAILING_STOP';
+export type ImpactDirection = 'BETTER' | 'WORSE' | 'TIGHTER' | 'WIDER' | 'INITIAL';
+export type ModifiableOrderType = 'SL' | 'TP1' | 'TP2' | 'TP3' | 'TP4';
+
+export interface ModificationEvent {
+  id: number;
+  chainId: string;
+  orderType: ModifiableOrderType;
+  binanceOrderId?: number;
+  eventType: ModificationEventType;
+  modificationSource: ModificationSource;
+  version: number;
+  oldPrice: number | null;
+  newPrice: number;
+  priceDelta: number | null;
+  priceDeltaPercent: number | null;
+  positionQuantity: number;
+  positionEntryPrice: number;
+  positionSide: 'LONG' | 'SHORT';
+  dollarImpact: number;
+  impactDirection: ImpactDirection;
+  modificationReason: string;
+  llmDecisionId?: string;
+  llmConfidence?: number;
+  marketContext?: {
+    currentPrice: number;
+    priceChange1h?: number;
+    priceChange24h?: number;
+    volatility?: number;
+    trend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    atr?: number;
+  };
+  createdAt: string;
+}
+
+export interface ModificationSummaryStats {
+  totalModifications: number;
+  netPriceChange: number;
+  netPriceChangePercent: number;
+  netDollarImpact: number;
+  initialPrice: number;
+  currentPrice: number;
+  lastModifiedAt: string;
+  sources: {
+    llmAuto: number;
+    userManual: number;
+    trailingStop: number;
+  };
+}
+
+export interface ModificationHistoryResponse {
+  success: boolean;
+  chainId: string;
+  orderType: ModifiableOrderType;
+  events: ModificationEvent[];
+  summary: ModificationSummaryStats;
+}
+
+// ==================== ORDER CHAINS WITH STATE TYPES (Story 7.14) ====================
+
+export interface ChainOrderInfo {
+  order_id: number;
+  client_order_id: string;
+  order_type: string; // E, SL, TP1, TP2, etc.
+  symbol: string;
+  side: string;
+  type: string; // MARKET, LIMIT, STOP_MARKET
+  status: string;
+  price: number;
+  stop_price?: number;
+  quantity: number;
+  executed_qty: number;
+  avg_price?: number;
+  time: number;
+  update_time: number;
+  is_algo: boolean;
+}
+
+export interface PositionStateInfo {
+  id: number;
+  chain_id: string;
+  symbol: string;
+  entry_order_id: number;
+  entry_client_order_id: string;
+  entry_side: 'BUY' | 'SELL';
+  entry_price: number;
+  entry_quantity: number;
+  entry_value: number;
+  entry_fees: number;
+  entry_filled_at: string; // ISO 8601
+  status: 'ACTIVE' | 'PARTIAL' | 'CLOSED';
+  remaining_quantity: number;
+  realized_pnl: number;
+  created_at: string; // ISO 8601
+  updated_at: string; // ISO 8601
+  closed_at?: string; // ISO 8601
+}
+
+export interface OrderChainWithState {
+  chain_id: string;
+  mode_code: string;
+  symbol: string;
+  position_side: string;
+  orders: ChainOrderInfo[];
+  position_state?: PositionStateInfo;
+  modification_counts: Record<string, number>; // e.g., {"SL": 3, "TP1": 2}
+  status: 'active' | 'partial' | 'closed';
+  total_value: number;
+  filled_value: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface OrderChainsWithStateResponse {
+  chains: OrderChainWithState[];
+  total: number;
+  chain_count: number;
+}
+
 // Export singleton instance
 export const futuresApi = new FuturesAPIService();
 
@@ -4454,6 +4711,32 @@ export async function getLLMConfigComparison(): Promise<ConfigResetPreview> {
  */
 export async function getCapitalAllocationComparison(): Promise<ConfigResetPreview> {
   return futuresApi.getCapitalAllocationComparison();
+}
+
+/**
+ * Get global trading comparison (preview mode)
+ * Includes: risk_level, max_usd_allocation, profit settings, timezone
+ */
+export async function getGlobalTradingComparison(): Promise<ConfigResetPreview> {
+  return futuresApi.getGlobalTradingComparison();
+}
+
+/**
+ * Load default configuration for global trading (preview or apply)
+ */
+export async function loadGlobalTradingDefaults(preview: boolean = true): Promise<ConfigResetPreview | ConfigResetResult> {
+  return futuresApi.loadGlobalTradingDefaults(preview);
+}
+
+export async function updateGlobalTrading(settings: {
+  timezone?: string;
+  timezone_offset?: string;
+  risk_level?: string;
+  max_usd_allocation?: number;
+  profit_reinvest_percent?: number;
+  profit_reinvest_risk_level?: string;
+}) {
+  return futuresApi.updateGlobalTrading(settings);
 }
 
 /**

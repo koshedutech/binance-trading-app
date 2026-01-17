@@ -456,6 +456,9 @@ func (s *AdminSyncService) SaveFlattenedDefaults(configType string, editedValues
 		}
 		changesCount = s.updateModeConfigFromFlattened(defaults.ModeConfigs[configType], editedValues)
 
+	case "global_trading":
+		changesCount = s.updateGlobalTradingFromFlattened(&defaults.GlobalTrading, editedValues)
+
 	default:
 		return 0, fmt.Errorf("unknown config type: %s", configType)
 	}
@@ -587,6 +590,46 @@ func (s *AdminSyncService) updateCircuitBreakerFromFlattened(cb *CircuitBreakerD
 			count++
 		case "max_daily_trades":
 			cb.Global.MaxDailyTrades = toInt(value)
+			count++
+		}
+	}
+	return count
+}
+
+// Timezone to offset mapping
+var timezoneOffsets = map[string]string{
+	"UTC":             "+00:00",
+	"Asia/Kolkata":    "+05:30",
+	"Asia/Phnom_Penh": "+07:00",
+}
+
+// updateGlobalTradingFromFlattened updates global trading config from flattened values
+func (s *AdminSyncService) updateGlobalTradingFromFlattened(gt *GlobalTradingDefaults, values map[string]interface{}) int {
+	count := 0
+	for key, value := range values {
+		parts := splitKeyPath(key)
+		field := parts[len(parts)-1] // Get the last part as the field name
+
+		switch field {
+		case "risk_level":
+			gt.RiskLevel = toString(value)
+			count++
+		case "max_usd_allocation":
+			gt.MaxUSDAllocation = toFloat64(value)
+			count++
+		case "profit_reinvest_percent":
+			gt.ProfitReinvestPercent = toFloat64(value)
+			count++
+		case "profit_reinvest_risk_level":
+			gt.ProfitReinvestRiskLevel = toString(value)
+			count++
+		case "timezone":
+			tz := toString(value)
+			gt.Timezone = tz
+			// Auto-derive timezone_offset from timezone
+			if offset, exists := timezoneOffsets[tz]; exists {
+				gt.TimezoneOffset = offset
+			}
 			count++
 		}
 	}

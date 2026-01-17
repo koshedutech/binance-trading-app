@@ -179,6 +179,15 @@ default-settings.json → Database → Redis Cache → API → Frontend
 
 ---
 
+## Screenshot Reference
+
+When the user says "look at the image" or "check the screenshot", read the image file from:
+- **Path**: `/mnt/c/Users/Administrator/Downloads/binance.png`
+
+This is the standard screenshot location for this project.
+
+---
+
 ## Summary
 
 > **After ANY code change, run `./scripts/docker-dev.sh`**

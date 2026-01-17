@@ -182,6 +182,7 @@ export default function FuturesOrdersHistory() {
     // Subscribe to WebSocket events
     wsService.subscribe('ORDER_PLACED', handleOrderEvent);
     wsService.subscribe('ORDER_CANCELLED', handleOrderEvent);
+    wsService.subscribe('ORDER_UPDATE', handleOrderEvent);
     wsService.subscribe('TRADE_CLOSED', handleTradeEvent);
     wsService.subscribe('SIGNAL_GENERATED', handleTradeEvent);
 
@@ -221,6 +222,7 @@ export default function FuturesOrdersHistory() {
     return () => {
       wsService.unsubscribe('ORDER_PLACED', handleOrderEvent);
       wsService.unsubscribe('ORDER_CANCELLED', handleOrderEvent);
+      wsService.unsubscribe('ORDER_UPDATE', handleOrderEvent);
       wsService.unsubscribe('TRADE_CLOSED', handleTradeEvent);
       wsService.unsubscribe('SIGNAL_GENERATED', handleTradeEvent);
       wsService.offConnect(handleConnect);

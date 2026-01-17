@@ -2,7 +2,7 @@
   "metadata": {
     "version": "1.5.0",
     "schema_version": 3,
-    "last_updated": "2026-01-14T18:03:48Z",
+    "last_updated": "2026-01-17T10:44:37Z",
     "updated_by": "admin",
     "description": "Story 9.5 Phase 1A: Refactored MTF with blocking capability, added trend_filters (BTC check, Price/EMA, VWAP). Previous: requires_trend_align=true, block_on_disagreement=true."
   },
@@ -11,8 +11,8 @@
     "max_usd_allocation": 2500,
     "profit_reinvest_percent": 50,
     "profit_reinvest_risk_level": "aggressive",
-    "timezone": "UTC",
-    "timezone_offset": "+00:00",
+    "timezone": "Asia/Phnom_Penh",
+    "timezone_offset": "+07:00",
     "_risk_info": {
       "max_usd_allocation": {
         "impact": "high",
@@ -25,12 +25,12 @@
     },
     "_timezone_info": {
       "timezone": {
-        "description": "Display timezone for P&L reports, countdown timers, and date ranges",
-        "examples": ["UTC", "Asia/Kolkata", "America/New_York", "Europe/London"]
+        "impact": "",
+        "recommendation": ""
       },
       "timezone_offset": {
-        "description": "UTC offset in format +HH:MM or -HH:MM",
-        "examples": ["+00:00", "+05:30", "-05:00", "+08:00"]
+        "impact": "",
+        "recommendation": ""
       }
     }
   },
@@ -241,7 +241,7 @@
       "early_warning": {
         "enabled": true,
         "start_after_minutes": 10,
-        "min_loss_percent": 1.0,
+        "min_loss_percent": 1,
         "check_interval_secs": 120,
         "close_min_hold_mins": 30
       },

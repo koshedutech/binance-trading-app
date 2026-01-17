@@ -5,6 +5,7 @@ import {
   loadCircuitBreakerDefaults,
   loadLLMConfigDefaults,
   loadCapitalAllocationDefaults,
+  loadGlobalTradingDefaults,
   loadSafetySettingsDefaults,
   loadAllModesDefaults,
   resetModeGroup,
@@ -108,7 +109,7 @@ export default function ResetSettings() {
     }
   }, [showToast, handleRefresh]);
 
-  // Reset all "other" settings (circuit breaker, LLM, capital allocation, safety)
+  // Reset all "other" settings (circuit breaker, LLM, capital allocation, global trading, safety)
   const handleResetAllOther = useCallback(async () => {
     try {
       setLoading(true);
@@ -130,6 +131,12 @@ export default function ResetSettings() {
       const capResult = await loadCapitalAllocationDefaults(false);
       if ('success' in capResult && capResult.success) {
         totalChanges += capResult.changes_applied || 0;
+      }
+
+      // Reset global trading
+      const gtResult = await loadGlobalTradingDefaults(false);
+      if ('success' in gtResult && gtResult.success) {
+        totalChanges += gtResult.changes_applied || 0;
       }
 
       // Reset safety settings
@@ -194,6 +201,23 @@ export default function ResetSettings() {
       }
     } catch (error: any) {
       showToast('error', error.response?.data?.error || 'Failed to reset capital allocation');
+    } finally {
+      setLoading(false);
+    }
+  }, [showToast, handleRefresh]);
+
+  // Reset global trading settings
+  const handleResetGlobalTrading = useCallback(async () => {
+    try {
+      setLoading(true);
+      const result = await loadGlobalTradingDefaults(false);
+      if ('success' in result && result.success) {
+        dispatchResetEvent('global_trading', result.changes_applied || 0);
+        showToast('success', 'Global trading settings reset to defaults.');
+        handleRefresh();
+      }
+    } catch (error: any) {
+      showToast('error', error.response?.data?.error || 'Failed to reset global trading settings');
     } finally {
       setLoading(false);
     }
@@ -349,6 +373,7 @@ export default function ResetSettings() {
           onResetCircuitBreaker={handleResetCircuitBreaker}
           onResetLLMConfig={handleResetLLMConfig}
           onResetCapitalAllocation={handleResetCapitalAllocation}
+          onResetGlobalTrading={handleResetGlobalTrading}
           // Admin save handlers
           onSaveMode={isAdmin ? handleSaveMode : undefined}
           onSaveOtherSetting={isAdmin ? handleSaveOtherSetting : undefined}

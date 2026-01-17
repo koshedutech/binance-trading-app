@@ -474,6 +474,9 @@ func (s *Server) setupRoutes() {
 			futures.GET("/orders/open", s.handleGetFuturesOpenOrders)
 			futures.GET("/orders/all", s.handleGetAllFuturesOrders)
 
+			// Order chains with state endpoint (Story 7.14)
+			futures.GET("/order-chains", s.handleGetOrderChainsWithState)
+
 			// Algo Order endpoints (TP/SL orders since 2025-12-09)
 			futures.DELETE("/algo-orders/:symbol/:id", s.handleCancelAlgoOrder)
 			futures.DELETE("/algo-orders/:symbol/all", s.handleCancelAllAlgoOrders)
@@ -492,6 +495,7 @@ func (s *Server) setupRoutes() {
 			futures.GET("/transactions/history", s.handleGetFuturesTransactionHistory)
 			futures.GET("/income-history", s.handleGetIncomeHistory) // PnL, fees, funding from Binance
 			futures.GET("/pnl-summary", s.handleGetPnLSummary)      // Daily/Weekly PnL with fees breakdown
+			futures.GET("/test-daily-pnl", s.handleTestDailyPnLFromTrades) // Test: Compare trades vs income history
 			futures.GET("/metrics", s.handleGetFuturesMetrics)
 			futures.GET("/trade-source-stats", s.handleGetTradeSourceStats)
 			futures.GET("/position-trade-sources", s.handleGetPositionTradeSources)
@@ -502,6 +506,20 @@ func (s *Server) setupRoutes() {
 			futures.GET("/trades/:tradeId/lifecycle-summary", s.handleGetTradeLifecycleSummary)
 			futures.GET("/trades/:tradeId/sl-revisions", s.handleGetTradeSLRevisionCount)
 			futures.GET("/trade-events/recent", s.handleGetRecentTradeLifecycleEvents)
+
+			// Position state endpoints (Story 7.11)
+			// Note: Static routes must come BEFORE parameterized routes to avoid routing conflicts
+			futures.GET("/position-states", s.handleGetActivePositionStates)
+			futures.GET("/position-states/recent", s.handleGetRecentPositionStates)
+			futures.GET("/position-states/symbol/:symbol", s.handleGetPositionStateBySymbol)
+			futures.GET("/position-states/:chainId", s.handleGetPositionStateByChainID)
+
+			// Order modification event endpoints (Story 7.12)
+			// Note: Static routes must come BEFORE parameterized routes
+			futures.GET("/modification-events/recent", s.handleGetRecentModificationEvents)
+			futures.GET("/trade-lifecycle/:chainId/modifications", s.handleGetOrderModificationHistory)
+			futures.GET("/trade-lifecycle/:chainId/modifications/summary", s.handleGetChainModificationSummary)
+			futures.GET("/trade-lifecycle/:chainId/modifications/all", s.handleGetAllChainModifications)
 
 			// Autopilot endpoints
 			futures.GET("/autopilot/status", s.handleGetFuturesAutopilotStatus)
@@ -747,6 +765,8 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ginie/circuit-breaker/load-defaults", s.handleLoadCircuitBreakerDefaults)
 			futures.POST("/ginie/llm-config/load-defaults", s.handleLoadLLMConfigDefaults)
 			futures.POST("/ginie/capital-allocation/load-defaults", s.handleLoadCapitalAllocationDefaults)
+			futures.POST("/ginie/global-trading/load-defaults", s.handleLoadGlobalTradingDefaults)
+			futures.PUT("/ginie/global-trading", s.handleUpdateGlobalTrading)
 			futures.POST("/ginie/hedge-mode/load-defaults", s.handleLoadHedgeDefaults)
 			futures.POST("/ginie/safety-settings/load-defaults", s.handleLoadSafetySettingsDefaults)
 			futures.POST("/ginie/position-optimization/load-defaults", s.handleLoadPositionOptimizationDefaults)

@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // isCacheUnavailableError checks if the error indicates cache is unavailable
@@ -983,6 +985,7 @@ type ScanDiagnostics struct {
 	SecondsSinceLastScan int64     `json:"seconds_since_last_scan"`
 	SymbolsInWatchlist   int       `json:"symbols_in_watchlist"`
 	SymbolsScannedLast   int       `json:"symbols_scanned_last_cycle"`
+	UltraFastEnabled     bool      `json:"ultra_fast_enabled"`
 	ScalpEnabled         bool      `json:"scalp_enabled"`
 	SwingEnabled         bool      `json:"swing_enabled"`
 	PositionEnabled      bool      `json:"position_enabled"`
@@ -1052,7 +1055,9 @@ type GinieAutopilot struct {
 	positionStateRepo *database.RedisPositionStateRepository // Redis-based position state storage
 	eventLogger       *TradeEventLogger                      // Trade lifecycle event logging
 	userID            string                                 // User ID for multi-tenant PnL isolation
-	clientOrderIdGen  *orders.ClientOrderIdGenerator         // Epic 7: Client order ID generator
+	clientOrderIdGen    *orders.ClientOrderIdGenerator         // Epic 7: Client order ID generator
+	positionStateInt    *PositionStateIntegration              // Story 7.11: Position state tracking
+	modificationTracker *orders.ModificationTracker            // Story 7.12: Order modification event log
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -1357,6 +1362,14 @@ func NewGinieAutopilot(
 		lastDayReset:         time.Now().Truncate(24 * time.Hour),
 		modeCircuitBreakers:  make(map[GinieTradingMode]*ModeCircuitBreaker),
 		pendingLimitOrders:   make(map[string]*PendingLimitOrder),
+	}
+
+	// Story 7.12: Initialize ModificationTracker for SL/TP modification event logging
+	if repo != nil && repo.GetDB() != nil {
+		modEventAdapter := database.NewModificationEventDBAdapter(repo.GetDB())
+		modLogger := zerolog.New(zerolog.ConsoleWriter{Out: log.Writer()}).With().Timestamp().Str("component", "ModificationTracker").Logger()
+		ga.modificationTracker = orders.NewModificationTracker(modEventAdapter, modLogger)
+		log.Printf("[GINIE-INIT] ModificationTracker initialized for order modification event logging")
 	}
 
 	// DATABASE-FIRST: Load mode enable/disable settings ONLY from DATABASE
@@ -1797,6 +1810,23 @@ func (ga *GinieAutopilot) GetUserID() string {
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
 	return ga.userID
+}
+
+// SetPositionStateIntegration sets the position state integration for Story 7.11 tracking
+func (ga *GinieAutopilot) SetPositionStateIntegration(psi *PositionStateIntegration) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.positionStateInt = psi
+	if psi != nil && ga.logger != nil {
+		ga.logger.Info("Position state integration set for trade lifecycle tracking")
+	}
+}
+
+// GetPositionStateIntegration returns the position state integration
+func (ga *GinieAutopilot) GetPositionStateIntegration() *PositionStateIntegration {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return ga.positionStateInt
 }
 
 // getEffectivePositionSide determines the correct position side based on Binance account's position mode
@@ -4948,6 +4978,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	// Variables for actual fill details
 	actualPrice := price
 	actualQty := quantity
+	var entryOrderId int64 // Story 7.11: Track entry order ID for position state
 
 	// Epic 7: Generate clientOrderId for entry order tracking
 	// This must be generated BEFORE any order is placed so all entry types use the same baseID
@@ -5088,6 +5119,7 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 
 			actualPrice = fillPrice
 			actualQty = fillQty
+			entryOrderId = order.OrderId // Story 7.11: Capture for position state
 
 			ga.logger.Info("Ginie MARKET trade executed (fallback)",
 				"symbol", symbol,
@@ -5325,6 +5357,22 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				)
 			}
 		}
+	}
+
+	// Story 7.11: Record position state for trade lifecycle tracking
+	if ga.positionStateInt != nil && entryOrderId > 0 {
+		go ga.positionStateInt.RecordEntryFill(
+			context.Background(),
+			ga.userID,
+			entryOrderId,
+			entryClientOrderId,
+			symbol,
+			side,
+			actualPrice,
+			actualQty,
+			0, // Commission not tracked at entry time
+			time.Now().UnixMilli(),
+		)
 	}
 
 	// Place SL/TP orders on Binance (if not dry run)
@@ -5611,10 +5659,12 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 				"symbol", pos.Symbol,
 				"pnl_percent", pnlPercent,
 				"threshold", ga.config.ProactiveBreakevenPercent)
-			ga.moveToBreakeven(pos, fmt.Sprintf("Proactive breakeven at %.2f%% profit (before TP1)", pnlPercent))
+			breakevenReason := fmt.Sprintf("Proactive breakeven at %.2f%% profit (before TP1)", pnlPercent)
+			ga.moveToBreakeven(pos, breakevenReason)
 			// FIX: Release lock BEFORE network call to prevent blocking GetStatus API
 			ga.mu.Unlock()
-			ga.updateBinanceSLOrder(pos)
+			// Story 7.12: Track breakeven move as LLM_AUTO modification
+			ga.updateBinanceSLOrderWithReason(pos, orders.ModificationSourceLLMAuto, breakevenReason)
 			// Re-acquire lock and check if position still exists
 			ga.mu.Lock()
 			pos, exists = ga.positions[symbol]
@@ -5775,7 +5825,8 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 
 				// FIX: Release lock BEFORE network call to prevent blocking GetStatus API
 				ga.mu.Unlock()
-				ga.updateBinanceSLOrder(pos)
+				// Story 7.12: Use trailing stop source for modification tracking
+				ga.updateBinanceSLOrderWithReason(pos, orders.ModificationSourceTrailingStop, fmt.Sprintf("Trailing stop update: improved by %.2f%%", trailingImprovement))
 
 				// Log trailing update to trade lifecycle (uses captured values, no lock needed)
 				if eventLogger != nil && futuresTradeID > 0 {
@@ -6081,7 +6132,8 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 			// Move SL to breakeven after TP1 and update Binance order
 			if tpLevel == 1 && ga.config.MoveToBreakevenAfterTP1 && !pos.MovedToBreakeven {
 				ga.moveToBreakeven(pos, "After TP1 hit")
-				ga.updateBinanceSLOrder(pos) // CRITICAL: Update the actual Binance SL order
+				// Story 7.12: Track breakeven move after TP1 hit as LLM_AUTO modification
+				ga.updateBinanceSLOrderWithReason(pos, orders.ModificationSourceLLMAuto, "Move to breakeven after TP1 hit")
 			}
 
 			// Place the next TP order on Binance (TP2 after TP1, TP3 after TP2, etc.)
@@ -6729,6 +6781,13 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 // updateBinanceSLOrder cancels the existing SL algo order and places a new one at the updated price
 // This is critical for trailing stops - without this, Binance would still trigger at the old SL price
 func (ga *GinieAutopilot) updateBinanceSLOrder(pos *GiniePosition) {
+	ga.updateBinanceSLOrderWithReason(pos, orders.ModificationSourceLLMAuto, "SL price update")
+}
+
+// updateBinanceSLOrderWithReason cancels existing SL and places new one with modification tracking
+// source: orders.ModificationSourceLLMAuto, orders.ModificationSourceUserManual, orders.ModificationSourceTrailingStop
+// reason: human-readable reason for the modification
+func (ga *GinieAutopilot) updateBinanceSLOrderWithReason(pos *GiniePosition, source, reason string) {
 	if ga.config.DryRun {
 		ga.logger.Info("Dry run: would update Binance SL order",
 			"symbol", pos.Symbol,
@@ -6736,11 +6795,25 @@ func (ga *GinieAutopilot) updateBinanceSLOrder(pos *GiniePosition) {
 		return
 	}
 
+	// Story 7.12: Capture old SL price before update
+	oldSLPrice := pos.OriginalSL
+	if pos.StopLossAlgoID > 0 {
+		// Use current SL if we have an active order
+		if history := ga.slUpdateHistory[pos.Symbol]; history != nil && len(history.Updates) > 0 {
+			lastUpdate := history.Updates[len(history.Updates)-1]
+			if lastUpdate.Status == "applied" {
+				oldSLPrice = lastUpdate.NewSL
+			}
+		}
+	}
+
 	if pos.StopLossAlgoID == 0 {
 		ga.logger.Warn("No existing SL algo order to update",
 			"symbol", pos.Symbol)
-		// Just place a new one
+		// Just place a new one (initial placement)
 		ga.placeSLOrder(pos)
+		// Log as initial placement
+		ga.logOrderModificationEvent(pos, "SL", nil, pos.StopLoss, pos.StopLossAlgoID, source, reason, nil)
 		return
 	}
 
@@ -6760,6 +6833,11 @@ func (ga *GinieAutopilot) updateBinanceSLOrder(pos *GiniePosition) {
 
 	// Place new SL order at updated price
 	ga.placeSLOrder(pos)
+
+	// Story 7.12: Log SL modification event (oldPrice provided = modification, not initial)
+	if oldSLPrice > 0 && oldSLPrice != pos.StopLoss {
+		ga.logOrderModificationEvent(pos, "SL", &oldSLPrice, pos.StopLoss, pos.StopLossAlgoID, source, reason, nil)
+	}
 }
 
 // placeSLOrder places a new SL algo order (helper for updateBinanceSLOrder)
@@ -6836,6 +6914,103 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 			"symbol", pos.Symbol,
 			"sl_price", roundedSL)
 	}
+}
+
+// logOrderModificationEvent logs a modification event for SL/TP orders (Story 7.12)
+// orderType: "SL", "TP1", "TP2", etc.
+// oldPrice: nil for initial placement, pointer to old price for modifications
+// newPrice: the new/current price
+// algoId: Binance algo order ID if available
+// source: orders.ModificationSourceLLMAuto, orders.ModificationSourceUserManual, orders.ModificationSourceTrailingStop
+// reason: human-readable reason for the modification
+// llmDecisionID: optional LLM decision ID for traceability
+func (ga *GinieAutopilot) logOrderModificationEvent(pos *GiniePosition, orderType string, oldPrice *float64, newPrice float64, algoId int64, source, reason string, llmDecisionID *string) {
+	if ga.modificationTracker == nil {
+		return // Tracker not initialized
+	}
+
+	// Parse userID from string to int64
+	var userID int64
+	if ga.userID != "" {
+		if parsed, err := fmt.Sscanf(ga.userID, "%d", &userID); err != nil || parsed != 1 {
+			userID = 0
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get chain ID from position
+	chainID := pos.ChainBaseID
+	if chainID == "" {
+		chainID = fmt.Sprintf("LEGACY-%s", pos.Symbol)
+	}
+
+	var algoIDPtr *int64
+	if algoId > 0 {
+		algoIDPtr = &algoId
+	}
+
+	var decisionID string
+	if llmDecisionID != nil {
+		decisionID = *llmDecisionID
+	}
+
+	// Determine position side for impact calculations
+	side := pos.Side // "LONG" or "SHORT"
+	if side == "" {
+		side = "LONG" // Default fallback
+	}
+
+	if oldPrice == nil {
+		// Initial placement
+		event := orders.PlaceOrderEvent{
+			UserID:         userID,
+			ChainID:        chainID,
+			OrderType:      orderType,
+			BinanceOrderID: algoIDPtr,
+			Price:          newPrice,
+			PositionQty:    pos.RemainingQty,
+			EntryPrice:     pos.EntryPrice,
+			Side:           side,
+			Source:         source,
+			Reason:         reason,
+			DecisionID:     decisionID,
+		}
+		if err := ga.modificationTracker.OnOrderPlaced(ctx, event); err != nil {
+			ga.logger.Warn("Failed to log order placement event",
+				"symbol", pos.Symbol,
+				"order_type", orderType,
+				"error", err.Error())
+		}
+	} else {
+		// Modification
+		event := orders.ModifyOrderEvent{
+			UserID:         userID,
+			ChainID:        chainID,
+			OrderType:      orderType,
+			BinanceOrderID: algoIDPtr,
+			OldPrice:       *oldPrice,
+			NewPrice:       newPrice,
+			PositionQty:    pos.RemainingQty,
+			EntryPrice:     pos.EntryPrice,
+			Side:           side,
+			Source:         source,
+			Reason:         reason,
+			DecisionID:     decisionID,
+		}
+		if err := ga.modificationTracker.OnOrderModified(ctx, event); err != nil {
+			ga.logger.Warn("Failed to log order modification event",
+				"symbol", pos.Symbol,
+				"order_type", orderType,
+				"error", err.Error())
+		}
+	}
+}
+
+// GetModificationTracker returns the modification tracker (for testing/API access)
+func (ga *GinieAutopilot) GetModificationTracker() *orders.ModificationTracker {
+	return ga.modificationTracker
 }
 
 // checkTrailingStop checks if trailing stop is triggered
@@ -7144,6 +7319,9 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	ga.mu.Lock()
 	delete(ga.positions, symbol)
 	ga.mu.Unlock()
+
+	// Broadcast position closure to WebSocket clients for real-time UI update
+	ga.broadcastPositionClosure(symbol)
 }
 
 // closePositionAtMarket closes a position immediately using a TRUE MARKET order
@@ -7295,6 +7473,9 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	delete(ga.positions, symbol)
 	ga.mu.Unlock()
 
+	// Broadcast position closure to WebSocket clients for real-time UI update
+	ga.broadcastPositionClosure(symbol)
+
 	// Log position closed to trade lifecycle
 	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
 		go ga.eventLogger.LogPositionClosed(
@@ -7313,6 +7494,35 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	log.Printf("[MARKET-CLOSE] %s: Position closed successfully via MARKET order (reason: %s)", symbol, reason)
 
 	return nil
+}
+
+// broadcastPositionClosure notifies frontend via WebSocket that a position was closed
+// This ensures the UI updates immediately without waiting for polling
+func (ga *GinieAutopilot) broadcastPositionClosure(symbol string) {
+	if ga.userID == "" {
+		return
+	}
+
+	// Build current positions list (excluding the just-closed one)
+	positions := make([]map[string]interface{}, 0)
+	ga.mu.RLock()
+	for sym, pos := range ga.positions {
+		positions = append(positions, map[string]interface{}{
+			"symbol":            sym,
+			"side":              pos.Side,
+			"entry_price":       pos.EntryPrice,
+			"position_amt":      pos.RemainingQty,
+			"unrealized_profit": pos.UnrealizedPnL,
+		})
+	}
+	ga.mu.RUnlock()
+
+	// Broadcast via WebSocket using events package (avoids circular import)
+	events.BroadcastPositionUpdate(ga.userID, positions)
+
+	ga.logger.Debug("Broadcast position closure",
+		"symbol", symbol,
+		"remaining_positions", len(positions))
 }
 
 // updateCoinLossTracking tracks per-coin consecutive losses and blocks coins with big losses
@@ -8621,7 +8831,7 @@ func (ga *GinieAutopilot) GetStats() map[string]interface{} {
 }
 
 // calculateEnabledModesMaxPositions sums MaxPositions from only enabled trading modes
-// PERFORMANCE FIX: Uses single batch DB query instead of N+1 queries per mode
+// Uses isModeEnabled() which reads from Redis cache (sub-millisecond reads)
 // This ensures position count updates IMMEDIATELY when user toggles modes
 func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
 	settings, settingsLoadErr := GetSettingsManager().LoadSettings()
@@ -8634,65 +8844,33 @@ func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
 		return ga.config.MaxPositions
 	}
 
-	// PERFORMANCE: Use single batch query to get all mode enabled statuses
-	// Instead of calling isModeEnabled() 4 times (4 DB queries each)
-	enabledModes := make(map[string]bool)
-
-	if ga.repo != nil && ga.userID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		modeConfigs, err := ga.repo.GetAllUserModeConfigsWithEnabled(ctx, ga.userID)
-		if err != nil {
-			log.Printf("[SETTINGS] WARN: Batch mode config load failed: %v - using fallback", err)
-		} else {
-			for modeName, cfg := range modeConfigs {
-				enabledModes[modeName] = cfg.Enabled
-			}
-		}
-	}
-
-	// If no DB data available, fall back to in-memory config (legacy mode)
-	if len(enabledModes) == 0 {
-		if ga.config.EnableUltraFastMode {
-			enabledModes["ultra_fast"] = true
-		}
-		if ga.config.EnableScalpMode {
-			enabledModes["scalp"] = true
-		}
-		if ga.config.EnableSwingMode {
-			enabledModes["swing"] = true
-		}
-		if ga.config.EnablePositionMode {
-			enabledModes["position"] = true
-		}
-	}
-
+	// Use isModeEnabled() which reads from Redis cache (fast, sub-millisecond reads)
+	// Cache is populated from DB on miss, and invalidated on toggle
 	totalMaxPositions := 0
 
 	// Check ultra_fast mode
-	if enabledModes["ultra_fast"] {
+	if ga.isModeEnabled(GinieModeUltraFast) {
 		if cfg, ok := settings.ModeConfigs["ultra_fast"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
 	}
 
 	// Check scalp mode
-	if enabledModes["scalp"] {
+	if ga.isModeEnabled(GinieModeScalp) {
 		if cfg, ok := settings.ModeConfigs["scalp"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
 	}
 
 	// Check swing mode
-	if enabledModes["swing"] {
+	if ga.isModeEnabled(GinieModeSwing) {
 		if cfg, ok := settings.ModeConfigs["swing"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
 	}
 
 	// Check position mode
-	if enabledModes["position"] {
+	if ga.isModeEnabled(GinieModePosition) {
 		if cfg, ok := settings.ModeConfigs["position"]; ok && cfg != nil && cfg.Size != nil {
 			totalMaxPositions += cfg.Size.MaxPositions
 		}
@@ -9687,6 +9865,9 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 				"chain_base_id", pos.ChainBaseID,
 				"attempt", attempt)
 			slOrderPlaced = true
+
+			// Story 7.12: Log initial SL placement event
+			ga.logOrderModificationEvent(pos, "SL", nil, roundedSL, slOrder.AlgoId, orders.ModificationSourceLLMAuto, "Initial SL placement", nil)
 			break
 		}
 		ga.logger.Error("Failed to place stop loss order",
@@ -13709,8 +13890,8 @@ func (ga *GinieAutopilot) canTradeWithReasonLocked() (bool, string) {
 	}
 
 	// Check if any mode is enabled - uses isModeEnabled() for real-time DB read
-	if !ga.isModeEnabled(GinieModeScalp) && !ga.isModeEnabled(GinieModeSwing) && !ga.isModeEnabled(GinieModePosition) {
-		return false, "no_modes: No trading modes enabled (scalp/swing/position)"
+	if !ga.isModeEnabled(GinieModeUltraFast) && !ga.isModeEnabled(GinieModeScalp) && !ga.isModeEnabled(GinieModeSwing) && !ga.isModeEnabled(GinieModePosition) {
+		return false, "no_modes: No trading modes enabled (ultra_fast/scalp/swing/position)"
 	}
 
 	return true, "ok"
@@ -13796,6 +13977,7 @@ func (ga *GinieAutopilot) getScanDiagnosticsLocked() ScanDiagnostics {
 		SecondsSinceLastScan: secondsSinceLastScan,
 		SymbolsInWatchlist:   symbolsCount,
 		SymbolsScannedLast:   ga.symbolsScannedLastCycle,
+		UltraFastEnabled:     ga.isModeEnabled(GinieModeUltraFast),
 		ScalpEnabled:         ga.isModeEnabled(GinieModeScalp),
 		SwingEnabled:         ga.isModeEnabled(GinieModeSwing),
 		PositionEnabled:      ga.isModeEnabled(GinieModePosition),
@@ -13999,12 +14181,12 @@ func (ga *GinieAutopilot) generateIssueRecommendationsLocked(diag *GinieDiagnost
 	}
 
 	// Critical: No modes enabled
-	if !diag.Scanning.ScalpEnabled && !diag.Scanning.SwingEnabled && !diag.Scanning.PositionEnabled {
+	if !diag.Scanning.UltraFastEnabled && !diag.Scanning.ScalpEnabled && !diag.Scanning.SwingEnabled && !diag.Scanning.PositionEnabled {
 		issues = append(issues, DiagnosticIssue{
 			Severity:   "critical",
 			Category:   "config",
 			Message:    "No trading modes enabled",
-			Suggestion: "Enable at least one mode: scalp, swing, or position trading",
+			Suggestion: "Enable at least one mode: ultra_fast, scalp, swing, or position trading",
 		})
 	}
 
@@ -17888,6 +18070,27 @@ func (ga *GinieAutopilot) createPositionFromLimitFill(pending *PendingLimitOrder
 		"quantity", fillQty,
 		"stop_loss", stopLoss,
 		"chain_base_id", pending.ChainBaseID)
+
+	// Story 7.11: Record position state for limit fill
+	if ga.positionStateInt != nil && pending.OrderID > 0 {
+		// Generate client order ID from chain base
+		entryClientOrderId := ""
+		if pending.ChainBaseID != "" {
+			entryClientOrderId = pending.ChainBaseID + "-E"
+		}
+		go ga.positionStateInt.RecordEntryFill(
+			context.Background(),
+			ga.userID,
+			pending.OrderID,
+			entryClientOrderId,
+			pending.Symbol,
+			pending.Side,
+			fillPrice,
+			fillQty,
+			0, // Commission not tracked at entry time
+			time.Now().UnixMilli(),
+		)
+	}
 }
 
 // getDefaultSLPercent returns default SL percentage for a mode

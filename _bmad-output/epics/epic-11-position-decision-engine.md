@@ -996,15 +996,49 @@ Show calibration data and accuracy in UI.
 
 ---
 
-## Migration Strategy
+## Architecture: Two Separate Models
 
-This system will be built **alongside** the existing system:
+This is a **completely new and separate** decision engine, NOT a modification of the existing one.
 
-1. **Parallel Operation** - New engine runs in shadow mode
-2. **Gradual Rollout** - Start with subset of coins
-3. **A/B Comparison** - Compare decisions with existing system
-4. **Full Migration** - Switch when new system proves superior
-5. **Fallback** - Keep existing system available for rollback
+```
+SCANNING (Coin Search)
+         │
+         ▼
+    ┌─────────┐
+    │ SWITCH  │  ← User selects which model to use
+    └────┬────┘
+         │
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌────────┐  ┌────────┐
+│  OLD   │  │  NEW   │
+│ MODEL  │  │ MODEL  │
+│(Ginie) │  │(Ep.11) │
+└────────┘  └────────┘
+    │         │
+    └────┬────┘
+         │
+         ▼
+    EXECUTION
+```
+
+| Aspect | Old Model (Existing Ginie) | New Model (Epic 11) |
+|--------|---------------------------|---------------------|
+| Logic | Hardcoded | Parametric/Configurable |
+| Settings | Fixed in code | JSON + UI adjustable |
+| Strategies | Single approach | Multiple strategies |
+| Scoring | Multiplicative | Additive |
+| Learning | None | Calibration |
+| UI | Current Ginie UI | Completely new UI |
+| Code | `ginie_analyzer.go` | New separate files |
+
+**Key Principles:**
+1. **Complete Separation** - 100% separate codebase
+2. **No Disturbance** - Old model remains untouched
+3. **Plug & Play** - Switch between models after scanning
+4. **Independent UI** - New UI for new model
+5. **Parallel Existence** - Both models can run simultaneously
 
 ---
 

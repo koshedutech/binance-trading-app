@@ -569,6 +569,7 @@ export default function GinieDiagnosticsPanel() {
                     <div>
                       <p className="text-gray-400">Modes</p>
                       <div className="flex space-x-1">
+                        {diagnostics.scanning?.ultra_fast_enabled && <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1 rounded">UF</span>}
                         {diagnostics.scanning?.scalp_enabled && <span className="text-xs bg-blue-500/20 text-blue-400 px-1 rounded">S</span>}
                         {diagnostics.scanning?.swing_enabled && <span className="text-xs bg-green-500/20 text-green-400 px-1 rounded">W</span>}
                         {diagnostics.scanning?.position_enabled && <span className="text-xs bg-purple-500/20 text-purple-400 px-1 rounded">P</span>}

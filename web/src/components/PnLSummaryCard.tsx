@@ -11,6 +11,19 @@ import {
   Wifi,
 } from 'lucide-react';
 
+interface DailyPnLBreakdown {
+  date: string;
+  day: number;
+  day_name: string;
+  pnl: number;
+  commission: number;
+  funding: number;
+  net_pnl: number;
+  trade_count: number;
+  is_profit: boolean;
+  is_today: boolean;
+}
+
 interface PnLSummaryData {
   // Daily breakdown
   daily_pnl: number;
@@ -27,6 +40,8 @@ interface PnLSummaryData {
   week_start_date: string;
   week_end_date: string;
   week_range: string;
+  // 7-day calendar breakdown
+  daily_breakdown: DailyPnLBreakdown[];
   // Timezone info
   timezone: string;
   timezone_offset: string;
@@ -297,6 +312,80 @@ export default function PnLSummaryCard() {
               </div>
             </div>
           </div>
+
+          {/* 7-Day Calendar Breakdown */}
+          {pnlData.daily_breakdown && pnlData.daily_breakdown.length > 0 && (
+            <div className="col-span-2 mt-2">
+              <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700 bg-gradient-to-r from-purple-900/30 to-gray-800">
+                  <div className="flex items-center gap-2">
+                    <Calendar className="w-4 h-4 text-purple-400" />
+                    <span className="font-semibold text-sm text-white">7-Day P&L Calendar</span>
+                  </div>
+                  <span className="text-xs text-gray-400">UTC Daily Reset</span>
+                </div>
+
+                <div className="p-3">
+                  <div className="grid grid-cols-7 gap-2">
+                    {pnlData.daily_breakdown.map((day) => {
+                      const isProfit = day.net_pnl >= 0;
+                      const hasActivity = day.trade_count > 0 || day.net_pnl !== 0;
+
+                      return (
+                        <div
+                          key={day.date}
+                          className={`
+                            relative rounded-lg p-2 text-center transition-all
+                            ${day.is_today ? 'ring-2 ring-blue-500' : ''}
+                            ${hasActivity
+                              ? isProfit
+                                ? 'bg-green-900/40 border border-green-700/50'
+                                : 'bg-red-900/40 border border-red-700/50'
+                              : 'bg-gray-700/30 border border-gray-600/30'
+                            }
+                          `}
+                        >
+                          {/* Day name */}
+                          <div className={`text-[10px] font-medium uppercase ${day.is_today ? 'text-blue-400' : 'text-gray-400'}`}>
+                            {day.day_name}
+                          </div>
+
+                          {/* Day number */}
+                          <div className={`text-lg font-bold ${day.is_today ? 'text-blue-300' : 'text-white'}`}>
+                            {day.day}
+                          </div>
+
+                          {/* Net P&L */}
+                          <div className={`text-xs font-semibold ${
+                            hasActivity
+                              ? isProfit ? 'text-green-400' : 'text-red-400'
+                              : 'text-gray-500'
+                          }`}>
+                            {hasActivity
+                              ? `${isProfit ? '+' : ''}${formatUSD(day.net_pnl)}`
+                              : '--'
+                            }
+                          </div>
+
+                          {/* Trade count indicator */}
+                          {day.trade_count > 0 && (
+                            <div className="text-[9px] text-gray-400 mt-0.5">
+                              {day.trade_count} trades
+                            </div>
+                          )}
+
+                          {/* Today indicator */}
+                          {day.is_today && (
+                            <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="text-center text-gray-500 py-4">

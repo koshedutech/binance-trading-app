@@ -11,6 +11,7 @@ require (
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/jackc/pgx/v5 v5.5.3
 	github.com/redis/go-redis/v9 v9.17.2
+	github.com/rs/zerolog v1.33.0
 	golang.org/x/crypto v0.40.0
 )
 
@@ -44,6 +45,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect

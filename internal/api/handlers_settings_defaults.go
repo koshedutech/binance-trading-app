@@ -3340,3 +3340,328 @@ func (s *Server) applyPositionOptimizationDefaults(ctx context.Context, userID s
 
 	return s.repo.SaveUserScalpReentryConfig(ctx, userID, configJSON)
 }
+
+// handleLoadGlobalTradingDefaults resets global trading settings to default values
+// POST /api/futures/ginie/global-trading/load-defaults?preview=true
+// For ADMIN users in preview mode: Returns default-settings.json values directly (for editing)
+// For REGULAR users in preview mode: Compares user's DB settings vs defaults
+// Includes: risk_level, max_usd_allocation, profit_reinvest_percent, profit_reinvest_risk_level, timezone, timezone_offset
+func (s *Server) handleLoadGlobalTradingDefaults(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	preview := c.Query("preview") == "true"
+	ctx := c.Request.Context()
+	isAdmin := auth.IsAdmin(c)
+
+	// Load defaults from default-settings.json
+	defaults, err := autopilot.LoadDefaultSettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load defaults: %v", err)})
+		return
+	}
+
+	jsonGlobal := defaults.GlobalTrading
+
+	// ADMIN USER PREVIEW: Return default-settings.json values directly for editing
+	if isAdmin && preview {
+		allValues := []FieldComparison{
+			{Path: "global_trading.risk_level", Current: jsonGlobal.RiskLevel, Default: jsonGlobal.RiskLevel, Match: true},
+			{Path: "global_trading.max_usd_allocation", Current: jsonGlobal.MaxUSDAllocation, Default: jsonGlobal.MaxUSDAllocation, Match: true},
+			{Path: "global_trading.profit_reinvest_percent", Current: jsonGlobal.ProfitReinvestPercent, Default: jsonGlobal.ProfitReinvestPercent, Match: true},
+			{Path: "global_trading.profit_reinvest_risk_level", Current: jsonGlobal.ProfitReinvestRiskLevel, Default: jsonGlobal.ProfitReinvestRiskLevel, Match: true},
+			{Path: "global_trading.timezone", Current: jsonGlobal.Timezone, Default: jsonGlobal.Timezone, Match: true},
+			{Path: "global_trading.timezone_offset", Current: jsonGlobal.TimezoneOffset, Default: jsonGlobal.TimezoneOffset, Match: true},
+		}
+		defaultValueMap := map[string]interface{}{
+			"risk_level":               jsonGlobal.RiskLevel,
+			"max_usd_allocation":       jsonGlobal.MaxUSDAllocation,
+			"profit_reinvest_percent":  jsonGlobal.ProfitReinvestPercent,
+			"profit_reinvest_risk_level": jsonGlobal.ProfitReinvestRiskLevel,
+			"timezone":                 jsonGlobal.Timezone,
+			"timezone_offset":          jsonGlobal.TimezoneOffset,
+		}
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "global_trading",
+			AllMatch:     true,
+			TotalChanges: 0,
+			Differences:  []SettingDifference{},
+			AllValues:    allValues,
+			IsAdmin:      true,
+			DefaultValue: defaultValueMap,
+		})
+		return
+	}
+
+	// REGULAR USER: Get current settings from cache/DB for comparison
+	var currentGlobal *database.UserGlobalTrading
+	if s.settingsCacheService != nil {
+		currentGlobal, err = s.settingsCacheService.GetGlobalTrading(ctx, userID)
+		if err != nil {
+			if IsCacheUnavailableError(err) {
+				RespondCacheUnavailable(c, "get_global_trading")
+				return
+			}
+			log.Printf("[GLOBAL-TRADING] Cache error for user %s: %v, falling back to DB", userID, err)
+			currentGlobal = nil
+		}
+	}
+
+	// Fallback to direct DB if cache miss
+	if currentGlobal == nil {
+		currentGlobal, err = s.repo.GetUserGlobalTrading(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to load user global trading: %v", err)})
+			return
+		}
+	}
+
+	// If no config exists, use database defaults for comparison
+	if currentGlobal == nil {
+		currentGlobal = database.DefaultUserGlobalTrading()
+		currentGlobal.UserID = userID
+	}
+
+	// Compare current vs defaults
+	var differences []SettingDifference
+	var allValues []FieldComparison
+
+	addField := func(path string, current, defaultVal interface{}, riskLevel, impact, recommendation string) {
+		match := reflect.DeepEqual(current, defaultVal)
+		fc := FieldComparison{
+			Path:    path,
+			Current: current,
+			Default: defaultVal,
+			Match:   match,
+		}
+		if !match {
+			fc.RiskLevel = riskLevel
+		}
+		allValues = append(allValues, fc)
+
+		if !match {
+			differences = append(differences, SettingDifference{
+				Path:           path,
+				Current:        current,
+				Default:        defaultVal,
+				RiskLevel:      riskLevel,
+				Impact:         impact,
+				Recommendation: recommendation,
+			})
+		}
+	}
+
+	addField("global_trading.risk_level",
+		currentGlobal.RiskLevel, jsonGlobal.RiskLevel,
+		"high", fmt.Sprintf("Current: %s, Default: %s", currentGlobal.RiskLevel, jsonGlobal.RiskLevel),
+		"Use default for balanced risk")
+
+	addField("global_trading.max_usd_allocation",
+		currentGlobal.MaxUSDAllocation, jsonGlobal.MaxUSDAllocation,
+		"high", fmt.Sprintf("Current: $%.2f, Default: $%.2f", currentGlobal.MaxUSDAllocation, jsonGlobal.MaxUSDAllocation),
+		"Use default for optimal capital allocation")
+
+	addField("global_trading.profit_reinvest_percent",
+		currentGlobal.ProfitReinvestPercent, jsonGlobal.ProfitReinvestPercent,
+		"medium", fmt.Sprintf("Current: %.1f%%, Default: %.1f%%", currentGlobal.ProfitReinvestPercent, jsonGlobal.ProfitReinvestPercent),
+		"Use default for balanced reinvestment")
+
+	addField("global_trading.profit_reinvest_risk_level",
+		currentGlobal.ProfitReinvestRiskLevel, jsonGlobal.ProfitReinvestRiskLevel,
+		"medium", fmt.Sprintf("Current: %s, Default: %s", currentGlobal.ProfitReinvestRiskLevel, jsonGlobal.ProfitReinvestRiskLevel),
+		"Use default for balanced reinvestment risk")
+
+	addField("global_trading.timezone",
+		currentGlobal.Timezone, jsonGlobal.Timezone,
+		"low", fmt.Sprintf("Current: %s, Default: %s", currentGlobal.Timezone, jsonGlobal.Timezone),
+		"Timezone for P&L reports and countdowns")
+
+	addField("global_trading.timezone_offset",
+		currentGlobal.TimezoneOffset, jsonGlobal.TimezoneOffset,
+		"low", fmt.Sprintf("Current: %s, Default: %s", currentGlobal.TimezoneOffset, jsonGlobal.TimezoneOffset),
+		"UTC offset for display formatting")
+
+	if preview {
+		c.JSON(http.StatusOK, ConfigResetPreview{
+			Preview:      true,
+			ConfigType:   "global_trading",
+			AllMatch:     len(differences) == 0,
+			TotalChanges: len(differences),
+			Differences:  differences,
+			AllValues:    allValues,
+			IsAdmin:      isAdmin,
+		})
+		return
+	}
+
+	// Apply defaults to database
+	updatedGlobal := &database.UserGlobalTrading{
+		UserID:                  userID,
+		RiskLevel:               jsonGlobal.RiskLevel,
+		MaxUSDAllocation:        jsonGlobal.MaxUSDAllocation,
+		ProfitReinvestPercent:   jsonGlobal.ProfitReinvestPercent,
+		ProfitReinvestRiskLevel: jsonGlobal.ProfitReinvestRiskLevel,
+		Timezone:                jsonGlobal.Timezone,
+		TimezoneOffset:          jsonGlobal.TimezoneOffset,
+	}
+
+	// Use cache service for write-through pattern
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateGlobalTrading(ctx, userID, updatedGlobal); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save global trading settings: %v", err)})
+			return
+		}
+	} else {
+		if err := s.repo.SaveUserGlobalTrading(ctx, updatedGlobal); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save global trading settings: %v", err)})
+			return
+		}
+	}
+
+	// Trigger immediate config reload in running autopilot
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[DEFAULTS-RESET] Triggered immediate config reload for user %s global trading", userID)
+		}
+	}
+
+	c.JSON(http.StatusOK, ConfigResetResult{
+		Success:        true,
+		ConfigType:     "global_trading",
+		ChangesApplied: len(differences),
+		Message:        fmt.Sprintf("Global trading settings reset to defaults (%d changes applied)", len(differences)),
+	})
+}
+
+// handleUpdateGlobalTrading updates global trading settings
+// PUT /api/futures/ginie/global-trading
+// Body: { field: value } - Updates specific fields (timezone, timezone_offset, risk_level, etc.)
+func (s *Server) handleUpdateGlobalTrading(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get current settings
+	var current *database.UserGlobalTrading
+	var err error
+	if s.settingsCacheService != nil {
+		current, err = s.settingsCacheService.GetGlobalTrading(ctx, userID)
+		if err != nil && !IsCacheUnavailableError(err) {
+			log.Printf("[GLOBAL-TRADING] Cache error for user %s: %v, falling back to DB", userID, err)
+		}
+	}
+
+	if current == nil {
+		current, err = s.repo.GetUserGlobalTrading(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to get global trading settings: %v", err)})
+			return
+		}
+	}
+
+	// If no config exists, create default
+	if current == nil {
+		current = database.DefaultUserGlobalTrading()
+		current.UserID = userID
+	}
+
+	// Timezone to offset mapping (same as Settings page presets)
+	timezoneOffsets := map[string]string{
+		"UTC":            "+00:00",
+		"Asia/Kolkata":   "+05:30",
+		"Asia/Phnom_Penh": "+07:00",
+	}
+
+	// Update fields from request
+	updated := false
+	for key, value := range req {
+		switch key {
+		case "timezone":
+			if v, ok := value.(string); ok {
+				current.Timezone = v
+				// Auto-derive timezone_offset from timezone
+				if offset, exists := timezoneOffsets[v]; exists {
+					current.TimezoneOffset = offset
+				}
+				updated = true
+			}
+		case "timezone_offset":
+			// Skip - timezone_offset is auto-derived from timezone
+			continue
+		case "risk_level":
+			if v, ok := value.(string); ok {
+				current.RiskLevel = v
+				updated = true
+			}
+		case "max_usd_allocation":
+			if v, ok := value.(float64); ok {
+				current.MaxUSDAllocation = v
+				updated = true
+			}
+		case "profit_reinvest_percent":
+			if v, ok := value.(float64); ok {
+				current.ProfitReinvestPercent = v
+				updated = true
+			}
+		case "profit_reinvest_risk_level":
+			if v, ok := value.(string); ok {
+				current.ProfitReinvestRiskLevel = v
+				updated = true
+			}
+		}
+	}
+
+	if !updated {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No valid fields to update"})
+		return
+	}
+
+	// Save using write-through cache pattern
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateGlobalTrading(ctx, userID, current); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save global trading settings: %v", err)})
+			return
+		}
+	} else {
+		if err := s.repo.SaveUserGlobalTrading(ctx, current); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save global trading settings: %v", err)})
+			return
+		}
+	}
+
+	// Trigger config reload if autopilot is running
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[GLOBAL-TRADING] Triggered config reload for user %s", userID)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Global trading settings updated",
+		"settings": gin.H{
+			"timezone":                 current.Timezone,
+			"timezone_offset":          current.TimezoneOffset,
+			"risk_level":               current.RiskLevel,
+			"max_usd_allocation":       current.MaxUSDAllocation,
+			"profit_reinvest_percent":  current.ProfitReinvestPercent,
+			"profit_reinvest_risk_level": current.ProfitReinvestRiskLevel,
+		},
+	})
+}

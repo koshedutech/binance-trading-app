@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -416,9 +417,27 @@ func cleanIPAddress(ip string) string {
 
 // =====================================================
 // USER TIMEZONE HANDLERS (Story 7.6)
+// Now uses user_global_trading table (same pattern as other settings)
 // =====================================================
 
+// timezoneToOffset maps IANA timezone identifiers to GMT offsets
+var timezoneToOffset = map[string]string{
+	"UTC":              "+00:00",
+	"Asia/Kolkata":     "+05:30",
+	"Asia/Phnom_Penh":  "+07:00",
+	"Asia/Bangkok":     "+07:00",
+	"Asia/Ho_Chi_Minh": "+07:00",
+	"Asia/Singapore":   "+08:00",
+	"Asia/Hong_Kong":   "+08:00",
+	"Asia/Tokyo":       "+09:00",
+	"America/New_York": "-05:00",
+	"America/Los_Angeles": "-08:00",
+	"Europe/London":    "+00:00",
+	"Europe/Paris":     "+01:00",
+}
+
 // handleGetUserTimezone returns the user's current timezone setting
+// Reads from user_global_trading (same pattern as other global trading fields)
 func (s *Server) handleGetUserTimezone(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -426,11 +445,20 @@ func (s *Server) handleGetUserTimezone(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	timezone := "UTC" // Default
 
-	timezone, err := s.repo.GetUserTimezone(ctx, userID)
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "failed to get timezone")
-		return
+	// Get from user_global_trading via cache service (same pattern as other fields)
+	if s.settingsCacheService != nil {
+		globalTrading, err := s.settingsCacheService.GetGlobalTrading(ctx, userID)
+		if err == nil && globalTrading != nil && globalTrading.Timezone != "" {
+			timezone = globalTrading.Timezone
+		}
+	} else {
+		// Fallback to direct DB query when cache service is unavailable (legacy mode)
+		globalTrading, err := s.repo.GetUserGlobalTrading(ctx, userID)
+		if err == nil && globalTrading != nil && globalTrading.Timezone != "" {
+			timezone = globalTrading.Timezone
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -440,6 +468,7 @@ func (s *Server) handleGetUserTimezone(c *gin.Context) {
 }
 
 // handleUpdateUserTimezone updates the user's timezone setting
+// Updates user_global_trading via cache service (write-through pattern)
 func (s *Server) handleUpdateUserTimezone(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
 	if !ok {
@@ -463,13 +492,49 @@ func (s *Server) handleUpdateUserTimezone(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	if err := s.repo.UpdateUserTimezone(ctx, userID, req.Timezone); err != nil {
-		if err.Error() == "user not found" {
-			errorResponse(c, http.StatusNotFound, "user not found")
+	// Get current global trading settings (try cache first, then DB)
+	var currentConfig *database.UserGlobalTrading
+	var err error
+	if s.settingsCacheService != nil {
+		currentConfig, err = s.settingsCacheService.GetGlobalTrading(ctx, userID)
+		if err != nil {
+			log.Printf("[TIMEZONE-UPDATE] Cache error for user %s: %v", userID, err)
+		}
+	} else {
+		// Fallback to direct DB query
+		currentConfig, err = s.repo.GetUserGlobalTrading(ctx, userID)
+		if err != nil {
+			log.Printf("[TIMEZONE-UPDATE] DB error for user %s: %v", userID, err)
+		}
+	}
+
+	// If no config exists, create default
+	if currentConfig == nil {
+		currentConfig = database.DefaultUserGlobalTrading()
+		currentConfig.UserID = userID
+	}
+
+	// Update timezone and auto-derive timezone_offset
+	currentConfig.Timezone = req.Timezone
+	if offset, exists := timezoneToOffset[req.Timezone]; exists {
+		currentConfig.TimezoneOffset = offset
+	} else {
+		// Default to +00:00 for unknown timezones
+		currentConfig.TimezoneOffset = "+00:00"
+	}
+
+	// Save via cache service (write-through: DB first, then cache) or direct DB
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateGlobalTrading(ctx, userID, currentConfig); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "failed to update timezone")
 			return
 		}
-		errorResponse(c, http.StatusInternalServerError, "failed to update timezone")
-		return
+	} else {
+		// Fallback to direct DB write
+		if err := s.repo.SaveUserGlobalTrading(ctx, currentConfig); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "failed to update timezone")
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{

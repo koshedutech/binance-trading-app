@@ -2,7 +2,7 @@
   "metadata": {
     "version": "1.5.0",
     "schema_version": 3,
-    "last_updated": "2026-01-14T09:17:15Z",
+    "last_updated": "2026-01-17T10:25:41Z",
     "updated_by": "admin",
     "description": "Story 9.5 Phase 1A: Refactored MTF with blocking capability, added trend_filters (BTC check, Price/EMA, VWAP). Previous: requires_trend_align=true, block_on_disagreement=true."
   },
@@ -11,6 +11,8 @@
     "max_usd_allocation": 2500,
     "profit_reinvest_percent": 50,
     "profit_reinvest_risk_level": "aggressive",
+    "timezone": "Asia/Kolkata",
+    "timezone_offset": "+05:30",
     "_risk_info": {
       "max_usd_allocation": {
         "impact": "high",
@@ -19,6 +21,16 @@
       "risk_level": {
         "impact": "high",
         "recommendation": "Use 'moderate' for beginners"
+      }
+    },
+    "_timezone_info": {
+      "timezone": {
+        "impact": "",
+        "recommendation": ""
+      },
+      "timezone_offset": {
+        "impact": "",
+        "recommendation": ""
       }
     }
   },
@@ -32,9 +44,9 @@
         "analysis_timeframe": "1d"
       },
       "entry": {
-        "limit_order_gap_percent": 0.20,
+        "limit_order_gap_percent": 0.2,
         "use_market_entry": false,
-        "max_limit_gap_percent": 1.00
+        "max_limit_gap_percent": 1
       },
       "confidence": {
         "min_confidence": 55,
@@ -228,9 +240,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 30,
-        "min_loss_percent": 3,
-        "check_interval_secs": 120
+        "start_after_minutes": 10,
+        "min_loss_percent": 1,
+        "check_interval_secs": 120,
+        "close_min_hold_mins": 30
       },
       "position_optimization": {
         "enabled": true,
@@ -300,9 +313,9 @@
         "analysis_timeframe": "15m"
       },
       "entry": {
-        "limit_order_gap_percent": 0.10,
+        "limit_order_gap_percent": 0.1,
         "use_market_entry": false,
-        "max_limit_gap_percent": 0.50
+        "max_limit_gap_percent": 0.5
       },
       "confidence": {
         "min_confidence": 55,
@@ -496,9 +509,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 10,
-        "min_loss_percent": 1,
-        "check_interval_secs": 30
+        "start_after_minutes": 1,
+        "min_loss_percent": 0.3,
+        "check_interval_secs": 30,
+        "close_min_hold_mins": 2
       },
       "position_optimization": {
         "enabled": true,
@@ -764,9 +778,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 15,
-        "min_loss_percent": 2,
-        "check_interval_secs": 60
+        "start_after_minutes": 5,
+        "min_loss_percent": 0.5,
+        "check_interval_secs": 60,
+        "close_min_hold_mins": 10
       },
       "position_optimization": {
         "enabled": true,
@@ -838,7 +853,7 @@
       "entry": {
         "limit_order_gap_percent": 0.05,
         "use_market_entry": true,
-        "max_limit_gap_percent": 0.20
+        "max_limit_gap_percent": 0.2
       },
       "confidence": {
         "min_confidence": 55,
@@ -1032,9 +1047,10 @@
       },
       "early_warning": {
         "enabled": true,
-        "start_after_minutes": 2,
-        "min_loss_percent": 0.5,
-        "check_interval_secs": 15
+        "start_after_minutes": 0.5,
+        "min_loss_percent": 0.2,
+        "check_interval_secs": 15,
+        "close_min_hold_mins": 1
       },
       "position_optimization": {
         "enabled": true,
@@ -1096,34 +1112,25 @@
       }
     }
   },
-  "global_averaging_hedging": {
+  "position_optimization": {
     "averaging": {
-      "enabled": true,
-      "max_entries": 3,
-      "entry_spacing_percent": 1.5,
-      "size_multiplier_per_level": 1,
+      "enabled": false,
+      "max_entries": 0,
+      "entry_spacing_percent": 0,
+      "size_multiplier_per_level": 0,
       "staged_entry_enabled": false,
-      "staged_entry_levels": 3,
-      "staged_entry_percent": [
-        40,
-        30,
-        30
-      ],
-      "staged_entry_cooldown_sec": 30
+      "staged_entry_levels": 0,
+      "staged_entry_percent": null,
+      "staged_entry_cooldown_sec": 0
     },
     "hedging": {
       "enabled": false,
-      "min_confidence_for_hedge": 75,
-      "existing_must_be_in_profit": 1,
-      "max_hedge_size_percent": 50,
+      "min_confidence_for_hedge": 0,
+      "existing_must_be_in_profit": 0,
+      "max_hedge_size_percent": 0,
       "allow_same_mode_hedge": false
     },
-    "_risk_info": {
-      "hedging.enabled": {
-        "impact": "high",
-        "recommendation": "Keep disabled - hedging is complex and can amplify losses"
-      }
-    }
+    "_risk_info": null
   },
   "circuit_breaker": {
     "global": {
@@ -1157,21 +1164,6 @@
         "recommendation": "Keep enabled for AI-assisted decision making"
       }
     }
-  },
-  "early_warning": {
-    "enabled": false,
-    "start_after_minutes": 0,
-    "check_interval_secs": 0,
-    "only_underwater": false,
-    "min_loss_percent": 0,
-    "close_on_reversal": false,
-    "tighten_sl_on_warning": false,
-    "min_confidence": 0,
-    "max_llm_calls_per_pos": 0,
-    "close_min_hold_mins": 0,
-    "close_min_confidence": 0,
-    "close_require_consecutive": 0,
-    "close_sl_proximity_pct": 0
   },
   "capital_allocation": {
     "ultra_fast_percent": 0,

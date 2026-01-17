@@ -231,6 +231,7 @@ var (
 	broadcastModeStatus      BroadcastFunc
 	broadcastSystemStatus    BroadcastFunc
 	broadcastSignalUpdate    BroadcastFunc
+	broadcastPositionUpdate  BroadcastFunc
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -271,6 +272,11 @@ func SetBroadcastSystemStatus(fn BroadcastFunc) {
 // SetBroadcastSignalUpdate sets the callback for signal update broadcasts
 func SetBroadcastSignalUpdate(fn BroadcastFunc) {
 	broadcastSignalUpdate = fn
+}
+
+// SetBroadcastPositionUpdate sets the callback for position update broadcasts
+func SetBroadcastPositionUpdate(fn BroadcastFunc) {
+	broadcastPositionUpdate = fn
 }
 
 // BroadcastLifecycleEvent broadcasts a lifecycle event to a user
@@ -326,5 +332,12 @@ func BroadcastSystemStatus(userID string, data interface{}) {
 func BroadcastSignalUpdate(userID string, data interface{}) {
 	if broadcastSignalUpdate != nil && userID != "" {
 		go broadcastSignalUpdate(userID, data)
+	}
+}
+
+// BroadcastPositionUpdate broadcasts position update to a user (used when positions close)
+func BroadcastPositionUpdate(userID string, data interface{}) {
+	if broadcastPositionUpdate != nil && userID != "" {
+		go broadcastPositionUpdate(userID, data)
 	}
 }

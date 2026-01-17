@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
-import { useFuturesStore, selectActivePositions, selectTotalUnrealizedPnl } from '../store/futuresStore';
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useFuturesStore, selectActivePositions } from '../store/futuresStore';
 import { futuresApi } from '../services/futuresApi';
 import {
   formatUSD,
@@ -52,7 +52,6 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   } = useFuturesStore();
 
   const activePositions = useFuturesStore(selectActivePositions);
-  const totalUnrealizedPnl = useFuturesStore(selectTotalUnrealizedPnl);
 
   const [positionOrders, setPositionOrders] = useState<Record<string, PositionOrders>>({});
   const [editingTPSL, setEditingTPSL] = useState<string | null>(null);
@@ -66,6 +65,35 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   const [tradingMode, setTradingMode] = useState<'live' | 'paper' | null>(null);
   const [tradeSources, setTradeSources] = useState<Record<string, string>>({});
   const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
+
+  // Real-time mark prices from WebSocket for instant PnL updates (like Binance app)
+  const [liveMarkPrices, setLiveMarkPrices] = useState<Record<string, number>>({});
+
+  // Calculate real-time PnL using Binance's exact formula:
+  // unrealizedPnL = (markPrice - entryPrice) * positionAmt
+  // For SHORT positions, positionAmt is negative, so formula works for both
+  const calculateLivePnL = useCallback((position: FuturesPosition): { markPrice: number; pnl: number; roe: number } => {
+    // Use live mark price if available, otherwise fall back to position's stored markPrice
+    const currentMarkPrice = liveMarkPrices[position.symbol] ?? position.markPrice;
+
+    // Binance PnL formula: (markPrice - entryPrice) * positionAmt
+    const pnl = (currentMarkPrice - position.entryPrice) * position.positionAmt;
+
+    // ROE formula: unrealizedPnL / initialMargin * 100
+    // initialMargin = |positionAmt| * entryPrice / leverage
+    const initialMargin = Math.abs(position.positionAmt) * position.entryPrice / position.leverage;
+    const roe = initialMargin > 0 ? (pnl / initialMargin) * 100 : 0;
+
+    return { markPrice: currentMarkPrice, pnl, roe };
+  }, [liveMarkPrices]);
+
+  // Calculate total real-time PnL across all positions
+  const totalUnrealizedPnl = useMemo(() => {
+    return activePositions.reduce((total, position) => {
+      const { pnl } = calculateLivePnL(position);
+      return total + pnl;
+    }, 0);
+  }, [activePositions, calculateLivePnL]);
 
   // Auto-select content on focus for easier value replacement
   const handleInputFocus = (e: React.FocusEvent<HTMLInputElement>) => {
@@ -103,21 +131,60 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   // State for custom ROI from Ginie positions
   const [roiFromGinie, setRoiFromGinie] = useState<Record<string, number | null>>({});
 
+  // Real-time mark price updates from WebSocket (updates every ~1 second like Binance app)
+  useEffect(() => {
+    const handleMarkPriceUpdate = (event: WSEvent) => {
+      const symbol = event.data?.symbol as string;
+      const markPriceStr = event.data?.markPrice as string;
+
+      if (symbol && markPriceStr) {
+        const markPrice = parseFloat(markPriceStr);
+        if (!isNaN(markPrice)) {
+          setLiveMarkPrices(prev => ({
+            ...prev,
+            [symbol]: markPrice,
+          }));
+        }
+      }
+    };
+
+    wsService.subscribe('FUTURES_MARK_PRICE_UPDATE', handleMarkPriceUpdate);
+
+    return () => {
+      wsService.unsubscribe('FUTURES_MARK_PRICE_UPDATE', handleMarkPriceUpdate);
+    };
+  }, []);
+
   // WebSocket-driven position updates
   // Note: Fallback polling is handled centrally by FallbackPollingManager in App.tsx (Story 12.9)
   useEffect(() => {
-    const handlePositionUpdate = (event: WSEvent) => {
-      // Directly use positions from WebSocket event data
-      const positions = event.data?.positions as FuturesPosition[] | undefined;
-      if (positions && Array.isArray(positions)) {
-        updatePositions(positions);
-      }
+    const handlePositionUpdate = () => {
+      // Always refresh positions from API on any position update
+      // This ensures we have complete and accurate state including closures
+      fetchPositions();
     };
 
     const handleOrderUpdate = () => {
       // ORDER_UPDATE triggers position orders refresh to update TP/SL display
-      // The actual order data is handled by the centralized FallbackPollingManager
-      // This just triggers a refresh of position-specific orders (TP/SL/Trailing)
+      if (activePositions.length > 0) {
+        const fetchAllPositionOrders = async () => {
+          const orders: Record<string, PositionOrders> = {};
+          for (const position of activePositions) {
+            try {
+              const data = await futuresApi.getPositionOrders(position.symbol);
+              orders[position.symbol] = {
+                take_profit_orders: data.take_profit_orders || [],
+                stop_loss_orders: data.stop_loss_orders || [],
+                trailing_stop_orders: data.trailing_stop_orders || [],
+              };
+            } catch (err) {
+              console.error(`Error fetching orders for ${position.symbol}:`, err);
+            }
+          }
+          setPositionOrders(orders);
+        };
+        fetchAllPositionOrders();
+      }
     };
 
     const handleConnect = () => {
@@ -149,7 +216,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);
     };
-  }, [fetchPositions, updatePositions]);
+  }, [fetchPositions, activePositions]);
 
   // Fetch Ginie positions to get custom ROI values - triggered by position updates
   const fetchGinieROI = useCallback(async () => {
@@ -363,15 +430,16 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                 position.positionAmt,
                 position.positionSide
               );
-              const roe = calculateROE(
-                position.unRealizedProfit,
-                position.entryPrice,
-                position.positionAmt,
-                position.leverage
-              );
+
+              // Use real-time calculated PnL from WebSocket mark prices (like Binance app)
+              const liveData = calculateLivePnL(position);
+              const liveMarkPrice = liveData.markPrice;
+              const livePnL = liveData.pnl;
+              const roe = liveData.roe;
+
               const isNearLiquidation = position.liquidationPrice > 0 && (
-                (position.positionAmt > 0 && position.markPrice < position.liquidationPrice * 1.1) ||
-                (position.positionAmt < 0 && position.markPrice > position.liquidationPrice * 0.9)
+                (position.positionAmt > 0 && liveMarkPrice < position.liquidationPrice * 1.1) ||
+                (position.positionAmt < 0 && liveMarkPrice > position.liquidationPrice * 0.9)
               );
 
               const orders = positionOrders[position.symbol];
@@ -381,11 +449,11 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
 
               const isEditing = editingTPSL === position.symbol;
 
-              // Calculate TP/SL distance from current price
+              // Calculate TP/SL distance from current price (using live mark price)
               const tpPrice = tpOrder?.stopPrice;
               const slPrice = slOrder?.stopPrice;
-              const tpDistance = tpPrice ? ((tpPrice - position.markPrice) / position.markPrice * 100) : null;
-              const slDistance = slPrice ? ((slPrice - position.markPrice) / position.markPrice * 100) : null;
+              const tpDistance = tpPrice ? ((tpPrice - liveMarkPrice) / liveMarkPrice * 100) : null;
+              const slDistance = slPrice ? ((slPrice - liveMarkPrice) / liveMarkPrice * 100) : null;
 
               return (
                 <tr key={`${position.symbol}-${position.positionSide}`} className="border-b border-gray-800 hover:bg-gray-800/50">
@@ -465,9 +533,9 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                     {formatPrice(position.entryPrice)}
                   </td>
 
-                  {/* Mark Price */}
+                  {/* Mark Price (real-time from WebSocket) */}
                   <td className="py-3 px-4 text-right font-mono text-xs">
-                    {formatPrice(position.markPrice)}
+                    {formatPrice(liveMarkPrice)}
                   </td>
 
                   {/* Liquidation Price */}
@@ -545,10 +613,10 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                     )}
                   </td>
 
-                  {/* PnL */}
+                  {/* PnL (real-time calculated from WebSocket mark price) */}
                   <td className="py-3 px-4 text-right">
-                    <div className={`font-semibold ${getPositionColor(position.unRealizedProfit)}`}>
-                      {formatUSD(position.unRealizedProfit)}
+                    <div className={`font-semibold ${getPositionColor(livePnL)}`}>
+                      {formatUSD(livePnL)}
                     </div>
                     <div className={`text-xs ${getPositionColor(roe)}`}>
                       ({formatPercent(roe)})
