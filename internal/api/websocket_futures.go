@@ -416,7 +416,8 @@ func (c *FuturesWSClient) broadcastMarkPrice(update MarkPriceUpdate) {
 		)
 	}
 
-	// Broadcast to frontend clients (both public and authenticated WebSocket hubs)
+	// Broadcast to frontend clients (public WebSocket hub only)
+	// Note: Not broadcasting to userWSHub to avoid flooding with ~100 updates/second
 	event := events.Event{
 		Type:      events.EventType("FUTURES_MARK_PRICE_UPDATE"),
 		Timestamp: time.Now(),
@@ -429,14 +430,8 @@ func (c *FuturesWSClient) broadcastMarkPrice(update MarkPriceUpdate) {
 		},
 	}
 
-	// Broadcast to public WebSocket hub
 	if c.hub != nil {
 		c.hub.BroadcastEvent(event)
-	}
-
-	// Also broadcast to authenticated user WebSocket hub for real-time price updates
-	if userWSHub != nil {
-		userWSHub.BroadcastToAll(event)
 	}
 }
 

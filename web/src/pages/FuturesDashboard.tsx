@@ -89,12 +89,12 @@ export default function FuturesDashboard() {
     fetchMarkPrice(selectedSymbol);
     fetchFundingRate(selectedSymbol);
 
-    // Mark price: 5s for responsive price display (like Binance app)
+    // Mark price: 30s polling (WebSocket updates cache in real-time)
     const markPriceInterval = setInterval(() => {
       fetchMarkPrice(selectedSymbol);
-    }, 5000);
+    }, 30000);
 
-    // Funding rate: 5 minutes (only changes every 8 hours, cached for 5 min)
+    // Funding rate: 5 minutes (only changes every 8 hours)
     const fundingInterval = setInterval(() => {
       fetchFundingRate(selectedSymbol);
     }, 300000);
@@ -105,16 +105,14 @@ export default function FuturesDashboard() {
     };
   }, [selectedSymbol, fetchMarkPrice, fetchFundingRate]);
 
-  // Periodic polling for real-time data updates (like Binance app)
+  // Periodic polling for data updates
   // NOTE: Binance User Data Stream only sends events on actual changes (trades, orders)
-  // It does NOT continuously push price updates or unrealized PnL.
-  // We poll every 5 seconds for responsive updates similar to Binance's own app.
+  // We poll every 10 seconds for a balance between freshness and stability.
   useEffect(() => {
-    // Poll every 5 seconds for positions and account info (Binance uses 1-3s internally)
     const pollingInterval = setInterval(() => {
       fetchPositions();
       fetchAccountInfo();
-    }, 5000);
+    }, 10000);
 
     return () => {
       clearInterval(pollingInterval);

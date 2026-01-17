@@ -81,7 +81,7 @@
   "ultra_fast_today_trades": 0,
   "ultra_fast_max_daily_trades": 0,
   "ultra_fast_daily_pnl": 0,
-  "ultra_fast_total_pnl": 0,
+  "ultra_fast_total_pnl": 10.725807040000138,
   "ultra_fast_win_rate": 0,
   "ultra_fast_last_update": "",
   "ultra_fast_min_profit_usd": 1,
@@ -422,7 +422,7 @@
     },
     "scalp": {
       "mode_name": "scalp",
-      "enabled": false,
+      "enabled": true,
       "timeframe": {
         "trend_timeframe": "15m",
         "entry_timeframe": "5m",
@@ -439,15 +439,15 @@
         "ultra_confidence": 85
       },
       "size": {
-        "base_size_usd": 50,
-        "max_size_usd": 50,
+        "base_size_usd": 20,
+        "max_size_usd": 20,
         "max_positions": 1,
         "leverage": 10,
         "size_multiplier_lo": 0,
         "size_multiplier_hi": 0,
         "safety_margin": 0.9,
         "min_balance_usd": 50,
-        "min_position_size_usd": 200,
+        "min_position_size_usd": 20,
         "risk_multiplier_conservative": 0,
         "risk_multiplier_moderate": 0,
         "risk_multiplier_aggressive": 0,
@@ -468,7 +468,7 @@
         "min_win_rate": 0
       },
       "sltp": {
-        "stop_loss_percent": 2,
+        "stop_loss_percent": 1.2,
         "take_profit_percent": 1.5,
         "trailing_stop_enabled": true,
         "trailing_stop_percent": 0.3,
