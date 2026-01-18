@@ -579,6 +579,9 @@ type FuturesController struct {
 	// Story 6.6: Cache-only settings reads (uses interface to avoid circular import)
 	settingsCache SettingsCacheReader
 
+	// Epic 7: Position state integration for trade lifecycle tracking
+	positionStateInt *PositionStateIntegration
+
 	// WebSocket broadcast callbacks (set by api package to avoid import cycle)
 	onBalanceUpdate  func(userID string, balance map[string]interface{})
 	onPositionUpdate func(userID string, positions []map[string]interface{})
@@ -1152,6 +1155,37 @@ func (fc *FuturesController) SetSettingsCache(cache SettingsCacheReader) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.settingsCache = cache
+}
+
+// SetPositionStateIntegration sets the position state integration for trade lifecycle tracking (Epic 7)
+// This enables entry order details to be saved to the database when orders fill
+func (fc *FuturesController) SetPositionStateIntegration(psi *PositionStateIntegration) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.positionStateInt = psi
+
+	// Pass to GinieAutopilot so it can record entry fills
+	if fc.ginieAutopilot != nil {
+		fc.ginieAutopilot.SetPositionStateIntegration(psi)
+		fc.logger.Info("Position state integration set on FuturesController and GinieAutopilot")
+	} else {
+		fc.logger.Info("Position state integration set on FuturesController (GinieAutopilot not initialized yet)")
+	}
+}
+
+// SetStateManager sets the Decision Engine state manager for saving coin states during scanning (Epic 11)
+// This enables the Entry Decision Engine to display all monitored coins with their current states
+func (fc *FuturesController) SetStateManager(sm StateManagerInterface) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	// Pass to GinieAutopilot so it can save coin states during scanning
+	if fc.ginieAutopilot != nil {
+		fc.ginieAutopilot.SetStateManager(sm)
+		fc.logger.Info("StateManager set on GinieAutopilot for Entry Decision Engine integration")
+	} else {
+		fc.logger.Info("StateManager received but GinieAutopilot not initialized yet")
+	}
 }
 
 // StartGinieAutopilot starts the Ginie autonomous trading

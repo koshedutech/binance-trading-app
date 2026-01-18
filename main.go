@@ -25,16 +25,21 @@ import (
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/continuous"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/decision"
 	"binance-trading-bot/internal/email"
 	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/license"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/notification"
+	"binance-trading-bot/internal/orders"
+
+	"github.com/rs/zerolog"
 	"binance-trading-bot/internal/risk"
 	"binance-trading-bot/internal/scalping"
 	"binance-trading-bot/internal/scanner"
 	"binance-trading-bot/internal/screener"
 	"binance-trading-bot/internal/settlement"
+	"binance-trading-bot/internal/startup"
 	"binance-trading-bot/internal/strategy"
 	"binance-trading-bot/internal/vault"
 )
@@ -220,6 +225,27 @@ func main() {
 			log.Printf("Warning: User Safety Settings migration failed: %v", err)
 		}
 		logger.Info("User Safety Settings migration completed")
+
+		// Run User Global Trading migrations (026, 032, 033) - Story 6.2
+		// Creates user_global_trading table with timezone support
+		if err := db.RunUserGlobalTradingMigrations(ctx); err != nil {
+			log.Printf("Warning: User Global Trading migrations failed: %v", err)
+		}
+		logger.Info("User Global Trading migrations completed")
+
+		// Run Calibration Data migrations (037) - Story 11.25
+		// Creates calibration_data and calibration_data_history tables
+		if err := db.RunCalibrationMigration(ctx); err != nil {
+			log.Printf("Warning: Calibration Data migrations failed: %v", err)
+		}
+		logger.Info("Calibration Data migrations completed")
+
+		// Run Order Chain migrations (034-036) - Epic 7: Client Order ID & Trade Lifecycle Tracking
+		// Creates position_states, order_modification_events, and order_chains tables
+		if err := db.RunOrderChainMigrations(ctx); err != nil {
+			log.Printf("Warning: Order Chain migrations failed: %v", err)
+		}
+		logger.Info("Order Chain migrations completed")
 	}
 
 	// Create repository early for API key service
@@ -544,6 +570,15 @@ func main() {
 		if sentimentAnalyzer != nil {
 			futuresAutopilotController.SetSentimentAnalyzer(sentimentAnalyzer)
 		}
+
+		// Epic 7: Wire up position state tracking for trade lifecycle
+		// This enables entry order details to be saved when orders fill
+		positionTrackerRepo := database.NewPositionStateDBAdapter(repo.GetDB())
+		positionTrackerLogger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "PositionTracker").Logger()
+		positionTracker := orders.NewPositionTracker(positionTrackerRepo, positionTrackerLogger)
+		positionStateInt := autopilot.NewPositionStateIntegration(positionTracker, positionTrackerLogger)
+		futuresAutopilotController.SetPositionStateIntegration(positionStateInt)
+		logger.Info("Position state integration initialized for trade lifecycle tracking")
 
 		// Set dry run mode
 		futuresAutopilotController.SetDryRun(cfg.TradingConfig.DryRun)
@@ -1019,6 +1054,40 @@ func main() {
 		logger.Info("SettlementService set on API server for daily P&L analytics")
 	}
 
+	// Story 7.20: Initialize OrderChainCache for fast UI reads
+	var orderChainCache *cache.OrderChainCache
+	if cacheService != nil && cacheService.IsHealthy() {
+		orderChainCache = cache.NewOrderChainCache(cacheService, logger)
+		server.SetOrderChainCache(orderChainCache)
+		logger.Info("OrderChainCache initialized and set on API server")
+
+		// Create cache adapter and wire to ChainEventWriter for write-through caching
+		// This is done via UserAutopilotManager which creates ChainEventWriter per user
+		// The adapter will be set on ChainEventWriter instances when they are created
+	}
+
+	// Epic 11: Initialize StateManager for Position Decision Engine coin state management
+	if cacheService != nil && cacheService.IsHealthy() {
+		stateManager := decision.NewStateManager(cacheService.GetClient())
+		if stateManager != nil {
+			server.SetStateManager(stateManager)
+			logger.Info("StateManager initialized and set on API server for coin state management")
+
+			// Also set on autopilot for saving coin states during scanning
+			if futuresAutopilotController != nil {
+				adapter := newStateManagerAdapter(stateManager)
+				futuresAutopilotController.SetStateManager(adapter)
+				logger.Info("StateManager adapter set on autopilot for Entry Decision Engine integration")
+
+				// Also set on UserAutopilotManager so user-specific autopilot instances get the StateManager
+				if userAutopilotManager != nil {
+					userAutopilotManager.SetStateManager(adapter)
+					logger.Info("StateManager adapter set on UserAutopilotManager for multi-user Entry Decision Engine")
+				}
+			}
+		}
+	}
+
 	// Wire up WebSocket broadcast callbacks for User Data Stream updates
 	// This enables real-time position, order, balance, and trade updates to the frontend
 	if futuresAutopilotController != nil {
@@ -1089,6 +1158,19 @@ func main() {
 			ctx := context.Background()
 			if err := userAutopilotManager.AutoStartFromSettings(ctx); err != nil {
 				logger.Warn("Failed to auto-start Ginie from settings", "error", err)
+			}
+		}()
+	}
+
+	// Story 7.20: Warm OrderChainCache on startup (AC9)
+	if orderChainCache != nil && orderChainCache.IsHealthy() {
+		go func() {
+			// Wait for services to be fully initialized
+			time.Sleep(5 * time.Second)
+			startupCtx := context.Background()
+			cacheWarmer := startup.NewCacheWarmer(db, orderChainCache, logger)
+			if err := cacheWarmer.WarmOrderChainCache(startupCtx); err != nil {
+				logger.Warn("Failed to warm order chain cache", "error", err)
 			}
 		}()
 	}
@@ -1888,4 +1970,54 @@ func getEnvBool(key string, defaultValue bool) bool {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+// ========================================================================
+// Epic 11: StateManager Adapter for Decision Engine Integration
+// ========================================================================
+
+// stateManagerAdapter adapts decision.StateManager to autopilot.StateManagerInterface.
+// This breaks the circular dependency between autopilot and decision packages by
+// keeping the conversion logic in main.go which can import both packages.
+type stateManagerAdapter struct {
+	sm *decision.StateManager
+}
+
+// newStateManagerAdapter creates a new adapter wrapping a decision.StateManager.
+func newStateManagerAdapter(sm *decision.StateManager) *stateManagerAdapter {
+	if sm == nil {
+		return nil
+	}
+	return &stateManagerAdapter{sm: sm}
+}
+
+// SetCoinState implements autopilot.StateManagerInterface by converting CoinStateData to decision.CoinState.
+func (a *stateManagerAdapter) SetCoinState(ctx context.Context, userID, symbol string, state *autopilot.CoinStateData) error {
+	if a.sm == nil || state == nil {
+		return nil
+	}
+
+	// Convert autopilot.CoinStateData to decision.CoinState
+	coinState := &decision.CoinState{
+		Symbol:          state.Symbol,
+		Price:           state.Price,
+		Regime:          decision.MarketRegime(state.Regime),
+		ActiveStrategy:  state.ActiveStrategy,
+		Decision:        decision.Decision(state.Decision),
+		ADX:             state.ADX,
+		ATR:             state.ATR,
+		RSI:             state.RSI,
+		EMA9:            state.EMA9,
+		EMA21:           state.EMA21,
+		Trend1H:         decision.TrendDirection(state.Trend1H),
+		Trend15M:        decision.TrendDirection(state.Trend15M),
+		ScoreTechnical:  state.ScoreTechnical,
+		ScoreContext:    state.ScoreContext,
+		ScoreLLM:        state.ScoreLLM,
+		ScoreHistory:    state.ScoreHistory,
+		ScoreFinal:      state.ScoreFinal,
+		BlockingReasons: state.BlockingReasons,
+	}
+
+	return a.sm.SetCoinState(ctx, userID, symbol, coinState)
 }

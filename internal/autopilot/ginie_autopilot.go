@@ -67,6 +67,65 @@ type SettingsCacheReader interface {
 	LoadUserSettings(ctx context.Context, userID string) error
 }
 
+// CalibrationLifecycleUpdater defines the interface for updating calibration on trade close.
+// Story 11.26: Calibration Data Lifecycle - interface to break circular dependency.
+type CalibrationLifecycleUpdater interface {
+	// UpdateOnTradeClose updates calibration data when a trade closes.
+	// Parameters:
+	//   - userID: The user ID (integer)
+	//   - strategy: The trading strategy used (e.g., "trend_following")
+	//   - indicatorHash: Hash of the indicators used
+	//   - entryScore: The decision score at time of entry (0-100)
+	//   - isWin: Whether the trade was profitable
+	//   - pnlPercent: The realized P&L percentage
+	UpdateOnTradeClose(ctx context.Context, userID int, strategy string, indicatorHash string, entryScore int, isWin bool, pnlPercent float64) error
+}
+
+// IndicatorPerformanceRecorder defines the interface for recording indicator performance.
+// Story 11.14: Indicator Performance Tracker - interface to break circular dependency.
+// The interface accepts the autopilot's local types which have the same structure as
+// decision.TradeIndicatorSnapshot and decision.TradeOutcome.
+type IndicatorPerformanceRecorder interface {
+	// RecordTradeEntryAutopilot logs indicator values when a trade is opened.
+	// The snapshot fields match decision.TradeIndicatorSnapshot.
+	RecordTradeEntryAutopilot(ctx context.Context, tradeID string, userID int, symbol, strategy string,
+		indicators map[string]float64, entryScore int, entryTime time.Time, marketRegime, side string) error
+	// RecordTradeExitAutopilot records the trade outcome and updates performance stats.
+	// The outcome fields match decision.TradeOutcome.
+	RecordTradeExitAutopilot(ctx context.Context, tradeID string, isWin bool, pnlPercent float64,
+		exitTime time.Time, exitReason string) error
+}
+
+// StateManagerInterface defines the interface for the Decision Engine state manager.
+// Epic 11: Position Decision Engine - Saves coin state during scanning for UI display.
+type StateManagerInterface interface {
+	// SetCoinState stores the complete coin state for a user and symbol.
+	SetCoinState(ctx context.Context, userID, symbol string, state *CoinStateData) error
+}
+
+// CoinStateData represents the coin state data to be stored in Redis.
+// This mirrors decision.CoinState but is defined here to avoid import cycles.
+type CoinStateData struct {
+	Symbol          string   `json:"symbol"`
+	Price           float64  `json:"price"`
+	Regime          string   `json:"regime"`
+	ActiveStrategy  string   `json:"active_strategy"`
+	Decision        string   `json:"decision"`
+	ADX             float64  `json:"adx"`
+	ATR             float64  `json:"atr"`
+	RSI             float64  `json:"rsi"`
+	EMA9            float64  `json:"ema_9"`
+	EMA21           float64  `json:"ema_21"`
+	Trend1H         string   `json:"trend_1h"`
+	Trend15M        string   `json:"trend_15m"`
+	ScoreTechnical  int      `json:"score_technical"`
+	ScoreContext    int      `json:"score_context"`
+	ScoreLLM        int      `json:"score_llm"`
+	ScoreHistory    int      `json:"score_history"`
+	ScoreFinal      int      `json:"score_final"`
+	BlockingReasons []string `json:"blocking_reasons"`
+}
+
 // ==================== TRADING FEE CONSTANTS ====================
 // Binance Futures trading fees (Standard tier - verified from API)
 // Note: These are fallback values. Actual user rates are stored in user_fee_rates table
@@ -1058,6 +1117,10 @@ type GinieAutopilot struct {
 	clientOrderIdGen    *orders.ClientOrderIdGenerator         // Epic 7: Client order ID generator
 	positionStateInt    *PositionStateIntegration              // Story 7.11: Position state tracking
 	modificationTracker *orders.ModificationTracker            // Story 7.12: Order modification event log
+	chainEventWriter    *orders.ChainEventWriter              // Story 7.17: Chain event writer (event sourcing)
+	calibrationUpdater  CalibrationLifecycleUpdater           // Story 11.26: Calibration data lifecycle
+	indicatorPerfRecorder IndicatorPerformanceRecorder        // Story 11.14: Indicator performance tracker
+	stateManager        StateManagerInterface                 // Epic 11: Decision Engine state management
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -1827,6 +1890,53 @@ func (ga *GinieAutopilot) GetPositionStateIntegration() *PositionStateIntegratio
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
 	return ga.positionStateInt
+}
+
+// SetCalibrationLifecycleUpdater sets the calibration lifecycle updater for Story 11.26.
+// This enables automatic calibration updates when trades close.
+func (ga *GinieAutopilot) SetCalibrationLifecycleUpdater(updater CalibrationLifecycleUpdater) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.calibrationUpdater = updater
+	if updater != nil && ga.logger != nil {
+		ga.logger.Info("Calibration lifecycle updater set for trade outcome tracking")
+	}
+}
+
+// GetCalibrationLifecycleUpdater returns the calibration lifecycle updater.
+func (ga *GinieAutopilot) GetCalibrationLifecycleUpdater() CalibrationLifecycleUpdater {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return ga.calibrationUpdater
+}
+
+// SetIndicatorPerformanceRecorder sets the indicator performance recorder for Story 11.14.
+// This enables tracking indicator values and correlating them with trade outcomes.
+func (ga *GinieAutopilot) SetIndicatorPerformanceRecorder(recorder IndicatorPerformanceRecorder) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.indicatorPerfRecorder = recorder
+	if recorder != nil && ga.logger != nil {
+		ga.logger.Info("Indicator performance recorder set for trade analysis")
+	}
+}
+
+// GetIndicatorPerformanceRecorder returns the indicator performance recorder.
+func (ga *GinieAutopilot) GetIndicatorPerformanceRecorder() IndicatorPerformanceRecorder {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+	return ga.indicatorPerfRecorder
+}
+
+// SetStateManager sets the Decision Engine state manager for saving coin states during scanning.
+// Epic 11: Position Decision Engine - Entry Decision Engine UI integration.
+func (ga *GinieAutopilot) SetStateManager(sm StateManagerInterface) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.stateManager = sm
+	if sm != nil && ga.logger != nil {
+		ga.logger.Info("Decision Engine state manager set for coin state tracking")
+	}
 }
 
 // getEffectivePositionSide determines the correct position side based on Binance account's position mode
@@ -3418,6 +3528,10 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				continue
 			}
 
+			// ===== EPIC 11: SAVE COIN STATE FOR ENTRY DECISION ENGINE UI =====
+			// Save the scan/decision data to Redis so the Entry Decision Engine can display it
+			ga.saveCoinStateFromDecision(symbol, decision)
+
 			// ===== SCALP RE-ENTRY MODE SELECTION =====
 			// [Story 9.9] Position optimization (progressive TP, re-entry at breakeven, dynamic SL)
 			// is now a FEATURE FLAG per-mode, not a separate mode. Positions stay in their original mode (scalp, swing, etc.)
@@ -4980,18 +5094,22 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	actualQty := quantity
 	var entryOrderId int64 // Story 7.11: Track entry order ID for position state
 
-	// Epic 7: Generate clientOrderId for entry order tracking
-	// This must be generated BEFORE any order is placed so all entry types use the same baseID
-	entryClientOrderId, clientOrderBaseID := ga.generateClientOrderId(decision.SelectedMode)
-	if entryClientOrderId != "" {
-		ga.logger.Info("Generated clientOrderId for entry",
-			"symbol", symbol,
-			"mode", decision.SelectedMode,
-			"clientOrderId", entryClientOrderId,
-			"baseID", clientOrderBaseID)
-	}
+	// Epic 7: clientOrderId variables - generated ONLY when placing real orders
+	// This prevents counter increment in DryRun mode or when order placement is aborted
+	var entryClientOrderId string
+	var clientOrderBaseID string
 
 	if !ga.config.DryRun {
+		// Epic 7: Generate clientOrderId for entry order tracking
+		// Generate AFTER DryRun check to prevent wasting sequence numbers
+		entryClientOrderId, clientOrderBaseID = ga.generateClientOrderId(decision.SelectedMode)
+		if entryClientOrderId != "" {
+			ga.logger.Info("Generated clientOrderId for entry",
+				"symbol", symbol,
+				"mode", decision.SelectedMode,
+				"clientOrderId", entryClientOrderId,
+				"baseID", clientOrderBaseID)
+		}
 		// Set leverage first
 		_, err = ga.futuresClient.SetLeverage(symbol, leverage)
 		if err != nil {
@@ -5374,6 +5492,9 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			time.Now().UnixMilli(),
 		)
 	}
+
+	// Story 11.14: Record indicator performance at entry
+	ga.recordIndicatorPerformanceEntry(position)
 
 	// Place SL/TP orders on Binance (if not dry run)
 	if !ga.config.DryRun {
@@ -6925,18 +7046,6 @@ func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 // reason: human-readable reason for the modification
 // llmDecisionID: optional LLM decision ID for traceability
 func (ga *GinieAutopilot) logOrderModificationEvent(pos *GiniePosition, orderType string, oldPrice *float64, newPrice float64, algoId int64, source, reason string, llmDecisionID *string) {
-	if ga.modificationTracker == nil {
-		return // Tracker not initialized
-	}
-
-	// Parse userID from string to int64
-	var userID int64
-	if ga.userID != "" {
-		if parsed, err := fmt.Sscanf(ga.userID, "%d", &userID); err != nil || parsed != 1 {
-			userID = 0
-		}
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -6944,6 +7053,19 @@ func (ga *GinieAutopilot) logOrderModificationEvent(pos *GiniePosition, orderTyp
 	chainID := pos.ChainBaseID
 	if chainID == "" {
 		chainID = fmt.Sprintf("LEGACY-%s", pos.Symbol)
+	}
+
+	// Use userID string directly (UUID format)
+	userID := ga.userID
+
+	// === Story 7.17/7.18: Write to ChainEventWriter (new event sourcing system) ===
+	if ga.chainEventWriter != nil {
+		ga.writeToChainEventWriter(ctx, pos, chainID, orderType, oldPrice, newPrice, algoId, source, reason)
+	}
+
+	// === Story 7.12: Write to ModificationTracker (legacy system - dual-write) ===
+	if ga.modificationTracker == nil {
+		return // Tracker not initialized
 	}
 
 	var algoIDPtr *int64
@@ -7008,9 +7130,129 @@ func (ga *GinieAutopilot) logOrderModificationEvent(pos *GiniePosition, orderTyp
 	}
 }
 
+// writeToChainEventWriter writes events to the new event sourcing system (Story 7.17/7.18)
+func (ga *GinieAutopilot) writeToChainEventWriter(ctx context.Context, pos *GiniePosition, chainID, orderType string, oldPrice *float64, newPrice float64, algoId int64, source, reason string) {
+	// Convert source string to ModificationSource type
+	var modSource orders.ModificationSource
+	switch source {
+	case "LLM_AUTO":
+		modSource = orders.ModSourceLLMAuto
+	case "USER_MANUAL":
+		modSource = orders.ModSourceUserManual
+	case "TRAILING_STOP":
+		modSource = orders.ModSourceTrailingStop
+	default:
+		modSource = orders.ModSourceSystem
+	}
+
+	// Get current market price
+	marketPrice := ga.getCurrentPrice(pos.Symbol)
+
+	// Determine which event type to record
+	if orderType == "SL" {
+		if oldPrice == nil {
+			// SL initial placement
+			event := orders.ChainSLPlacedEvent{
+				BinanceOrderID:       algoId,
+				BinanceClientOrderID: fmt.Sprintf("%s-SL", chainID),
+				Price:                newPrice,
+				BinanceTimestamp:     time.Now().UnixMilli(),
+			}
+			if err := ga.chainEventWriter.RecordSLPlaced(ctx, chainID, event); err != nil {
+				ga.logger.Warn("Failed to write SL placed to ChainEventWriter",
+					"chain_id", chainID,
+					"error", err.Error())
+			}
+		} else {
+			// SL modification
+			event := orders.ChainSLModifiedEvent{
+				BinanceOrderID:     algoId,
+				OldPrice:           *oldPrice,
+				NewPrice:           newPrice,
+				ModificationSource: modSource,
+				ModificationReason: reason,
+				MarketPrice:        marketPrice,
+				BinanceTimestamp:   time.Now().UnixMilli(),
+			}
+			if err := ga.chainEventWriter.RecordSLModified(ctx, chainID, event); err != nil {
+				ga.logger.Warn("Failed to write SL modified to ChainEventWriter",
+					"chain_id", chainID,
+					"error", err.Error())
+			}
+		}
+	} else if orderType == "TP" || orderType == "TP1" || orderType == "TP2" || orderType == "TP3" {
+		if oldPrice == nil {
+			// TP initial placement
+			if orderType == "TP" {
+				event := orders.ChainTPPlacedEvent{
+					BinanceOrderID:       algoId,
+					BinanceClientOrderID: fmt.Sprintf("%s-%s", chainID, orderType),
+					Price:                newPrice,
+					BinanceTimestamp:     time.Now().UnixMilli(),
+				}
+				if err := ga.chainEventWriter.RecordTPPlaced(ctx, chainID, event); err != nil {
+					ga.logger.Warn("Failed to write TP placed to ChainEventWriter",
+						"chain_id", chainID,
+						"error", err.Error())
+				}
+			} else {
+				// TP1, TP2, TP3
+				level := 1
+				if orderType == "TP2" {
+					level = 2
+				} else if orderType == "TP3" {
+					level = 3
+				}
+				event := orders.ChainTPLevelPlacedEvent{
+					Level:                level,
+					BinanceOrderID:       algoId,
+					BinanceClientOrderID: fmt.Sprintf("%s-%s", chainID, orderType),
+					Price:                newPrice,
+					Quantity:             pos.RemainingQty,
+					BinanceTimestamp:     time.Now().UnixMilli(),
+				}
+				if err := ga.chainEventWriter.RecordTPLevelPlaced(ctx, chainID, level, event); err != nil {
+					ga.logger.Warn("Failed to write TP level placed to ChainEventWriter",
+						"chain_id", chainID,
+						"level", level,
+						"error", err.Error())
+				}
+			}
+		} else {
+			// TP modification (only for normal mode TP, not TP1/2/3 which are static)
+			if orderType == "TP" {
+				event := orders.ChainTPModifiedEvent{
+					BinanceOrderID:     algoId,
+					OldPrice:           *oldPrice,
+					NewPrice:           newPrice,
+					ModificationSource: modSource,
+					ModificationReason: reason,
+					MarketPrice:        marketPrice,
+					BinanceTimestamp:   time.Now().UnixMilli(),
+				}
+				if err := ga.chainEventWriter.RecordTPModified(ctx, chainID, event); err != nil {
+					ga.logger.Warn("Failed to write TP modified to ChainEventWriter",
+						"chain_id", chainID,
+						"error", err.Error())
+				}
+			}
+		}
+	}
+}
+
 // GetModificationTracker returns the modification tracker (for testing/API access)
 func (ga *GinieAutopilot) GetModificationTracker() *orders.ModificationTracker {
 	return ga.modificationTracker
+}
+
+// SetChainEventWriter sets the chain event writer for event sourcing (Story 7.17/7.18)
+func (ga *GinieAutopilot) SetChainEventWriter(writer *orders.ChainEventWriter) {
+	ga.chainEventWriter = writer
+}
+
+// GetChainEventWriter returns the chain event writer (for testing/API access)
+func (ga *GinieAutopilot) GetChainEventWriter() *orders.ChainEventWriter {
+	return ga.chainEventWriter
 }
 
 // checkTrailingStop checks if trailing stop is triggered
@@ -7315,6 +7557,12 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	// Persist trade closure to database
 	ga.persistTradeClosure(pos, currentPrice, totalPnL, pnlPercent, reason)
 
+	// Story 11.26: Update calibration data with trade outcome
+	ga.updateCalibrationOnClose(pos, totalPnL > 0, pnlPercent)
+
+	// Story 11.14: Update indicator performance with trade outcome
+	ga.recordIndicatorPerformanceExit(pos, totalPnL > 0, pnlPercent, reason)
+
 	// Remove position with lock to prevent race conditions
 	ga.mu.Lock()
 	delete(ga.positions, symbol)
@@ -7468,6 +7716,9 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	// Persist trade closure to database
 	ga.persistTradeClosure(pos, currentPrice, totalPnL, pnlPercent, reason)
 
+	// Story 11.26: Update calibration data with trade outcome
+	ga.updateCalibrationOnClose(pos, totalPnL > 0, pnlPercent)
+
 	// Remove position
 	ga.mu.Lock()
 	delete(ga.positions, symbol)
@@ -7523,6 +7774,196 @@ func (ga *GinieAutopilot) broadcastPositionClosure(symbol string) {
 	ga.logger.Debug("Broadcast position closure",
 		"symbol", symbol,
 		"remaining_positions", len(positions))
+}
+
+// updateCalibrationOnClose updates calibration data when a position is closed.
+// Story 11.26: Calibration Data Lifecycle - automatically records trade outcomes.
+func (ga *GinieAutopilot) updateCalibrationOnClose(pos *GiniePosition, isWin bool, pnlPercent float64) {
+	if ga.calibrationUpdater == nil {
+		return // Calibration not configured
+	}
+
+	// Extract entry score from DecisionReport
+	var entryScore int
+	if pos.DecisionReport != nil {
+		entryScore = int(pos.DecisionReport.ConfidenceScore)
+	} else {
+		// Default to mid-range if no decision report (shouldn't happen in normal operation)
+		log.Printf("[CALIBRATION] Warning: Position %s has no DecisionReport, using default score", pos.Symbol)
+		entryScore = 50
+	}
+
+	// Parse user ID (stored as string in autopilot)
+	var userID int
+	if ga.userID != "" {
+		fmt.Sscanf(ga.userID, "%d", &userID)
+	}
+
+	if userID <= 0 {
+		log.Printf("[CALIBRATION] Warning: Invalid userID for calibration update: %s", ga.userID)
+		return
+	}
+
+	// Use the strategy from the decision report or default to trend_following
+	strategy := "trend_following"
+	if pos.DecisionReport != nil && pos.DecisionReport.SelectedMode != "" {
+		// Map mode to strategy (can be refined based on actual strategy configuration)
+		switch pos.DecisionReport.SelectedMode {
+		case GinieModeScalp, GinieModeUltraFast:
+			strategy = "trend_following" // Scalp typically uses trend following
+		case GinieModeSwing:
+			strategy = "trend_following" // Swing also uses trend following
+		case GinieModePosition:
+			strategy = "trend_following" // Position uses trend following
+		default:
+			strategy = "trend_following"
+		}
+	}
+
+	// For now, use a default indicator hash
+	// In a complete implementation, this would come from the user's active indicator settings
+	indicatorHash := "00000000"
+
+	// Perform the update asynchronously to avoid blocking the close flow
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := ga.calibrationUpdater.UpdateOnTradeClose(ctx, userID, strategy, indicatorHash, entryScore, isWin, pnlPercent)
+		if err != nil {
+			log.Printf("[CALIBRATION] Failed to update calibration for user %d: %v", userID, err)
+		} else {
+			log.Printf("[CALIBRATION] Updated calibration: user=%d, strategy=%s, score=%d, win=%v, pnl=%.2f%%",
+				userID, strategy, entryScore, isWin, pnlPercent)
+		}
+	}()
+}
+
+// recordIndicatorPerformanceEntry records indicator values when a position is opened.
+// Story 11.14: Indicator Performance Tracker - tracks indicators for correlation analysis.
+func (ga *GinieAutopilot) recordIndicatorPerformanceEntry(pos *GiniePosition) {
+	if ga.indicatorPerfRecorder == nil {
+		return // Performance tracking not configured
+	}
+
+	// Parse user ID
+	var userID int
+	if ga.userID != "" {
+		fmt.Sscanf(ga.userID, "%d", &userID)
+	}
+	if userID <= 0 {
+		return
+	}
+
+	// Extract indicator values from decision report
+	indicators := make(map[string]float64)
+	var marketRegime string
+	if pos.DecisionReport != nil {
+		// Market conditions as indicators
+		indicators["adx"] = pos.DecisionReport.MarketConditions.ADX
+		indicators["atr"] = pos.DecisionReport.MarketConditions.ATR
+		indicators["btc_correlation"] = pos.DecisionReport.MarketConditions.BTCCorr
+		indicators["sentiment"] = pos.DecisionReport.MarketConditions.SentimentVal
+		marketRegime = pos.DecisionReport.MarketConditions.Trend
+
+		// Extract trend as numeric (1=bullish, 0=neutral, -1=bearish)
+		switch pos.DecisionReport.MarketConditions.Trend {
+		case "BULLISH", "bullish":
+			indicators["trend"] = 1.0
+		case "BEARISH", "bearish":
+			indicators["trend"] = -1.0
+		default:
+			indicators["trend"] = 0.0
+		}
+
+		// Volatility as numeric (1=high, 0=normal, -1=low)
+		switch pos.DecisionReport.MarketConditions.Volatility {
+		case "HIGH", "high":
+			indicators["volatility"] = 1.0
+		case "LOW", "low":
+			indicators["volatility"] = -1.0
+		default:
+			indicators["volatility"] = 0.0
+		}
+
+		// Volume as numeric
+		switch pos.DecisionReport.MarketConditions.Volume {
+		case "HIGH", "high":
+			indicators["volume"] = 1.0
+		case "LOW", "low":
+			indicators["volume"] = -1.0
+		default:
+			indicators["volume"] = 0.0
+		}
+	}
+
+	// Determine strategy from mode
+	strategy := "trend_following"
+	if pos.DecisionReport != nil {
+		switch pos.DecisionReport.SelectedMode {
+		case GinieModeScalp, GinieModeUltraFast:
+			strategy = "scalping"
+		case GinieModeSwing:
+			strategy = "swing_trading"
+		case GinieModePosition:
+			strategy = "position_trading"
+		}
+	}
+
+	// Create trade ID from chain base ID or generate one
+	tradeID := pos.ChainBaseID
+	if tradeID == "" {
+		tradeID = fmt.Sprintf("%s-%d", pos.Symbol, time.Now().UnixMilli())
+	}
+
+	var entryScore int
+	if pos.DecisionReport != nil {
+		entryScore = int(pos.DecisionReport.ConfidenceScore)
+	} else {
+		entryScore = 50
+	}
+
+	// Record asynchronously using the interface method
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := ga.indicatorPerfRecorder.RecordTradeEntryAutopilot(
+			ctx, tradeID, userID, pos.Symbol, strategy,
+			indicators, entryScore, pos.EntryTime, marketRegime, pos.Side,
+		)
+		if err != nil {
+			log.Printf("[INDICATOR_PERF] Failed to record entry for %s: %v", pos.Symbol, err)
+		}
+	}()
+}
+
+// recordIndicatorPerformanceExit records trade outcome when a position is closed.
+// Story 11.14: Indicator Performance Tracker - correlates outcomes with entry indicators.
+func (ga *GinieAutopilot) recordIndicatorPerformanceExit(pos *GiniePosition, isWin bool, pnlPercent float64, reason string) {
+	if ga.indicatorPerfRecorder == nil {
+		return // Performance tracking not configured
+	}
+
+	// Use the chain base ID as trade ID (must match entry)
+	tradeID := pos.ChainBaseID
+	if tradeID == "" {
+		// Can't correlate without matching ID
+		return
+	}
+
+	// Record asynchronously using the interface method
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := ga.indicatorPerfRecorder.RecordTradeExitAutopilot(
+			ctx, tradeID, isWin, pnlPercent, time.Now(), reason,
+		)
+		if err != nil {
+			log.Printf("[INDICATOR_PERF] Failed to record exit for %s: %v", pos.Symbol, err)
+		}
+	}()
 }
 
 // updateCoinLossTracking tracks per-coin consecutive losses and blocks coins with big losses
@@ -18645,5 +19086,106 @@ func (ga *GinieAutopilot) GetTradeConditions() TradeConditionsResponse {
 		AllPassed:     blockingCount == 0,
 		BlockingCount: blockingCount,
 		Timestamp:     time.Now(),
+	}
+}
+
+// saveCoinStateFromDecision saves the coin state from a decision report to Redis.
+// Epic 11: Position Decision Engine - Entry Decision Engine UI integration.
+// This allows the frontend to display coin states being scanned by the autopilot.
+func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *GinieDecisionReport) {
+	// Skip if state manager is not configured
+	if ga.stateManager == nil {
+		return
+	}
+
+	// Skip if decision is nil
+	if decision == nil {
+		return
+	}
+
+	// Determine market regime from volatility
+	regime := "TRENDING"
+	if decision.MarketConditions.Volatility == "extreme" || decision.MarketConditions.Volatility == "high" {
+		regime = "VOLATILE"
+	} else if decision.MarketConditions.ADX < 20 {
+		regime = "RANGING"
+	} else if decision.MarketConditions.ADX < 25 {
+		regime = "CONSOLIDATING"
+	}
+
+	// Determine trend direction
+	trend1H := "NEUTRAL"
+	if decision.MarketConditions.Trend == "bullish" || decision.MarketConditions.Trend == "strong_bullish" {
+		trend1H = "BULLISH"
+	} else if decision.MarketConditions.Trend == "bearish" || decision.MarketConditions.Trend == "strong_bearish" {
+		trend1H = "BEARISH"
+	}
+
+	// Determine decision status (READY, BLOCKED, or PENDING)
+	decisionStatus := "PENDING"
+	var blockingReasons []string
+	if decision.TradeExecution.Action == "BUY" || decision.TradeExecution.Action == "SELL" {
+		if decision.ConfidenceScore >= ga.config.MinConfidenceToTrade {
+			decisionStatus = "READY"
+		} else {
+			blockingReasons = append(blockingReasons, "SCORE_BELOW_THRESHOLD")
+		}
+	} else if decision.TradeExecution.Action == "WAIT" || decision.TradeExecution.Action == "AVOID" {
+		decisionStatus = "BLOCKED"
+		// Add blocking reasons based on market conditions
+		if decision.MarketConditions.ADX < 20 {
+			blockingReasons = append(blockingReasons, "ADX_TOO_LOW")
+		}
+		if decision.MarketConditions.Volatility == "extreme" {
+			blockingReasons = append(blockingReasons, "HIGH_VOLATILITY")
+		}
+		if decision.SignalAnalysis.PrimaryMet < decision.SignalAnalysis.PrimaryRequired {
+			blockingReasons = append(blockingReasons, "SIGNALS_NOT_MET")
+		}
+	}
+
+	// Calculate score components (map confidence to score breakdown)
+	// Technical: 40 points max, Context: 30 points max, LLM: 20 points max, History: 10 points max
+	confidenceRatio := decision.ConfidenceScore / 100.0
+	scoreTechnical := int(confidenceRatio * 40)
+	scoreContext := int(confidenceRatio * 30)
+	scoreLLM := int(confidenceRatio * 20)
+	scoreHistory := int(confidenceRatio * 10)
+	scoreFinal := scoreTechnical + scoreContext + scoreLLM + scoreHistory
+
+	// Get entry price from decision
+	entryPrice := decision.TradeExecution.EntryHigh
+	if entryPrice == 0 {
+		entryPrice = decision.TradeExecution.EntryLow
+	}
+
+	// Build coin state data
+	coinState := &CoinStateData{
+		Symbol:          symbol,
+		Price:           entryPrice,
+		Regime:          regime,
+		ActiveStrategy:  string(decision.SelectedMode),
+		Decision:        decisionStatus,
+		ADX:             decision.MarketConditions.ADX,
+		ATR:             decision.MarketConditions.ATR,
+		RSI:             0, // Not available in MarketConditions
+		EMA9:            0, // Not available in decision report
+		EMA21:           0, // Not available in decision report
+		Trend1H:         trend1H,
+		Trend15M:        trend1H, // Use same as 1H for now
+		ScoreTechnical:  scoreTechnical,
+		ScoreContext:    scoreContext,
+		ScoreLLM:        scoreLLM,
+		ScoreHistory:    scoreHistory,
+		ScoreFinal:      scoreFinal,
+		BlockingReasons: blockingReasons,
+	}
+
+	// Save to Redis via state manager
+	ctx := context.Background()
+	if err := ga.stateManager.SetCoinState(ctx, ga.userID, symbol, coinState); err != nil {
+		log.Printf("[DECISION-STATE] Failed to save coin state for %s: %v", symbol, err)
+	} else {
+		log.Printf("[DECISION-STATE] Saved coin state for %s: regime=%s, decision=%s, score=%d", symbol, regime, decisionStatus, scoreFinal)
 	}
 }

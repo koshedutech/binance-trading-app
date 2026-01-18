@@ -80,6 +80,9 @@ type UserAutopilotManager struct {
 	cleanupStop chan struct{}
 	cleanupWg   sync.WaitGroup
 
+	// Epic 11: StateManager for Entry Decision Engine integration
+	stateManager StateManagerInterface
+
 	mu sync.RWMutex
 }
 
@@ -115,6 +118,15 @@ func NewUserAutopilotManager(
 	go mgr.cleanupLoop()
 
 	return mgr
+}
+
+// SetStateManager sets the Decision Engine state manager for saving coin states during scanning (Epic 11)
+// This is called from main.go after the StateManager is initialized
+func (m *UserAutopilotManager) SetStateManager(sm StateManagerInterface) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stateManager = sm
+	m.logger.Info("StateManager set on UserAutopilotManager for Entry Decision Engine integration")
 }
 
 // cleanupLoop periodically removes idle user sessions
@@ -280,6 +292,13 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	// Load persisted stats
 	autopilot.LoadPnLStats()
+
+	// Epic 11: Set StateManager for Entry Decision Engine integration
+	// This allows the autopilot to save coin states during scanning
+	if m.stateManager != nil {
+		autopilot.SetStateManager(m.stateManager)
+		m.logger.Info("StateManager set on user autopilot for Entry Decision Engine", "user_id", userID)
+	}
 
 	instance := &UserAutopilotInstance{
 		UserID:        userID,

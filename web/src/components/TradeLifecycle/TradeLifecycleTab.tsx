@@ -1,5 +1,6 @@
 // Story 7.15: Order Chain Tree Structure UI
 // Updated to use getOrderChainsWithState API for position state and modification counts
+// Enhanced: Added date range filtering with historical orders API
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Layers,
@@ -11,13 +12,15 @@ import {
   TrendingDown,
   Target,
   Shield,
+  History,
 } from 'lucide-react';
-import { futuresApi, OrderChainWithState, PositionStateInfo } from '../../services/futuresApi';
+import { futuresApi, OrderChainWithState, PositionStateInfo, HistoricalOrderChain } from '../../services/futuresApi';
 import { wsService } from '../../services/websocket';
 import { fallbackManager } from '../../services/fallbackPollingManager';
 import { ConnectionStatus } from '../ConnectionStatus';
 import ChainCard from './ChainCard';
 import ChainFilters from './ChainFilters';
+import EntryDecisionEngineCard from './EntryDecisionEngineCard';
 import {
   OrderChain,
   ChainOrder,
@@ -138,8 +141,70 @@ export default function TradeLifecycleTab({
     };
   };
 
+  // Helper: Convert historical API response to frontend OrderChain
+  const mapHistoricalOrderChain = (histChain: HistoricalOrderChain): OrderChain => {
+    // Historical chains from DB don't include individual orders
+    // They have summary data about the chain
+    const parsed = parseClientOrderId(histChain.chainId + '-E');
+
+    return {
+      chainId: histChain.chainId,
+      modeCode: (histChain.modeCode as TradingModeCode) || null,
+      dateStr: parsed?.dateStr || null,
+      sequence: parsed?.sequence || null,
+      symbol: histChain.symbol,
+      side: histChain.side as 'BUY' | 'SELL' || null,
+      positionSide: histChain.side === 'BUY' ? 'LONG' : 'SHORT' as 'LONG' | 'SHORT' | 'BOTH',
+      orders: [], // Historical chains don't have order details from Binance
+      entryOrder: null,
+      tpOrders: [],
+      slOrder: null,
+      dcaOrders: [],
+      rebuyOrder: null,
+      hedgeOrder: null,
+      hedgeSLOrder: null,
+      hedgeTPOrder: null,
+      status: (histChain.status === 'CLOSED' ? 'completed' :
+              histChain.status === 'CANCELLED' ? 'cancelled' :
+              histChain.status === 'PARTIAL' ? 'partial' : 'active') as 'active' | 'partial' | 'completed' | 'cancelled',
+      totalValue: histChain.entryPrice * histChain.entryQuantity,
+      filledValue: histChain.entryPrice * histChain.entryQuantity,
+      pnl: histChain.realizedPnl,
+      createdAt: new Date(histChain.createdAt).getTime(),
+      updatedAt: new Date(histChain.updatedAt).getTime(),
+      isFallback: histChain.chainId.includes('FALLBACK'),
+      positionState: {
+        id: 0,
+        chainId: histChain.chainId,
+        symbol: histChain.symbol,
+        entryOrderId: 0,
+        entryClientOrderId: histChain.chainId + '-E',
+        entrySide: histChain.side as 'BUY' | 'SELL',
+        entryPrice: histChain.entryPrice,
+        entryQuantity: histChain.entryQuantity,
+        entryValue: histChain.entryPrice * histChain.entryQuantity,
+        entryFees: histChain.totalFees,
+        entryFilledAt: histChain.createdAt,
+        status: histChain.status as 'ACTIVE' | 'PARTIAL' | 'CLOSED',
+        remainingQuantity: histChain.remainingQuantity,
+        realizedPnl: histChain.realizedPnl,
+        createdAt: histChain.createdAt,
+        updatedAt: histChain.updatedAt,
+        closedAt: histChain.closedAt,
+      },
+      modificationCounts: {
+        SL: histChain.slModificationCount || 0,
+        TP1: histChain.tpModificationCount || 0,
+      },
+    };
+  };
+
+  // Track if we're in historical mode (date filter active)
+  const isHistoricalMode = !!(filters.dateFrom || filters.dateTo);
+
   // Fetch order chains with state (Story 7.15: Use new API endpoint)
   // Uses fetchInFlightRef to prevent race conditions from concurrent calls
+  // Enhanced: Uses historical API when date filters are active
   const fetchOrders = useCallback(async () => {
     // Prevent concurrent fetch calls (race condition protection)
     if (fetchInFlightRef.current) {
@@ -148,7 +213,26 @@ export default function TradeLifecycleTab({
     fetchInFlightRef.current = true;
 
     try {
-      // Story 7.15: Use new getOrderChainsWithState API
+      // If date filters are active, use historical API (database query)
+      if (filters.dateFrom || filters.dateTo) {
+        const histResponse = await futuresApi.getHistoricalOrderChains({
+          symbol: filters.symbol !== 'all' ? filters.symbol : undefined,
+          mode: filters.mode !== 'all' ? filters.mode : undefined,
+          status: filters.status !== 'all' ? filters.status as 'active' | 'partial' | 'closed' | 'cancelled' : undefined,
+          dateFrom: filters.dateFrom,
+          dateTo: filters.dateTo,
+          limit: 200,
+        });
+
+        if (histResponse && histResponse.chains) {
+          const mappedChains = histResponse.chains.map(mapHistoricalOrderChain);
+          setChains(mappedChains);
+          setError(null);
+          return;
+        }
+      }
+
+      // Story 7.15: Use new getOrderChainsWithState API (for active orders from Binance)
       const response = await futuresApi.getOrderChainsWithState();
 
       if (!response || !response.chains) {
@@ -268,9 +352,9 @@ export default function TradeLifecycleTab({
       setLoading(false);
       fetchInFlightRef.current = false;
     }
-  }, []); // No dependencies - uses only stable setters and external API
+  }, [filters.dateFrom, filters.dateTo, filters.symbol, filters.mode, filters.status]); // Include filters for historical API
 
-  // Initial fetch
+  // Fetch when filters change (including date filters)
   useEffect(() => {
     fetchOrders();
   }, [fetchOrders]);
@@ -361,13 +445,15 @@ export default function TradeLifecycleTab({
     };
   }, [chains]);
 
-  // Reset filters
+  // Reset filters (including date filters)
   const resetFilters = () => {
     setFilters({
       mode: 'all',
       status: 'all',
       symbol: 'all',
       side: 'all',
+      dateFrom: undefined,
+      dateTo: undefined,
     });
   };
 
@@ -396,13 +482,24 @@ export default function TradeLifecycleTab({
   }
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700">
-      {/* Header */}
-      <div className="p-4 border-b border-gray-700">
+    <div className="space-y-4">
+      {/* Entry Decision Engine - Separate expandable module */}
+      <EntryDecisionEngineCard defaultExpanded={true} />
+
+      {/* Order Chains Card */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700">
+        {/* Header */}
+        <div className="p-4 border-b border-gray-700">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <Layers className="w-5 h-5 text-purple-400" />
             <h3 className="text-lg font-semibold text-gray-200">Order Chains</h3>
+            {isHistoricalMode && (
+              <span className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400">
+                <History className="w-3 h-3" />
+                Historical
+              </span>
+            )}
             <ConnectionStatus />
             <span className="text-sm text-gray-500">
               ({filteredChains.length} chain{filteredChains.length !== 1 ? 's' : ''})
@@ -535,6 +632,7 @@ export default function TradeLifecycleTab({
             <span>Hedge</span>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

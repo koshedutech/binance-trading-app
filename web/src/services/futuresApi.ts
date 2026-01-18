@@ -296,6 +296,58 @@ class FuturesAPIService {
     return data;
   }
 
+  /**
+   * Get historical order chains from database with flexible filtering
+   * Supports date range, status, symbol, and mode filters
+   */
+  async getHistoricalOrderChains(filters?: {
+    symbol?: string;
+    mode?: string;
+    status?: 'active' | 'partial' | 'closed' | 'cancelled';
+    dateFrom?: string; // YYYY-MM-DD
+    dateTo?: string;   // YYYY-MM-DD
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    chains: HistoricalOrderChain[];
+    count: number;
+    filter: Record<string, unknown>;
+  }> {
+    const { data } = await this.client.get('/order-chains/history', {
+      params: filters,
+    });
+    return data;
+  }
+
+  // ==================== COIN STATE (Epic 11: Position Decision Engine) ====================
+
+  /**
+   * Get coin state for a single symbol
+   * Returns decision engine state including regime, scores, blocking reasons
+   */
+  async getCoinState(symbol: string): Promise<CoinStateResponse> {
+    const { data } = await this.client.get<{ success: boolean; data: CoinStateResponse }>(`/decision/coin/${symbol}`);
+    return data.data;
+  }
+
+  /**
+   * Get all coin states for the current user
+   * Optionally filter by specific symbols
+   */
+  async getAllCoinStates(symbols?: string[]): Promise<CoinStateResponse[]> {
+    const params = symbols?.length ? { symbols: symbols.join(',') } : undefined;
+    const { data } = await this.client.get<{ success: boolean; data: CoinStateResponse[]; count: number }>('/decision/coins', { params });
+    return data.data || [];
+  }
+
+  /**
+   * Get count of coin states being tracked
+   */
+  async getCoinStateCount(): Promise<number> {
+    const { data } = await this.client.get<{ success: boolean; count: number }>('/decision/coins/count');
+    return data.count || 0;
+  }
+
   // ==================== MARKET DATA ====================
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
@@ -1195,6 +1247,55 @@ class FuturesAPIService {
   }> {
     // Use longer timeout for this endpoint since it makes 7+ Binance API calls
     const { data } = await this.client.get('/pnl-summary', { timeout: 120000 });
+    return data;
+  }
+
+  // Story 13.1: Extended P&L history with caching
+  async getPnLHistory(startDate?: string, endDate?: string): Promise<{
+    daily_records: Array<{
+      date: string;
+      day: number;
+      day_name: string;
+      pnl: number;
+      commission: number;
+      rebate: number;
+      funding: number;
+      other: number;
+      net_pnl: number;
+      trade_count: number;
+      is_profit: boolean;
+      is_today: boolean;
+      is_cached: boolean;
+    }>;
+    totals: {
+      pnl: number;
+      commission: number;
+      funding: number;
+      net_pnl: number;
+      trade_count: number;
+      days_count: number;
+    };
+    date_range: {
+      start_date: string;
+      end_date: string;
+    };
+    cache_stats: {
+      cached_days: number;
+      fetched_days: number;
+    };
+    timezone: string;
+    timezone_offset: string;
+    fetched_at: string;
+  }> {
+    const params: Record<string, string> = {};
+    if (startDate) params.start_date = startDate;
+    if (endDate) params.end_date = endDate;
+
+    // Use longer timeout since uncached days require Binance API calls
+    const { data } = await this.client.get('/pnl-history', {
+      params,
+      timeout: 120000
+    });
     return data;
   }
 
@@ -2334,7 +2435,20 @@ class FuturesAPIService {
     modifications: Record<string, ModificationHistoryResponse>;
     totalModifications: number;
   }> {
-    const { data } = await this.client.get(`/trade-lifecycle/${chainId}/all-modifications`);
+    const { data } = await this.client.get(`/trade-lifecycle/${chainId}/modifications/all`);
+    // Transform backend response to expected frontend format
+    if (data.success && data.grouped_events) {
+      return {
+        chainId: data.chain_id,
+        modifications: Object.fromEntries(
+          Object.entries(data.grouped_events).map(([key, events]) => [
+            key,
+            { events: events as ModificationHistoryResponse['events'], count: (events as unknown[]).length }
+          ])
+        ),
+        totalModifications: data.count || 0,
+      };
+    }
     return data;
   }
 }
@@ -4420,6 +4534,78 @@ export interface OrderChainsWithStateResponse {
   chains: OrderChainWithState[];
   total: number;
   chain_count: number;
+}
+
+// Historical order chain from database (includes closed orders)
+export interface HistoricalOrderChain {
+  chainId: string;
+  userId: string;
+  symbol: string;
+  side: string;
+  modeCode: string;
+  status: string;
+  entryPrice: number;
+  entryQuantity: number;
+  currentSlPrice: number;
+  currentTpPrice: number;
+  remainingQuantity: number;
+  slModificationCount: number;
+  tpModificationCount: number;
+  eventCount: number;
+  realizedPnl: number;
+  totalFees: number;
+  closeReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  closedAt?: string;
+}
+
+// ==================== COIN STATE TYPES (Epic 11: Position Decision Engine) ====================
+
+export interface CoinStateScores {
+  technical: number;
+  context: number;
+  llm: number;
+  history: number;
+  final: number;
+}
+
+export interface CoinStateBlockingReason {
+  code: string;
+  category: 'HARD_BLOCK' | 'SOFT_BLOCK' | 'WARNING';
+  description: string;
+  value?: number | string;
+  threshold?: number | string;
+  timestamp: number;
+  overridable: boolean;
+}
+
+export interface CoinStateBlocking {
+  total_reasons: number;
+  hard_block_count: number;
+  soft_block_count: number;
+  warning_count: number;
+  is_blocked: boolean;
+  can_override: boolean;
+  all_reasons: CoinStateBlockingReason[];
+}
+
+export interface CoinStateResponse {
+  symbol: string;
+  price: number;
+  regime: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'CONSOLIDATING';
+  active_strategy: string;
+  decision: 'READY' | 'BLOCKED' | 'PENDING';
+  adx: number;
+  atr: number;
+  rsi: number;
+  ema_9: number;
+  ema_21: number;
+  trend_1h: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  trend_15m: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  scores: CoinStateScores;
+  blocking: CoinStateBlocking;
+  last_updated: number;
 }
 
 // Export singleton instance
