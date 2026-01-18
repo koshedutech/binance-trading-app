@@ -1,6 +1,8 @@
 // Story 7.15: Order Tree Node Component
+// Story 7.19: Enhanced with timezone support via formatTime prop
+// Enhanced: Added duration counter, buy/sell side, order value display
 // Individual node in the order chain tree structure
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -14,11 +16,60 @@ import {
   CheckCircle,
   Clock,
   Edit3,
+  Timer,
+  DollarSign,
 } from 'lucide-react';
-import { format } from 'date-fns';
 import { ChainOrder, PositionState, ORDER_TYPE_CONFIG, OrderTypeSuffix } from './types';
 import { ModificationTree } from './ModificationHistory';
 import type { ModificationEvent, ModifiableOrderType } from './ModificationHistory/types';
+
+// Format duration from timestamp to human readable (e.g., "15m", "2h 30m", "1d 5h")
+function formatDuration(startTime: number): string {
+  const now = Date.now();
+  const diffMs = now - startTime;
+  if (diffMs < 0) return '0s';
+
+  const seconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    const remainingHours = hours % 24;
+    return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+  }
+  if (hours > 0) {
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  return `${seconds}s`;
+}
+
+// Format countdown timer (e.g., "2:45" for 2 minutes 45 seconds remaining)
+function formatCountdown(remainingMs: number): string {
+  if (remainingMs <= 0) return '0:00';
+
+  const totalSeconds = Math.floor(remainingMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+// Calculate remaining time before order timeout
+// Entry orders have 180s timeout for LIMIT orders
+const ENTRY_ORDER_TIMEOUT_MS = 180 * 1000; // 180 seconds
+
+// Format order value (price * quantity)
+function formatValue(price: number, quantity: number): string {
+  const value = price * quantity;
+  if (value >= 1000) return `$${value.toFixed(2)}`;
+  if (value >= 1) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(6)}`;
+}
 
 // Tree node types
 export type TreeNodeType = 'ENTRY' | 'POSITION' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'RB';
@@ -34,6 +85,8 @@ interface OrderTreeNodeProps {
   isLast?: boolean;
   depth: number;
   onLoadModifications?: (orderType: ModifiableOrderType) => Promise<ModificationEvent[]>;
+  // Story 7.19: Timezone-aware time formatter
+  formatTime?: (timestamp: string | number) => string;
 }
 
 // Get icon for node type
@@ -86,6 +139,16 @@ function formatPrice(price: number): string {
   return price.toFixed(8);
 }
 
+// Default time formatter (fallback to simple format)
+const defaultFormatTime = (timestamp: string | number): string => {
+  try {
+    const date = typeof timestamp === 'number' ? new Date(timestamp) : new Date(timestamp);
+    return date.toLocaleTimeString('en-GB', { hour12: false });
+  } catch {
+    return '--:--:--';
+  }
+};
+
 export default function OrderTreeNode({
   type,
   order,
@@ -97,10 +160,49 @@ export default function OrderTreeNode({
   isLast = false,
   depth,
   onLoadModifications,
+  formatTime = defaultFormatTime, // Story 7.19: Use provided formatter or default
 }: OrderTreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
   const [loadingMods, setLoadingMods] = useState(false);
+  const [duration, setDuration] = useState<string>('');
+  const [countdown, setCountdown] = useState<string>('');
+
+  // Update duration counter every 10 seconds for pending orders (non-entry)
+  // Update countdown every second for pending entry orders
+  useEffect(() => {
+    const isPending = order && ['NEW', 'PARTIALLY_FILLED'].includes(order.status);
+    if (!isPending || !order) {
+      setDuration('');
+      setCountdown('');
+      return;
+    }
+
+    const isEntry = type === 'ENTRY';
+
+    if (isEntry) {
+      // Entry orders: show reverse countdown (time remaining before timeout)
+      const calculateCountdown = () => {
+        const elapsedMs = Date.now() - order.time;
+        const remainingMs = ENTRY_ORDER_TIMEOUT_MS - elapsedMs;
+        setCountdown(remainingMs > 0 ? formatCountdown(remainingMs) : '0:00');
+      };
+
+      // Initial calculation
+      calculateCountdown();
+
+      // Update every second for countdown
+      const interval = setInterval(calculateCountdown, 1000);
+      return () => clearInterval(interval);
+    } else {
+      // Non-entry orders: show elapsed duration
+      setDuration(formatDuration(order.time));
+      const interval = setInterval(() => {
+        setDuration(formatDuration(order.time));
+      }, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [order, type]);
 
   // Get config for this order type
   const typeKey = type === 'ENTRY' ? 'E' : type;
@@ -206,6 +308,21 @@ export default function OrderTreeNode({
           <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
           <span className={`font-medium ${config.color}`}>{config.label}</span>
 
+          {/* Buy/Sell side badge for entry orders and positions */}
+          {(type === 'ENTRY' || type === 'POSITION') && (order || positionState) && (
+            <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+              (order?.side || positionState?.entrySide) === 'BUY'
+                ? 'bg-green-500/20 text-green-400'
+                : 'bg-red-500/20 text-red-400'
+            }`}>
+              {(order?.side || positionState?.entrySide) === 'BUY'
+                ? <TrendingUp className="w-3 h-3" />
+                : <TrendingDown className="w-3 h-3" />
+              }
+              {(order?.side || positionState?.entrySide) === 'BUY' ? 'LONG' : 'SHORT'}
+            </span>
+          )}
+
           {/* Modification count badge */}
           {isModifiable && modificationCount > 0 && (
             <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
@@ -220,6 +337,29 @@ export default function OrderTreeNode({
             {statusIndicator.label}
           </span>
 
+          {/* Countdown timer for pending entry orders */}
+          {countdown && type === 'ENTRY' && (
+            <span
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+                parseInt(countdown.split(':')[0]) < 1
+                  ? 'bg-red-500/30 text-red-400 animate-pulse'
+                  : 'bg-orange-500/20 text-orange-400'
+              }`}
+              title="Time remaining before order timeout"
+            >
+              <Clock className="w-3 h-3" />
+              {countdown}
+            </span>
+          )}
+
+          {/* Duration counter for pending non-entry orders */}
+          {duration && type !== 'ENTRY' && (
+            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400" title="Time since order placed">
+              <Timer className="w-3 h-3" />
+              {duration}
+            </span>
+          )}
+
           {/* Spacer */}
           <div className="flex-1" />
 
@@ -231,12 +371,19 @@ export default function OrderTreeNode({
             </div>
           )}
 
-          {/* Position-specific: quantity and P&L */}
+          {/* Position-specific: quantity, value, and P&L */}
           {type === 'POSITION' && positionState && (
             <>
               <div className="text-right ml-3">
                 <span className="text-gray-300 font-mono text-sm">{positionState.entryQuantity.toFixed(4)}</span>
                 <span className="text-xs text-gray-500 ml-1">Qty</span>
+              </div>
+              {/* Position value */}
+              <div className="text-right ml-3">
+                <span className="text-gray-300 font-mono text-sm">
+                  {formatValue(positionState.entryPrice, positionState.entryQuantity)}
+                </span>
+                <span className="text-xs text-gray-500 ml-1">Value</span>
               </div>
               {positionState.realizedPnl !== 0 && (
                 <div className="text-right ml-3">
@@ -253,25 +400,48 @@ export default function OrderTreeNode({
             </>
           )}
 
-          {/* Order-specific: quantity */}
+          {/* Order-specific: quantity and value */}
           {order && (
-            <div className="text-right ml-3">
-              <span className="text-gray-300 font-mono text-sm">
-                {order.executedQty > 0 ? `${order.executedQty.toFixed(4)}/` : ''}
-                {order.origQty.toFixed(4)}
-              </span>
-              <span className="text-xs text-gray-500 ml-1">Qty</span>
-            </div>
+            <>
+              <div className="text-right ml-3">
+                <span className="text-gray-300 font-mono text-sm">
+                  {order.executedQty > 0 ? `${order.executedQty.toFixed(4)}/` : ''}
+                  {order.origQty.toFixed(4)}
+                </span>
+                <span className="text-xs text-gray-500 ml-1">Qty</span>
+              </div>
+              {/* Order value - use stopPrice for STOP orders, avgPrice for filled, or price as fallback */}
+              <div className="text-right ml-3">
+                <span className="text-gray-300 font-mono text-sm">
+                  {formatValue(
+                    order.avgPrice && order.avgPrice > 0
+                      ? order.avgPrice
+                      : (order.stopPrice && order.stopPrice > 0 ? order.stopPrice : order.price),
+                    order.origQty
+                  )}
+                </span>
+                <span className="text-xs text-gray-500 ml-1">Value</span>
+              </div>
+              {/* Filled value when partially/fully filled */}
+              {order.executedQty > 0 && order.avgPrice && order.avgPrice > 0 && (
+                <div className="text-right ml-3">
+                  <span className="text-green-400 font-mono text-sm">
+                    {formatValue(order.avgPrice, order.executedQty)}
+                  </span>
+                  <span className="text-xs text-gray-500 ml-1">Filled</span>
+                </div>
+              )}
+            </>
           )}
 
-          {/* Timestamp */}
+          {/* Timestamp - Story 7.19: Using timezone-aware formatter */}
           {type === 'POSITION' && positionState ? (
             <div className="text-xs text-gray-500 ml-3">
-              {format(new Date(positionState.entryFilledAt), 'HH:mm:ss')}
+              {formatTime(positionState.entryFilledAt)}
             </div>
           ) : order ? (
             <div className="text-xs text-gray-500 ml-3">
-              {format(order.time, 'HH:mm:ss')}
+              {formatTime(order.time)}
             </div>
           ) : null}
         </div>

@@ -10,7 +10,7 @@
 -- Position state tracking table
 CREATE TABLE IF NOT EXISTS position_states (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) NOT NULL,
+    user_id UUID REFERENCES users(id) NOT NULL,
     chain_id VARCHAR(30) NOT NULL,              -- "ULT-17JAN-00001"
     symbol VARCHAR(20) NOT NULL,                -- "BTCUSDT"
 

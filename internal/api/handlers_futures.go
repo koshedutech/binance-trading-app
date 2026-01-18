@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -902,20 +903,15 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		}
 	}
 
-	// 4. Fetch position states for all chain IDs
-	userIDInt, err := strconv.ParseInt(userID, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
-		return
-	}
-	positionStates, err := s.repo.GetDB().GetPositionStatesByChainIDs(ctx, userIDInt, chainIDs)
+	// 4. Fetch position states for all chain IDs (using UUID string directly)
+	positionStates, err := s.repo.GetDB().GetPositionStatesByChainIDs(ctx, userID, chainIDs)
 	if err != nil {
 		log.Printf("[ORDER-CHAINS] Error fetching position states: %v", err)
 		positionStates = make(map[string]*orders.PositionState)
 	}
 
 	// 5. Fetch modification counts for all chain IDs (with user_id filter for security)
-	modCounts, err := s.repo.GetDB().GetModificationCountsByChainIDs(ctx, userIDInt, chainIDs)
+	modCounts, err := s.repo.GetDB().GetModificationCountsByChainIDs(ctx, userID, chainIDs)
 	if err != nil {
 		log.Printf("[ORDER-CHAINS] Error fetching modification counts: %v", err)
 		modCounts = make(map[string]map[string]int)
@@ -923,7 +919,28 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 
 	// 6. Merge position states and modification counts into chains
 	for chainID, chain := range chains {
-		// Add position state
+		// Calculate TotalValue and FilledValue from orders first
+		// Use stopPrice for SL/TP orders (algo orders), price for regular orders
+		for _, order := range chain.Orders {
+			// Determine the effective price for value calculation
+			effectivePrice := order.Price
+			if order.StopPrice > 0 {
+				effectivePrice = order.StopPrice
+			}
+			if effectivePrice > 0 {
+				chain.TotalValue += order.Quantity * effectivePrice
+			}
+			// Filled value uses avgPrice if available, otherwise effective price
+			if order.ExecutedQty > 0 {
+				filledPrice := order.AvgPrice
+				if filledPrice <= 0 {
+					filledPrice = effectivePrice
+				}
+				chain.FilledValue += order.ExecutedQty * filledPrice
+			}
+		}
+
+		// Add position state (overwrites calculated values with more accurate entry data)
 		if posState, exists := positionStates[chainID]; exists && posState != nil {
 			chain.PositionState = &PositionStateInfo{
 				ID:                 posState.ID,
@@ -949,8 +966,22 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 
 			// Update chain status based on position state
 			chain.Status = strings.ToLower(posState.Status)
-			chain.TotalValue = posState.EntryValue
-			chain.FilledValue = posState.EntryValue
+
+			// Use position state entry value for more accurate total/filled values
+			// Entry value is calculated at fill time with actual prices
+			if posState.EntryValue > 0 {
+				chain.FilledValue = posState.EntryValue
+				// TotalValue includes entry + pending SL/TP orders
+				if chain.TotalValue < posState.EntryValue {
+					chain.TotalValue = posState.EntryValue
+				}
+			}
+
+			// Update chain UpdatedAt if position state was updated more recently
+			posUpdateTime := posState.UpdatedAt.UnixMilli()
+			if posUpdateTime > chain.UpdatedAt {
+				chain.UpdatedAt = posUpdateTime
+			}
 		}
 
 		// Add modification counts
@@ -3081,5 +3112,538 @@ func (s *Server) handleTestDailyPnLFromTrades(c *gin.Context) {
 
 		// Trade details for verification
 		"trade_details": tradeDetails,
+	})
+}
+
+// ==================== PNL HISTORY ENDPOINTS ====================
+// Story 13.1: PNL Summary Caching & Historical Navigation
+
+// handleGetPnLHistory returns historical P&L data for extended date ranges
+// GET /api/futures/pnl-history?start_date=2026-01-01&end_date=2026-01-18
+func (s *Server) handleGetPnLHistory(c *gin.Context) {
+	// Use timeout to prevent long-running requests from exhausting resources
+	// 120 seconds matches the client-side timeout
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
+	defer cancel()
+
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "no_api_keys",
+			"message": "Please configure your Binance API keys in Settings",
+		})
+		return
+	}
+
+	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user_id_required"})
+		return
+	}
+
+	// Parse date range from query params
+	startDateStr := c.Query("start_date")
+	endDateStr := c.Query("end_date")
+
+	// Default to last 30 days if no dates provided
+	nowUTC := time.Now().UTC()
+	var startDate, endDate time.Time
+	var err error
+
+	if startDateStr != "" {
+		startDate, err = time.Parse("2006-01-02", startDateStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid start_date format, use YYYY-MM-DD"})
+			return
+		}
+	} else {
+		startDate = time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day()-29, 0, 0, 0, 0, time.UTC)
+	}
+
+	if endDateStr != "" {
+		endDate, err = time.Parse("2006-01-02", endDateStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid end_date format, use YYYY-MM-DD"})
+			return
+		}
+	} else {
+		endDate = time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC)
+	}
+
+	// Validate start_date is before or equal to end_date
+	if startDate.After(endDate) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "start_date cannot be after end_date"})
+		return
+	}
+
+	// Limit to 365 days max for safety
+	if endDate.Sub(startDate) > 365*24*time.Hour {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date range cannot exceed 365 days"})
+		return
+	}
+
+	log.Printf("[PNL-HISTORY] Fetching for user=%s, range=%s to %s", userID, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+
+	// Get user's timezone for display
+	userLoc, userTzName, userTzOffset := s.getUserTimezone(ctx, userID)
+
+	// Today's date (UTC) - we never cache today
+	todayUTC := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC)
+
+	// Build list of dates to fetch
+	var results []database.DailyPnLBreakdown
+	var datesToFetchFromBinance []time.Time
+
+	// First, check which dates we have in cache
+	cachedData, err := s.repo.GetUserDailyPnLRange(ctx, userID, startDate, endDate)
+	if err != nil {
+		log.Printf("[PNL-HISTORY] Error getting cached data: %v", err)
+		cachedData = []database.UserDailyPnLSummary{}
+	}
+
+	// Build a map of cached dates for quick lookup
+	cachedMap := make(map[string]*database.UserDailyPnLSummary)
+	for i := range cachedData {
+		dateStr := cachedData[i].Date.Format("2006-01-02")
+		cachedMap[dateStr] = &cachedData[i]
+	}
+
+	// Iterate through each day in the range
+	for d := startDate; !d.After(endDate); d = d.AddDate(0, 0, 1) {
+		dateStr := d.Format("2006-01-02")
+		isToday := d.Equal(todayUTC)
+
+		if isToday {
+			// TODAY: Always fetch live from Binance
+			datesToFetchFromBinance = append(datesToFetchFromBinance, d)
+		} else if cached, exists := cachedMap[dateStr]; exists {
+			// Past day with cache: Use cached data
+			breakdown := cached.ToDailyBreakdown(false)
+			results = append(results, breakdown)
+			log.Printf("[PNL-HISTORY] Day %s: from cache", dateStr)
+		} else {
+			// Past day without cache: Need to fetch from Binance
+			datesToFetchFromBinance = append(datesToFetchFromBinance, d)
+		}
+	}
+
+	// Fetch missing days from Binance (including today)
+	var summariesToSave []database.UserDailyPnLSummary
+
+	for _, d := range datesToFetchFromBinance {
+		dateStr := d.Format("2006-01-02")
+		isToday := d.Equal(todayUTC)
+
+		// Add small delay between API calls to avoid rate limits
+		if len(datesToFetchFromBinance) > 1 {
+			time.Sleep(150 * time.Millisecond)
+		}
+
+		// Fetch from Binance
+		dayData := s.fetchDayPnLFromBinance(futuresClient, d)
+
+		breakdown := database.DailyPnLBreakdown{
+			Date:       dateStr,
+			Day:        d.Day(),
+			DayName:    d.Format("Mon"),
+			PnL:        dayData.PnL,
+			Commission: dayData.Commission,
+			Rebate:     dayData.Rebate,
+			Funding:    dayData.Funding,
+			Other:      dayData.Other,
+			NetPnL:     dayData.NetPnL,
+			TradeCount: dayData.TradeCount,
+			IsProfit:   dayData.NetPnL >= 0,
+			IsToday:    isToday,
+			IsCached:   false,
+		}
+		results = append(results, breakdown)
+
+		// Save to cache if NOT today
+		if !isToday {
+			summary := database.NewUserDailyPnLSummary(
+				userID, d,
+				dayData.PnL, dayData.Commission, dayData.Funding,
+				dayData.Rebate, dayData.Other, dayData.NetPnL, dayData.TradeCount,
+			)
+			summariesToSave = append(summariesToSave, *summary)
+			log.Printf("[PNL-HISTORY] Day %s: fetched from Binance, will cache", dateStr)
+		} else {
+			log.Printf("[PNL-HISTORY] Day %s: fetched from Binance (TODAY, not cached)", dateStr)
+		}
+	}
+
+	// Save fetched historical data to cache
+	if len(summariesToSave) > 0 {
+		if err := s.repo.BulkSaveUserDailyPnL(ctx, summariesToSave); err != nil {
+			log.Printf("[PNL-HISTORY] Error saving to cache: %v", err)
+		} else {
+			log.Printf("[PNL-HISTORY] Cached %d days", len(summariesToSave))
+		}
+	}
+
+	// Sort results by date descending (most recent first) using efficient O(n log n) sort
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Date > results[j].Date
+	})
+
+	// Calculate totals
+	var totalPnL, totalCommission, totalFunding, totalNetPnL float64
+	var totalTrades int
+	for _, r := range results {
+		totalPnL += r.PnL
+		totalCommission += r.Commission
+		totalFunding += r.Funding
+		totalNetPnL += r.NetPnL
+		totalTrades += r.TradeCount
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"daily_records": results,
+		"totals": gin.H{
+			"pnl":         totalPnL,
+			"commission":  totalCommission,
+			"funding":     totalFunding,
+			"net_pnl":     totalNetPnL,
+			"trade_count": totalTrades,
+			"days_count":  len(results),
+		},
+		"date_range": gin.H{
+			"start_date": startDate.Format("2006-01-02"),
+			"end_date":   endDate.Format("2006-01-02"),
+		},
+		"cache_stats": gin.H{
+			"cached_days":  len(cachedData),
+			"fetched_days": len(datesToFetchFromBinance),
+		},
+		"timezone":        userTzName,
+		"timezone_offset": userTzOffset,
+		"fetched_at":      time.Now().In(userLoc).Format(time.RFC3339),
+	})
+}
+
+// DayPnLData holds the raw data fetched from Binance for a single day
+type DayPnLData struct {
+	PnL        float64
+	Commission float64
+	Rebate     float64
+	Funding    float64
+	Other      float64
+	NetPnL     float64
+	TradeCount int
+}
+
+// fetchDayPnLFromBinance fetches a single day's P&L data from Binance income history
+func (s *Server) fetchDayPnLFromBinance(futuresClient binance.FuturesClient, date time.Time) DayPnLData {
+	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.Add(24 * time.Hour)
+	dayStartMs := dayStart.UnixMilli()
+	// Binance API includes records AT endTime (inclusive), so subtract 1ms
+	dayEndMs := dayEnd.UnixMilli() - 1
+
+	dayRecords, err := futuresClient.GetIncomeHistory("", dayStartMs, dayEndMs, 1000)
+	if err != nil {
+		log.Printf("[FETCH-PNL] Error fetching day %s: %v", dayStart.Format("2006-01-02"), err)
+		return DayPnLData{}
+	}
+
+	var dayPnL, dayCommission float64
+	var dayFundingReceived, dayFundingPaid float64
+	var dayRebate, dayOther float64
+	var dayTradeCount int
+
+	for _, record := range dayRecords {
+		switch record.IncomeType {
+		case "REALIZED_PNL":
+			dayPnL += record.Income
+			dayTradeCount++
+		case "COMMISSION":
+			dayCommission += -record.Income // Store as positive
+		case "FUNDING_FEE":
+			if record.Income > 0 {
+				dayFundingReceived += record.Income
+			} else {
+				dayFundingPaid += -record.Income
+			}
+		case "COMMISSION_REBATE", "API_REBATE", "REFERRAL_KICKBACK":
+			dayRebate += record.Income
+		default:
+			dayOther += record.Income
+		}
+	}
+
+	dayNetFunding := dayFundingPaid - dayFundingReceived
+	rawNetPnL := dayPnL - dayCommission + dayRebate - dayNetFunding + dayOther
+	// Truncate to 2 decimal places (matches Binance display)
+	netPnL := math.Trunc(rawNetPnL*100) / 100
+
+	return DayPnLData{
+		PnL:        dayPnL,
+		Commission: dayCommission,
+		Rebate:     dayRebate,
+		Funding:    dayNetFunding,
+		Other:      dayOther,
+		NetPnL:     netPnL,
+		TradeCount: dayTradeCount,
+	}
+}
+
+// ==================== ORDER CHAIN CACHE ENDPOINTS ====================
+// Story 7.20: Order Chain Redis Cache Layer
+
+// handleGetCachedOrderChains returns all active order chains from cache (with PostgreSQL fallback)
+// GET /api/futures/order-chains/cached
+func (s *Server) handleGetCachedOrderChains(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	// Try cache first
+	if s.orderChainCache != nil && s.orderChainCache.IsHealthy() {
+		chains, err := s.orderChainCache.GetAllActiveChainsForUser(ctx, userID)
+		if err == nil && chains != nil && len(chains) > 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"chains": chains,
+				"source": "cache",
+				"count":  len(chains),
+			})
+			return
+		}
+	}
+
+	// Fallback to PostgreSQL
+	if s.repo != nil && s.repo.GetDB() != nil {
+		chains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get order chains"})
+			return
+		}
+
+		// Convert to response format
+		response := make([]map[string]interface{}, 0, len(chains))
+		for _, chain := range chains {
+			response = append(response, map[string]interface{}{
+				"chainId":            chain.ChainID,
+				"userId":             chain.UserID,
+				"symbol":             chain.Symbol,
+				"side":               chain.Side,
+				"modeCode":           chain.ModeCode,
+				"status":             string(chain.Status),
+				"entryPrice":         chain.EntryPrice,
+				"entryQuantity":      chain.EntryQuantity,
+				"currentSlPrice":     chain.CurrentSLPrice,
+				"currentTpPrice":     chain.CurrentTPPrice,
+				"remainingQuantity":  chain.RemainingQuantity,
+				"slModificationCount": chain.SLModificationCount,
+				"tpModificationCount": chain.TPModificationCount,
+				"eventCount":         chain.EventCount,
+				"createdAt":          chain.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+				"updatedAt":          chain.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			})
+		}
+
+		// Try to warm cache for future requests
+		if s.orderChainCache != nil {
+			go func() {
+				// Import startup package would create circular dependency
+				// So we just log here - the cache warmer will handle bulk operations
+			}()
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"chains": response,
+			"source": "database",
+			"count":  len(response),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"chains": []interface{}{},
+		"source": "none",
+		"count":  0,
+	})
+}
+
+// handleGetCachedOrderChain returns a single order chain from cache (with PostgreSQL fallback)
+// GET /api/futures/order-chains/cached/:chainId
+func (s *Server) handleGetCachedOrderChain(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	chainID := c.Param("chainId")
+	if chainID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Chain ID is required"})
+		return
+	}
+
+	// Try cache first
+	if s.orderChainCache != nil && s.orderChainCache.IsHealthy() {
+		chain, err := s.orderChainCache.GetChainState(ctx, userID, chainID)
+		if err == nil && chain != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"chain":  chain,
+				"source": "cache",
+			})
+			return
+		}
+	}
+
+	// Fallback to PostgreSQL
+	if s.repo != nil && s.repo.GetDB() != nil {
+		chain, err := s.repo.GetDB().GetOrderChainByID(ctx, userID, chainID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get order chain"})
+			return
+		}
+		if chain == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Order chain not found"})
+			return
+		}
+
+		// Convert to response format
+		response := map[string]interface{}{
+			"chainId":            chain.ChainID,
+			"userId":             chain.UserID,
+			"symbol":             chain.Symbol,
+			"side":               chain.Side,
+			"modeCode":           chain.ModeCode,
+			"status":             string(chain.Status),
+			"entryPrice":         chain.EntryPrice,
+			"entryQuantity":      chain.EntryQuantity,
+			"currentSlPrice":     chain.CurrentSLPrice,
+			"currentTpPrice":     chain.CurrentTPPrice,
+			"remainingQuantity":  chain.RemainingQuantity,
+			"slModificationCount": chain.SLModificationCount,
+			"tpModificationCount": chain.TPModificationCount,
+			"eventCount":         chain.EventCount,
+			"createdAt":          chain.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			"updatedAt":          chain.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"chain":  response,
+			"source": "database",
+		})
+		return
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "Order chain not found"})
+}
+
+// handleGetHistoricalOrderChains returns order chains from database with flexible filtering
+// Supports status, symbol, mode, and date range filters
+// GET /api/futures/order-chains/history
+func (s *Server) handleGetHistoricalOrderChains(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	if s.repo == nil || s.repo.GetDB() == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not available"})
+		return
+	}
+
+	// Parse query filters
+	statusFilter := c.Query("status")   // active, partial, closed, cancelled
+	symbolFilter := c.Query("symbol")
+	modeFilter := strings.ToUpper(c.Query("mode"))
+	dateFromStr := c.Query("dateFrom")  // YYYY-MM-DD
+	dateToStr := c.Query("dateTo")      // YYYY-MM-DD
+	limitStr := c.DefaultQuery("limit", "100")
+	offsetStr := c.DefaultQuery("offset", "0")
+
+	// Parse limit and offset
+	limit := 100
+	if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 500 {
+		limit = l
+	}
+	offset := 0
+	if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+		offset = o
+	}
+
+	// Parse dates
+	var dateFrom, dateTo *time.Time
+	if dateFromStr != "" {
+		if t, err := time.Parse("2006-01-02", dateFromStr); err == nil {
+			dateFrom = &t
+		}
+	}
+	if dateToStr != "" {
+		if t, err := time.Parse("2006-01-02", dateToStr); err == nil {
+			dateTo = &t
+		}
+	}
+
+	// Build filter
+	filter := database.OrderChainFilter{
+		UserID:   userID,
+		Status:   statusFilter,
+		Symbol:   symbolFilter,
+		ModeCode: modeFilter,
+		DateFrom: dateFrom,
+		DateTo:   dateTo,
+		Limit:    limit,
+		Offset:   offset,
+	}
+
+	// Query database
+	chains, err := s.repo.GetDB().GetOrderChainsWithFilter(ctx, filter)
+	if err != nil {
+		log.Printf("[ORDER-CHAINS] Failed to get historical order chains: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get order chains"})
+		return
+	}
+
+	// Convert to response format
+	response := make([]map[string]interface{}, 0, len(chains))
+	for _, chain := range chains {
+		chainData := map[string]interface{}{
+			"chainId":             chain.ChainID,
+			"userId":              chain.UserID,
+			"symbol":              chain.Symbol,
+			"side":                chain.Side,
+			"modeCode":            chain.ModeCode,
+			"status":              string(chain.Status),
+			"entryPrice":          chain.EntryPrice,
+			"entryQuantity":       chain.EntryQuantity,
+			"currentSlPrice":      chain.CurrentSLPrice,
+			"currentTpPrice":      chain.CurrentTPPrice,
+			"remainingQuantity":   chain.RemainingQuantity,
+			"slModificationCount": chain.SLModificationCount,
+			"tpModificationCount": chain.TPModificationCount,
+			"eventCount":          chain.EventCount,
+			"realizedPnl":         chain.RealizedPnL,
+			"totalFees":           chain.TotalFees,
+			"closeReason":         chain.CloseReason,
+			"createdAt":           chain.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			"updatedAt":           chain.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		}
+		if chain.ClosedAt != nil && !chain.ClosedAt.IsZero() {
+			chainData["closedAt"] = chain.ClosedAt.Format("2006-01-02T15:04:05Z07:00")
+		}
+		response = append(response, chainData)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"chains": response,
+		"count":  len(response),
+		"filter": map[string]interface{}{
+			"status":   statusFilter,
+			"symbol":   symbolFilter,
+			"mode":     modeFilter,
+			"dateFrom": dateFromStr,
+			"dateTo":   dateToStr,
+			"limit":    limit,
+			"offset":   offset,
+		},
 	})
 }

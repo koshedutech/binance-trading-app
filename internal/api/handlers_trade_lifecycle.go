@@ -190,7 +190,7 @@ func (s *Server) handleGetPositionStateByChainID(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -237,7 +237,7 @@ func (s *Server) handleGetActivePositionStates(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -276,7 +276,7 @@ func (s *Server) handleGetRecentPositionStates(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -312,7 +312,7 @@ func (s *Server) handleGetPositionStateBySymbol(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -378,7 +378,7 @@ func (s *Server) handleGetOrderModificationHistory(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -436,7 +436,7 @@ func (s *Server) handleGetChainModificationSummary(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -482,7 +482,7 @@ func (s *Server) handleGetAllChainModifications(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {
@@ -541,7 +541,7 @@ func (s *Server) handleGetRecentModificationEvents(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID, _ := strconv.ParseInt(userIDStr, 10, 64)
+	userID := userIDStr // Use UUID string directly
 
 	db := s.repo.GetDB()
 	if db == nil {

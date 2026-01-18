@@ -116,6 +116,8 @@ export interface OrderChain {
   // Story 7.15: Position state and modification counts from backend
   positionState?: PositionState;
   modificationCounts?: Record<string, number>; // e.g., {"SL": 3, "TP1": 2}
+  // Story 7.19: Hedge position state for combined P&L calculation
+  hedgePositionState?: PositionState;
 }
 
 // Filter options for chains
@@ -261,8 +263,11 @@ export function groupOrdersIntoChains(orders: ChainOrder[]): OrderChain[] {
     }
 
     // Update chain metadata
-    chain.totalValue += order.origQty * order.price;
-    chain.filledValue += order.executedQty * (order.avgPrice || order.price);
+    // Use stopPrice for STOP orders (SL/TP), avgPrice for filled, or price as fallback
+    const orderPrice = order.stopPrice && order.stopPrice > 0 ? order.stopPrice : (order.price || 0);
+    const filledPrice = order.avgPrice && order.avgPrice > 0 ? order.avgPrice : orderPrice;
+    chain.totalValue += order.origQty * orderPrice;
+    chain.filledValue += order.executedQty * filledPrice;
     chain.createdAt = Math.min(chain.createdAt, order.time);
     chain.updatedAt = Math.max(chain.updatedAt, order.updateTime);
   }

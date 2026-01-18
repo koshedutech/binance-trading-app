@@ -8,7 +8,7 @@
 -- Order modification event log table
 CREATE TABLE IF NOT EXISTS order_modification_events (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) NOT NULL,
+    user_id UUID REFERENCES users(id) NOT NULL,
     chain_id VARCHAR(30) NOT NULL,              -- "ULT-17JAN-00001"
     order_type VARCHAR(10) NOT NULL,            -- "SL", "TP1", "TP2", etc.
     binance_order_id BIGINT,                    -- Binance order ID (if known)

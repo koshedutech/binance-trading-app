@@ -413,7 +413,7 @@ export default function ChainCard({ chain, compact = false, useTreeView = true }
             )}
           </div>
 
-          {/* Chain info footer */}
+          {/* Chain info footer - Show ENTRY values only, not sum of all orders */}
           <div className="pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             <div>
               <span className="text-gray-500">Created:</span>
@@ -428,15 +428,27 @@ export default function ChainCard({ chain, compact = false, useTreeView = true }
               </span>
             </div>
             <div>
-              <span className="text-gray-500">Total Value:</span>
+              <span className="text-gray-500">Entry Value:</span>
               <span className="ml-2 text-gray-300 font-mono">
-                ${chain.totalValue.toFixed(2)}
+                {chain.positionState ? (
+                  `$${chain.positionState.entryValue.toFixed(2)}`
+                ) : entryOrder ? (
+                  `$${((entryOrder.stopPrice || entryOrder.price) * entryOrder.origQty).toFixed(2)}`
+                ) : (
+                  <span className="text-gray-500">N/A</span>
+                )}
               </span>
             </div>
             <div>
               <span className="text-gray-500">Filled Value:</span>
               <span className="ml-2 text-gray-300 font-mono">
-                ${chain.filledValue.toFixed(2)}
+                {chain.positionState ? (
+                  `$${chain.positionState.entryValue.toFixed(2)}`
+                ) : entryOrder && entryOrder.status === 'FILLED' ? (
+                  `$${((entryOrder.avgPrice || entryOrder.price) * entryOrder.executedQty).toFixed(2)}`
+                ) : (
+                  <span className="text-gray-500">$0.00</span>
+                )}
               </span>
             </div>
           </div>

@@ -23,7 +23,7 @@ const (
 // PositionState represents the state of a position from entry fill to close
 type PositionState struct {
 	ID                 int64      `json:"id"`
-	UserID             int64      `json:"user_id"`
+	UserID             string     `json:"user_id"`
 	ChainID            string     `json:"chain_id"`
 	Symbol             string     `json:"symbol"`
 	EntryOrderID       int64      `json:"entry_order_id"`
@@ -46,9 +46,9 @@ type PositionState struct {
 type PositionStateRepository interface {
 	CreatePositionState(ctx context.Context, position *PositionState) error
 	UpdatePositionState(ctx context.Context, position *PositionState) error
-	GetPositionByChainID(ctx context.Context, userID int64, chainID string) (*PositionState, error)
-	GetPositionsByUserID(ctx context.Context, userID int64, status string) ([]*PositionState, error)
-	GetPositionBySymbol(ctx context.Context, userID int64, symbol string, status string) (*PositionState, error)
+	GetPositionByChainID(ctx context.Context, userID string, chainID string) (*PositionState, error)
+	GetPositionsByUserID(ctx context.Context, userID string, status string) ([]*PositionState, error)
+	GetPositionBySymbol(ctx context.Context, userID string, symbol string, status string) (*PositionState, error)
 	GetPositionByEntryOrderID(ctx context.Context, entryOrderID int64) (*PositionState, error)
 }
 
@@ -81,7 +81,7 @@ var (
 
 // EntryFilledEvent represents the data when an entry order fills
 type EntryFilledEvent struct {
-	UserID          int64
+	UserID          string
 	OrderID         int64
 	ClientOrderID   string
 	Symbol          string
@@ -184,7 +184,7 @@ type PartialCloseEvent struct {
 }
 
 // OnPartialClose is called when a take profit order hits
-func (pt *PositionTracker) OnPartialClose(ctx context.Context, userID int64, event PartialCloseEvent) error {
+func (pt *PositionTracker) OnPartialClose(ctx context.Context, userID string, event PartialCloseEvent) error {
 	if event.ClosedQty <= 0 {
 		return ErrInvalidQuantity
 	}
@@ -256,7 +256,7 @@ func (pt *PositionTracker) OnPartialClose(ctx context.Context, userID int64, eve
 }
 
 // OnPositionClosed is called when a position is fully closed (SL hit, manual close, etc.)
-func (pt *PositionTracker) OnPositionClosed(ctx context.Context, userID int64, chainID string, realizedPnL float64, closeReason string) error {
+func (pt *PositionTracker) OnPositionClosed(ctx context.Context, userID string, chainID string, realizedPnL float64, closeReason string) error {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 
@@ -307,7 +307,7 @@ func (pt *PositionTracker) OnPositionClosed(ctx context.Context, userID int64, c
 }
 
 // GetPositionByChainID retrieves a position by chain ID
-func (pt *PositionTracker) GetPositionByChainID(ctx context.Context, userID int64, chainID string) (*PositionState, error) {
+func (pt *PositionTracker) GetPositionByChainID(ctx context.Context, userID string, chainID string) (*PositionState, error) {
 	// Check cache first
 	pt.mu.RLock()
 	position, exists := pt.activePositions[chainID]
@@ -326,7 +326,7 @@ func (pt *PositionTracker) GetPositionByChainID(ctx context.Context, userID int6
 }
 
 // GetActivePositions returns all active positions for a user
-func (pt *PositionTracker) GetActivePositions(ctx context.Context, userID int64) ([]*PositionState, error) {
+func (pt *PositionTracker) GetActivePositions(ctx context.Context, userID string) ([]*PositionState, error) {
 	if pt.repo != nil {
 		return pt.repo.GetPositionsByUserID(ctx, userID, PositionStatusActive)
 	}
@@ -345,7 +345,7 @@ func (pt *PositionTracker) GetActivePositions(ctx context.Context, userID int64)
 }
 
 // GetPositionsByStatus returns positions filtered by status
-func (pt *PositionTracker) GetPositionsByStatus(ctx context.Context, userID int64, status string) ([]*PositionState, error) {
+func (pt *PositionTracker) GetPositionsByStatus(ctx context.Context, userID string, status string) ([]*PositionState, error) {
 	if pt.repo != nil {
 		return pt.repo.GetPositionsByUserID(ctx, userID, status)
 	}
@@ -363,7 +363,7 @@ func (pt *PositionTracker) GetPositionsByStatus(ctx context.Context, userID int6
 }
 
 // GetPositionBySymbol returns the active position for a symbol
-func (pt *PositionTracker) GetPositionBySymbol(ctx context.Context, userID int64, symbol string) (*PositionState, error) {
+func (pt *PositionTracker) GetPositionBySymbol(ctx context.Context, userID string, symbol string) (*PositionState, error) {
 	if pt.repo != nil {
 		return pt.repo.GetPositionBySymbol(ctx, userID, symbol, PositionStatusActive)
 	}
@@ -380,7 +380,7 @@ func (pt *PositionTracker) GetPositionBySymbol(ctx context.Context, userID int64
 }
 
 // LoadActivePositions loads active positions from database into cache
-func (pt *PositionTracker) LoadActivePositions(ctx context.Context, userID int64) error {
+func (pt *PositionTracker) LoadActivePositions(ctx context.Context, userID string) error {
 	if pt.repo == nil {
 		return nil
 	}
@@ -398,7 +398,7 @@ func (pt *PositionTracker) LoadActivePositions(ctx context.Context, userID int64
 	}
 
 	pt.logger.Info().
-		Int64("user_id", userID).
+		Str("user_id", userID).
 		Int("count", len(positions)).
 		Msg("Loaded active positions into cache")
 

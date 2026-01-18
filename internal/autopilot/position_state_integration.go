@@ -8,8 +8,6 @@ package autopilot
 
 import (
 	"context"
-	"fmt"
-	"strconv"
 	"time"
 
 	"binance-trading-bot/internal/orders"
@@ -17,24 +15,16 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// parseUserIDToInt64 safely converts a string user ID to int64.
-// Returns an error if the string is empty or not a valid integer.
-func parseUserIDToInt64(userID string) (int64, error) {
-	if userID == "" {
-		return 0, fmt.Errorf("empty user ID")
-	}
-	return strconv.ParseInt(userID, 10, 64)
-}
-
 // PositionStateTracker interface defines methods needed by GinieAutopilot
 // for tracking position states. This allows for dependency injection and testing.
+// Note: userID is string (UUID format) to match database schema
 type PositionStateTracker interface {
 	OnEntryFilled(ctx context.Context, event orders.EntryFilledEvent) (*orders.PositionState, error)
-	OnPartialClose(ctx context.Context, userID int64, event orders.PartialCloseEvent) error
-	OnPositionClosed(ctx context.Context, userID int64, chainID string, realizedPnL float64, closeReason string) error
-	GetPositionByChainID(ctx context.Context, userID int64, chainID string) (*orders.PositionState, error)
-	GetActivePositions(ctx context.Context, userID int64) ([]*orders.PositionState, error)
-	LoadActivePositions(ctx context.Context, userID int64) error
+	OnPartialClose(ctx context.Context, userID string, event orders.PartialCloseEvent) error
+	OnPositionClosed(ctx context.Context, userID string, chainID string, realizedPnL float64, closeReason string) error
+	GetPositionByChainID(ctx context.Context, userID string, chainID string) (*orders.PositionState, error)
+	GetActivePositions(ctx context.Context, userID string) ([]*orders.PositionState, error)
+	LoadActivePositions(ctx context.Context, userID string) error
 }
 
 // PositionStateIntegration provides helper methods for tracking position states
@@ -83,15 +73,8 @@ func (psi *PositionStateIntegration) RecordEntryFill(
 		return nil
 	}
 
-	// Parse user ID to int64
-	userIDInt, err := parseUserIDToInt64(userID)
-	if err != nil {
-		psi.logger.Warn().Str("user_id", userID).Err(err).Msg("Failed to parse user ID")
-		return err
-	}
-
 	event := orders.EntryFilledEvent{
-		UserID:        userIDInt,
+		UserID:        userID,
 		OrderID:       orderID,
 		ClientOrderID: clientOrderID,
 		Symbol:        symbol,
@@ -102,7 +85,7 @@ func (psi *PositionStateIntegration) RecordEntryFill(
 		UpdateTime:    updateTime,
 	}
 
-	_, err = psi.tracker.OnEntryFilled(ctx, event)
+	_, err := psi.tracker.OnEntryFilled(ctx, event)
 	if err != nil {
 		psi.logger.Error().
 			Err(err).
@@ -144,13 +127,6 @@ func (psi *PositionStateIntegration) RecordPartialClose(
 		return nil
 	}
 
-	// Parse user ID to int64
-	userIDInt, err := parseUserIDToInt64(userID)
-	if err != nil {
-		psi.logger.Warn().Str("user_id", userID).Err(err).Msg("Failed to parse user ID")
-		return err
-	}
-
 	event := orders.PartialCloseEvent{
 		ChainID:    chainID,
 		ClosedQty:  closeQty,
@@ -160,7 +136,7 @@ func (psi *PositionStateIntegration) RecordPartialClose(
 		OrderType:  orderType,
 	}
 
-	err = psi.tracker.OnPartialClose(ctx, userIDInt, event)
+	err := psi.tracker.OnPartialClose(ctx, userID, event)
 	if err != nil {
 		psi.logger.Error().
 			Err(err).
@@ -198,14 +174,7 @@ func (psi *PositionStateIntegration) RecordPositionClose(
 		return nil
 	}
 
-	// Parse user ID to int64
-	userIDInt, err := parseUserIDToInt64(userID)
-	if err != nil {
-		psi.logger.Warn().Str("user_id", userID).Err(err).Msg("Failed to parse user ID")
-		return err
-	}
-
-	err = psi.tracker.OnPositionClosed(ctx, userIDInt, chainID, realizedPnL, closeReason)
+	err := psi.tracker.OnPositionClosed(ctx, userID, chainID, realizedPnL, closeReason)
 	if err != nil {
 		psi.logger.Error().
 			Err(err).
@@ -233,15 +202,7 @@ func (psi *PositionStateIntegration) GetPositionState(
 	if psi.tracker == nil {
 		return nil, nil
 	}
-
-	// Parse user ID to int64
-	userIDInt, err := parseUserIDToInt64(userID)
-	if err != nil {
-		psi.logger.Warn().Str("user_id", userID).Err(err).Msg("Failed to parse user ID")
-		return nil, err
-	}
-
-	return psi.tracker.GetPositionByChainID(ctx, userIDInt, chainID)
+	return psi.tracker.GetPositionByChainID(ctx, userID, chainID)
 }
 
 // GetActivePositionStates retrieves all active position states for a user.
@@ -252,15 +213,7 @@ func (psi *PositionStateIntegration) GetActivePositionStates(
 	if psi.tracker == nil {
 		return nil, nil
 	}
-
-	// Parse user ID to int64
-	userIDInt, err := parseUserIDToInt64(userID)
-	if err != nil {
-		psi.logger.Warn().Str("user_id", userID).Err(err).Msg("Failed to parse user ID")
-		return nil, err
-	}
-
-	return psi.tracker.GetActivePositions(ctx, userIDInt)
+	return psi.tracker.GetActivePositions(ctx, userID)
 }
 
 // LoadActivePositions loads active positions into the tracker's cache.
@@ -269,15 +222,7 @@ func (psi *PositionStateIntegration) LoadActivePositions(ctx context.Context, us
 	if psi.tracker == nil {
 		return nil
 	}
-
-	// Parse user ID to int64
-	userIDInt, err := parseUserIDToInt64(userID)
-	if err != nil {
-		psi.logger.Warn().Str("user_id", userID).Err(err).Msg("Failed to parse user ID")
-		return err
-	}
-
-	return psi.tracker.LoadActivePositions(ctx, userIDInt)
+	return psi.tracker.LoadActivePositions(ctx, userID)
 }
 
 // PositionSideToEntrySide converts position side to entry order side.

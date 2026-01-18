@@ -106,7 +106,7 @@ func (db *DB) UpdatePositionState(ctx context.Context, position *orders.Position
 }
 
 // GetPositionByChainID retrieves a position state by chain ID
-func (db *DB) GetPositionByChainID(ctx context.Context, userID int64, chainID string) (*orders.PositionState, error) {
+func (db *DB) GetPositionByChainID(ctx context.Context, userID string, chainID string) (*orders.PositionState, error) {
 	if db.Pool == nil {
 		return nil, nil
 	}
@@ -152,7 +152,7 @@ func (db *DB) GetPositionByChainID(ctx context.Context, userID int64, chainID st
 }
 
 // GetPositionsByUserID retrieves all positions for a user, optionally filtered by status
-func (db *DB) GetPositionsByUserID(ctx context.Context, userID int64, status string) ([]*orders.PositionState, error) {
+func (db *DB) GetPositionsByUserID(ctx context.Context, userID string, status string) ([]*orders.PositionState, error) {
 	if db.Pool == nil {
 		return nil, nil
 	}
@@ -225,7 +225,7 @@ func (db *DB) GetPositionsByUserID(ctx context.Context, userID int64, status str
 }
 
 // GetPositionBySymbol retrieves a position by symbol and status
-func (db *DB) GetPositionBySymbol(ctx context.Context, userID int64, symbol string, status string) (*orders.PositionState, error) {
+func (db *DB) GetPositionBySymbol(ctx context.Context, userID string, symbol string, status string) (*orders.PositionState, error) {
 	if db.Pool == nil {
 		return nil, nil
 	}
@@ -319,7 +319,7 @@ func (db *DB) GetPositionByEntryOrderID(ctx context.Context, entryOrderID int64)
 }
 
 // GetRecentPositionStates retrieves recent position states for a user
-func (db *DB) GetRecentPositionStates(ctx context.Context, userID int64, limit int) ([]*orders.PositionState, error) {
+func (db *DB) GetRecentPositionStates(ctx context.Context, userID string, limit int) ([]*orders.PositionState, error) {
 	if db.Pool == nil {
 		return nil, nil
 	}
@@ -393,7 +393,7 @@ func (db *DB) DeletePositionState(ctx context.Context, id int64) error {
 
 // GetPositionStatesByChainIDs retrieves position states for multiple chain IDs (batch query)
 // Story 7.14: Order Chain Backend Integration
-func (db *DB) GetPositionStatesByChainIDs(ctx context.Context, userID int64, chainIDs []string) (map[string]*orders.PositionState, error) {
+func (db *DB) GetPositionStatesByChainIDs(ctx context.Context, userID string, chainIDs []string) (map[string]*orders.PositionState, error) {
 	result := make(map[string]*orders.PositionState)
 	if db.Pool == nil || len(chainIDs) == 0 {
 		return result, nil
@@ -469,17 +469,17 @@ func (a *PositionStateDBAdapter) UpdatePositionState(ctx context.Context, positi
 }
 
 // GetPositionByChainID implements PositionStateRepository
-func (a *PositionStateDBAdapter) GetPositionByChainID(ctx context.Context, userID int64, chainID string) (*orders.PositionState, error) {
+func (a *PositionStateDBAdapter) GetPositionByChainID(ctx context.Context, userID string, chainID string) (*orders.PositionState, error) {
 	return a.db.GetPositionByChainID(ctx, userID, chainID)
 }
 
 // GetPositionsByUserID implements PositionStateRepository
-func (a *PositionStateDBAdapter) GetPositionsByUserID(ctx context.Context, userID int64, status string) ([]*orders.PositionState, error) {
+func (a *PositionStateDBAdapter) GetPositionsByUserID(ctx context.Context, userID string, status string) ([]*orders.PositionState, error) {
 	return a.db.GetPositionsByUserID(ctx, userID, status)
 }
 
 // GetPositionBySymbol implements PositionStateRepository
-func (a *PositionStateDBAdapter) GetPositionBySymbol(ctx context.Context, userID int64, symbol string, status string) (*orders.PositionState, error) {
+func (a *PositionStateDBAdapter) GetPositionBySymbol(ctx context.Context, userID string, symbol string, status string) (*orders.PositionState, error) {
 	return a.db.GetPositionBySymbol(ctx, userID, symbol, status)
 }
 
