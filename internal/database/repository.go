@@ -952,3 +952,17 @@ func (r *Repository) DeleteSystemSetting(ctx context.Context, key string) error 
 func (r *Repository) GetSMTPSettings(ctx context.Context) (map[string]string, error) {
 	return r.db.GetSMTPSettings(ctx)
 }
+
+// ============================================================================
+// CALIBRATION DATA - WRAPPER METHODS
+// Story 11.26: Calibration Data Lifecycle
+// ============================================================================
+
+// CalibrationRepo returns the CalibrationRepository interface for calibration data operations.
+// This allows the decision engine to access calibration data through the repository pattern.
+func (r *Repository) CalibrationRepo() CalibrationRepository {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db
+}

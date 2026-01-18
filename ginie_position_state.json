@@ -1,7 +1,7 @@
 {
   "positions": {
-    "ARBUSDT": {
-      "symbol": "ARBUSDT",
+    "LINKUSDT": {
+      "symbol": "LINKUSDT",
       "side": "LONG",
       "mode": "scalp",
       "current_tp_level": 0,
@@ -12,9 +12,9 @@
         "accumulated_profit": 0,
         "tp_level_unlocked": 0,
         "next_tp_blocked": false,
-        "original_entry_price": 0.2197,
-        "current_breakeven": 0.2197,
-        "remaining_quantity": 227,
+        "original_entry_price": 13.805,
+        "current_breakeven": 13.805,
+        "remaining_quantity": 2.5,
         "dynamic_sl_active": false,
         "dynamic_sl_price": 0,
         "protected_profit": 0,
@@ -37,8 +37,51 @@
         "manual_intervention_reason": "",
         "manual_intervention_alert_at": ""
       },
-      "saved_at": "2026-01-17T20:03:06.591855843Z"
+      "saved_at": "2026-01-18T22:07:53.833319294Z"
+    },
+    "UNIUSDT": {
+      "symbol": "UNIUSDT",
+      "side": "LONG",
+      "mode": "scalp",
+      "current_tp_level": 0,
+      "scalp_reentry": {
+        "enabled": true,
+        "current_cycle": 0,
+        "cycles": [],
+        "accumulated_profit": 0,
+        "tp_level_unlocked": 0,
+        "next_tp_blocked": false,
+        "original_entry_price": 5.358,
+        "current_breakeven": 5.358,
+        "remaining_quantity": 6,
+        "dynamic_sl_active": false,
+        "dynamic_sl_price": 0,
+        "protected_profit": 0,
+        "max_allowable_loss": 0,
+        "final_portion_active": false,
+        "final_portion_qty": 0,
+        "final_trailing_peak": 0,
+        "final_trailing_percent": 0,
+        "final_trailing_active": false,
+        "reentry_percent": 0.5,
+        "reentry_price_buffer": 0.0005,
+        "total_cycles_completed": 0,
+        "total_reentries": 0,
+        "successful_reentries": 0,
+        "skipped_reentries": 0,
+        "total_cycle_pnl": 0,
+        "started_at": "2026-01-18T22:06:53.848524298Z",
+        "last_update": "2026-01-18T22:07:53.587147849Z",
+        "debug_log": [
+          "22:06:53: [Story 9.9] Initialized position_optimization for UNIUSDT LONG @ 5.35800000 (mode: scalp, TP1=0.8%, TP2=1.2%, TP3=1.5%)",
+          "22:07:53: Monitoring: price=5.36900000, tpUnlocked=0, blocked=false, cycles=0"
+        ],
+        "needs_manual_intervention": false,
+        "manual_intervention_reason": "",
+        "manual_intervention_alert_at": ""
+      },
+      "saved_at": "2026-01-18T22:07:53.833301791Z"
     }
   },
-  "updated_at": "2026-01-17T20:03:06.572626641Z"
+  "updated_at": "2026-01-18T22:07:53.833286788Z"
 }

@@ -479,3 +479,44 @@ func CircuitBreakerKey(userID string) string {
 func DailySequenceKey(userID, dateStr string) string {
 	return fmt.Sprintf(PrefixDailySequence, userID, dateStr)
 }
+
+// ScanKeys finds keys matching a pattern using SCAN (non-blocking).
+// Story 11.14: Indicator Performance Tracker - needed for scanning combination stats.
+// Returns up to maxKeys matching keys.
+func (cs *CacheService) ScanKeys(ctx context.Context, pattern string, maxKeys int) ([]string, error) {
+	cs.checkHealth(ctx)
+
+	if !cs.IsHealthy() {
+		return nil, fmt.Errorf("redis unavailable (circuit breaker open)")
+	}
+
+	if maxKeys <= 0 {
+		maxKeys = 100
+	}
+
+	var keys []string
+	var cursor uint64
+	for {
+		var scanKeys []string
+		var err error
+		scanKeys, cursor, err = cs.client.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			cs.recordFailure()
+			return nil, fmt.Errorf("redis scan failed: %w", err)
+		}
+
+		keys = append(keys, scanKeys...)
+
+		if cursor == 0 || len(keys) >= maxKeys {
+			break
+		}
+	}
+
+	cs.recordSuccess()
+
+	if len(keys) > maxKeys {
+		keys = keys[:maxKeys]
+	}
+
+	return keys, nil
+}

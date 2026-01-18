@@ -99,13 +99,14 @@ func (g *ClientOrderIdGenerator) Generate(ctx context.Context, mode TradingMode,
 		return "", "", err
 	}
 
-	// Get current time in user's timezone
-	now := time.Now().In(g.timezone)
-	dateStr := strings.ToUpper(now.Format("02Jan")) // "15JAN"
+	// Get current time - use UTC for dateKey (daily reset at UTC 00:00)
+	// This ensures Binance transaction matching since Binance uses UTC
+	nowUTC := time.Now().UTC()
+	dateStr := strings.ToUpper(nowUTC.Format("02Jan")) // "15JAN" in UTC
 
 	// Try to get sequence from sequence provider (Redis)
 	if g.sequenceProvider != nil && g.sequenceProvider.IsHealthy() {
-		dateKey := now.Format("20060102") // "20260115" for Redis key
+		dateKey := nowUTC.Format("20060102") // "20260115" in UTC for Redis key
 		seq, err := g.sequenceProvider.IncrementDailySequence(ctx, g.userID, dateKey)
 		if err == nil {
 			// Check for sequence overflow (max 99999 for 5-digit format)

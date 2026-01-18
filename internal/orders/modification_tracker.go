@@ -41,7 +41,7 @@ const (
 // OrderModificationEvent represents a single modification event for an SL/TP order
 type OrderModificationEvent struct {
 	ID                 int64                  `json:"id"`
-	UserID             int64                  `json:"user_id"`
+	UserID             string                 `json:"user_id"`
 	ChainID            string                 `json:"chain_id"`
 	OrderType          string                 `json:"order_type"` // SL, TP1, TP2, etc.
 	BinanceOrderID     *int64                 `json:"binance_order_id,omitempty"`
@@ -68,13 +68,13 @@ type ModificationEventRepository interface {
 	CreateModificationEvent(ctx context.Context, event *OrderModificationEvent) error
 	GetModificationEvents(ctx context.Context, chainID, orderType string) ([]*OrderModificationEvent, error)
 	GetLatestModificationVersion(ctx context.Context, chainID, orderType string) (int, error)
-	GetModificationEventsByUser(ctx context.Context, userID int64, limit int) ([]*OrderModificationEvent, error)
-	GetModificationEventsBySource(ctx context.Context, userID int64, source string, limit int) ([]*OrderModificationEvent, error)
+	GetModificationEventsByUser(ctx context.Context, userID string, limit int) ([]*OrderModificationEvent, error)
+	GetModificationEventsBySource(ctx context.Context, userID string, source string, limit int) ([]*OrderModificationEvent, error)
 }
 
 // PlaceOrderEvent contains the data for when an SL/TP order is first placed
 type PlaceOrderEvent struct {
-	UserID          int64
+	UserID          string
 	ChainID         string
 	OrderType       string // SL, TP1, TP2, etc.
 	BinanceOrderID  *int64
@@ -91,7 +91,7 @@ type PlaceOrderEvent struct {
 
 // ModifyOrderEvent contains the data for when an SL/TP order price is modified
 type ModifyOrderEvent struct {
-	UserID          int64
+	UserID          string
 	ChainID         string
 	OrderType       string // SL, TP1, TP2, etc.
 	BinanceOrderID  *int64
@@ -109,7 +109,7 @@ type ModifyOrderEvent struct {
 
 // CancelOrderEvent contains the data for when an SL/TP order is cancelled
 type CancelOrderEvent struct {
-	UserID         int64
+	UserID         string
 	ChainID        string
 	OrderType      string
 	BinanceOrderID *int64
@@ -123,7 +123,7 @@ type CancelOrderEvent struct {
 
 // FillOrderEvent contains the data for when an SL/TP order is filled
 type FillOrderEvent struct {
-	UserID         int64
+	UserID         string
 	ChainID        string
 	OrderType      string
 	BinanceOrderID *int64

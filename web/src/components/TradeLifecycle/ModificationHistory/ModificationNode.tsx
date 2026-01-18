@@ -1,8 +1,9 @@
 // Story 7.13: Modification Node Component
+// Story 7.19: Enhanced with "current" indicator for latest modification
+// Story 7.19: Uses user timezone for timestamp formatting
 // Individual modification entry in the tree view
 
 import React, { useState } from 'react';
-import { format, formatDistanceToNow } from 'date-fns';
 import {
   ChevronDown,
   ChevronRight,
@@ -28,6 +29,11 @@ import {
 } from './types';
 import ImpactBadge, { PriceDeltaBadge } from './ImpactBadge';
 
+// Story 7.19: Extended props to accept formatTime from parent for user timezone support
+interface ExtendedModificationNodeProps extends ModificationNodeProps {
+  formatTime?: (isoDate: string) => string;
+}
+
 export default function ModificationNode({
   event,
   isFirst,
@@ -37,7 +43,8 @@ export default function ModificationNode({
   orderType,
   onExpandReasoning,
   isReasoningExpanded = false,
-}: ModificationNodeProps) {
+  formatTime: formatTimeProp,
+}: ExtendedModificationNodeProps) {
   const [showContext, setShowContext] = useState(false);
 
   // Get source styling
@@ -52,10 +59,23 @@ export default function ModificationNode({
     return price.toFixed(6);
   };
 
-  // Format timestamp
-  const formatTime = (isoDate: string) => {
-    const date = new Date(isoDate);
-    return format(date, 'HH:mm:ss');
+  // Story 7.19: Use parent formatTime if provided (with user timezone), fallback to basic format
+  const formatTime = (isoDate: string): string => {
+    if (formatTimeProp) {
+      return formatTimeProp(isoDate);
+    }
+    // Fallback: basic time formatting using Intl (no date-fns needed)
+    try {
+      const date = new Date(isoDate);
+      return new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(date);
+    } catch {
+      return '--:--:--';
+    }
   };
 
   // Get icon for modification source
@@ -132,7 +152,7 @@ export default function ModificationNode({
             )}
           </div>
 
-          {/* Right side: Impact + Time */}
+          {/* Right side: Impact + Time + Current indicator */}
           <div className="flex items-center gap-3">
             {/* Dollar impact */}
             {!isInitial && (
@@ -150,6 +170,13 @@ export default function ModificationNode({
               <Clock className="w-3 h-3" />
               {formatTime(event.createdAt)}
             </span>
+
+            {/* Story 7.19: Current indicator for latest modification */}
+            {isFirst && !isInitial && (
+              <span className="px-1.5 py-0.5 rounded text-xs bg-green-500/20 text-green-400 font-medium">
+                current
+              </span>
+            )}
           </div>
         </div>
 

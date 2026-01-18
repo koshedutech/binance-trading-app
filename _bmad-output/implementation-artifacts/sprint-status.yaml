@@ -118,17 +118,21 @@ development_status:
   epic-6-retrospective: optional
 
   # ============================================================================
-  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - COMPLETE (15/15 done)
-  # Original 10 stories + 5 NEW stories for lifecycle enhancement
-  # All Stories Completed: 2026-01-17
-  #   - 7.11: Position State Tracking - DONE
-  #   - 7.12: Order Modification Event Log - DONE
-  #   - 7.13: Tree Structure UI for Modification History - DONE
-  #   - 7.14: Order Chain Backend Integration - DONE (CODE REVIEW + QA PASSED)
-  #   - 7.15: Order Chain Tree Structure UI - DONE (CODE REVIEW + QA CONCERNS)
-  # QA Note: 7.15 has P2 gaps (timezone, mobile) for follow-up stories
+  # EPIC 7: Client Order ID & Trade Lifecycle Tracking - COMPLETE
+  # Original 10 stories + 5 lifecycle stories + 5 Event Sourcing stories
+  # Completed: 2026-01-18
+  # Total Stories: 20 (all done)
+  # Key Features:
+  #   - Structured Client Order ID (MODE-DDMMM-NNNNN-TYPE format)
+  #   - Order Chain tracking with chain IDs
+  #   - Position State tracking (entry → active → closed)
+  #   - SL/TP Modification Event Log with LLM reasoning
+  #   - Event Sourcing Architecture (order_chains, order_chain_events tables)
+  #   - Tree UI with expandable modification history
+  #   - Redis caching for active chains
+  #   - User timezone support
   # ============================================================================
-  epic-7: done
+  epic-7: done  # ALL 20 STORIES COMPLETE - QA VERIFIED 2026-01-18
   7-1-client-order-id-generation: done          # internal/orders/client_order_id.go
   7-2-daily-sequence-storage-in-redis: done     # cache_service.go:IncrementDailySequence
   7-3-order-chain-tracking: done                 # All chain tracking complete: DB migration, ChainTracker, H/HSL/HTP/DCA suffixes, tests
@@ -146,6 +150,12 @@ development_status:
   # NEW STORIES - Added 2026-01-17 for Order Chain Integration Fixes
   7-14-order-chain-backend-integration: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-17
   7-15-order-chain-tree-structure-ui: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-17
+  # NEW STORIES - Added 2026-01-18 for Event Sourcing Architecture
+  7-16-order-chain-event-store: done   # P0 - Database schema, migration - DONE 2026-01-18
+  7-17-chain-event-writer-service: done # P0 - Backend service - DONE 2026-01-18
+  7-18-autopilot-event-integration: done # P0 - Wire into GinieAutopilot - DONE 2026-01-18 (SL/TP events)
+  7-19-order-chain-tree-ui-restructure: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  7-20-order-chain-redis-cache-layer: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   epic-7-retrospective: optional
 
   # ============================================================================
@@ -217,42 +227,42 @@ development_status:
   #   market regime detection, multi-strategy framework, calibration layer
   # Dependencies: Epic 6 (Redis), Epic 10 (Position Management)
   # ============================================================================
-  epic-11: backlog
+  epic-11: in-progress  # Started 2026-01-17
   # Part A: Infrastructure (P0)
-  11-1-redis-state-management: backlog
-  11-2-delta-update-processor: backlog
-  11-3-websocket-state-sync: backlog
+  11-1-redis-state-management: done  # QA PASSED 2026-01-17
+  11-2-delta-update-processor: done  # QA PASSED 2026-01-17
+  11-3-websocket-state-sync: done  # QA PASSED 2026-01-17
   # Part B: Market Regime Detection (P1)
-  11-4-market-regime-classifier: backlog
-  11-5-regime-transition-handler: backlog
+  11-4-market-regime-classifier: done  # QA PASSED 2026-01-17
+  11-5-regime-transition-handler: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   # Part C: Multi-Strategy Framework (P1)
-  11-6-strategy-registry: backlog
-  11-7-strategy-selector: backlog
+  11-6-strategy-registry: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-7-strategy-selector: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   # Part D: Strategy Implementations
-  11-8-trend-following-strategy: backlog      # P1 - Refined existing
-  11-9-mean-reversion-strategy: backlog       # P2
-  11-10-breakout-strategy: backlog            # P2
-  11-11-range-trading-strategy: backlog       # P2
+  11-8-trend-following-strategy: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-9-mean-reversion-strategy: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-10-breakout-strategy: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-11-range-trading-strategy: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   # Part E: Configurable Indicators
-  11-12-indicator-segment-framework: backlog  # P1
-  11-13-indicator-calculation-engine: backlog # P1
-  11-14-indicator-performance-tracker: backlog # P2
+  11-12-indicator-segment-framework: done  # P1 - CODE REVIEW PASSED + QA CONCERNS 2026-01-18
+  11-13-indicator-calculation-engine: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-14-indicator-performance-tracker: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   # Part F: Scoring & Decision
-  11-15-additive-score-calculator: backlog    # P0 - Core formula change
-  11-16-enhanced-llm-context: backlog         # P1
-  11-17-calibration-layer: backlog            # P1
-  11-18-blocking-reason-tracker: backlog      # P0
+  11-15-additive-score-calculator: done  # QA PASSED 2026-01-17
+  11-16-enhanced-llm-context: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-17-calibration-layer: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-18-blocking-reason-tracker: done  # QA PASSED 2026-01-17
   # Part G: Execution & Tracking
-  11-19-decision-output-interface: backlog    # P1
-  11-20-actor-tracking-system: backlog        # P1
-  11-21-position-card-ui: backlog             # P2
-  11-22-performance-dashboard: backlog        # P2
+  11-19-decision-output-interface: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-20-actor-tracking-system: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-21-position-card-ui: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-22-performance-dashboard: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   # Part H: Settings & Calibration Management
-  11-23-decision-engine-settings-structure: backlog  # P0 - FOLLOWS SETTINGS LIFECYCLE
-  11-24-decision-engine-settings-ui: backlog  # P1
-  11-25-calibration-data-storage: backlog     # P1
-  11-26-calibration-data-lifecycle: backlog   # P1
-  11-27-calibration-display-ui: backlog       # P2
+  11-23-decision-engine-settings-structure: done  # QA PASSED 2026-01-17
+  11-24-decision-engine-settings-ui: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-18
+  11-25-calibration-data-storage: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-18
+  11-26-calibration-data-lifecycle: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  11-27-calibration-display-ui: done           # P2 - CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   epic-11-retrospective: optional
 
   # ============================================================================
@@ -289,3 +299,16 @@ development_status:
   # Phase 5: Cleanup
   12-10-remove-deprecated-polling: done             # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-17
   epic-12-retrospective: optional
+
+  # ============================================================================
+  # EPIC 13: PNL Summary History & Performance Optimization
+  # Created: 2026-01-18
+  # Total Stories: 1
+  # Description: Cache historical PNL data, smart fetching (TODAY=live,
+  #   historical=DB), extended date range navigation with UI enhancements
+  # Dependencies: Epic 8 (Daily Settlement), Epic 12 (WebSocket)
+  # Goal: Reduce API calls from 7 to 1, enable historical browsing
+  # ============================================================================
+  epic-13: in-progress
+  13-1-pnl-summary-caching-historical-navigation: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-18
+  epic-13-retrospective: optional

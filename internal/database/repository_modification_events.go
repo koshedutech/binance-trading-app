@@ -150,7 +150,7 @@ func (db *DB) GetLatestModificationVersion(ctx context.Context, chainID, orderTy
 }
 
 // GetModificationEventsByUser retrieves recent modification events for a user
-func (db *DB) GetModificationEventsByUser(ctx context.Context, userID int64, limit int) ([]*orders.OrderModificationEvent, error) {
+func (db *DB) GetModificationEventsByUser(ctx context.Context, userID string, limit int) ([]*orders.OrderModificationEvent, error) {
 	if db.Pool == nil {
 		return nil, nil
 	}
@@ -182,7 +182,7 @@ func (db *DB) GetModificationEventsByUser(ctx context.Context, userID int64, lim
 }
 
 // GetModificationEventsBySource retrieves modification events filtered by source
-func (db *DB) GetModificationEventsBySource(ctx context.Context, userID int64, source string, limit int) ([]*orders.OrderModificationEvent, error) {
+func (db *DB) GetModificationEventsBySource(ctx context.Context, userID string, source string, limit int) ([]*orders.OrderModificationEvent, error) {
 	if db.Pool == nil {
 		return nil, nil
 	}
@@ -269,7 +269,7 @@ func (db *DB) GetModificationSummaryByChain(ctx context.Context, chainID string)
 // Story 7.14: Order Chain Backend Integration
 // Returns: map[chainID]map[orderType]count (e.g., {"ULT-17JAN-00001": {"SL": 3, "TP1": 2}})
 // Security: Requires userID to ensure users can only see their own modification counts
-func (db *DB) GetModificationCountsByChainIDs(ctx context.Context, userID int64, chainIDs []string) (map[string]map[string]int, error) {
+func (db *DB) GetModificationCountsByChainIDs(ctx context.Context, userID string, chainIDs []string) (map[string]map[string]int, error) {
 	result := make(map[string]map[string]int)
 	if db.Pool == nil || len(chainIDs) == 0 {
 		return result, nil
@@ -415,11 +415,11 @@ func (a *ModificationEventDBAdapter) GetLatestModificationVersion(ctx context.Co
 }
 
 // GetModificationEventsByUser implements ModificationEventRepository
-func (a *ModificationEventDBAdapter) GetModificationEventsByUser(ctx context.Context, userID int64, limit int) ([]*orders.OrderModificationEvent, error) {
+func (a *ModificationEventDBAdapter) GetModificationEventsByUser(ctx context.Context, userID string, limit int) ([]*orders.OrderModificationEvent, error) {
 	return a.db.GetModificationEventsByUser(ctx, userID, limit)
 }
 
 // GetModificationEventsBySource implements ModificationEventRepository
-func (a *ModificationEventDBAdapter) GetModificationEventsBySource(ctx context.Context, userID int64, source string, limit int) ([]*orders.OrderModificationEvent, error) {
+func (a *ModificationEventDBAdapter) GetModificationEventsBySource(ctx context.Context, userID string, source string, limit int) ([]*orders.OrderModificationEvent, error) {
 	return a.db.GetModificationEventsBySource(ctx, userID, source, limit)
 }

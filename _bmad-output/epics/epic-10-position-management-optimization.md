@@ -71,6 +71,22 @@ Complete position management system including:
 - Integration with Position Optimization (TP1/TP2/TP3)
 - Historical baseline from average exit efficiency
 - UI display with expandable position cards
+- **Two Decision Modes:**
+  - **Classic Mode:** Fixed ADX/EMA/RSI thresholds (current approach)
+  - **New Engine Mode:** Epic 11 configurable indicators, strategy-aware exits
+
+### Story 10.1 Phase 2: Critical Safeguards
+**Priority:** P1
+**Status:** Planned
+**File:** `story-10.1-phase2-safeguards.md`
+
+Safeguards to prevent common failure scenarios:
+- S1: Minimum hold time before efficiency exit
+- S2: Consecutive signal requirement (whipsaw prevention)
+- S3: Breakeven verification before efficiency exit
+- S4: Stale data detection
+- S5: Epic 11 integration safeguards (fallback to Classic)
+- S6: Decision mode consistency (no change while positions open)
 
 ### Story 10.2: Position Analytics Dashboard
 **Priority:** P2
@@ -147,6 +163,52 @@ ENTRY → RISK_ZONE → BREAKEVEN → [TP1] → EFFICIENCY_TRACKING → EXIT
 | Redis infrastructure | Existing | Already in use |
 | Binance WebSocket | Existing | Already subscribed |
 | Position Optimization | Existing | Will integrate |
+| Epic 11 Decision Engine | Optional | For New Engine mode |
+
+---
+
+## Epic 11 Integration
+
+### Two Decision Modes
+
+Epic 10 supports two modes for trend detection and exit decisions:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    POSITION DECISION MODE                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  CLASSIC MODE (Default)                                         │
+│  ═══════════════════════                                        │
+│  • Fixed indicator thresholds (ADX > 20, EMA cross)            │
+│  • Hardcoded reversal pattern detection                        │
+│  • Works without Epic 11                                       │
+│                                                                 │
+│  NEW ENGINE MODE (Epic 11 Required)                            │
+│  ═══════════════════════════════════                           │
+│  • User-configurable indicators per segment                    │
+│  • Strategy-aware exit conditions                              │
+│  • Regime-aware decisions (exit on regime change)              │
+│  • Falls back to Classic mode on error                         │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Relationship
+
+```
+Epic 11 (ENTRY)                    Epic 10 (EXIT)
+═══════════════                    ═══════════════
+
+Strategy Selection     ────────►   Uses same strategy
+Indicator Calculation  ────────►   Uses same indicators
+Regime Classification  ────────►   Monitors regime changes
+Entry Decision         ────────►   Position Created
+                                        │
+                                        ▼
+                                   Exit Decision
+                                   (when conditions flip)
+```
 
 ---
 

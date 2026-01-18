@@ -79,6 +79,34 @@ context_estimation:
   # - Large stories: 3-4 per session
   # - Mixed: ~5-6 per session (recommended default)
 
+# Key Concepts
+key_concepts:
+  story_sources:
+    description: "Stories can exist in multiple locations - workflow auto-detects"
+    locations:
+      - name: "Separate Story File"
+        path: "{story_dir}/story-{story_key}.md"
+        priority: 1  # Highest - most detailed
+        when_used: "Complex stories that need detailed task breakdown"
+      - name: "Epic File (Embedded)"
+        path: "{epic_path} → Story X.Y section"
+        priority: 2
+        when_used: "Stories with clear ACs in epic - sufficient for implementation"
+    detection_flow: |
+      Status = backlog/not-started
+      → Check separate file exists? → YES: use file, go to validation
+      → Check epic has story section with ACs? → YES: mark ready-for-dev, go to implementation
+      → Neither found? → HALT
+
+  status_mapping:
+    backlog: "Story exists but not started - detect source and begin"
+    not-started: "Alias for backlog"
+    draft: "Story file created, needs validation"
+    ready-for-dev: "Validated and ready for implementation"
+    in-progress: "Developer actively implementing"
+    review: "Implementation complete, in code review"
+    done: "All gates passed, story complete"
+
 # Workflow modes
 modes:
   story:
@@ -105,10 +133,15 @@ phases:
     description: "Ensure sprint-status.yaml exists and tracks story"
     delegated: false  # Orchestrator handles
 
-  - name: "Story Discovery"
-    workflow: "create-story"
-    description: "Find or create story from epic"
+  - name: "Story Source Detection"
+    workflow: "none (inline)"
+    description: "Detect where story content exists (epic file or separate story file)"
     delegated: false  # Orchestrator handles
+    logic: |
+      1. Check for separate story file → use if exists
+      2. Check epic file for story section → use if has ACs
+      3. If epic content insufficient → create expanded story file
+      4. If story not found → HALT
 
   - name: "Story Validation"
     workflow: "check-implementation-readiness"

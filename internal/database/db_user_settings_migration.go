@@ -211,3 +211,173 @@ func (db *DB) runUserSafetySettingsInlineMigration(ctx context.Context) error {
 	log.Println("Inline User Safety Settings migration completed")
 	return nil
 }
+
+// RunUserGlobalTradingMigrations executes all user global trading related migrations (026, 032, 033)
+// These migrations create and populate the user_global_trading table including:
+// - Main table with risk level, allocation, profit reinvestment (026)
+// - Timezone and timezone_offset columns (032)
+// - Initialize records for existing users (033)
+func (db *DB) RunUserGlobalTradingMigrations(ctx context.Context) error {
+	log.Println("Running User Global Trading database migrations (026, 032, 033)...")
+
+	// Define the migrations to run in order
+	migrationFiles := []string{
+		"026_user_global_trading.sql",
+		"032_user_global_trading_timezone.sql",
+		"033_init_user_global_trading.sql",
+	}
+
+	// Get the project root directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Try to find migrations directory
+	migrationsDir := filepath.Join(currentDir, "migrations")
+	if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+		migrationsDir = filepath.Join(currentDir, "..", "migrations")
+		if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+			migrationsDir = filepath.Join(currentDir, "..", "..", "migrations")
+			if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+				log.Println("[MIGRATION] migrations directory not found, running inline migration")
+				return db.runUserGlobalTradingInlineMigration(ctx)
+			}
+		}
+	}
+
+	log.Printf("Using migrations directory: %s", migrationsDir)
+
+	// Execute each migration file
+	for _, filename := range migrationFiles {
+		migrationPath := filepath.Join(migrationsDir, filename)
+
+		log.Printf("Running migration: %s", filename)
+
+		// Read the SQL file
+		sqlContent, err := os.ReadFile(migrationPath)
+		if err != nil {
+			log.Printf("Warning: Failed to read migration file %s: %v", filename, err)
+			continue
+		}
+
+		// Execute the SQL
+		if _, err := db.Pool.Exec(ctx, string(sqlContent)); err != nil {
+			log.Printf("Warning: Migration %s failed: %v", filename, err)
+			// Continue with other migrations (table may already exist)
+			continue
+		}
+
+		log.Printf("Successfully executed migration: %s", filename)
+	}
+
+	log.Println("User Global Trading database migrations (026, 032, 033) completed")
+	return nil
+}
+
+// runUserGlobalTradingInlineMigration runs the migration using inline SQL
+func (db *DB) runUserGlobalTradingInlineMigration(ctx context.Context) error {
+	log.Println("Running inline User Global Trading migration...")
+
+	migrations := []string{
+		// Create main table (026)
+		`CREATE TABLE IF NOT EXISTS user_global_trading (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			risk_level VARCHAR(20) NOT NULL DEFAULT 'moderate',
+			max_usd_allocation DECIMAL(20,8) NOT NULL DEFAULT 2500.00000000,
+			profit_reinvest_percent DECIMAL(5,2) NOT NULL DEFAULT 50.00,
+			profit_reinvest_risk_level VARCHAR(20) NOT NULL DEFAULT 'aggressive',
+			timezone VARCHAR(50) DEFAULT 'Asia/Phnom_Penh',
+			timezone_offset VARCHAR(10) DEFAULT '+07:00',
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			CONSTRAINT unique_user_global_trading UNIQUE(user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_global_trading_user_id ON user_global_trading(user_id)`,
+
+		// Add timezone columns if they don't exist (032)
+		`ALTER TABLE user_global_trading ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Phnom_Penh'`,
+		`ALTER TABLE user_global_trading ADD COLUMN IF NOT EXISTS timezone_offset VARCHAR(10) DEFAULT '+07:00'`,
+
+		// Initialize records for existing users (033)
+		`INSERT INTO user_global_trading (user_id, risk_level, max_usd_allocation, profit_reinvest_percent, profit_reinvest_risk_level, timezone, timezone_offset)
+		SELECT u.id, 'moderate', 2500.00000000, 50.00, 'aggressive', 'Asia/Phnom_Penh', '+07:00'
+		FROM users u
+		WHERE NOT EXISTS (SELECT 1 FROM user_global_trading ugt WHERE ugt.user_id = u.id)`,
+	}
+
+	for i, migration := range migrations {
+		_, err := db.Pool.Exec(ctx, migration)
+		if err != nil {
+			log.Printf("[MIGRATION] Warning on step %d: %v (continuing...)", i+1, err)
+		}
+	}
+
+	log.Println("Inline User Global Trading migration completed")
+	return nil
+}
+
+// RunOrderChainMigrations executes order chain tracking migrations (034-036)
+// These migrations create tables for:
+// - Position states (034) - temporary position tracking
+// - Order modification events (035) - track SL/TP modifications
+// - Order chain events (036) - master order chain table and event store
+func (db *DB) RunOrderChainMigrations(ctx context.Context) error {
+	log.Println("Running Order Chain database migrations (034-036)...")
+
+	// Define the migrations to run in order
+	migrationFiles := []string{
+		"034_position_states.sql",
+		"035_order_modification_events.sql",
+		"036_order_chain_events.sql",
+	}
+
+	// Get the project root directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Try to find migrations directory
+	migrationsDir := filepath.Join(currentDir, "migrations")
+	if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+		// Try parent directory
+		migrationsDir = filepath.Join(currentDir, "..", "migrations")
+		if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+			// Try grandparent directory
+			migrationsDir = filepath.Join(currentDir, "..", "..", "migrations")
+			if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+				return fmt.Errorf("migrations directory not found: %w", err)
+			}
+		}
+	}
+
+	log.Printf("Using migrations directory: %s", migrationsDir)
+
+	// Execute each migration file
+	for _, filename := range migrationFiles {
+		migrationPath := filepath.Join(migrationsDir, filename)
+
+		log.Printf("Running migration: %s", filename)
+
+		// Read the SQL file
+		sqlContent, err := os.ReadFile(migrationPath)
+		if err != nil {
+			log.Printf("Warning: Failed to read migration file %s: %v", filename, err)
+			continue
+		}
+
+		// Execute the SQL
+		if _, err := db.Pool.Exec(ctx, string(sqlContent)); err != nil {
+			log.Printf("Warning: Migration %s failed: %v", filename, err)
+			// Continue with other migrations (table may already exist)
+			continue
+		}
+
+		log.Printf("Successfully executed migration: %s", filename)
+	}
+
+	log.Println("Order Chain database migrations (034-036) completed")
+	return nil
+}

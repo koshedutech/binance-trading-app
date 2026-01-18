@@ -217,8 +217,17 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 		log.Printf("[USER-INIT] Initialized safety settings for user %s (all 4 modes)", userID)
 	}
 
+	// ===== 10. Initialize Global Trading Settings =====
+	// Global trading config including risk level, max allocation, profit reinvestment, and timezone
+	// Uses defaults from default-settings.json -> global_trading section
+	if err := r.InitializeUserGlobalTrading(ctx, userID); err != nil {
+		log.Printf("[USER-INIT] Warning: Failed to initialize global trading: %v", err)
+	} else {
+		log.Printf("[USER-INIT] Initialized global trading for user %s (timezone: %s)", userID, DefaultUserGlobalTrading().Timezone)
+	}
+
 	// ===== Summary =====
-	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, and safety settings",
+	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, and global trading",
 		userID, modesInitialized, modesStatsInitialized)
 
 	return nil
@@ -415,7 +424,15 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 		log.Printf("[USER-RESTORE] Restored safety settings for user %s (all 4 modes)", userID)
 	}
 
-	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, and safety settings",
+	// ===== 10. Restore Global Trading Settings =====
+	// Reset to defaults including timezone from default-settings.json
+	if err := r.InitializeUserGlobalTrading(ctx, userID); err != nil {
+		log.Printf("[USER-RESTORE] Warning: Failed to restore global trading: %v", err)
+	} else {
+		log.Printf("[USER-RESTORE] Restored global trading for user %s (timezone: %s)", userID, DefaultUserGlobalTrading().Timezone)
+	}
+
+	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, and global trading",
 		userID, modesRestored, modesStatsRestored)
 
 	return nil

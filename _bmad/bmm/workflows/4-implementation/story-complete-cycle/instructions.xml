@@ -288,8 +288,9 @@
       <goto step="14">Next story</goto>
     </check>
 
-    <check if="{{story_status}} == 'not-started' OR story file does not exist">
-      <goto step="7">Create story</goto>
+    <!-- BACKLOG or NOT-STARTED: Detect story source and route accordingly -->
+    <check if="{{story_status}} == 'backlog' OR {{story_status}} == 'not-started'">
+      <goto step="7">Detect story source</goto>
     </check>
 
     <check if="{{story_status}} == 'draft'">
@@ -313,16 +314,103 @@
   <!-- STORY LIFECYCLE PHASES                     -->
   <!-- ========================================== -->
 
-  <step n="7" goal="Create story from epic">
+  <step n="7" goal="Detect story source and prepare for implementation">
+    <action>Set {{workflow_phase}} = "story-source-detection"</action>
+
+    <output>--- Detecting Story Source: {{story_key}} ---</output>
+
+    <!--
+      STORY SOURCE DETECTION:
+      Stories can exist in multiple locations:
+      1. Separate story file: {{story_dir}}/story-{{story_key}}.md
+      2. Embedded in epic file: {{epic_path}} (contains Story X.Y section)
+
+      Priority:
+      - If separate file exists → use it (most detailed)
+      - If story defined in epic → use epic content (sufficient for implementation)
+      - If neither → HALT (cannot proceed)
+    -->
+
+    <!-- Check 1: Separate story file exists? -->
+    <action>Check if file exists at {{story_path}}</action>
+    <check if="separate story file exists">
+      <output>Found separate story file: {{story_path}}</output>
+      <action>Set {{story_source}} = "file"</action>
+      <action>Read story file content</action>
+      <goto step="8">Validate story</goto>
+    </check>
+
+    <!-- Check 2: Story defined in epic file? -->
+    <action>Search epic file ({{epic_path}}) for "Story {{story_number}}" or "#### Story {{epic_number}}.{{story_index}}"</action>
+    <check if="story section found in epic">
+      <output>Found story definition in epic file</output>
+      <action>Set {{story_source}} = "epic"</action>
+      <action>Extract story content from epic:
+        - Title
+        - Priority
+        - Acceptance Criteria
+        - Interface/Code examples (if any)
+        - Dependencies
+      </action>
+
+      <!-- Validate epic content is sufficient for implementation -->
+      <action>Check epic story has:
+        - Clear acceptance criteria (REQUIRED)
+        - At least one testable condition (REQUIRED)
+        - Description of what to build (REQUIRED)
+      </action>
+
+      <check if="epic content is sufficient">
+        <output>Epic story definition is sufficient for implementation</output>
+
+        <!-- Update sprint status to ready-for-dev (skip draft since epic is pre-validated) -->
+        <action>Update sprint-status.yaml: {{story_key}} = "ready-for-dev"</action>
+        <action>Set {{story_status}} = "ready-for-dev"</action>
+
+        <output>**Story Source:** Epic file (embedded)
+          **Status Updated:** backlog → ready-for-dev
+          **Proceeding to:** Implementation
+        </output>
+
+        <goto step="10">Implement story</goto>
+      </check>
+
+      <check if="epic content is NOT sufficient">
+        <output>Epic story needs expansion - creating detailed story file</output>
+        <goto step="7b">Create expanded story file</goto>
+      </check>
+    </check>
+
+    <!-- Check 3: Story not found anywhere -->
+    <check if="story not found in file OR epic">
+      <output>HALT: Story {{story_key}} not found
+
+        - No separate story file at: {{story_path}}
+        - No story section found in epic: {{epic_path}}
+
+        **Action Required:**
+        - Ensure the story is defined in the epic file
+        - Or create a story file manually using create-story workflow
+      </output>
+      <action>Increment {{stories_failed}}</action>
+      <goto step="14">Next story</goto>
+    </check>
+  </step>
+
+  <step n="7b" goal="Create expanded story file from epic (when epic content insufficient)">
     <action>Set {{workflow_phase}} = "creating-story"</action>
 
-    <output>--- Creating Story: {{story_key}} ---</output>
+    <output>--- Creating Expanded Story File: {{story_key}} ---</output>
 
-    <!-- Delegate to sub-agent for story creation -->
+    <!-- Only reach here if epic has story but needs more detail -->
     <check if="{{use_sub_agents}} == true">
       <action>Spawn sub-agent with Task tool:
         - Type: general-purpose
-        - Prompt: "Run create-story workflow for story {{story_key}} from epic {{epic_path}}.
+        - Prompt: "Expand story {{story_key}} from epic {{epic_path}} into detailed story file.
+                   The epic has basic story info but needs:
+                   - Detailed task breakdown
+                   - Technical implementation notes
+                   - Test scenarios
                    Output the created story file path when done."
         - Wait for completion
       </action>

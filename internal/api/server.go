@@ -16,6 +16,7 @@ import (
 	"binance-trading-bot/internal/billing"
 	"binance-trading-bot/internal/cache"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/decision"
 	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/license"
 	"binance-trading-bot/internal/settlement"
@@ -94,6 +95,15 @@ type Server struct {
 
 	// Epic 8: Settlement service for daily P&L and analytics
 	settlementService *settlement.SettlementService
+
+	// Story 7.20: Order chain cache for fast UI reads
+	orderChainCache *cache.OrderChainCache
+
+	// Story 11.14: Indicator performance tracker for trade analysis
+	indicatorPerfTracker *decision.IndicatorPerformanceTracker
+
+	// Epic 11: State manager for coin state management
+	stateManager *decision.StateManager
 }
 
 // ServerConfig holds server configuration
@@ -231,6 +241,9 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/spot/ai-decisions":                       true,
 		"/api/spot/ai-decisions/stats":                 true,
 		"/api/spot/positions":                          true,
+		// Decision Engine coin state (Redis state only)
+		"/api/futures/decision/coins":                  true,
+		"/api/futures/decision/coins/count":            true,
 	}
 
 	return func(c *gin.Context) {
@@ -477,6 +490,13 @@ func (s *Server) setupRoutes() {
 			// Order chains with state endpoint (Story 7.14)
 			futures.GET("/order-chains", s.handleGetOrderChainsWithState)
 
+			// Order chain cache endpoints (Story 7.20)
+			futures.GET("/order-chains/cached", s.handleGetCachedOrderChains)
+			futures.GET("/order-chains/cached/:chainId", s.handleGetCachedOrderChain)
+
+			// Order chain history endpoint (supports date range filtering)
+			futures.GET("/order-chains/history", s.handleGetHistoricalOrderChains)
+
 			// Algo Order endpoints (TP/SL orders since 2025-12-09)
 			futures.DELETE("/algo-orders/:symbol/:id", s.handleCancelAlgoOrder)
 			futures.DELETE("/algo-orders/:symbol/all", s.handleCancelAllAlgoOrders)
@@ -495,6 +515,7 @@ func (s *Server) setupRoutes() {
 			futures.GET("/transactions/history", s.handleGetFuturesTransactionHistory)
 			futures.GET("/income-history", s.handleGetIncomeHistory) // PnL, fees, funding from Binance
 			futures.GET("/pnl-summary", s.handleGetPnLSummary)      // Daily/Weekly PnL with fees breakdown
+			futures.GET("/pnl-history", s.handleGetPnLHistory)      // Story 13.1: Extended date range P&L with caching
 			futures.GET("/test-daily-pnl", s.handleTestDailyPnLFromTrades) // Test: Compare trades vs income history
 			futures.GET("/metrics", s.handleGetFuturesMetrics)
 			futures.GET("/trade-source-stats", s.handleGetTradeSourceStats)
@@ -837,6 +858,43 @@ func (s *Server) setupRoutes() {
 			futures.GET("/ginie/instance-status", s.handleGetInstanceStatus)
 			futures.POST("/ginie/take-control", s.handleTakeControl)
 			futures.POST("/ginie/release-control", s.handleReleaseControl)
+
+			// Decision Engine Settings endpoints (Story 11.24)
+			// User-configurable strategy settings for the Position Decision Engine
+			futures.GET("/decision-engine/settings", s.handleGetDecisionEngineSettings)
+			futures.PUT("/decision-engine/settings", s.handleUpdateDecisionEngineSettings)
+			futures.POST("/decision-engine/settings/reset", s.handleResetDecisionEngineSettings)
+			futures.GET("/decision-engine/settings/compare", s.handleCompareDecisionEngineSettings)
+			futures.GET("/decision-engine/strategies", s.handleListDecisionEngineStrategies)
+			futures.PUT("/decision-engine/strategy/:name", s.handleUpdateDecisionEngineStrategy)
+			futures.POST("/decision-engine/strategy/:name/reset", s.handleResetDecisionEngineStrategy)
+			futures.PUT("/decision-engine/active-strategy", s.handleSetActiveStrategy)
+			futures.POST("/decision-engine/strategy/:name/enable", s.handleEnableStrategy)
+			futures.POST("/decision-engine/strategy/:name/disable", s.handleDisableStrategy)
+
+			// Calibration Data Lifecycle endpoints (Story 11.26)
+			// Manual reset option and confidence indicator for calibration
+			futures.POST("/calibration/reset", s.handleResetCalibration)
+			futures.GET("/calibration/confidence/:strategy", s.handleGetCalibrationConfidence)
+			futures.GET("/calibration/history/:strategy", s.handleGetCalibrationHistory)
+			futures.GET("/calibration/data/:strategy", s.handleGetCalibrationData)
+
+			// Indicator Performance Tracker endpoints (Story 11.14)
+			// Track and analyze indicator performance across trades
+			futures.GET("/indicators/performance/:strategy", s.handleGetIndicatorPerformanceGin)
+			futures.GET("/indicators/recommendations/:strategy", s.handleGetIndicatorRecommendationsGin)
+			futures.GET("/indicators/correlations/:strategy", s.handleGetIndicatorCorrelationsGin)
+			futures.GET("/indicators/top-combinations/:strategy", s.handleGetTopIndicatorCombinationsGin)
+
+			// Decision Engine Dashboard endpoint (Story 11.22)
+			// Aggregated dashboard statistics for performance analysis
+			futures.GET("/decision/dashboard/stats", s.handleGetDecisionDashboardStats)
+
+			// Coin State API (Epic 11: Position Decision Engine)
+			// Real-time coin state for PositionCard UI
+			futures.GET("/decision/coin/:symbol", s.handleGetCoinState)
+			futures.GET("/decision/coins", s.handleGetAllCoinStates)
+			futures.GET("/decision/coins/count", s.handleGetCoinStateCount)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================
@@ -1107,4 +1165,37 @@ func (s *Server) SetSettlementService(svc *settlement.SettlementService) {
 // GetSettlementService returns the settlement service
 func (s *Server) GetSettlementService() *settlement.SettlementService {
 	return s.settlementService
+}
+
+// SetOrderChainCache sets the order chain cache for fast UI reads
+// Story 7.20: Order Chain Redis Cache Layer
+func (s *Server) SetOrderChainCache(cache *cache.OrderChainCache) {
+	s.orderChainCache = cache
+}
+
+// GetOrderChainCache returns the order chain cache
+func (s *Server) GetOrderChainCache() *cache.OrderChainCache {
+	return s.orderChainCache
+}
+
+// SetIndicatorPerformanceTracker sets the indicator performance tracker.
+// Story 11.14: Indicator Performance Tracker
+func (s *Server) SetIndicatorPerformanceTracker(tracker *decision.IndicatorPerformanceTracker) {
+	s.indicatorPerfTracker = tracker
+}
+
+// GetIndicatorPerformanceTracker returns the indicator performance tracker.
+func (s *Server) GetIndicatorPerformanceTracker() *decision.IndicatorPerformanceTracker {
+	return s.indicatorPerfTracker
+}
+
+// SetStateManager sets the decision engine state manager.
+// Epic 11: Position Decision Engine
+func (s *Server) SetStateManager(sm *decision.StateManager) {
+	s.stateManager = sm
+}
+
+// GetStateManager returns the decision engine state manager.
+func (s *Server) GetStateManager() *decision.StateManager {
+	return s.stateManager
 }

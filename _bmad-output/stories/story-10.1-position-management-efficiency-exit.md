@@ -230,6 +230,256 @@ func (ga *GinieAutopilot) executeTrendReversalExit(pos *PositionRuntimeState) er
 
 ---
 
+## Part 2B: Position Decision Mode (Classic vs New Engine)
+
+### Overview
+
+The system supports **two decision modes** for trend detection and exit decisions:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 POSITION DECISION MODE                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ○ CLASSIC MODE (Current fixed approach)                       │
+│     └─ Fixed ADX, EMA, RSI thresholds                          │
+│     └─ Hardcoded reversal patterns                             │
+│     └─ Same logic for all coins                                │
+│                                                                 │
+│  ● NEW DECISION ENGINE (Epic 11 configurable approach)          │
+│     └─ User-configurable indicators per segment                │
+│     └─ Strategy-aware exit conditions                          │
+│     └─ Regime-aware decisions                                  │
+│     └─ Calibrated from trade outcomes                          │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Settings Configuration
+
+```go
+type PositionDecisionConfig struct {
+    // Mode Selection
+    DecisionMode        string  `json:"decision_mode"`  // "classic" | "new_engine"
+
+    // Classic Mode Settings (fixed values)
+    ClassicSettings     ClassicDecisionSettings `json:"classic"`
+
+    // New Engine Settings (references Epic 11 strategy)
+    NewEngineSettings   NewEngineDecisionSettings `json:"new_engine"`
+}
+
+type ClassicDecisionSettings struct {
+    // Fixed thresholds (current approach)
+    ADXReversalThreshold   float64 `json:"adx_reversal_thresh"`   // e.g., 20
+    EMAReversalPeriods     []int   `json:"ema_reversal_periods"`  // e.g., [9, 21]
+    RSIOverbought          float64 `json:"rsi_overbought"`        // e.g., 70
+    RSIOversold            float64 `json:"rsi_oversold"`          // e.g., 30
+    ReversalConfirmations  int     `json:"reversal_confirmations"` // e.g., 2
+}
+
+type NewEngineDecisionSettings struct {
+    // References active strategy from Epic 11
+    UseActiveStrategy     bool   `json:"use_active_strategy"`
+
+    // If not using active strategy, specify which one
+    StrategyName          string `json:"strategy_name"`  // e.g., "trend_following"
+
+    // Use strategy's exit conditions
+    UseStrategyExitRules  bool   `json:"use_strategy_exit_rules"`
+
+    // Regime-aware decisions
+    ExitOnRegimeChange    bool   `json:"exit_on_regime_change"`
+}
+```
+
+### Classic Mode: Trend Detection
+
+```go
+func (ga *GinieAutopilot) detectTrendReversalClassic(state *PositionRuntimeState) bool {
+    // Fixed indicator thresholds
+    if state.Side == "LONG" {
+        // LONG position - check for bearish reversal
+        bearishSignals := 0
+
+        // 1. ADX + DI flip
+        if state.ADX > 20 && state.MinusDI > state.PlusDI {
+            bearishSignals++
+        }
+
+        // 2. EMA cross (EMA9 below EMA21)
+        if state.EMA9 < state.EMA21 {
+            bearishSignals++
+        }
+
+        // 3. RSI overbought turning down
+        if state.RSI > 70 && state.RSIPrevious > state.RSI {
+            bearishSignals++
+        }
+
+        // 4. Lower lows pattern
+        if state.LowerLowsDetected >= 2 {
+            bearishSignals++
+        }
+
+        // Require 2+ confirmations
+        return bearishSignals >= ga.config.Classic.ReversalConfirmations
+    }
+
+    // For SHORT position - check for bullish reversal
+    // (mirror logic)
+    return false
+}
+```
+
+### New Engine Mode: Trend Detection
+
+```go
+func (ga *GinieAutopilot) detectTrendReversalNewEngine(state *PositionRuntimeState) bool {
+    // Get active strategy from Epic 11
+    strategy := ga.decisionEngine.GetActiveStrategy(state.Symbol)
+
+    // Get user-configured indicators for trend segment
+    trendIndicators := ga.decisionEngine.GetIndicators("trend")
+
+    // Calculate average of selected indicators
+    trendScore := 0.0
+    for _, indicator := range trendIndicators {
+        value := ga.decisionEngine.CalculateIndicator(indicator, state.Symbol)
+        normalized := ga.decisionEngine.NormalizeIndicator(indicator, value)
+        trendScore += normalized
+    }
+    trendScore /= float64(len(trendIndicators))
+
+    // Check strategy's exit conditions
+    exitConditions := strategy.GetExitConditions()
+
+    // Exit on trend reversal?
+    if exitConditions.ExitOnTrendReversal {
+        if state.Side == "LONG" && trendScore < 30 {  // Bearish
+            return true
+        }
+        if state.Side == "SHORT" && trendScore > 70 { // Bullish
+            return true
+        }
+    }
+
+    // Exit on regime change?
+    if ga.config.NewEngine.ExitOnRegimeChange {
+        currentRegime := ga.decisionEngine.GetCurrentRegime(state.Symbol)
+        if state.EntryRegime != currentRegime {
+            // Regime changed since entry (e.g., Trending → Ranging)
+            return true
+        }
+    }
+
+    return false
+}
+```
+
+### Unified Decision Flow
+
+```go
+func (ga *GinieAutopilot) shouldExitOnTrendReversal(state *PositionRuntimeState) bool {
+    switch ga.config.DecisionMode {
+    case "classic":
+        return ga.detectTrendReversalClassic(state)
+
+    case "new_engine":
+        return ga.detectTrendReversalNewEngine(state)
+
+    default:
+        return ga.detectTrendReversalClassic(state)  // Fallback
+    }
+}
+```
+
+### Exit Conditions by Mode
+
+| Condition | Classic Mode | New Engine Mode |
+|-----------|--------------|-----------------|
+| **Trend Reversal** | Fixed ADX/EMA/RSI thresholds | Configurable indicators averaged |
+| **Indicator Check** | Hardcoded patterns | User-selected per segment |
+| **Regime Awareness** | None | Exit when regime changes |
+| **Strategy Rules** | None | Uses strategy's exit_conditions |
+| **Calibration** | None | Learned from trade outcomes |
+
+### UI Settings
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ POSITION MANAGEMENT SETTINGS                                    │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│ Position Decision Mode:                                         │
+│ ┌─────────────────────────────────────────────────────────────┐│
+│ │ ○ Classic Mode                                              ││
+│ │   Use fixed indicator thresholds (ADX > 20, EMA cross, etc) ││
+│ │                                                             ││
+│ │ ● New Decision Engine (Recommended)                         ││
+│ │   Use configurable indicators from Epic 11                  ││
+│ │   Strategy-aware exit rules                                 ││
+│ │   Adapts to market regime changes                           ││
+│ └─────────────────────────────────────────────────────────────┘│
+│                                                                 │
+│ IF Classic Mode selected:                                       │
+│ ├─ ADX Reversal Threshold: [20] (min 15, max 30)               │
+│ ├─ Reversal Confirmations: [2]  (1-4 signals required)         │
+│ └─ RSI Thresholds: Oversold [30] / Overbought [70]             │
+│                                                                 │
+│ IF New Engine Mode selected:                                    │
+│ ├─ Use Active Strategy: [✓] (from entry decision)              │
+│ ├─ Exit on Regime Change: [✓]                                  │
+│ └─ Strategy Exit Rules: [✓] (use strategy's exit conditions)   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Relationship with Epic 11
+
+```
+Epic 11 Decision Engine (ENTRY)              Epic 10 Position Engine (EXIT)
+════════════════════════════════             ════════════════════════════════
+
+Strategy Selection                           Uses SAME strategy for exit
+   ↓                                            ↑
+Indicator Calculation (Trend, Momentum...)   Uses SAME indicators for exit
+   ↓                                            ↑
+Additive Scoring (40+30+20+10)              Exit when conditions flip
+   ↓                                            ↑
+Entry Decision: EXECUTE / SKIP              Exit Decision: HOLD / EXIT
+   │                                            ↑
+   │                                            │
+   └─────────── Position Created ───────────────┘
+                   │
+                   ▼
+              Redis State
+         (stores entry strategy,
+          entry regime, indicators)
+```
+
+### Redis State Extension
+
+```go
+type PositionRuntimeState struct {
+    // ... existing fields ...
+
+    // Epic 11 Integration
+    EntryStrategy     string  `json:"entry_strat"`     // Strategy used for entry
+    EntryRegime       string  `json:"entry_regime"`    // Regime at entry time
+    CurrentRegime     string  `json:"cur_regime"`      // Current market regime
+    DecisionMode      string  `json:"dec_mode"`        // "classic" | "new_engine"
+
+    // Configurable Indicator Scores (from Epic 11)
+    TrendScore        float64 `json:"trend_score"`     // Averaged trend indicators
+    MomentumScore     float64 `json:"momentum_score"`  // Averaged momentum indicators
+    VolatilityScore   float64 `json:"vol_score"`       // Averaged volatility indicators
+    VolumeScore       float64 `json:"volume_score"`    // Averaged volume indicators
+}
+```
+
+---
+
 ## Part 3: Dynamic SL/TP Management
 
 ### Why Both SL and TP on Binance
@@ -915,9 +1165,139 @@ func (ga *GinieAutopilot) processPositionTick(symbol string, price float64) erro
 
 ---
 
-## Part 9: UI Display - Position Stages
+## Part 9: UI Display
 
-### Expandable Position Card
+### 9.1 Settings Panel Location
+
+The Position Management settings are located in the Ginie Settings page:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  GINIE AUTOPILOT SETTINGS                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐   │
+│  │ General     │ │ Entry       │ │ Position    │ │ Risk Management │   │
+│  │ Settings    │ │ Settings    │ │ Management  │ │                 │   │
+│  └─────────────┘ └─────────────┘ └──────┬──────┘ └─────────────────┘   │
+│                                         │                               │
+│                                    [SELECTED]                           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.2 Position Management Settings Panel
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  POSITION MANAGEMENT SETTINGS                                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  POSITION DECISION MODE                                          │   │
+│  │  ───────────────────────────────────────────────────────────────│   │
+│  │                                                                  │   │
+│  │  How should the system detect trend reversals for exit?         │   │
+│  │                                                                  │   │
+│  │  ┌─────────────────────────────────────────────────────────┐    │   │
+│  │  │ ○ Classic Mode                                          │    │   │
+│  │  │   Uses fixed indicator thresholds                       │    │   │
+│  │  │   • ADX > 20 for trend strength                         │    │   │
+│  │  │   • EMA 9/21 crossover for direction                    │    │   │
+│  │  │   • RSI 30/70 for overbought/oversold                   │    │   │
+│  │  │   • Lower lows / Higher highs patterns                  │    │   │
+│  │  └─────────────────────────────────────────────────────────┘    │   │
+│  │                                                                  │   │
+│  │  ┌─────────────────────────────────────────────────────────┐    │   │
+│  │  │ ● New Decision Engine (Recommended)                     │    │   │
+│  │  │   Uses your configured strategy from Entry Settings     │    │   │
+│  │  │   • Same indicators you selected for entry              │    │   │
+│  │  │   • Strategy-specific exit rules                        │    │   │
+│  │  │   • Exits when market regime changes                    │    │   │
+│  │  │   • Adapts based on trade outcomes                      │    │   │
+│  │  └─────────────────────────────────────────────────────────┘    │   │
+│  │                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  CLASSIC MODE SETTINGS                    [Visible if Classic]   │   │
+│  │  ───────────────────────────────────────────────────────────────│   │
+│  │                                                                  │   │
+│  │  ADX Reversal Threshold      [ 20 ]  ← (15-30)                  │   │
+│  │  Reversal Confirmations      [ 2  ]  ← (1-4 signals)            │   │
+│  │  RSI Oversold               [ 30 ]  ← (20-40)                   │   │
+│  │  RSI Overbought             [ 70 ]  ← (60-80)                   │   │
+│  │                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  NEW ENGINE SETTINGS                  [Visible if New Engine]    │   │
+│  │  ───────────────────────────────────────────────────────────────│   │
+│  │                                                                  │   │
+│  │  [✓] Use Active Strategy from Entry                             │   │
+│  │      Exit uses same strategy that opened the position           │   │
+│  │                                                                  │   │
+│  │  [✓] Exit on Regime Change                                      │   │
+│  │      Exit if market shifts (e.g., Trending → Ranging)           │   │
+│  │                                                                  │   │
+│  │  [✓] Use Strategy Exit Rules                                    │   │
+│  │      Follow the strategy's defined exit conditions              │   │
+│  │                                                                  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.3 Efficiency Exit Settings Panel
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  EFFICIENCY EXIT SETTINGS                                               │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  [✓] Enable Efficiency Exit                                            │
+│      Exit when profit efficiency drops below historical average        │
+│                                                                         │
+│  ───────────────────────────────────────────────────────────────────   │
+│                                                                         │
+│  Historical Window (hours)    [ 6  ]  ← How far back to calculate      │
+│                                                                         │
+│  Minimum Hold Time (minutes)  [ 2  ]  ← Don't exit too early           │
+│                                                                         │
+│  Consecutive Signals Required [ 3  ]  ← Prevent whipsaw exits          │
+│                                                                         │
+│  ───────────────────────────────────────────────────────────────────   │
+│                                                                         │
+│  Current Threshold: 48%  (from last 6 hours, 23 trades)                │
+│  ████████████████████░░░░░░░░░░░░░░░░░░░░                              │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.4 Dynamic SL/TP Settings Panel
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  DYNAMIC SL/TP SETTINGS                                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  [✓] Enable Dynamic Stop Loss                                          │
+│      SL trails based on ATR and trend strength                         │
+│                                                                         │
+│  [✓] Enable Dynamic Take Profit                                        │
+│      TP adjusts upward as price rises                                  │
+│                                                                         │
+│  [✓] Update Orders on Binance                                          │
+│      Sync SL/TP to Binance (protects if system goes down)             │
+│                                                                         │
+│  ───────────────────────────────────────────────────────────────────   │
+│                                                                         │
+│  ATR Multiplier for SL    [ 1.5 ]  ← Higher = wider stop               │
+│  ATR Multiplier for TP    [ 3.0 ]  ← Higher = further target           │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### 9.5 Expandable Position Card
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -926,7 +1306,8 @@ func (ga *GinieAutopilot) processPositionTick(symbol string, price float64) erro
 │ BTCUSDT LONG       +1.25% ($125)                    [Expand]   │
 │ Entry: $100,000 │ Current: $101,250 │ SL: $100,500            │
 │ ████████████████░░░░░░░░░░░░░  Efficiency: 74%                │
-│ Stage: PROFIT ZONE (Efficiency Tracking)                       │
+│ Stage: EFFICIENCY TRACKING                                      │
+│ Mode: New Engine │ Strategy: Trend Following │ Regime: TRENDING│
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -970,17 +1351,32 @@ func (ga *GinieAutopilot) processPositionTick(symbol string, price float64) erro
 │ Threshold:      48% (from last 6 hours)                        │
 │ Status:         HOLDING - Above threshold                      │
 ├─────────────────────────────────────────────────────────────────┤
-│ TREND ANALYSIS                                                  │
+│ DECISION ENGINE                                                 │
 │ ───────────────────────────────────────────────────────────────│
-│ Direction:      UP (Bullish)                                   │
-│ Strength:       ████████████░░░░░░  ADX: 32                    │
-│ RSI: 58 │ MACD: Bullish │ ATR: 0.8%                           │
+│ Mode:            New Engine                                    │
+│ Entry Strategy:  Trend Following                               │
+│ Entry Regime:    TRENDING                                      │
+│ Current Regime:  TRENDING (no change)                          │
+│                                                                 │
+│ Indicator Scores:                                               │
+│ ├─ Trend:      ████████████████░░░░  72/100  (Bullish)        │
+│ ├─ Momentum:   ██████████████░░░░░░  65/100  (Neutral)        │
+│ ├─ Volatility: ████████░░░░░░░░░░░░  42/100  (Low)            │
+│ └─ Volume:     ██████████████████░░  85/100  (High)           │
+├─────────────────────────────────────────────────────────────────┤
+│ TREND ANALYSIS (Classic Indicators)                            │
+│ ───────────────────────────────────────────────────────────────│
+│ ADX:    32  ████████████████░░░░  Strong Trend                 │
+│ RSI:    58  ██████████████░░░░░░  Neutral                      │
+│ EMA9:   Above EMA21 ✓                                          │
+│ MACD:   Bullish ✓                                              │
+│ ATR:    0.8%                                                   │
 ├─────────────────────────────────────────────────────────────────┤
 │ [Close Position]  [Adjust SL/TP]  [View History]              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Stage Indicators
+### 9.6 Stage Indicators
 
 | Stage | Icon | Color | Description |
 |-------|------|-------|-------------|
@@ -1002,7 +1398,7 @@ func (ga *GinieAutopilot) processPositionTick(symbol string, price float64) erro
 CREATE TABLE trade_efficiency_metrics (
     id SERIAL PRIMARY KEY,
     futures_trade_id INTEGER REFERENCES futures_trades(id),
-    user_id UUID REFERENCES users(id),
+    user_id UUID NOT NULL,
     symbol VARCHAR(20) NOT NULL,
     mode VARCHAR(20) NOT NULL,
 
@@ -1016,26 +1412,44 @@ CREATE TABLE trade_efficiency_metrics (
     original_qty DECIMAL(20,8) NOT NULL,
     exit_qty DECIMAL(20,8) NOT NULL,
 
-    -- Efficiency Data (SIMPLIFIED!)
-    peak_profit DECIMAL(10,6) NOT NULL,       -- Highest profit % achieved
-    exit_profit DECIMAL(10,6) NOT NULL,       -- Profit % at exit
-    exit_efficiency DECIMAL(10,6) NOT NULL,   -- exit_profit / peak_profit
+    -- Efficiency Data
+    peak_profit_pct DECIMAL(10,6) NOT NULL,      -- Highest profit % achieved
+    exit_profit_pct DECIMAL(10,6) NOT NULL,      -- Profit % at exit
+    exit_efficiency DECIMAL(10,6) NOT NULL,      -- exit_profit / peak_profit
 
     -- Exit Details
-    exit_reason VARCHAR(50) NOT NULL,         -- 'efficiency', 'trend', 'sl', 'tp'
-    exit_urgency VARCHAR(20),                 -- 'immediate', 'normal'
+    exit_reason VARCHAR(50) NOT NULL,            -- See exit_reason values below
+    exit_urgency VARCHAR(20),                    -- 'immediate', 'normal'
 
     -- Stage Data
     breakeven_achieved BOOLEAN DEFAULT FALSE,
+    breakeven_time TIMESTAMP,
     tp1_hit BOOLEAN DEFAULT FALSE,
+    tp1_time TIMESTAMP,
+    tp1_qty DECIMAL(20,8),
     tp1_profit DECIMAL(20,8),
 
-    -- Trend at Exit
+    -- DECISION ENGINE DATA (Epic 11 Integration)
+    decision_mode VARCHAR(20) NOT NULL,          -- 'classic', 'new_engine'
+    entry_strategy VARCHAR(50),                  -- 'trend_following', 'mean_reversion', etc.
+    entry_regime VARCHAR(20),                    -- 'TRENDING', 'RANGING', 'VOLATILE', 'CONSOLIDATING'
+    exit_regime VARCHAR(20),                     -- Regime at exit time
+
+    -- INDICATOR SCORES AT EXIT (New Engine mode)
+    trend_score DECIMAL(5,2),                    -- 0-100
+    momentum_score DECIMAL(5,2),                 -- 0-100
+    volatility_score DECIMAL(5,2),               -- 0-100
+    volume_score DECIMAL(5,2),                   -- 0-100
+
+    -- CLASSIC INDICATORS AT EXIT
+    adx_at_exit DECIMAL(10,4),
+    rsi_at_exit DECIMAL(10,4),
+    atr_pct_at_exit DECIMAL(10,4),
     trend_direction VARCHAR(20),
     trend_strength DECIMAL(10,6),
 
     -- Category
-    trade_category INTEGER NOT NULL,          -- 1=loss, 2=breakeven, 3=success
+    trade_category INTEGER NOT NULL,             -- 1=loss, 2=breakeven, 3=profit
 
     -- Timestamps
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1044,6 +1458,75 @@ CREATE TABLE trade_efficiency_metrics (
 -- Indexes for baseline query
 CREATE INDEX idx_eff_user_mode_time ON trade_efficiency_metrics(user_id, mode, created_at);
 CREATE INDEX idx_eff_category ON trade_efficiency_metrics(trade_category);
+CREATE INDEX idx_eff_strategy ON trade_efficiency_metrics(entry_strategy);
+CREATE INDEX idx_eff_regime ON trade_efficiency_metrics(entry_regime);
+```
+
+### Exit Reason Values
+
+| exit_reason | Description |
+|-------------|-------------|
+| `TREND_REVERSAL` | Trend reversed, immediate exit |
+| `TREND_REVERSAL_RISK_ZONE` | Trend reversed while still in risk zone |
+| `EFFICIENCY_BELOW_THRESHOLD` | Efficiency dropped below historical average |
+| `REGIME_CHANGE` | Market regime changed (New Engine mode) |
+| `TRAILING_SL_HIT` | Dynamic stop loss triggered |
+| `DYNAMIC_TP_HIT` | Dynamic take profit reached |
+| `MANUAL_CLOSE` | User manually closed position |
+| `SYSTEM_CLOSE` | System closed (emergency, shutdown) |
+
+### Example Record
+
+```json
+{
+    "id": 12345,
+    "futures_trade_id": 98765,
+    "user_id": "abc-123-def",
+    "symbol": "BTCUSDT",
+    "mode": "scalp",
+
+    "entry_price": 100000.00,
+    "exit_price": 101250.00,
+    "entry_time": "2026-01-18 10:15:23",
+    "exit_time": "2026-01-18 11:42:18",
+
+    "original_qty": 0.1,
+    "exit_qty": 0.07,
+
+    "peak_profit_pct": 1.70,
+    "exit_profit_pct": 1.25,
+    "exit_efficiency": 0.735,
+
+    "exit_reason": "EFFICIENCY_BELOW_THRESHOLD",
+    "exit_urgency": "normal",
+
+    "breakeven_achieved": true,
+    "breakeven_time": "2026-01-18 10:23:45",
+    "tp1_hit": true,
+    "tp1_time": "2026-01-18 10:35:12",
+    "tp1_qty": 0.03,
+    "tp1_profit": 120.00,
+
+    "decision_mode": "new_engine",
+    "entry_strategy": "trend_following",
+    "entry_regime": "TRENDING",
+    "exit_regime": "TRENDING",
+
+    "trend_score": 72.00,
+    "momentum_score": 65.00,
+    "volatility_score": 42.00,
+    "volume_score": 85.00,
+
+    "adx_at_exit": 32.50,
+    "rsi_at_exit": 58.00,
+    "atr_pct_at_exit": 0.85,
+    "trend_direction": "UP",
+    "trend_strength": 0.75,
+
+    "trade_category": 3,
+
+    "created_at": "2026-01-18 11:42:18"
+}
 ```
 
 ---
@@ -1060,6 +1543,7 @@ CREATE INDEX idx_eff_category ON trade_efficiency_metrics(trade_category);
 - [ ] Create PositionRuntimeState struct
 - [ ] Implement Redis save/load methods
 - [ ] Add active positions index management
+- [ ] Add Epic 11 integration fields (EntryStrategy, EntryRegime, etc.)
 
 ### Task 3: Simplified Efficiency Tracking
 - [ ] Implement peak profit tracking (every tick)
@@ -1076,35 +1560,56 @@ CREATE INDEX idx_eff_category ON trade_efficiency_metrics(trade_category);
 - [ ] Implement calculateDynamicTP()
 - [ ] Update Binance orders on improvement
 
-### Task 6: Trend-Based Exit
-- [ ] Implement trend reversal detection
-- [ ] Add immediate exit on confirmed reversal
-- [ ] Add trend data to position state
+### Task 6: Trend-Based Exit (Classic Mode)
+- [ ] Implement detectTrendReversalClassic()
+- [ ] Fixed ADX/EMA/RSI threshold checks
+- [ ] Lower lows / Higher highs pattern detection
+- [ ] Configurable reversal confirmations
 
-### Task 7: Stage Management
+### Task 7: Trend-Based Exit (New Engine Mode)
+- [ ] Implement detectTrendReversalNewEngine()
+- [ ] Integration with Epic 11 DecisionEngine
+- [ ] Get active strategy and its exit conditions
+- [ ] Calculate averaged indicator scores per segment
+- [ ] Regime change detection
+
+### Task 8: Position Decision Mode Settings
+- [ ] Add PositionDecisionConfig struct
+- [ ] Add ClassicDecisionSettings struct
+- [ ] Add NewEngineDecisionSettings struct
+- [ ] Add to default-settings.json
+- [ ] Settings lifecycle (Redis cache, API, UI)
+
+### Task 9: Stage Management
 - [ ] Implement stage transitions
 - [ ] Integrate with Position Optimization
 - [ ] Handle TP1 → Efficiency handoff
+- [ ] Store entry strategy/regime in Redis state
 
-### Task 8: Market Data Caching
+### Task 10: Market Data Caching
 - [ ] Cache candles in Redis Sorted Sets
 - [ ] Implement rolling window cleanup
 - [ ] Cache indicators on candle close
 
-### Task 9: UI Updates
+### Task 11: UI Updates
 - [ ] Add expandable position card
 - [ ] Display stage information
 - [ ] Show efficiency metrics
+- [ ] Add Position Decision Mode settings panel
+- [ ] Show Classic vs New Engine toggle
 
-### Task 10: Database Changes
+### Task 12: Database Changes
 - [ ] Create trade_efficiency_metrics table
 - [ ] Add migration script
 - [ ] Implement repository methods
 
-### Task 11: Testing
+### Task 13: Testing
 - [ ] Unit tests for efficiency calculation
 - [ ] Unit tests for baseline calculation
+- [ ] Unit tests for Classic mode trend detection
+- [ ] Unit tests for New Engine mode trend detection
 - [ ] Integration tests with Redis
+- [ ] Integration tests with Epic 11 DecisionEngine
 - [ ] End-to-end position lifecycle test
 
 ---
@@ -1153,6 +1658,20 @@ CREATE INDEX idx_eff_category ON trade_efficiency_metrics(trade_category);
 - [ ] Efficiency metrics displayed
 - [ ] Trend status shown
 
+### AC10.1.8: Position Decision Mode Selection
+- [ ] Settings toggle for Classic vs New Engine mode
+- [ ] Classic mode uses fixed indicator thresholds
+- [ ] New Engine mode uses Epic 11 configurable indicators
+- [ ] Strategy exit conditions respected in New Engine mode
+- [ ] Regime change detection triggers exit (if enabled)
+
+### AC10.1.9: Epic 11 Integration
+- [ ] Entry strategy stored in position state
+- [ ] Entry regime stored in position state
+- [ ] Indicator segment scores calculated and stored
+- [ ] DecisionEngine integration for trend detection
+- [ ] Seamless fallback to Classic mode if Epic 11 not available
+
 ---
 
 ## Summary
@@ -1194,12 +1713,27 @@ Architecture:
 
 | File | Changes |
 |------|---------|
-| `internal/autopilot/ginie_types.go` | Add PositionRuntimeState |
-| `internal/autopilot/ginie_autopilot.go` | Add efficiency tracking |
+| `internal/autopilot/ginie_types.go` | Add PositionRuntimeState, PositionDecisionConfig |
+| `internal/autopilot/ginie_autopilot.go` | Add efficiency tracking, decision mode routing |
 | `internal/autopilot/position_redis.go` | New file - Redis operations |
+| `internal/autopilot/position_exit_classic.go` | New file - Classic mode exit logic |
+| `internal/autopilot/position_exit_engine.go` | New file - New Engine mode exit logic |
 | `internal/autopilot/market_cache.go` | New file - Market data cache |
 | `internal/db/migrations/` | Add trade_efficiency_metrics table |
+| `default-settings.json` | Add position_decision settings |
 | `web/src/components/PositionCard.tsx` | Add expandable view |
+| `web/src/components/PositionDecisionSettings.tsx` | New file - Settings panel |
+
+### Dependencies
+
+| Dependency | Status | Required For |
+|------------|--------|--------------|
+| Story 10.1 Phase 1 (Basic) | This story | Core functionality |
+| Epic 11 Story 11.4 | Optional | Market regime classifier |
+| Epic 11 Story 11.6 | Optional | Strategy interface |
+| Epic 11 Story 11.12 | Optional | Indicator segment framework |
+
+**Note:** Epic 11 integration is optional. If Epic 11 is not yet implemented, system defaults to Classic mode.
 
 ---
 

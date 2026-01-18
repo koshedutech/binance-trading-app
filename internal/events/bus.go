@@ -38,6 +38,9 @@ const (
 	EventModeStatusUpdate    EventType = "MODE_STATUS_UPDATE"
 	EventSystemStatusUpdate  EventType = "SYSTEM_STATUS_UPDATE"
 	EventSignalUpdate        EventType = "SIGNAL_UPDATE"
+
+	// Epic 11: Position Decision Engine - Coin State Updates
+	EventCoinStateUpdate EventType = "COIN_STATE_UPDATE"
 )
 
 // Event represents a system event
@@ -232,6 +235,7 @@ var (
 	broadcastSystemStatus    BroadcastFunc
 	broadcastSignalUpdate    BroadcastFunc
 	broadcastPositionUpdate  BroadcastFunc
+	broadcastCoinStateUpdate BroadcastFunc // Epic 11: Position Decision Engine
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -277,6 +281,12 @@ func SetBroadcastSignalUpdate(fn BroadcastFunc) {
 // SetBroadcastPositionUpdate sets the callback for position update broadcasts
 func SetBroadcastPositionUpdate(fn BroadcastFunc) {
 	broadcastPositionUpdate = fn
+}
+
+// SetBroadcastCoinStateUpdate sets the callback for coin state update broadcasts
+// Epic 11: Position Decision Engine
+func SetBroadcastCoinStateUpdate(fn BroadcastFunc) {
+	broadcastCoinStateUpdate = fn
 }
 
 // BroadcastLifecycleEvent broadcasts a lifecycle event to a user
@@ -339,5 +349,13 @@ func BroadcastSignalUpdate(userID string, data interface{}) {
 func BroadcastPositionUpdate(userID string, data interface{}) {
 	if broadcastPositionUpdate != nil && userID != "" {
 		go broadcastPositionUpdate(userID, data)
+	}
+}
+
+// BroadcastCoinStateUpdate broadcasts coin state update to a user
+// Epic 11: Position Decision Engine - Real-time coin state for PositionCard UI
+func BroadcastCoinStateUpdate(userID string, data interface{}) {
+	if broadcastCoinStateUpdate != nil && userID != "" {
+		go broadcastCoinStateUpdate(userID, data)
 	}
 }

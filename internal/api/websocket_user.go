@@ -276,6 +276,10 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 			BroadcastUserPositionUpdate(userID, positions)
 		}
 	})
+	events.SetBroadcastCoinStateUpdate(func(userID string, data interface{}) {
+		// Epic 11: Position Decision Engine - Coin state broadcasts
+		BroadcastCoinStateUpdate(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -538,6 +542,24 @@ func BroadcastSignalUpdate(userID string, signal interface{}) {
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
 			"signal": signal,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastCoinStateUpdate broadcasts a coin state update to a specific user
+// Epic 11: Position Decision Engine - Real-time coin state for PositionCard UI
+func BroadcastCoinStateUpdate(userID string, coinState interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventCoinStateUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"coin_state": coinState,
 		},
 	}
 

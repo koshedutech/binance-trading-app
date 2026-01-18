@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain, RefreshCw } from 'lucide-react';
+import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain, RefreshCw, BarChart3, Menu } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { useAuth, TIER_INFO } from '../contexts/AuthContext';
@@ -21,8 +21,10 @@ export default function Header() {
   const location = useLocation();
   const navigate = useNavigate();
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [subscriptionEnabled, setSubscriptionEnabled] = useState(true);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const isActive = (path: string) => location.pathname === path;
 
@@ -41,11 +43,14 @@ export default function Header() {
     checkSubscriptionStatus();
   }, []);
 
-  // Close dropdown when clicking outside
+  // Close dropdowns when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setDropdownOpen(false);
+      }
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -93,39 +98,6 @@ export default function Header() {
                 <span className="font-medium">Dashboard</span>
               </Link>
               <Link
-                to="/strategy-builder"
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isActive('/strategy-builder')
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-300 hover:bg-dark-700 hover:text-blue-400'
-                }`}
-              >
-                <Layers className="w-4 h-4" />
-                <span className="font-medium">Strategy Builder</span>
-              </Link>
-              <Link
-                to="/visual-strategy-advanced"
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isActive('/visual-strategy-advanced')
-                    ? 'bg-primary-600 text-white'
-                    : 'text-gray-300 hover:bg-dark-700 hover:text-white'
-                }`}
-              >
-                <TrendingUp className="w-4 h-4" />
-                <span className="font-medium">Visual Builder</span>
-              </Link>
-              <Link
-                to="/pattern-scanner"
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isActive('/pattern-scanner')
-                    ? 'bg-primary-600 text-white'
-                    : 'text-gray-300 hover:bg-dark-700 hover:text-white'
-                }`}
-              >
-                <Sparkles className="w-4 h-4" />
-                <span className="font-medium">Pattern Scanner</span>
-              </Link>
-              <Link
                 to="/futures"
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
                   isActive('/futures')
@@ -136,17 +108,88 @@ export default function Header() {
                 <Zap className="w-4 h-4" />
                 <span className="font-medium">Futures</span>
               </Link>
-              <Link
-                to="/investigate"
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                  isActive('/investigate')
-                    ? 'bg-purple-600 text-white'
-                    : 'text-gray-300 hover:bg-dark-700 hover:text-purple-400'
-                }`}
-              >
-                <Search className="w-4 h-4" />
-                <span className="font-medium">Investigate</span>
-              </Link>
+
+              {/* More Menu Dropdown */}
+              <div className="relative" ref={menuRef}>
+                <button
+                  onClick={() => setMenuOpen(!menuOpen)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+                    menuOpen || ['/strategy-builder', '/visual-strategy-advanced', '/pattern-scanner', '/investigate', '/decision-dashboard'].includes(location.pathname)
+                      ? 'bg-dark-600 text-white'
+                      : 'text-gray-300 hover:bg-dark-700 hover:text-white'
+                  }`}
+                >
+                  <Menu className="w-4 h-4" />
+                  <span className="font-medium">More</span>
+                  <ChevronDown className={`w-4 h-4 transition-transform ${menuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {menuOpen && (
+                  <div className="absolute left-0 mt-2 w-56 bg-dark-700 rounded-lg shadow-lg border border-dark-600 py-1 z-50">
+                    <Link
+                      to="/strategy-builder"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/strategy-builder')
+                          ? 'bg-blue-600/20 text-blue-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <Layers className="w-4 h-4" />
+                      Strategy Builder
+                    </Link>
+                    <Link
+                      to="/visual-strategy-advanced"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/visual-strategy-advanced')
+                          ? 'bg-primary-600/20 text-primary-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <TrendingUp className="w-4 h-4" />
+                      Visual Builder
+                    </Link>
+                    <Link
+                      to="/pattern-scanner"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/pattern-scanner')
+                          ? 'bg-primary-600/20 text-primary-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      Pattern Scanner
+                    </Link>
+                    <div className="border-t border-dark-600 my-1"></div>
+                    <Link
+                      to="/investigate"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/investigate')
+                          ? 'bg-purple-600/20 text-purple-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <Search className="w-4 h-4" />
+                      Investigate
+                    </Link>
+                    <Link
+                      to="/decision-dashboard"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/decision-dashboard')
+                          ? 'bg-blue-600/20 text-blue-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <BarChart3 className="w-4 h-4" />
+                      Analytics Dashboard
+                    </Link>
+                  </div>
+                )}
+              </div>
             </nav>
           </div>
 

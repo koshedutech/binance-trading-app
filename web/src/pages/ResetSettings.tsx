@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { RefreshCw, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
+import { RefreshCw, AlertTriangle, CheckCircle2, Loader2, Settings } from 'lucide-react';
 import {
   loadModeDefaults,
   loadCircuitBreakerDefaults,
@@ -13,7 +13,9 @@ import {
   adminSaveOtherSetting,
 } from '../services/futuresApi';
 import SettingsComparisonView from '../components/SettingsComparisonView';
+import DecisionEngineSettings from '../components/DecisionEngineSettings';
 import { useAuth } from '../contexts/AuthContext';
+import type { StrategyName } from '../types/decision-engine';
 
 // Toast notification types
 interface ToastMessage {
@@ -276,6 +278,21 @@ export default function ResetSettings() {
     }
   }, [isAdmin, showToast, handleRefresh]);
 
+  // Handle Decision Engine strategy reset
+  const handleResetDecisionEngineStrategy = useCallback((strategy: StrategyName) => {
+    const strategyName = strategy.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    dispatchResetEvent(`decision_engine.${strategy}`, 1);
+    showToast('success', `Decision Engine strategy "${strategyName}" reset to defaults.`);
+    handleRefresh();
+  }, [showToast, handleRefresh]);
+
+  // Handle Decision Engine all strategies reset
+  const handleResetAllDecisionEngineStrategies = useCallback(() => {
+    dispatchResetEvent('decision_engine.all', 4);
+    showToast('success', 'All Decision Engine strategies reset to defaults.');
+    handleRefresh();
+  }, [showToast, handleRefresh]);
+
   return (
     <div className="min-h-screen bg-dark-900 p-6">
       <div className="max-w-7xl mx-auto">
@@ -378,6 +395,23 @@ export default function ResetSettings() {
           onSaveMode={isAdmin ? handleSaveMode : undefined}
           onSaveOtherSetting={isAdmin ? handleSaveOtherSetting : undefined}
         />
+
+        {/* Decision Engine Settings Section */}
+        <div className="mt-8">
+          <div className="flex items-center gap-2 mb-4">
+            <Settings className="w-6 h-6 text-blue-400" />
+            <h2 className="text-xl font-bold text-white">Decision Engine</h2>
+            <span className="text-sm text-gray-400 ml-2">
+              (Position Decision Engine Strategy Settings)
+            </span>
+          </div>
+          <DecisionEngineSettings
+            key={`decision-engine-${refreshKey}`}
+            isAdmin={isAdmin}
+            onResetStrategy={handleResetDecisionEngineStrategy}
+            onResetAll={handleResetAllDecisionEngineStrategies}
+          />
+        </div>
       </div>
     </div>
   );

@@ -1,8 +1,8 @@
 // Story 7.13: Modification Tree Component
+// Story 7.19: Uses user timezone for timestamp formatting
 // Main container for displaying SL/TP modification history
 
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { format } from 'date-fns';
 import {
   ChevronDown,
   ChevronRight,
@@ -20,12 +20,12 @@ import {
   ORDER_TYPE_LABELS,
   formatDollarImpact,
   formatPriceDelta,
-  formatPercentChange,
   getImpactColor,
 } from './types';
 import ModificationNode from './ModificationNode';
 import ImpactBadge from './ImpactBadge';
 import { futuresApi } from '../../../services/futuresApi';
+import { useUserTimezone } from '../hooks/useUserTimezone';
 
 export default function ModificationTree({
   chainId,
@@ -37,6 +37,9 @@ export default function ModificationTree({
   onToggle,
   compact = false,
 }: ModificationTreeProps) {
+  // Story 7.19: User timezone for timestamp formatting
+  const { formatTime } = useUserTimezone();
+
   // State management
   const [isExpanded, setIsExpanded] = useState(controlledExpanded ?? false);
   const [expandedReasoning, setExpandedReasoning] = useState<number | null>(null);
@@ -203,6 +206,7 @@ export default function ModificationTree({
                     orderType={orderType}
                     onExpandReasoning={() => toggleReasoning(event.id)}
                     isReasoningExpanded={expandedReasoning === event.id}
+                    formatTime={formatTime}
                   />
                 ))}
               </div>
@@ -372,6 +376,7 @@ export default function ModificationTree({
                     orderType={orderType}
                     onExpandReasoning={() => toggleReasoning(event.id)}
                     isReasoningExpanded={expandedReasoning === event.id}
+                    formatTime={formatTime}
                   />
                 ))}
               </div>

@@ -1,7 +1,9 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { formatUSD, futuresApi } from '../services/futuresApi';
 import { wsService } from '../services/websocket';
 import CollapsibleCard from './CollapsibleCard';
+import { DateRangeFilter, NavigationControls, DayDetailPanel } from './PnLSummary';
+import type { DateRangeType } from './PnLSummary';
 import type { PnLPayload, WSEvent } from '../types';
 import {
   TrendingUp,
@@ -9,6 +11,8 @@ import {
   DollarSign,
   Activity,
   Wifi,
+  Database,
+  RefreshCw,
 } from 'lucide-react';
 
 interface DailyPnLBreakdown {
@@ -17,11 +21,14 @@ interface DailyPnLBreakdown {
   day_name: string;
   pnl: number;
   commission: number;
+  rebate?: number;
   funding: number;
+  other?: number;
   net_pnl: number;
   trade_count: number;
   is_profit: boolean;
   is_today: boolean;
+  is_cached?: boolean;
 }
 
 interface PnLSummaryData {
@@ -54,6 +61,17 @@ export default function PnLSummaryCard() {
   const [countdown, setCountdown] = useState<string>('');
   const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
+  // Story 13.1: Extended navigation state
+  const [selectedDay, setSelectedDay] = useState<DailyPnLBreakdown | null>(null);
+  const [dateRange, setDateRange] = useState<DateRangeType>('week');
+  const [customStartDate, setCustomStartDate] = useState<string>('');
+  const [customEndDate, setCustomEndDate] = useState<string>('');
+  const [extendedData, setExtendedData] = useState<DailyPnLBreakdown[] | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const DAYS_PER_PAGE = 7;
+
   const fetchPnlSummary = useCallback(async () => {
     try {
       const response = await futuresApi.getPnLSummary();
@@ -64,6 +82,68 @@ export default function PnLSummaryCard() {
       setIsLoading(false);
     }
   }, []);
+
+  // Story 13.1: Fetch extended history
+  const fetchPnLHistory = useCallback(async (startDate?: string, endDate?: string) => {
+    setIsLoadingHistory(true);
+    setHistoryError(null);
+    try {
+      const response = await futuresApi.getPnLHistory(startDate, endDate);
+      setExtendedData(response.daily_records);
+    } catch (err: any) {
+      console.error('Failed to fetch PnL history:', err);
+      const message = err?.response?.data?.error || err?.message || 'Failed to load history';
+      setHistoryError(message);
+      setExtendedData(null);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, []);
+
+  // Handle date range change
+  const handleRangeChange = useCallback((range: DateRangeType, startDate?: string, endDate?: string) => {
+    setDateRange(range);
+    setCurrentPage(1);
+
+    if (range === 'week') {
+      // Use default 7-day data from pnlData
+      setExtendedData(null);
+    } else {
+      // Calculate date range and fetch
+      const today = new Date();
+      let start: Date;
+      let end: Date = today;
+
+      switch (range) {
+        case 'day':
+          start = today;
+          break;
+        case 'month':
+          start = new Date(today);
+          start.setDate(start.getDate() - 29);
+          break;
+        case 'year':
+          start = new Date(today);
+          start.setFullYear(start.getFullYear() - 1);
+          break;
+        case 'custom':
+          if (startDate && endDate) {
+            setCustomStartDate(startDate);
+            setCustomEndDate(endDate);
+            fetchPnLHistory(startDate, endDate);
+            return;
+          }
+          return;
+        default:
+          start = new Date(today);
+          start.setDate(start.getDate() - 6);
+      }
+
+      const startStr = start.toISOString().split('T')[0];
+      const endStr = end.toISOString().split('T')[0];
+      fetchPnLHistory(startStr, endStr);
+    }
+  }, [fetchPnLHistory]);
 
   // Ref for fallback interval
   const fallbackRef = useRef<NodeJS.Timeout | null>(null);
@@ -191,15 +271,36 @@ export default function PnLSummaryCard() {
   }, [pnlData?.seconds_to_reset]);
 
   // Calculate P&L values
-  // daily_pnl from API is the GROSS value (before fees deduction)
   const dailyGrossPnl = pnlData?.daily_pnl ?? 0;
   const weeklyGrossPnl = pnlData?.weekly_pnl ?? 0;
-  // Total fees = Commission + Funding
   const dailyTotalFees = pnlData ? pnlData.daily_commission + pnlData.daily_funding : 0;
   const weeklyTotalFees = pnlData ? pnlData.weekly_commission + pnlData.weekly_funding : 0;
-  // Net = Gross - Fees (actual earning after deductions)
   const dailyNetPnl = dailyGrossPnl - dailyTotalFees;
   const weeklyNetPnl = weeklyGrossPnl - weeklyTotalFees;
+
+  // Get display data based on range selection
+  const displayData = useMemo(() => {
+    if (extendedData && dateRange !== 'week') {
+      return extendedData;
+    }
+    return pnlData?.daily_breakdown || [];
+  }, [extendedData, dateRange, pnlData?.daily_breakdown]);
+
+  // Paginate display data
+  const paginatedData = useMemo(() => {
+    const startIndex = (currentPage - 1) * DAYS_PER_PAGE;
+    return displayData.slice(startIndex, startIndex + DAYS_PER_PAGE);
+  }, [displayData, currentPage]);
+
+  const totalPages = Math.ceil(displayData.length / DAYS_PER_PAGE);
+
+  // Page label
+  const pageLabel = useMemo(() => {
+    if (paginatedData.length === 0) return 'No data';
+    const first = paginatedData[0];
+    const last = paginatedData[paginatedData.length - 1];
+    return `${last.date.slice(5)} - ${first.date.slice(5)}`;
+  }, [paginatedData]);
 
   return (
     <CollapsibleCard
@@ -303,7 +404,7 @@ export default function PnLSummaryCard() {
               {/* Date Range & Trades */}
               <div className="flex items-center justify-between pt-2 border-t border-gray-700">
                 <div className="text-xs text-purple-400">
-                  {pnlData.week_start_date} → {pnlData.week_end_date}
+                  {pnlData.week_start_date} - {pnlData.week_end_date}
                 </div>
                 <div className="flex items-center gap-1 text-xs text-gray-400">
                   <Activity className="w-3 h-3" />
@@ -313,79 +414,131 @@ export default function PnLSummaryCard() {
             </div>
           </div>
 
-          {/* 7-Day Calendar Breakdown */}
-          {pnlData.daily_breakdown && pnlData.daily_breakdown.length > 0 && (
-            <div className="col-span-2 mt-2">
-              <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700 bg-gradient-to-r from-purple-900/30 to-gray-800">
-                  <div className="flex items-center gap-2">
-                    <Calendar className="w-4 h-4 text-purple-400" />
-                    <span className="font-semibold text-sm text-white">7-Day P&L Calendar</span>
-                  </div>
-                  <span className="text-xs text-gray-400">UTC Daily Reset</span>
+          {/* P&L Calendar with Navigation */}
+          <div className="col-span-2 mt-2">
+            <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+              {/* Header with filters and navigation */}
+              <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700 bg-gradient-to-r from-purple-900/30 to-gray-800">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-4 h-4 text-purple-400" />
+                  <span className="font-semibold text-sm text-white">P&L Calendar</span>
+                  {isLoadingHistory && <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" />}
                 </div>
+                <div className="flex items-center gap-2">
+                  <DateRangeFilter
+                    selectedRange={dateRange}
+                    onRangeChange={handleRangeChange}
+                    customStartDate={customStartDate}
+                    customEndDate={customEndDate}
+                  />
+                  {totalPages > 1 && (
+                    <NavigationControls
+                      currentPage={currentPage}
+                      totalPages={totalPages}
+                      pageLabel={pageLabel}
+                      onFirst={() => setCurrentPage(1)}
+                      onPrev={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      onNext={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                      onLast={() => setCurrentPage(totalPages)}
+                    />
+                  )}
+                </div>
+              </div>
 
-                <div className="p-3">
-                  <div className="grid grid-cols-7 gap-2">
-                    {pnlData.daily_breakdown.map((day) => {
-                      const isProfit = day.net_pnl >= 0;
-                      const hasActivity = day.trade_count > 0 || day.net_pnl !== 0;
+              <div className="p-3">
+                {/* Flex container for detail panel and calendar grid */}
+                <div className="flex gap-3">
+                  {/* Detail panel (left side when day selected) */}
+                  {selectedDay && (
+                    <DayDetailPanel
+                      selectedDay={selectedDay}
+                      onClose={() => setSelectedDay(null)}
+                    />
+                  )}
 
-                      return (
-                        <div
-                          key={day.date}
-                          className={`
-                            relative rounded-lg p-2 text-center transition-all
-                            ${day.is_today ? 'ring-2 ring-blue-500' : ''}
-                            ${hasActivity
-                              ? isProfit
-                                ? 'bg-green-900/40 border border-green-700/50'
-                                : 'bg-red-900/40 border border-red-700/50'
-                              : 'bg-gray-700/30 border border-gray-600/30'
-                            }
-                          `}
-                        >
-                          {/* Day name */}
-                          <div className={`text-[10px] font-medium uppercase ${day.is_today ? 'text-blue-400' : 'text-gray-400'}`}>
-                            {day.day_name}
-                          </div>
+                  {/* Calendar grid */}
+                  <div className="flex-1">
+                    <div className="grid grid-cols-7 gap-2">
+                      {paginatedData.length > 0 ? (
+                        paginatedData.map((day) => {
+                          const isProfit = day.net_pnl >= 0;
+                          const hasActivity = day.trade_count > 0 || day.net_pnl !== 0;
+                          const isSelected = selectedDay?.date === day.date;
 
-                          {/* Day number */}
-                          <div className={`text-lg font-bold ${day.is_today ? 'text-blue-300' : 'text-white'}`}>
-                            {day.day}
-                          </div>
+                          return (
+                            <div
+                              key={day.date}
+                              onClick={() => setSelectedDay(isSelected ? null : day)}
+                              className={`
+                                relative rounded-lg p-2 text-center transition-all cursor-pointer
+                                ${day.is_today ? 'ring-2 ring-blue-500' : ''}
+                                ${isSelected ? 'ring-2 ring-purple-500' : ''}
+                                ${hasActivity
+                                  ? isProfit
+                                    ? 'bg-green-900/40 border border-green-700/50 hover:bg-green-900/60'
+                                    : 'bg-red-900/40 border border-red-700/50 hover:bg-red-900/60'
+                                  : 'bg-gray-700/30 border border-gray-600/30 hover:bg-gray-700/50'
+                                }
+                              `}
+                            >
+                              {/* TODAY label or Day name */}
+                              <div className={`text-[10px] font-medium uppercase ${day.is_today ? 'text-blue-400' : 'text-gray-400'}`}>
+                                {day.is_today ? 'TODAY' : day.day_name}
+                              </div>
 
-                          {/* Net P&L */}
-                          <div className={`text-xs font-semibold ${
-                            hasActivity
-                              ? isProfit ? 'text-green-400' : 'text-red-400'
-                              : 'text-gray-500'
-                          }`}>
-                            {hasActivity
-                              ? `${isProfit ? '+' : ''}${formatUSD(day.net_pnl)}`
-                              : '--'
-                            }
-                          </div>
+                              {/* Day number (prominent) */}
+                              <div className={`text-2xl font-bold ${day.is_today ? 'text-blue-300' : 'text-white'}`}>
+                                {day.day}
+                              </div>
 
-                          {/* Trade count indicator */}
-                          {day.trade_count > 0 && (
-                            <div className="text-[9px] text-gray-400 mt-0.5">
-                              {day.trade_count} trades
+                              {/* Net P&L */}
+                              <div className={`text-xs font-semibold ${
+                                hasActivity
+                                  ? isProfit ? 'text-green-400' : 'text-red-400'
+                                  : 'text-gray-500'
+                              }`}>
+                                {hasActivity
+                                  ? `${isProfit ? '+' : ''}${formatUSD(day.net_pnl)}`
+                                  : '--'
+                                }
+                              </div>
+
+                              {/* Trade count indicator */}
+                              {day.trade_count > 0 && (
+                                <div className="text-[9px] text-gray-400 mt-0.5">
+                                  {day.trade_count} trades
+                                </div>
+                              )}
+
+                              {/* Cached indicator */}
+                              {day.is_cached && (
+                                <div className="absolute top-1 left-1">
+                                  <Database className="w-2.5 h-2.5 text-gray-500" title="Cached data" />
+                                </div>
+                              )}
+
+                              {/* Today indicator */}
+                              {day.is_today && (
+                                <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                              )}
                             </div>
-                          )}
-
-                          {/* Today indicator */}
-                          {day.is_today && (
-                            <div className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-                          )}
+                          );
+                        })
+                      ) : historyError ? (
+                        <div className="col-span-7 text-center text-red-400 py-4">
+                          Error: {historyError}
                         </div>
-                      );
-                    })}
+                      ) : (
+                        <div className="col-span-7 text-center text-gray-500 py-4">
+                          No P&L data for this period
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
-          )}
+          </div>
         </div>
       ) : (
         <div className="text-center text-gray-500 py-4">

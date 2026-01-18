@@ -103,14 +103,15 @@ type UserGlobalTrading struct {
 }
 
 // DefaultUserGlobalTrading returns default global trading config values
+// Values match default-settings.json -> global_trading section
 func DefaultUserGlobalTrading() *UserGlobalTrading {
 	return &UserGlobalTrading{
-		RiskLevel:               "medium",
-		MaxUSDAllocation:        1000.0,
+		RiskLevel:               "moderate",
+		MaxUSDAllocation:        2500.0,
 		ProfitReinvestPercent:   50.0,
-		ProfitReinvestRiskLevel: "medium",
-		Timezone:                "UTC",
-		TimezoneOffset:          "+00:00",
+		ProfitReinvestRiskLevel: "aggressive",
+		Timezone:                "Asia/Phnom_Penh",
+		TimezoneOffset:          "+07:00",
 	}
 }
 

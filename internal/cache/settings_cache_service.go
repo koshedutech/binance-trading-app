@@ -7,6 +7,8 @@ import (
 
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // SettingsCacheService provides granular cache access to user settings
@@ -583,6 +585,15 @@ func (s *SettingsCacheService) UpdateGlobalTrading(ctx context.Context, userID s
 // Story 6.5: Expose cache for handlers that need direct key access
 func (s *SettingsCacheService) GetCacheService() *CacheService {
 	return s.cache
+}
+
+// GetRedisClient returns the underlying Redis client for services that need it.
+// Story 11.26: Calibration Data Lifecycle - needed for CalibrationService initialization.
+func (s *SettingsCacheService) GetRedisClient() *redis.Client {
+	if s == nil || s.cache == nil {
+		return nil
+	}
+	return s.cache.GetClient()
 }
 
 // ============================================================================

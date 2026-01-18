@@ -25,6 +25,7 @@ import AIKeys from './pages/AIKeys';
 import Billing from './pages/Billing';
 import AdminSettings from './pages/AdminSettings';
 import ResetSettings from './pages/ResetSettings';
+import { DecisionEngineDashboard } from './components/DecisionDashboard';
 import Header from './components/Header';
 import ConnectionIndicator from './components/ConnectionIndicator';
 
@@ -369,6 +370,11 @@ function AppContent() {
           <Route path="/reset-settings" element={
             <ProtectedRoute>
               <ResetSettings />
+            </ProtectedRoute>
+          } />
+          <Route path="/decision-dashboard" element={
+            <ProtectedRoute requiredTier={['trader', 'pro', 'whale']}>
+              <DecisionEngineDashboard />
             </ProtectedRoute>
           } />
 
