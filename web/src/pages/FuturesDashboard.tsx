@@ -16,7 +16,7 @@ import TradeSourceStatsPanel from '../components/TradeSourceStatsPanel';
 import TradingModeToggle from '../components/TradingModeToggle';
 import ModeAllocationPanel from '../components/ModeAllocationPanel';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
-import ModeStrategySettings from '../components/settings/ModeStrategySettings';
+// ModeStrategySettings removed - strategies are managed in Reset Settings page via SettingsComparisonView
 import { TradeLifecycleTab } from '../components/TradeLifecycle';
 import AccountStatsCard from '../components/AccountStatsCard';
 import PnLSummaryCard from '../components/PnLSummaryCard';
@@ -423,19 +423,6 @@ export default function FuturesDashboard() {
           badgeColor="yellow"
         >
           <ModeSafetyPanel />
-        </CollapsibleCard>
-      </div>
-
-      {/* Mode Strategy Settings (Story 11.34) */}
-      <div className="mb-4">
-        <CollapsibleCard
-          title="Mode Strategy Settings"
-          icon={<Settings className="w-4 h-4" />}
-          defaultExpanded={false}
-          badge="Strategies"
-          badgeColor="purple"
-        >
-          <ModeStrategySettings />
         </CollapsibleCard>
       </div>
 
