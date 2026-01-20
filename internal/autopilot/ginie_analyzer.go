@@ -12,6 +12,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,12 @@ type GinieAnalyzer struct {
 
 	// Breakout detection for catching rallies early
 	breakoutDetector *BreakoutDetector
+
+	// Story 11.37: Strategy switch cooldown tracking per mode
+	// Prevents rapid strategy switching (5 minute cooldown)
+	strategyLastSwitch   map[string]time.Time // key: mode, value: last switch time
+	strategyLastSelected map[string]string    // key: mode, value: last selected strategy
+	strategySwitchLock   sync.RWMutex
 }
 
 // NewGinieAnalyzer creates a new Ginie AI analyzer
@@ -105,6 +112,9 @@ func NewGinieAnalyzer(
 		activeMode:       GinieModeScalp, // Default to scalp mode for faster trades
 		watchSymbols:     coreSymbols, // Start with core coins, LLM will update
 		llmCoinsCacheTTL: 30 * time.Minute, // Refresh LLM coin list every 30 minutes
+		// Story 11.37: Initialize strategy switch cooldown tracking
+		strategyLastSwitch:   make(map[string]time.Time),
+		strategyLastSelected: make(map[string]string),
 	}
 
 	// Initialize breakout detector for catching rallies early
@@ -1825,6 +1835,86 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 		}
 	}
 
+	// Story 11.37: Regime-based strategy selection with cooldown
+	// Classify current market regime using ADX and ATR from scan data
+	var strategyConfig *database.ModeStrategyConfig
+	activeStrategy := "trend_following" // Default fallback
+	currentRegime := "TRENDING"          // Default regime
+	const strategySwitchCooldown = 5 * time.Minute
+
+	// Classify market regime using scan data
+	if scan.Trend.ADXValue > 0 {
+		// Use the decision package's RegimeClassifier logic directly
+		// This avoids needing to instantiate the full classifier
+		currentRegime = classifyMarketRegime(scan.Trend.ADXValue, scan.Volatility.ATR14, scan.Volatility.AvgATR20)
+	}
+
+	if g.settingsCache != nil && g.userID != "" {
+		userIDInt, parseErr := strconv.Atoi(g.userID)
+		if parseErr == nil {
+			// Check cooldown before allowing strategy switch
+			g.strategySwitchLock.RLock()
+			lastSwitch, hasSwitch := g.strategyLastSwitch[modeKey]
+			lastStrategy, hasStrategy := g.strategyLastSelected[modeKey]
+			g.strategySwitchLock.RUnlock()
+
+			cooldownActive := hasSwitch && time.Since(lastSwitch) < strategySwitchCooldown
+
+			// Story 11.37: Use GetActiveStrategyForMode with regime-based selection
+			var err error
+			var newStrategy string
+			strategyConfig, newStrategy, err = g.settingsCache.GetActiveStrategyForMode(ctx, userIDInt, modeKey, currentRegime)
+			if err != nil {
+				// Fallback to trend_following if selection fails
+				activeStrategy = "trend_following"
+				strategyConfig, _ = g.settingsCache.GetModeStrategyConfig(ctx, userIDInt, modeKey, activeStrategy)
+				if g.logger != nil {
+					g.logger.Debug("Strategy selection failed, using default",
+						"symbol", symbol,
+						"mode", modeKey,
+						"regime", currentRegime,
+						"strategy", activeStrategy,
+						"error", err.Error())
+				}
+			} else {
+				// Apply cooldown: if different strategy selected but cooldown is active, keep previous
+				if cooldownActive && hasStrategy && newStrategy != lastStrategy {
+					activeStrategy = lastStrategy
+					// Re-fetch the config for the cooldown-preserved strategy
+					strategyConfig, _ = g.settingsCache.GetModeStrategyConfig(ctx, userIDInt, modeKey, activeStrategy)
+					if g.logger != nil {
+						g.logger.Debug("Strategy switch blocked by cooldown",
+							"symbol", symbol,
+							"mode", modeKey,
+							"regime", currentRegime,
+							"requested_strategy", newStrategy,
+							"active_strategy", activeStrategy,
+							"cooldown_remaining", (strategySwitchCooldown - time.Since(lastSwitch)).Round(time.Second))
+					}
+				} else {
+					activeStrategy = newStrategy
+					// Update cooldown tracking if strategy changed
+					if !hasStrategy || activeStrategy != lastStrategy {
+						g.strategySwitchLock.Lock()
+						g.strategyLastSwitch[modeKey] = time.Now()
+						g.strategyLastSelected[modeKey] = activeStrategy
+						g.strategySwitchLock.Unlock()
+					}
+					if g.logger != nil {
+						g.logger.Debug("Selected strategy based on market regime",
+							"symbol", symbol,
+							"mode", modeKey,
+							"regime", currentRegime,
+							"strategy", activeStrategy,
+							"adx", scan.Trend.ADXValue,
+							"atr", scan.Volatility.ATR14,
+							"source", "regime_based")
+					}
+				}
+			}
+		}
+	}
+
 	// Extract modeConfig once for reuse throughout function
 	var targetTimeframe string
 	modeKey, ok := modeToConfigKey[string(mode)]
@@ -2257,7 +2347,7 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			minTP, maxTP = 5.0, 50.0
 		}
 
-		// Override with database values if available
+		// Override with database values if available (OLD modeConfig - for backward compatibility)
 		if modeConfig != nil {
 			// Load leverage from database
 			if modeConfig.Size != nil && modeConfig.Size.Leverage > 0 {
@@ -2267,7 +2357,7 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 						"symbol", symbol,
 						"mode", modeKey,
 						"leverage", leverage,
-						"source", "database")
+						"source", "mode_config")
 				}
 			}
 
@@ -2288,7 +2378,83 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 						"mode", modeKey,
 						"sl_multiplier", baseSLMultiplier,
 						"tp_multiplier", baseTPMultiplier,
-						"source", "database")
+						"source", "mode_config")
+				}
+			}
+		}
+
+		// Story 11.36: Override with strategyConfig values (NEW - takes priority over modeConfig)
+		// The strategyConfig contains user's strategy-specific settings from the UI
+		if strategyConfig != nil {
+			// Leverage from strategy config
+			if strategyConfig.Leverage > 0 {
+				leverage = strategyConfig.Leverage
+				if g.logger != nil {
+					g.logger.Debug("Using leverage from strategy config",
+						"symbol", symbol,
+						"mode", modeKey,
+						"strategy", activeStrategy,
+						"leverage", leverage,
+						"source", "strategy_config")
+				}
+			}
+
+			// Base size USD from strategy config
+			if strategyConfig.BaseSizeUSD > 0 {
+				// Note: This overrides the mode-based positionPct calculation
+				// The actual position sizing is handled later based on capital allocation
+				if g.logger != nil {
+					g.logger.Debug("Using base_size_usd from strategy config",
+						"symbol", symbol,
+						"mode", modeKey,
+						"strategy", activeStrategy,
+						"base_size_usd", strategyConfig.BaseSizeUSD,
+						"source", "strategy_config")
+				}
+			}
+
+			// SL/TP percentages from strategy config (direct percentages, not ATR multipliers)
+			// These values directly set SL/TP percentages when configured
+			if strategyConfig.SLTP.SLPercent > 0 {
+				// Use direct SL percentage from strategy config
+				minSL = strategyConfig.SLTP.SLPercent * 0.5 // Allow some flexibility
+				maxSL = strategyConfig.SLTP.SLPercent * 2.0
+				// Set baseSLMultiplier to achieve target SL percent
+				if atrPct > 0 {
+					baseSLMultiplier = strategyConfig.SLTP.SLPercent / atrPct
+				}
+				if g.logger != nil {
+					g.logger.Debug("Using SL from strategy config",
+						"symbol", symbol,
+						"mode", modeKey,
+						"strategy", activeStrategy,
+						"sl_percent", strategyConfig.SLTP.SLPercent,
+						"source", "strategy_config")
+				}
+			}
+
+			// TP percentages from strategy config - use TP1 as the base target
+			if strategyConfig.SLTP.TP1Percent > 0 {
+				// Use TP1 as the base take profit percentage
+				minTP = strategyConfig.SLTP.TP1Percent * 0.5
+				if strategyConfig.SLTP.TP3Percent > 0 {
+					maxTP = strategyConfig.SLTP.TP3Percent * 1.2
+				} else {
+					maxTP = strategyConfig.SLTP.TP1Percent * 3.0
+				}
+				// Set baseTPMultiplier to achieve target TP percent
+				if atrPct > 0 {
+					baseTPMultiplier = strategyConfig.SLTP.TP1Percent / atrPct
+				}
+				if g.logger != nil {
+					g.logger.Debug("Using TP from strategy config",
+						"symbol", symbol,
+						"mode", modeKey,
+						"strategy", activeStrategy,
+						"tp1_percent", strategyConfig.SLTP.TP1Percent,
+						"tp2_percent", strategyConfig.SLTP.TP2Percent,
+						"tp3_percent", strategyConfig.SLTP.TP3Percent,
+						"source", "strategy_config")
 				}
 			}
 		}
@@ -5839,4 +6005,50 @@ func (g *GinieAnalyzer) getEntryTimeframe(mode string) string {
 	default:
 		return "5m"
 	}
+}
+
+// Story 11.37: Market regime constants
+// Matches decision.MarketRegime values to avoid circular import
+const (
+	RegimeTrending      = "TRENDING"
+	RegimeRanging       = "RANGING"
+	RegimeVolatile      = "VOLATILE"
+	RegimeConsolidating = "CONSOLIDATING"
+)
+
+// Story 11.37: classifyMarketRegime determines the market regime based on ADX and ATR values
+// Uses the same logic as decision.RegimeClassifier but as a standalone function
+// to avoid circular dependencies and unnecessary object instantiation
+func classifyMarketRegime(adx, atr, atrAverage float64) string {
+	// Default thresholds from decision.DefaultRegimeConfig()
+	const (
+		adxTrendingThreshold    = 25.0
+		adxRangingThreshold     = 20.0
+		atrVolatileMultiplier   = 1.5
+		atrConsolidatingDivisor = 0.5
+	)
+
+	// High ADX indicates trending market
+	if adx >= adxTrendingThreshold {
+		return RegimeTrending
+	}
+
+	// Low ADX could be ranging, volatile, or consolidating
+	if adx < adxRangingThreshold {
+		// If we have ATR data, differentiate between volatile and consolidating
+		if atr > 0 && atrAverage > 0 {
+			if atr > atrAverage*atrVolatileMultiplier {
+				return RegimeVolatile
+			}
+			if atr < atrAverage*atrConsolidatingDivisor {
+				return RegimeConsolidating
+			}
+		}
+		// Default to ranging for low ADX without clear ATR signals
+		return RegimeRanging
+	}
+
+	// Mid-range ADX (between ranging and trending thresholds)
+	// This is an indeterminate zone - default to ranging
+	return RegimeRanging
 }

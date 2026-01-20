@@ -78,6 +78,20 @@ type SettingsCacheReader interface {
 	// GetCoinConfluenceConfigCached returns the confluence config for a symbol from cache
 	// Returns nil if not found (caller should use tier-based defaults via DefaultCoinConfluenceConfig)
 	GetCoinConfluenceConfigCached(ctx context.Context, userID, symbol string) (*CoinConfluenceConfig, error)
+
+	// Story 11.36: Mode+Strategy configuration from cache
+	// GetModeStrategyConfig retrieves settings for a specific mode+strategy combination
+	// Returns cached config or populates from DB on cache miss
+	// The userID is an int (not string) for this method as mode_strategies table uses int
+	GetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) (*database.ModeStrategyConfig, error)
+
+	// Story 11.37: Regime-based strategy selection
+	// GetActiveStrategyForMode retrieves the best strategy for a mode based on market regime
+	// Selection logic:
+	// 1. Find strategies that support the given regime
+	// 2. Among those, select the enabled one with highest priority
+	// 3. If none match, return the mode's default strategy
+	GetActiveStrategyForMode(ctx context.Context, userID int, mode, regime string) (*database.ModeStrategyConfig, string, error)
 }
 
 // CalibrationLifecycleUpdater defines the interface for updating calibration on trade close.

@@ -889,6 +889,7 @@ func (s *Server) setupRoutes() {
 			futures.POST("/modes/:mode/strategies/:strategy/reset", s.handleResetModeStrategy)
 			futures.POST("/modes/:mode/strategies/:strategy/enable", s.handleEnableModeStrategy)
 			futures.POST("/modes/:mode/strategies/:strategy/disable", s.handleDisableModeStrategy)
+			futures.GET("/modes/:mode/strategies/:strategy/compare", s.handleCompareModeStrategy)
 			futures.POST("/modes/:mode/reset-all", s.handleResetAllModeStrategies)
 
 			// Calibration Data Lifecycle endpoints (Story 11.26)

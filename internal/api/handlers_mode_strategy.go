@@ -666,3 +666,183 @@ func (s *Server) handleToggleModeStrategy(c *gin.Context, enabled bool) {
 		"message": fmt.Sprintf("Strategy %s/%s %s", mode, strategy, action),
 	})
 }
+
+// ==================== GET /api/modes/:mode/strategies/:strategy/compare ====================
+// Compare current mode+strategy config with defaults
+
+// StrategyFieldComparison represents a single field comparison
+type StrategyFieldComparison struct {
+	Path    string      `json:"path"`
+	Current interface{} `json:"current"`
+	Default interface{} `json:"default"`
+	Match   bool        `json:"match"`
+}
+
+// StrategyComparisonResponse is the API response for strategy comparison
+type StrategyComparisonResponse struct {
+	Success        bool                      `json:"success"`
+	Mode           string                    `json:"mode"`
+	Strategy       string                    `json:"strategy"`
+	Enabled        bool                      `json:"enabled"`
+	AllMatch       bool                      `json:"all_match"`
+	TotalFields    int                       `json:"total_fields"`
+	MatchingFields int                       `json:"matching_fields"`
+	Differences    []StrategyFieldComparison `json:"differences"`
+}
+
+func (s *Server) handleCompareModeStrategy(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User authentication required")
+		return
+	}
+
+	mode := c.Param("mode")
+	strategy := c.Param("strategy")
+
+	if !validateMode(mode) {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid mode: %s. Valid modes: ultra_fast, scalp, swing, position", mode))
+		return
+	}
+
+	if !validateStrategy(strategy) {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid strategy: %s. Valid strategies: trend_following, mean_reversion, breakout, range_trading", strategy))
+		return
+	}
+
+	userIDInt, err := parseUserIDToInt(userID)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	if s.settingsCacheService == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Settings cache service not available")
+		return
+	}
+
+	// Get current user config
+	currentConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userIDInt, mode, strategy)
+	if err != nil {
+		if err == cache.ErrCacheUnavailable {
+			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
+			return
+		}
+		errorResponse(c, http.StatusInternalServerError, "Failed to get current config: "+err.Error())
+		return
+	}
+
+	// Get default config
+	defaultConfig := database.DefaultModeStrategyConfig(mode, strategy)
+
+	// Compare configs and build differences
+	differences := []StrategyFieldComparison{}
+	totalFields := 0
+	matchingFields := 0
+
+	// Helper to compare and add field
+	compareField := func(path string, current, defaultVal interface{}) {
+		totalFields++
+		match := compareValues(current, defaultVal)
+		if match {
+			matchingFields++
+		} else {
+			differences = append(differences, StrategyFieldComparison{
+				Path:    path,
+				Current: current,
+				Default: defaultVal,
+				Match:   false,
+			})
+		}
+	}
+
+	// Compare top-level fields
+	compareField("enabled", currentConfig.Enabled, defaultConfig.Enabled)
+	compareField("priority", currentConfig.Priority, defaultConfig.Priority)
+	compareField("leverage", currentConfig.Leverage, defaultConfig.Leverage)
+	compareField("max_positions", currentConfig.MaxPositions, defaultConfig.MaxPositions)
+	compareField("base_size_usd", currentConfig.BaseSizeUSD, defaultConfig.BaseSizeUSD)
+
+	// Compare timeframe fields
+	compareField("timeframe.trend_timeframe", currentConfig.Timeframe.TrendTimeframe, defaultConfig.Timeframe.TrendTimeframe)
+	compareField("timeframe.entry_timeframe", currentConfig.Timeframe.EntryTimeframe, defaultConfig.Timeframe.EntryTimeframe)
+	compareField("timeframe.analysis_timeframe", currentConfig.Timeframe.AnalysisTimeframe, defaultConfig.Timeframe.AnalysisTimeframe)
+
+	// Compare SLTP fields
+	compareField("sltp.sl_percent", currentConfig.SLTP.SLPercent, defaultConfig.SLTP.SLPercent)
+	compareField("sltp.tp1_percent", currentConfig.SLTP.TP1Percent, defaultConfig.SLTP.TP1Percent)
+	compareField("sltp.tp2_percent", currentConfig.SLTP.TP2Percent, defaultConfig.SLTP.TP2Percent)
+	compareField("sltp.tp3_percent", currentConfig.SLTP.TP3Percent, defaultConfig.SLTP.TP3Percent)
+	compareField("sltp.trailing_enabled", currentConfig.SLTP.TrailingEnabled, defaultConfig.SLTP.TrailingEnabled)
+	compareField("sltp.trailing_activation_pct", currentConfig.SLTP.TrailingActivationPct, defaultConfig.SLTP.TrailingActivationPct)
+	compareField("sltp.trailing_stop_pct", currentConfig.SLTP.TrailingStopPct, defaultConfig.SLTP.TrailingStopPct)
+
+	// Compare confidence fields
+	compareField("confidence.min_confidence", currentConfig.Confidence.MinConfidence, defaultConfig.Confidence.MinConfidence)
+	compareField("confidence.high_confidence", currentConfig.Confidence.HighConfidence, defaultConfig.Confidence.HighConfidence)
+	compareField("confidence.ultra_confidence", currentConfig.Confidence.UltraConfidence, defaultConfig.Confidence.UltraConfidence)
+
+	// Compare exit conditions
+	compareField("exit_conditions.max_hold_minutes", currentConfig.ExitConditions.MaxHoldMinutes, defaultConfig.ExitConditions.MaxHoldMinutes)
+	compareField("exit_conditions.early_warning_enabled", currentConfig.ExitConditions.EarlyWarningEnabled, defaultConfig.ExitConditions.EarlyWarningEnabled)
+
+	// Compare scoring fields
+	compareField("scoring.technical_weight", currentConfig.Scoring.TechnicalWeight, defaultConfig.Scoring.TechnicalWeight)
+	compareField("scoring.momentum_weight", currentConfig.Scoring.MomentumWeight, defaultConfig.Scoring.MomentumWeight)
+	compareField("scoring.volume_weight", currentConfig.Scoring.VolumeWeight, defaultConfig.Scoring.VolumeWeight)
+	compareField("scoring.sentiment_weight", currentConfig.Scoring.SentimentWeight, defaultConfig.Scoring.SentimentWeight)
+
+	// Compare entry conditions (compare as JSON since it's a map)
+	if currentConfig.EntryConditions != nil || defaultConfig.EntryConditions != nil {
+		currentJSON, _ := json.Marshal(currentConfig.EntryConditions)
+		defaultJSON, _ := json.Marshal(defaultConfig.EntryConditions)
+		if string(currentJSON) != string(defaultJSON) {
+			// Add individual entry condition differences
+			for key, defaultVal := range defaultConfig.EntryConditions {
+				currentVal := currentConfig.EntryConditions[key]
+				compareField("entry_conditions."+key, currentVal, defaultVal)
+			}
+		} else {
+			// Count entry condition fields as matching
+			for range defaultConfig.EntryConditions {
+				totalFields++
+				matchingFields++
+			}
+		}
+	}
+
+	response := StrategyComparisonResponse{
+		Success:        true,
+		Mode:           mode,
+		Strategy:       strategy,
+		Enabled:        currentConfig.Enabled,
+		AllMatch:       len(differences) == 0,
+		TotalFields:    totalFields,
+		MatchingFields: matchingFields,
+		Differences:    differences,
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// compareValues compares two values for equality
+func compareValues(a, b interface{}) bool {
+	// Handle nil cases
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	// Convert to JSON and compare for deep equality
+	aJSON, errA := json.Marshal(a)
+	bJSON, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+
+	return string(aJSON) == string(bJSON)
+}

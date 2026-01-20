@@ -287,11 +287,16 @@ development_status:
   11-33-mode-strategy-ui-update: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-20 (compare UI implemented)
   # Part J: UI Consolidation (added 2026-01-20)
   11-34-nest-strategies-inside-modes-ui: done  # CODE REVIEW PASSED + QA CONCERNS (AC6 partial) 2026-01-20
+  # Part K: Mode-Strategy Runtime Integration (added 2026-01-20) - CRITICAL GAPS
+  11-35-expand-default-mode-strategy-configs: done  # Completed 2026-01-20
+  11-36-runtime-read-strategy-config: done  # Completed 2026-01-20
+  11-37-wire-strategy-selection: done  # Completed 2026-01-20
+  11-38-reset-settings-comparison-new-structure: done  # Completed 2026-01-20 - Added backend compare endpoint
+  11-39-futures-mode-strategy-data-wiring: done  # Completed 2026-01-20 - Verified all API wiring working
   epic-11-retrospective: done  # Completed 2026-01-20
   # ============================================================================
-  # EPIC 11 COMPLETE - All 34 stories done
-  # Completed: 2026-01-20 (Story 11.34 added and completed same day)
-  # Part I (Mode-Strategy Architecture) added and completed same day
+  # EPIC 11 - 39 stories total (ALL COMPLETE)
+  # Part K completed 2026-01-20 - mode-strategy runtime integration done
   # ============================================================================
 
   # ============================================================================
