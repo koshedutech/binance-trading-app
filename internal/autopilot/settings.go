@@ -2267,53 +2267,12 @@ func (sm *SettingsManager) loadAndMigrateSettings() (*AutopilotSettings, error) 
 	return settings, nil
 }
 
-// SaveSettings saves settings to file using atomic write pattern
-// Uses temp file + rename for crash-safe persistence
+// SaveSettings is DEPRECATED (Story 9.12): All settings are now stored in database + Redis cache.
+// This function is now a no-op to prevent file creation.
+// The file autopilot_settings.json is no longer used.
 func (sm *SettingsManager) SaveSettings(settings *AutopilotSettings) error {
-	// Marshal data outside the lock to avoid holding lock during I/O
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	// Atomic write pattern: write to temp file, then rename
-	// This prevents corruption if the process crashes during write
-	tempPath := sm.settingsPath + ".tmp"
-
-	// Write to temp file
-	tempFile, err := os.Create(tempPath)
-	if err != nil {
-		return err
-	}
-
-	if _, err := tempFile.Write(data); err != nil {
-		tempFile.Close()
-		os.Remove(tempPath)
-		return err
-	}
-
-	// Sync to disk to ensure data is written
-	if err := tempFile.Sync(); err != nil {
-		tempFile.Close()
-		os.Remove(tempPath)
-		return err
-	}
-
-	if err := tempFile.Close(); err != nil {
-		os.Remove(tempPath)
-		return err
-	}
-
-	// Now acquire lock for the file replacement
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	// Atomic rename (replace existing file)
-	if err := os.Rename(tempPath, sm.settingsPath); err != nil {
-		os.Remove(tempPath)
-		return err
-	}
-
+	// Story 9.12: No-op - settings are persisted via database, not file
+	// Keeping function signature for backward compatibility with any remaining callers
 	return nil
 }
 
