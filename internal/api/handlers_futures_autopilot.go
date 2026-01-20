@@ -1804,6 +1804,7 @@ func (s *Server) handleRefreshSymbolPerformance(c *gin.Context) {
 
 // handleGetSingleSymbolSettings returns settings for a specific symbol
 func (s *Server) handleGetSingleSymbolSettings(c *gin.Context) {
+	userID := s.getUserID(c)
 	symbol := c.Param("symbol")
 	if symbol == "" {
 		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
@@ -1813,12 +1814,23 @@ func (s *Server) handleGetSingleSymbolSettings(c *gin.Context) {
 	sm := autopilot.GetSettingsManager()
 	settings := sm.GetSymbolSettings(symbol)
 
+	// Check if symbol is blocked in database (multi-user isolated)
+	isBlockedInDB := false
+	if userID != "" && s.repo != nil {
+		blocked, _, _ := s.repo.IsSymbolBlocked(c.Request.Context(), userID, symbol)
+		isBlockedInDB = blocked
+	}
+
+	// Symbol is enabled if: not blocked in DB, AND enabled in settings, AND not blacklisted
+	isEnabled := !isBlockedInDB && settings.Enabled && settings.Category != autopilot.PerformanceBlacklist
+
 	c.JSON(http.StatusOK, gin.H{
-		"symbol":              symbol,
-		"settings":            settings,
+		"symbol":               symbol,
+		"settings":             settings,
 		"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
-		"effective_max_usd":   sm.GetEffectivePositionSize(symbol, 500), // Default max USD
-		"enabled":             sm.IsSymbolEnabled(symbol),
+		"effective_max_usd":    sm.GetEffectivePositionSize(symbol, 500), // Default max USD
+		"enabled":              isEnabled,
+		"blocked_in_db":        isBlockedInDB,
 	})
 }
 

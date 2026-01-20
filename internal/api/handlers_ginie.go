@@ -3662,6 +3662,12 @@ func (s *Server) handleGetScanPreview(c *gin.Context) {
 // handleBlockSymbolForDay blocks a symbol for the rest of the day
 // POST /api/futures/autopilot/symbols/:symbol/block-day
 func (s *Server) handleBlockSymbolForDay(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	symbol := c.Param("symbol")
 	if symbol == "" {
 		errorResponse(c, http.StatusBadRequest, "Symbol is required")
@@ -3678,12 +3684,15 @@ func (s *Server) handleBlockSymbolForDay(c *gin.Context) {
 		reason = "manual_block"
 	}
 
-	sm := autopilot.GetSettingsManager()
-	err := sm.BlockSymbolForDay(symbol, reason)
+	// Use database repository (multi-user isolated)
+	err := s.repo.BlockSymbolForDay(c.Request.Context(), userID, symbol, reason)
 	if err != nil {
+		log.Printf("[SYMBOL-BLOCK] ERROR: Failed to block symbol %s for user %s: %v", symbol, userID, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to block symbol: "+err.Error())
 		return
 	}
+
+	log.Printf("[SYMBOL-BLOCK] User %s blocked symbol %s for 24 hours (reason: %s)", userID, symbol, reason)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":       true,
@@ -3696,18 +3705,27 @@ func (s *Server) handleBlockSymbolForDay(c *gin.Context) {
 // handleUnblockSymbol removes the block from a symbol
 // POST /api/futures/autopilot/symbols/:symbol/unblock
 func (s *Server) handleUnblockSymbol(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	symbol := c.Param("symbol")
 	if symbol == "" {
 		errorResponse(c, http.StatusBadRequest, "Symbol is required")
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	err := sm.UnblockSymbol(symbol)
+	// Use database repository (multi-user isolated)
+	err := s.repo.UnblockSymbol(c.Request.Context(), userID, symbol)
 	if err != nil {
+		log.Printf("[SYMBOL-UNBLOCK] ERROR: Failed to unblock symbol %s for user %s: %v", symbol, userID, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to unblock symbol: "+err.Error())
 		return
 	}
+
+	log.Printf("[SYMBOL-UNBLOCK] User %s unblocked symbol %s", userID, symbol)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -3719,18 +3737,39 @@ func (s *Server) handleUnblockSymbol(c *gin.Context) {
 // handleGetBlockedSymbols returns all currently blocked symbols
 // GET /api/futures/autopilot/symbols/blocked
 func (s *Server) handleGetBlockedSymbols(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-	blocked := sm.GetAllBlockedSymbols()
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	// Use database repository (multi-user isolated)
+	blocked, err := s.repo.GetBlockedSymbols(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[SYMBOL-BLOCKED] ERROR: Failed to get blocked symbols for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get blocked symbols: "+err.Error())
+		return
+	}
 
 	// Convert to JSON-friendly format
 	result := make([]map[string]interface{}, 0)
-	for symbol, info := range blocked {
-		result = append(result, map[string]interface{}{
-			"symbol":        symbol,
-			"blocked_until": info.Until.Format(time.RFC3339),
-			"reason":        info.Reason,
-			"remaining":     time.Until(info.Until).String(),
-		})
+	for _, b := range blocked {
+		entry := map[string]interface{}{
+			"symbol":     b.Symbol,
+			"blocked_at": b.BlockedAt.Format(time.RFC3339),
+			"reason":     b.Reason,
+		}
+
+		// Add expiration info if not permanent
+		if b.ExpiresAt != nil {
+			entry["blocked_until"] = b.ExpiresAt.Format(time.RFC3339)
+			entry["remaining"] = time.Until(*b.ExpiresAt).String()
+		} else {
+			entry["blocked_until"] = "permanent"
+			entry["remaining"] = "permanent"
+		}
+
+		result = append(result, entry)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -3743,26 +3782,74 @@ func (s *Server) handleGetBlockedSymbols(c *gin.Context) {
 // handleAutoBlockWorstPerformers blocks all "worst" category symbols for the day
 // POST /api/futures/autopilot/symbols/auto-block-worst
 func (s *Server) handleAutoBlockWorstPerformers(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-	blockedSymbols, err := sm.AutoBlockWorstPerformers()
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to auto-block worst performers: "+err.Error())
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get all user symbol settings to find "worst" performers
+	symbolSettings, err := s.repo.GetAllUserSymbolSettings(ctx, userID)
+	if err != nil {
+		log.Printf("[AUTO-BLOCK] ERROR: Failed to get symbol settings for user %s: %v", userID, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get symbol settings: "+err.Error())
+		return
+	}
+
+	// Find symbols with "worst" category that are not already blocked
+	symbolsToBlock := make([]string, 0) // Initialize as empty slice for proper JSON serialization
+	for symbol, settings := range symbolSettings {
+		if settings.Category == "worst" {
+			// Check if already blocked
+			isBlocked, _, _ := s.repo.IsSymbolBlocked(ctx, userID, symbol)
+			if !isBlocked {
+				symbolsToBlock = append(symbolsToBlock, symbol)
+			}
+		}
+	}
+
+	// Block all worst performers at once
+	if len(symbolsToBlock) > 0 {
+		duration := 24 * time.Hour
+		if err := s.repo.BlockMultipleSymbols(ctx, userID, symbolsToBlock, "worst_performer_auto", &duration); err != nil {
+			log.Printf("[AUTO-BLOCK] ERROR: Failed to auto-block worst performers for user %s: %v", userID, err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to auto-block worst performers: "+err.Error())
+			return
+		}
+		log.Printf("[AUTO-BLOCK] User %s blocked %d worst performers: %v", userID, len(symbolsToBlock), symbolsToBlock)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":         true,
-		"blocked_symbols": blockedSymbols,
-		"count":           len(blockedSymbols),
-		"message":         fmt.Sprintf("Blocked %d worst performing symbols for the day", len(blockedSymbols)),
+		"blocked_symbols": symbolsToBlock,
+		"count":           len(symbolsToBlock),
+		"message":         fmt.Sprintf("Blocked %d worst performing symbols for the day", len(symbolsToBlock)),
 	})
 }
 
 // handleClearExpiredBlocks removes expired blocks from all symbols
 // POST /api/futures/autopilot/symbols/clear-expired-blocks
 func (s *Server) handleClearExpiredBlocks(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-	cleared := sm.ClearExpiredBlocks()
+	// Require authentication (admin cleanup operation)
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	// Note: This cleans up expired blocks for ALL users (admin cleanup operation)
+	// The DB query only removes blocks where expires_at <= CURRENT_TIMESTAMP
+	log.Printf("[CLEAR-EXPIRED] User %s triggered cleanup of expired blocks", userID)
+	cleared, err := s.repo.CleanExpiredBlocks(c.Request.Context())
+	if err != nil {
+		log.Printf("[CLEAR-EXPIRED] ERROR: Failed to clear expired blocks: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to clear expired blocks: "+err.Error())
+		return
+	}
+
+	log.Printf("[CLEAR-EXPIRED] Cleaned up %d expired symbol blocks", cleared)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -3774,24 +3861,42 @@ func (s *Server) handleClearExpiredBlocks(c *gin.Context) {
 // handleGetSymbolBlockStatus checks if a specific symbol is blocked
 // GET /api/futures/autopilot/symbols/:symbol/block-status
 func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	symbol := c.Param("symbol")
 	if symbol == "" {
 		errorResponse(c, http.StatusBadRequest, "Symbol is required")
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	reason, until, isBlocked := sm.GetBlockedReason(symbol)
+	// Use database repository (multi-user isolated)
+	blockInfo, err := s.repo.GetBlockedSymbolInfo(c.Request.Context(), userID, symbol)
+	if err != nil {
+		log.Printf("[SYMBOL-STATUS] ERROR: Failed to get block status for %s: %v", symbol, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get block status: "+err.Error())
+		return
+	}
 
 	response := gin.H{
 		"symbol":     symbol,
-		"is_blocked": isBlocked,
+		"is_blocked": blockInfo != nil,
 	}
 
-	if isBlocked {
-		response["blocked_until"] = until.Format(time.RFC3339)
-		response["reason"] = reason
-		response["remaining"] = time.Until(until).String()
+	if blockInfo != nil {
+		response["reason"] = blockInfo.Reason
+		response["blocked_at"] = blockInfo.BlockedAt.Format(time.RFC3339)
+
+		if blockInfo.ExpiresAt != nil {
+			response["blocked_until"] = blockInfo.ExpiresAt.Format(time.RFC3339)
+			response["remaining"] = time.Until(*blockInfo.ExpiresAt).String()
+		} else {
+			response["blocked_until"] = "permanent"
+			response["remaining"] = "permanent"
+		}
 	}
 
 	c.JSON(http.StatusOK, response)

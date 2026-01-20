@@ -4303,7 +4303,23 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 
 			// Check if symbol is enabled (per-symbol settings)
 			settingsManager := GetSettingsManager()
-			if !settingsManager.IsSymbolEnabled(symbol) {
+			symbolSettings := settingsManager.GetSymbolSettings(symbol)
+
+			// Check if symbol is blocked in database (multi-user isolated)
+			isBlockedInDB := false
+			if ga.repo != nil && ga.userID != "" {
+				blockCtx, blockCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				blocked, _, blockErr := ga.repo.IsSymbolBlocked(blockCtx, ga.userID, symbol)
+				blockCancel()
+				if blockErr != nil {
+					log.Printf("[SYMBOL-BLOCK-CHECK] WARNING: Failed to check block status for %s: %v", symbol, blockErr)
+				}
+				isBlockedInDB = blocked
+			}
+
+			// Symbol is disabled if: blocked in DB, OR not enabled in settings, OR blacklisted
+			isSymbolDisabled := isBlockedInDB || !symbolSettings.Enabled || symbolSettings.Category == PerformanceBlacklist
+			if isSymbolDisabled {
 				// Scalp mode: Log symbol disabled (AC-2.2.2)
 				if isScalpMode {
 					log.Printf("[SCALP-SCAN] %s: Symbol disabled, SKIP", symbol)
@@ -4324,8 +4340,7 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 			// Get effective confidence threshold for this symbol (considers performance category)
 			effectiveMinConfidence := settingsManager.GetEffectiveConfidence(symbol, ga.config.MinConfidenceToTrade)
 
-			// Get symbol category for logging
-			symbolSettings := settingsManager.GetSymbolSettings(symbol)
+			// symbolSettings was already retrieved above for the blocking check
 			categoryBoost := effectiveMinConfidence - ga.config.MinConfidenceToTrade
 
 			// Check confidence threshold (both are 0-100 format)
