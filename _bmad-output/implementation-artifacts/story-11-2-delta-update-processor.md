@@ -2,7 +2,7 @@
 
 **Epic:** 11 - Position Decision Engine
 **Priority:** P0 (Critical)
-**Status:** done
+**Status:** review
 **Created:** 2026-01-17
 
 ## Goal
@@ -16,6 +16,7 @@ Implement an efficient delta processing system that compares new state values ag
 - [x] Batch multiple field updates in single HSET
 - [x] Track update frequency per field
 - [x] Performance target: < 1ms per update (achieved 65µs)
+- [x] **AC6: DeltaProcessor integrated into GinieAutopilot scanning loop** (CRITICAL - fixed 2026-01-19)
 
 ## Implementation Tasks
 
@@ -53,6 +54,13 @@ Implement an efficient delta processing system that compares new state values ag
 - Tests for batched update operations
 - Performance benchmarks targeting < 1ms
 - Integration tests with Redis
+
+### Task 7: Integrate DeltaProcessor into GinieAutopilot (CRITICAL FIX)
+- Add `deltaProcessor` field to GinieAutopilot struct
+- Initialize DeltaProcessor in SetStateManager()
+- Replace `SetCoinState()` with `DeltaProcessor.Process()` in `saveCoinStateFromDecision()`
+- Broadcast only changed fields via WebSocket
+- Add import for decision package
 
 ## Technical Design
 
@@ -138,3 +146,5 @@ The DeltaProcessor maintains an in-memory cache of the last known state for each
 | 2026-01-17 | in-progress | Implementation started |
 | 2026-01-17 | review | Code review passed (8 issues, 5 fixed) |
 | 2026-01-17 | done | QA trace passed - all 5 ACs verified, 65µs performance |
+| 2026-01-19 | in-progress | **RE-OPENED**: Integration gap found - DeltaProcessor not integrated into GinieAutopilot |
+| 2026-01-19 | review | **FIXED**: DeltaProcessor now integrated via StateManagerInterface.UpdateCoinStateDelta() |

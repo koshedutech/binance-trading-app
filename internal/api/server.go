@@ -472,6 +472,8 @@ func (s *Server) setupRoutes() {
 			futures.POST("/positions/:symbol/close", s.handleCloseFuturesPosition)
 			futures.GET("/positions/:symbol/orders", s.handleGetPositionOrders)   // Get TP/SL orders for position
 			futures.POST("/positions/:symbol/tpsl", s.handleSetPositionTPSL)       // Set TP/SL for position
+			futures.GET("/positions/:symbol/expanded", s.handleGetExpandedPositionData)  // Story 10.1: Expanded position card data
+			futures.GET("/positions/:symbol/exit-decision", s.handleGetExitDecisionState) // Story 10.3: Exit decision monitoring
 
 			// Settings endpoints
 			futures.POST("/leverage", s.handleSetLeverage)
@@ -792,6 +794,11 @@ func (s *Server) setupRoutes() {
 			futures.POST("/ginie/safety-settings/load-defaults", s.handleLoadSafetySettingsDefaults)
 			futures.POST("/ginie/position-optimization/load-defaults", s.handleLoadPositionOptimizationDefaults)
 
+			// Position Management endpoints (Story 10.1: Position Decision Configuration)
+			futures.GET("/ginie/position-management", s.handleGetPositionManagement)
+			futures.PUT("/ginie/position-management", s.handleUpdatePositionManagement)
+			futures.POST("/ginie/position-management/load-defaults", s.handleLoadPositionManagementDefaults)
+
 			// Batch Reset endpoints (reset multiple settings at once)
 			futures.POST("/ginie/modes/reset-all", s.handleResetAllModes)
 			futures.POST("/ginie/other-settings/reset-all", s.handleResetAllOtherSettings)
@@ -895,6 +902,13 @@ func (s *Server) setupRoutes() {
 			futures.GET("/decision/coin/:symbol", s.handleGetCoinState)
 			futures.GET("/decision/coins", s.handleGetAllCoinStates)
 			futures.GET("/decision/coins/count", s.handleGetCoinStateCount)
+
+			// Position Analytics Dashboard endpoints (Story 10.2)
+			// Historical efficiency analysis, trade categorization, performance metrics
+			futures.GET("/position-analytics/summary", s.handleGetPositionAnalyticsSummary)
+			futures.GET("/position-analytics/efficiency-timeline", s.handleGetEfficiencyTimeline)
+			futures.GET("/position-analytics/distribution", s.handleGetTradeDistribution)
+			futures.GET("/position-analytics/export", s.handleExportPositionAnalytics)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

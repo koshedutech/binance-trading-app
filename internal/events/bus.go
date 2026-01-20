@@ -41,6 +41,9 @@ const (
 
 	// Epic 11: Position Decision Engine - Coin State Updates
 	EventCoinStateUpdate EventType = "COIN_STATE_UPDATE"
+
+	// Story 10.3: Exit Decision Monitoring UI
+	EventExitDecisionUpdate EventType = "EXIT_DECISION_UPDATE"
 )
 
 // Event represents a system event
@@ -235,7 +238,8 @@ var (
 	broadcastSystemStatus    BroadcastFunc
 	broadcastSignalUpdate    BroadcastFunc
 	broadcastPositionUpdate  BroadcastFunc
-	broadcastCoinStateUpdate BroadcastFunc // Epic 11: Position Decision Engine
+	broadcastCoinStateUpdate    BroadcastFunc // Epic 11: Position Decision Engine
+	broadcastExitDecisionUpdate BroadcastFunc // Story 10.3: Exit Decision Monitoring
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -287,6 +291,12 @@ func SetBroadcastPositionUpdate(fn BroadcastFunc) {
 // Epic 11: Position Decision Engine
 func SetBroadcastCoinStateUpdate(fn BroadcastFunc) {
 	broadcastCoinStateUpdate = fn
+}
+
+// SetBroadcastExitDecisionUpdate sets the callback for exit decision update broadcasts
+// Story 10.3: Exit Decision Monitoring
+func SetBroadcastExitDecisionUpdate(fn BroadcastFunc) {
+	broadcastExitDecisionUpdate = fn
 }
 
 // BroadcastLifecycleEvent broadcasts a lifecycle event to a user
@@ -357,5 +367,13 @@ func BroadcastPositionUpdate(userID string, data interface{}) {
 func BroadcastCoinStateUpdate(userID string, data interface{}) {
 	if broadcastCoinStateUpdate != nil && userID != "" {
 		go broadcastCoinStateUpdate(userID, data)
+	}
+}
+
+// BroadcastExitDecisionUpdate broadcasts exit decision update to a user
+// Story 10.3: Exit Decision Monitoring - Real-time exit decision state for UI
+func BroadcastExitDecisionUpdate(userID string, data interface{}) {
+	if broadcastExitDecisionUpdate != nil && userID != "" {
+		go broadcastExitDecisionUpdate(userID, data)
 	}
 }

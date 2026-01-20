@@ -108,6 +108,44 @@ if [ "$DOWN_ONLY" = true ]; then
 fi
 
 # ============================================================================
+# Check and start Redis infrastructure (REQUIRED before dev/prod)
+# ============================================================================
+INFRA_COMPOSE_FILE="docker-compose.infra.yml"
+REDIS_CONTAINER="binance-bot-redis"
+
+check_redis_running() {
+    docker ps --filter "name=${REDIS_CONTAINER}" --filter "status=running" --format "{{.Names}}" 2>/dev/null | grep -q "${REDIS_CONTAINER}"
+}
+
+echo -e "${YELLOW}Checking Redis infrastructure...${NC}"
+
+if check_redis_running; then
+    echo -e "${GREEN}Redis infrastructure is running${NC}"
+else
+    echo -e "${YELLOW}Redis infrastructure not running. Starting it now...${NC}"
+    docker-compose -f "$INFRA_COMPOSE_FILE" up -d
+
+    # Wait for Redis to be healthy
+    echo -e "${CYAN}Waiting for Redis to be ready...${NC}"
+    RETRIES=30
+    while [ $RETRIES -gt 0 ]; do
+        if docker exec "${REDIS_CONTAINER}" redis-cli ping 2>/dev/null | grep -q "PONG"; then
+            echo -e "${GREEN}Redis is ready${NC}"
+            break
+        fi
+        RETRIES=$((RETRIES - 1))
+        sleep 1
+    done
+
+    if [ $RETRIES -eq 0 ]; then
+        echo -e "${RED}ERROR: Redis failed to start. Check docker-compose.infra.yml${NC}"
+        exit 1
+    fi
+fi
+
+echo ""
+
+# ============================================================================
 # Build Docker image (only if --build-image flag or image doesn't exist)
 # ============================================================================
 IMAGE_EXISTS=$(docker images -q binance-trading-bot-trading-bot 2>/dev/null)

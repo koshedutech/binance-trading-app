@@ -3,10 +3,11 @@
 ## Epic Overview
 
 **Epic ID:** EPIC-10
-**Status:** Ready for Implementation
+**Status:** Done
 **Created:** 2026-01-14
-**Last Updated:** 2026-01-14
+**Last Updated:** 2026-01-20
 **Priority:** High
+**Stories:** 3 total (3 done)
 
 ---
 
@@ -60,8 +61,8 @@ No complex rate-per-unit calculations. Just simple profit comparison.
 
 ### Story 10.1: Position Management & Efficiency Exit System
 **Priority:** P1
-**Status:** Ready for Implementation
-**File:** `story-10.1-position-management-efficiency-exit.md`
+**Status:** Done (2026-01-19)
+**File:** `story-10-1-position-management-efficiency-exit-system.md`
 
 Complete position management system including:
 - Simplified efficiency tracking (every tick, not candle-based)
@@ -90,13 +91,29 @@ Safeguards to prevent common failure scenarios:
 
 ### Story 10.2: Position Analytics Dashboard
 **Priority:** P2
-**Status:** Planning
+**Status:** Done (2026-01-20)
+**File:** `story-10-2-position-analytics-dashboard.md`
 
 UI and analytics for position efficiency:
 - Historical efficiency analysis
-- Trade categorization charts
-- Performance metrics by mode
-- Export capabilities
+- Trade categorization charts (by mode, exit reason, strategy, decision mode)
+- Performance metrics by mode/strategy/regime
+- Export capabilities (CSV/JSON)
+
+### Story 10.3: Exit Decision Monitoring UI
+**Priority:** P1
+**Status:** Done (2026-01-20)
+**File:** `story-10-3-exit-decision-monitoring-ui.md`
+
+Real-time exit decision monitoring for open positions:
+- New API endpoint exposing exit decision state
+- Exit Decision Monitor UI component
+- Hold safeguards display (min hold time, breakeven, consecutive signals)
+- Exit checks display with priority order (Trend Reversal, Efficiency, Trailing SL, Dynamic TP)
+- Classic mode indicators (ADX, RSI, EMA, reversal signals)
+- New Engine mode display (strategy, regime, exit signal strength)
+- WebSocket real-time updates
+- Integration into PositionCardExpanded
 
 ---
 

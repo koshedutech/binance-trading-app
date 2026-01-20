@@ -83,6 +83,9 @@ type UserAutopilotManager struct {
 	// Epic 11: StateManager for Entry Decision Engine integration
 	stateManager StateManagerInterface
 
+	// Epic 7: Position state integration for trade lifecycle tracking
+	positionStateInt *PositionStateIntegration
+
 	mu sync.RWMutex
 }
 
@@ -127,6 +130,41 @@ func (m *UserAutopilotManager) SetStateManager(sm StateManagerInterface) {
 	defer m.mu.Unlock()
 	m.stateManager = sm
 	m.logger.Info("StateManager set on UserAutopilotManager for Entry Decision Engine integration")
+}
+
+// SetPositionStateIntegration sets the position state integration for trade lifecycle tracking (Epic 7)
+// This enables entry order details to be saved to the database when orders fill
+// Called from main.go after the PositionStateIntegration is initialized
+func (m *UserAutopilotManager) SetPositionStateIntegration(psi *PositionStateIntegration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.positionStateInt = psi
+	m.logger.Info("PositionStateIntegration set on UserAutopilotManager for trade lifecycle tracking")
+}
+
+// SetSettingsCache sets the settings cache service for cache-only reads.
+// This fixes the startup race condition where Redis may not be ready when the manager is created.
+// It updates the manager's cache reference AND propagates to all existing user autopilot instances.
+// Called from main.go after the SettingsCacheService is initialized (Story 6.6).
+func (m *UserAutopilotManager) SetSettingsCache(cache SettingsCacheReader) {
+	m.settingsCache = cache
+	m.logger.Info("SettingsCache set on UserAutopilotManager (late initialization)")
+
+	// Propagate to all existing user autopilot instances (using sync.Map Range)
+	propagated := 0
+	m.instances.Range(func(key, value interface{}) bool {
+		userID := key.(string)
+		instance := value.(*UserAutopilotInstance)
+		if instance.Autopilot != nil {
+			instance.Autopilot.SetSettingsCache(cache)
+			propagated++
+			m.logger.Debug("Propagated SettingsCache to user autopilot", "user_id", userID)
+		}
+		return true // continue iteration
+	})
+	if propagated > 0 {
+		m.logger.Info("SettingsCache propagated to existing user autopilots", "count", propagated)
+	}
 }
 
 // cleanupLoop periodically removes idle user sessions
@@ -298,6 +336,13 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	if m.stateManager != nil {
 		autopilot.SetStateManager(m.stateManager)
 		m.logger.Info("StateManager set on user autopilot for Entry Decision Engine", "user_id", userID)
+	}
+
+	// Epic 7: Set PositionStateIntegration for trade lifecycle tracking
+	// This enables entry order details to be saved when orders fill
+	if m.positionStateInt != nil {
+		autopilot.SetPositionStateIntegration(m.positionStateInt)
+		m.logger.Info("PositionStateIntegration set on user autopilot for trade lifecycle", "user_id", userID)
 	}
 
 	instance := &UserAutopilotInstance{

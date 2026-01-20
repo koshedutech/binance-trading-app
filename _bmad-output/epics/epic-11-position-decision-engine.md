@@ -1066,5 +1066,545 @@ SCANNING (Coin Search)
 | **F: Scoring** | 11.15-11.18 | Additive score, LLM context, calibration, blocking |
 | **G: Execution** | 11.19-11.22 | Decision output, actors, UI, dashboard |
 | **H: Settings** | 11.23-11.27 | Settings structure, UI, calibration storage & display |
+| **I: Mode-Strategy Architecture** | 11.28-11.33 | Mode→Strategy hierarchy, settings migration |
 
-**Total Stories:** 27
+**Total Stories:** 33
+
+---
+
+## PART I: Mode-Strategy Architecture
+
+### Context
+
+Current mode settings (Scalp, Swing, Position, UltraFast) are actually **strategy-specific settings** designed for Trend Following only. Each strategy requires different:
+- SLTP settings (MeanReversion needs tighter stops, Breakout needs wider targets)
+- Confidence thresholds
+- Entry/Exit conditions
+- Risk parameters
+
+**Architecture Decision:** Mode → Strategy (not Strategy → Mode)
+- User selects **Mode** (trading style/timeframe preference)
+- System selects **Strategy** based on market regime
+- Each Mode+Strategy combination has **complete independent settings**
+
+---
+
+#### Story 11.28: Mode-Strategy Settings Restructure
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Restructure `default-settings.json` to nest strategies under modes.
+
+**Current Structure:**
+```json
+{
+  "mode_configs": {
+    "scalp": {
+      "sltp": {...},
+      "confidence": {...}
+    }
+  },
+  "decision_engine": {
+    "strategies": {
+      "trend_following": {...}
+    }
+  }
+}
+```
+
+**New Structure:**
+```json
+{
+  "modes": {
+    "scalp": {
+      "name": "scalp",
+      "enabled": true,
+      "default_strategy": "trend_following",
+      "auto_select_strategy": true,
+      "strategies": {
+        "trend_following": {
+          "enabled": true,
+          "priority": 1,
+          "supported_regimes": ["TRENDING"],
+          "leverage": 10,
+          "max_positions": 5,
+          "sltp": {
+            "sl_percent": 1.0,
+            "tp1_percent": 0.5,
+            "tp1_close_percent": 50,
+            "tp2_percent": 1.0,
+            "tp2_close_percent": 30,
+            "tp3_percent": 1.5,
+            "tp3_close_percent": 20,
+            "trailing_enabled": true
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 75
+          },
+          "entry_conditions": {
+            "adx_min": 25,
+            "rsi_min": 40,
+            "rsi_max": 70,
+            "require_trend_alignment": true
+          },
+          "exit_conditions": {
+            "adx_exit_threshold": 20,
+            "trailing_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 40,
+            "context_weight": 30,
+            "llm_weight": 20,
+            "history_weight": 10
+          }
+        },
+        "mean_reversion": {
+          "enabled": true,
+          "priority": 2,
+          "supported_regimes": ["RANGING"],
+          "leverage": 5,
+          "max_positions": 8,
+          "sltp": {
+            "sl_percent": 0.8,
+            "tp1_percent": 0.3,
+            "tp1_close_percent": 100
+          },
+          "confidence": {
+            "min_confidence": 60
+          },
+          "entry_conditions": {
+            "adx_max": 25,
+            "rsi_oversold": 30,
+            "rsi_overbought": 70
+          }
+        },
+        "breakout": {
+          "enabled": true,
+          "priority": 3,
+          "supported_regimes": ["CONSOLIDATING", "VOLATILE"],
+          "leverage": 8,
+          "max_positions": 3,
+          "sltp": {
+            "sl_percent": 1.5,
+            "tp1_percent": 2.0,
+            "tp2_percent": 4.0
+          }
+        },
+        "range_trading": {
+          "enabled": false,
+          "priority": 4,
+          "supported_regimes": ["RANGING"]
+        }
+      }
+    },
+    "swing": {
+      "name": "swing",
+      "strategies": {
+        "trend_following": {
+          "leverage": 5,
+          "sltp": { "sl_percent": 3.0, "tp1_percent": 2.0 }
+        },
+        "mean_reversion": {...},
+        "breakout": {...}
+      }
+    },
+    "position": {
+      "name": "position",
+      "strategies": {...}
+    },
+    "ultra_fast": {
+      "name": "ultra_fast",
+      "strategies": {...}
+    }
+  }
+}
+```
+
+**Migration Path:**
+1. Keep `mode_configs` temporarily for backward compatibility
+2. Add new `modes` structure with nested strategies
+3. Copy current mode settings → `modes.{mode}.strategies.trend_following`
+4. Add placeholder configs for other strategies
+5. Deprecation warning on `mode_configs` access
+
+**Acceptance Criteria:**
+- New `modes` structure in `default-settings.json`
+- Current mode settings migrated to `trend_following` strategy under each mode
+- All 4 modes × 4 strategies = 16 strategy configs (some disabled by default)
+- Go structs updated to match new hierarchy
+- Backward compatibility during transition
+
+---
+
+#### Story 11.29: Mode-Strategy Database Schema
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Create database schema for Mode+Strategy settings storage.
+
+**New Table: `user_mode_strategy_settings`**
+```sql
+CREATE TABLE user_mode_strategy_settings (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mode VARCHAR(20) NOT NULL,        -- scalp, swing, position, ultra_fast
+    strategy VARCHAR(30) NOT NULL,     -- trend_following, mean_reversion, breakout, range_trading
+    enabled BOOLEAN DEFAULT true,
+    priority INTEGER DEFAULT 1,
+    settings JSONB NOT NULL,           -- Complete settings for this mode+strategy
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, mode, strategy)
+);
+
+CREATE INDEX idx_user_mode_strategy_user ON user_mode_strategy_settings(user_id);
+CREATE INDEX idx_user_mode_strategy_mode ON user_mode_strategy_settings(user_id, mode);
+```
+
+**Records per User:**
+| mode | strategy | settings |
+|------|----------|----------|
+| scalp | trend_following | {sltp: {...}, confidence: {...}, ...} |
+| scalp | mean_reversion | {sltp: {...}, confidence: {...}, ...} |
+| scalp | breakout | {sltp: {...}, confidence: {...}, ...} |
+| scalp | range_trading | {sltp: {...}, confidence: {...}, ...} |
+| swing | trend_following | {...} |
+| swing | mean_reversion | {...} |
+| ... | ... | ... |
+
+**Total:** 4 modes × 4 strategies = **16 records per user**
+
+**Migration Script:**
+```sql
+-- Migrate existing mode settings to trend_following strategy
+INSERT INTO user_mode_strategy_settings (user_id, mode, strategy, settings)
+SELECT
+    user_id,
+    mode_name,
+    'trend_following',
+    settings_json
+FROM user_mode_configs
+ON CONFLICT (user_id, mode, strategy) DO UPDATE
+SET settings = EXCLUDED.settings;
+```
+
+**Acceptance Criteria:**
+- New table created with proper indexes
+- Migration script moves existing settings to `trend_following` strategy
+- Go repository functions for CRUD operations
+- Unit tests for repository
+
+---
+
+#### Story 11.30: Mode-Strategy Cache Layer
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Update Redis cache layer for Mode+Strategy hierarchy.
+
+**New Redis Key Pattern:**
+```
+mode:{userID}:{mode}:{strategy}
+```
+
+**Example Keys:**
+```
+mode:123:scalp:trend_following     → {sltp: {...}, confidence: {...}}
+mode:123:scalp:mean_reversion     → {sltp: {...}, confidence: {...}}
+mode:123:scalp:breakout           → {sltp: {...}, confidence: {...}}
+mode:123:swing:trend_following    → {sltp: {...}, confidence: {...}}
+...
+```
+
+**Cache Service Updates:**
+```go
+// settings_cache_service.go
+
+// GetModeStrategyConfig retrieves settings for a specific mode+strategy
+func (s *SettingsCacheService) GetModeStrategyConfig(
+    ctx context.Context,
+    userID, mode, strategy string,
+) (*ModeStrategyConfig, error)
+
+// SetModeStrategyConfig stores settings for a specific mode+strategy
+func (s *SettingsCacheService) SetModeStrategyConfig(
+    ctx context.Context,
+    userID, mode, strategy string,
+    config *ModeStrategyConfig,
+) error
+
+// GetAllStrategiesForMode retrieves all strategy configs for a mode
+func (s *SettingsCacheService) GetAllStrategiesForMode(
+    ctx context.Context,
+    userID, mode string,
+) (map[string]*ModeStrategyConfig, error)
+
+// GetActiveStrategy retrieves the currently selected/auto-selected strategy for a mode
+func (s *SettingsCacheService) GetActiveStrategy(
+    ctx context.Context,
+    userID, mode string,
+    currentRegime MarketRegime,
+) (*ModeStrategyConfig, string, error)
+```
+
+**Cache Initialization (on user login):**
+1. Load all 16 mode+strategy configs from DB
+2. Store each in Redis with individual keys
+3. Set TTL for auto-refresh
+
+**Acceptance Criteria:**
+- New Redis key pattern implemented
+- Cache service functions for mode+strategy CRUD
+- Batch loading on user login
+- TTL management
+- Unit tests for cache operations
+
+---
+
+#### Story 11.31: Mode-Strategy API Endpoints
+**Priority:** P1
+**Status:** Ready for Implementation
+
+Create API endpoints for Mode+Strategy management.
+
+**New Endpoints:**
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/modes` | List all modes with their strategies |
+| GET | `/api/modes/{mode}` | Get mode with all strategy configs |
+| GET | `/api/modes/{mode}/strategies` | List strategies for a mode |
+| GET | `/api/modes/{mode}/strategies/{strategy}` | Get specific mode+strategy config |
+| PUT | `/api/modes/{mode}/strategies/{strategy}` | Update mode+strategy config |
+| POST | `/api/modes/{mode}/strategies/{strategy}/reset` | Reset to defaults |
+| POST | `/api/modes/{mode}/reset-all` | Reset all strategies in mode to defaults |
+| GET | `/api/modes/{mode}/active-strategy` | Get active strategy based on regime |
+
+**Response Format:**
+```json
+// GET /api/modes/scalp/strategies/trend_following
+{
+  "mode": "scalp",
+  "strategy": "trend_following",
+  "enabled": true,
+  "priority": 1,
+  "supported_regimes": ["TRENDING"],
+  "settings": {
+    "leverage": 10,
+    "max_positions": 5,
+    "sltp": {...},
+    "confidence": {...},
+    "entry_conditions": {...},
+    "exit_conditions": {...},
+    "scoring": {...}
+  },
+  "is_default": false,
+  "differences_from_default": 3
+}
+```
+
+**Acceptance Criteria:**
+- All endpoints implemented with proper validation
+- Write-through cache pattern (DB + Redis)
+- Admin defaults support
+- Reset functionality
+- Swagger documentation
+
+---
+
+#### Story 11.32: Mode-Strategy User Initialization
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Update user initialization to create Mode+Strategy records.
+
+**On New User Registration:**
+```go
+func InitializeUserModeStrategies(userID int) error {
+    // Load defaults from default-settings.json
+    defaults := LoadDefaultSettings()
+
+    // Create 16 records (4 modes × 4 strategies)
+    for modeName, modeConfig := range defaults.Modes {
+        for strategyName, strategyConfig := range modeConfig.Strategies {
+            err := db.CreateModeStrategySettings(
+                userID,
+                modeName,
+                strategyName,
+                strategyConfig,
+            )
+            if err != nil {
+                return err
+            }
+        }
+    }
+
+    return nil
+}
+```
+
+**On User Login (Cache Population):**
+```go
+func PopulateModeStrategyCacheOnLogin(ctx context.Context, userID int) error {
+    // Load all from DB
+    configs, err := db.GetAllModeStrategyConfigs(userID)
+    if err != nil {
+        return err
+    }
+
+    // Populate Redis cache
+    for _, config := range configs {
+        key := fmt.Sprintf("mode:%d:%s:%s", userID, config.Mode, config.Strategy)
+        cache.Set(ctx, key, config.Settings, 24*time.Hour)
+    }
+
+    return nil
+}
+```
+
+**Acceptance Criteria:**
+- New users get 16 mode+strategy records from defaults
+- Existing users get migration (trend_following from current settings)
+- Cache populated on login
+- Idempotent initialization (safe to run multiple times)
+
+---
+
+#### Story 11.33: Mode-Strategy UI Update
+**Priority:** P1
+**Status:** Ready for Implementation
+
+Update frontend for Mode→Strategy hierarchy.
+
+**UI Changes:**
+
+1. **Mode Settings Page (New Layout):**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Mode: Scalp                                          [Switch Mode ▼]│
+├─────────────────────────────────────────────────────────────────────┤
+│ ┌─────────────────────────────────────────────────────────────────┐ │
+│ │ Strategies                                                       │ │
+│ │ ┌─────────┐ ┌─────────────┐ ┌─────────┐ ┌─────────────┐         │ │
+│ │ │ Trend   │ │ Mean        │ │Breakout │ │ Range       │         │ │
+│ │ │Following│ │ Reversion   │ │         │ │ Trading     │         │ │
+│ │ │ ✓ ON    │ │ ✓ ON        │ │ ✓ ON    │ │ ✗ OFF       │         │ │
+│ │ └─────────┘ └─────────────┘ └─────────┘ └─────────────┘         │ │
+│ └─────────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+│ Selected: Trend Following                     [Auto-Select: ON ✓]   │
+│ Market Regime: TRENDING                       Active via: Auto      │
+├─────────────────────────────────────────────────────────────────────┤
+│ ┌───────────────────────────────────────────────────────────────┐   │
+│ │ Strategy Settings: Trend Following                            │   │
+│ │                                                               │   │
+│ │ ▼ Position Settings                                           │   │
+│ │   Leverage: [10]     Max Positions: [5]                       │   │
+│ │                                                               │   │
+│ │ ▼ SLTP Settings                                               │   │
+│ │   Stop Loss: [1.0%]  TP1: [0.5%]  TP2: [1.0%]  TP3: [1.5%]   │   │
+│ │                                                               │   │
+│ │ ▼ Entry Conditions                                            │   │
+│ │   ADX Min: [25]      RSI Range: [40-70]                       │   │
+│ │   Trend Alignment: [✓]                                        │   │
+│ │                                                               │   │
+│ │ ▼ Scoring Weights                                             │   │
+│ │   Technical: [40]  Context: [30]  LLM: [20]  History: [10]    │   │
+│ │                                                               │   │
+│ │           [Reset to Defaults]  [Save Changes]                 │   │
+│ └───────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+2. **Reset Settings Page Update:**
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Mode Settings                                        [Reset All]    │
+├─────────────────────────────────────────────────────────────────────┤
+│ ▼ Scalp Mode                                                        │
+│   ├─ Trend Following (45/52 match defaults)              [Reset]    │
+│   ├─ Mean Reversion (52/52 match defaults)               [Reset]    │
+│   ├─ Breakout (48/52 match defaults)                     [Reset]    │
+│   └─ Range Trading (disabled)                            [Reset]    │
+│                                                                     │
+│ ▼ Swing Mode                                                        │
+│   ├─ Trend Following ...                                            │
+│   └─ ...                                                            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+3. **TypeScript Types:**
+```typescript
+interface ModeConfig {
+  name: string;
+  enabled: boolean;
+  defaultStrategy: string;
+  autoSelectStrategy: boolean;
+  strategies: Record<string, ModeStrategyConfig>;
+}
+
+interface ModeStrategyConfig {
+  enabled: boolean;
+  priority: number;
+  supportedRegimes: MarketRegime[];
+  leverage: number;
+  maxPositions: number;
+  sltp: SLTPConfig;
+  confidence: ConfidenceConfig;
+  entryConditions: EntryConditionsConfig;
+  exitConditions: ExitConditionsConfig;
+  scoring: ScoringConfig;
+}
+```
+
+**Acceptance Criteria:**
+- Mode selector with strategy tabs
+- Strategy enable/disable toggle
+- Full settings form per strategy
+- Reset to defaults per strategy
+- Compare current vs defaults
+- Real-time save to backend
+
+---
+
+## Updated Implementation Phases
+
+### Phase 1: Foundation (Stories 11.1-11.3, 11.15, 11.18, 11.23)
+- Redis state management
+- Delta updates
+- Additive scoring
+- Blocking reason tracker
+- Settings structure
+
+### Phase 2: Mode-Strategy Architecture (Stories 11.28-11.32) **NEW**
+- Restructure default-settings.json
+- Database schema migration
+- Cache layer update
+- API endpoints
+- User initialization
+
+### Phase 3: Intelligence (Stories 11.4-11.7, 11.16-11.17, 11.25-11.26)
+- Market regime detection
+- Strategy framework (now Mode-aware)
+- Enhanced LLM context
+- Calibration layer
+
+### Phase 4: Strategies (Stories 11.8-11.11)
+- Trend following (refined)
+- Mean reversion
+- Breakout
+- Range trading
+
+### Phase 5: Configurability (Stories 11.12-11.14)
+- Indicator segment framework
+- Calculation engine
+- Performance tracker
+
+### Phase 6: UI & Integration (Stories 11.19-11.22, 11.24, 11.27, 11.33)
+- Decision output interface
+- Actor tracking
+- Position card UI
+- Performance dashboard
+- Mode-Strategy UI
+- Calibration Display UI

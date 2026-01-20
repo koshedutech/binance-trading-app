@@ -1151,10 +1151,21 @@ func (fc *FuturesController) GetInstanceControl() *InstanceControl {
 }
 
 // SetSettingsCache sets the settings cache service for cache-only reads (Story 6.6)
+// Also propagates to GinieAnalyzer and GinieAutopilot to fix startup race condition
 func (fc *FuturesController) SetSettingsCache(cache SettingsCacheReader) {
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	fc.settingsCache = cache
+
+	// Propagate to GinieAnalyzer (uses ModeConfigCache interface)
+	if fc.ginieAnalyzer != nil && cache != nil {
+		fc.ginieAnalyzer.SetSettingsCache(cache)
+	}
+
+	// Propagate to GinieAutopilot
+	if fc.ginieAutopilot != nil && cache != nil {
+		fc.ginieAutopilot.SetSettingsCache(cache)
+	}
 }
 
 // SetPositionStateIntegration sets the position state integration for trade lifecycle tracking (Epic 7)

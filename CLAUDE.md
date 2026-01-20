@@ -87,6 +87,87 @@ See `docs/production-releases.md` for full documentation.
 
 ---
 
+## Running Tests (MANDATORY - Docker Only)
+
+**CRITICAL: Go and Node.js are NOT installed on the host. ALL commands must run inside Docker containers.**
+
+### Backend Tests (Go)
+```bash
+# Run tests inside the running dev container
+docker exec binance-trading-bot-dev go test ./... -v
+
+# Run specific package tests
+docker exec binance-trading-bot-dev go test ./internal/autopilot/... -v
+
+# Run with coverage
+docker exec binance-trading-bot-dev go test ./... -cover
+```
+
+### Frontend Tests (React/TypeScript)
+```bash
+# Run tests inside the running dev container
+docker exec binance-trading-bot-dev npm --prefix web test
+
+# Run with coverage
+docker exec binance-trading-bot-dev npm --prefix web run test:coverage
+```
+
+### Build Verification
+```bash
+# Verify backend builds
+docker exec binance-trading-bot-dev go build -o /tmp/test-build .
+
+# Verify frontend builds
+docker exec binance-trading-bot-dev npm --prefix web run build
+```
+
+### Before Running Tests
+1. Ensure dev container is running: `docker ps | grep binance-trading-bot-dev`
+2. If not running: `./scripts/docker-dev.sh -d`
+3. Wait for health check to pass
+
+### NEVER Do These
+- Do NOT run `go test` directly on host (Go not installed)
+- Do NOT run `npm test` directly on host (may conflict)
+- Do NOT create new Docker containers for testing
+- Do NOT use `docker run` for tests - use `docker exec` on existing container
+- Do NOT kill or restart containers from other projects
+
+---
+
+## CRITICAL: Docker Container Safety (MANDATORY)
+
+**This project uses NAMED compose projects. NEVER affect other Docker containers.**
+
+### Safe Commands (Only affect this project)
+```bash
+# These ONLY affect binance-dev or binance-prod containers
+docker-compose -f docker-compose.yml down        # Only binance-dev
+docker-compose -f docker-compose.prod.yml down   # Only binance-prod
+docker-compose -f docker-compose.infra.yml down  # Only binance-infra (Redis)
+./scripts/docker-dev.sh                          # Safe - uses named project
+```
+
+### FORBIDDEN Commands
+```bash
+# NEVER USE THESE - they affect ALL Docker containers on the system
+docker kill $(docker ps -q)           # FORBIDDEN - kills ALL containers
+docker stop $(docker ps -q)           # FORBIDDEN - stops ALL containers
+docker rm $(docker ps -aq)            # FORBIDDEN - removes ALL containers
+docker system prune                   # DANGEROUS - may remove shared resources
+docker container prune                # DANGEROUS - may remove other projects
+```
+
+### Rule: Only Target Named Containers
+Always use specific container names or compose projects:
+- `binance-trading-bot-dev` - Development app
+- `binance-bot-postgres-dev` - Development database
+- `binance-trading-bot-prod` - Production app
+- `binance-bot-postgres-prod` - Production database
+- `binance-bot-redis` - Shared Redis (infra)
+
+---
+
 ## CRITICAL: Docker Volume Protection (MANDATORY)
 
 **Docker volumes contain REAL USER DATA (accounts, settings, API keys, trade history). NEVER remove volumes without explicit written permission.**

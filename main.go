@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -524,6 +525,8 @@ func main() {
 
 	// Initialize Futures Autopilot Controller
 	var futuresAutopilotController *autopilot.FuturesController
+	// Epic 7: Declare positionStateInt at outer scope for access by UserAutopilotManager
+	var positionStateInt *autopilot.PositionStateIntegration
 	if cfg.FuturesConfig.Enabled && cfg.FuturesAutopilotConfig.Enabled {
 		futuresLogger := logging.New(&logging.Config{
 			Level:       cfg.LoggingConfig.Level,
@@ -576,7 +579,7 @@ func main() {
 		positionTrackerRepo := database.NewPositionStateDBAdapter(repo.GetDB())
 		positionTrackerLogger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "PositionTracker").Logger()
 		positionTracker := orders.NewPositionTracker(positionTrackerRepo, positionTrackerLogger)
-		positionStateInt := autopilot.NewPositionStateIntegration(positionTracker, positionTrackerLogger)
+		positionStateInt = autopilot.NewPositionStateIntegration(positionTracker, positionTrackerLogger)
 		futuresAutopilotController.SetPositionStateIntegration(positionStateInt)
 		logger.Info("Position state integration initialized for trade lifecycle tracking")
 
@@ -962,6 +965,10 @@ func main() {
 		// Set manager on FuturesController for access in handlers
 		futuresAutopilotController.SetUserAutopilotManager(userAutopilotManager)
 
+		// Epic 7: Wire position state integration to UserAutopilotManager
+		// This enables entry order tracking for per-user autopilot instances
+		userAutopilotManager.SetPositionStateIntegration(positionStateInt)
+
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
 
@@ -1040,6 +1047,17 @@ func main() {
 	if settingsCache != nil {
 		server.SetSettingsCacheService(settingsCache)
 		logger.Info("SettingsCacheService set on API server for cache-first reads")
+
+		// Fix startup race condition: Update all components with the now-available cache
+		// This handles the case where Redis wasn't ready when components were created
+		if futuresAutopilotController != nil {
+			futuresAutopilotController.SetSettingsCache(settingsCache)
+			logger.Info("SettingsCacheService set on FuturesController (late binding fix)")
+		}
+		if userAutopilotManager != nil {
+			userAutopilotManager.SetSettingsCache(settingsCache)
+			logger.Info("SettingsCacheService set on UserAutopilotManager (late binding fix)")
+		}
 	}
 
 	// Story 6.4: Set the AdminDefaultsCacheService on the server for settings comparison
@@ -1981,6 +1999,7 @@ func strPtr(s string) *string {
 // keeping the conversion logic in main.go which can import both packages.
 type stateManagerAdapter struct {
 	sm *decision.StateManager
+	dp *decision.DeltaProcessor // Story 11.2: Delta update processor for efficient state updates
 }
 
 // newStateManagerAdapter creates a new adapter wrapping a decision.StateManager.
@@ -1988,7 +2007,12 @@ func newStateManagerAdapter(sm *decision.StateManager) *stateManagerAdapter {
 	if sm == nil {
 		return nil
 	}
-	return &stateManagerAdapter{sm: sm}
+	// Story 11.2: Initialize DeltaProcessor for efficient delta updates
+	dp := decision.NewDeltaProcessor(sm)
+	if dp != nil {
+		log.Println("[DECISION] DeltaProcessor initialized for efficient state updates")
+	}
+	return &stateManagerAdapter{sm: sm, dp: dp}
 }
 
 // SetCoinState implements autopilot.StateManagerInterface by converting CoinStateData to decision.CoinState.
@@ -2020,4 +2044,55 @@ func (a *stateManagerAdapter) SetCoinState(ctx context.Context, userID, symbol s
 	}
 
 	return a.sm.SetCoinState(ctx, userID, symbol, coinState)
+}
+
+// UpdateCoinStateDelta implements autopilot.StateManagerInterface using DeltaProcessor.
+// Story 11.2: Delta Update Processor - Only updates changed fields for efficiency.
+func (a *stateManagerAdapter) UpdateCoinStateDelta(ctx context.Context, userID, symbol string, state *autopilot.CoinStateData) ([]string, error) {
+	if a.dp == nil || state == nil {
+		// Fallback to full update if DeltaProcessor not available
+		if a.sm != nil && state != nil {
+			err := a.SetCoinState(ctx, userID, symbol, state)
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	// Convert autopilot.CoinStateData to map for delta processing
+	// Note: blocking_reasons must be JSON-encoded for Redis storage
+	blockingReasonsJSON := "[]"
+	if len(state.BlockingReasons) > 0 {
+		if jsonBytes, err := json.Marshal(state.BlockingReasons); err == nil {
+			blockingReasonsJSON = string(jsonBytes)
+		}
+	}
+
+	stateMap := map[string]interface{}{
+		"symbol":           state.Symbol,
+		"price":            state.Price,
+		"regime":           state.Regime,
+		"active_strategy":  state.ActiveStrategy,
+		"decision":         state.Decision,
+		"adx":              state.ADX,
+		"atr":              state.ATR,
+		"rsi":              state.RSI,
+		"ema_9":            state.EMA9,
+		"ema_21":           state.EMA21,
+		"trend_1h":         state.Trend1H,
+		"trend_15m":        state.Trend15M,
+		"score_technical":  state.ScoreTechnical,
+		"score_context":    state.ScoreContext,
+		"score_llm":        state.ScoreLLM,
+		"score_history":    state.ScoreHistory,
+		"score_final":      state.ScoreFinal,
+		"blocking_reasons": blockingReasonsJSON,
+	}
+
+	// Use DeltaProcessor for efficient delta updates
+	result, err := a.dp.Process(ctx, userID, symbol, stateMap)
+	if err != nil {
+		return nil, fmt.Errorf("delta update failed: %w", err)
+	}
+
+	return result.ChangedFields, nil
 }

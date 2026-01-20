@@ -516,10 +516,30 @@ type GinieDecisionReport struct {
 	// Entry Confluence Check (ADX+DI, VWAP, Volume Spike, Pivots, EMA 20/50)
 	EntryConfluence *EntryConfluenceResult `json:"entry_confluence,omitempty"`
 
+	// Technical Indicators (ALWAYS populated for UI display)
+	TechnicalIndicators *TechnicalIndicatorsSnapshot `json:"technical_indicators,omitempty"`
+
 	// Final Scores
 	ConfidenceScore    float64             `json:"confidence_score"`
 	Recommendation     GenieRecommendation `json:"recommendation"`
 	RecommendationNote string              `json:"recommendation_note"`
+}
+
+// TechnicalIndicatorsSnapshot contains key technical indicators (ALWAYS populated)
+type TechnicalIndicatorsSnapshot struct {
+	RSI14   float64 `json:"rsi_14"`   // RSI(14) value
+	RSI7    float64 `json:"rsi_7"`    // RSI(7) value for scalping
+	EMA9    float64 `json:"ema_9"`    // EMA(9)
+	EMA20   float64 `json:"ema_20"`   // EMA(20)
+	EMA50   float64 `json:"ema_50"`   // EMA(50)
+	MACD    float64 `json:"macd"`     // MACD line
+	Signal  float64 `json:"signal"`   // MACD signal line
+	ADX     float64 `json:"adx"`      // ADX value
+	PlusDI  float64 `json:"plus_di"`  // +DI
+	MinusDI float64 `json:"minus_di"` // -DI
+	ATR     float64 `json:"atr"`      // ATR value
+	VWAP    float64 `json:"vwap"`     // VWAP value
+	Price   float64 `json:"price"`    // Current price
 }
 
 // TrendConfirmation contains LLM trend analysis

@@ -83,7 +83,7 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest) (*database.
 	if s.config.RequireEmailVerification && s.emailService != nil && !s.emailService.IsSMTPConfigured(ctx) {
 		return nil, AuthError{
 			Code:    "SMTP_NOT_CONFIGURED",
-			Message: "Email service is not configured. Please contact administrator.",
+			Message: "Registration is temporarily unavailable. The administrator has not configured email service (SMTP). Please contact the administrator to enable registration.",
 		}
 	}
 
@@ -590,6 +590,77 @@ func (s *Service) ResendVerificationCode(ctx context.Context, userID string) err
 	// Send email
 	if err := s.emailService.SendVerificationEmail(ctx, user.Email, code); err != nil {
 		return fmt.Errorf("failed to send verification email: %w", err)
+	}
+
+	return nil
+}
+
+// ResendVerificationCodeByEmail generates and sends a new verification code using email (public endpoint)
+// This allows unverified users to request a new code without being logged in
+func (s *Service) ResendVerificationCodeByEmail(ctx context.Context, email string) error {
+	if s.emailService == nil {
+		return AuthError{
+			Code:    "EMAIL_DISABLED",
+			Message: "Email service is not configured",
+		}
+	}
+
+	// Get user by email
+	user, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil || user == nil {
+		// Don't reveal if email exists or not for security
+		return nil
+	}
+
+	// Check if already verified
+	if user.EmailVerified {
+		return AuthError{
+			Code:    "ALREADY_VERIFIED",
+			Message: "Email is already verified",
+		}
+	}
+
+	// Generate new code
+	code, err := s.GenerateVerificationCode(ctx, user.ID)
+	if err != nil {
+		return fmt.Errorf("failed to generate code: %w", err)
+	}
+
+	// Send email
+	if err := s.emailService.SendVerificationEmail(ctx, user.Email, code); err != nil {
+		return fmt.Errorf("failed to send verification email: %w", err)
+	}
+
+	return nil
+}
+
+// VerifyEmailWithCodeByEmail verifies an email using a 6-digit code (public endpoint)
+// This allows unverified users to verify without being logged in
+func (s *Service) VerifyEmailWithCodeByEmail(ctx context.Context, email, code string) error {
+	// Get user by email
+	user, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil || user == nil {
+		return ErrInvalidCredentials
+	}
+
+	// Check if already verified
+	if user.EmailVerified {
+		return AuthError{
+			Code:    "ALREADY_VERIFIED",
+			Message: "Email is already verified",
+		}
+	}
+
+	// Verify the code
+	verified, err := s.repo.VerifyEmailCode(ctx, user.ID, code)
+	if err != nil {
+		return fmt.Errorf("failed to verify code: %w", err)
+	}
+	if !verified {
+		return AuthError{
+			Code:    "INVALID_CODE",
+			Message: "Invalid or expired verification code",
+		}
 	}
 
 	return nil

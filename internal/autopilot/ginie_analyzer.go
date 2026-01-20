@@ -1938,6 +1938,32 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	report.MarketConditions.Sentiment = "Neutral"
 	report.MarketConditions.SentimentVal = 50
 
+	// Technical Indicators (ALWAYS populated for UI display - Story 11.2 fix)
+	rsi14 := g.calculateRSI(klines, 14)
+	rsi7 := g.calculateRSI(klines, 7)
+	ema9 := g.calculateEMA(klines, 9)
+	ema20 := g.calculateEMA(klines, 20)
+	ema50 := g.calculateEMA(klines, 50)
+	macdLine, signalLine, _ := g.calculateMACD(klines)
+	adxValue, plusDI, minusDI := g.calculateADX(klines, 14)
+	vwapValue := g.calculateVWAP(klines, 20)
+
+	report.TechnicalIndicators = &TechnicalIndicatorsSnapshot{
+		RSI14:   rsi14,
+		RSI7:    rsi7,
+		EMA9:    ema9,
+		EMA20:   ema20,
+		EMA50:   ema50,
+		MACD:    macdLine,
+		Signal:  signalLine,
+		ADX:     adxValue,
+		PlusDI:  plusDI,
+		MinusDI: minusDI,
+		ATR:     scan.Volatility.ATR14,
+		VWAP:    vwapValue,
+		Price:   currentPrice,
+	}
+
 	// Signal analysis
 	report.SignalAnalysis = *signals
 
@@ -2461,14 +2487,15 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 		// HARD BLOCK - Return SKIP recommendation immediately
 		adxBlockReport := &GinieDecisionReport{
-			Symbol:             symbol,
-			Timestamp:          time.Now(),
-			ScanStatus:         scan.Status,
-			SelectedMode:       mode,
-			Recommendation:     RecommendationSkip,
-			RecommendationNote: fmt.Sprintf("BLOCKED: No trend detected - ADX %.1f is below %.0f threshold AND +DI=%.1f/-DI=%.1f both below 18 for %s mode. Need ADX>=%.0f OR DI>=18.", trendAnalysis.ADXValue, adxThreshold, trendAnalysis.PlusDI, trendAnalysis.MinusDI, mode, adxThreshold),
-			ConfidenceScore:    0.0,
-			RejectionTracking:  rejectionTracker,
+			Symbol:              symbol,
+			Timestamp:           time.Now(),
+			ScanStatus:          scan.Status,
+			SelectedMode:        mode,
+			Recommendation:      RecommendationSkip,
+			RecommendationNote:  fmt.Sprintf("BLOCKED: No trend detected - ADX %.1f is below %.0f threshold AND +DI=%.1f/-DI=%.1f both below 18 for %s mode. Need ADX>=%.0f OR DI>=18.", trendAnalysis.ADXValue, adxThreshold, trendAnalysis.PlusDI, trendAnalysis.MinusDI, mode, adxThreshold),
+			ConfidenceScore:     0.0,
+			RejectionTracking:   rejectionTracker,
+			TechnicalIndicators: report.TechnicalIndicators, // Copy from main report (Story 11.2)
 		}
 		return adxBlockReport, nil
 	}
@@ -2591,14 +2618,15 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 				// Return report with rejection tracking attached
 				counterTrendReport := &GinieDecisionReport{
-					Symbol:             symbol,
-					Timestamp:          time.Now(),
-					ScanStatus:         scan.Status,
-					SelectedMode:       mode,
-					Recommendation:     RecommendationSkip,
-					RecommendationNote: "Counter-trend trade rejected - missing required reversal signals (RSI extreme zone, ADX weakening, reversal pattern)",
-					ConfidenceScore:    0.0,
-					RejectionTracking:  rejectionTracker,
+					Symbol:              symbol,
+					Timestamp:           time.Now(),
+					ScanStatus:          scan.Status,
+					SelectedMode:        mode,
+					Recommendation:      RecommendationSkip,
+					RecommendationNote:  "Counter-trend trade rejected - missing required reversal signals (RSI extreme zone, ADX weakening, reversal pattern)",
+					ConfidenceScore:     0.0,
+					RejectionTracking:   rejectionTracker,
+					TechnicalIndicators: report.TechnicalIndicators, // Copy from main report (Story 11.2)
 				}
 				return counterTrendReport, nil
 			}
@@ -3778,7 +3806,15 @@ func (g *GinieAnalyzer) calculateRSI(klines []binance.Kline, period int) float64
 	}
 
 	rs := avgGain / avgLoss
-	return 100 - (100 / (1 + rs))
+	rsi := 100 - (100 / (1 + rs))
+
+	// Debug: Log when RSI is at extreme (0 or 100)
+	if rsi < 1 || rsi > 99 {
+		log.Printf("[RSI-DEBUG] RSI=%.2f, period=%d, klines=%d, gains=%.6f, losses=%.6f, avgGain=%.6f, avgLoss=%.6f, rs=%.6f",
+			rsi, period, len(klines), gains, losses, avgGain, avgLoss, rs)
+	}
+
+	return rsi
 }
 
 func (g *GinieAnalyzer) calculateStochRSI(klines []binance.Kline, rsiPeriod, kPeriod, dPeriod int) float64 {

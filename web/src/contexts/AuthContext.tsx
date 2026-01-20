@@ -226,7 +226,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const refreshAuth = useCallback(async () => {
     const { refreshToken } = getStoredTokens();
     if (!refreshToken) {
-      throw new Error('No refresh token');
+      throw new Error('Session expired. Please login again.');
     }
 
     const response = await api.post('/auth/refresh', { refresh_token: refreshToken });

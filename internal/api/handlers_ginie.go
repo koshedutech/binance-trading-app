@@ -2184,6 +2184,23 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 		// Don't fail - database is the source of truth now
 	}
 
+	// Trigger immediate config reload for running autopilot
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userIDStr)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[MODE-CONFIG-UPDATE] Triggered immediate config reload for user %s", userIDStr)
+		}
+	}
+
+	// Broadcast mode config change to frontend via WebSocket for immediate UI update
+	events.BroadcastModeStatus(userIDStr, map[string]interface{}{
+		"event":   "mode_config_update",
+		"mode":    mode,
+		"enabled": config.Enabled,
+	})
+	log.Printf("[MODE-CONFIG-UPDATE] Broadcasted mode config update to user %s", userIDStr)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"mode":    mode,
@@ -2250,11 +2267,28 @@ func (s *Server) handleToggleModeEnabled(c *gin.Context) {
 		}
 	}
 
+	// Trigger immediate config reload for running autopilot
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userIDStr)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[MODE-TOGGLE] Triggered immediate config reload for user %s", userIDStr)
+		}
+	}
+
+	// Broadcast mode status change to frontend via WebSocket for immediate UI update
+	events.BroadcastModeStatus(userIDStr, map[string]interface{}{
+		"event":   "mode_toggle",
+		"mode":    mode,
+		"enabled": req.Enabled,
+	})
+	log.Printf("[MODE-TOGGLE] Broadcasted mode status change to user %s", userIDStr)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"mode":    mode,
 		"enabled": req.Enabled,
-		"message": "Mode toggled - takes effect on next scan cycle",
+		"message": "Mode toggled - takes effect immediately",
 	})
 }
 
@@ -2285,6 +2319,22 @@ func (s *Server) handleResetModeConfigs(c *gin.Context) {
 			log.Printf("[MODE-CONFIG] All mode caches invalidated for user %s", userID)
 		}
 	}
+
+	// Trigger immediate config reload for running autopilot
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[MODE-CONFIG-RESET] Triggered immediate config reload for user %s", userID)
+		}
+	}
+
+	// Broadcast mode status change to frontend via WebSocket for immediate UI update
+	events.BroadcastModeStatus(userID, map[string]interface{}{
+		"event": "modes_reset",
+		"modes": []string{"ultra_fast", "scalp", "swing", "position"},
+	})
+	log.Printf("[MODE-CONFIG-RESET] Broadcasted mode reset to user %s", userID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

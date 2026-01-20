@@ -1,10 +1,22 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+
+interface LocationState {
+  email?: string;
+  needsVerification?: boolean;
+}
 
 export default function VerifyEmail() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const locationState = location.state as LocationState | null;
+
+  // Get email from either logged-in user or location state (from login redirect)
+  const email = user?.email || locationState?.email || '';
+  const isPublicMode = !user && !!locationState?.email;
+
   const [code, setCode] = useState(['', '', '', '', '', '']);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -13,29 +25,48 @@ export default function VerifyEmail() {
   const [initialSendDone, setInitialSendDone] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
-  // Redirect if already verified
+  // Redirect if already verified (only for logged-in users)
   useEffect(() => {
     if (user?.email_verified) {
       navigate('/');
     }
   }, [user, navigate]);
 
+  // Redirect to login if no email available
+  useEffect(() => {
+    if (!email) {
+      navigate('/login');
+    }
+  }, [email, navigate]);
+
   // Auto-send verification code on page load (only once)
   useEffect(() => {
     const sendInitialCode = async () => {
-      if (initialSendDone || !user || user.email_verified) return;
+      if (initialSendDone || !email) return;
+      if (user?.email_verified) return;
 
       setInitialSendDone(true);
       setLoading(true);
 
       try {
-        const response = await fetch('/api/auth/resend-verification', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
-          },
-        });
+        let response;
+        if (isPublicMode) {
+          // Use public endpoint for users who failed login
+          response = await fetch('/api/auth/public/resend-verification', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email }),
+          });
+        } else {
+          // Use protected endpoint for logged-in users
+          response = await fetch('/api/auth/resend-verification', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+            },
+          });
+        }
 
         const data = await response.json();
 
@@ -43,7 +74,6 @@ export default function VerifyEmail() {
           setSuccessMessage('Verification code sent to your email!');
           setResendCooldown(60);
         } else if (data.error !== 'ALREADY_VERIFIED') {
-          // Only show error if it's not "already verified"
           console.log('Initial verification send:', data.message || 'Code sent');
         }
       } catch (err) {
@@ -54,7 +84,7 @@ export default function VerifyEmail() {
     };
 
     sendInitialCode();
-  }, [user, initialSendDone]);
+  }, [email, user, initialSendDone, isPublicMode]);
 
   // Handle resend cooldown timer
   useEffect(() => {
@@ -67,7 +97,6 @@ export default function VerifyEmail() {
   }, [resendCooldown]);
 
   const handleChange = (index: number, value: string) => {
-    // Only allow single digit
     const digit = value.replace(/[^0-9]/g, '').slice(0, 1);
 
     const newCode = [...code];
@@ -75,12 +104,10 @@ export default function VerifyEmail() {
     setCode(newCode);
     setError('');
 
-    // Auto-focus next input
     if (digit && index < 5) {
       inputRefs.current[index + 1]?.focus();
     }
 
-    // Auto-submit when all 6 digits are entered
     if (index === 5 && digit) {
       const fullCode = newCode.join('');
       if (fullCode.length === 6) {
@@ -90,18 +117,13 @@ export default function VerifyEmail() {
   };
 
   const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    // Handle backspace
     if (e.key === 'Backspace') {
       if (!code[index] && index > 0) {
         inputRefs.current[index - 1]?.focus();
       }
-    }
-    // Handle left arrow
-    else if (e.key === 'ArrowLeft' && index > 0) {
+    } else if (e.key === 'ArrowLeft' && index > 0) {
       inputRefs.current[index - 1]?.focus();
-    }
-    // Handle right arrow
-    else if (e.key === 'ArrowRight' && index < 5) {
+    } else if (e.key === 'ArrowRight' && index < 5) {
       inputRefs.current[index + 1]?.focus();
     }
   };
@@ -118,11 +140,9 @@ export default function VerifyEmail() {
     setCode(newCode);
     setError('');
 
-    // Focus the next empty input or the last input
     const nextIndex = Math.min(pastedData.length, 5);
     inputRefs.current[nextIndex]?.focus();
 
-    // Auto-submit if 6 digits pasted
     if (pastedData.length === 6) {
       handleSubmit(pastedData);
     }
@@ -140,14 +160,25 @@ export default function VerifyEmail() {
     setError('');
 
     try {
-      const response = await fetch('/api/auth/verify-email', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
-        },
-        body: JSON.stringify({ code: verificationCode }),
-      });
+      let response;
+      if (isPublicMode) {
+        // Use public endpoint for users who failed login
+        response = await fetch('/api/auth/public/verify-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, code: verificationCode }),
+        });
+      } else {
+        // Use protected endpoint for logged-in users
+        response = await fetch('/api/auth/verify-email', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+          },
+          body: JSON.stringify({ code: verificationCode }),
+        });
+      }
 
       const data = await response.json();
 
@@ -155,10 +186,16 @@ export default function VerifyEmail() {
         throw new Error(data.message || 'Verification failed');
       }
 
-      setSuccessMessage('Email verified successfully! Redirecting...');
+      setSuccessMessage('Email verified successfully! Redirecting to login...');
       setTimeout(() => {
-        navigate('/');
-        window.location.reload(); // Reload to update user context
+        if (isPublicMode) {
+          // Redirect to login page for public mode users
+          navigate('/login', { state: { message: 'Email verified! Please login.' } });
+        } else {
+          // Reload for logged-in users to update context
+          navigate('/');
+          window.location.reload();
+        }
       }, 1500);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Verification failed');
@@ -177,13 +214,22 @@ export default function VerifyEmail() {
     setSuccessMessage('');
 
     try {
-      const response = await fetch('/api/auth/resend-verification', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
-        },
-      });
+      let response;
+      if (isPublicMode) {
+        response = await fetch('/api/auth/public/resend-verification', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+      } else {
+        response = await fetch('/api/auth/resend-verification', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+          },
+        });
+      }
 
       const data = await response.json();
 
@@ -202,10 +248,14 @@ export default function VerifyEmail() {
     }
   };
 
+  if (!email) {
+    return null; // Will redirect via useEffect
+  }
+
   return (
-    <div className="min-h-screen bg-dark-900 flex items-center justify-center px-4">
+    <div className="min-h-screen bg-gray-900 flex items-center justify-center px-4">
       <div className="max-w-md w-full">
-        <div className="bg-dark-800 rounded-lg border border-dark-700 p-8">
+        <div className="bg-gray-800 rounded-lg border border-gray-700 p-8">
           <div className="text-center mb-8">
             <div className="mx-auto w-16 h-16 bg-indigo-600 rounded-full flex items-center justify-center mb-4">
               <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -215,7 +265,7 @@ export default function VerifyEmail() {
             <h2 className="text-2xl font-bold text-white mb-2">Verify Your Email</h2>
             <p className="text-gray-400">
               We've sent a 6-digit verification code to<br />
-              <span className="text-indigo-400 font-medium">{user?.email}</span>
+              <span className="text-indigo-400 font-medium">{email}</span>
             </p>
           </div>
 
@@ -233,7 +283,7 @@ export default function VerifyEmail() {
                   onChange={(e) => handleChange(index, e.target.value)}
                   onKeyDown={(e) => handleKeyDown(index, e)}
                   onPaste={index === 0 ? handlePaste : undefined}
-                  className="w-12 h-14 text-center text-2xl font-bold bg-dark-700 border-2 border-dark-600 rounded-lg text-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-colors"
+                  className="w-12 h-14 text-center text-2xl font-bold bg-gray-700 border-2 border-gray-600 rounded-lg text-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-colors"
                   disabled={loading}
                   autoFocus={index === 0}
                 />
@@ -272,7 +322,7 @@ export default function VerifyEmail() {
               </button>
             </div>
 
-            {/* Manual submit button (optional) */}
+            {/* Manual submit button */}
             <button
               onClick={() => handleSubmit()}
               disabled={loading || code.join('').length !== 6}
@@ -282,10 +332,15 @@ export default function VerifyEmail() {
             </button>
           </div>
 
-          <div className="mt-6 text-center">
+          <div className="mt-6 text-center space-y-2">
             <p className="text-gray-500 text-xs">
               The code will expire in 15 minutes
             </p>
+            {isPublicMode && (
+              <Link to="/login" className="text-indigo-400 hover:text-indigo-300 text-sm">
+                Back to Login
+              </Link>
+            )}
           </div>
         </div>
       </div>

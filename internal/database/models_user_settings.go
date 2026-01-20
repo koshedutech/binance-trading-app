@@ -486,3 +486,416 @@ func DefaultUserModeCBStats(userID, modeName string) *UserModeCBStats {
 		LastDayReset:      now,
 	}
 }
+
+// ====== POSITION MANAGEMENT SETTINGS ======
+
+// UserPositionManagement represents per-user position management configuration
+// Story 10.1: Position Decision Configuration
+type UserPositionManagement struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+
+	// Decision Mode: "classic" or "new_engine"
+	DecisionMode string `json:"decision_mode"`
+
+	// Classic Decision Engine Settings
+	ClassicADXReversalThreshold  float64 `json:"classic_adx_reversal_threshold"`
+	ClassicEMAReversalPeriods    []int   `json:"classic_ema_reversal_periods"`
+	ClassicRSIOverbought         float64 `json:"classic_rsi_overbought"`
+	ClassicRSIOversold           float64 `json:"classic_rsi_oversold"`
+	ClassicReversalConfirmations int     `json:"classic_reversal_confirmations"`
+
+	// New Engine Settings
+	NewEngineUseActiveStrategy    bool   `json:"new_engine_use_active_strategy"`
+	NewEngineStrategyName         string `json:"new_engine_strategy_name"`
+	NewEngineUseStrategyExitRules bool   `json:"new_engine_use_strategy_exit_rules"`
+	NewEngineExitOnRegimeChange   bool   `json:"new_engine_exit_on_regime_change"`
+
+	// Efficiency Exit Settings
+	EfficiencyExitEnabled                    bool `json:"efficiency_exit_enabled"`
+	EfficiencyExitHistoricalWindowHours      int  `json:"efficiency_exit_historical_window_hours"`
+	EfficiencyExitMinimumHoldMinutes         int  `json:"efficiency_exit_minimum_hold_minutes"`
+	EfficiencyExitConsecutiveSignalsRequired int  `json:"efficiency_exit_consecutive_signals_required"`
+
+	// Dynamic SL/TP Settings
+	DynamicSLTPEnabled        bool    `json:"dynamic_sltp_enabled"`
+	DynamicSLTPSLATRMultiplier float64 `json:"dynamic_sltp_sl_atr_multiplier"`
+	DynamicSLTPTPATRMultiplier float64 `json:"dynamic_sltp_tp_atr_multiplier"`
+	DynamicSLTPUpdateOnBinance bool    `json:"dynamic_sltp_update_on_binance"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// DefaultUserPositionManagement returns default position management settings
+// Values match default-settings.json -> position_management section
+func DefaultUserPositionManagement() *UserPositionManagement {
+	return &UserPositionManagement{
+		DecisionMode:                             "classic",
+		ClassicADXReversalThreshold:              20,
+		ClassicEMAReversalPeriods:                []int{9, 21},
+		ClassicRSIOverbought:                     70,
+		ClassicRSIOversold:                       30,
+		ClassicReversalConfirmations:             2,
+		NewEngineUseActiveStrategy:               true,
+		NewEngineStrategyName:                    "",
+		NewEngineUseStrategyExitRules:            true,
+		NewEngineExitOnRegimeChange:              true,
+		EfficiencyExitEnabled:                    true,
+		EfficiencyExitHistoricalWindowHours:      6,
+		EfficiencyExitMinimumHoldMinutes:         2,
+		EfficiencyExitConsecutiveSignalsRequired: 3,
+		DynamicSLTPEnabled:                       true,
+		DynamicSLTPSLATRMultiplier:               1.5,
+		DynamicSLTPTPATRMultiplier:               3.0,
+		DynamicSLTPUpdateOnBinance:               true,
+	}
+}
+
+// ====== MODE-STRATEGY CONFIGURATION (Story 11.28) ======
+// New hierarchical structure: modes.{mode}.strategies.{strategy}
+// Each mode has 4 strategies with independent settings.
+// This replaces the flat mode_configs structure.
+
+// ModeStrategyConfig represents a complete strategy configuration within a mode
+// Path: modes.{mode}.strategies.{strategy}
+type ModeStrategyConfig struct {
+	// Strategy identification
+	Enabled          bool     `json:"enabled"`
+	Priority         int      `json:"priority"`
+	SupportedRegimes []string `json:"supported_regimes"`
+
+	// Position sizing
+	Leverage     int     `json:"leverage"`
+	MaxPositions int     `json:"max_positions"`
+	BaseSizeUSD  float64 `json:"base_size_usd"`
+
+	// Timeframes
+	Timeframe StrategyTimeframe `json:"timeframe"`
+
+	// SL/TP configuration
+	SLTP StrategySLTP `json:"sltp"`
+
+	// Confidence thresholds
+	Confidence StrategyConfidence `json:"confidence"`
+
+	// Entry conditions (strategy-specific)
+	EntryConditions map[string]interface{} `json:"entry_conditions"`
+
+	// Exit conditions
+	ExitConditions StrategyExitConditions `json:"exit_conditions"`
+
+	// Scoring weights
+	Scoring StrategyScoring `json:"scoring"`
+}
+
+// StrategyTimeframe contains timeframe settings for a strategy
+type StrategyTimeframe struct {
+	TrendTimeframe    string `json:"trend_timeframe"`
+	EntryTimeframe    string `json:"entry_timeframe"`
+	AnalysisTimeframe string `json:"analysis_timeframe"`
+}
+
+// StrategySLTP contains stop-loss and take-profit settings
+type StrategySLTP struct {
+	SLPercent              float64 `json:"sl_percent"`
+	TP1Percent             float64 `json:"tp1_percent"`
+	TP2Percent             float64 `json:"tp2_percent"`
+	TP3Percent             float64 `json:"tp3_percent"`
+	TrailingEnabled        bool    `json:"trailing_enabled"`
+	TrailingActivationPct  float64 `json:"trailing_activation_pct"`
+	TrailingStopPct        float64 `json:"trailing_stop_pct"`
+}
+
+// StrategyConfidence contains confidence thresholds
+type StrategyConfidence struct {
+	MinConfidence   int `json:"min_confidence"`
+	HighConfidence  int `json:"high_confidence"`
+	UltraConfidence int `json:"ultra_confidence"`
+}
+
+// StrategyExitConditions contains exit rule settings
+type StrategyExitConditions struct {
+	UseAIExit           bool `json:"use_ai_exit,omitempty"`
+	ExitAtMean          bool `json:"exit_at_mean,omitempty"`
+	ExitAtRangeBoundary bool `json:"exit_at_range_boundary,omitempty"`
+	MaxHoldMinutes      int  `json:"max_hold_minutes"`
+	EarlyWarningEnabled bool `json:"early_warning_enabled"`
+}
+
+// StrategyScoring contains scoring weight configuration
+type StrategyScoring struct {
+	TechnicalWeight int `json:"technical_weight"`
+	MomentumWeight  int `json:"momentum_weight"`
+	VolumeWeight    int `json:"volume_weight"`
+	SentimentWeight int `json:"sentiment_weight"`
+}
+
+// ModeConfig represents a complete mode configuration with all strategies
+// Path: modes.{mode}
+type ModeConfig struct {
+	Name               string                        `json:"name"`
+	Enabled            bool                          `json:"enabled"`
+	DefaultStrategy    string                        `json:"default_strategy"`
+	AutoSelectStrategy bool                          `json:"auto_select_strategy"`
+	Strategies         map[string]ModeStrategyConfig `json:"strategies"`
+}
+
+// ModesConfig is the top-level container for all modes
+// Path: modes
+type ModesConfig struct {
+	Description string                `json:"_description,omitempty"`
+	Version     string                `json:"_version,omitempty"`
+	Scalp       ModeConfig            `json:"scalp"`
+	Swing       ModeConfig            `json:"swing"`
+	Position    ModeConfig            `json:"position"`
+	UltraFast   ModeConfig            `json:"ultra_fast"`
+}
+
+// DefaultModeStrategyConfig returns default strategy config for a given mode and strategy
+func DefaultModeStrategyConfig(modeName, strategyName string) *ModeStrategyConfig {
+	// Base configuration that varies by mode and strategy
+	configs := map[string]map[string]*ModeStrategyConfig{
+		"scalp": {
+			"trend_following": {
+				Enabled:          true,
+				Priority:         1,
+				SupportedRegimes: []string{"TRENDING", "VOLATILE_TRENDING"},
+				Leverage:         10,
+				MaxPositions:     10,
+				BaseSizeUSD:      200,
+				Timeframe: StrategyTimeframe{
+					TrendTimeframe:    "15m",
+					EntryTimeframe:    "5m",
+					AnalysisTimeframe: "15m",
+				},
+				SLTP: StrategySLTP{
+					SLPercent:              2.0,
+					TP1Percent:             0.5,
+					TP2Percent:             1.0,
+					TP3Percent:             1.5,
+					TrailingEnabled:        true,
+					TrailingActivationPct:  0.5,
+					TrailingStopPct:        0.3,
+				},
+				Confidence: StrategyConfidence{
+					MinConfidence:   55,
+					HighConfidence:  75,
+					UltraConfidence: 85,
+				},
+				ExitConditions: StrategyExitConditions{
+					UseAIExit:           true,
+					MaxHoldMinutes:      240,
+					EarlyWarningEnabled: true,
+				},
+				Scoring: StrategyScoring{
+					TechnicalWeight: 40,
+					MomentumWeight:  30,
+					VolumeWeight:    15,
+					SentimentWeight: 15,
+				},
+			},
+			"mean_reversion": {
+				Enabled:          false,
+				Priority:         2,
+				SupportedRegimes: []string{"RANGING", "MEAN_REVERTING"},
+				Leverage:         8,
+				MaxPositions:     8,
+				BaseSizeUSD:      150,
+				Timeframe: StrategyTimeframe{
+					TrendTimeframe:    "15m",
+					EntryTimeframe:    "5m",
+					AnalysisTimeframe: "1h",
+				},
+				SLTP: StrategySLTP{
+					SLPercent:  1.5,
+					TP1Percent: 0.3,
+					TP2Percent: 0.6,
+					TP3Percent: 1.0,
+				},
+				Confidence: StrategyConfidence{
+					MinConfidence:   60,
+					HighConfidence:  80,
+					UltraConfidence: 90,
+				},
+				ExitConditions: StrategyExitConditions{
+					ExitAtMean:          true,
+					MaxHoldMinutes:      120,
+					EarlyWarningEnabled: true,
+				},
+				Scoring: StrategyScoring{
+					TechnicalWeight: 50,
+					MomentumWeight:  20,
+					VolumeWeight:    20,
+					SentimentWeight: 10,
+				},
+			},
+			"breakout": {
+				Enabled:          false,
+				Priority:         3,
+				SupportedRegimes: []string{"BREAKOUT", "VOLATILE_TRENDING"},
+				Leverage:         10,
+				MaxPositions:     6,
+				BaseSizeUSD:      200,
+				Timeframe: StrategyTimeframe{
+					TrendTimeframe:    "15m",
+					EntryTimeframe:    "5m",
+					AnalysisTimeframe: "1h",
+				},
+				SLTP: StrategySLTP{
+					SLPercent:              1.5,
+					TP1Percent:             0.8,
+					TP2Percent:             1.5,
+					TP3Percent:             2.5,
+					TrailingEnabled:        true,
+					TrailingActivationPct:  0.8,
+					TrailingStopPct:        0.4,
+				},
+				Confidence: StrategyConfidence{
+					MinConfidence:   65,
+					HighConfidence:  80,
+					UltraConfidence: 90,
+				},
+				ExitConditions: StrategyExitConditions{
+					UseAIExit:           true,
+					MaxHoldMinutes:      180,
+					EarlyWarningEnabled: true,
+				},
+				Scoring: StrategyScoring{
+					TechnicalWeight: 35,
+					MomentumWeight:  35,
+					VolumeWeight:    20,
+					SentimentWeight: 10,
+				},
+			},
+			"range_trading": {
+				Enabled:          false,
+				Priority:         4,
+				SupportedRegimes: []string{"RANGING", "LOW_VOLATILITY"},
+				Leverage:         6,
+				MaxPositions:     5,
+				BaseSizeUSD:      100,
+				Timeframe: StrategyTimeframe{
+					TrendTimeframe:    "1h",
+					EntryTimeframe:    "15m",
+					AnalysisTimeframe: "4h",
+				},
+				SLTP: StrategySLTP{
+					SLPercent:  1.0,
+					TP1Percent: 0.3,
+					TP2Percent: 0.5,
+					TP3Percent: 0.8,
+				},
+				Confidence: StrategyConfidence{
+					MinConfidence:   55,
+					HighConfidence:  70,
+					UltraConfidence: 85,
+				},
+				ExitConditions: StrategyExitConditions{
+					ExitAtRangeBoundary: true,
+					MaxHoldMinutes:      360,
+					EarlyWarningEnabled: false,
+				},
+				Scoring: StrategyScoring{
+					TechnicalWeight: 45,
+					MomentumWeight:  15,
+					VolumeWeight:    25,
+					SentimentWeight: 15,
+				},
+			},
+		},
+	}
+
+	// Return the config if it exists, otherwise return a default
+	if modeConfigs, ok := configs[modeName]; ok {
+		if config, ok := modeConfigs[strategyName]; ok {
+			return config
+		}
+	}
+
+	// Return a minimal default config
+	return &ModeStrategyConfig{
+		Enabled:          false,
+		Priority:         99,
+		SupportedRegimes: []string{},
+		Leverage:         5,
+		MaxPositions:     1,
+		BaseSizeUSD:      100,
+		Timeframe: StrategyTimeframe{
+			TrendTimeframe:    "1h",
+			EntryTimeframe:    "15m",
+			AnalysisTimeframe: "4h",
+		},
+		SLTP: StrategySLTP{
+			SLPercent:  2.0,
+			TP1Percent: 1.0,
+			TP2Percent: 2.0,
+			TP3Percent: 3.0,
+		},
+		Confidence: StrategyConfidence{
+			MinConfidence:   60,
+			HighConfidence:  80,
+			UltraConfidence: 90,
+		},
+		ExitConditions: StrategyExitConditions{
+			MaxHoldMinutes:      360,
+			EarlyWarningEnabled: true,
+		},
+		Scoring: StrategyScoring{
+			TechnicalWeight: 40,
+			MomentumWeight:  30,
+			VolumeWeight:    15,
+			SentimentWeight: 15,
+		},
+	}
+}
+
+// GetStrategyConfig returns the strategy config for a given mode and strategy name
+// Returns nil if the mode or strategy doesn't exist
+func (m *ModesConfig) GetStrategyConfig(modeName, strategyName string) *ModeStrategyConfig {
+	var modeConfig *ModeConfig
+
+	switch modeName {
+	case "scalp":
+		modeConfig = &m.Scalp
+	case "swing":
+		modeConfig = &m.Swing
+	case "position":
+		modeConfig = &m.Position
+	case "ultra_fast":
+		modeConfig = &m.UltraFast
+	default:
+		return nil
+	}
+
+	if config, ok := modeConfig.Strategies[strategyName]; ok {
+		return &config
+	}
+	return nil
+}
+
+// GetModeConfig returns the mode configuration by name
+func (m *ModesConfig) GetModeConfig(modeName string) *ModeConfig {
+	switch modeName {
+	case "scalp":
+		return &m.Scalp
+	case "swing":
+		return &m.Swing
+	case "position":
+		return &m.Position
+	case "ultra_fast":
+		return &m.UltraFast
+	default:
+		return nil
+	}
+}
+
+// ValidModes returns the list of valid trading mode names
+func ValidModes() []string {
+	return []string{"scalp", "swing", "position", "ultra_fast"}
+}
+
+// ValidStrategies returns the list of valid strategy names
+func ValidStrategies() []string {
+	return []string{"trend_following", "mean_reversion", "breakout", "range_trading"}
+}

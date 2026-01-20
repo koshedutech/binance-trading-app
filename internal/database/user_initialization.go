@@ -226,8 +226,17 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 		log.Printf("[USER-INIT] Initialized global trading for user %s (timezone: %s)", userID, DefaultUserGlobalTrading().Timezone)
 	}
 
+	// ===== 11. Initialize Position Management Settings =====
+	// Position management config for decision mode (classic/new_engine), efficiency exit, and dynamic SL/TP
+	// Uses defaults from default-settings.json -> position_management section
+	if err := r.InitializeUserPositionManagement(ctx, userID); err != nil {
+		log.Printf("[USER-INIT] Warning: Failed to initialize position management: %v", err)
+	} else {
+		log.Printf("[USER-INIT] Initialized position management for user %s (decision_mode: %s)", userID, DefaultUserPositionManagement().DecisionMode)
+	}
+
 	// ===== Summary =====
-	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, and global trading",
+	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, and position management",
 		userID, modesInitialized, modesStatsInitialized)
 
 	return nil
@@ -432,7 +441,15 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 		log.Printf("[USER-RESTORE] Restored global trading for user %s (timezone: %s)", userID, DefaultUserGlobalTrading().Timezone)
 	}
 
-	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, and global trading",
+	// ===== 11. Restore Position Management Settings =====
+	// Reset to defaults from default-settings.json -> position_management section
+	if err := r.InitializeUserPositionManagement(ctx, userID); err != nil {
+		log.Printf("[USER-RESTORE] Warning: Failed to restore position management: %v", err)
+	} else {
+		log.Printf("[USER-RESTORE] Restored position management for user %s (decision_mode: %s)", userID, DefaultUserPositionManagement().DecisionMode)
+	}
+
+	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, and position management",
 		userID, modesRestored, modesStatsRestored)
 
 	return nil

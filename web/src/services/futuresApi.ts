@@ -21,6 +21,12 @@ import type {
   FuturesTradingMetrics,
   TradeSourceStats,
 } from '../types/futures';
+import type {
+  PositionAnalyticsSummary,
+  EfficiencyTimelineResponse,
+  TradeDistributionResponse,
+  TimeRange,
+} from '../types/positionAnalytics';
 
 // Token storage keys
 const ACCESS_TOKEN_KEY = 'access_token';
@@ -2408,6 +2414,66 @@ class FuturesAPIService {
       },
     });
     return data;
+  }
+
+  // ==================== POSITION ANALYTICS (Story 10.2) ====================
+
+  /**
+   * Get position analytics summary
+   * Story 10.2: Position Analytics Dashboard
+   */
+  async getPositionAnalyticsSummary(range: TimeRange = '7d'): Promise<PositionAnalyticsSummary> {
+    const { data } = await this.client.get('/position-analytics/summary', {
+      params: { range }
+    });
+    if (data.success && data.data) {
+      return data.data;
+    }
+    throw new Error(data.error || 'Failed to get analytics summary');
+  }
+
+  /**
+   * Get efficiency timeline data
+   * Story 10.2: Position Analytics Dashboard
+   */
+  async getEfficiencyTimeline(range: TimeRange = '7d'): Promise<EfficiencyTimelineResponse> {
+    const { data } = await this.client.get('/position-analytics/efficiency-timeline', {
+      params: { range }
+    });
+    if (data.success && data.data) {
+      return data.data;
+    }
+    throw new Error(data.error || 'Failed to get efficiency timeline');
+  }
+
+  /**
+   * Get trade distribution data
+   * Story 10.2: Position Analytics Dashboard
+   */
+  async getTradeDistribution(range: TimeRange = '7d'): Promise<TradeDistributionResponse> {
+    const { data } = await this.client.get('/position-analytics/distribution', {
+      params: { range }
+    });
+    if (data.success && data.data) {
+      return data.data;
+    }
+    throw new Error(data.error || 'Failed to get trade distribution');
+  }
+
+  /**
+   * Export position analytics data
+   * Story 10.2: Position Analytics Dashboard
+   */
+  async exportPositionAnalytics(format: 'csv' | 'json', range: string = '7d', mode?: string): Promise<Blob> {
+    const params: Record<string, string> = { format, range };
+    if (mode) {
+      params.mode = mode;
+    }
+    const response = await this.client.get('/position-analytics/export', {
+      params,
+      responseType: 'blob'
+    });
+    return response.data;
   }
 
   // ==================== ORDER MODIFICATION HISTORY (Story 7.13) ====================

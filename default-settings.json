@@ -1110,6 +1110,743 @@
         "allow_hedge_chains": false,
         "max_hedge_chain_depth": 2
       }
+    },
+    "_deprecation_notice": "DEPRECATED: mode_configs is deprecated. Use 'modes' section below for strategy-specific settings. mode_configs will be removed in v2.0.0."
+  },
+  "modes": {
+    "_description": "Mode-Strategy settings matrix. Each mode has multiple strategies with independent configurations.",
+    "_version": "1.0.0",
+    "scalp": {
+      "name": "scalp",
+      "enabled": true,
+      "default_strategy": "trend_following",
+      "auto_select_strategy": false,
+      "strategies": {
+        "trend_following": {
+          "enabled": true,
+          "priority": 1,
+          "supported_regimes": ["TRENDING", "VOLATILE_TRENDING"],
+          "leverage": 10,
+          "max_positions": 10,
+          "base_size_usd": 200,
+          "timeframe": {
+            "trend_timeframe": "15m",
+            "entry_timeframe": "5m",
+            "analysis_timeframe": "15m"
+          },
+          "sltp": {
+            "sl_percent": 2.0,
+            "tp1_percent": 0.5,
+            "tp2_percent": 1.0,
+            "tp3_percent": 1.5,
+            "trailing_enabled": true,
+            "trailing_activation_pct": 0.5,
+            "trailing_stop_pct": 0.3
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 75,
+            "ultra_confidence": 85
+          },
+          "entry_conditions": {
+            "adx_min": 15,
+            "require_trend_align": true,
+            "min_volume_multiplier": 1.0
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 240,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 40,
+            "momentum_weight": 30,
+            "volume_weight": 15,
+            "sentiment_weight": 15
+          }
+        },
+        "mean_reversion": {
+          "enabled": false,
+          "priority": 2,
+          "supported_regimes": ["RANGING", "MEAN_REVERTING"],
+          "leverage": 8,
+          "max_positions": 8,
+          "base_size_usd": 150,
+          "timeframe": {
+            "trend_timeframe": "15m",
+            "entry_timeframe": "5m",
+            "analysis_timeframe": "1h"
+          },
+          "sltp": {
+            "sl_percent": 1.5,
+            "tp1_percent": 0.3,
+            "tp2_percent": 0.6,
+            "tp3_percent": 1.0,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 60,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "rsi_oversold": 30,
+            "rsi_overbought": 70,
+            "bollinger_std": 2.0,
+            "require_price_at_band": true
+          },
+          "exit_conditions": {
+            "exit_at_mean": true,
+            "max_hold_minutes": 120,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 50,
+            "momentum_weight": 20,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "breakout": {
+          "enabled": false,
+          "priority": 3,
+          "supported_regimes": ["BREAKOUT", "VOLATILE_TRENDING"],
+          "leverage": 10,
+          "max_positions": 6,
+          "base_size_usd": 200,
+          "timeframe": {
+            "trend_timeframe": "15m",
+            "entry_timeframe": "5m",
+            "analysis_timeframe": "1h"
+          },
+          "sltp": {
+            "sl_percent": 1.5,
+            "tp1_percent": 0.8,
+            "tp2_percent": 1.5,
+            "tp3_percent": 2.5,
+            "trailing_enabled": true,
+            "trailing_activation_pct": 0.8,
+            "trailing_stop_pct": 0.4
+          },
+          "confidence": {
+            "min_confidence": 65,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "breakout_atr_multiplier": 1.5,
+            "volume_spike_multiplier": 2.0,
+            "require_consolidation": true,
+            "consolidation_bars": 10
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 180,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 35,
+            "momentum_weight": 35,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "range_trading": {
+          "enabled": false,
+          "priority": 4,
+          "supported_regimes": ["RANGING", "LOW_VOLATILITY"],
+          "leverage": 6,
+          "max_positions": 5,
+          "base_size_usd": 100,
+          "timeframe": {
+            "trend_timeframe": "1h",
+            "entry_timeframe": "15m",
+            "analysis_timeframe": "4h"
+          },
+          "sltp": {
+            "sl_percent": 1.0,
+            "tp1_percent": 0.3,
+            "tp2_percent": 0.5,
+            "tp3_percent": 0.8,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 70,
+            "ultra_confidence": 85
+          },
+          "entry_conditions": {
+            "range_high_touch": true,
+            "range_low_touch": true,
+            "range_width_atr": 2.0,
+            "min_range_duration_bars": 20
+          },
+          "exit_conditions": {
+            "exit_at_range_boundary": true,
+            "max_hold_minutes": 360,
+            "early_warning_enabled": false
+          },
+          "scoring": {
+            "technical_weight": 45,
+            "momentum_weight": 15,
+            "volume_weight": 25,
+            "sentiment_weight": 15
+          }
+        }
+      }
+    },
+    "swing": {
+      "name": "swing",
+      "enabled": false,
+      "default_strategy": "trend_following",
+      "auto_select_strategy": false,
+      "strategies": {
+        "trend_following": {
+          "enabled": true,
+          "priority": 1,
+          "supported_regimes": ["TRENDING", "VOLATILE_TRENDING"],
+          "leverage": 10,
+          "max_positions": 5,
+          "base_size_usd": 300,
+          "timeframe": {
+            "trend_timeframe": "1h",
+            "entry_timeframe": "15m",
+            "analysis_timeframe": "4h"
+          },
+          "sltp": {
+            "sl_percent": 2.0,
+            "tp1_percent": 1.0,
+            "tp2_percent": 2.0,
+            "tp3_percent": 3.0,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "adx_min": 25,
+            "require_trend_align": true,
+            "min_volume_multiplier": 1.2
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 4320,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 40,
+            "momentum_weight": 30,
+            "volume_weight": 15,
+            "sentiment_weight": 15
+          }
+        },
+        "mean_reversion": {
+          "enabled": false,
+          "priority": 2,
+          "supported_regimes": ["RANGING", "MEAN_REVERTING"],
+          "leverage": 8,
+          "max_positions": 4,
+          "base_size_usd": 250,
+          "timeframe": {
+            "trend_timeframe": "1h",
+            "entry_timeframe": "15m",
+            "analysis_timeframe": "4h"
+          },
+          "sltp": {
+            "sl_percent": 2.0,
+            "tp1_percent": 0.5,
+            "tp2_percent": 1.0,
+            "tp3_percent": 1.5,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 60,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "rsi_oversold": 25,
+            "rsi_overbought": 75,
+            "bollinger_std": 2.5,
+            "require_price_at_band": true
+          },
+          "exit_conditions": {
+            "exit_at_mean": true,
+            "max_hold_minutes": 1440,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 50,
+            "momentum_weight": 20,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "breakout": {
+          "enabled": false,
+          "priority": 3,
+          "supported_regimes": ["BREAKOUT", "VOLATILE_TRENDING"],
+          "leverage": 10,
+          "max_positions": 4,
+          "base_size_usd": 300,
+          "timeframe": {
+            "trend_timeframe": "1h",
+            "entry_timeframe": "15m",
+            "analysis_timeframe": "4h"
+          },
+          "sltp": {
+            "sl_percent": 2.0,
+            "tp1_percent": 1.5,
+            "tp2_percent": 2.5,
+            "tp3_percent": 4.0,
+            "trailing_enabled": true,
+            "trailing_activation_pct": 1.5,
+            "trailing_stop_pct": 0.8
+          },
+          "confidence": {
+            "min_confidence": 65,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "breakout_atr_multiplier": 2.0,
+            "volume_spike_multiplier": 2.5,
+            "require_consolidation": true,
+            "consolidation_bars": 20
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 2880,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 35,
+            "momentum_weight": 35,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "range_trading": {
+          "enabled": false,
+          "priority": 4,
+          "supported_regimes": ["RANGING", "LOW_VOLATILITY"],
+          "leverage": 6,
+          "max_positions": 3,
+          "base_size_usd": 200,
+          "timeframe": {
+            "trend_timeframe": "4h",
+            "entry_timeframe": "1h",
+            "analysis_timeframe": "1d"
+          },
+          "sltp": {
+            "sl_percent": 1.5,
+            "tp1_percent": 0.5,
+            "tp2_percent": 1.0,
+            "tp3_percent": 1.5,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 70,
+            "ultra_confidence": 85
+          },
+          "entry_conditions": {
+            "range_high_touch": true,
+            "range_low_touch": true,
+            "range_width_atr": 3.0,
+            "min_range_duration_bars": 30
+          },
+          "exit_conditions": {
+            "exit_at_range_boundary": true,
+            "max_hold_minutes": 1440,
+            "early_warning_enabled": false
+          },
+          "scoring": {
+            "technical_weight": 45,
+            "momentum_weight": 15,
+            "volume_weight": 25,
+            "sentiment_weight": 15
+          }
+        }
+      }
+    },
+    "position": {
+      "name": "position",
+      "enabled": false,
+      "default_strategy": "trend_following",
+      "auto_select_strategy": false,
+      "strategies": {
+        "trend_following": {
+          "enabled": true,
+          "priority": 1,
+          "supported_regimes": ["TRENDING"],
+          "leverage": 3,
+          "max_positions": 2,
+          "base_size_usd": 600,
+          "timeframe": {
+            "trend_timeframe": "4h",
+            "entry_timeframe": "1h",
+            "analysis_timeframe": "1d"
+          },
+          "sltp": {
+            "sl_percent": 3.5,
+            "tp1_percent": 2.0,
+            "tp2_percent": 5.0,
+            "tp3_percent": 8.0,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 85,
+            "ultra_confidence": 92
+          },
+          "entry_conditions": {
+            "adx_min": 25,
+            "require_trend_align": true,
+            "min_volume_multiplier": 1.5
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 30240,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 40,
+            "momentum_weight": 25,
+            "volume_weight": 20,
+            "sentiment_weight": 15
+          }
+        },
+        "mean_reversion": {
+          "enabled": false,
+          "priority": 2,
+          "supported_regimes": ["RANGING", "MEAN_REVERTING"],
+          "leverage": 3,
+          "max_positions": 2,
+          "base_size_usd": 500,
+          "timeframe": {
+            "trend_timeframe": "4h",
+            "entry_timeframe": "1h",
+            "analysis_timeframe": "1d"
+          },
+          "sltp": {
+            "sl_percent": 4.0,
+            "tp1_percent": 1.5,
+            "tp2_percent": 3.0,
+            "tp3_percent": 5.0,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 65,
+            "high_confidence": 85,
+            "ultra_confidence": 92
+          },
+          "entry_conditions": {
+            "rsi_oversold": 20,
+            "rsi_overbought": 80,
+            "bollinger_std": 3.0,
+            "require_price_at_band": true
+          },
+          "exit_conditions": {
+            "exit_at_mean": true,
+            "max_hold_minutes": 10080,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 50,
+            "momentum_weight": 20,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "breakout": {
+          "enabled": false,
+          "priority": 3,
+          "supported_regimes": ["BREAKOUT"],
+          "leverage": 3,
+          "max_positions": 2,
+          "base_size_usd": 600,
+          "timeframe": {
+            "trend_timeframe": "4h",
+            "entry_timeframe": "1h",
+            "analysis_timeframe": "1d"
+          },
+          "sltp": {
+            "sl_percent": 4.0,
+            "tp1_percent": 3.0,
+            "tp2_percent": 6.0,
+            "tp3_percent": 10.0,
+            "trailing_enabled": true,
+            "trailing_activation_pct": 3.0,
+            "trailing_stop_pct": 1.5
+          },
+          "confidence": {
+            "min_confidence": 70,
+            "high_confidence": 85,
+            "ultra_confidence": 92
+          },
+          "entry_conditions": {
+            "breakout_atr_multiplier": 2.5,
+            "volume_spike_multiplier": 3.0,
+            "require_consolidation": true,
+            "consolidation_bars": 50
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 20160,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 35,
+            "momentum_weight": 35,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "range_trading": {
+          "enabled": false,
+          "priority": 4,
+          "supported_regimes": ["RANGING", "LOW_VOLATILITY"],
+          "leverage": 2,
+          "max_positions": 1,
+          "base_size_usd": 400,
+          "timeframe": {
+            "trend_timeframe": "1d",
+            "entry_timeframe": "4h",
+            "analysis_timeframe": "1w"
+          },
+          "sltp": {
+            "sl_percent": 3.0,
+            "tp1_percent": 1.0,
+            "tp2_percent": 2.0,
+            "tp3_percent": 3.0,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 60,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "range_high_touch": true,
+            "range_low_touch": true,
+            "range_width_atr": 4.0,
+            "min_range_duration_bars": 50
+          },
+          "exit_conditions": {
+            "exit_at_range_boundary": true,
+            "max_hold_minutes": 10080,
+            "early_warning_enabled": false
+          },
+          "scoring": {
+            "technical_weight": 45,
+            "momentum_weight": 15,
+            "volume_weight": 25,
+            "sentiment_weight": 15
+          }
+        }
+      }
+    },
+    "ultra_fast": {
+      "name": "ultra_fast",
+      "enabled": false,
+      "default_strategy": "trend_following",
+      "auto_select_strategy": false,
+      "strategies": {
+        "trend_following": {
+          "enabled": true,
+          "priority": 1,
+          "supported_regimes": ["TRENDING", "VOLATILE_TRENDING"],
+          "leverage": 10,
+          "max_positions": 1,
+          "base_size_usd": 200,
+          "timeframe": {
+            "trend_timeframe": "5m",
+            "entry_timeframe": "1m",
+            "analysis_timeframe": "5m"
+          },
+          "sltp": {
+            "sl_percent": 0.5,
+            "tp1_percent": 0.2,
+            "tp2_percent": 0.4,
+            "tp3_percent": 0.8,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "adx_min": 15,
+            "require_trend_align": false,
+            "min_volume_multiplier": 1.5
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 5,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 30,
+            "momentum_weight": 40,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "mean_reversion": {
+          "enabled": false,
+          "priority": 2,
+          "supported_regimes": ["RANGING", "MEAN_REVERTING"],
+          "leverage": 8,
+          "max_positions": 1,
+          "base_size_usd": 150,
+          "timeframe": {
+            "trend_timeframe": "5m",
+            "entry_timeframe": "1m",
+            "analysis_timeframe": "15m"
+          },
+          "sltp": {
+            "sl_percent": 0.4,
+            "tp1_percent": 0.15,
+            "tp2_percent": 0.25,
+            "tp3_percent": 0.4,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 60,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "rsi_oversold": 25,
+            "rsi_overbought": 75,
+            "bollinger_std": 2.0,
+            "require_price_at_band": true
+          },
+          "exit_conditions": {
+            "exit_at_mean": true,
+            "max_hold_minutes": 3,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 50,
+            "momentum_weight": 25,
+            "volume_weight": 15,
+            "sentiment_weight": 10
+          }
+        },
+        "breakout": {
+          "enabled": false,
+          "priority": 3,
+          "supported_regimes": ["BREAKOUT", "VOLATILE_TRENDING"],
+          "leverage": 10,
+          "max_positions": 1,
+          "base_size_usd": 200,
+          "timeframe": {
+            "trend_timeframe": "5m",
+            "entry_timeframe": "1m",
+            "analysis_timeframe": "15m"
+          },
+          "sltp": {
+            "sl_percent": 0.4,
+            "tp1_percent": 0.3,
+            "tp2_percent": 0.6,
+            "tp3_percent": 1.0,
+            "trailing_enabled": true,
+            "trailing_activation_pct": 0.3,
+            "trailing_stop_pct": 0.15
+          },
+          "confidence": {
+            "min_confidence": 65,
+            "high_confidence": 80,
+            "ultra_confidence": 90
+          },
+          "entry_conditions": {
+            "breakout_atr_multiplier": 1.0,
+            "volume_spike_multiplier": 2.5,
+            "require_consolidation": true,
+            "consolidation_bars": 5
+          },
+          "exit_conditions": {
+            "use_ai_exit": true,
+            "max_hold_minutes": 5,
+            "early_warning_enabled": true
+          },
+          "scoring": {
+            "technical_weight": 30,
+            "momentum_weight": 40,
+            "volume_weight": 20,
+            "sentiment_weight": 10
+          }
+        },
+        "range_trading": {
+          "enabled": false,
+          "priority": 4,
+          "supported_regimes": ["RANGING", "LOW_VOLATILITY"],
+          "leverage": 5,
+          "max_positions": 1,
+          "base_size_usd": 100,
+          "timeframe": {
+            "trend_timeframe": "5m",
+            "entry_timeframe": "1m",
+            "analysis_timeframe": "15m"
+          },
+          "sltp": {
+            "sl_percent": 0.3,
+            "tp1_percent": 0.1,
+            "tp2_percent": 0.2,
+            "tp3_percent": 0.3,
+            "trailing_enabled": false,
+            "trailing_activation_pct": 0,
+            "trailing_stop_pct": 0
+          },
+          "confidence": {
+            "min_confidence": 55,
+            "high_confidence": 70,
+            "ultra_confidence": 85
+          },
+          "entry_conditions": {
+            "range_high_touch": true,
+            "range_low_touch": true,
+            "range_width_atr": 1.0,
+            "min_range_duration_bars": 10
+          },
+          "exit_conditions": {
+            "exit_at_range_boundary": true,
+            "max_hold_minutes": 3,
+            "early_warning_enabled": false
+          },
+          "scoring": {
+            "technical_weight": 40,
+            "momentum_weight": 20,
+            "volume_weight": 25,
+            "sentiment_weight": 15
+          }
+        }
+      }
     }
   },
   "position_optimization": {
@@ -1226,6 +1963,34 @@
       "win_rate_sample_size": 30,
       "min_win_rate_threshold": 60,
       "win_rate_cooldown_minutes": 180
+    }
+  },
+  "position_management": {
+    "decision_mode": "classic",
+    "classic": {
+      "adx_reversal_threshold": 20,
+      "ema_reversal_periods": [9, 21],
+      "rsi_overbought": 70,
+      "rsi_oversold": 30,
+      "reversal_confirmations": 2
+    },
+    "new_engine": {
+      "use_active_strategy": true,
+      "strategy_name": "",
+      "use_strategy_exit_rules": true,
+      "exit_on_regime_change": true
+    },
+    "efficiency_exit": {
+      "enabled": true,
+      "historical_window_hours": 6,
+      "minimum_hold_minutes": 2,
+      "consecutive_signals_required": 3
+    },
+    "dynamic_sltp": {
+      "enabled": true,
+      "sl_atr_multiplier": 1.5,
+      "tp_atr_multiplier": 3.0,
+      "update_on_binance": true
     }
   },
   "_settings_risk_index": {

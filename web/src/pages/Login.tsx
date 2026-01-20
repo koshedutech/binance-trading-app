@@ -28,9 +28,18 @@ const Login: React.FC = () => {
       await login({ email, password }, rememberMe);
       navigate(from, { replace: true });
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error
-        ? err.message
-        : (err as { response?: { data?: { message?: string } } })?.response?.data?.message || 'Login failed. Please try again.';
+      // Extract error details from API response
+      const axiosError = err as { response?: { data?: { error?: string; message?: string } } };
+      const errorCode = axiosError?.response?.data?.error;
+      const apiMessage = axiosError?.response?.data?.message;
+
+      // If email not verified, redirect to verification page with email
+      if (errorCode === 'EMAIL_NOT_VERIFIED') {
+        navigate('/verify-email', { state: { email, needsVerification: true } });
+        return;
+      }
+
+      const errorMessage = apiMessage || (err instanceof Error ? err.message : 'Login failed. Please try again.');
       setError(errorMessage);
     } finally {
       setIsLoading(false);

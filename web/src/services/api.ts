@@ -57,8 +57,11 @@ class APIService {
       async (error) => {
         const originalRequest = error.config;
 
-        // Handle 401 Unauthorized
-        if (error.response?.status === 401 && !originalRequest._retry) {
+        // Skip token refresh for auth endpoints - these should return their own clear errors
+        const isAuthEndpoint = originalRequest?.url?.includes('/auth/');
+
+        // Handle 401 Unauthorized (but not for auth endpoints like login/register)
+        if (error.response?.status === 401 && !originalRequest._retry && !isAuthEndpoint) {
           if (this.isRefreshing) {
             // Queue the request while refreshing
             return new Promise((resolve, reject) => {
@@ -75,7 +78,7 @@ class APIService {
           try {
             const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
             if (!refreshToken) {
-              throw new Error('No refresh token');
+              throw new Error('Session expired. Please login again.');
             }
 
             const response = await axios.post('/api/auth/refresh', {
@@ -820,6 +823,158 @@ class APIService {
 
   async syncPaperBalance(): Promise<{ paper_balance_usdt: string; synced_from: string; message: string }> {
     const { data } = await this.client.post('/settings/sync-paper-balance');
+    return data;
+  }
+
+  // ==================== Position Management Endpoints (Story 10.1) ====================
+
+  async getExpandedPositionData(symbol: string): Promise<{
+    success: boolean;
+    position: {
+      symbol: string;
+      side: 'LONG' | 'SHORT';
+      entry_price: number;
+      current_price: number;
+      quantity: number;
+      leverage: number;
+      unrealized_pnl: number;
+      unrealized_pnl_percent: number;
+      roe: number;
+      stage: 'RISK_ZONE' | 'BREAKEVEN' | 'TP1' | 'EFFICIENCY';
+      stage_entry_time: number;
+      stage_progress_percent: number;
+      stop_loss?: number;
+      take_profit?: number;
+      breakeven_price?: number;
+      tp1_price?: number;
+      tp2_price?: number;
+      tp3_price?: number;
+      decision_mode: 'classic' | 'new_engine';
+      efficiency?: {
+        peak_profit: number;
+        current_profit: number;
+        efficiency_percent: number;
+        threshold_percent: number;
+        peak_timestamp: number;
+      };
+      classic_scores?: {
+        adx: number;
+        adx_threshold: number;
+        rsi: number;
+        rsi_state: 'oversold' | 'normal' | 'overbought';
+        reversal_signals: number;
+        reversal_required: number;
+      };
+      new_engine_scores?: {
+        technical: number;
+        context: number;
+        llm: number;
+        history: number;
+        final: number;
+        regime: string;
+        strategy: string;
+      };
+      entry_time: number;
+      last_updated: number;
+    };
+  }> {
+    const { data } = await this.client.get(`/futures/positions/${symbol}/expanded`);
+    return data;
+  }
+
+  // ==================== Exit Decision Monitoring (Story 10.3) ====================
+
+  /**
+   * Get the current exit decision state for a position.
+   * Returns hold safeguards, exit checks, and overall decision.
+   */
+  async getExitDecisionState(symbol: string): Promise<{
+    success: boolean;
+    exit_decision?: {
+      symbol: string;
+      decision_mode: 'classic' | 'new_engine';
+      overall_decision: 'HOLD' | 'EXIT';
+      decision_reason: string;
+      last_check_time: number;
+      hold_safeguards: {
+        min_hold_time: {
+          required_seconds: number;
+          elapsed_seconds: number;
+          met: boolean;
+        };
+        breakeven: {
+          achieved: boolean;
+          achieved_at?: number;
+          be_price?: number;
+        };
+        consecutive_signals: {
+          required: number;
+          current: number;
+        };
+      };
+      exit_checks: Array<{
+        name: string;
+        priority: number;
+        status: 'PASSED' | 'FAILED' | 'PENDING' | 'DISABLED' | 'ACTIVE';
+        would_exit: boolean;
+        trend_reversal_details?: {
+          adx: {
+            value: number;
+            threshold: number;
+            status: string;
+            direction: string;
+          };
+          rsi: {
+            value: number;
+            state: string;
+            overbought: number;
+            oversold: number;
+          };
+          ema_cross: {
+            detected: boolean;
+            type?: string;
+          };
+          reversal_signals: {
+            count: number;
+            required: number;
+          };
+          macd?: {
+            histogram: number;
+            direction: string;
+          };
+        };
+        efficiency_details?: {
+          peak_profit_percent: number;
+          current_profit_percent: number;
+          efficiency_percent: number;
+          threshold_percent: number;
+        };
+        trailing_sl_details?: {
+          active: boolean;
+          sl_price: number;
+          current_price: number;
+          distance_percent?: number;
+        };
+        dynamic_tp_details?: {
+          active: boolean;
+          tp_price?: number;
+          current_price: number;
+          progress_percent?: number;
+        };
+        new_engine_details?: {
+          strategy: string;
+          entry_regime: string;
+          current_regime: string;
+          regime_changed: boolean;
+          technical_score: number;
+          exit_signal: number;
+          strategy_rules?: string[];
+        };
+      }>;
+    };
+    error?: string;
+  }> {
+    const { data } = await this.client.get(`/futures/positions/${symbol}/exit-decision`);
     return data;
   }
 }

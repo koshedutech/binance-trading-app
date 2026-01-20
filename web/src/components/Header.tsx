@@ -114,7 +114,7 @@ export default function Header() {
                 <button
                   onClick={() => setMenuOpen(!menuOpen)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                    menuOpen || ['/strategy-builder', '/visual-strategy-advanced', '/pattern-scanner', '/investigate', '/decision-dashboard'].includes(location.pathname)
+                    menuOpen || ['/strategy-builder', '/visual-strategy-advanced', '/pattern-scanner', '/investigate', '/decision-dashboard', '/position-analytics'].includes(location.pathname)
                       ? 'bg-dark-600 text-white'
                       : 'text-gray-300 hover:bg-dark-700 hover:text-white'
                   }`}
@@ -185,7 +185,19 @@ export default function Header() {
                       }`}
                     >
                       <BarChart3 className="w-4 h-4" />
-                      Analytics Dashboard
+                      Decision Dashboard
+                    </Link>
+                    <Link
+                      to="/position-analytics"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/position-analytics')
+                          ? 'bg-green-600/20 text-green-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <BarChart3 className="w-4 h-4" />
+                      Position Analytics
                     </Link>
                   </div>
                 )}

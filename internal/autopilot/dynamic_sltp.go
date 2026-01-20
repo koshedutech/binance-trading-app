@@ -211,3 +211,300 @@ func clamp(value, min, max float64) float64 {
 func formatPercent(value float64) string {
 	return strconv.FormatFloat(math.Round(value*100)/100, 'f', 2, 64) + "%"
 }
+
+// ==================== STORY 10.1: EFFICIENCY-AWARE DYNAMIC SL/TP ====================
+// These functions calculate adaptive SL/TP levels based on ATR, ADX, profit, and efficiency.
+
+// DynamicLevelConfig holds configuration for efficiency-aware dynamic SL/TP
+type DynamicLevelConfig struct {
+	// SL Configuration
+	MinSLPercent float64 // Floor: 0.3%
+	MaxSLPercent float64 // Cap: 3.0%
+
+	// TP Configuration
+	MinTPPercent float64 // Floor: 1.5%
+	MaxTPPercent float64 // Cap: 8.0%
+
+	// Enabled flags
+	SLEnabled bool
+	TPEnabled bool
+}
+
+// DefaultDynamicLevelConfig returns default configuration for efficiency-aware SL/TP
+func DefaultDynamicLevelConfig() *DynamicLevelConfig {
+	return &DynamicLevelConfig{
+		MinSLPercent: 0.3,
+		MaxSLPercent: 3.0,
+		MinTPPercent: 1.5,
+		MaxTPPercent: 8.0,
+		SLEnabled:    true,
+		TPEnabled:    true,
+	}
+}
+
+// DynamicLevelResult holds the calculated SL/TP values with adjustment details
+type DynamicLevelResult struct {
+	SLPercent      float64  `json:"sl_percent"`       // Stop loss percentage from peak
+	TPPercent      float64  `json:"tp_percent"`       // Take profit percentage from peak
+	SLPrice        float64  `json:"sl_price"`         // Calculated SL price
+	TPPrice        float64  `json:"tp_price"`         // Calculated TP price
+	ATRPct         float64  `json:"atr_pct"`          // ATR percentage used
+	ADX            float64  `json:"adx"`              // ADX value used
+	ProfitPct      float64  `json:"profit_pct"`       // Current profit percentage
+	Efficiency     float64  `json:"efficiency"`       // Position efficiency (0-1)
+	Adjustments    []string `json:"adjustments"`      // List of adjustments applied
+	SLImproved     bool     `json:"sl_improved"`      // True if SL is better than current
+	TPImproved     bool     `json:"tp_improved"`      // True if TP is better than current
+}
+
+// CalculateDynamicSL calculates efficiency-aware stop loss percentage
+// Story 10.1: Dynamic SL/TP Management
+//
+// Formula:
+//   - BASE: 1.5x ATR% from peak price
+//   - ADJUST for ADX: if ADX > 30, tighten 20%; if ADX < 20, widen 30%
+//   - ADJUST for profit: if profit > 1%, tighten 10%
+//   - ADJUST for efficiency: if efficiency < 50%, tighten 15%
+//   - CLAMP to 0.3% - 3.0%
+func CalculateDynamicSL(pos *GiniePosition, atrPct, adx float64) float64 {
+	if pos == nil || atrPct <= 0 {
+		return 0
+	}
+
+	// BASE: 1.5x ATR from peak price
+	baseSL := atrPct * 1.5
+
+	// ADJUST for ADX (trend strength)
+	// Strong trend (ADX > 30): tighten by 20% (trend likely to continue)
+	// Weak trend (ADX < 20): widen by 30% (more volatility expected)
+	if adx > 30 {
+		baseSL *= 0.8 // Tighten 20%
+	} else if adx < 20 {
+		baseSL *= 1.3 // Widen 30%
+	}
+
+	// ADJUST for profit (only tighten when profitable)
+	// Protect profits by tightening SL when position is profitable
+	profitPct := calculatePositionProfit(pos)
+	if profitPct > 1.0 {
+		baseSL *= 0.9 // Tighten 10%
+	}
+
+	// ADJUST for efficiency
+	// Low efficiency means price is retracing from peak - be more conservative
+	if pos.Efficiency > 0 && pos.Efficiency < 0.5 {
+		baseSL *= 0.85 // Tighten 15%
+	}
+
+	// CLAMP to bounds
+	return clamp(baseSL, 0.3, 3.0)
+}
+
+// CalculateDynamicTP calculates efficiency-aware take profit percentage
+// Story 10.1: Dynamic SL/TP Management
+//
+// Formula:
+//   - BASE: 3x ATR% above peak price
+//   - ADJUST for ADX: if ADX > 35, aim 50% higher; if ADX < 20, aim 30% lower
+//   - CLAMP to 1.5% - 8.0%
+func CalculateDynamicTP(pos *GiniePosition, atrPct, adx float64) float64 {
+	if pos == nil || atrPct <= 0 {
+		return 0
+	}
+
+	// BASE: 3x ATR above current price
+	baseTP := atrPct * 3.0
+
+	// ADJUST for ADX (trend strength)
+	// Very strong trend (ADX > 35): aim 50% higher (ride the trend)
+	// Weak trend (ADX < 20): aim 30% lower (take profits quickly)
+	if adx > 35 {
+		baseTP *= 1.5 // Aim 50% higher
+	} else if adx < 20 {
+		baseTP *= 0.7 // Aim 30% lower
+	}
+
+	// CLAMP to bounds
+	return clamp(baseTP, 1.5, 8.0)
+}
+
+// calculatePositionProfit calculates the current profit percentage for a position
+func calculatePositionProfit(pos *GiniePosition) float64 {
+	if pos == nil || pos.EntryPrice <= 0 {
+		return 0
+	}
+
+	// Use highest/lowest price for profit calculation
+	var peakPrice float64
+	if pos.Side == "LONG" {
+		peakPrice = pos.HighestPrice
+		if peakPrice <= 0 {
+			return 0
+		}
+		return ((peakPrice - pos.EntryPrice) / pos.EntryPrice) * 100
+	} else {
+		peakPrice = pos.LowestPrice
+		if peakPrice <= 0 {
+			return 0
+		}
+		return ((pos.EntryPrice - peakPrice) / pos.EntryPrice) * 100
+	}
+}
+
+// CalculateUpdatedSLPrice calculates the new SL price based on dynamic percentage
+// Returns the actual price level for the SL order
+func CalculateUpdatedSLPrice(pos *GiniePosition, slPercent float64) float64 {
+	if pos == nil || slPercent <= 0 {
+		return 0
+	}
+
+	// Get peak price for SL calculation
+	var peakPrice float64
+	if pos.Side == "LONG" {
+		peakPrice = pos.HighestPrice
+		if peakPrice <= 0 {
+			peakPrice = pos.EntryPrice
+		}
+		// SL is below peak for LONG
+		return peakPrice * (1 - slPercent/100)
+	} else {
+		peakPrice = pos.LowestPrice
+		if peakPrice <= 0 {
+			peakPrice = pos.EntryPrice
+		}
+		// SL is above peak for SHORT
+		return peakPrice * (1 + slPercent/100)
+	}
+}
+
+// CalculateUpdatedTPPrice calculates the new TP price based on dynamic percentage
+// Returns the actual price level for the TP order
+func CalculateUpdatedTPPrice(pos *GiniePosition, tpPercent float64, currentPrice float64) float64 {
+	if pos == nil || tpPercent <= 0 || currentPrice <= 0 {
+		return 0
+	}
+
+	// TP is calculated from current price, not peak
+	if pos.Side == "LONG" {
+		// TP is above current for LONG
+		return currentPrice * (1 + tpPercent/100)
+	} else {
+		// TP is below current for SHORT
+		return currentPrice * (1 - tpPercent/100)
+	}
+}
+
+// IsSLImproved checks if the new SL is better (more protective) than the current one
+// For LONG: higher SL is better (locks in more profit)
+// For SHORT: lower SL is better (locks in more profit)
+func IsSLImproved(pos *GiniePosition, newSL float64) bool {
+	if pos == nil || newSL <= 0 || pos.StopLoss <= 0 {
+		return false
+	}
+
+	if pos.Side == "LONG" {
+		return newSL > pos.StopLoss
+	}
+	return newSL < pos.StopLoss
+}
+
+// IsTPImproved checks if the new TP is better (more ambitious) than the current one
+// For LONG: higher TP is better (more profit potential)
+// For SHORT: lower TP is better (more profit potential)
+func IsTPImproved(pos *GiniePosition, newTP float64) bool {
+	if pos == nil || newTP <= 0 {
+		return false
+	}
+
+	// If no current TP levels, any TP is an improvement
+	if len(pos.TakeProfits) == 0 {
+		return true
+	}
+
+	// Compare with the last (highest) TP level
+	lastTP := pos.TakeProfits[len(pos.TakeProfits)-1].Price
+
+	if pos.Side == "LONG" {
+		return newTP > lastTP
+	}
+	return newTP < lastTP
+}
+
+// DynamicLevelCalculator provides a comprehensive dynamic SL/TP calculation
+// that combines all adjustments and returns detailed results
+func DynamicLevelCalculator(pos *GiniePosition, atrPct, adx, currentPrice float64, config *DynamicLevelConfig) *DynamicLevelResult {
+	if pos == nil {
+		return nil
+	}
+
+	if config == nil {
+		config = DefaultDynamicLevelConfig()
+	}
+
+	result := &DynamicLevelResult{
+		ATRPct:      atrPct,
+		ADX:         adx,
+		ProfitPct:   calculatePositionProfit(pos),
+		Efficiency:  pos.Efficiency,
+		Adjustments: make([]string, 0),
+	}
+
+	// Calculate SL
+	if config.SLEnabled {
+		// Start with base calculation
+		baseSL := atrPct * 1.5
+		result.Adjustments = append(result.Adjustments, formatAdjustment("Base SL", atrPct*1.5))
+
+		// ADX adjustments
+		if adx > 30 {
+			baseSL *= 0.8
+			result.Adjustments = append(result.Adjustments, "ADX>30: tighten 20%")
+		} else if adx < 20 {
+			baseSL *= 1.3
+			result.Adjustments = append(result.Adjustments, "ADX<20: widen 30%")
+		}
+
+		// Profit adjustment
+		if result.ProfitPct > 1.0 {
+			baseSL *= 0.9
+			result.Adjustments = append(result.Adjustments, "Profit>1%: tighten 10%")
+		}
+
+		// Efficiency adjustment
+		if pos.Efficiency > 0 && pos.Efficiency < 0.5 {
+			baseSL *= 0.85
+			result.Adjustments = append(result.Adjustments, "Efficiency<50%: tighten 15%")
+		}
+
+		// Clamp
+		result.SLPercent = clamp(baseSL, config.MinSLPercent, config.MaxSLPercent)
+		result.SLPrice = CalculateUpdatedSLPrice(pos, result.SLPercent)
+		result.SLImproved = IsSLImproved(pos, result.SLPrice)
+	}
+
+	// Calculate TP
+	if config.TPEnabled {
+		baseTP := atrPct * 3.0
+		result.Adjustments = append(result.Adjustments, formatAdjustment("Base TP", atrPct*3.0))
+
+		// ADX adjustments
+		if adx > 35 {
+			baseTP *= 1.5
+			result.Adjustments = append(result.Adjustments, "ADX>35: aim 50% higher")
+		} else if adx < 20 {
+			baseTP *= 0.7
+			result.Adjustments = append(result.Adjustments, "ADX<20: aim 30% lower")
+		}
+
+		// Clamp
+		result.TPPercent = clamp(baseTP, config.MinTPPercent, config.MaxTPPercent)
+		result.TPPrice = CalculateUpdatedTPPrice(pos, result.TPPercent, currentPrice)
+		result.TPImproved = IsTPImproved(pos, result.TPPrice)
+	}
+
+	return result
+}
+
+func formatAdjustment(name string, value float64) string {
+	return name + ": " + formatPercent(value)
+}

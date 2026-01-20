@@ -60,9 +60,21 @@ const Register: React.FC = () => {
         navigate('/dashboard', { replace: true });
       }
     } catch (err: unknown) {
-      const errorMessage = err instanceof Error
-        ? err.message
-        : (err as { response?: { data?: { message?: string } } })?.response?.data?.message || 'Registration failed. Please try again.';
+      // Extract error message and code from API response
+      const axiosError = err as { response?: { data?: { error?: string; message?: string } } };
+      const apiErrorCode = axiosError?.response?.data?.error;
+      const apiMessage = axiosError?.response?.data?.message;
+
+      // If email not verified, redirect to verification page
+      if (apiErrorCode === 'EMAIL_NOT_VERIFIED') {
+        navigate('/verify-email', {
+          replace: true,
+          state: { email: formData.email, needsVerification: true }
+        });
+        return;
+      }
+
+      const errorMessage = apiMessage || (err instanceof Error ? err.message : 'Registration failed. Please try again.');
       setError(errorMessage);
     } finally {
       setIsLoading(false);

@@ -350,6 +350,75 @@ func (h *Handlers) ResendVerification(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "verification code sent to your email"})
 }
 
+// PublicResendVerification resends verification email using email address (no auth required)
+// POST /api/auth/public/resend-verification
+func (h *Handlers) PublicResendVerification(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "VALIDATION_ERROR",
+			"message": "valid email address is required",
+		})
+		return
+	}
+
+	err := h.service.ResendVerificationCodeByEmail(c.Request.Context(), req.Email)
+	if err != nil {
+		if authErr, ok := err.(AuthError); ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   authErr.Code,
+				"message": authErr.Message,
+			})
+			return
+		}
+		// Log internal errors but don't expose details
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "INTERNAL_ERROR",
+			"message": "failed to send verification code",
+		})
+		return
+	}
+
+	// Always return success to prevent email enumeration
+	c.JSON(http.StatusOK, gin.H{"message": "if an account exists with this email, a verification code has been sent"})
+}
+
+// PublicVerifyEmail verifies email using code and email address (no auth required)
+// POST /api/auth/public/verify-email
+func (h *Handlers) PublicVerifyEmail(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+		Code  string `json:"code" binding:"required,len=6"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "VALIDATION_ERROR",
+			"message": "valid email and 6-digit code are required",
+		})
+		return
+	}
+
+	err := h.service.VerifyEmailWithCodeByEmail(c.Request.Context(), req.Email, req.Code)
+	if err != nil {
+		if authErr, ok := err.(AuthError); ok {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   authErr.Code,
+				"message": authErr.Message,
+			})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "INVALID_CODE",
+			"message": "Invalid or expired verification code",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "email verified successfully"})
+}
+
 // GetMe returns the current user's profile
 // GET /api/auth/me
 func (h *Handlers) GetMe(c *gin.Context) {
@@ -394,6 +463,10 @@ func (h *Handlers) RegisterRoutes(router *gin.RouterGroup, jwtManager *JWTManage
 	router.POST("/logout", h.Logout)
 	router.POST("/forgot-password", h.ForgotPassword)
 	router.POST("/reset-password", h.ResetPassword)
+
+	// Public email verification routes (for users who failed login due to unverified email)
+	router.POST("/public/resend-verification", h.PublicResendVerification)
+	router.POST("/public/verify-email", h.PublicVerifyEmail)
 
 	// Protected routes (auth required)
 	protected := router.Group("")

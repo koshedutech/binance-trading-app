@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
@@ -111,8 +112,8 @@ func (s *SettingsCacheService) loadModeToCache(ctx context.Context, userID, mode
 	return nil
 }
 
-// loadGlobalSettings loads all 4 global settings (circuit_breaker, llm_config, capital_allocation, global_trading)
-// Story 6.2: Part of 88-key architecture
+// loadGlobalSettings loads all 5 global settings (circuit_breaker, llm_config, capital_allocation, global_trading, position_management)
+// Story 6.2: Part of 88-key architecture (now 89 keys with position_management)
 func (s *SettingsCacheService) loadGlobalSettings(ctx context.Context, userID string) error {
 	// Circuit Breaker
 	if cb, err := s.repo.GetUserGlobalCircuitBreaker(ctx, userID); err == nil && cb != nil {
@@ -139,6 +140,13 @@ func (s *SettingsCacheService) loadGlobalSettings(ctx context.Context, userID st
 	if gt, err := s.repo.GetUserGlobalTrading(ctx, userID); err == nil && gt != nil {
 		key := fmt.Sprintf("user:%s:global_trading", userID)
 		data, _ := json.Marshal(gt)
+		s.cache.Set(ctx, key, string(data), 0)
+	}
+
+	// Position Management (Story 10.1: Position Decision Configuration)
+	if pm, err := s.repo.GetUserPositionManagement(ctx, userID); err == nil && pm != nil {
+		key := fmt.Sprintf("user:%s:position_management", userID)
+		data, _ := json.Marshal(pm)
 		s.cache.Set(ctx, key, string(data), 0)
 	}
 
@@ -1045,6 +1053,73 @@ func (s *SettingsCacheService) InvalidateAllSafetySettings(ctx context.Context, 
 }
 
 // ============================================================================
+// POSITION MANAGEMENT SETTINGS (Story 10.1: Position Decision Configuration)
+// Cache-First Read Pattern for Position Management
+// ============================================================================
+
+// GetPositionManagement retrieves position management settings (cache-only with auto-populate)
+func (s *SettingsCacheService) GetPositionManagement(ctx context.Context, userID string) (*database.UserPositionManagement, error) {
+	if !s.cache.IsHealthy() {
+		return nil, ErrCacheUnavailable
+	}
+
+	key := fmt.Sprintf("user:%s:position_management", userID)
+
+	// Try cache first
+	cached, err := s.cache.Get(ctx, key)
+	if err == nil && cached != "" {
+		var config database.UserPositionManagement
+		if err := json.Unmarshal([]byte(cached), &config); err == nil {
+			return &config, nil
+		}
+	}
+
+	// Cache miss - load from DB, populate cache
+	config, err := s.repo.GetUserPositionManagement(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if config == nil {
+		// Return default settings if not found in DB
+		config = database.DefaultUserPositionManagement()
+		config.UserID = userID
+	}
+
+	// Populate cache
+	data, _ := json.Marshal(config)
+	s.cache.Set(ctx, key, string(data), 0)
+
+	return config, nil
+}
+
+// UpdatePositionManagement updates position management with write-through (DB first, then cache)
+func (s *SettingsCacheService) UpdatePositionManagement(ctx context.Context, userID string, config *database.UserPositionManagement) error {
+	// DB first for durability
+	config.UserID = userID
+	if err := s.repo.SaveUserPositionManagement(ctx, config); err != nil {
+		return err
+	}
+
+	// Then update cache (best effort - DB has the truth)
+	key := fmt.Sprintf("user:%s:position_management", userID)
+	if s.cache.IsHealthy() {
+		data, _ := json.Marshal(config)
+		if err := s.cache.Set(ctx, key, string(data), 0); err != nil {
+			s.logger.Warn("Failed to update position management cache, will repopulate on next read",
+				"key", key, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// InvalidatePositionManagement removes position management from cache for a user
+func (s *SettingsCacheService) InvalidatePositionManagement(ctx context.Context, userID string) error {
+	key := fmt.Sprintf("user:%s:position_management", userID)
+	return s.cache.Delete(ctx, key)
+}
+
+// ============================================================================
 // SEQUENCE PROVIDER (Epic 7: Client Order ID Generation)
 // Implements orders.SequenceProvider interface for atomic daily sequence numbers
 // ============================================================================
@@ -1054,4 +1129,367 @@ func (s *SettingsCacheService) InvalidateAllSafetySettings(ctx context.Context, 
 // Delegates to underlying CacheService.
 func (s *SettingsCacheService) IncrementDailySequence(ctx context.Context, userID, dateKey string) (int64, error) {
 	return s.cache.IncrementDailySequence(ctx, userID, dateKey)
+}
+
+// ============================================================================
+// MODE-STRATEGY CACHE LAYER (Story 11.30)
+// Hierarchical cache for Mode+Strategy configuration
+// Key pattern: mode:{userID}:{mode}:{strategy}
+// TTL: 24 hours (same as other settings)
+// ============================================================================
+
+// ModeStrategyCacheTTL is the TTL for mode+strategy cache entries (24 hours)
+const ModeStrategyCacheTTL = 24 * time.Hour
+
+// ValidStrategies lists the valid strategy names for cache operations
+var ValidStrategies = []string{"trend_following", "mean_reversion", "breakout", "range_trading"}
+
+// modeStrategyKey generates the cache key for a mode+strategy configuration
+// Format: mode:{userID}:{mode}:{strategy}
+func modeStrategyKey(userID int, mode, strategy string) string {
+	return fmt.Sprintf("mode:%d:%s:%s", userID, mode, strategy)
+}
+
+// modeStrategiesPattern generates a pattern for all strategies under a mode
+// Format: mode:{userID}:{mode}:*
+func modeStrategiesPattern(userID int, mode string) string {
+	return fmt.Sprintf("mode:%d:%s:*", userID, mode)
+}
+
+// allModeStrategiesPattern generates a pattern for all mode+strategy keys for a user
+// Format: mode:{userID}:*
+func allModeStrategiesPattern(userID int) string {
+	return fmt.Sprintf("mode:%d:*", userID)
+}
+
+// GetModeStrategyConfig retrieves settings for a specific mode+strategy
+// Cache-first with auto-populate from DB on miss
+func (s *SettingsCacheService) GetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) (*database.ModeStrategyConfig, error) {
+	if !s.cache.IsHealthy() {
+		return nil, ErrCacheUnavailable
+	}
+
+	key := modeStrategyKey(userID, mode, strategy)
+
+	// Try cache first
+	cached, err := s.cache.Get(ctx, key)
+	if err == nil && cached != "" {
+		var config database.ModeStrategyConfig
+		if err := json.Unmarshal([]byte(cached), &config); err == nil {
+			return &config, nil
+		}
+		// Invalid JSON in cache, fall through to DB
+		s.logger.Warn("Invalid JSON in mode strategy cache, repopulating", "key", key)
+	}
+
+	// Cache miss - load from DB, populate cache
+	row, err := s.repo.GetModeStrategySettings(ctx, userID, mode, strategy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mode strategy from DB: %w", err)
+	}
+
+	// If not in DB, return default config
+	if row == nil {
+		config := database.DefaultModeStrategyConfig(mode, strategy)
+		// Cache the default
+		data, _ := json.Marshal(config)
+		s.cache.Set(ctx, key, string(data), ModeStrategyCacheTTL)
+		return config, nil
+	}
+
+	// Parse the settings JSON into ModeStrategyConfig
+	var config database.ModeStrategyConfig
+	if err := json.Unmarshal(row.Settings, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse mode strategy settings: %w", err)
+	}
+
+	// Apply row-level fields that aren't in the settings JSON
+	config.Enabled = row.Enabled
+	config.Priority = row.Priority
+
+	// Populate cache
+	data, _ := json.Marshal(config)
+	s.cache.Set(ctx, key, string(data), ModeStrategyCacheTTL)
+
+	return &config, nil
+}
+
+// SetModeStrategyConfig stores settings for a specific mode+strategy
+// Write-through: DB first, then cache
+func (s *SettingsCacheService) SetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string, config *database.ModeStrategyConfig) error {
+	// Serialize the config for DB storage
+	settingsJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal mode strategy config: %w", err)
+	}
+
+	// Check if record exists to decide INSERT vs UPDATE
+	existing, err := s.repo.GetModeStrategySettings(ctx, userID, mode, strategy)
+	if err != nil {
+		return fmt.Errorf("failed to check existing mode strategy: %w", err)
+	}
+
+	if existing == nil {
+		// Create new record
+		if err := s.repo.CreateModeStrategySettings(ctx, userID, mode, strategy, config.Enabled, config.Priority, settingsJSON); err != nil {
+			return fmt.Errorf("failed to create mode strategy in DB: %w", err)
+		}
+	} else {
+		// Update existing record
+		if err := s.repo.UpdateModeStrategySettings(ctx, userID, mode, strategy, settingsJSON); err != nil {
+			return fmt.Errorf("failed to update mode strategy in DB: %w", err)
+		}
+		// Also update enabled/priority if they changed
+		if existing.Enabled != config.Enabled {
+			if err := s.repo.UpdateModeStrategyEnabled(ctx, userID, mode, strategy, config.Enabled); err != nil {
+				s.logger.Warn("Failed to update enabled status", "error", err)
+			}
+		}
+	}
+
+	// Update cache (best effort - DB has the truth)
+	key := modeStrategyKey(userID, mode, strategy)
+	if s.cache.IsHealthy() {
+		data, _ := json.Marshal(config)
+		if err := s.cache.Set(ctx, key, string(data), ModeStrategyCacheTTL); err != nil {
+			s.logger.Warn("Failed to update mode strategy cache, will repopulate on next read",
+				"key", key, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// GetAllStrategiesForMode retrieves all strategy configs for a mode
+// Returns map[strategyName]*ModeStrategyConfig
+func (s *SettingsCacheService) GetAllStrategiesForMode(ctx context.Context, userID int, mode string) (map[string]*database.ModeStrategyConfig, error) {
+	if !s.cache.IsHealthy() {
+		return nil, ErrCacheUnavailable
+	}
+
+	result := make(map[string]*database.ModeStrategyConfig)
+
+	// Try to get all strategies from cache first using MGET
+	keys := make([]string, len(ValidStrategies))
+	for i, strategy := range ValidStrategies {
+		keys[i] = modeStrategyKey(userID, mode, strategy)
+	}
+
+	values, err := s.cache.MGet(ctx, keys...)
+	if err != nil {
+		// Cache error, fall back to individual DB queries
+		s.logger.Warn("MGET failed for mode strategies, falling back to DB", "error", err)
+		return s.getAllStrategiesFromDB(ctx, userID, mode)
+	}
+
+	// Process cache results and identify misses
+	misses := make([]string, 0)
+	for i, val := range values {
+		strategy := ValidStrategies[i]
+		if val == nil {
+			misses = append(misses, strategy)
+			continue
+		}
+
+		valStr, ok := val.(string)
+		if !ok || valStr == "" {
+			misses = append(misses, strategy)
+			continue
+		}
+
+		var config database.ModeStrategyConfig
+		if err := json.Unmarshal([]byte(valStr), &config); err != nil {
+			misses = append(misses, strategy)
+			continue
+		}
+
+		result[strategy] = &config
+	}
+
+	// Populate misses from DB
+	for _, strategy := range misses {
+		config, err := s.GetModeStrategyConfig(ctx, userID, mode, strategy)
+		if err != nil {
+			s.logger.Warn("Failed to get strategy config", "mode", mode, "strategy", strategy, "error", err)
+			// Use default on error
+			config = database.DefaultModeStrategyConfig(mode, strategy)
+		}
+		result[strategy] = config
+	}
+
+	return result, nil
+}
+
+// getAllStrategiesFromDB loads all strategies for a mode directly from DB
+func (s *SettingsCacheService) getAllStrategiesFromDB(ctx context.Context, userID int, mode string) (map[string]*database.ModeStrategyConfig, error) {
+	result := make(map[string]*database.ModeStrategyConfig)
+
+	rows, err := s.repo.GetModeStrategies(ctx, userID, mode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mode strategies from DB: %w", err)
+	}
+
+	// Convert rows to map
+	for _, row := range rows {
+		var config database.ModeStrategyConfig
+		if err := json.Unmarshal(row.Settings, &config); err != nil {
+			s.logger.Warn("Failed to parse strategy settings", "strategy", row.Strategy, "error", err)
+			continue
+		}
+		config.Enabled = row.Enabled
+		config.Priority = row.Priority
+		result[row.Strategy] = &config
+
+		// Also populate cache for future reads
+		if s.cache.IsHealthy() {
+			key := modeStrategyKey(userID, mode, row.Strategy)
+			data, _ := json.Marshal(config)
+			s.cache.Set(ctx, key, string(data), ModeStrategyCacheTTL)
+		}
+	}
+
+	// Fill in missing strategies with defaults
+	for _, strategy := range ValidStrategies {
+		if _, exists := result[strategy]; !exists {
+			result[strategy] = database.DefaultModeStrategyConfig(mode, strategy)
+		}
+	}
+
+	return result, nil
+}
+
+// InvalidateModeStrategyConfig removes a specific mode+strategy from cache
+func (s *SettingsCacheService) InvalidateModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) error {
+	key := modeStrategyKey(userID, mode, strategy)
+	return s.cache.Delete(ctx, key)
+}
+
+// InvalidateAllModeStrategies removes all mode+strategy configs for a user
+func (s *SettingsCacheService) InvalidateAllModeStrategies(ctx context.Context, userID int) error {
+	pattern := allModeStrategiesPattern(userID)
+	return s.cache.DeletePattern(ctx, pattern)
+}
+
+// PopulateModeStrategiesFromDB loads all mode+strategy configs from DB to cache
+// Called on user login to pre-warm the cache
+func (s *SettingsCacheService) PopulateModeStrategiesFromDB(ctx context.Context, userID int) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	// Get all mode+strategy settings from DB
+	rows, err := s.repo.GetAllModeStrategySettings(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("failed to get all mode strategy settings: %w", err)
+	}
+
+	// Cache each configuration
+	for _, row := range rows {
+		var config database.ModeStrategyConfig
+		if err := json.Unmarshal(row.Settings, &config); err != nil {
+			s.logger.Warn("Failed to parse mode strategy settings during populate",
+				"mode", row.Mode, "strategy", row.Strategy, "error", err)
+			continue
+		}
+		config.Enabled = row.Enabled
+		config.Priority = row.Priority
+
+		key := modeStrategyKey(userID, row.Mode, row.Strategy)
+		data, _ := json.Marshal(config)
+		if err := s.cache.Set(ctx, key, string(data), ModeStrategyCacheTTL); err != nil {
+			s.logger.Warn("Failed to cache mode strategy during populate",
+				"key", key, "error", err)
+		}
+	}
+
+	// For any mode+strategy combinations not in DB, cache defaults
+	dbConfigKeys := make(map[string]bool)
+	for _, row := range rows {
+		dbConfigKeys[row.Mode+":"+row.Strategy] = true
+	}
+
+	for _, mode := range TradingModes {
+		for _, strategy := range ValidStrategies {
+			configKey := mode + ":" + strategy
+			if !dbConfigKeys[configKey] {
+				config := database.DefaultModeStrategyConfig(mode, strategy)
+				key := modeStrategyKey(userID, mode, strategy)
+				data, _ := json.Marshal(config)
+				s.cache.Set(ctx, key, string(data), ModeStrategyCacheTTL)
+			}
+		}
+	}
+
+	s.logger.Info("Populated mode strategy cache", "userID", userID, "dbRows", len(rows))
+	return nil
+}
+
+// GetActiveStrategyForMode retrieves the currently active strategy for a mode based on regime
+// Returns the config, the strategy name, and any error
+// Selection logic:
+// 1. Find strategies that support the given regime
+// 2. Among those, select the enabled one with highest priority
+// 3. If none match, return the mode's default strategy
+func (s *SettingsCacheService) GetActiveStrategyForMode(ctx context.Context, userID int, mode string, regime string) (*database.ModeStrategyConfig, string, error) {
+	// Get all strategies for this mode
+	strategies, err := s.GetAllStrategiesForMode(ctx, userID, mode)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to get strategies for mode %s: %w", mode, err)
+	}
+
+	// Find the best matching strategy
+	var bestConfig *database.ModeStrategyConfig
+	var bestStrategy string
+	bestPriority := -1
+
+	for strategyName, config := range strategies {
+		// Skip disabled strategies
+		if !config.Enabled {
+			continue
+		}
+
+		// Check if this strategy supports the current regime
+		supportsRegime := false
+		for _, supportedRegime := range config.SupportedRegimes {
+			if supportedRegime == regime {
+				supportsRegime = true
+				break
+			}
+		}
+
+		if !supportsRegime {
+			continue
+		}
+
+		// Select highest priority (higher number = higher priority)
+		if config.Priority > bestPriority {
+			bestPriority = config.Priority
+			bestConfig = config
+			bestStrategy = strategyName
+		}
+	}
+
+	// If no matching strategy found, return the first enabled strategy or default
+	if bestConfig == nil {
+		// Try to find any enabled strategy
+		for strategyName, config := range strategies {
+			if config.Enabled && config.Priority > bestPriority {
+				bestPriority = config.Priority
+				bestConfig = config
+				bestStrategy = strategyName
+			}
+		}
+	}
+
+	// If still no match, return trend_following as default
+	if bestConfig == nil {
+		defaultStrategy := "trend_following"
+		bestConfig = strategies[defaultStrategy]
+		if bestConfig == nil {
+			bestConfig = database.DefaultModeStrategyConfig(mode, defaultStrategy)
+		}
+		bestStrategy = defaultStrategy
+	}
+
+	return bestConfig, bestStrategy, nil
 }

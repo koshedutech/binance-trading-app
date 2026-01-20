@@ -101,6 +101,10 @@ type IndicatorPerformanceRecorder interface {
 type StateManagerInterface interface {
 	// SetCoinState stores the complete coin state for a user and symbol.
 	SetCoinState(ctx context.Context, userID, symbol string, state *CoinStateData) error
+	// UpdateCoinStateDelta performs a delta update, only updating changed fields.
+	// Returns the list of changed field names for logging/broadcasting.
+	// Story 11.2: Delta Update Processor integration.
+	UpdateCoinStateDelta(ctx context.Context, userID, symbol string, state *CoinStateData) (changedFields []string, err error)
 }
 
 // CoinStateData represents the coin state data to be stored in Redis.
@@ -800,6 +804,43 @@ type GiniePosition struct {
 
 	// Dust Position Tracking
 	IsDustPosition bool `json:"is_dust_position,omitempty"` // Position qty too small to protect with SL/TP orders
+
+	// === Epic 10 / Story 10.1: EFFICIENCY TRACKING ===
+	// Tracks position progress through stages and calculates exit efficiency
+	// Formula: EFFICIENCY = currentProfit / peakProfit
+	// Exit when efficiency < historical baseline threshold
+
+	// Position Stage (where the position is in its lifecycle)
+	Stage string `json:"stage,omitempty"` // RISK_ZONE, BREAKEVEN, TP1_PENDING, EFFICIENCY
+
+	// Breakeven Tracking
+	BEPrice    float64   `json:"be_price,omitempty"`    // Breakeven price (entry + fees + buffer)
+	BEAchieved bool      `json:"be_achieved,omitempty"` // Whether breakeven has been achieved
+	BETime     time.Time `json:"be_time,omitempty"`     // Time when breakeven was achieved
+
+	// Efficiency Tracking (active after TP1 hit)
+	EffActive     bool      `json:"eff_active,omitempty"`     // Efficiency tracking active (post-TP1)
+	PeakProfit    float64   `json:"peak_profit,omitempty"`    // Highest profit % achieved
+	PeakPrice     float64   `json:"peak_price,omitempty"`     // Price at peak profit
+	PeakTime      time.Time `json:"peak_time,omitempty"`      // Time of peak profit
+	CurrentProfit float64   `json:"cur_profit,omitempty"`     // Current profit %
+	Efficiency    float64   `json:"efficiency,omitempty"`     // currentProfit / peakProfit (0-1.0)
+
+	// === Epic 11 Integration: Entry Decision Engine Context ===
+	// Captures the market state and strategy at entry for analysis
+
+	// Decision Mode & Strategy
+	DecisionMode  string `json:"dec_mode,omitempty"`    // "classic" | "new_engine" - which decision system was used
+	EntryStrategy string `json:"entry_strat,omitempty"` // Strategy used at entry (e.g., "trend_following", "mean_reversion")
+	EntryRegime   string `json:"entry_regime,omitempty"` // Market regime at entry (e.g., "trending_bullish", "ranging")
+	CurrentRegime string `json:"cur_regime,omitempty"`   // Current market regime (updated during position)
+
+	// Indicator Scores at Entry (normalized 0-100)
+	// These are averaged/composite scores from multiple indicators
+	TrendScore      float64 `json:"trend_score,omitempty"`    // Averaged trend indicators (ADX, EMA alignment, etc.)
+	MomentumScore   float64 `json:"momentum_score,omitempty"` // Averaged momentum indicators (RSI, MACD, etc.)
+	VolatilityScore float64 `json:"vol_score,omitempty"`      // Averaged volatility indicators (ATR, BB width, etc.)
+	VolumeScore     float64 `json:"volume_score,omitempty"`   // Averaged volume indicators (volume ratio, OBV, etc.)
 }
 
 // GinieTradeResult tracks the result of a trade action with full signal info for study
@@ -1120,7 +1161,12 @@ type GinieAutopilot struct {
 	chainEventWriter    *orders.ChainEventWriter              // Story 7.17: Chain event writer (event sourcing)
 	calibrationUpdater  CalibrationLifecycleUpdater           // Story 11.26: Calibration data lifecycle
 	indicatorPerfRecorder IndicatorPerformanceRecorder        // Story 11.14: Indicator performance tracker
-	stateManager        StateManagerInterface                 // Epic 11: Decision Engine state management
+	stateManager        StateManagerInterface                 // Epic 11: Decision Engine state management (includes delta updates via Story 11.2)
+
+	// Epic 10: Position Management Components
+	positionStageManager      *PositionStageManager       // Stage lifecycle management (RISK_ZONE -> EFFICIENCY)
+	positionDecisionEvaluator *PositionDecisionEvaluator  // Unified exit decision routing (classic/new_engine)
+	positionManagementConfig  *PositionManagementConfig   // Position management settings
 
 	// Circuit breaker (separate from FuturesController)
 	circuitBreaker *circuit.CircuitBreaker
@@ -1245,6 +1291,9 @@ type GinieAutopilot struct {
 
 	// Redis-based order tracker for timeout management
 	orderTracker *database.RedisOrderTracker
+
+	// Story 10.3: Exit Decision State Manager for UI monitoring
+	exitDecisionStateManager *ExitDecisionStateManager
 }
 
 // generateClientOrderId generates a new client order ID for an entry order.
@@ -1425,6 +1474,8 @@ func NewGinieAutopilot(
 		lastDayReset:         time.Now().Truncate(24 * time.Hour),
 		modeCircuitBreakers:  make(map[GinieTradingMode]*ModeCircuitBreaker),
 		pendingLimitOrders:   make(map[string]*PendingLimitOrder),
+		// Story 10.3: Exit Decision State Manager for UI monitoring
+		exitDecisionStateManager: NewExitDecisionStateManager(),
 	}
 
 	// Story 7.12: Initialize ModificationTracker for SL/TP modification event logging
@@ -1434,6 +1485,9 @@ func NewGinieAutopilot(
 		ga.modificationTracker = orders.NewModificationTracker(modEventAdapter, modLogger)
 		log.Printf("[GINIE-INIT] ModificationTracker initialized for order modification event logging")
 	}
+
+	// Epic 10: Initialize Position Management Components
+	ga.initializePositionManagement()
 
 	// DATABASE-FIRST: Load mode enable/disable settings ONLY from DATABASE
 	// Safety configs use hardcoded defaults (not user-specific)
@@ -1939,6 +1993,204 @@ func (ga *GinieAutopilot) SetStateManager(sm StateManagerInterface) {
 	}
 }
 
+// SetSettingsCache sets the settings cache service for cache-only reads.
+// This allows updating the cache reference after Redis becomes available (fixes startup race condition).
+// Story 6.6: Cache-only settings reads during trading.
+func (ga *GinieAutopilot) SetSettingsCache(cache SettingsCacheReader) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.settingsCache = cache
+	if cache != nil && ga.logger != nil {
+		ga.logger.Info("Settings cache set for cache-only reads (late initialization)")
+	}
+}
+
+// initializePositionManagement initializes Epic 10 Position Management components.
+// This sets up the stage manager, decision evaluator, and configuration.
+// Components work alongside existing trailing SL/TP logic with priority:
+// 1. Trend reversal (immediate exit)
+// 2. Efficiency below threshold
+// 3. Existing trailing SL/TP logic (unchanged)
+func (ga *GinieAutopilot) initializePositionManagement() {
+	// Initialize default position management config
+	ga.positionManagementConfig = DefaultPositionManagementConfig()
+
+	// Create PositionStageManager with default parameters
+	// Fee percent: 0.10% (combined entry+exit), Buffer: 0.05%
+	// Position Optimization and Efficiency tracking enabled by default
+	ga.positionStageManager = NewPositionStageManager(
+		0.10,  // feePercent (total round-trip fee %)
+		0.05,  // breakevenBuffer (additional safety buffer %)
+		0.50,  // tp1Percent (TP1 target - used for stage transition)
+		true,  // posOptEnabled (Position Optimization feature flag)
+		ga.positionManagementConfig.EfficiencyExit.Enabled,
+	)
+
+	// Create PositionDecisionEvaluator with analyzer and default config
+	// Note: Decision Engine interfaces (stateManager, selector, registry) will be
+	// set later via SetDecisionEngineInterfaces if Epic 11 integration is available
+	decisionConfig := DefaultPositionDecisionConfig()
+	decisionConfig.EnableTrendReversalExit = true
+	decisionConfig.EnableEfficiencyExit = ga.positionManagementConfig.EfficiencyExit.Enabled
+	decisionConfig.EfficiencyThreshold = 0.30 // 30% minimum efficiency
+
+	ga.positionDecisionEvaluator = NewPositionDecisionEvaluator(
+		ga.analyzer,
+		nil, // stateManager - set later via SetDecisionEngineInterfaces
+		nil, // selector - set later
+		nil, // registry - set later
+		decisionConfig,
+	)
+
+	log.Printf("[GINIE-INIT] Epic 10 Position Management initialized: StageManager=%v, DecisionEvaluator=%v, EfficiencyExit=%v",
+		ga.positionStageManager != nil, ga.positionDecisionEvaluator != nil,
+		ga.positionManagementConfig.EfficiencyExit.Enabled)
+}
+
+// SetDecisionEngineInterfaces sets the Epic 11 Decision Engine interfaces for position exit decisions.
+// This enables the "new_engine" decision mode that uses strategy-based exit rules.
+func (ga *GinieAutopilot) SetDecisionEngineInterfaces(
+	stateManager DecisionStateManagerInterface,
+	selector StrategySelectorInterface,
+	registry StrategyRegistryInterface,
+) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	if ga.positionDecisionEvaluator != nil {
+		// Recreate the evaluator with the new interfaces
+		decisionConfig := DefaultPositionDecisionConfig()
+		if ga.positionManagementConfig != nil {
+			decisionConfig.EnableEfficiencyExit = ga.positionManagementConfig.EfficiencyExit.Enabled
+		}
+
+		ga.positionDecisionEvaluator = NewPositionDecisionEvaluator(
+			ga.analyzer,
+			stateManager,
+			selector,
+			registry,
+			decisionConfig,
+		)
+
+		log.Printf("[GINIE-INIT] Decision Engine interfaces set for position exit decisions (new_engine mode enabled)")
+	}
+}
+
+// checkPositionManagementExit evaluates Epic 10 position management exit conditions.
+// Priority order:
+// 1. Trend reversal (highest priority - immediate exit)
+// 2. Efficiency below threshold (exit when giving back too much profit)
+// Returns nil if no exit is recommended.
+// Note: This does NOT replace existing trailing SL/TP logic, it runs BEFORE it.
+func (ga *GinieAutopilot) checkPositionManagementExit(pos *GiniePosition, currentPrice, pnlPercent float64) *PositionExitDecision {
+	// Skip if position management is not initialized
+	if ga.positionDecisionEvaluator == nil {
+		return nil
+	}
+
+	// Skip if position management config is disabled
+	if ga.positionManagementConfig == nil {
+		return nil
+	}
+
+	// Skip positions that are already closing
+	if pos.IsClosing {
+		return nil
+	}
+
+	// Minimum hold time check - don't exit too early (let the position develop)
+	if ga.positionManagementConfig.EfficiencyExit.MinimumHoldMinutes > 0 {
+		holdMinutes := time.Since(pos.EntryTime).Minutes()
+		if holdMinutes < float64(ga.positionManagementConfig.EfficiencyExit.MinimumHoldMinutes) {
+			return nil
+		}
+	}
+
+	// Use the decision evaluator to check exit priorities
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	exitDecision := ga.positionDecisionEvaluator.EvaluateExitPriorities(ctx, pos, ga.userID, currentPrice)
+
+	if exitDecision != nil && exitDecision.ShouldExit {
+		log.Printf("[POSITION-MGMT] %s %s: Exit recommended - Priority=%d, Reason=%s",
+			pos.Symbol, pos.Side, exitDecision.Priority, exitDecision.ExitReason)
+
+		// Add prefix to distinguish from other exit reasons
+		switch exitDecision.Priority {
+		case ExitPriorityTrendReversal:
+			exitDecision.ExitReason = "trend_reversal:" + exitDecision.ExitReason
+		case ExitPriorityEfficiency:
+			exitDecision.ExitReason = "efficiency_exit:" + exitDecision.ExitReason
+		}
+
+		return exitDecision
+	}
+
+	return nil
+}
+
+// updatePositionStageTracking updates the position's stage data based on current price.
+// This tracks progression through stages: RISK_ZONE -> BREAKEVEN -> TP1_PENDING -> EFFICIENCY
+// and updates efficiency tracking metrics.
+func (ga *GinieAutopilot) updatePositionStageTracking(pos *GiniePosition, currentPrice float64) {
+	// Skip if stage manager is not initialized
+	if ga.positionStageManager == nil {
+		return
+	}
+
+	// Initialize stage if not set (new positions or upgrade from older version)
+	if pos.Stage == "" {
+		pos.Stage = StageRiskZone
+	}
+
+	// Initialize breakeven price if not set
+	if pos.BEPrice == 0 && pos.EntryPrice > 0 {
+		pos.BEPrice = ga.positionStageManager.CalculateBreakevenPrice(pos.EntryPrice, pos.Side)
+	}
+
+	// Get Position Optimization status for stage transitions
+	var posOpt *PositionOptimizationStatus
+	if pos.ScalpReentry != nil {
+		posOpt = pos.ScalpReentry
+	}
+
+	// Create stage data from position fields for processing
+	stageData := &PositionStageData{
+		Stage:         pos.Stage,
+		BEPrice:       pos.BEPrice,
+		BEAchieved:    pos.BEAchieved,
+		BETime:        pos.BETime,
+		TP1Hit:        pos.CurrentTPLevel >= 1,
+		EffActive:     pos.EffActive,
+		PeakProfit:    pos.PeakProfit,
+		PeakPrice:     pos.PeakPrice,
+		PeakTime:      pos.PeakTime,
+		CurrentProfit: pos.CurrentProfit,
+		Efficiency:    pos.Efficiency,
+	}
+
+	// Process price tick and check for stage transitions
+	transitioned := ga.positionStageManager.ProcessPriceTick(stageData, pos.EntryPrice, currentPrice, pos.Side, posOpt)
+
+	// Copy updated data back to position
+	pos.Stage = stageData.Stage
+	pos.BEAchieved = stageData.BEAchieved
+	pos.BETime = stageData.BETime
+	pos.EffActive = stageData.EffActive
+	pos.PeakProfit = stageData.PeakProfit
+	pos.PeakPrice = stageData.PeakPrice
+	pos.PeakTime = stageData.PeakTime
+	pos.CurrentProfit = stageData.CurrentProfit
+	pos.Efficiency = stageData.Efficiency
+
+	// Log stage transitions
+	if transitioned {
+		log.Printf("[POSITION-STAGE] %s %s: Stage transition to %s (BE=%.8f, Efficiency=%.2f%%)",
+			pos.Symbol, pos.Side, pos.Stage, pos.BEPrice, pos.Efficiency*100)
+	}
+}
+
 // getEffectivePositionSide determines the correct position side based on Binance account's position mode
 // Returns PositionSideBoth for ONE_WAY mode, or the provided positionSide for HEDGE mode
 func (ga *GinieAutopilot) getEffectivePositionSide(positionSide binance.PositionSide) binance.PositionSide {
@@ -2114,6 +2366,367 @@ func (ga *GinieAutopilot) GetPosition(symbol string) (*GiniePosition, bool) {
 
 	pos, exists := ga.positions[symbol]
 	return pos, exists
+}
+
+// GetExitDecisionState returns the current exit decision state for a position.
+// Story 10.3: Exit Decision Monitoring UI
+func (ga *GinieAutopilot) GetExitDecisionState(symbol string) *ExitDecisionState {
+	if ga.exitDecisionStateManager == nil {
+		return nil
+	}
+
+	// Get the state from the manager
+	state := ga.exitDecisionStateManager.GetState(symbol)
+	if state == nil {
+		// Position exists but no state yet - check if position exists and create initial state
+		ga.mu.RLock()
+		pos, exists := ga.positions[symbol]
+		ga.mu.RUnlock()
+
+		if !exists {
+			return nil
+		}
+
+		// Create initial state for this position
+		mode := DecisionModeClassic
+		if ga.positionManagementConfig != nil && ga.positionManagementConfig.DecisionMode == "new_engine" {
+			mode = DecisionModeNewEngine
+		}
+		state = ga.exitDecisionStateManager.GetOrCreateState(symbol, mode)
+
+		// Populate with current position data
+		ga.updateExitDecisionStateForPosition(pos, state)
+	}
+
+	return state.Clone()
+}
+
+// updateExitDecisionStateForPosition updates the exit decision state for a position.
+// This is called during the monitoring loop to keep the state current.
+func (ga *GinieAutopilot) updateExitDecisionStateForPosition(pos *GiniePosition, state *ExitDecisionState) {
+	if pos == nil || state == nil {
+		return
+	}
+
+	// Update hold safeguards
+	holdMinutes := time.Since(pos.EntryTime).Minutes()
+	minHoldMinutes := 5.0 // Default 5 minutes
+	if ga.positionManagementConfig != nil && ga.positionManagementConfig.EfficiencyExit.MinimumHoldMinutes > 0 {
+		minHoldMinutes = float64(ga.positionManagementConfig.EfficiencyExit.MinimumHoldMinutes)
+	}
+
+	safeguards := HoldSafeguards{
+		MinHoldTime: MinHoldTimeSafeguard{
+			RequiredSeconds: int64(minHoldMinutes * 60),
+			ElapsedSeconds:  int64(holdMinutes * 60),
+			Met:             holdMinutes >= minHoldMinutes,
+		},
+		Breakeven: BreakEvenSafeguard{
+			Achieved:   pos.BEAchieved,
+			AchievedAt: pos.BETime.UnixMilli(),
+			BEPrice:    pos.BEPrice,
+		},
+		ConsecutiveSignals: ConsecutiveSignalsSafeguard{
+			Required: 2, // Default 2 consecutive signals
+			Current:  0, // Will be updated by exit check logic
+		},
+	}
+	state.UpdateSafeguards(safeguards)
+
+	// Clear previous exit checks
+	state.ClearExitChecks()
+
+	// Get current price for calculations
+	currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(pos.Symbol)
+	if err != nil {
+		state.SetOverallDecision(OverallDecisionHold, "Unable to get current price")
+		return
+	}
+
+	// Calculate PnL
+	var pnlPercent float64
+	if pos.EntryPrice > 0 {
+		if pos.Side == "LONG" {
+			pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		} else {
+			pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+		}
+	}
+
+	// Build exit checks based on decision mode
+	exitChecks := make([]ExitCheck, 0, 4)
+
+	// Determine decision mode
+	mode := DecisionModeClassic
+	if ga.positionManagementConfig != nil && ga.positionManagementConfig.DecisionMode == "new_engine" {
+		mode = DecisionModeNewEngine
+	}
+	state.DecisionMode = mode
+
+	// P1: Trend Reversal Check
+	trendCheck := ga.buildTrendReversalExitCheck(pos, mode, currentPrice)
+	exitChecks = append(exitChecks, trendCheck)
+
+	// P2: Efficiency Exit Check
+	efficiencyCheck := ga.buildEfficiencyExitCheck(pos, currentPrice, pnlPercent)
+	exitChecks = append(exitChecks, efficiencyCheck)
+
+	// P3: Trailing SL Check
+	trailingSLCheck := ga.buildTrailingSLExitCheck(pos, currentPrice)
+	exitChecks = append(exitChecks, trailingSLCheck)
+
+	// P4: Dynamic TP Check
+	dynamicTPCheck := ga.buildDynamicTPExitCheck(pos, currentPrice)
+	exitChecks = append(exitChecks, dynamicTPCheck)
+
+	state.SetExitChecks(exitChecks)
+
+	// Determine overall decision
+	overallDecision := OverallDecisionHold
+	decisionReason := "All safeguards passed, no exit signals detected"
+
+	// Check if any exit condition is triggered
+	for _, check := range exitChecks {
+		if check.WouldExit {
+			overallDecision = OverallDecisionExit
+			decisionReason = fmt.Sprintf("Exit triggered by %s (Priority %d)", check.Name, check.Priority)
+			break
+		}
+	}
+
+	state.SetOverallDecision(overallDecision, decisionReason)
+}
+
+// buildTrendReversalExitCheck builds the P1 trend reversal exit check.
+func (ga *GinieAutopilot) buildTrendReversalExitCheck(pos *GiniePosition, mode DecisionMode, currentPrice float64) ExitCheck {
+	check := ExitCheck{
+		Name:      "TREND_REVERSAL",
+		Priority:  1,
+		Status:    ExitCheckStatusPassed,
+		WouldExit: false,
+	}
+
+	// Get classic indicator values if available
+	if ga.analyzer != nil {
+		timeframe := "15m" // Default timeframe for analysis
+
+		indicators, err := calculateClassicTrendIndicators(ga.analyzer, pos.Symbol, timeframe)
+		if err == nil && indicators != nil {
+			// Build trend reversal details
+			trendDetails := &TrendReversalDetails{
+				ADX: ADXDetails{
+					Value:     indicators.ADX,
+					Threshold: 20.0, // Default threshold
+					Direction: "flat",
+				},
+				RSI: RSIDetails{
+					Value:      indicators.RSI,
+					Overbought: 70.0,
+					Oversold:   30.0,
+					State:      "normal",
+				},
+				EMACross: EMACrossDetails{
+					Detected: false,
+				},
+				ReversalSignals: ReversalSignalsDetails{
+					Count:    0,
+					Required: 2,
+				},
+			}
+
+			// Determine ADX status and direction
+			if indicators.ADX >= 25 {
+				trendDetails.ADX.Status = "strong_trend"
+			} else if indicators.ADX >= 20 {
+				trendDetails.ADX.Status = "weak_trend"
+			} else {
+				trendDetails.ADX.Status = "ranging"
+			}
+
+			// Determine RSI state
+			if indicators.RSI >= 70 {
+				trendDetails.RSI.State = "overbought"
+			} else if indicators.RSI <= 30 {
+				trendDetails.RSI.State = "oversold"
+			} else {
+				trendDetails.RSI.State = "normal"
+			}
+
+			// Check for EMA cross (using EMA9 and EMA21)
+			if indicators.EMA9 > 0 && indicators.EMA21 > 0 {
+				if indicators.EMA9 > indicators.EMA21 {
+					trendDetails.EMACross.Type = "bullish"
+				} else {
+					trendDetails.EMACross.Type = "bearish"
+				}
+				// Detect cross based on indicator flags
+				if indicators.EMABearishCross || indicators.EMABullishCross {
+					trendDetails.EMACross.Detected = true
+				}
+			}
+
+			check.TrendReversalDetails = trendDetails
+
+			// Check if trend reversal would trigger exit
+			reversalSignalCount := 0
+			if (pos.Side == "LONG" && trendDetails.RSI.State == "overbought") ||
+				(pos.Side == "SHORT" && trendDetails.RSI.State == "oversold") {
+				reversalSignalCount++
+			}
+			if trendDetails.ADX.Status == "weak_trend" || trendDetails.ADX.Status == "ranging" {
+				reversalSignalCount++
+			}
+			trendDetails.ReversalSignals.Count = reversalSignalCount
+
+			if reversalSignalCount >= trendDetails.ReversalSignals.Required {
+				check.Status = ExitCheckStatusFailed
+				check.WouldExit = true
+			}
+		}
+	}
+
+	// For New Engine mode, add additional details
+	if mode == DecisionModeNewEngine {
+		check.NewEngineDetails = &NewEngineDetails{
+			Strategy:       "unknown",
+			EntryRegime:    "unknown",
+			CurrentRegime:  "unknown",
+			RegimeChanged:  false,
+			TechnicalScore: 0,
+			ExitSignal:     0,
+		}
+	}
+
+	return check
+}
+
+// buildEfficiencyExitCheck builds the P2 efficiency exit check.
+func (ga *GinieAutopilot) buildEfficiencyExitCheck(pos *GiniePosition, currentPrice, pnlPercent float64) ExitCheck {
+	check := ExitCheck{
+		Name:      "EFFICIENCY_EXIT",
+		Priority:  2,
+		Status:    ExitCheckStatusPassed,
+		WouldExit: false,
+	}
+
+	// Calculate efficiency metrics
+	peakProfit := pos.PeakProfit
+	if peakProfit <= 0 {
+		peakProfit = math.Max(0, pnlPercent)
+	}
+
+	currentProfit := pnlPercent
+	efficiencyPercent := 100.0
+	if peakProfit > 0 {
+		efficiencyPercent = (currentProfit / peakProfit) * 100
+	}
+
+	thresholdPercent := 50.0 // Default 50% efficiency threshold
+
+	check.EfficiencyDetails = &EfficiencyExitDetails{
+		PeakProfitPercent:    peakProfit,
+		CurrentProfitPercent: currentProfit,
+		EfficiencyPercent:    efficiencyPercent,
+		ThresholdPercent:     thresholdPercent,
+	}
+
+	// Check if efficiency has dropped below threshold
+	if efficiencyPercent < thresholdPercent && peakProfit > 0.5 { // Only check if we had at least 0.5% profit
+		check.Status = ExitCheckStatusFailed
+		check.WouldExit = true
+	}
+
+	return check
+}
+
+// buildTrailingSLExitCheck builds the P3 trailing SL exit check.
+func (ga *GinieAutopilot) buildTrailingSLExitCheck(pos *GiniePosition, currentPrice float64) ExitCheck {
+	check := ExitCheck{
+		Name:     "TRAILING_SL",
+		Priority: 3,
+		Status:   ExitCheckStatusPending,
+	}
+
+	if pos.TrailingActive && pos.StopLoss > 0 {
+		check.Status = ExitCheckStatusActive
+		distancePercent := 0.0
+		if pos.Side == "LONG" {
+			distancePercent = (currentPrice - pos.StopLoss) / currentPrice * 100
+		} else {
+			distancePercent = (pos.StopLoss - currentPrice) / currentPrice * 100
+		}
+
+		check.TrailingSLDetails = &TrailingSLDetails{
+			Active:          true,
+			SLPrice:         pos.StopLoss,
+			CurrentPrice:    currentPrice,
+			DistancePercent: distancePercent,
+		}
+
+		// Check if SL would be hit
+		if (pos.Side == "LONG" && currentPrice <= pos.StopLoss) ||
+			(pos.Side == "SHORT" && currentPrice >= pos.StopLoss) {
+			check.Status = ExitCheckStatusFailed
+			check.WouldExit = true
+		}
+	} else {
+		check.TrailingSLDetails = &TrailingSLDetails{
+			Active:       false,
+			SLPrice:      pos.StopLoss,
+			CurrentPrice: currentPrice,
+		}
+	}
+
+	return check
+}
+
+// buildDynamicTPExitCheck builds the P4 dynamic TP exit check.
+func (ga *GinieAutopilot) buildDynamicTPExitCheck(pos *GiniePosition, currentPrice float64) ExitCheck {
+	check := ExitCheck{
+		Name:     "DYNAMIC_TP",
+		Priority: 4,
+		Status:   ExitCheckStatusPending,
+	}
+
+	// Get the primary TP (first pending TP)
+	var tpPrice float64
+	for _, tp := range pos.TakeProfits {
+		if tp.Status != "hit" {
+			tpPrice = tp.Price
+			break
+		}
+	}
+
+	if tpPrice > 0 {
+		check.Status = ExitCheckStatusActive
+		progressPercent := 0.0
+		if pos.Side == "LONG" && tpPrice > pos.EntryPrice {
+			progressPercent = (currentPrice - pos.EntryPrice) / (tpPrice - pos.EntryPrice) * 100
+		} else if pos.Side == "SHORT" && tpPrice < pos.EntryPrice {
+			progressPercent = (pos.EntryPrice - currentPrice) / (pos.EntryPrice - tpPrice) * 100
+		}
+
+		check.DynamicTPDetails = &DynamicTPDetails{
+			Active:          true,
+			TPPrice:         tpPrice,
+			CurrentPrice:    currentPrice,
+			ProgressPercent: math.Min(100, math.Max(0, progressPercent)),
+		}
+
+		// Check if TP would be hit
+		if (pos.Side == "LONG" && currentPrice >= tpPrice) ||
+			(pos.Side == "SHORT" && currentPrice <= tpPrice) {
+			check.Status = ExitCheckStatusFailed
+			check.WouldExit = true
+		}
+	} else {
+		check.DynamicTPDetails = &DynamicTPDetails{
+			Active:       false,
+			CurrentPrice: currentPrice,
+		}
+	}
+
+	return check
 }
 
 // StuckPositionAlert represents a position that needs manual intervention
@@ -5733,6 +6346,33 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 		} else {
 			pnlPercent = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
 			pos.UnrealizedPnL = (pos.EntryPrice - currentPrice) * pos.RemainingQty
+		}
+
+		// === EPIC 10: POSITION MANAGEMENT EXIT CHECKS ===
+		// Priority order: 1. Trend reversal, 2. Efficiency exit, 3. (existing trailing/SL/TP)
+		if exitDecision := ga.checkPositionManagementExit(pos, currentPrice, pnlPercent); exitDecision != nil && exitDecision.ShouldExit {
+			// Position management recommends exit
+			ga.mu.Unlock()
+			ga.closePosition(symbol, pos, currentPrice, exitDecision.ExitReason, pos.CurrentTPLevel)
+			continue
+		}
+
+		// Update position stage tracking (non-exit path)
+		ga.updatePositionStageTracking(pos, currentPrice)
+
+		// Story 10.3: Update exit decision state for UI monitoring
+		if ga.exitDecisionStateManager != nil {
+			mode := DecisionModeClassic
+			if ga.positionManagementConfig != nil && ga.positionManagementConfig.DecisionMode == "new_engine" {
+				mode = DecisionModeNewEngine
+			}
+			exitState := ga.exitDecisionStateManager.GetOrCreateState(symbol, mode)
+			ga.updateExitDecisionStateForPosition(pos, exitState)
+
+			// Broadcast exit decision update via WebSocket
+			if ga.userID != "" {
+				events.BroadcastExitDecisionUpdate(ga.userID, exitState.Clone())
+			}
 		}
 
 		// === STALE POSITION RELEASE ===
@@ -19144,13 +19784,143 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 		}
 	}
 
-	// Calculate score components (map confidence to score breakdown)
-	// Technical: 40 points max, Context: 30 points max, LLM: 20 points max, History: 10 points max
-	confidenceRatio := decision.ConfidenceScore / 100.0
-	scoreTechnical := int(confidenceRatio * 40)
-	scoreContext := int(confidenceRatio * 30)
-	scoreLLM := int(confidenceRatio * 20)
-	scoreHistory := int(confidenceRatio * 10)
+	// Extract RSI and EMA values from TechnicalIndicators (ALWAYS populated - Story 11.2 fix)
+	var rsiValue, ema9Value, ema20Value float64
+	if decision.TechnicalIndicators != nil {
+		rsiValue = decision.TechnicalIndicators.RSI14
+		ema9Value = decision.TechnicalIndicators.EMA9
+		ema20Value = decision.TechnicalIndicators.EMA20
+	} else {
+		// Debug: Log when TechnicalIndicators is nil
+		log.Printf("[DECISION-STATE] WARNING: TechnicalIndicators is nil for %s (mode=%s, recommendation=%s)",
+			symbol, decision.SelectedMode, decision.Recommendation)
+	}
+
+	// Calculate REAL score components using additive scoring (Story 11.15)
+	// Technical Score (0-40): Trend alignment (15) + RSI momentum (10) + ADX volatility (10) + Volume (5)
+	scoreTechnical := 0
+
+	// 1. Trend alignment: check if market trend aligns with strategy direction (0-15 points)
+	trendAlignmentScore := 7 // Neutral default
+	if decision.MarketConditions.Trend == "bullish" || decision.MarketConditions.Trend == "strong_bullish" {
+		if decision.TradeExecution.Action == "BUY" {
+			trendAlignmentScore = 15 // Aligned
+		} else if decision.TradeExecution.Action == "SELL" {
+			trendAlignmentScore = 0 // Conflicting
+		}
+	} else if decision.MarketConditions.Trend == "bearish" || decision.MarketConditions.Trend == "strong_bearish" {
+		if decision.TradeExecution.Action == "SELL" {
+			trendAlignmentScore = 15 // Aligned
+		} else if decision.TradeExecution.Action == "BUY" {
+			trendAlignmentScore = 0 // Conflicting
+		}
+	}
+	scoreTechnical += trendAlignmentScore
+
+	// 2. RSI momentum score (0-10 points)
+	rsiMomentumScore := 0
+	if rsiValue > 0 {
+		if rsiValue >= 40 && rsiValue <= 60 {
+			rsiMomentumScore = 10 // Optimal zone
+		} else if (rsiValue >= 30 && rsiValue < 40) || (rsiValue > 60 && rsiValue <= 70) {
+			rsiMomentumScore = 7 // Moderate zone
+		} else if (rsiValue >= 20 && rsiValue < 30) || (rsiValue > 70 && rsiValue <= 80) {
+			rsiMomentumScore = 4 // Extended zone
+		} else {
+			rsiMomentumScore = 2 // Extreme zone
+		}
+	}
+	scoreTechnical += rsiMomentumScore
+
+	// 3. ADX volatility score (0-10 points)
+	adxVolatilityScore := 0
+	if decision.MarketConditions.ADX > 40 {
+		adxVolatilityScore = 10 // Strong trend
+	} else if decision.MarketConditions.ADX >= 25 {
+		adxVolatilityScore = 7 // Moderate trend
+	} else if decision.MarketConditions.ADX >= 20 {
+		adxVolatilityScore = 4 // Weak trend
+	} else {
+		adxVolatilityScore = 2 // No trend / consolidation
+	}
+	scoreTechnical += adxVolatilityScore
+
+	// 4. Volume score (0-5 points) - use signal analysis as proxy
+	volumeScore := 3 // Default middle value
+	if decision.MarketConditions.Volume == "high" || decision.MarketConditions.Volume == "very_high" {
+		volumeScore = 5
+	} else if decision.MarketConditions.Volume == "low" {
+		volumeScore = 1
+	}
+	scoreTechnical += volumeScore
+
+	// Context Score (0-30): Regime match (10) + Timeframe alignment (10) + BTC trend (10)
+	scoreContext := 0
+
+	// 1. Regime match score (0-10 points)
+	regimeMatchScore := 5 // Default
+	strategy := string(decision.SelectedMode)
+	switch regime {
+	case "TRENDING":
+		if strategy == "momentum" || strategy == "breakout" || strategy == "trend" {
+			regimeMatchScore = 10
+		} else if strategy == "swing" {
+			regimeMatchScore = 7
+		} else {
+			regimeMatchScore = 3
+		}
+	case "RANGING":
+		if strategy == "scalp" || strategy == "range" {
+			regimeMatchScore = 10
+		} else if strategy == "swing" {
+			regimeMatchScore = 7
+		} else {
+			regimeMatchScore = 3
+		}
+	case "VOLATILE":
+		if strategy == "scalp" {
+			regimeMatchScore = 6
+		} else {
+			regimeMatchScore = 2
+		}
+	case "CONSOLIDATING":
+		if strategy == "range" || strategy == "scalp" {
+			regimeMatchScore = 8
+		} else if strategy == "breakout" {
+			regimeMatchScore = 5
+		} else {
+			regimeMatchScore = 4
+		}
+	}
+	scoreContext += regimeMatchScore
+
+	// 2. Timeframe alignment (0-10 points) - use trend consistency
+	timeframeScore := 5 // Default partial alignment
+	if trend1H != "NEUTRAL" {
+		// If we have a clear trend, give more points
+		timeframeScore = 7
+	}
+	scoreContext += timeframeScore
+
+	// 3. BTC trend influence (0-10 points)
+	btcTrendScore := 5 // Default neutral - would need BTC state for real calculation
+	if symbol == "BTCUSDT" {
+		// For BTC itself, use its own trend
+		if trend1H == "BULLISH" {
+			btcTrendScore = 10
+		} else if trend1H == "BEARISH" {
+			btcTrendScore = 2
+		}
+	}
+	scoreContext += btcTrendScore
+
+	// LLM Score (0-20): Map confidence score (0-100) to (0-20)
+	scoreLLM := int((decision.ConfidenceScore / 100.0) * 20)
+
+	// History Score (0-10): Placeholder until win rate tracking is implemented
+	scoreHistory := 5 // Default middle value
+
+	// Final score is sum of all components
 	scoreFinal := scoreTechnical + scoreContext + scoreLLM + scoreHistory
 
 	// Get entry price from decision
@@ -19159,7 +19929,7 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 		entryPrice = decision.TradeExecution.EntryLow
 	}
 
-	// Build coin state data
+	// Build coin state data with REAL values
 	coinState := &CoinStateData{
 		Symbol:          symbol,
 		Price:           entryPrice,
@@ -19168,9 +19938,9 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 		Decision:        decisionStatus,
 		ADX:             decision.MarketConditions.ADX,
 		ATR:             decision.MarketConditions.ATR,
-		RSI:             0, // Not available in MarketConditions
-		EMA9:            0, // Not available in decision report
-		EMA21:           0, // Not available in decision report
+		RSI:             rsiValue,   // Real RSI from TechnicalIndicators
+		EMA9:            ema9Value,  // Real EMA9 from TechnicalIndicators
+		EMA21:           ema20Value, // Using EMA20 (closest to EMA21)
 		Trend1H:         trend1H,
 		Trend15M:        trend1H, // Use same as 1H for now
 		ScoreTechnical:  scoreTechnical,
@@ -19181,11 +19951,36 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 		BlockingReasons: blockingReasons,
 	}
 
-	// Save to Redis via state manager
+	// Story 11.2: Use delta updates for efficient state management
+	// Only changed fields are updated in Redis, reducing network traffic and improving performance
 	ctx := context.Background()
-	if err := ga.stateManager.SetCoinState(ctx, ga.userID, symbol, coinState); err != nil {
-		log.Printf("[DECISION-STATE] Failed to save coin state for %s: %v", symbol, err)
+	changedFields, err := ga.stateManager.UpdateCoinStateDelta(ctx, ga.userID, symbol, coinState)
+	if err != nil {
+		log.Printf("[DECISION-STATE] Delta update failed for %s: %v", symbol, err)
+		return
+	}
+
+	// Log based on what changed
+	if len(changedFields) > 0 {
+		log.Printf("[DECISION-STATE] Delta updated %d fields for %s: %v (T=%d C=%d L=%d H=%d Total=%d RSI=%.1f)",
+			len(changedFields), symbol, changedFields, scoreTechnical, scoreContext, scoreLLM, scoreHistory, scoreFinal, rsiValue)
+
+		// Broadcast state update with all relevant data to frontend via WebSocket
+		events.BroadcastCoinStateUpdate(ga.userID, map[string]interface{}{
+			"symbol":          symbol,
+			"changed_fields":  changedFields,
+			"regime":          regime,
+			"decision":        decisionStatus,
+			"score_technical": scoreTechnical,
+			"score_context":   scoreContext,
+			"score_llm":       scoreLLM,
+			"score_history":   scoreHistory,
+			"score_final":     scoreFinal,
+			"rsi":             rsiValue,
+			"adx":             decision.MarketConditions.ADX,
+		})
 	} else {
-		log.Printf("[DECISION-STATE] Saved coin state for %s: regime=%s, decision=%s, score=%d", symbol, regime, decisionStatus, scoreFinal)
+		// No changes detected - state is same as cached, skip logging spam
+		// This is the efficiency gain from delta processing
 	}
 }

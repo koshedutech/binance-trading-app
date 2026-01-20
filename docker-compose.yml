@@ -133,7 +133,7 @@ services:
       # Authentication Configuration
       - AUTH_ENABLED=true
       - AUTH_JWT_SECRET=binance-trading-bot-jwt-secret-key-2025-change-in-prod
-      - AUTH_REQUIRE_EMAIL_VERIFICATION=false
+      - AUTH_REQUIRE_EMAIL_VERIFICATION=true
       - AUTH_ACCESS_TOKEN_DURATION=24h
       - AUTH_REFRESH_TOKEN_DURATION=720h
       # API Key Encryption

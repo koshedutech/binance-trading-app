@@ -280,6 +280,10 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 		// Epic 11: Position Decision Engine - Coin state broadcasts
 		BroadcastCoinStateUpdate(userID, data)
 	})
+	events.SetBroadcastExitDecisionUpdate(func(userID string, data interface{}) {
+		// Story 10.3: Exit Decision Monitoring - Real-time exit decision broadcasts
+		BroadcastExitDecisionUpdate(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -560,6 +564,24 @@ func BroadcastCoinStateUpdate(userID string, coinState interface{}) {
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
 			"coin_state": coinState,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastExitDecisionUpdate broadcasts an exit decision update to a specific user
+// Story 10.3: Exit Decision Monitoring UI - Real-time exit decision state for PositionCardExpanded UI
+func BroadcastExitDecisionUpdate(userID string, exitDecision interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventExitDecisionUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"exit_decision": exitDecision,
 		},
 	}
 

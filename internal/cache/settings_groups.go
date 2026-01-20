@@ -43,8 +43,8 @@ var SettingGroups = []SettingGroup{
 // TradingModes defines the 4 trading modes
 var TradingModes = []string{"ultra_fast", "scalp", "swing", "position"}
 
-// CrossModeSettings defines the 4 cross-mode global setting types
-var CrossModeSettings = []string{"circuit_breaker", "llm_config", "capital_allocation", "global_trading"}
+// CrossModeSettings defines the 5 cross-mode global setting types
+var CrossModeSettings = []string{"circuit_breaker", "llm_config", "capital_allocation", "global_trading", "position_management"}
 
 // SafetySettingsModes defines the 4 modes that have safety settings (rate limits, profit monitor, win rate monitor)
 var SafetySettingsModes = []string{"ultra_fast", "scalp", "swing", "position"}

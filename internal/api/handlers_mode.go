@@ -4,6 +4,7 @@ import (
 	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/events"
 	"context"
 	"log"
 	"net/http"
@@ -308,6 +309,22 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 		// Log but don't fail - database is source of truth
 		log.Printf("[MODE-ALLOCATION] Warning: Failed to update in-memory settings: %v", err)
 	}
+
+	// 5. Trigger immediate config reload for running autopilot
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			instance.Autopilot.TriggerConfigReload()
+			log.Printf("[MODE-ALLOCATION] Triggered immediate config reload for user %s", userID)
+		}
+	}
+
+	// 6. Broadcast allocation change to frontend via WebSocket for immediate UI update
+	events.BroadcastModeStatus(userID, map[string]interface{}{
+		"event":      "allocation_update",
+		"allocation": allocation,
+	})
+	log.Printf("[MODE-ALLOCATION] Broadcasted allocation update to user %s", userID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":    true,

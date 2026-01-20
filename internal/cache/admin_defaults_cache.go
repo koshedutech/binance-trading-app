@@ -17,6 +17,17 @@ type AdminDefaultsCacheService struct {
 	logger Logger
 }
 
+// truncateHash safely truncates a hash string to 8 characters for logging
+func truncateHash(hash string) string {
+	if len(hash) >= 8 {
+		return hash[:8]
+	}
+	if len(hash) == 0 {
+		return "(empty)"
+	}
+	return hash
+}
+
 // NewAdminDefaultsCacheService creates a new admin defaults cache service
 func NewAdminDefaultsCacheService(cache *CacheService, logger Logger) *AdminDefaultsCacheService {
 	return &AdminDefaultsCacheService{
@@ -81,7 +92,7 @@ func (s *AdminDefaultsCacheService) LoadAdminDefaults(ctx context.Context) error
 	// Store safety settings (4 keys - one per mode)
 	s.storeSafetySettings(ctx, defaults)
 
-	s.logger.Info("Admin defaults loaded to cache", "hash", hash[:8], "keys", 89)
+	s.logger.Info("Admin defaults loaded to cache", "hash", truncateHash(hash), "keys", 89)
 	return nil
 }
 
@@ -365,8 +376,8 @@ func (s *AdminDefaultsCacheService) CheckAndRefreshIfChanged(ctx context.Context
 	if err != nil || cachedHash != currentHash {
 		// Hash changed or missing - reload
 		s.logger.Info("Admin defaults changed, reloading cache",
-			"cachedHash", cachedHash[:8],
-			"currentHash", currentHash[:8])
+			"cachedHash", truncateHash(cachedHash),
+			"currentHash", truncateHash(currentHash))
 
 		if err := s.LoadAdminDefaults(ctx); err != nil {
 			return false, err

@@ -20,6 +20,8 @@ import ScalpReentryMonitor from './ScalpReentryMonitor';
 import HedgeModeMonitor from './HedgeModeMonitor';
 import ResetConfirmDialog from './ResetConfirmDialog';
 import { CollapsibleSection } from './CollapsibleCard';
+import PositionCardExpanded from './PositionCardExpanded';
+import type { ExpandedPositionData } from '../types/positionManagement';
 
 // Error classification helper
 interface ErrorClassification {
@@ -178,6 +180,8 @@ export default function GiniePanel() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedDecision, setExpandedDecision] = useState<string | null>(null);
   const [expandedPosition, setExpandedPosition] = useState<string | null>(null);
+  const [expandedPositionData, setExpandedPositionData] = useState<ExpandedPositionData | null>(null);
+  const [loadingExpandedPosition, setLoadingExpandedPosition] = useState(false);
   const [coinScans, setCoinScans] = useState<GinieCoinScan[]>([]);
   const [showScans, setShowScans] = useState(false);
   const [expandedPriceAction, setExpandedPriceAction] = useState<string | null>(null);
@@ -638,6 +642,91 @@ export default function GiniePanel() {
     } catch (err) {
       console.error('Failed to fetch pending orders:', err);
     }
+  };
+
+  // Fetch expanded position data for PositionCardExpanded
+  const fetchExpandedPositionData = async (symbol: string) => {
+    if (!symbol) return;
+
+    setLoadingExpandedPosition(true);
+    try {
+      const response = await apiService.getExpandedPositionData(symbol);
+      if (response.success && response.position) {
+        // Map API response to ExpandedPositionData type
+        setExpandedPositionData({
+          symbol: response.position.symbol,
+          side: response.position.side,
+          entry_price: response.position.entry_price,
+          current_price: response.position.current_price,
+          quantity: response.position.quantity,
+          leverage: response.position.leverage,
+          unrealized_pnl: response.position.unrealized_pnl,
+          unrealized_pnl_percent: response.position.unrealized_pnl_percent,
+          roe: response.position.roe,
+          stage: response.position.stage,
+          stage_entry_time: response.position.stage_entry_time,
+          stage_progress_percent: response.position.stage_progress_percent,
+          stop_loss: response.position.stop_loss,
+          take_profit: response.position.take_profit,
+          breakeven_price: response.position.breakeven_price,
+          tp1_price: response.position.tp1_price,
+          tp2_price: response.position.tp2_price,
+          tp3_price: response.position.tp3_price,
+          decision_mode: response.position.decision_mode,
+          efficiency: response.position.efficiency,
+          classic_scores: response.position.classic_scores,
+          new_engine_scores: response.position.new_engine_scores,
+          entry_time: response.position.entry_time,
+          last_updated: response.position.last_updated,
+        });
+      }
+    } catch (err) {
+      console.error('Failed to fetch expanded position data:', err);
+      setExpandedPositionData(null);
+    } finally {
+      setLoadingExpandedPosition(false);
+    }
+  };
+
+  // Handle position expansion toggle
+  const handlePositionToggle = async (symbol: string) => {
+    if (expandedPosition === symbol) {
+      // Collapsing - clear data
+      setExpandedPosition(null);
+      setExpandedPositionData(null);
+    } else {
+      // Expanding - fetch data
+      setExpandedPosition(symbol);
+      await fetchExpandedPositionData(symbol);
+    }
+  };
+
+  // Handle position close from expanded card
+  const handleClosePosition = async (symbol: string) => {
+    try {
+      await futuresApi.closeAllGiniePositions(); // Note: Needs per-position close API
+      setSuccessMsg(`Position ${symbol} close initiated`);
+      setTimeout(() => setSuccessMsg(null), 3000);
+      // Refresh positions
+      await fetchAutopilotStatus();
+      setExpandedPosition(null);
+      setExpandedPositionData(null);
+    } catch (err) {
+      console.error('Failed to close position:', err);
+      setError(`Failed to close position: ${err}`);
+      setTimeout(() => setError(null), 5000);
+    }
+  };
+
+  // Handle refresh expanded position data
+  const handleRefreshExpandedPosition = async (symbol: string) => {
+    await fetchExpandedPositionData(symbol);
+  };
+
+  // Handle collapse from PositionCardExpanded
+  const handleCollapsePosition = (symbol: string) => {
+    setExpandedPosition(null);
+    setExpandedPositionData(null);
   };
 
   const syncPositionsOnLoad = async () => {
@@ -4960,7 +5049,7 @@ export default function GiniePanel() {
               </button>
             ))}
           </div>
-          <div className="max-h-60 overflow-y-auto space-y-2">
+          <div className="max-h-80 overflow-y-auto space-y-2">
             {autopilotStatus.positions
               .filter(pos => sourceFilter === 'all' || pos.source === sourceFilter)
               .length === 0 ? (
@@ -4973,12 +5062,51 @@ export default function GiniePanel() {
                 .map((pos) => {
                   // Find matching Binance position for real-time price
                   const binancePos = binancePositions.find(bp => bp.symbol === pos.symbol);
+                  const isExpanded = expandedPosition === pos.symbol;
+
+                  // Show PositionCardExpanded when expanded and data is loaded
+                  if (isExpanded && expandedPositionData && expandedPositionData.symbol === pos.symbol) {
+                    return (
+                      <PositionCardExpanded
+                        key={pos.symbol}
+                        position={expandedPositionData}
+                        defaultExpanded={true}
+                        onClose={handleClosePosition}
+                        onRefresh={handleRefreshExpandedPosition}
+                        onCollapse={handleCollapsePosition}
+                      />
+                    );
+                  }
+
+                  // Show loading skeleton when fetching expanded data
+                  if (isExpanded && loadingExpandedPosition) {
+                    return (
+                      <div key={pos.symbol} className="bg-gray-700/30 rounded p-4 animate-pulse">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-4 h-4 bg-gray-600 rounded" />
+                            <div className="w-24 h-6 bg-gray-600 rounded" />
+                            <div className="w-20 h-5 bg-gray-600 rounded-full" />
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <div className="w-20 h-8 bg-gray-600 rounded" />
+                            <div className="w-16 h-8 bg-gray-600 rounded" />
+                          </div>
+                        </div>
+                        <div className="mt-4 text-center text-gray-500 text-sm">
+                          Loading expanded position data...
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Show regular PositionCard for collapsed view
                   return (
                     <PositionCard
                       key={pos.symbol}
                       position={pos}
-                      expanded={expandedPosition === pos.symbol}
-                      onToggle={() => setExpandedPosition(expandedPosition === pos.symbol ? null : pos.symbol)}
+                      expanded={false}
+                      onToggle={() => handlePositionToggle(pos.symbol)}
                       realTimePrice={binancePos?.markPrice}
                     />
                   );
