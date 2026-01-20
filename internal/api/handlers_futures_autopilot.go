@@ -1697,16 +1697,45 @@ func (s *Server) handleToggleAutoMode(c *gin.Context) {
 // ============================================================================
 
 // handleGetSymbolSettings returns all symbol settings with performance data
+// Story 9.12: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleGetSymbolSettings(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-	allSettings := sm.GetAllSymbolSettings()
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
 
-	// Also get category defaults
+	ctx := c.Request.Context()
+
+	// Get all symbol settings from cache (Story 9.12)
+	allSettings, err := s.settingsCacheService.GetAllSymbolSettings(ctx, userID)
+	if err != nil {
+		log.Printf("[GET-SYMBOL-SETTINGS] Error getting symbol settings: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get symbol settings")
+		return
+	}
+
+	// Also get category defaults (still from SettingsManager for now)
+	sm := autopilot.GetSettingsManager()
 	categorySettings := sm.GetCategorySettings()
 
 	// Apply category adjustments to each symbol's effective values
 	type EnrichedSymbolSettings struct {
-		*autopilot.SymbolSettings
+		Symbol           string  `json:"symbol"`
+		Category         string  `json:"category"`
+		MinConfidence    float64 `json:"min_confidence"`
+		MaxPositionUSD   float64 `json:"max_position_usd"`
+		SizeMultiplier   float64 `json:"size_multiplier"`
+		LeverageOverride int     `json:"leverage_override"`
+		Enabled          bool    `json:"enabled"`
+		CustomROIPercent float64 `json:"custom_roi_percent"`
+		Notes            string  `json:"notes"`
+		TotalTrades      int     `json:"total_trades"`
+		WinningTrades    int     `json:"winning_trades"`
+		TotalPnL         float64 `json:"total_pnl"`
+		WinRate          float64 `json:"win_rate"`
+		AvgPnL           float64 `json:"avg_pnl"`
+		LastUpdated      string  `json:"last_updated"`
 		EffectiveConfidence float64 `json:"effective_confidence"`
 		EffectiveMaxUSD     float64 `json:"effective_max_usd"`
 	}
@@ -1714,9 +1743,23 @@ func (s *Server) handleGetSymbolSettings(c *gin.Context) {
 	enrichedSymbols := make(map[string]*EnrichedSymbolSettings)
 	for symbol, settings := range allSettings {
 		enrichedSymbols[symbol] = &EnrichedSymbolSettings{
-			SymbolSettings:      settings,
-			EffectiveConfidence: sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
-			EffectiveMaxUSD:     sm.GetEffectivePositionSize(symbol, 500), // Default max USD
+			Symbol:           settings.Symbol,
+			Category:         settings.Category,
+			MinConfidence:    settings.MinConfidence,
+			MaxPositionUSD:   settings.MaxPositionUSD,
+			SizeMultiplier:   settings.SizeMultiplier,
+			LeverageOverride: settings.LeverageOverride,
+			Enabled:          settings.Enabled,
+			CustomROIPercent: settings.CustomROIPercent,
+			Notes:            settings.Notes,
+			TotalTrades:      settings.TotalTrades,
+			WinningTrades:    settings.WinningTrades,
+			TotalPnL:         settings.TotalPnL,
+			WinRate:          settings.WinRate,
+			AvgPnL:           settings.AvgPnL,
+			LastUpdated:      settings.LastUpdated,
+			EffectiveConfidence: s.settingsCacheService.GetEffectiveConfidence(ctx, userID, symbol, 50.0),
+			EffectiveMaxUSD:     s.settingsCacheService.GetEffectivePositionSize(ctx, userID, symbol, 500),
 		}
 	}
 
@@ -1803,39 +1846,84 @@ func (s *Server) handleRefreshSymbolPerformance(c *gin.Context) {
 }
 
 // handleGetSingleSymbolSettings returns settings for a specific symbol
+// Story 9.12: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleGetSingleSymbolSettings(c *gin.Context) {
 	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	symbol := c.Param("symbol")
 	if symbol == "" {
 		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings := sm.GetSymbolSettings(symbol)
+	ctx := c.Request.Context()
+
+	// Get symbol settings from cache (Story 9.12)
+	settings, err := s.settingsCacheService.GetSymbolSettings(ctx, userID, symbol)
+	if err != nil {
+		log.Printf("[GET-SINGLE-SYMBOL-SETTINGS] Error getting symbol settings for %s: %v", symbol, err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get symbol settings")
+		return
+	}
 
 	// Check if symbol is blocked in database (multi-user isolated)
 	isBlockedInDB := false
-	if userID != "" && s.repo != nil {
-		blocked, _, _ := s.repo.IsSymbolBlocked(c.Request.Context(), userID, symbol)
+	if s.repo != nil {
+		blocked, _, _ := s.repo.IsSymbolBlocked(ctx, userID, symbol)
 		isBlockedInDB = blocked
 	}
 
-	// Symbol is enabled if: not blocked in DB, AND enabled in settings, AND not blacklisted
-	isEnabled := !isBlockedInDB && settings.Enabled && settings.Category != autopilot.PerformanceBlacklist
+	// Default settings if no custom settings exist
+	var settingsResponse interface{}
+	var isEnabled bool
+	var category string
+
+	if settings != nil {
+		// Symbol is enabled if: not blocked in DB, AND enabled in settings, AND not blacklisted
+		category = settings.Category
+		isEnabled = !isBlockedInDB && settings.Enabled && settings.Category != "blacklist"
+		settingsResponse = settings
+	} else {
+		// No custom settings - use defaults
+		category = "neutral"
+		isEnabled = !isBlockedInDB
+		settingsResponse = map[string]interface{}{
+			"symbol":            symbol,
+			"category":          "neutral",
+			"min_confidence":    0,
+			"max_position_usd":  0,
+			"size_multiplier":   1.0,
+			"leverage_override": 0,
+			"enabled":           true,
+			"custom_roi_percent": 0,
+			"notes":             "",
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"symbol":               symbol,
-		"settings":             settings,
-		"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
-		"effective_max_usd":    sm.GetEffectivePositionSize(symbol, 500), // Default max USD
+		"settings":             settingsResponse,
+		"category":             category,
+		"effective_confidence": s.settingsCacheService.GetEffectiveConfidence(ctx, userID, symbol, 50.0),
+		"effective_max_usd":    s.settingsCacheService.GetEffectivePositionSize(ctx, userID, symbol, 500),
 		"enabled":              isEnabled,
 		"blocked_in_db":        isBlockedInDB,
 	})
 }
 
 // handleUpdateSymbolSettings updates settings for a specific symbol
+// Story 9.12: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleUpdateSymbolSettings(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
 	symbol := c.Param("symbol")
 	if symbol == "" {
 		errorResponse(c, http.StatusBadRequest, "Symbol parameter required")
@@ -1857,28 +1945,13 @@ func (s *Server) handleUpdateSymbolSettings(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
+	ctx := c.Request.Context()
 
-	// Map string category to type
-	category := autopilot.PerformanceNeutral
-	switch req.Category {
-	case "best":
-		category = autopilot.PerformanceBest
-	case "good":
-		category = autopilot.PerformanceGood
-	case "neutral":
-		category = autopilot.PerformanceNeutral
-	case "poor":
-		category = autopilot.PerformancePoor
-	case "worst":
-		category = autopilot.PerformanceWorst
-	case "blacklist":
-		category = autopilot.PerformanceBlacklist
-	}
-
-	update := &autopilot.SymbolSettings{
+	// Build database settings object (Story 9.12)
+	dbSettings := &database.UserSymbolSettings{
+		UserID:           userID,
 		Symbol:           symbol,
-		Category:         category,
+		Category:         req.Category,
 		MinConfidence:    req.MinConfidence,
 		MaxPositionUSD:   req.MaxPositionUSD,
 		SizeMultiplier:   req.SizeMultiplier,
@@ -1887,18 +1960,28 @@ func (s *Server) handleUpdateSymbolSettings(c *gin.Context) {
 		Notes:            req.Notes,
 	}
 
-	if err := sm.UpdateSymbolSettings(symbol, update); err != nil {
+	// Default empty category to neutral
+	if dbSettings.Category == "" {
+		dbSettings.Category = "neutral"
+	}
+
+	// Save to DB and cache
+	if err := s.settingsCacheService.SetSymbolSettings(ctx, userID, dbSettings); err != nil {
+		log.Printf("[UPDATE-SYMBOL-SETTINGS] Error saving symbol settings for %s: %v", symbol, err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to update symbol settings: "+err.Error())
 		return
 	}
+
+	// Get updated settings from cache
+	updatedSettings, _ := s.settingsCacheService.GetSymbolSettings(ctx, userID, symbol)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":              true,
 		"message":              "Symbol settings updated",
 		"symbol":               symbol,
-		"settings":             sm.GetSymbolSettings(symbol),
-		"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
-		"effective_max_usd":    sm.GetEffectivePositionSize(symbol, 500), // Default max USD
+		"settings":             updatedSettings,
+		"effective_confidence": s.settingsCacheService.GetEffectiveConfidence(ctx, userID, symbol, 50.0),
+		"effective_max_usd":    s.settingsCacheService.GetEffectivePositionSize(ctx, userID, symbol, 500),
 	})
 }
 

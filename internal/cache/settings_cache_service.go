@@ -70,6 +70,11 @@ func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID stri
 		}
 	}
 
+	// Load symbol settings (Story 9.12 Phase 1)
+	if err := s.LoadSymbolSettings(ctx, userID); err != nil {
+		errs = append(errs, fmt.Errorf("symbol_settings: %w", err))
+	}
+
 	if len(errs) > 0 {
 		s.logger.Warn("Some settings failed to load", "userID", userID, "errors", errs)
 	}
@@ -1528,4 +1533,321 @@ func (s *SettingsCacheService) GetActiveStrategyForMode(ctx context.Context, use
 	}
 
 	return bestConfig, bestStrategy, nil
+}
+
+// ============================================================================
+// SYMBOL SETTINGS CACHE (Story 9.12 Phase 1)
+// ============================================================================
+
+// Symbol settings cache key patterns
+const (
+	symbolSettingsKeyPrefix = "user:%s:symbol_settings"       // Hash key for all symbols
+	symbolSettingsTTL       = 24 * time.Hour                  // Cache for 24 hours
+)
+
+// CachedSymbolSettings represents symbol settings stored in cache
+type CachedSymbolSettings struct {
+	Symbol           string  `json:"symbol"`
+	Category         string  `json:"category"`
+	MinConfidence    float64 `json:"min_confidence"`
+	MaxPositionUSD   float64 `json:"max_position_usd"`
+	SizeMultiplier   float64 `json:"size_multiplier"`
+	LeverageOverride int     `json:"leverage_override"`
+	Enabled          bool    `json:"enabled"`
+	CustomROIPercent float64 `json:"custom_roi_percent"`
+	Notes            string  `json:"notes"`
+	TotalTrades      int     `json:"total_trades"`
+	WinningTrades    int     `json:"winning_trades"`
+	TotalPnL         float64 `json:"total_pnl"`
+	WinRate          float64 `json:"win_rate"`
+	AvgPnL           float64 `json:"avg_pnl"`
+	LastUpdated      string  `json:"last_updated"`
+}
+
+// LoadSymbolSettings loads all symbol settings for a user into cache
+// Called during user login as part of LoadUserSettings
+func (s *SettingsCacheService) LoadSymbolSettings(ctx context.Context, userID string) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	// Get all symbol settings from database
+	settings, err := s.repo.GetAllUserSymbolSettings(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("failed to load symbol settings from DB: %w", err)
+	}
+
+	if len(settings) == 0 {
+		return nil // No settings to cache
+	}
+
+	// Store each symbol as a hash field
+	hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+	pipe := s.cache.client.Pipeline()
+
+	for symbol, setting := range settings {
+		cached := &CachedSymbolSettings{
+			Symbol:           setting.Symbol,
+			Category:         setting.Category,
+			MinConfidence:    setting.MinConfidence,
+			MaxPositionUSD:   setting.MaxPositionUSD,
+			SizeMultiplier:   setting.SizeMultiplier,
+			LeverageOverride: setting.LeverageOverride,
+			Enabled:          setting.Enabled,
+			CustomROIPercent: setting.CustomROIPercent,
+			Notes:            setting.Notes,
+			TotalTrades:      setting.TotalTrades,
+			WinningTrades:    setting.WinningTrades,
+			TotalPnL:         setting.TotalPnL,
+			WinRate:          setting.WinRate,
+			AvgPnL:           setting.AvgPnL,
+			LastUpdated:      setting.LastUpdated,
+		}
+
+		data, _ := json.Marshal(cached)
+		pipe.HSet(ctx, hashKey, symbol, string(data))
+	}
+
+	// Set TTL on the hash
+	pipe.Expire(ctx, hashKey, symbolSettingsTTL)
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to cache symbol settings: %w", err)
+	}
+
+	s.logger.Debug("Symbol settings cached", "userID", userID, "count", len(settings))
+	return nil
+}
+
+// GetSymbolSettings retrieves symbol settings for a specific symbol (cache-first)
+// Returns nil if symbol not found (use defaults)
+func (s *SettingsCacheService) GetSymbolSettings(ctx context.Context, userID, symbol string) (*CachedSymbolSettings, error) {
+	if !s.cache.IsHealthy() {
+		// Fallback to DB
+		return s.getSymbolSettingsFromDB(ctx, userID, symbol)
+	}
+
+	hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+	data, err := s.cache.client.HGet(ctx, hashKey, symbol).Result()
+
+	if err == redis.Nil {
+		// Not in cache - try DB
+		return s.getSymbolSettingsFromDB(ctx, userID, symbol)
+	}
+	if err != nil {
+		s.logger.Debug("Cache read error for symbol settings", "error", err)
+		return s.getSymbolSettingsFromDB(ctx, userID, symbol)
+	}
+
+	var settings CachedSymbolSettings
+	if err := json.Unmarshal([]byte(data), &settings); err != nil {
+		return s.getSymbolSettingsFromDB(ctx, userID, symbol)
+	}
+
+	return &settings, nil
+}
+
+// getSymbolSettingsFromDB retrieves symbol settings from database and caches it
+func (s *SettingsCacheService) getSymbolSettingsFromDB(ctx context.Context, userID, symbol string) (*CachedSymbolSettings, error) {
+	dbSettings, err := s.repo.GetUserSymbolSettings(ctx, userID, symbol)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get symbol settings from DB: %w", err)
+	}
+	if dbSettings == nil {
+		return nil, nil // Symbol not configured
+	}
+
+	cached := &CachedSymbolSettings{
+		Symbol:           dbSettings.Symbol,
+		Category:         dbSettings.Category,
+		MinConfidence:    dbSettings.MinConfidence,
+		MaxPositionUSD:   dbSettings.MaxPositionUSD,
+		SizeMultiplier:   dbSettings.SizeMultiplier,
+		LeverageOverride: dbSettings.LeverageOverride,
+		Enabled:          dbSettings.Enabled,
+		CustomROIPercent: dbSettings.CustomROIPercent,
+		Notes:            dbSettings.Notes,
+		TotalTrades:      dbSettings.TotalTrades,
+		WinningTrades:    dbSettings.WinningTrades,
+		TotalPnL:         dbSettings.TotalPnL,
+		WinRate:          dbSettings.WinRate,
+		AvgPnL:           dbSettings.AvgPnL,
+		LastUpdated:      dbSettings.LastUpdated,
+	}
+
+	// Cache for future reads
+	if s.cache.IsHealthy() {
+		hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+		data, _ := json.Marshal(cached)
+		s.cache.client.HSet(ctx, hashKey, symbol, string(data))
+	}
+
+	return cached, nil
+}
+
+// GetAllSymbolSettings retrieves all symbol settings for a user (cache-first)
+func (s *SettingsCacheService) GetAllSymbolSettings(ctx context.Context, userID string) (map[string]*CachedSymbolSettings, error) {
+	if !s.cache.IsHealthy() {
+		return s.getAllSymbolSettingsFromDB(ctx, userID)
+	}
+
+	hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+	data, err := s.cache.client.HGetAll(ctx, hashKey).Result()
+
+	if err != nil || len(data) == 0 {
+		return s.getAllSymbolSettingsFromDB(ctx, userID)
+	}
+
+	result := make(map[string]*CachedSymbolSettings)
+	for symbol, jsonData := range data {
+		var settings CachedSymbolSettings
+		if err := json.Unmarshal([]byte(jsonData), &settings); err != nil {
+			continue
+		}
+		result[symbol] = &settings
+	}
+
+	return result, nil
+}
+
+// getAllSymbolSettingsFromDB retrieves all symbol settings from database
+func (s *SettingsCacheService) getAllSymbolSettingsFromDB(ctx context.Context, userID string) (map[string]*CachedSymbolSettings, error) {
+	dbSettings, err := s.repo.GetAllUserSymbolSettings(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all symbol settings from DB: %w", err)
+	}
+
+	result := make(map[string]*CachedSymbolSettings)
+	for symbol, setting := range dbSettings {
+		result[symbol] = &CachedSymbolSettings{
+			Symbol:           setting.Symbol,
+			Category:         setting.Category,
+			MinConfidence:    setting.MinConfidence,
+			MaxPositionUSD:   setting.MaxPositionUSD,
+			SizeMultiplier:   setting.SizeMultiplier,
+			LeverageOverride: setting.LeverageOverride,
+			Enabled:          setting.Enabled,
+			CustomROIPercent: setting.CustomROIPercent,
+			Notes:            setting.Notes,
+			TotalTrades:      setting.TotalTrades,
+			WinningTrades:    setting.WinningTrades,
+			TotalPnL:         setting.TotalPnL,
+			WinRate:          setting.WinRate,
+			AvgPnL:           setting.AvgPnL,
+			LastUpdated:      setting.LastUpdated,
+		}
+	}
+
+	// Populate cache for future reads
+	if s.cache.IsHealthy() && len(result) > 0 {
+		_ = s.LoadSymbolSettings(ctx, userID)
+	}
+
+	return result, nil
+}
+
+// SetSymbolSettings updates symbol settings (write-through: DB first, then cache)
+func (s *SettingsCacheService) SetSymbolSettings(ctx context.Context, userID string, settings *database.UserSymbolSettings) error {
+	// Write to DB first
+	settings.UserID = userID
+	if err := s.repo.UpsertUserSymbolSettings(ctx, settings); err != nil {
+		return fmt.Errorf("failed to save symbol settings to DB: %w", err)
+	}
+
+	// Update cache
+	if s.cache.IsHealthy() {
+		cached := &CachedSymbolSettings{
+			Symbol:           settings.Symbol,
+			Category:         settings.Category,
+			MinConfidence:    settings.MinConfidence,
+			MaxPositionUSD:   settings.MaxPositionUSD,
+			SizeMultiplier:   settings.SizeMultiplier,
+			LeverageOverride: settings.LeverageOverride,
+			Enabled:          settings.Enabled,
+			CustomROIPercent: settings.CustomROIPercent,
+			Notes:            settings.Notes,
+			TotalTrades:      settings.TotalTrades,
+			WinningTrades:    settings.WinningTrades,
+			TotalPnL:         settings.TotalPnL,
+			WinRate:          settings.WinRate,
+			AvgPnL:           settings.AvgPnL,
+			LastUpdated:      settings.LastUpdated,
+		}
+
+		hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+		data, _ := json.Marshal(cached)
+		s.cache.client.HSet(ctx, hashKey, settings.Symbol, string(data))
+	}
+
+	return nil
+}
+
+// InvalidateSymbolSettings removes a specific symbol's settings from cache
+func (s *SettingsCacheService) InvalidateSymbolSettings(ctx context.Context, userID, symbol string) error {
+	if !s.cache.IsHealthy() {
+		return nil
+	}
+
+	hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+	return s.cache.client.HDel(ctx, hashKey, symbol).Err()
+}
+
+// InvalidateAllSymbolSettings removes all symbol settings from cache for a user
+func (s *SettingsCacheService) InvalidateAllSymbolSettings(ctx context.Context, userID string) error {
+	if !s.cache.IsHealthy() {
+		return nil
+	}
+
+	hashKey := fmt.Sprintf(symbolSettingsKeyPrefix, userID)
+	return s.cache.client.Del(ctx, hashKey).Err()
+}
+
+// GetEffectiveConfidence returns the effective minimum confidence for a symbol
+// Uses symbol-specific override if set, otherwise returns the global value
+func (s *SettingsCacheService) GetEffectiveConfidence(ctx context.Context, userID, symbol string, globalMinConfidence float64) float64 {
+	settings, err := s.GetSymbolSettings(ctx, userID, symbol)
+	if err != nil || settings == nil {
+		return globalMinConfidence
+	}
+
+	// If symbol has a custom min confidence > 0, use it
+	if settings.MinConfidence > 0 {
+		return settings.MinConfidence
+	}
+
+	return globalMinConfidence
+}
+
+// GetEffectivePositionSize returns the effective max position size for a symbol
+// Uses symbol-specific override if set, otherwise returns the global value
+// Also applies size multiplier if set
+func (s *SettingsCacheService) GetEffectivePositionSize(ctx context.Context, userID, symbol string, globalMaxUSD float64) float64 {
+	settings, err := s.GetSymbolSettings(ctx, userID, symbol)
+	if err != nil || settings == nil {
+		return globalMaxUSD
+	}
+
+	// Start with global or symbol-specific max
+	effectiveMax := globalMaxUSD
+	if settings.MaxPositionUSD > 0 {
+		effectiveMax = settings.MaxPositionUSD
+	}
+
+	// Apply size multiplier
+	if settings.SizeMultiplier > 0 && settings.SizeMultiplier != 1.0 {
+		effectiveMax *= settings.SizeMultiplier
+	}
+
+	return effectiveMax
+}
+
+// IsSymbolEnabled checks if a symbol is enabled for trading (cache-first)
+func (s *SettingsCacheService) IsSymbolEnabled(ctx context.Context, userID, symbol string) bool {
+	settings, err := s.GetSymbolSettings(ctx, userID, symbol)
+	if err != nil || settings == nil {
+		return true // Default to enabled if no settings
+	}
+
+	return settings.Enabled
 }

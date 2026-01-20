@@ -153,15 +153,15 @@ Use existing cache patterns from `settings_cache_service.go`:
 ## Acceptance Criteria
 
 ### AC9.12.1: Symbol Settings Migrated
-- [ ] `GetSymbolSettings()` uses DB+cache
-- [ ] `UpdateSymbolSettings()` uses DB with cache invalidation
-- [ ] `GetEffectiveConfidence()` uses cached data
-- [ ] `GetEffectivePositionSize()` uses cached data
+- [x] `GetSymbolSettings()` uses DB+cache
+- [x] `UpdateSymbolSettings()` uses DB with cache invalidation
+- [x] `GetEffectiveConfidence()` uses cached data
+- [x] `GetEffectivePositionSize()` uses cached data
 
 ### AC9.12.2: Circuit Breaker Stats Migrated
-- [ ] Stats loaded from DB on startup
-- [ ] Stats saved to DB on update
-- [ ] Time-based reset uses DB timestamps
+- [x] Stats loaded from DB on startup
+- [x] Stats saved to DB on update
+- [x] Time-based reset uses DB timestamps
 
 ### AC9.12.3: Confluence Config Migrated
 - [ ] New migration creates table

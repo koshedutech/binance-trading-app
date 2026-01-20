@@ -65,6 +65,14 @@ type SettingsCacheReader interface {
 	IsHealthy() bool
 	// LoadUserSettings pre-loads all user settings into cache for warm-up
 	LoadUserSettings(ctx context.Context, userID string) error
+
+	// Story 9.12: Symbol settings cache methods
+	// GetEffectiveConfidence returns the effective min confidence for a symbol
+	GetEffectiveConfidence(ctx context.Context, userID, symbol string, globalMinConfidence float64) float64
+	// GetEffectivePositionSize returns the effective max position size for a symbol
+	GetEffectivePositionSize(ctx context.Context, userID, symbol string, globalMaxUSD float64) float64
+	// IsSymbolEnabled checks if a symbol is enabled for trading
+	IsSymbolEnabled(ctx context.Context, userID, symbol string) bool
 }
 
 // CalibrationLifecycleUpdater defines the interface for updating calibration on trade close.
@@ -4301,10 +4309,7 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				continue
 			}
 
-			// Check if symbol is enabled (per-symbol settings)
-			settingsManager := GetSettingsManager()
-			symbolSettings := settingsManager.GetSymbolSettings(symbol)
-
+			// Check if symbol is enabled (per-symbol settings) - Story 9.12: Use cache service
 			// Check if symbol is blocked in database (multi-user isolated)
 			isBlockedInDB := false
 			if ga.repo != nil && ga.userID != "" {
@@ -4317,8 +4322,16 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				isBlockedInDB = blocked
 			}
 
-			// Symbol is disabled if: blocked in DB, OR not enabled in settings, OR blacklisted
-			isSymbolDisabled := isBlockedInDB || !symbolSettings.Enabled || symbolSettings.Category == PerformanceBlacklist
+			// Check if symbol is enabled via cache service (Story 9.12)
+			symbolEnabled := true
+			if ga.settingsCache != nil && ga.userID != "" {
+				cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				symbolEnabled = ga.settingsCache.IsSymbolEnabled(cacheCtx, ga.userID, symbol)
+				cacheCancel()
+			}
+
+			// Symbol is disabled if: blocked in DB, OR not enabled in settings
+			isSymbolDisabled := isBlockedInDB || !symbolEnabled
 			if isSymbolDisabled {
 				// Scalp mode: Log symbol disabled (AC-2.2.2)
 				if isScalpMode {
@@ -4337,10 +4350,15 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				continue
 			}
 
-			// Get effective confidence threshold for this symbol (considers performance category)
-			effectiveMinConfidence := settingsManager.GetEffectiveConfidence(symbol, ga.config.MinConfidenceToTrade)
+			// Get effective confidence threshold for this symbol (Story 9.12: use cache service)
+			effectiveMinConfidence := ga.config.MinConfidenceToTrade
+			if ga.settingsCache != nil && ga.userID != "" {
+				cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				effectiveMinConfidence = ga.settingsCache.GetEffectiveConfidence(cacheCtx, ga.userID, symbol, ga.config.MinConfidenceToTrade)
+				cacheCancel()
+			}
 
-			// symbolSettings was already retrieved above for the blocking check
+			// Calculate boost for logging
 			categoryBoost := effectiveMinConfidence - ga.config.MinConfidenceToTrade
 
 			// Check confidence threshold (both are 0-100 format)
@@ -4348,11 +4366,11 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 				// Enhanced logging with category boost information
 				boostInfo := ""
 				if categoryBoost > 0 {
-					boostInfo = fmt.Sprintf(" (base %.1f%% + %.1f%% boost for '%s' category)",
-						ga.config.MinConfidenceToTrade, categoryBoost, symbolSettings.Category)
+					boostInfo = fmt.Sprintf(" (base %.1f%% + %.1f%% symbol boost)",
+						ga.config.MinConfidenceToTrade, categoryBoost)
 				} else if categoryBoost < 0 {
-					boostInfo = fmt.Sprintf(" (base %.1f%% - %.1f%% bonus for '%s' category)",
-						ga.config.MinConfidenceToTrade, -categoryBoost, symbolSettings.Category)
+					boostInfo = fmt.Sprintf(" (base %.1f%% - %.1f%% symbol bonus)",
+						ga.config.MinConfidenceToTrade, -categoryBoost)
 				}
 
 				// Scalp mode: Log confidence rejection (AC-2.2.2)
@@ -4375,7 +4393,6 @@ func (ga *GinieAutopilot) scanForMode(mode GinieTradingMode) {
 					"confidence", decision.ConfidenceScore,
 					"min_required", effectiveMinConfidence,
 					"global_min", ga.config.MinConfidenceToTrade,
-					"category", symbolSettings.Category,
 					"category_boost", categoryBoost)
 				signalLog.Status = "rejected"
 				signalLog.RejectionReason = fmt.Sprintf("low_confidence (%.1f < %.1f)%s",
@@ -4741,10 +4758,13 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 	// Scale: 65% confidence = 0.8x, 80% confidence = 1.0x, 95% confidence = 1.15x
 	confidenceMultiplier := confidenceBase + (confidence / 100.0 * confidenceScale)
 
-	// Get per-symbol size multiplier based on performance category
-	settingsManager := GetSettingsManager()
-	effectiveMaxUSD := settingsManager.GetEffectivePositionSize(symbol, ga.config.MaxUSDPerPosition)
-	symbolSettings := settingsManager.GetSymbolSettings(symbol)
+	// Get per-symbol size multiplier based on performance category (Story 9.12: use cache service)
+	effectiveMaxUSD := ga.config.MaxUSDPerPosition
+	if ga.settingsCache != nil && ga.userID != "" {
+		cacheCtx, cacheCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		effectiveMaxUSD = ga.settingsCache.GetEffectivePositionSize(cacheCtx, ga.userID, symbol, ga.config.MaxUSDPerPosition)
+		cacheCancel()
+	}
 
 	// Check if AI/LLM sizing is enabled for this mode
 	autoSizeEnabled := false
@@ -4784,7 +4804,6 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		ga.logger.Debug("Position size cap applied",
 			"symbol", symbol,
 			"mode", mode,
-			"category", symbolSettings.Category,
 			"global_max_usd", ga.config.MaxUSDPerPosition,
 			"effective_max_usd", maxSizeUSD)
 	}
@@ -18030,11 +18049,21 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 
 // initModeCircuitBreakers initializes mode circuit breakers from default configs
 // [Story 9.9] scalp_reentry mode removed - circuit breakers only track the 4 base modes
+// [Story 9.12] Phase 2: Load persisted stats from database instead of file
 func (ga *GinieAutopilot) initModeCircuitBreakers() {
 	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition}
 
-	// Load persisted stats from settings
-	persistedStats := GetSettingsManager().GetAllModeCircuitBreakerStats()
+	// Load persisted stats from database (Story 9.12 Phase 2)
+	var dbStats map[string]*database.UserModeCBStats
+	if ga.repo != nil && ga.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var err error
+		dbStats, err = ga.repo.GetAllUserModeCBStats(ctx, ga.userID)
+		cancel()
+		if err != nil {
+			log.Printf("[CB-INIT] Warning: Failed to load CB stats from DB: %v", err)
+		}
+	}
 
 	for _, mode := range modes {
 		config := ga.GetDefaultModeConfig(mode)
@@ -18063,32 +18092,44 @@ func (ga *GinieAutopilot) initModeCircuitBreakers() {
 				IsPaused:          false,
 			}
 
-			// Load persisted stats if available
+			// Load persisted stats from database if available (Story 9.12 Phase 2)
 			modeStr := string(mode)
-			if savedStats, exists := persistedStats[modeStr]; exists && savedStats != nil {
-				// Check and apply time-based resets first
-				GetSettingsManager().CheckAndResetTimeBasedCounters(modeStr, savedStats)
+			if dbStats != nil {
+				if savedStats, exists := dbStats[modeStr]; exists && savedStats != nil {
+					// Time-based resets are handled by DB timestamps, check if counters need reset
+					now := time.Now()
 
-				// Restore persisted values
-				ga.modeCircuitBreakers[mode].TradesThisMinute = savedStats.TradesThisMinute
-				ga.modeCircuitBreakers[mode].TradesThisHour = savedStats.TradesThisHour
-				ga.modeCircuitBreakers[mode].TradesThisDay = savedStats.TradesThisDay
-				ga.modeCircuitBreakers[mode].TotalTrades = savedStats.TotalTrades
-				ga.modeCircuitBreakers[mode].TotalWins = savedStats.TotalWins
-				ga.modeCircuitBreakers[mode].ConsecutiveLosses = savedStats.ConsecutiveLosses
-				ga.modeCircuitBreakers[mode].CurrentHourLoss = savedStats.CurrentHourLoss
-				ga.modeCircuitBreakers[mode].CurrentDayLoss = savedStats.CurrentDayLoss
-				ga.modeCircuitBreakers[mode].IsPaused = savedStats.IsPaused
-				ga.modeCircuitBreakers[mode].PauseReason = savedStats.PauseReason
-
-				if savedStats.PausedUntil != "" {
-					if pauseTime, err := time.Parse(time.RFC3339, savedStats.PausedUntil); err == nil {
-						ga.modeCircuitBreakers[mode].PausedUntil = pauseTime
+					// Reset minute counter if last reset was in a different minute
+					if savedStats.LastMinuteReset.Minute() != now.Minute() || savedStats.LastMinuteReset.Hour() != now.Hour() {
+						savedStats.TradesThisMinute = 0
 					}
-				}
+					// Reset hour counter if last reset was in a different hour
+					if savedStats.LastHourReset.Hour() != now.Hour() || savedStats.LastHourReset.Day() != now.Day() {
+						savedStats.TradesThisHour = 0
+						savedStats.CurrentHourLoss = 0
+					}
+					// Reset day counter if last reset was on a different day
+					if savedStats.LastDayReset.Day() != now.Day() || savedStats.LastDayReset.Month() != now.Month() {
+						savedStats.TradesThisDay = 0
+						savedStats.CurrentDayLoss = 0
+					}
 
-				log.Printf("[MODE-CIRCUIT-BREAKER] Restored persisted stats for %s: trades_day=%d, day_loss=$%.2f, consec_loss=%d, paused=%v",
-					mode, savedStats.TradesThisDay, savedStats.CurrentDayLoss, savedStats.ConsecutiveLosses, savedStats.IsPaused)
+					// Restore persisted values
+					ga.modeCircuitBreakers[mode].TradesThisMinute = savedStats.TradesThisMinute
+					ga.modeCircuitBreakers[mode].TradesThisHour = savedStats.TradesThisHour
+					ga.modeCircuitBreakers[mode].TradesThisDay = savedStats.TradesThisDay
+					ga.modeCircuitBreakers[mode].TotalTrades = savedStats.TotalTrades
+					ga.modeCircuitBreakers[mode].TotalWins = savedStats.TotalWins
+					ga.modeCircuitBreakers[mode].ConsecutiveLosses = savedStats.ConsecutiveLosses
+					ga.modeCircuitBreakers[mode].CurrentHourLoss = savedStats.CurrentHourLoss
+					ga.modeCircuitBreakers[mode].CurrentDayLoss = savedStats.CurrentDayLoss
+					ga.modeCircuitBreakers[mode].IsPaused = savedStats.IsPaused
+					ga.modeCircuitBreakers[mode].PauseReason = savedStats.PauseReason
+					ga.modeCircuitBreakers[mode].PausedUntil = savedStats.PausedUntil
+
+					log.Printf("[MODE-CIRCUIT-BREAKER] Restored DB stats for %s: trades_day=%d, day_loss=$%.2f, consec_loss=%d, paused=%v",
+						mode, savedStats.TradesThisDay, savedStats.CurrentDayLoss, savedStats.ConsecutiveLosses, savedStats.IsPaused)
+				}
 			}
 
 			log.Printf("[MODE-CIRCUIT-BREAKER] Initialized for mode %s: MaxLoss/hr=$%.2f, MaxLoss/day=$%.2f, MaxConsecLoss=%d, Cooldown=%dm",
@@ -18361,17 +18402,26 @@ func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float
 	ga.persistModeCircuitBreakerStats(mode, cb)
 }
 
-// persistModeCircuitBreakerStats saves the current circuit breaker state to disk
+// persistModeCircuitBreakerStats saves the current circuit breaker state to database
+// [Story 9.12] Phase 2: Migrated from file to database
 // This is called after each trade to ensure counters survive restarts
 func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, cb *ModeCircuitBreaker) {
 	if cb == nil {
 		return
 	}
 
+	// Skip if no repo or userID (required for DB operations)
+	if ga.repo == nil || ga.userID == "" {
+		return
+	}
+
 	now := time.Now().UTC()
 	modeStr := string(mode)
 
-	stats := &ModeCircuitBreakerStats{
+	// Build database stats object
+	dbStats := &database.UserModeCBStats{
+		UserID:            ga.userID,
+		ModeName:          modeStr,
 		TradesThisMinute:  cb.TradesThisMinute,
 		TradesThisHour:    cb.TradesThisHour,
 		TradesThisDay:     cb.TradesThisDay,
@@ -18382,18 +18432,20 @@ func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, 
 		CurrentDayLoss:    cb.CurrentDayLoss,
 		IsPaused:          cb.IsPaused,
 		PauseReason:       cb.PauseReason,
-		LastMinuteReset:   now.Truncate(time.Minute).Format(time.RFC3339),
-		LastHourReset:     now.Truncate(time.Hour).Format(time.RFC3339),
-		LastDayReset:      now.Format("2006-01-02"),
+		PausedUntil:       cb.PausedUntil,
+		LastMinuteReset:   now.Truncate(time.Minute),
+		LastHourReset:     now.Truncate(time.Hour),
+		LastDayReset:      time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC),
 	}
 
-	if cb.IsPaused && !cb.PausedUntil.IsZero() {
-		stats.PausedUntil = cb.PausedUntil.Format(time.RFC3339)
-	}
-
-	if err := GetSettingsManager().SaveModeCircuitBreakerStats(modeStr, stats); err != nil {
-		log.Printf("[MODE-CB-STATS] Failed to persist stats for %s: %v", mode, err)
-	}
+	// Save to database asynchronously to not block trading
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := ga.repo.SaveUserModeCBStats(ctx, dbStats); err != nil {
+			log.Printf("[MODE-CB-STATS] Failed to persist stats to DB for %s: %v", mode, err)
+		}
+	}()
 }
 
 // ResetModeCircuitBreakerStats resets circuit breaker stats for a mode based on period

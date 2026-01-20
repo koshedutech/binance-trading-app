@@ -211,7 +211,7 @@ development_status:
   9-9-position-optimization-refactoring: done
   9-10-migrate-settings-manager-to-db-redis: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-20
   9-11-migrate-symbol-blocking-to-database: done   # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-20
-  9-12-deprecate-autopilot-settings-json: pending  # Large story - 110+ usages to migrate
+  9-12-deprecate-autopilot-settings-json: in-progress  # Large story - 110+ usages to migrate
   epic-9-retrospective: optional
 
   # ============================================================================
