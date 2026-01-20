@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"binance-trading-bot/internal/autopilot"
@@ -60,11 +61,46 @@ func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID stri
 		errs = append(errs, fmt.Errorf("safety: %w", err))
 	}
 
+	// Load mode+strategy settings (16 keys: 4 modes x 4 strategies) - Story 11.32
+	if userIDInt, err := parseUserIDStringToInt(userID); err != nil {
+		errs = append(errs, fmt.Errorf("mode+strategy: failed to parse userID: %w", err))
+	} else {
+		if err := s.PopulateModeStrategiesFromDB(ctx, userIDInt); err != nil {
+			errs = append(errs, fmt.Errorf("mode+strategy: %w", err))
+		}
+	}
+
 	if len(errs) > 0 {
 		s.logger.Warn("Some settings failed to load", "userID", userID, "errors", errs)
 	}
 
 	return nil
+}
+
+// parseUserIDStringToInt converts a string user ID to integer
+// Handles UUID format for default admin user
+func parseUserIDStringToInt(userID string) (int, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("user ID is empty")
+	}
+
+	// Handle UUID format (00000000-0000-0000-0000-000000000000)
+	// Default admin UUID should map to user ID 1
+	if userID == "00000000-0000-0000-0000-000000000000" {
+		return 1, nil
+	}
+
+	// Try parsing as integer
+	id, err := strconv.Atoi(userID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid user ID format: %s", userID)
+	}
+
+	if id <= 0 {
+		return 0, fmt.Errorf("user ID must be positive: %d", id)
+	}
+
+	return id, nil
 }
 
 // loadModeToCache loads a single mode's settings into granular cache keys

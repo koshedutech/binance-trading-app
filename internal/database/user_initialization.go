@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 )
 
 // InitializeUserDefaultSettings copies ALL default settings from default-settings.json
@@ -235,9 +236,20 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 		log.Printf("[USER-INIT] Initialized position management for user %s (decision_mode: %s)", userID, DefaultUserPositionManagement().DecisionMode)
 	}
 
+	// ===== 12. Initialize Mode+Strategy Settings (Story 11.32) =====
+	// Create 16 mode+strategy records (4 modes x 4 strategies) with default configs
+	// This is idempotent - safe to run multiple times
+	modeStrategiesInitialized := 0
+	if err := r.InitializeUserModeStrategies(ctx, userID); err != nil {
+		log.Printf("[USER-INIT] Warning: Failed to initialize mode+strategy settings: %v", err)
+	} else {
+		modeStrategiesInitialized = 16 // 4 modes x 4 strategies
+		log.Printf("[USER-INIT] Initialized %d mode+strategy configs for user %s", modeStrategiesInitialized, userID)
+	}
+
 	// ===== Summary =====
-	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, and position management",
-		userID, modesInitialized, modesStatsInitialized)
+	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, and %d mode+strategy configs",
+		userID, modesInitialized, modesStatsInitialized, modeStrategiesInitialized)
 
 	return nil
 }
@@ -449,8 +461,98 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 		log.Printf("[USER-RESTORE] Restored position management for user %s (decision_mode: %s)", userID, DefaultUserPositionManagement().DecisionMode)
 	}
 
-	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, and position management",
-		userID, modesRestored, modesStatsRestored)
+	// ===== 12. Restore Mode+Strategy Settings (Story 11.32) =====
+	// Reset all 16 mode+strategy records to defaults
+	// This is idempotent - uses ON CONFLICT UPDATE
+	modeStrategiesRestored := 0
+	if err := r.InitializeUserModeStrategies(ctx, userID); err != nil {
+		log.Printf("[USER-RESTORE] Warning: Failed to restore mode+strategy settings: %v", err)
+	} else {
+		modeStrategiesRestored = 16 // 4 modes x 4 strategies
+		log.Printf("[USER-RESTORE] Restored %d mode+strategy configs for user %s", modeStrategiesRestored, userID)
+	}
+
+	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, and %d mode+strategy configs",
+		userID, modesRestored, modesStatsRestored, modeStrategiesRestored)
 
 	return nil
+}
+
+// InitializeUserModeStrategies creates 16 mode+strategy records (4 modes x 4 strategies) for a new user
+// Story 11.32: Mode-Strategy User Initialization
+// This function is idempotent - safe to run multiple times (uses INSERT ON CONFLICT DO NOTHING)
+func (r *Repository) InitializeUserModeStrategies(ctx context.Context, userID string) error {
+	log.Printf("[USER-INIT-MODESTRAT] Initializing mode+strategy settings for user %s", userID)
+
+	// Convert string userID to int for the mode strategy table
+	// The mode strategy table uses INTEGER user_id for consistency with its schema
+	userIDInt, err := parseUserIDToInt(userID)
+	if err != nil {
+		return fmt.Errorf("failed to parse user ID: %w", err)
+	}
+
+	// Get all valid modes and strategies
+	modes := ValidModes()         // ultra_fast, scalp, swing, position
+	strategies := ValidStrategies() // trend_following, mean_reversion, breakout, range_trading
+
+	// Build bulk insert configs
+	var configs []ModeStrategySettingsRow
+	for _, mode := range modes {
+		for _, strategy := range strategies {
+			// Get default config for this mode+strategy combination
+			config := DefaultModeStrategyConfig(mode, strategy)
+
+			// Serialize config to JSON
+			settingsJSON, err := json.Marshal(config)
+			if err != nil {
+				log.Printf("[USER-INIT-MODESTRAT] Warning: Failed to marshal config for %s/%s: %v", mode, strategy, err)
+				continue
+			}
+
+			configs = append(configs, ModeStrategySettingsRow{
+				UserID:   userIDInt,
+				Mode:     mode,
+				Strategy: strategy,
+				Enabled:  config.Enabled,
+				Priority: config.Priority,
+				Settings: settingsJSON,
+			})
+		}
+	}
+
+	// Bulk create with ON CONFLICT DO NOTHING (idempotent)
+	if err := r.BulkCreateModeStrategySettings(ctx, userIDInt, configs); err != nil {
+		return fmt.Errorf("failed to bulk create mode strategy settings: %w", err)
+	}
+
+	log.Printf("[USER-INIT-MODESTRAT] Successfully initialized %d mode+strategy configs for user %s (4 modes x 4 strategies)",
+		len(configs), userID)
+
+	return nil
+}
+
+// parseUserIDToInt converts a string user ID to integer
+// Handles UUID format for default admin user
+func parseUserIDToInt(userID string) (int, error) {
+	if userID == "" {
+		return 0, fmt.Errorf("user ID is empty")
+	}
+
+	// Handle UUID format (00000000-0000-0000-0000-000000000000)
+	// Default admin UUID should map to user ID 1
+	if userID == "00000000-0000-0000-0000-000000000000" {
+		return 1, nil
+	}
+
+	// Try parsing as integer
+	id, err := strconv.Atoi(userID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid user ID format: %s", userID)
+	}
+
+	if id <= 0 {
+		return 0, fmt.Errorf("user ID must be positive: %d", id)
+	}
+
+	return id, nil
 }

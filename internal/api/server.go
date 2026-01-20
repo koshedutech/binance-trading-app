@@ -879,6 +879,18 @@ func (s *Server) setupRoutes() {
 			futures.POST("/decision-engine/strategy/:name/enable", s.handleEnableStrategy)
 			futures.POST("/decision-engine/strategy/:name/disable", s.handleDisableStrategy)
 
+			// Mode-Strategy API endpoints (Story 11.31)
+			// CRUD operations for Mode+Strategy configuration
+			futures.GET("/modes", s.handleGetAllModes)
+			futures.GET("/modes/:mode", s.handleGetMode)
+			futures.GET("/modes/:mode/strategies", s.handleGetModeStrategies)
+			futures.GET("/modes/:mode/strategies/:strategy", s.handleGetModeStrategy)
+			futures.PUT("/modes/:mode/strategies/:strategy", s.handleUpdateModeStrategy)
+			futures.POST("/modes/:mode/strategies/:strategy/reset", s.handleResetModeStrategy)
+			futures.POST("/modes/:mode/strategies/:strategy/enable", s.handleEnableModeStrategy)
+			futures.POST("/modes/:mode/strategies/:strategy/disable", s.handleDisableModeStrategy)
+			futures.POST("/modes/:mode/reset-all", s.handleResetAllModeStrategies)
+
 			// Calibration Data Lifecycle endpoints (Story 11.26)
 			// Manual reset option and confidence indicator for calibration
 			futures.POST("/calibration/reset", s.handleResetCalibration)
