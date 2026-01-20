@@ -203,11 +203,13 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 					fmt.Printf("Failed to update dry run mode: %v\n", err)
 				}
 			} else {
-				// Fallback if settings API not available (legacy support)
+				// Fallback: use database directly if settings API not available
 				controller.SetDryRun(*req.DryRun)
-				sm := autopilot.GetSettingsManager()
-				if err := sm.UpdateDryRunMode(*req.DryRun); err != nil {
-					fmt.Printf("Failed to persist dry run mode: %v\n", err)
+				userID := s.getUserID(c)
+				if userID != "" {
+					if err := s.repo.SetUserDryRunMode(c.Request.Context(), userID, *req.DryRun); err != nil {
+						fmt.Printf("Failed to persist dry run mode to database: %v\n", err)
+					}
 				}
 			}
 		}
@@ -255,11 +257,13 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 					fmt.Printf("Failed to update dry run mode: %v\n", err)
 				}
 			} else {
-				// Fallback if settings API not available (legacy support)
+				// Fallback: use database directly if settings API not available
 				controller.SetDryRun(*req.DryRun)
-				sm := autopilot.GetSettingsManager()
-				if err := sm.UpdateDryRunMode(*req.DryRun); err != nil {
-					fmt.Printf("Failed to persist dry run mode: %v\n", err)
+				userID := s.getUserID(c)
+				if userID != "" {
+					if err := s.repo.SetUserDryRunMode(c.Request.Context(), userID, *req.DryRun); err != nil {
+						fmt.Printf("Failed to persist dry run mode to database: %v\n", err)
+					}
 				}
 			}
 		}
@@ -317,12 +321,13 @@ func (s *Server) handleSetFuturesAutopilotDryRun(c *gin.Context) {
 			return
 		}
 	} else {
-		// Fallback if settings API not available (legacy support)
+		// Fallback: use database directly if settings API not available
 		controller.SetDryRun(req.DryRun)
-		// Persist dry run mode to settings file (synchronous, not async)
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateDryRunMode(req.DryRun); err != nil {
-			fmt.Printf("Failed to persist dry run mode: %v\n", err)
+		userID := s.getUserID(c)
+		if userID != "" {
+			if err := s.repo.SetUserDryRunMode(c.Request.Context(), userID, req.DryRun); err != nil {
+				fmt.Printf("Failed to persist dry run mode to database: %v\n", err)
+			}
 		}
 	}
 
@@ -361,13 +366,23 @@ func (s *Server) handleSetFuturesAutopilotAllocation(c *gin.Context) {
 		return
 	}
 
-	// Persist max allocation to settings file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateMaxAllocation(req.MaxUSDAllocation); err != nil {
-			fmt.Printf("Failed to persist max allocation: %v\n", err)
-		}
-	}()
+	// Persist max allocation to DB + cache
+	userID := s.getUserID(c)
+	if userID != "" && s.settingsCacheService != nil {
+		go func() {
+			ctx := context.Background()
+			// Get current global trading settings, update max allocation, save back
+			gt, err := s.settingsCacheService.GetGlobalTrading(ctx, userID)
+			if err != nil || gt == nil {
+				gt = database.DefaultUserGlobalTrading()
+				gt.UserID = userID
+			}
+			gt.MaxUSDAllocation = req.MaxUSDAllocation
+			if err := s.settingsCacheService.UpdateGlobalTrading(ctx, userID, gt); err != nil {
+				fmt.Printf("[MAX-ALLOC] Failed to persist max allocation to database: %v\n", err)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":            true,
@@ -400,13 +415,24 @@ func (s *Server) handleSetFuturesAutopilotProfitReinvest(c *gin.Context) {
 		return
 	}
 
-	// Persist profit reinvest settings to file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateProfitReinvest(req.ProfitReinvestPercent, req.ProfitRiskLevel); err != nil {
-			fmt.Printf("Failed to persist profit reinvest settings: %v\n", err)
-		}
-	}()
+	// Persist profit reinvest settings to DB + cache
+	userID := s.getUserID(c)
+	if userID != "" && s.settingsCacheService != nil {
+		go func() {
+			ctx := context.Background()
+			// Get current global trading settings, update profit reinvest, save back
+			gt, err := s.settingsCacheService.GetGlobalTrading(ctx, userID)
+			if err != nil || gt == nil {
+				gt = database.DefaultUserGlobalTrading()
+				gt.UserID = userID
+			}
+			gt.ProfitReinvestPercent = req.ProfitReinvestPercent
+			gt.ProfitReinvestRiskLevel = req.ProfitRiskLevel
+			if err := s.settingsCacheService.UpdateGlobalTrading(ctx, userID, gt); err != nil {
+				fmt.Printf("[PROFIT-REINVEST] Failed to persist profit reinvest to database: %v\n", err)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":                 true,
@@ -731,22 +757,22 @@ func (s *Server) handleToggleFuturesCircuitBreaker(c *gin.Context) {
 		return
 	}
 
-	// FIXED: Persist circuit breaker enabled state using database call, not GetDefaultSettings()
-	// Capture repo and userID for goroutine (c.Request.Context() not safe after handler returns)
-	repo := s.repo
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		ctx := context.Background()
-		settings, loadErr := sm.LoadSettingsFromDB(ctx, repo, userID)
-		if loadErr != nil || settings == nil {
-			fmt.Printf("[FUTURES-CB] ERROR: Failed to load settings from database for user %s: %v\n", userID, loadErr)
-			return
-		}
-		settings.CircuitBreakerEnabled = req.Enabled
-		if err := sm.SaveSettings(settings); err != nil {
-			fmt.Printf("[FUTURES-CB] Failed to persist circuit breaker enabled state: %v\n", err)
-		}
-	}()
+	// Persist circuit breaker enabled state to DB + cache
+	if s.settingsCacheService != nil {
+		go func() {
+			ctx := context.Background()
+			// Get current circuit breaker settings, update enabled state, save back
+			cb, err := s.settingsCacheService.GetCircuitBreaker(ctx, userID)
+			if err != nil || cb == nil {
+				cb = database.DefaultUserGlobalCircuitBreaker()
+				cb.UserID = userID
+			}
+			cb.Enabled = req.Enabled
+			if err := s.settingsCacheService.UpdateCircuitBreaker(ctx, userID, cb); err != nil {
+				fmt.Printf("[FUTURES-CB] Failed to persist circuit breaker to database: %v\n", err)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

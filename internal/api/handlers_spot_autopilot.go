@@ -3,10 +3,12 @@ package api
 import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/circuit"
+	"binance-trading-bot/internal/database"
 	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -163,13 +165,23 @@ func (s *Server) handleSetSpotAutopilotDryRun(c *gin.Context) {
 	controller.SetDryRun(req.DryRun)
 	log.Printf("[SPOT] User %s set dry_run=%v", userID, req.DryRun)
 
-	// Persist dry run mode to settings file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateSpotDryRunMode(req.DryRun); err != nil {
-			fmt.Printf("Failed to persist spot dry run mode: %v\n", err)
-		}
-	}()
+	// Persist dry run mode to database
+	// Note: Spot settings don't have cache layer yet - direct DB access is intentional
+	if userID != "" && s.repo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			spot, err := s.repo.GetUserSpotSettings(ctx, userID)
+			if err != nil || spot == nil {
+				spot = database.DefaultUserSpotSettings()
+				spot.UserID = userID
+			}
+			spot.DryRunMode = req.DryRun
+			if err := s.repo.SaveUserSpotSettings(ctx, spot); err != nil {
+				log.Printf("[SPOT] Failed to persist spot dry run mode to database: %v", err)
+			}
+		}()
+	}
 
 	mode := "LIVE"
 	if req.DryRun {
@@ -220,13 +232,23 @@ func (s *Server) handleSetSpotAutopilotAllocation(c *gin.Context) {
 		return
 	}
 
-	// Persist to settings
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateSpotMaxAllocation(req.MaxUSDPerPosition); err != nil {
-			fmt.Printf("Failed to persist spot max allocation: %v\n", err)
-		}
-	}()
+	// Persist to database
+	// Note: Spot settings don't have cache layer yet - direct DB access is intentional
+	if userID != "" && s.repo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			spot, err := s.repo.GetUserSpotSettings(ctx, userID)
+			if err != nil || spot == nil {
+				spot = database.DefaultUserSpotSettings()
+				spot.UserID = userID
+			}
+			spot.MaxUSDPerPosition = req.MaxUSDPerPosition
+			if err := s.repo.SaveUserSpotSettings(ctx, spot); err != nil {
+				log.Printf("[SPOT] Failed to persist spot max allocation to database: %v", err)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":              true,
@@ -469,23 +491,28 @@ func (s *Server) handleUpdateSpotCircuitBreakerConfig(c *gin.Context) {
 		return
 	}
 
-	// Persist circuit breaker settings to file
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		status := controller.GetCircuitBreakerStatus()
-		enabled, _ := status["enabled"].(bool)
-		if err := sm.UpdateSpotCircuitBreaker(
-			enabled,
-			req.MaxLossPerHour,
-			req.MaxDailyLoss,
-			req.MaxConsecutiveLosses,
-			req.CooldownMinutes,
-			req.MaxTradesPerMinute,
-			req.MaxDailyTrades,
-		); err != nil {
-			fmt.Printf("Failed to persist spot circuit breaker settings: %v\n", err)
-		}
-	}()
+	// Persist circuit breaker settings to database
+	// Note: Spot settings don't have cache layer yet - direct DB access is intentional
+	if userID != "" && s.repo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			spot, err := s.repo.GetUserSpotSettings(ctx, userID)
+			if err != nil || spot == nil {
+				spot = database.DefaultUserSpotSettings()
+				spot.UserID = userID
+			}
+			spot.CBMaxLossPerHour = req.MaxLossPerHour
+			spot.CBMaxDailyLoss = req.MaxDailyLoss
+			spot.CBMaxConsecutiveLosses = req.MaxConsecutiveLosses
+			spot.CBCooldownMinutes = req.CooldownMinutes
+			spot.CBMaxTradesPerMinute = req.MaxTradesPerMinute
+			spot.CBMaxDailyTrades = req.MaxDailyTrades
+			if err := s.repo.SaveUserSpotSettings(ctx, spot); err != nil {
+				log.Printf("[SPOT] Failed to persist spot circuit breaker to database: %v", err)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -531,22 +558,23 @@ func (s *Server) handleToggleSpotCircuitBreaker(c *gin.Context) {
 		return
 	}
 
-	// FIXED: Persist circuit breaker enabled state using database call, not GetDefaultSettings()
-	// Capture repo for goroutine (c.Request.Context() not safe after handler returns)
-	repo := s.repo
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		ctx := context.Background()
-		settings, loadErr := sm.LoadSettingsFromDB(ctx, repo, userID)
-		if loadErr != nil || settings == nil {
-			fmt.Printf("[SPOT-CB] ERROR: Failed to load settings from database for user %s: %v\n", userID, loadErr)
-			return
-		}
-		settings.SpotCircuitBreakerEnabled = req.Enabled
-		if err := sm.SaveSettings(settings); err != nil {
-			fmt.Printf("[SPOT-CB] Failed to persist spot circuit breaker enabled state: %v\n", err)
-		}
-	}()
+	// Persist circuit breaker enabled state to database
+	// Note: Spot settings don't have cache layer yet - direct DB access is intentional
+	if s.repo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			spot, err := s.repo.GetUserSpotSettings(ctx, userID)
+			if err != nil || spot == nil {
+				spot = database.DefaultUserSpotSettings()
+				spot.UserID = userID
+			}
+			spot.CircuitBreakerEnabled = req.Enabled
+			if err := s.repo.SaveUserSpotSettings(ctx, spot); err != nil {
+				log.Printf("[SPOT-CB] Failed to persist spot circuit breaker enabled to database: %v", err)
+			}
+		}()
+	}
 
 	log.Printf("[SPOT] User %s toggled circuit breaker to %v", userID, req.Enabled)
 	c.JSON(http.StatusOK, gin.H{
@@ -620,13 +648,25 @@ func (s *Server) handleSetSpotCoinPreferences(c *gin.Context) {
 
 	controller.SetCoinPreferences(req.Blacklist, req.Whitelist, req.UseWhitelist)
 
-	// Persist coin preferences
-	go func() {
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateSpotCoinPreferences(req.Blacklist, req.Whitelist, req.UseWhitelist); err != nil {
-			fmt.Printf("Failed to persist spot coin preferences: %v\n", err)
-		}
-	}()
+	// Persist coin preferences to database
+	// Note: Spot settings don't have cache layer yet - direct DB access is intentional
+	if userID != "" && s.repo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			spot, err := s.repo.GetUserSpotSettings(ctx, userID)
+			if err != nil || spot == nil {
+				spot = database.DefaultUserSpotSettings()
+				spot.UserID = userID
+			}
+			spot.CoinBlacklist = req.Blacklist
+			spot.CoinWhitelist = req.Whitelist
+			spot.UseWhitelist = req.UseWhitelist
+			if err := s.repo.SaveUserSpotSettings(ctx, spot); err != nil {
+				log.Printf("[SPOT] Failed to persist spot coin preferences to database: %v", err)
+			}
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":     true,

@@ -1806,41 +1806,23 @@ func (w *BotAPIWrapper) SetDryRunMode(enabled bool) error {
 		"to_mode", modeStr,
 		"mode_changed", oldMode != enabled)
 
-	// CRITICAL FIX: Load settings ONCE at the start to prevent race condition
-	// Previously we were loading and saving twice, creating a window where
-	// another thread could call LoadSavedSettings() and revert the mode
-	sm := autopilot.GetSettingsManager()
-	settings, err := sm.LoadSettings()
-	if err != nil {
-		w.logger.Warn("Failed to load settings for mode update", "error", err)
-		return fmt.Errorf("failed to load settings: %w", err)
+	// Persist to database if we have an owner user ID
+	// Note: Database persistence is the source of truth; file-based SettingsManager is deprecated
+	ownerUserID := ""
+	if w.futuresAutopilotController != nil {
+		ownerUserID = w.futuresAutopilotController.GetOwnerUserID()
 	}
-
-	// Update both main dry run mode and Ginie dry run mode together
-	oldDryRunMode := settings.DryRunMode
-	oldGinieDryRunMode := settings.GinieDryRunMode
-
-	settings.DryRunMode = enabled
-	settings.GinieDryRunMode = enabled
-	settings.SpotDryRunMode = enabled
-
-	w.logger.Info("Updating settings file",
-		"old_dry_run", oldDryRunMode,
-		"new_dry_run", enabled,
-		"old_ginie_dry_run", oldGinieDryRunMode,
-		"new_ginie_dry_run", enabled)
-
-	// Save to persistent storage IMMEDIATELY to prevent LoadSavedSettings from reading stale data
-	if err := sm.SaveSettings(settings); err != nil {
-		w.logger.Error("Failed to save settings after mode change", "error", err)
-		return fmt.Errorf("failed to save settings: %w", err)
+	if ownerUserID != "" && w.repo != nil {
+		ctx := context.Background()
+		if err := w.repo.SetUserDryRunMode(ctx, ownerUserID, enabled); err != nil {
+			w.logger.Warn("Failed to persist dry run mode to database", "error", err, "user_id", ownerUserID)
+		} else {
+			w.logger.Info("Persisted trading mode to database",
+				"mode", modeStr,
+				"dry_run", enabled,
+				"user_id", ownerUserID)
+		}
 	}
-
-	w.logger.Info("Successfully saved trading mode to settings file",
-		"mode", modeStr,
-		"dry_run", enabled,
-		"dry_run_mode_saved", settings.DryRunMode,
-		"ginie_dry_run_mode_saved", settings.GinieDryRunMode)
 
 	// Update all mode fields AFTER persistent save to prevent race condition
 	w.cfg.TradingConfig.DryRun = enabled
