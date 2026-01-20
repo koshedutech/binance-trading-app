@@ -197,3 +197,34 @@ func (r *Repository) ResetDailyGiniePnL(ctx context.Context, userID string) erro
 
 	return nil
 }
+
+// GetUsersWithAutoStartEnabled returns a list of user IDs that have auto_start enabled
+// Used for auto-starting Ginie instances after server restart
+func (r *Repository) GetUsersWithAutoStartEnabled(ctx context.Context) ([]string, error) {
+	query := `
+		SELECT user_id
+		FROM user_ginie_settings
+		WHERE auto_start = true
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users with auto-start enabled: %w", err)
+	}
+	defer rows.Close()
+
+	var userIDs []string
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, fmt.Errorf("failed to scan user ID: %w", err)
+		}
+		userIDs = append(userIDs, userID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating user IDs: %w", err)
+	}
+
+	return userIDs, nil
+}

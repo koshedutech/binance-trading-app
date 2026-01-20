@@ -146,10 +146,21 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 		return
 	}
 
-	// CRITICAL FIX: Persist the auto-start setting so Ginie restarts after server reboot
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateGinieAutoStart(req.Enabled, userID); err != nil {
-		log.Printf("[GINIE-TOGGLE] Failed to persist auto-start setting: %v", err)
+	// CRITICAL FIX: Persist the auto-start setting to database so Ginie restarts after server reboot
+	if userID != "" && s.repo != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			gs, err := s.repo.GetUserGinieSettings(ctx, userID)
+			if err != nil || gs == nil {
+				gs = database.DefaultUserGinieSettings()
+				gs.UserID = userID
+			}
+			gs.AutoStart = req.Enabled
+			if err := s.repo.SaveUserGinieSettings(ctx, gs); err != nil {
+				log.Printf("[GINIE-TOGGLE] Failed to persist auto-start setting to database: %v", err)
+			}
+		}()
 	}
 
 	// MULTI-USER MODE: Use per-user autopilot if manager is available
@@ -186,14 +197,14 @@ func (s *Server) handleToggleGinie(c *gin.Context) {
 			}
 		}
 
-		// Get dry_run mode from settings - MUST load from database
-		currentSettings, err := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-		if err != nil || currentSettings == nil {
-			log.Printf("[GINIE-TOGGLE] ERROR: Failed to load user settings from database: %v", err)
-			errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
-			return
+		// Get dry_run mode from database
+		var dbErr error
+		dryRun, dbErr = s.repo.GetUserDryRunMode(c.Request.Context(), userID)
+		if dbErr != nil {
+			log.Printf("[GINIE-TOGGLE] ERROR: Failed to load dry run mode from database: %v", dbErr)
+			// Default to paper mode on error for safety
+			dryRun = true
 		}
-		dryRun = currentSettings.GinieDryRunMode
 
 		// Broadcast autopilot status change to the SPECIFIC user via WebSocket (multi-user safe)
 		if userWSHub != nil {
@@ -691,11 +702,21 @@ func (s *Server) handleStartGinieAutopilot(c *gin.Context) {
 
 		log.Printf("[MULTI-USER] User %s started their personal Ginie autopilot", userID)
 
-		// Persist auto-start setting so Ginie restarts automatically after server restart
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateGinieAutoStart(true, userID); err != nil {
-			// Log but don't fail - the start was successful
-			log.Printf("Failed to persist Ginie auto-start setting: %v", err)
+		// Persist auto-start setting to database so Ginie restarts after server restart
+		if s.repo != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				gs, err := s.repo.GetUserGinieSettings(ctx, userID)
+				if err != nil || gs == nil {
+					gs = database.DefaultUserGinieSettings()
+					gs.UserID = userID
+				}
+				gs.AutoStart = true
+				if err := s.repo.SaveUserGinieSettings(ctx, gs); err != nil {
+					log.Printf("[GINIE-START] Failed to persist auto-start setting to database: %v", err)
+				}
+			}()
 		}
 
 		status := s.userAutopilotManager.GetStatus(userID)
@@ -748,11 +769,21 @@ func (s *Server) handleStopGinieAutopilot(c *gin.Context) {
 
 		log.Printf("[MULTI-USER] User %s stopped their personal Ginie autopilot", userID)
 
-		// Clear auto-start setting so Ginie doesn't restart after server restart
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateGinieAutoStart(false, userID); err != nil {
-			// Log but don't fail - the stop was successful
-			log.Printf("Failed to clear Ginie auto-start setting: %v", err)
+		// Clear auto-start setting in database so Ginie doesn't restart after server restart
+		if s.repo != nil {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				gs, err := s.repo.GetUserGinieSettings(ctx, userID)
+				if err != nil || gs == nil {
+					gs = database.DefaultUserGinieSettings()
+					gs.UserID = userID
+				}
+				gs.AutoStart = false
+				if err := s.repo.SaveUserGinieSettings(ctx, gs); err != nil {
+					log.Printf("[GINIE-STOP] Failed to clear auto-start setting in database: %v", err)
+				}
+			}()
 		}
 
 		status := s.userAutopilotManager.GetStatus(userID)

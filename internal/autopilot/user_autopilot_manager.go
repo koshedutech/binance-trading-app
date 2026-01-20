@@ -649,40 +649,49 @@ func (m *UserAutopilotManager) GetManagerStatus() *ManagerStatus {
 	}
 }
 
-// AutoStartFromSettings checks if auto-start is enabled and starts Ginie for the saved user
+// AutoStartFromSettings checks the database for users with auto-start enabled and starts their autopilots
 // This should be called after server initialization to restore Ginie state from before restart
 func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error {
-	sm := GetSettingsManager()
-	if sm == nil {
-		m.logger.Warn("SettingsManager not available for auto-start check")
+	// Query database for users with auto_start = true
+	if m.repo == nil {
+		m.logger.Warn("Repository not available for auto-start check")
 		return nil
 	}
 
-	if !sm.GetGinieAutoStart() {
-		m.logger.Info("Ginie auto-start is disabled, skipping")
+	// Get all users with auto-start enabled from the database
+	users, err := m.repo.GetUsersWithAutoStartEnabled(ctx)
+	if err != nil {
+		m.logger.Warn("Failed to query users with auto-start enabled", "error", err)
 		return nil
 	}
 
-	userID := sm.GetGinieAutoStartUserID()
-	if userID == "" {
-		m.logger.Warn("Ginie auto-start enabled but no user ID saved, skipping")
+	if len(users) == 0 {
+		m.logger.Info("No users with auto-start enabled, skipping")
 		return nil
 	}
 
-	m.logger.Info("Auto-starting Ginie from saved settings",
-		"user_id", userID,
-		"auto_start", true)
-
-	// Start autopilot for the saved user
-	if err := m.StartAutopilot(ctx, userID); err != nil {
-		m.logger.Error("Failed to auto-start Ginie for user",
+	// Start autopilot for each user with auto-start enabled
+	var startErrors []error
+	for _, userID := range users {
+		m.logger.Info("Auto-starting Ginie from database settings",
 			"user_id", userID,
-			"error", err)
-		return fmt.Errorf("failed to auto-start Ginie for user %s: %w", userID, err)
+			"auto_start", true)
+
+		if err := m.StartAutopilot(ctx, userID); err != nil {
+			m.logger.Error("Failed to auto-start Ginie for user",
+				"user_id", userID,
+				"error", err)
+			startErrors = append(startErrors, fmt.Errorf("user %s: %w", userID, err))
+			continue
+		}
+
+		m.logger.Info("Ginie auto-started successfully",
+			"user_id", userID)
 	}
 
-	m.logger.Info("Ginie auto-started successfully",
-		"user_id", userID)
+	if len(startErrors) > 0 {
+		return fmt.Errorf("failed to auto-start Ginie for %d user(s): %v", len(startErrors), startErrors[0])
+	}
 
 	return nil
 }

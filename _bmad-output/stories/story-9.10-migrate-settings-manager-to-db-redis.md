@@ -223,3 +223,127 @@ After all calls migrated:
 ## Notes
 
 This story completes the migration from file-based settings to the DB+Redis architecture established in Epic 6. After completion, `autopilot_settings.json` can be fully removed and all settings will be properly persisted with multi-user support.
+
+---
+
+# PHASE 2: Complete Migration of Remaining SettingsManager Usages
+
+**Added**: 2026-01-20
+**Status**: In Progress
+
+## Phase 2 Problem Statement
+
+Phase 1 migrated core user settings (dry run, max allocation, profit reinvest, circuit breaker toggle). However, 100+ GetSettingsManager() calls remain across the codebase in these categories:
+
+### Category Analysis
+
+| Category | Files | Data | DB Status | Priority |
+|----------|-------|------|-----------|----------|
+| **PnL Stats** | ginie_autopilot.go | Total/Daily PnL, trade counts | UserGinieSettings has fields | HIGH |
+| **Circuit Breaker Stats** | ginie_autopilot.go | Mode loss/trade counters | NOT in DB | HIGH |
+| **Symbol Blocking** | handlers_ginie.go, ginie_autopilot.go | Blocked symbols with TTL | NOT in DB | HIGH |
+| **Ginie Auto-start** | handlers_ginie.go, user_autopilot_manager.go | Auto-start flag, user ID | UserGinieSettings has fields | HIGH |
+| **Spot Settings** | spot_controller.go | Coin preferences, settings | UserSpotSettings exists | MEDIUM |
+| **Mode Configs** | ginie_patterns.go, ginie_analyzer.go | MTF, LLM settings | Mostly in DB | MEDIUM |
+| **Symbol Settings** | handlers_futures_autopilot.go | Per-symbol performance | NOT in DB | LOW |
+
+---
+
+## Phase 2 Technical Specification
+
+### Task 2.1: Migrate PnL Stats (HIGH PRIORITY)
+
+**Current**: `ginie_autopilot.go` lines 1720, 1787
+```go
+sm := GetSettingsManager()
+totalPnL, dailyPnL, totalTrades, winningTrades, dailyTrades := sm.GetGiniePnLStats()
+sm.UpdateGiniePnLStats(totalPnL, dailyPnL, totalTrades, winningTrades, dailyTrades)
+```
+
+**Solution**: `UserGinieSettings` already has these fields!
+- TotalPnL, DailyPnL, TotalTrades, WinningTrades, DailyTrades, PnLLastUpdate
+
+**Migration**:
+1. Add `settingsCacheService` to GinieAutopilot
+2. Replace file reads with `repo.GetUserGinieSettings(ctx, userID)`
+3. Replace file writes with `repo.SaveUserGinieSettings(ctx, settings)`
+
+### Task 2.2: Migrate Ginie Auto-start (HIGH PRIORITY)
+
+**Current**: `handlers_ginie.go` line 150, `user_autopilot_manager.go` line 655
+```go
+sm.UpdateGinieAutoStart(enabled, userID)
+autoStart, userID := sm.GetGinieAutoStart()
+```
+
+**Solution**: `UserGinieSettings` has `AutoStart` field
+
+**Migration**:
+1. Add handler to update `user_ginie_settings.auto_start`
+2. On server restart, query DB for auto-start flag
+
+### Task 2.3: Migrate Spot Controller Settings (MEDIUM PRIORITY)
+
+**Current**: `spot_controller.go` lines 131, 826, 841
+```go
+sm := GetSettingsManager()
+settings := sm.GetDefaultSettings()
+// Access spot settings...
+```
+
+**Solution**: `UserSpotSettings` exists with all needed fields
+
+**Migration**:
+1. Pass repository to SpotController constructor
+2. Replace file reads with `repo.GetUserSpotSettings(ctx, userID)`
+
+### Task 2.4: Migrate Mode Configs in ginie_patterns.go (MEDIUM PRIORITY)
+
+**Current**: `ginie_patterns.go` lines 1244, 1315
+```go
+settings := GetSettingsManager().GetDefaultSettings()
+modeConfig := settings.ModeConfigs[modeStr]
+```
+
+**Solution**: Use cache service for mode configs
+
+**Migration**:
+1. Pass settingsCacheService to GinieAutopilot
+2. Use `settingsCacheService.GetModeConfig(ctx, userID, mode)`
+
+---
+
+## Phase 2 Acceptance Criteria
+
+### AC9.10.7: PnL Stats Migrated
+- [ ] PnL stats read from UserGinieSettings table
+- [ ] PnL stats write to UserGinieSettings table
+- [ ] Daily reset works with DB
+
+### AC9.10.8: Auto-start Migrated
+- [ ] Auto-start flag persists to DB
+- [ ] Server restart reads auto-start from DB
+- [ ] User ID for auto-start stored in DB
+
+### AC9.10.9: Spot Controller Migrated
+- [ ] Spot settings read from UserSpotSettings
+- [ ] Coin preferences persist to DB
+
+### AC9.10.10: Mode Configs via Cache
+- [ ] ginie_patterns.go uses cache service
+- [ ] No file reads for mode configs
+
+---
+
+## Phase 2 Implementation Order
+
+1. **Task 2.1**: PnL Stats - Most frequently written, affects runtime
+2. **Task 2.2**: Auto-start - Critical for server restart
+3. **Task 2.3**: Spot Controller - Independent subsystem
+4. **Task 2.4**: Mode Configs - Read-heavy, lower priority
+
+---
+
+## Phase 2 Notes
+
+Symbol-level settings (performance tracking, blacklists) will be addressed in a separate story as they require new database tables and more extensive changes.
