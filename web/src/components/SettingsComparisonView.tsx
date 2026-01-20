@@ -16,6 +16,11 @@ import {
   Target,
   FileText,
   Globe,
+  TrendingUp,
+  RotateCcw,
+  Zap,
+  Power,
+  PowerOff,
 } from 'lucide-react';
 import {
   loadModeDefaults,
@@ -26,6 +31,9 @@ import {
   ConfigResetPreview,
   FieldComparison,
 } from '../services/futuresApi';
+import modeStrategyApi from '../api/modeStrategy';
+import type { ModeName, StrategyName, ModeStrategyConfig, StrategyComparisonResponse } from '../types/modeStrategy';
+import { STRATEGY_DISPLAY_NAMES, STRATEGY_DESCRIPTIONS } from '../types/modeStrategy';
 
 // ==================== INTERFACES ====================
 
@@ -39,6 +47,21 @@ interface SettingGroupComparison {
   fields: FieldComparison[];
 }
 
+// Strategy comparison result for nested strategies inside modes
+interface StrategyComparisonResult {
+  strategy: StrategyName;
+  strategyName: string;
+  enabled: boolean;
+  allMatch: boolean;
+  totalFields: number;
+  matchingFields: number;
+  differentFields: number;
+  differences: FieldComparison[];
+  config?: ModeStrategyConfig;
+  isLoading?: boolean;
+  error?: string;
+}
+
 interface ModeComparisonResult {
   mode: string;
   modeName: string;
@@ -49,6 +72,10 @@ interface ModeComparisonResult {
   isAdmin?: boolean;
   configNotFound?: boolean;
   rawData?: any;
+  // NEW: Strategies nested inside modes
+  strategies?: StrategyComparisonResult[];
+  strategiesAllMatch?: boolean;
+  totalStrategyDifferences?: number;
 }
 
 interface OtherSettingComparison {
@@ -71,6 +98,9 @@ interface SettingsComparisonViewProps {
   onResetAllModes?: () => void;
   onResetMode?: (mode: string) => void;
   onResetModeGroup?: (mode: string, group: string) => void;
+  // Strategy resets (NEW for Story 11.34)
+  onResetStrategy?: (mode: string, strategy: string) => void;
+  onResetAllStrategiesInMode?: (mode: string) => void;
   // Other settings resets
   onResetAllOther?: () => void;
   onResetCircuitBreaker?: () => void;
@@ -199,6 +229,9 @@ const MODE_DISPLAY_NAMES: Record<string, string> = {
   swing: 'Swing',
   position: 'Position',
 };
+
+// List of all strategies (Story 11.34)
+const ALL_STRATEGIES: StrategyName[] = ['trend_following', 'mean_reversion', 'breakout', 'range_trading'];
 
 // ==================== UTILITY FUNCTIONS ====================
 
@@ -618,7 +651,7 @@ function FieldTable({
           </tr>
         </thead>
         <tbody>
-          {fields.map((field, idx) => {
+          {fields.map((field) => {
             const isEdited = editedValues && editedValues[field.path] !== undefined;
             const displayValue = isEdited ? editedValues[field.path] : field.current;
             const fieldName = field.path.split('.').pop() || '';
@@ -626,7 +659,7 @@ function FieldTable({
 
             return (
               <tr
-                key={idx}
+                key={field.path}
                 className={`border-b border-gray-700/30 ${
                   notConfigured
                     ? 'bg-red-900/10'
@@ -720,6 +753,12 @@ function ModeCard({
   onSaveMode,
   editedValues,
   onFieldChange,
+  // Strategy props (Story 11.34)
+  selectedStrategy,
+  onSelectStrategy,
+  onResetStrategy,
+  onResetAllStrategies,
+  resettingStrategies,
 }: {
   comparison: ModeComparisonResult;
   isAdmin: boolean;
@@ -732,8 +771,15 @@ function ModeCard({
   onSaveMode?: () => void;
   editedValues?: Record<string, any>;
   onFieldChange?: (path: string, value: any) => void;
+  // Strategy props (Story 11.34)
+  selectedStrategy?: StrategyName | null;
+  onSelectStrategy?: (strategy: StrategyName) => void;
+  onResetStrategy?: (strategy: StrategyName) => void;
+  onResetAllStrategies?: () => void;
+  resettingStrategies?: Set<string>;
 }) {
   const hasEdits = editedValues && Object.keys(editedValues).length > 0;
+  const hasStrategies = comparison.strategies && comparison.strategies.length > 0;
 
   return (
     <div
@@ -819,91 +865,366 @@ function ModeCard({
                 </button>
               )}
             </div>
-          ) : comparison.groups.length === 0 ? (
-            <div className="p-6 text-center">
-              <Info className="w-12 h-12 text-purple-400 mx-auto mb-3" />
-              <p className="text-gray-400">No settings data available.</p>
-            </div>
           ) : (
-            <div className="p-4 space-y-2">
-              {/* Render ALL groups */}
-              {comparison.groups.map((group) => {
-                const groupExpandKey = `${comparison.mode}-${group.groupKey}`;
-                const isGroupExpanded = expandedGroups.has(groupExpandKey);
+            <div className="p-4 space-y-4">
+              {/* === STRATEGIES SECTION (Story 11.34) === */}
+              {hasStrategies && (
+                <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
+                  {/* Strategies Header */}
+                  <div className="px-4 py-3 border-b border-purple-500/20 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Settings className="w-5 h-5 text-purple-400" />
+                      <h5 className="font-medium text-purple-300">Strategies</h5>
+                      <span className="text-xs text-gray-500">
+                        ({comparison.strategies?.filter(s => s.enabled).length || 0}/{ALL_STRATEGIES.length} enabled)
+                      </span>
+                    </div>
+                    {onResetAllStrategies && !comparison.strategiesAllMatch && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onResetAllStrategies();
+                        }}
+                        className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors flex items-center gap-1"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        Reset All Strategies
+                      </button>
+                    )}
+                  </div>
 
-                return (
-                  <div
-                    key={group.groupKey}
-                    className={`border rounded-lg overflow-hidden ${
-                      group.allMatch
-                        ? 'border-green-500/30 bg-green-900/10'
-                        : 'border-orange-500/30 bg-orange-900/10'
-                    }`}
-                  >
-                    {/* Group Header */}
-                    <button
-                      onClick={() => onToggleGroup(groupExpandKey)}
-                      className={`w-full p-3 flex items-center justify-between transition-colors ${
-                        group.allMatch ? 'hover:bg-green-900/20' : 'hover:bg-orange-900/20'
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        {group.allMatch ? (
-                          <CheckCircle2 className="w-5 h-5 text-green-400" />
-                        ) : (
-                          <XCircle className="w-5 h-5 text-orange-400" />
-                        )}
-                        <span className={`font-medium ${group.allMatch ? 'text-green-300' : 'text-orange-300'}`}>
-                          {group.groupName}
-                        </span>
-                        <span className="text-gray-500 text-sm">
-                          ({group.matchingFields}/{group.totalFields} match)
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        {onResetGroup && (
-                          <ResetButton
-                            onClick={() => onResetGroup(group.groupKey)}
-                            label="Reset Group"
-                            size="small"
-                          />
-                        )}
-                        {group.allMatch ? (
-                          <span className="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
-                            All Match
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 text-xs bg-orange-500/20 text-orange-400 rounded">
-                            {group.differentFields} difference{group.differentFields !== 1 ? 's' : ''}
-                          </span>
-                        )}
-                        {isGroupExpanded ? (
-                          <ChevronUp className="w-4 h-4 text-gray-400" />
-                        ) : (
-                          <ChevronDown className="w-4 h-4 text-gray-400" />
-                        )}
-                      </div>
-                    </button>
-
-                    {/* Group Fields Table */}
-                    {isGroupExpanded && (
-                      <div className="border-t border-gray-700/50">
-                        <FieldTable
-                          fields={group.fields}
-                          isAdmin={isAdmin}
-                          onFieldChange={onFieldChange}
-                          editedValues={editedValues}
+                  {/* Strategy Cards Grid */}
+                  <div className="p-3">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {comparison.strategies?.map((strategy) => (
+                        <StrategyCard
+                          key={strategy.strategy}
+                          strategy={strategy}
+                          isSelected={selectedStrategy === strategy.strategy}
+                          onSelect={() => onSelectStrategy?.(strategy.strategy)}
+                          onReset={onResetStrategy ? () => onResetStrategy(strategy.strategy) : undefined}
+                          isResetting={resettingStrategies?.has(strategy.strategy)}
                         />
+                      ))}
+                    </div>
+
+                    {/* Selected Strategy Settings Panel */}
+                    {selectedStrategy && comparison.strategies && (
+                      <div className="mt-3 border-t border-purple-500/20 pt-3">
+                        <div className="text-sm text-purple-300 mb-2 flex items-center gap-2">
+                          <Target className="w-4 h-4" />
+                          Selected: {STRATEGY_DISPLAY_NAMES[selectedStrategy]} - Settings Comparison
+                        </div>
+                        {comparison.strategies
+                          .filter(s => s.strategy === selectedStrategy)
+                          .map(strategy => (
+                            <StrategySettingsPanel
+                              key={strategy.strategy}
+                              strategy={strategy}
+                              mode={comparison.mode}
+                              isAdmin={isAdmin}
+                            />
+                          ))}
                       </div>
                     )}
                   </div>
-                );
-              })}
+                </div>
+              )}
+
+              {/* === MODE-LEVEL SETTINGS GROUPS === */}
+              {comparison.groups.length > 0 && (
+                <div>
+                  <div className="text-sm text-gray-400 mb-2">Mode-Level Settings</div>
+                  <div className="space-y-2">
+                    {comparison.groups.map((group) => {
+                      const groupExpandKey = `${comparison.mode}-${group.groupKey}`;
+                      const isGroupExpanded = expandedGroups.has(groupExpandKey);
+
+                      return (
+                        <div
+                          key={group.groupKey}
+                          className={`border rounded-lg overflow-hidden ${
+                            group.allMatch
+                              ? 'border-green-500/30 bg-green-900/10'
+                              : 'border-orange-500/30 bg-orange-900/10'
+                          }`}
+                        >
+                          {/* Group Header */}
+                          <button
+                            onClick={() => onToggleGroup(groupExpandKey)}
+                            className={`w-full p-3 flex items-center justify-between transition-colors ${
+                              group.allMatch ? 'hover:bg-green-900/20' : 'hover:bg-orange-900/20'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3">
+                              {group.allMatch ? (
+                                <CheckCircle2 className="w-5 h-5 text-green-400" />
+                              ) : (
+                                <XCircle className="w-5 h-5 text-orange-400" />
+                              )}
+                              <span className={`font-medium ${group.allMatch ? 'text-green-300' : 'text-orange-300'}`}>
+                                {group.groupName}
+                              </span>
+                              <span className="text-gray-500 text-sm">
+                                ({group.matchingFields}/{group.totalFields} match)
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              {onResetGroup && (
+                                <ResetButton
+                                  onClick={() => onResetGroup(group.groupKey)}
+                                  label="Reset Group"
+                                  size="small"
+                                />
+                              )}
+                              {group.allMatch ? (
+                                <span className="px-2 py-0.5 text-xs bg-green-500/20 text-green-400 rounded">
+                                  All Match
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 text-xs bg-orange-500/20 text-orange-400 rounded">
+                                  {group.differentFields} difference{group.differentFields !== 1 ? 's' : ''}
+                                </span>
+                              )}
+                              {isGroupExpanded ? (
+                                <ChevronUp className="w-4 h-4 text-gray-400" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-gray-400" />
+                              )}
+                            </div>
+                          </button>
+
+                          {/* Group Fields Table */}
+                          {isGroupExpanded && (
+                            <div className="border-t border-gray-700/50">
+                              <FieldTable
+                                fields={group.fields}
+                                isAdmin={isAdmin}
+                                onFieldChange={onFieldChange}
+                                editedValues={editedValues}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* No data message */}
+              {!hasStrategies && comparison.groups.length === 0 && (
+                <div className="p-6 text-center">
+                  <Info className="w-12 h-12 text-purple-400 mx-auto mb-3" />
+                  <p className="text-gray-400">No settings data available.</p>
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// Strategy Card Component (Story 11.34)
+// Displays a strategy card inside a mode, with ON/OFF badge, settings count, and reset button
+function StrategyCard({
+  strategy,
+  isSelected,
+  onSelect,
+  onReset,
+  isResetting,
+}: {
+  strategy: StrategyComparisonResult;
+  isSelected: boolean;
+  onSelect: () => void;
+  onReset?: () => void;
+  isResetting?: boolean;
+}) {
+  const getStrategyIcon = (name: StrategyName) => {
+    switch (name) {
+      case 'trend_following':
+        return <TrendingUp className="w-4 h-4" />;
+      case 'mean_reversion':
+        return <RotateCcw className="w-4 h-4" />;
+      case 'breakout':
+        return <Zap className="w-4 h-4" />;
+      case 'range_trading':
+        return <Target className="w-4 h-4" />;
+    }
+  };
+
+  return (
+    <div
+      onClick={onSelect}
+      className={`
+        relative p-3 rounded-lg border-2 cursor-pointer transition-all
+        ${isSelected
+          ? 'border-purple-500 bg-purple-500/10'
+          : strategy.allMatch
+          ? 'border-green-500/30 bg-green-900/10 hover:border-green-500/50'
+          : 'border-orange-500/30 bg-orange-900/10 hover:border-orange-500/50'}
+      `}
+    >
+      {/* Strategy Header */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className={isSelected ? 'text-purple-400' : strategy.allMatch ? 'text-green-400' : 'text-orange-400'}>
+            {getStrategyIcon(strategy.strategy)}
+          </span>
+          <span className={`text-sm font-medium ${isSelected ? 'text-purple-300' : 'text-gray-200'}`}>
+            {strategy.strategyName}
+          </span>
+        </div>
+        {/* ON/OFF Badge */}
+        <span
+          className={`
+            flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium
+            ${strategy.enabled
+              ? 'bg-green-500/20 text-green-400'
+              : 'bg-gray-600/20 text-gray-500'}
+          `}
+        >
+          {strategy.enabled ? (
+            <>
+              <Power className="w-3 h-3" />
+              ON
+            </>
+          ) : (
+            <>
+              <PowerOff className="w-3 h-3" />
+              OFF
+            </>
+          )}
+        </span>
+      </div>
+
+      {/* Settings Match Count */}
+      <div className="text-xs text-gray-400 mb-2">
+        {strategy.isLoading ? (
+          <span className="flex items-center gap-1">
+            <Loader2 className="w-3 h-3 animate-spin" />
+            Loading...
+          </span>
+        ) : strategy.error ? (
+          <span className="text-red-400">{strategy.error}</span>
+        ) : strategy.allMatch ? (
+          <span className="text-green-400">{strategy.matchingFields}/{strategy.totalFields} match</span>
+        ) : (
+          <span className="text-orange-400">{strategy.differentFields} differences</span>
+        )}
+      </div>
+
+      {/* Reset Button */}
+      {onReset && !strategy.allMatch && !strategy.isLoading && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onReset();
+          }}
+          disabled={isResetting}
+          className="w-full mt-1 px-2 py-1 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded transition-colors flex items-center justify-center gap-1"
+        >
+          {isResetting ? (
+            <>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Resetting...
+            </>
+          ) : (
+            <>
+              <RefreshCw className="w-3 h-3" />
+              Reset
+            </>
+          )}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Strategy Settings Expansion Panel (Story 11.34)
+// Shows grouped settings with comparison table when strategy is selected
+function StrategySettingsPanel({
+  strategy,
+  // Note: mode parameter reserved for future use (e.g., mode-specific formatting)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  mode: _mode,
+  isAdmin,
+}: {
+  strategy: StrategyComparisonResult;
+  mode: string;
+  isAdmin: boolean;
+}) {
+  if (strategy.isLoading) {
+    return (
+      <div className="p-4 text-center">
+        <Loader2 className="w-6 h-6 animate-spin text-purple-400 mx-auto mb-2" />
+        <p className="text-sm text-gray-400">Loading strategy settings...</p>
+      </div>
+    );
+  }
+
+  if (strategy.error) {
+    return (
+      <div className="p-4 text-center">
+        <AlertTriangle className="w-6 h-6 text-red-400 mx-auto mb-2" />
+        <p className="text-sm text-red-400">{strategy.error}</p>
+      </div>
+    );
+  }
+
+  if (strategy.allMatch) {
+    return (
+      <div className="p-4 text-center">
+        <CheckCircle2 className="w-6 h-6 text-green-400 mx-auto mb-2" />
+        <p className="text-sm text-green-400">All settings match defaults</p>
+        <p className="text-xs text-gray-500 mt-1">{strategy.totalFields} settings total</p>
+      </div>
+    );
+  }
+
+  if (strategy.differences.length === 0) {
+    return (
+      <div className="p-4 text-center">
+        <Info className="w-6 h-6 text-gray-400 mx-auto mb-2" />
+        <p className="text-sm text-gray-400">No differences to display</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3">
+      <div className="text-xs text-gray-400 mb-2">
+        Showing {strategy.differences.length} differences from defaults
+      </div>
+      <div className="bg-gray-900/50 rounded-lg overflow-hidden">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-gray-700 text-gray-400">
+              <th className="text-left p-2 pl-3">Setting</th>
+              <th className="text-left p-2">Current</th>
+              <th className="text-left p-2">Default</th>
+            </tr>
+          </thead>
+          <tbody>
+            {strategy.differences.map((diff) => (
+              <tr key={diff.path} className="border-b border-gray-700/30 bg-orange-900/5">
+                <td className="p-2 pl-3 font-mono text-gray-300">
+                  {diff.path.split('.').pop() || diff.path}
+                </td>
+                <td className="p-2 font-mono text-orange-400">
+                  {formatValue(diff.current)}
+                </td>
+                <td className="p-2 font-mono text-blue-400">
+                  {formatValue(diff.default)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -1088,6 +1409,9 @@ export default function SettingsComparisonView({
   onResetAllModes,
   onResetMode,
   onResetModeGroup,
+  // Strategy resets (Story 11.34)
+  onResetStrategy,
+  onResetAllStrategiesInMode,
   // Other settings resets
   onResetAllOther,
   onResetCircuitBreaker,
@@ -1111,6 +1435,10 @@ export default function SettingsComparisonView({
   const [expandedOtherSettings, setExpandedOtherSettings] = useState<Set<string>>(new Set());
   const [expandedReadOnly, setExpandedReadOnly] = useState<Set<string>>(new Set());
 
+  // Strategy states (Story 11.34)
+  const [selectedStrategies, setSelectedStrategies] = useState<Record<string, StrategyName | null>>({});
+  const [resettingStrategies, setResettingStrategies] = useState<Set<string>>(new Set());
+
   // Edited values state (for admin mode)
   const [editedModeValues, setEditedModeValues] = useState<Record<string, Record<string, any>>>({});
   const [editedOtherValues, setEditedOtherValues] = useState<Record<string, Record<string, any>>>({});
@@ -1128,12 +1456,61 @@ export default function SettingsComparisonView({
 
   // ==================== DATA LOADING ====================
 
+  // Load strategy comparisons for a single mode (Story 11.34)
+  const loadStrategyComparisons = useCallback(async (mode: string): Promise<StrategyComparisonResult[]> => {
+    const results: StrategyComparisonResult[] = [];
+
+    for (const strategy of ALL_STRATEGIES) {
+      try {
+        // Get strategy comparison from API
+        const comparison = await modeStrategyApi.compareModeStrategy(mode as ModeName, strategy);
+
+        results.push({
+          strategy,
+          strategyName: STRATEGY_DISPLAY_NAMES[strategy] || strategy,
+          enabled: comparison.enabled ?? false,
+          allMatch: comparison.all_match ?? true,
+          totalFields: comparison.total_fields ?? 0,
+          matchingFields: comparison.matching_fields ?? comparison.total_fields ?? 0,
+          differentFields: comparison.differences?.length ?? 0,
+          differences: comparison.differences?.map(d => ({
+            path: d.path,
+            current: d.current,
+            default: d.default,
+            match: d.match ?? false,
+          })) || [],
+        });
+      } catch (err: any) {
+        console.error(`[SettingsComparison] Error loading strategy ${strategy} for mode ${mode}:`, err);
+        // Add placeholder for failed strategies
+        results.push({
+          strategy,
+          strategyName: STRATEGY_DISPLAY_NAMES[strategy] || strategy,
+          enabled: false,
+          allMatch: true,
+          totalFields: 0,
+          matchingFields: 0,
+          differentFields: 0,
+          differences: [],
+          error: err?.response?.status === 404 ? 'Not configured' : 'Failed to load',
+        });
+      }
+    }
+
+    return results;
+  }, []);
+
   const loadModeComparisons = useCallback(async () => {
     const results: ModeComparisonResult[] = [];
 
     for (const mode of modes) {
       try {
         const preview = (await loadModeDefaults(mode, true)) as ConfigResetPreview;
+
+        // Load strategy comparisons for this mode (Story 11.34)
+        const strategies = await loadStrategyComparisons(mode);
+        const strategiesAllMatch = strategies.every(s => s.allMatch);
+        const totalStrategyDifferences = strategies.reduce((sum, s) => sum + s.differentFields, 0);
 
         if (preview.is_admin) {
           // Admin view - convert default_value to fields for editing
@@ -1162,12 +1539,16 @@ export default function SettingsComparisonView({
           results.push({
             mode,
             modeName: MODE_DISPLAY_NAMES[mode] || mode,
-            allMatch: true,
-            totalChanges: 0,
+            allMatch: true && strategiesAllMatch,
+            totalChanges: totalStrategyDifferences,
             totalFields: allFields.length,
             groups,
             isAdmin: true,
             rawData: preview.default_value,
+            // Strategies (Story 11.34)
+            strategies,
+            strategiesAllMatch,
+            totalStrategyDifferences,
           });
         } else {
           // User view - use all_values if available, fallback to differences, or empty array
@@ -1187,11 +1568,15 @@ export default function SettingsComparisonView({
           results.push({
             mode,
             modeName: MODE_DISPLAY_NAMES[mode] || mode,
-            allMatch: preview.all_match,
-            totalChanges: preview.total_changes,
+            allMatch: preview.all_match && strategiesAllMatch,
+            totalChanges: preview.total_changes + totalStrategyDifferences,
             totalFields,
             groups,
             rawData: preview,
+            // Strategies (Story 11.34)
+            strategies,
+            strategiesAllMatch,
+            totalStrategyDifferences,
           });
         }
       } catch (err: any) {
@@ -1210,7 +1595,7 @@ export default function SettingsComparisonView({
     }
 
     return results;
-  }, [modes]);
+  }, [modes, loadStrategyComparisons]);
 
   const loadOtherSettings = useCallback(async () => {
     const results: OtherSettingComparison[] = [];
@@ -1334,9 +1719,7 @@ export default function SettingsComparisonView({
 
     // Global Trading (includes timezone)
     try {
-      console.log('[SettingsComparison] Loading global trading defaults...');
       const preview = (await loadGlobalTradingDefaults(true)) as ConfigResetPreview;
-      console.log('[SettingsComparison] Global trading preview:', preview);
       const allFields =
         preview.all_values ||
         (preview.differences || []).map((d) => ({
@@ -1346,7 +1729,6 @@ export default function SettingsComparisonView({
           match: false,
           risk_level: d.risk_level,
         }));
-      console.log('[SettingsComparison] Global trading allFields:', allFields.length);
 
       results.push({
         settingType: 'global_trading',
@@ -1378,7 +1760,6 @@ export default function SettingsComparisonView({
   }, []);
 
   const loadAllComparisons = useCallback(async () => {
-    console.log('[SettingsComparison] Loading data...');
     setLoading(true);
     setError(null);
 
@@ -1388,7 +1769,6 @@ export default function SettingsComparisonView({
         loadOtherSettings(),
       ]);
 
-      console.log('[SettingsComparison] Data loaded, setting state');
       setModeComparisons(modeResults);
       setOtherSettings(otherResults);
 
@@ -1416,8 +1796,6 @@ export default function SettingsComparisonView({
       // Clear any pending edits on fresh load
       setEditedModeValues({});
       setEditedOtherValues({});
-
-      console.log('[SettingsComparison] Original values captured');
     } catch (err: any) {
       console.error('[SettingsComparison] Failed to load comparisons:', err);
       setError(err?.response?.data?.error || err?.message || 'Failed to load settings comparison');
@@ -1427,11 +1805,7 @@ export default function SettingsComparisonView({
   }, [loadModeComparisons, loadOtherSettings]);
 
   useEffect(() => {
-    console.log('[SettingsComparison] Component mounted/deps changed, loading data');
     loadAllComparisons();
-    return () => {
-      console.log('[SettingsComparison] Component unmounting');
-    };
   }, [loadAllComparisons]);
 
   // ==================== TOGGLE HANDLERS ====================
@@ -1592,6 +1966,86 @@ export default function SettingsComparisonView({
     }
   };
 
+  // ==================== STRATEGY HANDLERS (Story 11.34) ====================
+
+  // Select a strategy within a mode
+  const handleSelectStrategy = useCallback((mode: string, strategy: StrategyName) => {
+    setSelectedStrategies(prev => ({
+      ...prev,
+      [mode]: prev[mode] === strategy ? null : strategy,
+    }));
+  }, []);
+
+  // Reset a single strategy
+  const handleResetStrategy = useCallback(async (mode: string, strategy: StrategyName) => {
+    const key = `${mode}:${strategy}`;
+    setResettingStrategies(prev => new Set(prev).add(key));
+
+    try {
+      if (onResetStrategy) {
+        await onResetStrategy(mode, strategy);
+      } else {
+        // Use API directly if no handler provided
+        await modeStrategyApi.resetModeStrategy(mode as ModeName, strategy);
+      }
+      // Reload comparisons after reset
+      loadAllComparisons();
+    } catch (err: any) {
+      console.error(`Failed to reset strategy ${strategy} for mode ${mode}:`, err);
+      // Show error to user via the component's error state
+      setError(`Failed to reset ${STRATEGY_DISPLAY_NAMES[strategy]} strategy: ${err?.response?.data?.error || err?.message || 'Unknown error'}`);
+    } finally {
+      setResettingStrategies(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [onResetStrategy, loadAllComparisons]);
+
+  // Reset all strategies in a mode
+  const handleResetAllStrategiesInMode = useCallback(async (mode: string) => {
+    // Mark all strategies as resetting
+    const keys = ALL_STRATEGIES.map(s => `${mode}:${s}`);
+    setResettingStrategies(prev => {
+      const next = new Set(prev);
+      keys.forEach(k => next.add(k));
+      return next;
+    });
+
+    try {
+      if (onResetAllStrategiesInMode) {
+        await onResetAllStrategiesInMode(mode);
+      } else {
+        // Use API directly if no handler provided
+        await modeStrategyApi.resetAllModeStrategies(mode as ModeName);
+      }
+      // Reload comparisons after reset
+      loadAllComparisons();
+    } catch (err: any) {
+      console.error(`Failed to reset all strategies for mode ${mode}:`, err);
+      // Show error to user via the component's error state
+      setError(`Failed to reset all strategies for ${MODE_DISPLAY_NAMES[mode] || mode} mode: ${err?.response?.data?.error || err?.message || 'Unknown error'}`);
+    } finally {
+      setResettingStrategies(prev => {
+        const next = new Set(prev);
+        keys.forEach(k => next.delete(k));
+        return next;
+      });
+    }
+  }, [onResetAllStrategiesInMode, loadAllComparisons]);
+
+  // Get resetting state for a specific mode
+  const getModeResettingStrategies = useCallback((mode: string): Set<string> => {
+    const modeStrategies = new Set<string>();
+    resettingStrategies.forEach(key => {
+      if (key.startsWith(`${mode}:`)) {
+        modeStrategies.add(key.split(':')[1]);
+      }
+    });
+    return modeStrategies;
+  }, [resettingStrategies]);
+
   // ==================== SUMMARY STATS ====================
 
   const modeStats = useMemo(() => {
@@ -1720,6 +2174,12 @@ export default function SettingsComparisonView({
                 }
                 editedValues={editedModeValues[comparison.mode]}
                 onFieldChange={(path, value) => handleModeFieldChange(comparison.mode, path, value)}
+                // Strategy props (Story 11.34)
+                selectedStrategy={selectedStrategies[comparison.mode] || null}
+                onSelectStrategy={(strategy) => handleSelectStrategy(comparison.mode, strategy)}
+                onResetStrategy={(strategy) => handleResetStrategy(comparison.mode, strategy)}
+                onResetAllStrategies={() => handleResetAllStrategiesInMode(comparison.mode)}
+                resettingStrategies={getModeResettingStrategies(comparison.mode)}
               />
             ))}
           </div>

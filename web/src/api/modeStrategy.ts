@@ -168,6 +168,19 @@ export async function compareModeStrategy(
   return response.data;
 }
 
+// ==================== POST /api/futures/modes/:mode/reset-all ====================
+// Reset all strategies in a mode to defaults
+export async function resetAllModeStrategies(
+  mode: ModeName
+): Promise<{ success: boolean; message: string; strategies_reset: number }> {
+  const response = await axios.post(
+    `${BASE_URL}/${mode}/reset-all`,
+    {},
+    { headers: getAuthHeaders() }
+  );
+  return response.data;
+}
+
 // ==================== PUT /api/futures/modes/:mode ====================
 // Update mode-level settings (enabled, default_strategy, auto_select)
 export async function updateModeSettings(
@@ -263,6 +276,7 @@ const modeStrategyApi = {
   getModeStrategy,
   updateModeStrategy,
   resetModeStrategy,
+  resetAllModeStrategies,
   enableModeStrategy,
   disableModeStrategy,
   compareModeStrategy,

@@ -249,6 +249,7 @@ export interface StrategyComparisonResponse {
   success: boolean;
   mode: ModeName;
   strategy: StrategyName;
+  enabled?: boolean;  // Strategy enabled status
   all_match: boolean;
   total_fields: number;
   matching_fields: number;
