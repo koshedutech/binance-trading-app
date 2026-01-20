@@ -27,6 +27,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 COMPOSE_FILE="docker-compose.yml"
+PROJECT_NAME="binance-dev-v2"
 SERVICE_NAME="trading-bot"
 LOGS_ONLY=false
 DOWN_ONLY=false
@@ -93,7 +94,7 @@ echo ""
 # ============================================================================
 if [ "$LOGS_ONLY" = true ]; then
     echo -e "${YELLOW}Showing logs for ${SERVICE_NAME}...${NC}"
-    docker-compose -f "$COMPOSE_FILE" logs -f "$SERVICE_NAME"
+    docker-compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" logs -f "$SERVICE_NAME"
     exit 0
 fi
 
@@ -102,7 +103,7 @@ fi
 # ============================================================================
 if [ "$DOWN_ONLY" = true ]; then
     echo -e "${YELLOW}Stopping containers...${NC}"
-    docker-compose -f "$COMPOSE_FILE" down
+    docker-compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down
     echo -e "${GREEN}Containers stopped${NC}"
     exit 0
 fi
@@ -152,7 +153,7 @@ IMAGE_EXISTS=$(docker images -q binance-trading-bot-trading-bot 2>/dev/null)
 
 if [ "$BUILD_IMAGE" = true ] || [ -z "$IMAGE_EXISTS" ]; then
     echo -e "${YELLOW}Building Docker image (one-time setup)...${NC}"
-    docker-compose -f "$COMPOSE_FILE" build
+    docker-compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" build
     echo -e "${GREEN}Docker image built${NC}"
 else
     echo -e "${GREEN}Docker image exists, skipping build${NC}"
@@ -164,10 +165,10 @@ fi
 # ============================================================================
 echo -e "${YELLOW}Restarting containers...${NC}"
 echo -e "${CYAN}(App will build inside container on startup)${NC}"
-docker-compose -f "$COMPOSE_FILE" down 2>/dev/null || true
+docker-compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down 2>/dev/null || true
 
 if [ "$DETACHED" = true ]; then
-    docker-compose -f "$COMPOSE_FILE" up -d
+    docker-compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d
     echo ""
     echo -e "${GREEN}Containers started in detached mode${NC}"
     echo -e "${BLUE}Development: http://localhost:8094${NC}"
@@ -178,5 +179,5 @@ else
     echo -e "${BLUE}Development: http://localhost:8094${NC}"
     echo -e "${YELLOW}Press Ctrl+C to stop${NC}"
     echo ""
-    docker-compose -f "$COMPOSE_FILE" up
+    docker-compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up
 fi
