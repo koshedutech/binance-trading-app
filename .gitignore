@@ -55,6 +55,10 @@ temp/
 D:*
 D\357\200\272*
 
+# Deprecated settings file (migrated to database in Story 9.12)
+autopilot_settings.json
+autopilot_settings.json.*
+
 # Build artifacts
 dist/
 build/

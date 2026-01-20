@@ -289,23 +289,20 @@ func (s *Server) handleGetFuturesPositions(c *gin.Context) {
 		}
 	}
 
-	// FIXED: Get symbol-level custom ROI from Settings using database call, not GetDefaultSettings()
-	// This requires user authentication to load from database
+	// Story 9.12: Get symbol-level custom ROI from cache service (replaces GetSettingsManager() singleton)
+	// Use cache-first approach for symbol settings instead of loading full settings from DB
 	userID := s.getUserID(c)
-	if userID != "" {
-		settingsManager := autopilot.GetSettingsManager()
-		if settingsManager != nil {
-			settings, loadErr := settingsManager.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-			if loadErr != nil {
-				// Log but don't fail - this is optional enrichment
-				log.Printf("[FUTURES-POS] WARNING: Failed to load settings for custom ROI enrichment: %v", loadErr)
-			} else if settings != nil && settings.SymbolSettings != nil {
-				for symbol, symbolSettings := range settings.SymbolSettings {
-					// Only add symbol-level ROI if we don't already have position-level ROI
-					if symbolSettings != nil && symbolSettings.CustomROIPercent > 0 {
-						if _, exists := customROIMap[symbol]; !exists {
-							customROIMap[symbol] = symbolSettings.CustomROIPercent
-						}
+	if userID != "" && s.settingsCacheService != nil {
+		symbolSettings, loadErr := s.settingsCacheService.GetAllSymbolSettings(c.Request.Context(), userID)
+		if loadErr != nil {
+			// Log but don't fail - this is optional enrichment
+			log.Printf("[FUTURES-POS] WARNING: Failed to load symbol settings for custom ROI enrichment: %v", loadErr)
+		} else {
+			for symbol, settings := range symbolSettings {
+				// Only add symbol-level ROI if we don't already have position-level ROI
+				if settings != nil && settings.CustomROIPercent > 0 {
+					if _, exists := customROIMap[symbol]; !exists {
+						customROIMap[symbol] = settings.CustomROIPercent
 					}
 				}
 			}

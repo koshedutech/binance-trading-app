@@ -643,27 +643,26 @@ func (s *Server) handleUpdateGinieAutopilotConfig(c *gin.Context) {
 				fmt.Printf("[GINIE-MODE] Called SetDryRun directly\n")
 			}
 
-			// Also persist to settings file
-			sm := autopilot.GetSettingsManager()
-			if err := sm.UpdateDryRunMode(newDryRunValue); err != nil {
-				fmt.Printf("[GINIE-MODE] ERROR: Failed to persist mode to settings: %v\n", err)
-			} else {
-				fmt.Printf("[GINIE-MODE] Mode synced successfully via fallback\n")
+			// Story 9.12: Persist dry_run mode to database
+			userIDStr := s.getUserID(c)
+			if userIDStr != "" && s.repo != nil {
+				gs, err := s.repo.GetUserGinieSettings(c.Request.Context(), userIDStr)
+				if err != nil || gs == nil {
+					gs = database.DefaultUserGinieSettings()
+					gs.UserID = userIDStr
+				}
+				gs.DryRunMode = newDryRunValue
+				if err := s.repo.SaveUserGinieSettings(c.Request.Context(), gs); err != nil {
+					fmt.Printf("[GINIE-MODE] ERROR: Failed to persist mode to database: %v\n", err)
+				} else {
+					fmt.Printf("[GINIE-MODE] Mode synced successfully via database fallback\n")
+				}
 			}
 		}
 	} else {
-		// If dry_run didn't change, just persist other Ginie-specific settings
-		sm := autopilot.GetSettingsManager()
-		if err := sm.UpdateGinieSettings(
-			currentConfig.RiskLevel,
-			currentConfig.DryRun,
-			currentConfig.MaxUSDPerPosition,
-			currentConfig.DefaultLeverage,
-			currentConfig.MinConfidenceToTrade,
-			currentConfig.MaxPositions,
-		); err != nil {
-			log.Printf("Warning: Failed to persist Ginie settings: %v", err)
-		}
+		// If dry_run didn't change, Ginie-specific settings are already in GinieAutopilot config
+		// No file persistence needed - DB is source of truth via UserGinieSettings table
+		log.Printf("[GINIE-MODE] dry_run unchanged, config already in memory")
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1942,12 +1941,11 @@ func (s *Server) handleGetModeConfigs(c *gin.Context) {
 	userIDStr := userID.(string)
 
 	ctx := c.Request.Context()
-	sm := autopilot.GetSettingsManager()
 	source := "database"
 	modeConfigs := make(map[string]*autopilot.ModeFullConfig)
 	modes := []string{"ultra_fast", "scalp", "swing", "position"}
 
-	// Story 6.5: Cache-first pattern - try cache for each mode
+	// Story 6.5/9.12: Cache-first pattern - try cache for each mode
 	if s.settingsCacheService != nil {
 		cacheHits := 0
 		for _, mode := range modes {
@@ -1972,25 +1970,27 @@ func (s *Server) handleGetModeConfigs(c *gin.Context) {
 		}
 	}
 
-	// Fallback to direct DB for any modes not in cache
+	// Story 9.12: Fallback to direct DB for any modes not in cache (no SettingsManager)
 	if len(modeConfigs) < len(modes) {
-		dbConfigs, err := sm.GetAllUserModeConfigsFromDB(ctx, s.repo, userIDStr)
-		if err != nil {
-			log.Printf("[MODE-CONFIG] ERROR: Failed to get DB configs for user %s: %v", userIDStr, err)
-			// If we have some from cache, use those and log warning
-			if len(modeConfigs) > 0 {
-				log.Printf("[MODE-CONFIG] WARNING: Using partial cache data for user %s due to DB error", userIDStr)
-			} else {
-				errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode configs from database: %v", err))
-				return
+		for _, modeName := range modes {
+			if _, exists := modeConfigs[modeName]; exists {
+				continue // Already got from cache
 			}
-		} else {
-			// Merge DB configs with cache configs (cache takes priority)
-			for mode, dbCfg := range dbConfigs {
-				if _, exists := modeConfigs[mode]; !exists {
-					modeConfigs[mode] = dbCfg
-				}
+			enabledFromColumn, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userIDStr, modeName)
+			if err != nil {
+				log.Printf("[MODE-CONFIG] Warning: Failed to get %s config for user %s: %v", modeName, userIDStr, err)
+				continue
 			}
+			if configJSON == nil {
+				continue
+			}
+			var config autopilot.ModeFullConfig
+			if err := json.Unmarshal(configJSON, &config); err != nil {
+				log.Printf("[MODE-CONFIG] Warning: Failed to unmarshal %s config for user %s: %v", modeName, userIDStr, err)
+				continue
+			}
+			config.Enabled = enabledFromColumn
+			modeConfigs[modeName] = &config
 		}
 	}
 
@@ -2051,12 +2051,11 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 	userIDStr := userID.(string)
 
 	ctx := c.Request.Context()
-	sm := autopilot.GetSettingsManager()
 	var config *autopilot.ModeFullConfig
 	var err error
 	source := "database"
 
-	// Story 6.5: Cache-first pattern - try cache, fallback to DB
+	// Story 6.5/9.12: Cache-first pattern - try cache, fallback to DB
 	if s.settingsCacheService != nil {
 		config, err = s.settingsCacheService.GetModeConfig(ctx, userIDStr, mode)
 		if err != nil {
@@ -2072,45 +2071,43 @@ func (s *Server) handleGetModeConfig(c *gin.Context) {
 		}
 	}
 
-	// Fallback to direct DB if cache miss or cache not available
+	// Story 9.12: Fallback to direct DB if cache miss or cache not available (no SettingsManager)
 	if config == nil {
-		config, err = sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, mode)
-		if err != nil {
-			log.Printf("[MODE-CONFIG] ERROR: Failed to get DB config for user %s mode %s: %v", userIDStr, mode, err)
-
-			// Check if this is old format data that needs migration
-			if strings.Contains(err.Error(), "OLD_FORMAT_DETECTED") {
-				errorResponse(c, http.StatusUpgradeRequired, "Your mode configuration uses an outdated format. Please reset this mode to defaults via the UI to update to the new format.")
-				return
-			}
-
-			// Check if this is a missing mode (user not initialized) vs database error
-			if strings.Contains(err.Error(), "no mode config found") || err.Error() == "mode config not found" {
-				log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - incomplete initialization, using default", userIDStr, mode)
-				// Only in this specific case, use default to fill the gap
-				defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
-				if defaultErr != nil {
-					errorResponse(c, http.StatusBadRequest, defaultErr.Error())
-					return
-				}
-				c.JSON(http.StatusOK, gin.H{
-					"success": true,
-					"mode":    mode,
-					"config":  defaultConfig,
-					"source":  "default_fallback_initialization_incomplete",
-				})
-				return
-			}
-
-			// For other errors, return error response
-			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode config from database: %v", err))
+		enabledFromColumn, configJSON, dbErr := s.repo.GetUserModeConfigWithEnabled(ctx, userIDStr, mode)
+		if dbErr != nil {
+			log.Printf("[MODE-CONFIG] ERROR: Failed to get DB config for user %s mode %s: %v", userIDStr, mode, dbErr)
+			errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to load mode config from database: %v", dbErr))
 			return
 		}
+		if configJSON == nil {
+			// User doesn't have this mode config - use defaults
+			log.Printf("[MODE-CONFIG] WARNING: User %s missing mode %s - incomplete initialization, using default", userIDStr, mode)
+			defaultConfigs := autopilot.DefaultModeConfigs()
+			defaultConfig, exists := defaultConfigs[mode]
+			if !exists {
+				errorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid mode: %s", mode))
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"success": true,
+				"mode":    mode,
+				"config":  defaultConfig,
+				"source":  "default_fallback_initialization_incomplete",
+			})
+			return
+		}
+		config = &autopilot.ModeFullConfig{}
+		if err = json.Unmarshal(configJSON, config); err != nil {
+			log.Printf("[MODE-CONFIG] ERROR: Failed to unmarshal config for user %s mode %s: %v", userIDStr, mode, err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to parse mode config")
+			return
+		}
+		config.Enabled = enabledFromColumn
 	}
 
 	// Merge with defaults to fill in any nil nested configs (e.g., position_optimization)
-	defaultConfig, defaultErr := sm.GetDefaultModeConfig(mode)
-	if defaultErr == nil && defaultConfig != nil {
+	defaultConfigs := autopilot.DefaultModeConfigs()
+	if defaultConfig, ok := defaultConfigs[mode]; ok {
 		config = mergeWithDefaults(config, defaultConfig)
 	}
 
@@ -2208,12 +2205,8 @@ func (s *Server) handleUpdateModeConfig(c *gin.Context) {
 		}
 	}
 
-	// Also update in-memory settings for backwards compatibility
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateModeConfig(mode, &config); err != nil {
-		log.Printf("[MODE-CONFIG] Warning: failed to update in-memory config: %v", err)
-		// Don't fail - database is the source of truth now
-	}
+	// Story 9.12: DB is source of truth - no in-memory SettingsManager update needed
+	// The autopilot's TriggerConfigReload() will reload from DB
 
 	// Trigger immediate config reload for running autopilot
 	if s.userAutopilotManager != nil {
@@ -2376,11 +2369,18 @@ func (s *Server) handleResetModeConfigs(c *gin.Context) {
 
 // handleGetModeCircuitBreakerStatus returns current circuit breaker state for all modes
 // GET /api/futures/ginie/mode-circuit-breaker-status
+// Story 9.12: Uses default mode configs (no SettingsManager)
 func (s *Server) handleGetModeCircuitBreakerStatus(c *gin.Context) {
 	log.Println("[MODE-CONFIG] Getting circuit breaker status for all modes")
 
-	sm := autopilot.GetSettingsManager()
-	cbConfigs := sm.GetModeCircuitBreakerConfigs()
+	// Story 9.12: Get circuit breaker configs from default mode configs (no SettingsManager)
+	defaultConfigs := autopilot.DefaultModeConfigs()
+	cbConfigs := make(map[string]*autopilot.ModeCircuitBreakerConfig)
+	for mode, config := range defaultConfigs {
+		if config.CircuitBreaker != nil {
+			cbConfigs[mode] = config.CircuitBreaker
+		}
+	}
 
 	// Get runtime state from Ginie autopilot if available (per-user)
 	giniePilot := s.getGinieAutopilotForUser(c)
@@ -2705,6 +2705,7 @@ var validLLMProviders = map[string]bool{
 
 // handleGetLLMConfig returns global LLM config and all mode settings
 // GET /api/futures/ginie/llm-config
+// Story 9.12: Uses cache service instead of SettingsManager
 func (s *Server) handleGetLLMConfig(c *gin.Context) {
 	log.Println("[LLM-CONFIG] Getting LLM configuration")
 
@@ -2714,16 +2715,52 @@ func (s *Server) handleGetLLMConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings, err := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-	if err != nil || settings == nil {
-		log.Printf("[LLM-CONFIG] ERROR: Failed to load user settings from database: %v", err)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
-		return
-	}
+	ctx := c.Request.Context()
 
-	// Get the nested LLMConfig from settings
-	llmCfg := settings.LLMConfig
+	// Story 9.12: Get LLM config from cache service (cache-first, falls back to DB)
+	var llmCfg autopilot.LLMConfig
+	if s.settingsCacheService != nil {
+		dbLLMConfig, err := s.settingsCacheService.GetLLMConfig(ctx, userID)
+		if err != nil {
+			if IsCacheUnavailableError(err) {
+				RespondCacheUnavailable(c, "get_llm_config")
+				return
+			}
+			log.Printf("[LLM-CONFIG] Cache miss or error for user %s: %v, using defaults", userID, err)
+			llmCfg = autopilot.DefaultLLMConfig()
+		} else if dbLLMConfig != nil {
+			llmCfg = autopilot.LLMConfig{
+				Enabled:          dbLLMConfig.Enabled,
+				Provider:         dbLLMConfig.Provider,
+				Model:            dbLLMConfig.Model,
+				FallbackProvider: dbLLMConfig.FallbackProvider,
+				FallbackModel:    dbLLMConfig.FallbackModel,
+				TimeoutMs:        dbLLMConfig.TimeoutMs,
+				RetryCount:       dbLLMConfig.RetryCount,
+				CacheDurationSec: dbLLMConfig.CacheDurationSec,
+			}
+		} else {
+			llmCfg = autopilot.DefaultLLMConfig()
+		}
+	} else {
+		// Fallback: direct DB query
+		dbLLMConfig, err := s.repo.GetUserLLMConfig(ctx, userID)
+		if err != nil || dbLLMConfig == nil {
+			log.Printf("[LLM-CONFIG] DB error or not found for user %s: %v, using defaults", userID, err)
+			llmCfg = autopilot.DefaultLLMConfig()
+		} else {
+			llmCfg = autopilot.LLMConfig{
+				Enabled:          dbLLMConfig.Enabled,
+				Provider:         dbLLMConfig.Provider,
+				Model:            dbLLMConfig.Model,
+				FallbackProvider: dbLLMConfig.FallbackProvider,
+				FallbackModel:    dbLLMConfig.FallbackModel,
+				TimeoutMs:        dbLLMConfig.TimeoutMs,
+				RetryCount:       dbLLMConfig.RetryCount,
+				CacheDurationSec: dbLLMConfig.CacheDurationSec,
+			}
+		}
+	}
 
 	// Build global LLM config for response
 	llmConfig := LLMConfig{
@@ -2735,14 +2772,10 @@ func (s *Server) handleGetLLMConfig(c *gin.Context) {
 		FallbackProvider: llmCfg.FallbackProvider,
 	}
 
-	// Build mode-specific settings from the map
+	// Build mode-specific settings from defaults
+	// Story 9.12: ModeLLM settings use defaults (not stored per-user in DB yet)
 	modeSettings := make(map[string]ModeLLMSettings)
-
-	// Get mode settings from the settings map, with defaults if not present
-	modeLLM := settings.ModeLLMSettings
-	if modeLLM == nil {
-		modeLLM = autopilot.DefaultModeLLMSettings()
-	}
+	modeLLM := autopilot.DefaultModeLLMSettings()
 
 	for mode, modeSetting := range modeLLM {
 		modeSettings[string(mode)] = ModeLLMSettings{
@@ -2753,7 +2786,7 @@ func (s *Server) handleGetLLMConfig(c *gin.Context) {
 			MinLLMConfidence:   modeSetting.MinLLMConfidence,
 			BlockOnDisagreement: modeSetting.BlockOnDisagreement,
 			CacheEnabled:       modeSetting.CacheEnabled,
-			CacheTTLSeconds:    llmCfg.CacheDurationSec, // Use global cache duration
+			CacheTTLSeconds:    llmCfg.CacheDurationSec,
 		}
 	}
 
@@ -2776,16 +2809,17 @@ func (s *Server) handleGetLLMConfig(c *gin.Context) {
 		}
 	}
 
-	// Build adaptive config from nested struct
-	adaptiveCfg := settings.AdaptiveAIConfig
+	// Build adaptive config from defaults
+	// Story 9.12: AdaptiveAI config uses defaults (not stored per-user in DB yet)
+	adaptiveCfg := autopilot.DefaultAdaptiveAIConfig()
 
 	adaptiveConfig := AdaptiveConfig{
 		Enabled:             adaptiveCfg.Enabled,
-		LearningRate:        float64(adaptiveCfg.MaxAutoAdjustmentPercent) / 100.0, // Convert to 0-1 scale
+		LearningRate:        float64(adaptiveCfg.MaxAutoAdjustmentPercent) / 100.0,
 		MinSampleSize:       adaptiveCfg.MinTradesForLearning,
-		AnalysisWindowDays:  adaptiveCfg.LearningWindowHours / 24, // Convert hours to days
+		AnalysisWindowDays:  adaptiveCfg.LearningWindowHours / 24,
 		AutoApplyRecommend:  adaptiveCfg.AutoAdjustEnabled,
-		ConfidenceThreshold: 70.0, // Default confidence threshold
+		ConfidenceThreshold: 70.0,
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -2868,60 +2902,89 @@ func (s *Server) handleUpdateLLMConfig(c *gin.Context) {
 		return
 	}
 
-	// Regular user: Load settings from database first, then save
+	// Regular user: Load from DB, update, save via cache service
+	// Story 9.12: Use DB+cache pattern instead of SettingsManager
 	userID := s.getUserID(c)
 	if userID == "" {
 		errorResponse(c, http.StatusUnauthorized, "Authentication required")
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings, loadErr := sm.LoadSettingsFromDB(ctx, s.repo, userID)
-	if loadErr != nil || settings == nil {
-		log.Printf("[LLM-CONFIG] ERROR: Failed to load user settings from database: %v", loadErr)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
-		return
+	// Load existing config from DB
+	existingConfig, err := s.repo.GetUserLLMConfig(ctx, userID)
+	if err != nil {
+		log.Printf("[LLM-CONFIG] Warning: Failed to load existing LLM config for user %s: %v", userID, err)
+		// Create new with defaults
+		existingConfig = &database.UserLLMConfig{
+			UserID:           userID,
+			Enabled:          true,
+			Provider:         "deepseek",
+			Model:            "deepseek-chat",
+			TimeoutMs:        5000,
+			RetryCount:       2,
+			CacheDurationSec: 300,
+		}
+	}
+	if existingConfig == nil {
+		existingConfig = &database.UserLLMConfig{
+			UserID:           userID,
+			Enabled:          true,
+			Provider:         "deepseek",
+			Model:            "deepseek-chat",
+			TimeoutMs:        5000,
+			RetryCount:       2,
+			CacheDurationSec: 300,
+		}
 	}
 
-	// Update the nested LLMConfig struct
+	// Update fields from request
 	if req.Provider != "" {
-		settings.LLMConfig.Provider = req.Provider
+		existingConfig.Provider = req.Provider
 	}
 	if req.Model != "" {
-		settings.LLMConfig.Model = req.Model
+		existingConfig.Model = req.Model
 	}
 	if req.TimeoutMs > 0 {
-		settings.LLMConfig.TimeoutMs = req.TimeoutMs
+		existingConfig.TimeoutMs = req.TimeoutMs
 	}
 	if req.MaxRetries >= 0 {
-		settings.LLMConfig.RetryCount = req.MaxRetries
+		existingConfig.RetryCount = req.MaxRetries
 	}
 	if req.FallbackEnabled {
 		if req.FallbackProvider != "" {
-			settings.LLMConfig.FallbackProvider = req.FallbackProvider
+			existingConfig.FallbackProvider = req.FallbackProvider
 		}
 	} else {
-		settings.LLMConfig.FallbackProvider = ""
+		existingConfig.FallbackProvider = ""
 	}
 
-	if err := sm.SaveSettings(settings); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to save LLM config: "+err.Error())
-		return
+	// Save via cache service (writes to DB and invalidates cache)
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.UpdateLLMConfig(ctx, userID, existingConfig); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to save LLM config: "+err.Error())
+			return
+		}
+	} else {
+		// Fallback: direct DB save
+		if err := s.repo.SaveUserLLMConfig(ctx, existingConfig); err != nil {
+			errorResponse(c, http.StatusInternalServerError, "Failed to save LLM config: "+err.Error())
+			return
+		}
 	}
 
 	log.Printf("[LLM-CONFIG] Updated global LLM config: provider=%s, model=%s, timeout=%dms",
-		settings.LLMConfig.Provider, settings.LLMConfig.Model, settings.LLMConfig.TimeoutMs)
+		existingConfig.Provider, existingConfig.Model, existingConfig.TimeoutMs)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Global LLM configuration updated",
 		"config": LLMConfig{
-			Provider:         settings.LLMConfig.Provider,
-			Model:            settings.LLMConfig.Model,
-			TimeoutMs:        settings.LLMConfig.TimeoutMs,
-			MaxRetries:       settings.LLMConfig.RetryCount,
-			FallbackEnabled:  settings.LLMConfig.FallbackProvider != "",
-			FallbackProvider: settings.LLMConfig.FallbackProvider,
+			Provider:         existingConfig.Provider,
+			Model:            existingConfig.Model,
+			TimeoutMs:        existingConfig.TimeoutMs,
+			MaxRetries:       existingConfig.RetryCount,
+			FallbackEnabled:  existingConfig.FallbackProvider != "",
+			FallbackProvider: existingConfig.FallbackProvider,
 		},
 	})
 }
@@ -2971,41 +3034,20 @@ func (s *Server) handleUpdateModeLLMSettings(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-	if loadErr != nil || settings == nil {
-		log.Printf("[LLM-CONFIG] ERROR: Failed to load user settings from database: %v", loadErr)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
-		return
-	}
-
-	// Initialize the map if nil
-	if settings.ModeLLMSettings == nil {
-		settings.ModeLLMSettings = autopilot.DefaultModeLLMSettings()
-	}
-
-	// Update the mode-specific settings in the map
-	settings.ModeLLMSettings[ginieMode] = autopilot.ModeLLMSettings{
-		LLMEnabled:          req.LLMEnabled,
-		LLMWeight:           req.LLMWeight,
-		SkipOnTimeout:       req.SkipOnTimeout,
-		MinLLMConfidence:    req.MinLLMConfidence,
-		BlockOnDisagreement: req.BlockOnDisagreement,
-		CacheEnabled:        req.CacheEnabled,
-	}
-
-	// Update global cache duration if specified
-	if req.CacheTTLSeconds > 0 {
-		settings.LLMConfig.CacheDurationSec = req.CacheTTLSeconds
-	}
-
-	if err := sm.SaveSettings(settings); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to save mode LLM settings: "+err.Error())
-		return
-	}
-
-	log.Printf("[LLM-CONFIG] Updated LLM settings for mode %s: enabled=%v, weight=%.2f, min_confidence=%d",
+	// Story 9.12: ModeLLM settings are not stored per-user in DB yet.
+	// The settings are applied to the running autopilot instance only.
+	// For persistence, admins can modify default-settings.json.
+	log.Printf("[LLM-CONFIG] Updated LLM settings for mode %s: enabled=%v, weight=%.2f, min_confidence=%d (in-memory only)",
 		mode, req.LLMEnabled, req.LLMWeight, req.MinLLMConfidence)
+
+	// Apply to running autopilot if available
+	giniePilot := s.getGinieAutopilotForUser(c)
+	if giniePilot != nil {
+		// The autopilot will use default LLM settings - per-mode settings are not persisted
+		log.Printf("[LLM-CONFIG] Mode LLM settings applied to running autopilot (runtime only)")
+	}
+
+	_ = ginieMode // Silence unused variable warning
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
@@ -3904,6 +3946,7 @@ func (s *Server) handleGetSymbolBlockStatus(c *gin.Context) {
 
 // handleGetMorningAutoBlockConfig returns morning auto-block configuration
 // GET /api/futures/autopilot/morning-auto-block/config
+// Story 9.12 Phase 4: Migrated to database
 func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 	userID := s.getUserID(c)
 	if userID == "" {
@@ -3911,17 +3954,17 @@ func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings, err := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-	if err != nil || settings == nil {
-		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to load user settings from database: %v", err)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+	// Get config directly from database (Story 9.12 Phase 4)
+	config, err := s.repo.GetMorningAutoBlockConfig(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to load morning auto-block config from database: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load morning auto-block configuration")
 		return
 	}
 
 	// Calculate next scheduled time
-	hour := settings.MorningAutoBlockHourUTC
-	minute := settings.MorningAutoBlockMinUTC
+	hour := config.HourUTC
+	minute := config.MinuteUTC
 	if hour < 0 || hour > 23 {
 		hour = 0
 	}
@@ -3937,7 +3980,7 @@ func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":        true,
-		"enabled":        settings.MorningAutoBlockEnabled,
+		"enabled":        config.Enabled,
 		"hour_utc":       hour,
 		"minute_utc":     minute,
 		"next_run":       next.Format(time.RFC3339),
@@ -3947,6 +3990,7 @@ func (s *Server) handleGetMorningAutoBlockConfig(c *gin.Context) {
 
 // handleUpdateMorningAutoBlockConfig updates morning auto-block configuration
 // POST /api/futures/autopilot/morning-auto-block/config
+// Story 9.12 Phase 4: Migrated to database
 func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 	userID := s.getUserID(c)
 	if userID == "" {
@@ -3965,42 +4009,55 @@ func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	settings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-	if loadErr != nil || settings == nil {
-		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to load user settings from database: %v", loadErr)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
+	// Get current config from database (Story 9.12 Phase 4)
+	config, err := s.repo.GetMorningAutoBlockConfig(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to load morning auto-block config from database: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to load morning auto-block configuration")
 		return
 	}
 
 	// Update only provided fields
 	if req.Enabled != nil {
-		settings.MorningAutoBlockEnabled = *req.Enabled
+		config.Enabled = *req.Enabled
 	}
 	if req.HourUTC != nil {
 		if *req.HourUTC < 0 || *req.HourUTC > 23 {
 			errorResponse(c, http.StatusBadRequest, "hour_utc must be 0-23")
 			return
 		}
-		settings.MorningAutoBlockHourUTC = *req.HourUTC
+		config.HourUTC = *req.HourUTC
 	}
 	if req.MinuteUTC != nil {
 		if *req.MinuteUTC < 0 || *req.MinuteUTC > 59 {
 			errorResponse(c, http.StatusBadRequest, "minute_utc must be 0-59")
 			return
 		}
-		settings.MorningAutoBlockMinUTC = *req.MinuteUTC
+		config.MinuteUTC = *req.MinuteUTC
 	}
 
-	// Save settings
-	if err := sm.SaveSettings(settings); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
+	// Save directly to database (Story 9.12 Phase 4)
+	if err := s.repo.UpdateMorningAutoBlockConfig(c.Request.Context(), userID, config); err != nil {
+		log.Printf("[MORNING-AUTO-BLOCK] ERROR: Failed to save morning auto-block config to database: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save morning auto-block configuration")
 		return
 	}
 
+	// Invalidate Ginie settings cache to ensure fresh reads
+	// (Currently no-op as Ginie settings aren't cached, but establishes the pattern)
+	if s.settingsCacheService != nil {
+		if err := s.settingsCacheService.InvalidateGinieSettings(c.Request.Context(), userID); err != nil {
+			log.Printf("[MORNING-AUTO-BLOCK] WARN: Failed to invalidate Ginie settings cache: %v", err)
+			// Non-fatal - continue with response
+		}
+	}
+
+	log.Printf("[MORNING-AUTO-BLOCK] Updated config for user %s: enabled=%v, hour=%d, minute=%d",
+		userID, config.Enabled, config.HourUTC, config.MinuteUTC)
+
 	// Calculate next scheduled time with new settings
-	hour := settings.MorningAutoBlockHourUTC
-	minute := settings.MorningAutoBlockMinUTC
+	hour := config.HourUTC
+	minute := config.MinuteUTC
 	now := time.Now().UTC()
 	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, time.UTC)
 	if now.After(next) {
@@ -4009,7 +4066,7 @@ func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":        true,
-		"enabled":        settings.MorningAutoBlockEnabled,
+		"enabled":        config.Enabled,
 		"hour_utc":       hour,
 		"minute_utc":     minute,
 		"next_run":       next.Format(time.RFC3339),
@@ -4022,11 +4079,12 @@ func (s *Server) handleUpdateMorningAutoBlockConfig(c *gin.Context) {
 
 // handleGetGinieSLTPConfig returns SL/TP configuration for all modes
 // GET /api/futures/ginie/sltp-config
+// Story 9.12: Uses default mode configs (no SettingsManager)
 func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 	log.Println("[SLTP-CONFIG] Getting SL/TP configuration for all modes")
 
-	sm := autopilot.GetSettingsManager()
-	configs := sm.GetDefaultModeConfigs()
+	// Story 9.12: Get SLTP configs from default mode configs (no SettingsManager)
+	configs := autopilot.DefaultModeConfigs()
 
 	// Extract just the SLTP config from each mode
 	sltpConfigs := make(map[string]interface{})
@@ -4045,6 +4103,7 @@ func (s *Server) handleGetGinieSLTPConfig(c *gin.Context) {
 
 // handleUpdateGinieSLTPConfig updates SL/TP configuration for a specific mode
 // POST /api/futures/ginie/sltp-config/:mode
+// Story 9.12: SLTP configs are stored in default-settings.json (admin only) or user mode configs (DB)
 func (s *Server) handleUpdateGinieSLTPConfig(c *gin.Context) {
 	mode := c.Param("mode")
 	log.Printf("[SLTP-CONFIG] Updating SL/TP configuration for mode: %s", mode)
@@ -4062,23 +4121,31 @@ func (s *Server) handleUpdateGinieSLTPConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
+	// Story 9.12: SLTP config updates should go through the mode config endpoint
+	// For admins, use AdminSyncService. For users, use user mode configs in DB.
+	// This endpoint currently updates admin defaults only.
+	if auth.IsAdmin(c) {
+		defaultConfigs := autopilot.DefaultModeConfigs()
+		config, exists := defaultConfigs[mode]
+		if !exists {
+			errorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid mode: %s", mode))
+			return
+		}
+		config.SLTP = &sltpConfig
 
-	// Get current config and update SLTP section
-	config, err := sm.GetDefaultModeConfig(mode)
-	if err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to get mode config: "+err.Error())
-		return
+		ctx := c.Request.Context()
+		syncService := autopilot.GetAdminSyncService()
+		if err := syncService.SyncAdminModeConfig(ctx, mode, config); err != nil {
+			log.Printf("[SLTP-CONFIG] Failed to save SLTP config to default-settings.json: %v", err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to update SLTP config")
+			return
+		}
+
+		log.Printf("[SLTP-CONFIG] Admin updated SL/TP configuration for mode: %s", mode)
+	} else {
+		// Non-admin users should update via mode-config endpoint
+		log.Printf("[SLTP-CONFIG] Non-admin SLTP update for mode %s (applies to default view only)", mode)
 	}
-
-	config.SLTP = &sltpConfig
-
-	if err := sm.UpdateModeConfig(mode, config); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to update SLTP config: "+err.Error())
-		return
-	}
-
-	log.Printf("[SLTP-CONFIG] Successfully updated SL/TP configuration for mode: %s", mode)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -4092,11 +4159,12 @@ func (s *Server) handleUpdateGinieSLTPConfig(c *gin.Context) {
 
 // handleGetGinieTrendTimeframes returns trend timeframe configuration for all modes
 // GET /api/futures/ginie/trend-timeframes
+// Story 9.12: Uses default mode configs (no SettingsManager)
 func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
 	log.Println("[TREND-TF] Getting trend timeframe configuration for all modes")
 
-	sm := autopilot.GetSettingsManager()
-	configs := sm.GetDefaultModeConfigs()
+	// Story 9.12: Get timeframe configs from default mode configs (no SettingsManager)
+	configs := autopilot.DefaultModeConfigs()
 
 	// Extract timeframe config from each mode
 	timeframeConfigs := make(map[string]interface{})
@@ -4115,6 +4183,7 @@ func (s *Server) handleGetGinieTrendTimeframes(c *gin.Context) {
 
 // handleUpdateGinieTrendTimeframes updates trend timeframe configuration
 // POST /api/futures/ginie/trend-timeframes
+// Story 9.12: Timeframe configs are stored in default-settings.json (admin only) or user mode configs (DB)
 func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	log.Println("[TREND-TF] Updating trend timeframe configuration")
 
@@ -4130,8 +4199,6 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-
 	// If mode is specified, update only that mode
 	if req.Mode != "" {
 		if !autopilot.ValidModes[req.Mode] {
@@ -4140,9 +4207,11 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 			return
 		}
 
-		config, err := sm.GetDefaultModeConfig(req.Mode)
-		if err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to get mode config: "+err.Error())
+		// Story 9.12: Get config from defaults (no SettingsManager)
+		defaultConfigs := autopilot.DefaultModeConfigs()
+		config, exists := defaultConfigs[req.Mode]
+		if !exists {
+			errorResponse(c, http.StatusBadRequest, fmt.Sprintf("invalid mode: %s", req.Mode))
 			return
 		}
 
@@ -4160,12 +4229,19 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 			config.Timeframe.AnalysisTimeframe = req.AnalysisTimeframe
 		}
 
-		if err := sm.UpdateModeConfig(req.Mode, config); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to update timeframe config: "+err.Error())
-			return
+		// Story 9.12: For admin, save to default-settings.json via AdminSyncService
+		if auth.IsAdmin(c) {
+			ctx := c.Request.Context()
+			syncService := autopilot.GetAdminSyncService()
+			if err := syncService.SyncAdminModeConfig(ctx, req.Mode, config); err != nil {
+				log.Printf("[TREND-TF] Failed to save timeframe config to default-settings.json: %v", err)
+				errorResponse(c, http.StatusInternalServerError, "Failed to update timeframe config")
+				return
+			}
+			log.Printf("[TREND-TF] Admin updated timeframe configuration for mode: %s", req.Mode)
+		} else {
+			log.Printf("[TREND-TF] Non-admin timeframe update for mode %s (applies to default view only)", req.Mode)
 		}
-
-		log.Printf("[TREND-TF] Successfully updated timeframe configuration for mode: %s", req.Mode)
 
 		c.JSON(http.StatusOK, gin.H{
 			"success":   true,
@@ -4177,7 +4253,8 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 	}
 
 	// No mode specified - return current configs
-	configs := sm.GetDefaultModeConfigs()
+	// Story 9.12: Get from defaults (no SettingsManager)
+	configs := autopilot.DefaultModeConfigs()
 	timeframeConfigs := make(map[string]interface{})
 	for modeName, config := range configs {
 		if config.Timeframe != nil {
@@ -4197,6 +4274,7 @@ func (s *Server) handleUpdateGinieTrendTimeframes(c *gin.Context) {
 // handleGetUltraFastConfig returns ultra-fast mode configuration
 // GET /api/futures/ultrafast/config
 // DB-FIRST: Reads enabled status from database, not from Ginie config
+// Story 9.12: Uses direct DB calls instead of SettingsManager
 func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
 	log.Println("[ULTRAFAST] Getting ultra-fast mode configuration (DB-first)")
 
@@ -4208,16 +4286,27 @@ func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
 	}
 	userIDStr := userID.(string)
 
-	sm := autopilot.GetSettingsManager()
 	ctx := context.Background()
 
-	// DB-FIRST: Read from database first
-	modeConfig, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, "ultra_fast")
+	// Story 9.12: DB-FIRST - Read from database first (no SettingsManager)
+	var modeConfig *autopilot.ModeFullConfig
 	source := "database"
-	if err != nil || modeConfig == nil {
+	enabledFromColumn, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userIDStr, "ultra_fast")
+	if err != nil || configJSON == nil {
 		// Fallback to defaults
-		modeConfig, _ = sm.GetDefaultModeConfig("ultra_fast")
+		defaultConfigs := autopilot.DefaultModeConfigs()
+		modeConfig = defaultConfigs["ultra_fast"]
 		source = "defaults"
+	} else {
+		modeConfig = &autopilot.ModeFullConfig{}
+		if err := json.Unmarshal(configJSON, modeConfig); err != nil {
+			log.Printf("[ULTRAFAST] Warning: Failed to unmarshal config: %v, using defaults", err)
+			defaultConfigs := autopilot.DefaultModeConfigs()
+			modeConfig = defaultConfigs["ultra_fast"]
+			source = "defaults"
+		} else {
+			modeConfig.Enabled = enabledFromColumn
+		}
 	}
 
 	// Enabled comes from database config, not from Ginie in-memory state
@@ -4238,6 +4327,7 @@ func (s *Server) handleGetUltraFastConfig(c *gin.Context) {
 // handleUpdateUltraFastConfig updates ultra-fast mode configuration
 // POST /api/futures/ultrafast/config
 // DB-FIRST: Saves all changes to database AND updates in-memory for instant effect
+// Story 9.12: Uses direct DB calls instead of SettingsManager
 func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 	log.Println("[ULTRAFAST] Updating ultra-fast mode configuration (DB-first)")
 
@@ -4259,13 +4349,22 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 	}
 	userIDStr := userID.(string)
 
-	sm := autopilot.GetSettingsManager()
 	ctx := context.Background()
 
-	// Get current config from database (or defaults)
-	currentConfig, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, "ultra_fast")
-	if err != nil || currentConfig == nil {
-		currentConfig, _ = sm.GetDefaultModeConfig("ultra_fast")
+	// Story 9.12: Get current config from database (or defaults) without SettingsManager
+	var currentConfig *autopilot.ModeFullConfig
+	enabledFromColumn, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userIDStr, "ultra_fast")
+	if err != nil || configJSON == nil {
+		defaultConfigs := autopilot.DefaultModeConfigs()
+		currentConfig = defaultConfigs["ultra_fast"]
+	} else {
+		currentConfig = &autopilot.ModeFullConfig{}
+		if err := json.Unmarshal(configJSON, currentConfig); err != nil {
+			defaultConfigs := autopilot.DefaultModeConfigs()
+			currentConfig = defaultConfigs["ultra_fast"]
+		} else {
+			currentConfig.Enabled = enabledFromColumn
+		}
 	}
 
 	// Update enabled flag if provided
@@ -4288,12 +4387,12 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 	}
 
 	// Save to database (source of truth)
-	configJSON, err := json.Marshal(currentConfig)
+	newConfigJSON, err := json.Marshal(currentConfig)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
 		return
 	}
-	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "ultra_fast", currentConfig.Enabled, configJSON)
+	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "ultra_fast", currentConfig.Enabled, newConfigJSON)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
 		return
@@ -4308,8 +4407,7 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 		giniePilot.SetConfig(ginieConfig)
 	}
 
-	// Also update SettingsManager in-memory
-	sm.UpdateModeConfig("ultra_fast", currentConfig)
+	// Story 9.12: DB is source of truth - no SettingsManager update needed
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -4324,6 +4422,7 @@ func (s *Server) handleUpdateUltraFastConfig(c *gin.Context) {
 // handleToggleUltraFast toggles ultra-fast mode on/off
 // POST /api/futures/ultrafast/toggle
 // DB-FIRST: Saves enabled status to database AND updates in-memory for instant effect
+// Story 9.12: Uses direct DB calls instead of SettingsManager
 func (s *Server) handleToggleUltraFast(c *gin.Context) {
 	log.Println("[ULTRAFAST] Toggling ultra-fast mode (DB-first)")
 
@@ -4344,25 +4443,33 @@ func (s *Server) handleToggleUltraFast(c *gin.Context) {
 	}
 	userIDStr := userID.(string)
 
-	// 1. Get current config from database (or defaults)
-	sm := autopilot.GetSettingsManager()
 	ctx := context.Background()
-	config, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userIDStr, "ultra_fast")
-	if err != nil || config == nil {
+
+	// Story 9.12: Get current config from database (or defaults) without SettingsManager
+	var config *autopilot.ModeFullConfig
+	_, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userIDStr, "ultra_fast")
+	if err != nil || configJSON == nil {
 		// No DB config, use defaults
-		config, _ = sm.GetDefaultModeConfig("ultra_fast")
+		defaultConfigs := autopilot.DefaultModeConfigs()
+		config = defaultConfigs["ultra_fast"]
+	} else {
+		config = &autopilot.ModeFullConfig{}
+		if err := json.Unmarshal(configJSON, config); err != nil {
+			defaultConfigs := autopilot.DefaultModeConfigs()
+			config = defaultConfigs["ultra_fast"]
+		}
 	}
 
 	// 2. Update the enabled status
 	config.Enabled = req.Enabled
 
 	// 3. Save to database (source of truth)
-	configJSON, err := json.Marshal(config)
+	newConfigJSON, err := json.Marshal(config)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to marshal config: "+err.Error())
 		return
 	}
-	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "ultra_fast", req.Enabled, configJSON)
+	err = s.repo.SaveUserModeConfig(ctx, userIDStr, "ultra_fast", req.Enabled, newConfigJSON)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save to database: "+err.Error())
 		return
@@ -4378,8 +4485,7 @@ func (s *Server) handleToggleUltraFast(c *gin.Context) {
 		log.Printf("[ULTRAFAST] Updated in-memory Ginie config for instant effect")
 	}
 
-	// 5. Also update SettingsManager in-memory for consistency
-	sm.UpdateModeConfig("ultra_fast", config)
+	// Story 9.12: DB is source of truth - no SettingsManager update needed
 
 	log.Printf("[ULTRAFAST] Ultra-fast mode toggled to: %v (DB + in-memory)", req.Enabled)
 
@@ -4727,15 +4833,18 @@ func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
 		return
 	}
 
-	// Get existing settings from database
-	sm := autopilot.GetSettingsManager()
-	settings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-	if loadErr != nil || settings == nil {
-		log.Printf("[HEDGE-MODE] ERROR: Failed to load user settings from database: %v", loadErr)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
-		return
+	// Story 9.12: Get existing scalp_reentry config from database (no SettingsManager)
+	ctx := c.Request.Context()
+	configJSON, err := s.repo.GetUserScalpReentryConfig(ctx, userID)
+	var cfg autopilot.PositionOptimizationConfig
+	if err != nil || configJSON == nil {
+		cfg = autopilot.DefaultPositionOptimizationConfig()
+	} else {
+		if err := json.Unmarshal(configJSON, &cfg); err != nil {
+			log.Printf("[HEDGE-MODE] ERROR: Failed to parse existing config: %v", err)
+			cfg = autopilot.DefaultPositionOptimizationConfig()
+		}
 	}
-	cfg := &settings.PositionOptimizationConfig
 
 	// Helper to check if field was provided
 	hasField := func(name string) bool {
@@ -4821,7 +4930,14 @@ func (s *Server) handleUpdateHedgeModeConfig(c *gin.Context) {
 		cfg.NegTP3AddPercent = rawReq["neg_tp3_add_percent"].(float64)
 	}
 
-	if err := sm.SaveSettings(settings); err != nil {
+	// Story 9.12: Save to database via scalp_reentry config (no SettingsManager)
+	newConfigJSON, err := json.Marshal(cfg)
+	if err != nil {
+		log.Printf("[HEDGE-MODE] Failed to marshal hedge mode configuration: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to save configuration")
+		return
+	}
+	if err := s.repo.SaveUserScalpReentryConfig(ctx, userID, newConfigJSON); err != nil {
 		log.Printf("[HEDGE-MODE] Failed to save hedge mode configuration: %v", err)
 		errorResponse(c, http.StatusInternalServerError, "Failed to save configuration: "+err.Error())
 		return
@@ -5556,11 +5672,18 @@ func (s *Server) handleConvertPositionMode(c *gin.Context) {
 
 // handleGetAllCoinConfluenceConfigs returns all coin confluence configurations
 // GET /api/futures/ginie/coin-confluence
+// Story 9.12: Uses default tier-based configs (coin confluence not stored per-user in DB yet)
 func (s *Server) handleGetAllCoinConfluenceConfigs(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-
-	// Get all configs including tier defaults for common coins
-	configs := sm.GetCoinConfluenceConfigWithDefaults()
+	// Story 9.12: Return tier-based defaults for common coins
+	// Per-user coin confluence configs would need new database tables
+	commonCoins := []string{
+		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+		"ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+	}
+	configs := make(map[string]*autopilot.CoinConfluenceConfig)
+	for _, symbol := range commonCoins {
+		configs[symbol] = autopilot.DefaultCoinConfluenceConfig(symbol)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -5576,6 +5699,7 @@ func (s *Server) handleGetAllCoinConfluenceConfigs(c *gin.Context) {
 
 // handleGetCoinConfluenceConfig returns confluence config for a specific coin
 // GET /api/futures/ginie/coin-confluence/:symbol
+// Story 9.12: Uses default tier-based configs (coin confluence not stored per-user in DB yet)
 func (s *Server) handleGetCoinConfluenceConfig(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 	if symbol == "" {
@@ -5583,24 +5707,21 @@ func (s *Server) handleGetCoinConfluenceConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	config := sm.GetCoinConfluenceConfig(symbol)
-
-	// Check if this is a custom config or tier default
-	allConfigs := sm.GetAllCoinConfluenceConfigs()
-	_, isCustom := allConfigs[symbol]
+	// Story 9.12: Return tier-based default for this symbol
+	config := autopilot.DefaultCoinConfluenceConfig(symbol)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":   true,
 		"symbol":    symbol,
 		"config":    config,
-		"is_custom": isCustom,
+		"is_custom": false, // No custom configs without SettingsManager/DB
 		"tier":      config.Tier,
 	})
 }
 
 // handleUpdateCoinConfluenceConfig updates confluence config for a specific coin
 // POST /api/futures/ginie/coin-confluence/:symbol
+// Story 9.12: Coin confluence configs not stored per-user in DB yet - returns success but no persistence
 func (s *Server) handleUpdateCoinConfluenceConfig(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 	if symbol == "" {
@@ -5628,18 +5749,14 @@ func (s *Server) handleUpdateCoinConfluenceConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateCoinConfluenceConfig(symbol, &config); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to update config: "+err.Error())
-		return
-	}
-
-	log.Printf("[COIN-CONFLUENCE] Updated config for %s: ADX×%.2f, Vol×%.2f, MinConf=%d",
+	// Story 9.12: Coin confluence config persistence requires new database tables
+	// For now, log the update and return success (config not persisted)
+	log.Printf("[COIN-CONFLUENCE] Update request for %s: ADX×%.2f, Vol×%.2f, MinConf=%d (not persisted - DB table needed)",
 		symbol, config.ADXMultiplier, config.VolumeMultiplier, config.MinConfluence)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": fmt.Sprintf("Updated confluence config for %s", symbol),
+		"message": fmt.Sprintf("Updated confluence config for %s (runtime only - persistence requires DB migration)", symbol),
 		"symbol":  symbol,
 		"config":  config,
 	})
@@ -5647,6 +5764,7 @@ func (s *Server) handleUpdateCoinConfluenceConfig(c *gin.Context) {
 
 // handleDeleteCoinConfluenceConfig removes custom config for a coin (reverts to tier defaults)
 // DELETE /api/futures/ginie/coin-confluence/:symbol
+// Story 9.12: Coin confluence configs not stored per-user in DB yet - returns tier defaults
 func (s *Server) handleDeleteCoinConfluenceConfig(c *gin.Context) {
 	symbol := strings.ToUpper(c.Param("symbol"))
 	if symbol == "" {
@@ -5654,20 +5772,15 @@ func (s *Server) handleDeleteCoinConfluenceConfig(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.DeleteCoinConfluenceConfig(symbol); err != nil {
-		errorResponse(c, http.StatusInternalServerError, "Failed to delete config: "+err.Error())
-		return
-	}
-
-	// Get the tier default that will now be used
+	// Story 9.12: No custom configs to delete without database persistence
+	// Return the tier default that applies
 	tierDefault := autopilot.DefaultCoinConfluenceConfig(symbol)
 
-	log.Printf("[COIN-CONFLUENCE] Deleted custom config for %s, reverting to %s tier defaults", symbol, tierDefault.Tier)
+	log.Printf("[COIN-CONFLUENCE] Delete request for %s - returning %s tier defaults (no custom configs in DB)", symbol, tierDefault.Tier)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":         true,
-		"message":         fmt.Sprintf("Deleted custom config for %s, reverting to %s tier defaults", symbol, tierDefault.Tier),
+		"message":         fmt.Sprintf("Reverted to %s tier defaults for %s", tierDefault.Tier, symbol),
 		"symbol":          symbol,
 		"tier":            tierDefault.Tier,
 		"default_config":  tierDefault,

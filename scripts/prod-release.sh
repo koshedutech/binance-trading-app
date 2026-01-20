@@ -194,7 +194,8 @@ backup_configs() {
     mkdir -p "$configs_dir"
 
     # List of config files to backup
-    local configs=("default-settings.json" "autopilot_settings.json" "config.json")
+    # Note: autopilot_settings.json was deprecated in Story 9.12 (settings now in DB+Redis)
+    local configs=("default-settings.json" "config.json")
 
     for config in "${configs[@]}"; do
         if [ -f "${PROJECT_DIR}/${config}" ]; then
@@ -514,8 +515,7 @@ cmd_new() {
     "redis": "volumes/redis-shared-data.tar.gz"
   },
   "configs": [
-    "configs/default-settings.json",
-    "configs/autopilot_settings.json"
+    "configs/default-settings.json"
   ]
 }
 EOF

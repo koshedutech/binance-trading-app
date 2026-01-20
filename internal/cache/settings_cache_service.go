@@ -75,6 +75,11 @@ func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID stri
 		errs = append(errs, fmt.Errorf("symbol_settings: %w", err))
 	}
 
+	// Load confluence configs (Story 9.12 Phase 3)
+	if err := s.LoadCoinConfluenceConfigs(ctx, userID); err != nil {
+		errs = append(errs, fmt.Errorf("confluence_configs: %w", err))
+	}
+
 	if len(errs) > 0 {
 		s.logger.Warn("Some settings failed to load", "userID", userID, "errors", errs)
 	}
@@ -1850,4 +1855,696 @@ func (s *SettingsCacheService) IsSymbolEnabled(ctx context.Context, userID, symb
 	}
 
 	return settings.Enabled
+}
+
+// ============================================================================
+// COIN CONFLUENCE CONFIG CACHE (Story 9.12 Phase 3)
+// Per-coin entry confluence settings (ADX, VWAP, Volume, Pivots, EMA thresholds)
+// ============================================================================
+
+// Confluence config cache key patterns
+const (
+	confluenceConfigKeyPrefix = "user:%s:confluence_config" // Hash key for all symbols
+	confluenceConfigTTL       = 24 * time.Hour              // Cache for 24 hours
+)
+
+// CachedConfluenceConfig represents confluence config stored in cache
+// Mirrors autopilot.CoinConfluenceConfig for cache storage
+type CachedConfluenceConfig struct {
+	Symbol             string                 `json:"symbol"`
+	Tier               string                 `json:"tier"`
+	Enabled            bool                   `json:"enabled"`
+	ADXMultiplier      float64                `json:"adx_multiplier"`
+	ScalpADX           float64                `json:"scalp_adx"`
+	SwingADX           float64                `json:"swing_adx"`
+	PositionADX        float64                `json:"position_adx"`
+	VolumeMultiplier   float64                `json:"volume_multiplier"`
+	VolumePeriod       int                    `json:"volume_period"`
+	VWAPPeriod         int                    `json:"vwap_period"`
+	VWAPEnabled        bool                   `json:"vwap_enabled"`
+	PivotProximity     float64                `json:"pivot_proximity"`
+	PivotEnabled       bool                   `json:"pivot_enabled"`
+	EMAFastPeriod      int                    `json:"ema_fast_period"`
+	EMASlowPeriod      int                    `json:"ema_slow_period"`
+	EMAEnabled         bool                   `json:"ema_enabled"`
+	MinConfluence      int                    `json:"min_confluence"`
+	ScalpMinConfluence int                    `json:"scalp_min_confluence"`
+	CustomWeights      map[string]interface{} `json:"custom_weights,omitempty"`
+	Notes              string                 `json:"notes"`
+}
+
+// LoadCoinConfluenceConfigs loads all confluence configs for a user into cache
+// Called during user login as part of LoadUserSettings
+func (s *SettingsCacheService) LoadCoinConfluenceConfigs(ctx context.Context, userID string) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	// Get all confluence configs from database
+	configs, err := s.repo.GetAllUserCoinConfluenceConfigs(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("failed to load confluence configs from DB: %w", err)
+	}
+
+	if len(configs) == 0 {
+		return nil // No configs to cache
+	}
+
+	// Store each config as a hash field
+	hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+	pipe := s.cache.client.Pipeline()
+
+	for symbol, dbConfig := range configs {
+		cached := &CachedConfluenceConfig{
+			Symbol:             dbConfig.Symbol,
+			Tier:               dbConfig.Tier,
+			Enabled:            dbConfig.Enabled,
+			ADXMultiplier:      dbConfig.ADXMultiplier,
+			ScalpADX:           dbConfig.ScalpADX,
+			SwingADX:           dbConfig.SwingADX,
+			PositionADX:        dbConfig.PositionADX,
+			VolumeMultiplier:   dbConfig.VolumeMultiplier,
+			VolumePeriod:       dbConfig.VolumePeriod,
+			VWAPPeriod:         dbConfig.VWAPPeriod,
+			VWAPEnabled:        dbConfig.VWAPEnabled,
+			PivotProximity:     dbConfig.PivotProximity,
+			PivotEnabled:       dbConfig.PivotEnabled,
+			EMAFastPeriod:      dbConfig.EMAFastPeriod,
+			EMASlowPeriod:      dbConfig.EMASlowPeriod,
+			EMAEnabled:         dbConfig.EMAEnabled,
+			MinConfluence:      dbConfig.MinConfluence,
+			ScalpMinConfluence: dbConfig.ScalpMinConfluence,
+			CustomWeights:      dbConfig.CustomWeights,
+			Notes:              dbConfig.Notes,
+		}
+
+		data, _ := json.Marshal(cached)
+		pipe.HSet(ctx, hashKey, symbol, string(data))
+	}
+
+	// Set TTL on the hash
+	pipe.Expire(ctx, hashKey, confluenceConfigTTL)
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to cache confluence configs: %w", err)
+	}
+
+	s.logger.Debug("Confluence configs cached", "userID", userID, "count", len(configs))
+	return nil
+}
+
+// GetCoinConfluenceConfig retrieves confluence config for a specific symbol (cache-first)
+// Returns nil if symbol not found (caller should use tier-based defaults)
+func (s *SettingsCacheService) GetCoinConfluenceConfig(ctx context.Context, userID, symbol string) (*CachedConfluenceConfig, error) {
+	if !s.cache.IsHealthy() {
+		// Fallback to DB
+		return s.getCoinConfluenceConfigFromDB(ctx, userID, symbol)
+	}
+
+	hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+	data, err := s.cache.client.HGet(ctx, hashKey, symbol).Result()
+
+	if err == redis.Nil {
+		// Not in cache - try DB
+		return s.getCoinConfluenceConfigFromDB(ctx, userID, symbol)
+	}
+	if err != nil {
+		s.logger.Debug("Cache read error for confluence config", "error", err)
+		return s.getCoinConfluenceConfigFromDB(ctx, userID, symbol)
+	}
+
+	var config CachedConfluenceConfig
+	if err := json.Unmarshal([]byte(data), &config); err != nil {
+		return s.getCoinConfluenceConfigFromDB(ctx, userID, symbol)
+	}
+
+	return &config, nil
+}
+
+// getCoinConfluenceConfigFromDB retrieves confluence config from database and caches it
+func (s *SettingsCacheService) getCoinConfluenceConfigFromDB(ctx context.Context, userID, symbol string) (*CachedConfluenceConfig, error) {
+	dbConfig, err := s.repo.GetUserCoinConfluenceConfig(ctx, userID, symbol)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get confluence config from DB: %w", err)
+	}
+	if dbConfig == nil {
+		return nil, nil // Symbol not configured - use tier defaults
+	}
+
+	cached := &CachedConfluenceConfig{
+		Symbol:             dbConfig.Symbol,
+		Tier:               dbConfig.Tier,
+		Enabled:            dbConfig.Enabled,
+		ADXMultiplier:      dbConfig.ADXMultiplier,
+		ScalpADX:           dbConfig.ScalpADX,
+		SwingADX:           dbConfig.SwingADX,
+		PositionADX:        dbConfig.PositionADX,
+		VolumeMultiplier:   dbConfig.VolumeMultiplier,
+		VolumePeriod:       dbConfig.VolumePeriod,
+		VWAPPeriod:         dbConfig.VWAPPeriod,
+		VWAPEnabled:        dbConfig.VWAPEnabled,
+		PivotProximity:     dbConfig.PivotProximity,
+		PivotEnabled:       dbConfig.PivotEnabled,
+		EMAFastPeriod:      dbConfig.EMAFastPeriod,
+		EMASlowPeriod:      dbConfig.EMASlowPeriod,
+		EMAEnabled:         dbConfig.EMAEnabled,
+		MinConfluence:      dbConfig.MinConfluence,
+		ScalpMinConfluence: dbConfig.ScalpMinConfluence,
+		CustomWeights:      dbConfig.CustomWeights,
+		Notes:              dbConfig.Notes,
+	}
+
+	// Cache for future reads
+	if s.cache.IsHealthy() {
+		hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+		data, _ := json.Marshal(cached)
+		s.cache.client.HSet(ctx, hashKey, symbol, string(data))
+	}
+
+	return cached, nil
+}
+
+// GetAllCoinConfluenceConfigs retrieves all confluence configs for a user (cache-first)
+func (s *SettingsCacheService) GetAllCoinConfluenceConfigs(ctx context.Context, userID string) (map[string]*CachedConfluenceConfig, error) {
+	if !s.cache.IsHealthy() {
+		return s.getAllCoinConfluenceConfigsFromDB(ctx, userID)
+	}
+
+	hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+	data, err := s.cache.client.HGetAll(ctx, hashKey).Result()
+
+	if err != nil || len(data) == 0 {
+		return s.getAllCoinConfluenceConfigsFromDB(ctx, userID)
+	}
+
+	result := make(map[string]*CachedConfluenceConfig)
+	for symbol, jsonData := range data {
+		var config CachedConfluenceConfig
+		if err := json.Unmarshal([]byte(jsonData), &config); err != nil {
+			continue
+		}
+		result[symbol] = &config
+	}
+
+	return result, nil
+}
+
+// getAllCoinConfluenceConfigsFromDB retrieves all confluence configs from database
+func (s *SettingsCacheService) getAllCoinConfluenceConfigsFromDB(ctx context.Context, userID string) (map[string]*CachedConfluenceConfig, error) {
+	dbConfigs, err := s.repo.GetAllUserCoinConfluenceConfigs(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all confluence configs from DB: %w", err)
+	}
+
+	result := make(map[string]*CachedConfluenceConfig)
+	for symbol, dbConfig := range dbConfigs {
+		result[symbol] = &CachedConfluenceConfig{
+			Symbol:             dbConfig.Symbol,
+			Tier:               dbConfig.Tier,
+			Enabled:            dbConfig.Enabled,
+			ADXMultiplier:      dbConfig.ADXMultiplier,
+			ScalpADX:           dbConfig.ScalpADX,
+			SwingADX:           dbConfig.SwingADX,
+			PositionADX:        dbConfig.PositionADX,
+			VolumeMultiplier:   dbConfig.VolumeMultiplier,
+			VolumePeriod:       dbConfig.VolumePeriod,
+			VWAPPeriod:         dbConfig.VWAPPeriod,
+			VWAPEnabled:        dbConfig.VWAPEnabled,
+			PivotProximity:     dbConfig.PivotProximity,
+			PivotEnabled:       dbConfig.PivotEnabled,
+			EMAFastPeriod:      dbConfig.EMAFastPeriod,
+			EMASlowPeriod:      dbConfig.EMASlowPeriod,
+			EMAEnabled:         dbConfig.EMAEnabled,
+			MinConfluence:      dbConfig.MinConfluence,
+			ScalpMinConfluence: dbConfig.ScalpMinConfluence,
+			CustomWeights:      dbConfig.CustomWeights,
+			Notes:              dbConfig.Notes,
+		}
+	}
+
+	// Populate cache for future reads
+	if s.cache.IsHealthy() && len(result) > 0 {
+		_ = s.LoadCoinConfluenceConfigs(ctx, userID)
+	}
+
+	return result, nil
+}
+
+// SetCoinConfluenceConfig updates confluence config (write-through: DB first, then cache)
+func (s *SettingsCacheService) SetCoinConfluenceConfig(ctx context.Context, userID string, config *database.UserCoinConfluenceConfig) error {
+	// Write to DB first
+	config.UserID = userID
+	if err := s.repo.UpsertUserCoinConfluenceConfig(ctx, config); err != nil {
+		return fmt.Errorf("failed to save confluence config to DB: %w", err)
+	}
+
+	// Update cache
+	if s.cache.IsHealthy() {
+		cached := &CachedConfluenceConfig{
+			Symbol:             config.Symbol,
+			Tier:               config.Tier,
+			Enabled:            config.Enabled,
+			ADXMultiplier:      config.ADXMultiplier,
+			ScalpADX:           config.ScalpADX,
+			SwingADX:           config.SwingADX,
+			PositionADX:        config.PositionADX,
+			VolumeMultiplier:   config.VolumeMultiplier,
+			VolumePeriod:       config.VolumePeriod,
+			VWAPPeriod:         config.VWAPPeriod,
+			VWAPEnabled:        config.VWAPEnabled,
+			PivotProximity:     config.PivotProximity,
+			PivotEnabled:       config.PivotEnabled,
+			EMAFastPeriod:      config.EMAFastPeriod,
+			EMASlowPeriod:      config.EMASlowPeriod,
+			EMAEnabled:         config.EMAEnabled,
+			MinConfluence:      config.MinConfluence,
+			ScalpMinConfluence: config.ScalpMinConfluence,
+			CustomWeights:      config.CustomWeights,
+			Notes:              config.Notes,
+		}
+
+		hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+		data, _ := json.Marshal(cached)
+		s.cache.client.HSet(ctx, hashKey, config.Symbol, string(data))
+	}
+
+	return nil
+}
+
+// InvalidateCoinConfluenceConfig removes a specific symbol's confluence config from cache
+func (s *SettingsCacheService) InvalidateCoinConfluenceConfig(ctx context.Context, userID, symbol string) error {
+	if !s.cache.IsHealthy() {
+		return nil
+	}
+
+	hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+	return s.cache.client.HDel(ctx, hashKey, symbol).Err()
+}
+
+// InvalidateAllCoinConfluenceConfigs removes all confluence configs from cache for a user
+func (s *SettingsCacheService) InvalidateAllCoinConfluenceConfigs(ctx context.Context, userID string) error {
+	if !s.cache.IsHealthy() {
+		return nil
+	}
+
+	hashKey := fmt.Sprintf(confluenceConfigKeyPrefix, userID)
+	return s.cache.client.Del(ctx, hashKey).Err()
+}
+
+// DeleteCoinConfluenceConfig deletes a confluence config (DB + cache)
+// Used when reverting to tier-based defaults
+func (s *SettingsCacheService) DeleteCoinConfluenceConfig(ctx context.Context, userID, symbol string) error {
+	// Delete from DB first
+	if err := s.repo.DeleteUserCoinConfluenceConfig(ctx, userID, symbol); err != nil {
+		return fmt.Errorf("failed to delete confluence config from DB: %w", err)
+	}
+
+	// Then invalidate cache
+	return s.InvalidateCoinConfluenceConfig(ctx, userID, symbol)
+}
+
+// GetCoinConfluenceConfigCached implements autopilot.ConfluenceConfigCache interface
+// Returns per-coin confluence config converted to autopilot.CoinConfluenceConfig
+// Returns nil if not found (caller should use tier-based defaults via autopilot.DefaultCoinConfluenceConfig)
+func (s *SettingsCacheService) GetCoinConfluenceConfigCached(ctx context.Context, userID, symbol string) (*autopilot.CoinConfluenceConfig, error) {
+	cached, err := s.GetCoinConfluenceConfig(ctx, userID, symbol)
+	if err != nil {
+		return nil, err
+	}
+	if cached == nil {
+		return nil, nil // Not found - caller uses tier defaults
+	}
+
+	// Convert CachedConfluenceConfig to autopilot.CoinConfluenceConfig
+	return &autopilot.CoinConfluenceConfig{
+		Symbol:             cached.Symbol,
+		Tier:               autopilot.CoinTier(cached.Tier),
+		Enabled:            cached.Enabled,
+		ADXMultiplier:      cached.ADXMultiplier,
+		ScalpADX:           cached.ScalpADX,
+		SwingADX:           cached.SwingADX,
+		PositionADX:        cached.PositionADX,
+		VolumeMultiplier:   cached.VolumeMultiplier,
+		VolumePeriod:       cached.VolumePeriod,
+		VWAPPeriod:         cached.VWAPPeriod,
+		VWAPEnabled:        cached.VWAPEnabled,
+		PivotProximity:     cached.PivotProximity,
+		PivotEnabled:       cached.PivotEnabled,
+		EMAFastPeriod:      cached.EMAFastPeriod,
+		EMASlowPeriod:      cached.EMASlowPeriod,
+		EMAEnabled:         cached.EMAEnabled,
+		MinConfluence:      cached.MinConfluence,
+		ScalpMinConfluence: cached.ScalpMinConfluence,
+		Notes:              cached.Notes,
+	}, nil
+}
+
+// ============================================================================
+// CATEGORY SETTINGS CACHE (Story 9.12 Phase 5b)
+// Per-performance-category confidence/size adjustments
+// ============================================================================
+
+// CategorySettingsKey is the cache key pattern for category settings
+const categorySettingsKeyPrefix = "user:%s:category_settings"
+
+// DefaultCategorySettings returns the default category adjustments
+// These are global defaults used when no per-user customization exists
+func DefaultCategorySettings() map[string]map[string]float64 {
+	return map[string]map[string]float64{
+		"confidence_boost": {
+			"best":      -10, // Reduce confidence requirement (more trades)
+			"good":      -5,
+			"neutral":   0,
+			"poor":      5,  // Increase confidence requirement (fewer trades)
+			"worst":     10,
+			"blacklist": 100, // Effectively disable
+		},
+		"size_multiplier": {
+			"best":      1.5, // Increase position size
+			"good":      1.2,
+			"neutral":   1.0,
+			"poor":      0.7,
+			"worst":     0.5,
+			"blacklist": 0.0, // No position
+		},
+	}
+}
+
+// GetCategorySettings retrieves category settings for a user (cache-first)
+// Returns default settings if none customized
+func (s *SettingsCacheService) GetCategorySettings(ctx context.Context, userID string) (map[string]map[string]float64, error) {
+	if !s.cache.IsHealthy() {
+		// Return defaults if cache unavailable
+		return DefaultCategorySettings(), nil
+	}
+
+	key := fmt.Sprintf(categorySettingsKeyPrefix, userID)
+	cached, err := s.cache.Get(ctx, key)
+	if err == nil && cached != "" {
+		var settings map[string]map[string]float64
+		if err := json.Unmarshal([]byte(cached), &settings); err == nil {
+			return settings, nil
+		}
+	}
+
+	// Cache miss - return defaults (could also check DB here if we add a table)
+	defaults := DefaultCategorySettings()
+
+	// Cache for future reads
+	data, _ := json.Marshal(defaults)
+	s.cache.Set(ctx, key, string(data), symbolSettingsTTL)
+
+	return defaults, nil
+}
+
+// SetCategorySettings updates category settings (cache-first for now, DB integration pending)
+// Story 9.12: This will be migrated to DB in a future phase when user_category_settings table is added
+func (s *SettingsCacheService) SetCategorySettings(ctx context.Context, userID string, settings map[string]map[string]float64) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	key := fmt.Sprintf(categorySettingsKeyPrefix, userID)
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal category settings: %w", err)
+	}
+
+	return s.cache.Set(ctx, key, string(data), symbolSettingsTTL)
+}
+
+// ============================================================================
+// SYMBOL PERFORMANCE REPORT (Story 9.12 Phase 5b)
+// Calculated from user_symbol_settings table
+// ============================================================================
+
+// SymbolPerformanceReport represents a symbol's trading performance summary
+type SymbolPerformanceReport struct {
+	Symbol         string  `json:"symbol"`
+	Category       string  `json:"category"`
+	TotalTrades    int     `json:"total_trades"`
+	WinningTrades  int     `json:"winning_trades"`
+	LosingTrades   int     `json:"losing_trades"`
+	TotalPnL       float64 `json:"total_pnl"`
+	WinRate        float64 `json:"win_rate"`
+	AvgPnL         float64 `json:"avg_pnl"`
+	MinConfidence  float64 `json:"min_confidence"`
+	MaxPositionUSD float64 `json:"max_position_usd"`
+	SizeMultiplier float64 `json:"size_multiplier"`
+	Enabled        bool    `json:"enabled"`
+}
+
+// GetSymbolPerformanceReport generates performance reports from cached symbol settings
+func (s *SettingsCacheService) GetSymbolPerformanceReport(ctx context.Context, userID string, globalMinConfidence, globalMaxUSD float64) ([]SymbolPerformanceReport, error) {
+	allSettings, err := s.GetAllSymbolSettings(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var reports []SymbolPerformanceReport
+	for _, settings := range allSettings {
+		report := SymbolPerformanceReport{
+			Symbol:         settings.Symbol,
+			Category:       settings.Category,
+			TotalTrades:    settings.TotalTrades,
+			WinningTrades:  settings.WinningTrades,
+			LosingTrades:   settings.TotalTrades - settings.WinningTrades,
+			TotalPnL:       settings.TotalPnL,
+			WinRate:        settings.WinRate,
+			AvgPnL:         settings.AvgPnL,
+			MinConfidence:  s.GetEffectiveConfidence(ctx, userID, settings.Symbol, globalMinConfidence),
+			MaxPositionUSD: s.GetEffectivePositionSize(ctx, userID, settings.Symbol, globalMaxUSD),
+			SizeMultiplier: settings.SizeMultiplier,
+			Enabled:        settings.Enabled,
+		}
+		reports = append(reports, report)
+	}
+
+	return reports, nil
+}
+
+// GetSymbolsByCategory returns all symbols in a given category
+func (s *SettingsCacheService) GetSymbolsByCategory(ctx context.Context, userID, category string) ([]string, error) {
+	allSettings, err := s.GetAllSymbolSettings(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	var symbols []string
+	for symbol, settings := range allSettings {
+		if settings.Category == category {
+			symbols = append(symbols, symbol)
+		}
+	}
+
+	return symbols, nil
+}
+
+// BlacklistSymbol adds a symbol to the blacklist category
+func (s *SettingsCacheService) BlacklistSymbol(ctx context.Context, userID, symbol, reason string) error {
+	// Get existing settings or create new
+	existing, _ := s.GetSymbolSettings(ctx, userID, symbol)
+
+	dbSettings := &database.UserSymbolSettings{
+		UserID:         userID,
+		Symbol:         symbol,
+		Category:       "blacklist",
+		Enabled:        false,
+		Notes:          reason,
+		SizeMultiplier: 1.0,
+		LastUpdated:    time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	// Preserve existing performance data if available
+	if existing != nil {
+		dbSettings.TotalTrades = existing.TotalTrades
+		dbSettings.WinningTrades = existing.WinningTrades
+		dbSettings.TotalPnL = existing.TotalPnL
+		dbSettings.WinRate = existing.WinRate
+		dbSettings.AvgPnL = existing.AvgPnL
+		dbSettings.MinConfidence = existing.MinConfidence
+		dbSettings.MaxPositionUSD = existing.MaxPositionUSD
+		if existing.SizeMultiplier > 0 {
+			dbSettings.SizeMultiplier = existing.SizeMultiplier
+		}
+	}
+
+	return s.SetSymbolSettings(ctx, userID, dbSettings)
+}
+
+// UnblacklistSymbol removes a symbol from the blacklist
+func (s *SettingsCacheService) UnblacklistSymbol(ctx context.Context, userID, symbol string) error {
+	existing, _ := s.GetSymbolSettings(ctx, userID, symbol)
+	if existing == nil {
+		return nil // Symbol doesn't exist, nothing to unblacklist
+	}
+
+	dbSettings := &database.UserSymbolSettings{
+		UserID:           userID,
+		Symbol:           symbol,
+		Category:         "neutral", // Reset to neutral
+		Enabled:          true,
+		Notes:            existing.Notes,
+		MinConfidence:    existing.MinConfidence,
+		MaxPositionUSD:   existing.MaxPositionUSD,
+		SizeMultiplier:   existing.SizeMultiplier,
+		LeverageOverride: existing.LeverageOverride,
+		CustomROIPercent: existing.CustomROIPercent,
+		TotalTrades:      existing.TotalTrades,
+		WinningTrades:    existing.WinningTrades,
+		TotalPnL:         existing.TotalPnL,
+		WinRate:          existing.WinRate,
+		AvgPnL:           existing.AvgPnL,
+		LastUpdated:      time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	if dbSettings.SizeMultiplier == 0 {
+		dbSettings.SizeMultiplier = 1.0
+	}
+
+	return s.SetSymbolSettings(ctx, userID, dbSettings)
+}
+
+// RecalculateSymbolPerformance updates symbol performance from database stats
+// and recategorizes based on performance thresholds
+func (s *SettingsCacheService) RecalculateSymbolPerformance(ctx context.Context, userID string, dbStats map[string]interface{}) (int, error) {
+	updated := 0
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	for symbol, statsRaw := range dbStats {
+		stats, ok := statsRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Get existing settings or create new
+		existing, _ := s.GetSymbolSettings(ctx, userID, symbol)
+
+		dbSettings := &database.UserSymbolSettings{
+			UserID:         userID,
+			Symbol:         symbol,
+			SizeMultiplier: 1.0,
+			Enabled:        true,
+			LastUpdated:    now,
+		}
+
+		// Preserve existing settings
+		if existing != nil {
+			dbSettings.Category = existing.Category
+			dbSettings.MinConfidence = existing.MinConfidence
+			dbSettings.MaxPositionUSD = existing.MaxPositionUSD
+			dbSettings.LeverageOverride = existing.LeverageOverride
+			dbSettings.Notes = existing.Notes
+			if existing.SizeMultiplier > 0 {
+				dbSettings.SizeMultiplier = existing.SizeMultiplier
+			}
+			dbSettings.Enabled = existing.Enabled
+		}
+
+		// Update performance metrics from DB stats
+		if v, ok := stats["total_trades"].(int); ok {
+			dbSettings.TotalTrades = v
+		}
+		if v, ok := stats["winning_trades"].(int); ok {
+			dbSettings.WinningTrades = v
+		}
+		if v, ok := stats["total_pnl"].(float64); ok {
+			dbSettings.TotalPnL = v
+		}
+		if v, ok := stats["avg_pnl"].(float64); ok {
+			dbSettings.AvgPnL = v
+		}
+
+		// Calculate win rate
+		if dbSettings.TotalTrades > 0 {
+			dbSettings.WinRate = float64(dbSettings.WinningTrades) / float64(dbSettings.TotalTrades) * 100
+		}
+
+		// Recategorize based on performance (unless blacklisted)
+		if dbSettings.Category != "blacklist" {
+			dbSettings.Category = calculatePerformanceCategory(dbSettings.TotalPnL, dbSettings.WinRate, dbSettings.TotalTrades)
+		}
+
+		if err := s.SetSymbolSettings(ctx, userID, dbSettings); err != nil {
+			s.logger.Warn("Failed to update symbol settings", "symbol", symbol, "error", err)
+			continue
+		}
+		updated++
+	}
+
+	return updated, nil
+}
+
+// calculatePerformanceCategory determines category based on performance metrics
+func calculatePerformanceCategory(totalPnL, winRate float64, totalTrades int) string {
+	// Need minimum trades for categorization
+	if totalTrades < 3 {
+		return "neutral"
+	}
+
+	// Score-based categorization
+	score := 0.0
+
+	// PnL contribution (weighted heavily)
+	if totalPnL > 100 {
+		score += 3
+	} else if totalPnL > 50 {
+		score += 2
+	} else if totalPnL > 0 {
+		score += 1
+	} else if totalPnL > -50 {
+		score -= 1
+	} else if totalPnL > -100 {
+		score -= 2
+	} else {
+		score -= 3
+	}
+
+	// Win rate contribution
+	if winRate > 70 {
+		score += 2
+	} else if winRate > 55 {
+		score += 1
+	} else if winRate < 40 {
+		score -= 1
+	} else if winRate < 30 {
+		score -= 2
+	}
+
+	// Map score to category
+	switch {
+	case score >= 4:
+		return "best"
+	case score >= 2:
+		return "good"
+	case score >= -1:
+		return "neutral"
+	case score >= -3:
+		return "poor"
+	default:
+		return "worst"
+	}
+}
+
+// ============================================================================
+// GINIE SETTINGS CACHE (Story 9.12)
+// User Ginie autopilot settings (dry run, auto-start, morning auto-block, etc.)
+// NOTE: Currently Ginie settings are NOT cached in Redis - they read directly from DB.
+// This method exists for consistency and future cache support.
+// ============================================================================
+
+// Ginie settings cache key pattern
+const ginieSettingsKeyPrefix = "user:%s:ginie_settings"
+
+// InvalidateGinieSettings removes Ginie settings from cache for a user
+// Should be called after updating any Ginie settings in the database.
+// Currently a no-op since Ginie settings are not cached, but establishes the pattern.
+func (s *SettingsCacheService) InvalidateGinieSettings(ctx context.Context, userID string) error {
+	if !s.cache.IsHealthy() {
+		return nil
+	}
+
+	key := fmt.Sprintf(ginieSettingsKeyPrefix, userID)
+	return s.cache.client.Del(ctx, key).Err()
 }

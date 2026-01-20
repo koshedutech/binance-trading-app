@@ -16,6 +16,8 @@ import (
 
 // ModeConfigCache defines the interface for cache-first mode config reads (Story 6.6)
 // This interface allows the cache package to be injected without creating import cycles
+// NOTE: The actual cache service (SettingsCacheService) implements the full SettingsCacheReader
+// interface which includes additional methods like GetCoinConfluenceConfigCached (Story 9.12 Phase 3)
 type ModeConfigCache interface {
 	// GetModeConfig retrieves full mode configuration from cache
 	GetModeConfig(ctx context.Context, userID, mode string) (*ModeFullConfig, error)
@@ -4065,6 +4067,67 @@ var ValidModes = map[string]bool{
 	"swing":         true,
 	"position":      true,
 	"scalp_reentry": true,
+}
+
+// GetModeConfigFromDB is a standalone function to retrieve mode configuration from database.
+// Story 9.12 Phase 5e: This function replaces the need to use GetSettingsManager() singleton.
+// It retrieves mode configuration from database for a specific user.
+// This is the DB-first approach - NO fallback to JSON file or defaults.
+// IMPORTANT: The 'enabled' status comes from the dedicated 'enabled' column, NOT the JSON.
+// This ensures the dedicated column is the single source of truth (Story 4.11).
+// Returns error if config not found - caller must handle missing configs explicitly.
+// NOTE: scalp_reentry uses PositionOptimizationConfig, NOT ModeFullConfig. Do not call this for scalp_reentry.
+func GetModeConfigFromDB(ctx context.Context, db *database.Repository, userID, modeName string) (*ModeFullConfig, error) {
+	// scalp_reentry is a position optimizer with its own config format (PositionOptimizationConfig)
+	// It should NOT be loaded via this function - use GetUserPositionOptimizationConfig or handle in API
+	if modeName == "scalp_reentry" {
+		return nil, fmt.Errorf("scalp_reentry uses PositionOptimizationConfig format, not ModeFullConfig. Use /ginie/scalp-reentry-config endpoint")
+	}
+
+	if !ValidModes[modeName] {
+		return nil, fmt.Errorf("invalid mode '%s': must be ultra_fast, scalp, swing, or position", modeName)
+	}
+
+	// Get both enabled column AND config JSON from database
+	// The enabled column is the SOURCE OF TRUTH for mode enabled/disabled status
+	enabledFromColumn, configJSON, err := db.GetUserModeConfigWithEnabled(ctx, userID, modeName)
+	if err != nil {
+		return nil, fmt.Errorf("database error getting mode config for user %s mode %s: %w", userID, modeName, err)
+	}
+	if configJSON == nil {
+		return nil, fmt.Errorf("no mode config found in database for user %s mode %s", userID, modeName)
+	}
+
+	// Unmarshal into ModeFullConfig
+	var config ModeFullConfig
+	if err := json.Unmarshal(configJSON, &config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal mode config JSON for user %s mode %s: %w", userID, modeName, err)
+	}
+
+	// CRITICAL: Detect old format data (all nested pointers are nil)
+	// Old format has flat fields like "dca_on_loss", "tp1_percent" which don't map to new nested structure
+	if config.MTF == nil && config.Size == nil && config.SLTP == nil &&
+		config.Timeframe == nil && config.Confidence == nil {
+		// Check if this is actually old format by looking at raw JSON
+		var rawMap map[string]interface{}
+		if err := json.Unmarshal(configJSON, &rawMap); err == nil {
+			// Check for old format fields (only for modes that should use ModeFullConfig)
+			if _, hasOldField := rawMap["dca_on_loss"]; hasOldField {
+				log.Printf("[MODE-CONFIG] WARNING: User %s mode %s has OLD FORMAT config - migration needed", userID, modeName)
+				return nil, fmt.Errorf("OLD_FORMAT_DETECTED: This mode configuration uses an outdated format. Please reset to defaults via the UI to update to the new format")
+			}
+			if _, hasOldField := rawMap["tp1_percent"]; hasOldField {
+				log.Printf("[MODE-CONFIG] WARNING: User %s mode %s has OLD FORMAT config - migration needed", userID, modeName)
+				return nil, fmt.Errorf("OLD_FORMAT_DETECTED: This mode configuration uses an outdated format. Please reset to defaults via the UI to update to the new format")
+			}
+		}
+	}
+
+	// CRITICAL: Override the JSON's enabled field with the dedicated column value
+	// The enabled column is authoritative; JSON may have stale/incorrect value
+	config.Enabled = enabledFromColumn
+
+	return &config, nil
 }
 
 // ValidateModeConfig validates a ModeFullConfig for consistency and bounds

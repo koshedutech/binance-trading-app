@@ -290,27 +290,7 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 		}
 	}
 
-	// 4. Update in-memory settings for immediate use (optional - for backward compatibility)
-	allocation := &autopilot.ModeAllocationConfig{
-		UltraFastScalpPercent:        currentAllocation.UltraFastPercent,
-		ScalpPercent:                 currentAllocation.ScalpPercent,
-		SwingPercent:                 currentAllocation.SwingPercent,
-		PositionPercent:              currentAllocation.PositionPercent,
-		MaxUltraFastPositions:        currentAllocation.MaxUltraFastPositions,
-		MaxScalpPositions:            currentAllocation.MaxScalpPositions,
-		MaxSwingPositions:            currentAllocation.MaxSwingPositions,
-		MaxPositionPositions:         currentAllocation.MaxPositionPositions,
-		MaxUltraFastUSDPerPosition:   currentAllocation.MaxUltraFastUSDPerPosition,
-		MaxScalpUSDPerPosition:       currentAllocation.MaxScalpUSDPerPosition,
-		MaxSwingUSDPerPosition:       currentAllocation.MaxSwingUSDPerPosition,
-		MaxPositionUSDPerPosition:    currentAllocation.MaxPositionUSDPerPosition,
-	}
-	if err := autopilot.GetSettingsManager().UpdateModeAllocation(allocation); err != nil {
-		// Log but don't fail - database is source of truth
-		log.Printf("[MODE-ALLOCATION] Warning: Failed to update in-memory settings: %v", err)
-	}
-
-	// 5. Trigger immediate config reload for running autopilot
+	// 4. Trigger immediate config reload for running autopilot
 	if s.userAutopilotManager != nil {
 		instance := s.userAutopilotManager.GetInstance(userID)
 		if instance != nil && instance.Autopilot != nil {
@@ -319,17 +299,17 @@ func (s *Server) handleUpdateModeAllocations(c *gin.Context) {
 		}
 	}
 
-	// 6. Broadcast allocation change to frontend via WebSocket for immediate UI update
+	// 5. Broadcast allocation change to frontend via WebSocket for immediate UI update
 	events.BroadcastModeStatus(userID, map[string]interface{}{
 		"event":      "allocation_update",
-		"allocation": allocation,
+		"allocation": currentAllocation,
 	})
 	log.Printf("[MODE-ALLOCATION] Broadcasted allocation update to user %s", userID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success":    true,
 		"message":    "Mode allocation updated",
-		"allocation": allocation,
+		"allocation": currentAllocation,
 	})
 }
 

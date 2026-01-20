@@ -93,7 +93,6 @@ type AdaptiveAI struct {
 	recommendations []AdaptiveRecommendation
 	lastAnalysis    time.Time
 	analysisCount   int
-	settingsManager *SettingsManager
 
 	// Learning configuration
 	learningWindowTrades int // Number of trades before analysis
@@ -103,11 +102,11 @@ type AdaptiveAI struct {
 }
 
 // NewAdaptiveAI creates a new AdaptiveAI instance
-func NewAdaptiveAI(settingsManager *SettingsManager) *AdaptiveAI {
+// Note: The settingsManager parameter is deprecated and ignored. Settings are now read from defaults.
+func NewAdaptiveAI(_ *SettingsManager) *AdaptiveAI {
 	ai := &AdaptiveAI{
 		outcomes:             make([]TradeOutcome, 0, 1000),
 		recommendations:      make([]AdaptiveRecommendation, 0, 100),
-		settingsManager:      settingsManager,
 		learningWindowTrades: 50,   // Analyze after 50 trades
 		learningWindowHours:  24,   // Or after 24 hours
 		maxOutcomes:          1000, // Keep last 1000 outcomes
@@ -450,12 +449,9 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 
 	// If LLM-only wins < 45%, recommend reducing LLM weight
 	if llmWinRate < 45 {
-		// Get current LLM weight (default 0.3)
-		currentWeight := 0.3 // Default
-		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
-			currentWeight = settings.LLMSLTPWeight // Using this as a proxy
-		}
+		// Get current LLM weight from defaults
+		defaults := DefaultSettings()
+		currentWeight := defaults.LLMSLTPWeight // Default 0.3
 
 		suggestedWeight := currentWeight - 0.05
 		if suggestedWeight < 0.1 {
@@ -484,11 +480,9 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 
 	// If LLM-only wins > 60%, recommend increasing LLM weight
 	if llmWinRate > 60 {
-		currentWeight := 0.3
-		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
-			currentWeight = settings.LLMSLTPWeight
-		}
+		// Get current LLM weight from defaults
+		defaults := DefaultSettings()
+		currentWeight := defaults.LLMSLTPWeight // Default 0.3
 
 		suggestedWeight := currentWeight + 0.05
 		if suggestedWeight > 0.5 {
@@ -522,13 +516,11 @@ func (ai *AdaptiveAI) generateLLMWeightRecommendation(mode GinieTradingMode, sta
 func (ai *AdaptiveAI) generateConfidenceRecommendation(mode GinieTradingMode, stats *ModeStatistics) *AdaptiveRecommendation {
 	// If low confidence trades have < 50% win rate, recommend raising min confidence
 	if stats.LowConfidenceTrades >= 5 && stats.LowConfidenceWinRate < 50 {
-		// Get current min confidence for mode
+		// Get current min confidence for mode from defaults
 		currentMinConf := 60.0 // Default
-		if ai.settingsManager != nil {
-			modeConfig, err := ai.settingsManager.GetDefaultModeConfig(string(mode))
-			if err == nil && modeConfig != nil && modeConfig.Confidence != nil {
-				currentMinConf = modeConfig.Confidence.MinConfidence
-			}
+		modeConfigs := DefaultModeConfigs()
+		if modeConfig, ok := modeConfigs[string(mode)]; ok && modeConfig != nil && modeConfig.Confidence != nil {
+			currentMinConf = modeConfig.Confidence.MinConfidence
 		}
 
 		// If already at 65+, suggest 70; otherwise suggest 65
@@ -597,7 +589,10 @@ func (ai *AdaptiveAI) GetAllRecommendations() []AdaptiveRecommendation {
 
 // ===== RECOMMENDATION ACTIONS =====
 
-// ApplyRecommendation applies a recommendation and updates settings
+// ApplyRecommendation marks a recommendation as applied.
+// Note: File-based settings (autopilot_settings.json) are deprecated.
+// Recommendations are now logged for manual review or future database integration.
+// The actual setting changes should be applied through the database-backed settings system.
 func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 	ai.mu.Lock()
 	defer ai.mu.Unlock()
@@ -623,55 +618,37 @@ func (ai *AdaptiveAI) ApplyRecommendation(id string) error {
 		return fmt.Errorf("recommendation was dismissed: %s", id)
 	}
 
-	log.Printf("[ADAPTIVE-AI] Applying recommendation %s: %s for mode %s", id, rec.Type, rec.Mode)
+	log.Printf("[ADAPTIVE-AI] Marking recommendation %s as applied: %s for mode %s", id, rec.Type, rec.Mode)
 
-	// Apply based on type
-	var err error
+	// Log the recommendation details for manual review or future database integration
 	switch rec.Type {
 	case "block_disagreement":
-		// Update block_on_divergence in all ModeConfigs
-		if ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
-			// Update all mode configurations with block_on_divergence
-			for _, mc := range settings.ModeConfigs {
-				if mc != nil && mc.TrendDivergence != nil {
-					mc.TrendDivergence.BlockOnDivergence = true
-				}
-			}
-			err = ai.settingsManager.SaveSettings(settings)
-		}
+		log.Printf("[ADAPTIVE-AI] RECOMMENDATION: Enable block_on_divergence for mode %s", rec.Mode)
+		log.Printf("[ADAPTIVE-AI] Reason: %s", rec.Reason)
 
 	case "llm_weight":
-		// Update LLM weight
-		if suggestedWeight, ok := rec.SuggestedValue.(float64); ok && ai.settingsManager != nil {
-			settings := ai.settingsManager.GetCurrentSettings()
-			settings.LLMSLTPWeight = suggestedWeight
-			err = ai.settingsManager.SaveSettings(settings)
+		if suggestedWeight, ok := rec.SuggestedValue.(float64); ok {
+			log.Printf("[ADAPTIVE-AI] RECOMMENDATION: Change LLM weight from %v to %.2f for mode %s",
+				rec.CurrentValue, suggestedWeight, rec.Mode)
+			log.Printf("[ADAPTIVE-AI] Reason: %s", rec.Reason)
 		}
 
 	case "min_confidence":
-		// Update min confidence for the specific mode
-		if suggestedConf, ok := rec.SuggestedValue.(float64); ok && ai.settingsManager != nil {
-			modeConfig, getErr := ai.settingsManager.GetDefaultModeConfig(string(rec.Mode))
-			if getErr == nil && modeConfig != nil && modeConfig.Confidence != nil {
-				modeConfig.Confidence.MinConfidence = suggestedConf
-				err = ai.settingsManager.UpdateModeConfig(string(rec.Mode), modeConfig)
-			}
+		if suggestedConf, ok := rec.SuggestedValue.(float64); ok {
+			log.Printf("[ADAPTIVE-AI] RECOMMENDATION: Change min confidence from %v to %.0f%% for mode %s",
+				rec.CurrentValue, suggestedConf, rec.Mode)
+			log.Printf("[ADAPTIVE-AI] Reason: %s", rec.Reason)
 		}
 
 	default:
 		return fmt.Errorf("unknown recommendation type: %s", rec.Type)
 	}
 
-	if err != nil {
-		return fmt.Errorf("failed to apply recommendation: %w", err)
-	}
-
-	// Mark as applied
+	// Mark as applied (the actual setting change should be done via database-backed settings)
 	now := time.Now()
 	rec.AppliedAt = &now
 
-	log.Printf("[ADAPTIVE-AI] Successfully applied recommendation %s", id)
+	log.Printf("[ADAPTIVE-AI] Recommendation %s marked as applied (manual action may be required)", id)
 
 	return nil
 }

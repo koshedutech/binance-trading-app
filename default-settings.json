@@ -1110,9 +1110,9 @@
         "allow_hedge_chains": false,
         "max_hedge_chain_depth": 2
       }
-    },
-    "_deprecation_notice": "DEPRECATED: mode_configs is deprecated. Use 'modes' section below for strategy-specific settings. mode_configs will be removed in v2.0.0."
+    }
   },
+  "_mode_configs_deprecation_notice": "DEPRECATED: mode_configs is deprecated. Use 'modes' section below for strategy-specific settings. mode_configs will be removed in v2.0.0.",
   "modes": {
     "_description": "Mode-Strategy settings matrix. Each mode has multiple strategies with independent configurations.",
     "_version": "1.0.0",

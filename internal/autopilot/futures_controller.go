@@ -769,249 +769,11 @@ func NewFuturesController(
 	}
 }
 
-// LoadSavedSettings loads settings from the persistent settings file
-// Call this after creating the controller to restore saved settings
+// LoadSavedSettings is DEPRECATED (Story 9.12): Settings are now loaded from database via cache.
+// This function is now a no-op. Settings are applied at autopilot creation time via ApplyUserSettings().
+// Kept for backward compatibility to avoid breaking callers during the transition period.
 func (fc *FuturesController) LoadSavedSettings() {
-	sm := GetSettingsManager()
-	settings, err := sm.LoadSettings()
-	if err != nil {
-		fc.logger.Warn("Failed to load saved settings, using defaults", "error", err)
-		return
-	}
-
-	// CRITICAL: Only hold lock while updating fc fields, NOT for Ginie config or I/O operations
-	// This prevents blocking API handlers that need the lock
-	fc.mu.Lock()
-
-	// Apply Dynamic SL/TP settings
-	fc.config.DynamicSLTPEnabled = settings.DynamicSLTPEnabled
-	fc.config.ATRPeriod = settings.ATRPeriod
-	fc.config.ATRMultiplierSL = settings.ATRMultiplierSL
-	fc.config.ATRMultiplierTP = settings.ATRMultiplierTP
-	fc.config.LLMSLTPWeight = settings.LLMSLTPWeight
-	fc.config.MinSLPercent = settings.MinSLPercent
-	fc.config.MaxSLPercent = settings.MaxSLPercent
-	fc.config.MinTPPercent = settings.MinTPPercent
-	fc.config.MaxTPPercent = settings.MaxTPPercent
-
-	// Apply Scalping settings
-	fc.config.ScalpingModeEnabled = settings.ScalpingModeEnabled
-	fc.config.ScalpingMinProfit = settings.ScalpingMinProfit
-	fc.config.ScalpingQuickReentry = settings.ScalpingQuickReentry
-	fc.config.ScalpingReentryDelaySec = settings.ScalpingReentryDelaySec
-	fc.config.ScalpingMaxTradesPerDay = settings.ScalpingMaxTradesPerDay
-
-	// Apply Circuit Breaker settings (if circuit breaker exists)
-	if fc.circuitBreaker != nil {
-		fc.circuitBreaker.SetEnabled(settings.CircuitBreakerEnabled)
-		cbConfig := &circuit.CircuitBreakerConfig{
-			MaxLossPerHour:       settings.MaxLossPerHour,
-			MaxDailyLoss:         settings.MaxDailyLoss,
-			MaxConsecutiveLosses: settings.MaxConsecutiveLosses,
-			CooldownMinutes:      settings.CooldownMinutes,
-			MaxTradesPerMinute:   settings.MaxTradesPerMinute,
-			MaxDailyTrades:       settings.MaxDailyTrades,
-		}
-		fc.circuitBreaker.UpdateConfig(cbConfig)
-	}
-
-	// Apply Autopilot mode settings (risk level, dry run, allocation)
-	if settings.RiskLevel != "" {
-		fc.currentRiskLevel = settings.RiskLevel
-	}
-	fc.dryRun = settings.GinieDryRunMode
-	if settings.MaxUSDAllocation > 0 {
-		fc.maxUSDAllocation = settings.MaxUSDAllocation
-	}
-	if settings.ProfitReinvestPercent >= 0 {
-		fc.profitReinvestPct = settings.ProfitReinvestPercent
-	}
-	if settings.ProfitReinvestRiskLevel != "" {
-		fc.profitRiskLevel = settings.ProfitReinvestRiskLevel
-	}
-
-	fc.mu.Unlock()
-	// LOCK RELEASED - API handlers can now proceed
-
-	// Apply Ginie Autopilot settings AFTER releasing lock to prevent API timeouts
-	if fc.ginieAutopilot != nil {
-		ginieConfig := fc.ginieAutopilot.GetConfig()
-		ginieConfig.DryRun = settings.GinieDryRunMode
-
-		// PRIORITY: Use global RiskLevel setting if set (user's explicit preference)
-		if settings.RiskLevel != "" {
-			ginieConfig.RiskLevel = settings.RiskLevel
-		}
-
-		// Read configuration from ModeConfigs (use swing as default reference mode)
-		// Individual mode-specific settings are read by GinieAutopilot at runtime
-		refMode := "swing" // Reference mode for global config values
-		if modeConfig := settings.ModeConfigs[refMode]; modeConfig != nil {
-			// Only override risk level from mode config if global wasn't set
-			if ginieConfig.RiskLevel == "" && modeConfig.Risk != nil && modeConfig.Risk.RiskLevel != "" {
-				ginieConfig.RiskLevel = modeConfig.Risk.RiskLevel
-			}
-			if modeConfig.Size != nil {
-				if modeConfig.Size.MaxSizeUSD > 0 {
-					ginieConfig.MaxUSDPerPosition = modeConfig.Size.MaxSizeUSD
-				}
-				if modeConfig.Size.Leverage > 0 {
-					ginieConfig.DefaultLeverage = modeConfig.Size.Leverage
-				}
-				if modeConfig.Size.MaxPositions > 0 {
-					ginieConfig.MaxPositions = modeConfig.Size.MaxPositions
-				}
-			}
-			if modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
-				ginieConfig.MinConfidenceToTrade = modeConfig.Confidence.MinConfidence
-			}
-		}
-		// Apply defaults if not set from ModeConfigs (database-first with fallback)
-		if ginieConfig.RiskLevel == "" {
-			ginieConfig.RiskLevel = "moderate"
-			log.Printf("[SetRiskLevel] Using fallback RiskLevel: %s (DB config not available)", ginieConfig.RiskLevel)
-		}
-		if ginieConfig.MaxUSDPerPosition == 0 {
-			ginieConfig.MaxUSDPerPosition = 500
-			log.Printf("[SetRiskLevel] Using fallback MaxUSDPerPosition: %.2f (DB config not available)", ginieConfig.MaxUSDPerPosition)
-		}
-		if ginieConfig.DefaultLeverage == 0 {
-			ginieConfig.DefaultLeverage = 10
-			log.Printf("[SetRiskLevel] Using fallback DefaultLeverage: %d (DB config not available)", ginieConfig.DefaultLeverage)
-		}
-		// NOTE: MinConfidenceToTrade is now set from database mode configs (lines 843-845)
-		// The database config takes precedence. These hardcoded values are DEPRECATED.
-		// Fallback only applies if database config is not available.
-		if ginieConfig.MinConfidenceToTrade == 0 {
-			// Set MinConfidenceToTrade based on RiskLevel - FALLBACK ONLY
-			// LOWERED 2026-01-03: Previous thresholds blocked all trades - confidence typically 25-45%
-			switch ginieConfig.RiskLevel {
-			case "conservative":
-				ginieConfig.MinConfidenceToTrade = 45.0 // Was 60.0
-			case "moderate":
-				ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
-			case "aggressive":
-				ginieConfig.MinConfidenceToTrade = 25.0 // Was 40.0
-			default:
-				ginieConfig.MinConfidenceToTrade = 35.0 // Was 50.0
-			}
-			log.Printf("[SetRiskLevel] Using fallback MinConfidenceToTrade: %.1f (DB config not available)", ginieConfig.MinConfidenceToTrade)
-		}
-		if ginieConfig.MaxPositions == 0 && settings.GinieMaxPositions > 0 {
-			ginieConfig.MaxPositions = settings.GinieMaxPositions
-		}
-
-		// Apply Ginie circuit breaker settings
-		ginieConfig.CircuitBreakerEnabled = settings.CircuitBreakerEnabled
-		if settings.MaxLossPerHour > 0 {
-			ginieConfig.CBMaxLossPerHour = settings.MaxLossPerHour
-		}
-		if settings.MaxDailyLoss > 0 {
-			ginieConfig.CBMaxDailyLoss = settings.MaxDailyLoss
-		}
-		if settings.MaxConsecutiveLosses > 0 {
-			ginieConfig.CBMaxConsecutiveLosses = settings.MaxConsecutiveLosses
-		}
-		if settings.CooldownMinutes > 0 {
-			ginieConfig.CBCooldownMinutes = settings.CooldownMinutes
-		}
-
-		// Apply Ginie TP percentages from ModeConfigs (database-first with fallback)
-		useSingleTP := false
-		tp1, tp2, tp3, tp4 := 25.0, 25.0, 25.0, 25.0 // Fallback defaults
-		loadedTPFromDB := false
-		if mc := settings.ModeConfigs["swing"]; mc != nil && mc.SLTP != nil {
-			useSingleTP = mc.SLTP.UseSingleTP
-			if len(mc.SLTP.TPAllocation) >= 4 {
-				tp1 = mc.SLTP.TPAllocation[0]
-				tp2 = mc.SLTP.TPAllocation[1]
-				tp3 = mc.SLTP.TPAllocation[2]
-				tp4 = mc.SLTP.TPAllocation[3]
-				loadedTPFromDB = true
-			}
-		}
-		if useSingleTP {
-			ginieConfig.TP1Percent = 100.0
-			ginieConfig.TP2Percent = 0
-			ginieConfig.TP3Percent = 0
-			ginieConfig.TP4Percent = 0
-			if loadedTPFromDB {
-				log.Printf("[SetRiskLevel] Using single TP mode from DB config")
-			} else {
-				log.Printf("[SetRiskLevel] Using single TP mode (fallback)")
-			}
-		} else {
-			ginieConfig.TP1Percent = tp1
-			ginieConfig.TP2Percent = tp2
-			ginieConfig.TP3Percent = tp3
-			ginieConfig.TP4Percent = tp4
-			if loadedTPFromDB {
-				log.Printf("[SetRiskLevel] Using multi-level TP from DB config: [%.1f, %.1f, %.1f, %.1f]", tp1, tp2, tp3, tp4)
-			} else {
-				log.Printf("[SetRiskLevel] Using fallback multi-level TP: [%.1f, %.1f, %.1f, %.1f]", tp1, tp2, tp3, tp4)
-			}
-		}
-
-		fc.ginieAutopilot.SetConfig(ginieConfig)
-
-		// Build trend timeframes map from ModeConfigs for logging
-		trendTimeframes := make(map[string]string)
-		blockOnDivergence := false
-		for modeName, mc := range settings.ModeConfigs {
-			if mc != nil && mc.Timeframe != nil {
-				trendTimeframes[modeName] = mc.Timeframe.TrendTimeframe
-			}
-			if mc != nil && mc.TrendDivergence != nil && mc.TrendDivergence.BlockOnDivergence {
-				blockOnDivergence = true
-			}
-		}
-
-		fc.logger.Info("Applied Ginie autopilot settings",
-			"dry_run", ginieConfig.DryRun,
-			"risk_level", ginieConfig.RiskLevel,
-			"max_usd", ginieConfig.MaxUSDPerPosition,
-			"leverage", ginieConfig.DefaultLeverage,
-			"min_confidence", ginieConfig.MinConfidenceToTrade,
-			"max_positions", ginieConfig.MaxPositions,
-			"circuit_breaker_enabled", ginieConfig.CircuitBreakerEnabled,
-			"cb_max_loss_per_hour", ginieConfig.CBMaxLossPerHour,
-			"cb_max_daily_loss", ginieConfig.CBMaxDailyLoss,
-			"cb_max_consecutive_losses", ginieConfig.CBMaxConsecutiveLosses,
-			"cb_cooldown_minutes", ginieConfig.CBCooldownMinutes,
-			"tp_mode", map[bool]string{true: "SINGLE", false: "MULTI"}[useSingleTP],
-			"tp1_percent", ginieConfig.TP1Percent,
-			"trend_timeframes", trendTimeframes,
-			"block_on_divergence", blockOnDivergence,
-			"auto_start", settings.GinieAutoStart)
-
-		// Apply risk level to GinieAutopilot's internal state (updates MinConfidenceToTrade)
-		if ginieConfig.RiskLevel != "" {
-			if err := fc.ginieAutopilot.SetRiskLevel(ginieConfig.RiskLevel); err != nil {
-				fc.logger.Warn("Failed to apply risk level to Ginie autopilot", "error", err)
-			}
-		}
-
-		// NOTE: Ginie analyzer automatically reads trend timeframes and divergence settings
-		// from SettingsManager, so no additional configuration needed here.
-		// The settings are applied when GinieAnalyzer calls GetCurrentSettings()
-
-		// NOTE: Auto-start is disabled during LoadSavedSettings to avoid blocking API startup
-		// The API handler /api/futures/ginie/toggle will handle auto-start on-demand
-		if settings.GinieAutoStart {
-			fc.logger.Info("Ginie auto-start is enabled in settings",
-				"mode", map[bool]string{true: "PAPER", false: "LIVE"}[ginieConfig.DryRun],
-				"note", "auto-start will be triggered via API or manual start")
-		}
-	}
-
-	fc.logger.Info("Loaded saved autopilot settings",
-		"dynamic_sltp_enabled", settings.DynamicSLTPEnabled,
-		"scalping_enabled", settings.ScalpingModeEnabled,
-		"circuit_breaker_enabled", settings.CircuitBreakerEnabled,
-		"risk_level", settings.RiskLevel,
-		"dry_run", settings.DryRunMode,
-		"max_usd_allocation", settings.MaxUSDAllocation,
-		"ginie_auto_start", settings.GinieAutoStart)
+	fc.logger.Info("LoadSavedSettings called (DEPRECATED - no-op, settings loaded from DB/cache)")
 }
 
 // SetMLPredictor sets the ML predictor
@@ -1515,9 +1277,8 @@ func (fc *FuturesController) SetRiskLevel(level string) error {
 	if fc.settingsCache != nil {
 		modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, level)
 	} else {
-		// Fallback to DB for legacy mode
-		sm := GetSettingsManager()
-		modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, level)
+		// Fallback to DB for legacy mode (Story 9.12: use standalone function)
+		modeConfig, err = GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, level)
 	}
 
 	// Apply config if available
@@ -1880,23 +1641,8 @@ func (fc *FuturesController) SetDynamicSLTPConfig(
 		"atr_multiplier_tp", fc.config.ATRMultiplierTP,
 		"llm_weight", fc.config.LLMSLTPWeight)
 
-	// Persist settings to file
-	go func() {
-		sm := GetSettingsManager()
-		if err := sm.UpdateDynamicSLTP(
-			enabled,
-			atrPeriod,
-			atrMultiplierSL,
-			atrMultiplierTP,
-			llmWeight,
-			minSL,
-			maxSL,
-			minTP,
-			maxTP,
-		); err != nil {
-			fc.logger.Warn("Failed to persist dynamic SL/TP settings", "error", err)
-		}
-	}()
+	// NOTE (Story 9.12): File persistence removed. Settings are persisted via database/cache write-through
+	// by the API handler that calls this method.
 }
 
 // GetScalpingConfig returns the scalping mode configuration
@@ -1944,19 +1690,8 @@ func (fc *FuturesController) SetScalpingConfig(
 		"reentry_delay_sec", fc.config.ScalpingReentryDelaySec,
 		"max_trades_per_day", fc.config.ScalpingMaxTradesPerDay)
 
-	// Persist settings to file
-	go func() {
-		sm := GetSettingsManager()
-		if err := sm.UpdateScalping(
-			enabled,
-			minProfit,
-			quickReentry,
-			reentryDelaySec,
-			maxTradesPerDay,
-		); err != nil {
-			fc.logger.Warn("Failed to persist scalping settings", "error", err)
-		}
-	}()
+	// NOTE (Story 9.12): File persistence removed. Settings are persisted via database/cache write-through
+	// by the API handler that calls this method.
 }
 
 // SetDefaultLeverage sets custom default leverage for new positions
@@ -2826,9 +2561,8 @@ func (fc *FuturesController) collectSignals(symbol string, currentPrice float64,
 			if fc.settingsCache != nil {
 				modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
 			} else {
-				// Fallback to DB for legacy mode
-				sm := GetSettingsManager()
-				modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+				// Fallback to DB for legacy mode (Story 9.12: use standalone function)
+				modeConfig, err = GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
 			}
 			if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 				if modeConfig.SLTP.TakeProfitPercent > 0 {
@@ -3047,9 +2781,8 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		if fc.settingsCache != nil {
 			modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
 		} else {
-			// Fallback to DB for legacy mode
-			sm := GetSettingsManager()
-			modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+			// Fallback to DB for legacy mode (Story 9.12: use standalone function)
+			modeConfig, err = GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
 		}
 		if err == nil && modeConfig != nil && modeConfig.SLTP != nil {
 			if modeConfig.SLTP.TakeProfitPercent > 0 {
@@ -3206,9 +2939,8 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 	if fc.settingsCache != nil {
 		modeConfig, cacheErr = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
 	} else {
-		// Fallback to DB for legacy mode
-		sm := GetSettingsManager()
-		modeConfig, cacheErr = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+		// Fallback to DB for legacy mode (Story 9.12: use standalone function)
+		modeConfig, cacheErr = GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
 	}
 	if cacheErr == nil && modeConfig != nil && modeConfig.SLTP != nil {
 		if modeConfig.SLTP.TakeProfitPercent > 0 {
@@ -4434,9 +4166,8 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 			if fc.settingsCache != nil {
 				modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
 			} else {
-				// Fallback to DB for legacy mode
-				sm := GetSettingsManager()
-				modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+				// Fallback to DB for legacy mode (Story 9.12: use standalone function)
+				modeConfig, err = GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
 			}
 			if err == nil && modeConfig != nil && modeConfig.Confidence != nil && modeConfig.Confidence.MinConfidence > 0 {
 				confluenceThreshold = modeConfig.Confidence.MinConfidence / 100.0 // Convert percent to decimal
@@ -4475,17 +4206,16 @@ func (fc *FuturesController) saveDecisionToDB(decision *FuturesAutopilotDecision
 				aggressiveThreshold = aggressiveCfg.Confidence.MinConfidence / 100.0
 			}
 		} else {
-			// Fallback to DB for legacy mode
-			sm := GetSettingsManager()
+			// Fallback to DB for legacy mode (Story 9.12: use standalone function)
 
 			// Get conservative mode threshold
-			conservativeCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "conservative")
+			conservativeCfg, err := GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "conservative")
 			if err == nil && conservativeCfg != nil && conservativeCfg.Confidence != nil && conservativeCfg.Confidence.MinConfidence > 0 {
 				conservativeThreshold = conservativeCfg.Confidence.MinConfidence / 100.0
 			}
 
 			// Get aggressive mode threshold
-			aggressiveCfg, err := sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "aggressive")
+			aggressiveCfg, err := GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, "aggressive")
 			if err == nil && aggressiveCfg != nil && aggressiveCfg.Confidence != nil && aggressiveCfg.Confidence.MinConfidence > 0 {
 				aggressiveThreshold = aggressiveCfg.Confidence.MinConfidence / 100.0
 			}
@@ -4704,9 +4434,8 @@ func (fc *FuturesController) getAveragingConfidenceThreshold() float64 {
 	if fc.settingsCache != nil {
 		modeConfig, err = fc.settingsCache.GetModeConfig(ctx, fc.ownerUserID, currentMode)
 	} else {
-		// Fallback to DB for legacy mode
-		sm := GetSettingsManager()
-		modeConfig, err = sm.GetUserModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
+		// Fallback to DB for legacy mode (Story 9.12: use standalone function)
+		modeConfig, err = GetModeConfigFromDB(ctx, fc.repo, fc.ownerUserID, currentMode)
 	}
 	if err != nil || modeConfig == nil || modeConfig.Averaging == nil {
 		// Fallback to confidence threshold if averaging config not available
@@ -5226,14 +4955,13 @@ func (fc *FuturesController) SetAveragingConfig(
 // getDefaultAnalysisTimeframe returns a sensible default timeframe for initial analysis
 // when the trading mode hasn't been determined yet. Uses scalp mode timeframe as default
 // since it's a good middle-ground for initial signal collection
+// Story 9.12: Use DefaultModeConfigs() directly instead of going through SettingsManager singleton
 func (fc *FuturesController) getDefaultAnalysisTimeframe() string {
-	sm := GetSettingsManager()
-	if sm != nil {
-		// Try to get scalp mode entry timeframe as default (5m is a good balance)
-		if modeConfig, err := sm.GetDefaultModeConfig("scalp"); err == nil && modeConfig != nil {
-			if modeConfig.Timeframe != nil && modeConfig.Timeframe.EntryTimeframe != "" {
-				return modeConfig.Timeframe.EntryTimeframe
-			}
+	// Get defaults directly without SettingsManager singleton
+	defaults := DefaultModeConfigs()
+	if modeConfig, exists := defaults["scalp"]; exists && modeConfig != nil {
+		if modeConfig.Timeframe != nil && modeConfig.Timeframe.EntryTimeframe != "" {
+			return modeConfig.Timeframe.EntryTimeframe
 		}
 	}
 	// Fallback to 5m as sensible default for initial analysis

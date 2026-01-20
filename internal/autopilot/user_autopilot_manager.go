@@ -315,16 +315,18 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		autopilot.SetLLMAnalyzer(llmAnalyzer)
 	}
 
-	// Apply global settings (RiskLevel, etc.) from SettingsManager
-	settingsManager := GetSettingsManager()
-	if settingsManager != nil {
-		settings := settingsManager.GetDefaultSettings()
-		if settings.RiskLevel != "" {
-			if err := autopilot.SetRiskLevel(settings.RiskLevel); err != nil {
-				m.logger.Warn("Failed to apply risk level to user autopilot", "error", err, "user_id", userID)
-			} else {
-				m.logger.Info("Applied risk level to user autopilot", "risk_level", settings.RiskLevel, "user_id", userID)
-			}
+	// Story 9.12: Apply global settings (RiskLevel) from default-settings.json
+	// This reads from default-settings.json which is the single source of truth for defaults.
+	// Future enhancement: Load user's risk level from database (user_ginie_settings table)
+	// and apply it via cache service. For now, using default-settings.json.
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		m.logger.Warn("Failed to load default settings for risk level", "error", err, "user_id", userID)
+	} else if defaults.GlobalTrading.RiskLevel != "" {
+		if err := autopilot.SetRiskLevel(defaults.GlobalTrading.RiskLevel); err != nil {
+			m.logger.Warn("Failed to apply risk level to user autopilot", "error", err, "user_id", userID)
+		} else {
+			m.logger.Info("Applied risk level to user autopilot", "risk_level", defaults.GlobalTrading.RiskLevel, "user_id", userID)
 		}
 	}
 

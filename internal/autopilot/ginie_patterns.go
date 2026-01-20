@@ -1240,15 +1240,12 @@ type MTFAnalysisResult struct {
 }
 
 // GetMTFConfigForMode returns the MTF config for a given trading mode
+// Story 9.12 Phase 5d: Migrated from GetSettingsManager() to LoadDefaultSettings()
 func GetMTFConfigForMode(mode GinieTradingMode) *ModeMTFConfig {
-	settings := GetSettingsManager().GetDefaultSettings()
-
-	// Get mode config from ModeConfigs
+	// Get mode config from default-settings.json (cached singleton)
 	modeStr := string(mode)
-	if settings.ModeConfigs != nil {
-		if cfg, ok := settings.ModeConfigs[modeStr]; ok && cfg.MTF != nil {
-			return cfg.MTF
-		}
+	if modeConfig, err := GetDefaultModeFullConfig(modeStr); err == nil && modeConfig != nil && modeConfig.MTF != nil {
+		return modeConfig.MTF
 	}
 
 	// Return default MTF config based on mode
@@ -1311,15 +1308,12 @@ func GetMTFConfigForMode(mode GinieTradingMode) *ModeMTFConfig {
 }
 
 // GetDynamicAIExitConfigForMode returns the Dynamic AI Exit config for a given trading mode
+// Story 9.12 Phase 5d: Migrated from GetSettingsManager() to LoadDefaultSettings()
 func GetDynamicAIExitConfigForMode(mode GinieTradingMode) *ModeDynamicAIExitConfig {
-	settings := GetSettingsManager().GetDefaultSettings()
-
-	// Get mode config from ModeConfigs
+	// Get mode config from default-settings.json (cached singleton)
 	modeStr := string(mode)
-	if settings.ModeConfigs != nil {
-		if cfg, ok := settings.ModeConfigs[modeStr]; ok && cfg.DynamicAIExit != nil {
-			return cfg.DynamicAIExit
-		}
+	if modeConfig, err := GetDefaultModeFullConfig(modeStr); err == nil && modeConfig != nil && modeConfig.DynamicAIExit != nil {
+		return modeConfig.DynamicAIExit
 	}
 
 	// Return default Dynamic AI Exit config based on mode

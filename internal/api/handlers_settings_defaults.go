@@ -134,19 +134,25 @@ func (s *Server) handleLoadModeDefaults(c *gin.Context) {
 	}
 
 	// REGULAR USER: Get current settings from DB for comparison
-	sm := autopilot.GetSettingsManager()
-	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
+	// Story 9.12: Direct DB call instead of SettingsManager
+	enabledFromColumn, configJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userID, mode)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database: "+err.Error())
 		return
 	}
-	if currentMode == nil {
+	if configJSON == nil {
 		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Mode config not found in database: %s", mode))
 		return
 	}
+	var currentMode autopilot.ModeFullConfig
+	if err := json.Unmarshal(configJSON, &currentMode); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to parse mode config: "+err.Error())
+		return
+	}
+	currentMode.Enabled = enabledFromColumn
 
 	// Compare user's settings vs defaults
-	diff := compareModeConfigs(mode, currentMode, defaultMode)
+	diff := compareModeConfigs(mode, &currentMode, defaultMode)
 	diff.IsAdmin = isAdmin
 
 	// If not preview mode, apply the defaults to user's database
@@ -233,19 +239,25 @@ func (s *Server) handleResetModeGroup(c *gin.Context) {
 	}
 
 	// Get current user's mode config from DB
-	sm := autopilot.GetSettingsManager()
-	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
+	// Story 9.12: Direct DB call instead of SettingsManager
+	enabledFromColumn, modeConfigJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userID, mode)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings: "+err.Error())
 		return
 	}
-	if currentMode == nil {
+	if modeConfigJSON == nil {
 		errorResponse(c, http.StatusNotFound, fmt.Sprintf("Mode config not found: %s", mode))
 		return
 	}
+	var currentMode autopilot.ModeFullConfig
+	if err := json.Unmarshal(modeConfigJSON, &currentMode); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to parse mode config: "+err.Error())
+		return
+	}
+	currentMode.Enabled = enabledFromColumn
 
 	// Reset only the specific group
-	changesApplied := resetModeGroupToDefaults(currentMode, defaultMode, group)
+	changesApplied := resetModeGroupToDefaults(&currentMode, defaultMode, group)
 
 	// Save updated config to database
 	configJSON, marshalErr := json.Marshal(currentMode)
@@ -524,7 +536,7 @@ func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 	}
 
 	// REGULAR USER: Compare user's DB settings vs defaults
-	sm := autopilot.GetSettingsManager()
+	// Story 9.12: Direct DB calls instead of SettingsManager
 	response := &AllModesDiffResponse{
 		Preview: preview,
 		Modes:   make(map[string]*ModeDiffResponse),
@@ -536,15 +548,24 @@ func (s *Server) handleLoadAllModeDefaults(c *gin.Context) {
 
 	for _, modeName := range modeNames {
 		// Get user's current mode config from DATABASE
-		currentMode, dbErr := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, modeName)
+		enabledFromColumn, modeConfigJSON, dbErr := s.repo.GetUserModeConfigWithEnabled(ctx, userID, modeName)
 		if dbErr != nil {
 			// Log but continue - user might not have all modes configured
 			continue
 		}
+		if modeConfigJSON == nil {
+			continue
+		}
+		var currentMode autopilot.ModeFullConfig
+		if err := json.Unmarshal(modeConfigJSON, &currentMode); err != nil {
+			log.Printf("[LOAD-ALL-DEFAULTS] Warning: Failed to parse %s config for user %s: %v", modeName, userID, err)
+			continue
+		}
+		currentMode.Enabled = enabledFromColumn
 
 		defaultMode := defaultModes[modeName]
-		if currentMode != nil && defaultMode != nil {
-			diff := compareModeConfigs(modeName, currentMode, defaultMode)
+		if defaultMode != nil {
+			diff := compareModeConfigs(modeName, &currentMode, defaultMode)
 			diff.IsAdmin = isAdmin
 			response.Modes[modeName] = diff
 			totalChanges += diff.TotalChanges
@@ -648,16 +669,22 @@ func (s *Server) handleGetModeDiff(c *gin.Context) {
 	}
 
 	// Get user's current settings FROM DATABASE (not JSON file!)
-	sm := autopilot.GetSettingsManager()
-	currentMode, err := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
+	// Story 9.12: Direct DB call instead of SettingsManager
+	enabledFromColumn, modeConfigJSON, err := s.repo.GetUserModeConfigWithEnabled(ctx, userID, mode)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database: "+err.Error())
 		return
 	}
-	if currentMode == nil {
+	if modeConfigJSON == nil {
 		errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Mode config not found in database: %s", mode))
 		return
 	}
+	var currentMode autopilot.ModeFullConfig
+	if err := json.Unmarshal(modeConfigJSON, &currentMode); err != nil {
+		errorResponse(c, http.StatusInternalServerError, "Failed to parse mode config: "+err.Error())
+		return
+	}
+	currentMode.Enabled = enabledFromColumn
 
 	// Get default mode config from default-settings.json
 	defaultMode, err := autopilot.GetDefaultModeFullConfig(mode)
@@ -667,7 +694,7 @@ func (s *Server) handleGetModeDiff(c *gin.Context) {
 	}
 
 	// Compare and generate diff
-	diff := compareModeConfigs(mode, currentMode, defaultMode)
+	diff := compareModeConfigs(mode, &currentMode, defaultMode)
 	diff.Preview = true   // This is read-only, always preview
 	diff.IsAdmin = isAdmin // Set admin flag for frontend (Story 9.4)
 
@@ -732,12 +759,29 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 	}
 
 	// FIXED: Get user's current settings from database, not GetDefaultSettings()
-	sm := autopilot.GetSettingsManager()
-	currentSettings, loadErr := sm.LoadSettingsFromDB(c.Request.Context(), s.repo, userID)
-	if loadErr != nil || currentSettings == nil {
-		log.Printf("[SETTINGS-DEFAULTS] ERROR: Failed to load user settings from database: %v", loadErr)
-		errorResponse(c, http.StatusInternalServerError, "Failed to load user settings from database")
-		return
+	// Story 9.12: Direct DB calls instead of SettingsManager
+	ctx := c.Request.Context()
+
+	// Load all mode configs from DB
+	modeNames := []string{"ultra_fast", "scalp", "swing", "position"}
+	currentModeConfigs := make(map[string]*autopilot.ModeFullConfig)
+
+	for _, modeName := range modeNames {
+		enabledFromColumn, modeConfigJSON, dbErr := s.repo.GetUserModeConfigWithEnabled(ctx, userID, modeName)
+		if dbErr != nil {
+			log.Printf("[SETTINGS-DEFAULTS] Warning: Failed to get %s config for user %s: %v", modeName, userID, dbErr)
+			continue
+		}
+		if modeConfigJSON == nil {
+			continue
+		}
+		var config autopilot.ModeFullConfig
+		if err := json.Unmarshal(modeConfigJSON, &config); err != nil {
+			log.Printf("[SETTINGS-DEFAULTS] Warning: Failed to parse %s config for user %s: %v", modeName, userID, err)
+			continue
+		}
+		config.Enabled = enabledFromColumn
+		currentModeConfigs[modeName] = &config
 	}
 
 	// Compare all settings
@@ -749,24 +793,15 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 	// Compare mode configs
 	// NOTE: scalp_reentry is NOT a trading mode - it's a Position Optimization feature
 	// stored separately as ScalpReentryConfig, not in ModeConfigs
-	modes := []struct {
-		name    string
-		current *autopilot.ModeFullConfig
-		def     *autopilot.ModeFullConfig
-	}{
-		{"ultra_fast", currentSettings.ModeConfigs["ultra_fast"], defaults.ModeConfigs["ultra_fast"]},
-		{"scalp", currentSettings.ModeConfigs["scalp"], defaults.ModeConfigs["scalp"]},
-		{"swing", currentSettings.ModeConfigs["swing"], defaults.ModeConfigs["swing"]},
-		{"position", currentSettings.ModeConfigs["position"], defaults.ModeConfigs["position"]},
-	}
-
 	totalChanges := 0
 	allMatch := true
 
-	for _, m := range modes {
-		if m.current != nil && m.def != nil {
-			diff := compareModeConfigs(m.name, m.current, m.def)
-			response.Modes[m.name] = diff
+	for _, modeName := range modeNames {
+		currentMode := currentModeConfigs[modeName]
+		defaultMode := defaults.ModeConfigs[modeName]
+		if currentMode != nil && defaultMode != nil {
+			diff := compareModeConfigs(modeName, currentMode, defaultMode)
+			response.Modes[modeName] = diff
 			totalChanges += diff.TotalChanges
 			if !diff.AllMatch {
 				allMatch = false
@@ -780,22 +815,42 @@ func (s *Server) handleLoadAllDefaults(c *gin.Context) {
 	// If not preview mode, apply all defaults
 	if !preview {
 		// Apply mode configs (4 trading modes - scalp_reentry is separate)
-		currentSettings.ModeConfigs["ultra_fast"] = defaults.ModeConfigs["ultra_fast"]
-		currentSettings.ModeConfigs["scalp"] = defaults.ModeConfigs["scalp"]
-		currentSettings.ModeConfigs["swing"] = defaults.ModeConfigs["swing"]
-		currentSettings.ModeConfigs["position"] = defaults.ModeConfigs["position"]
+		// Story 9.12: Direct DB writes instead of SaveSettings()
+		modesApplied := 0
+		for _, modeName := range modeNames {
+			defaultMode := defaults.ModeConfigs[modeName]
+			if defaultMode == nil {
+				continue
+			}
 
-		// TODO: Also apply global settings, position optimization, circuit breaker, etc.
-		// For Story 4.14, we focus on mode configs only
+			configJSON, marshalErr := json.Marshal(defaultMode)
+			if marshalErr != nil {
+				errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to serialize %s config: %v", modeName, marshalErr))
+				return
+			}
 
-		// Save settings to database
-		if err := sm.SaveSettings(currentSettings); err != nil {
-			errorResponse(c, http.StatusInternalServerError, "Failed to save settings: "+err.Error())
-			return
+			if saveErr := s.repo.SaveUserModeConfig(ctx, userID, modeName, defaultMode.Enabled, configJSON); saveErr != nil {
+				errorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to save %s settings: %v", modeName, saveErr))
+				return
+			}
+			modesApplied++
 		}
 
-		// Note: User-specific autopilot instances will reload config on next cycle
-		// No need to force reload as settings are saved to database
+		// CRITICAL: Invalidate all mode caches after reset to prevent stale reads
+		if s.settingsCacheService != nil {
+			if err := s.settingsCacheService.InvalidateAllModes(ctx, userID); err != nil {
+				log.Printf("[SETTINGS-DEFAULTS] Warning: failed to invalidate all mode caches for user %s: %v", userID, err)
+			}
+		}
+
+		// Trigger immediate config reload in running autopilot
+		if s.userAutopilotManager != nil {
+			instance := s.userAutopilotManager.GetInstance(userID)
+			if instance != nil && instance.Autopilot != nil {
+				instance.Autopilot.TriggerConfigReload()
+				log.Printf("[SETTINGS-DEFAULTS] Triggered config reload for user %s", userID)
+			}
+		}
 
 		response.AppliedAt = currentTime()
 	}
@@ -2037,7 +2092,7 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 	}
 
 	// REGULAR USER: Compare user's DB settings vs defaults
-	sm := autopilot.GetSettingsManager()
+	// Story 9.12: Direct DB calls instead of SettingsManager
 	var differences []SettingDifference
 	var allValues []FieldComparison
 
@@ -2072,8 +2127,17 @@ func (s *Server) handleLoadHedgeDefaults(c *gin.Context) {
 
 	for _, mode := range modes {
 		// Get user's CURRENT mode config from DATABASE
-		currentMode, dbErr := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, mode)
-		if dbErr != nil || currentMode == nil || currentMode.Hedge == nil {
+		enabledFromColumn, modeConfigJSON, dbErr := s.repo.GetUserModeConfigWithEnabled(ctx, userID, mode)
+		if dbErr != nil || modeConfigJSON == nil {
+			continue
+		}
+		var currentMode autopilot.ModeFullConfig
+		if err := json.Unmarshal(modeConfigJSON, &currentMode); err != nil {
+			log.Printf("[HEDGE-DEFAULTS] Warning: Failed to parse %s config for user %s: %v", mode, userID, err)
+			continue
+		}
+		currentMode.Enabled = enabledFromColumn
+		if currentMode.Hedge == nil {
 			continue
 		}
 
@@ -2801,7 +2865,7 @@ func (s *Server) handleResetAllModes(c *gin.Context) {
 	}
 
 	// REGULAR USER: Compare user's DB settings vs defaults
-	sm := autopilot.GetSettingsManager()
+	// Story 9.12: Direct DB calls instead of SettingsManager
 	response := &AllModesDiffResponse{
 		Preview: preview,
 		Modes:   make(map[string]*ModeDiffResponse),
@@ -2812,14 +2876,20 @@ func (s *Server) handleResetAllModes(c *gin.Context) {
 	allMatch := true
 
 	for _, modeName := range modeNames {
-		currentMode, dbErr := sm.GetUserModeConfigFromDB(ctx, s.repo, userID, modeName)
-		if dbErr != nil {
+		enabledFromColumn, modeConfigJSON, dbErr := s.repo.GetUserModeConfigWithEnabled(ctx, userID, modeName)
+		if dbErr != nil || modeConfigJSON == nil {
 			continue
 		}
+		var currentMode autopilot.ModeFullConfig
+		if err := json.Unmarshal(modeConfigJSON, &currentMode); err != nil {
+			log.Printf("[RESET-ALL-MODES] Warning: Failed to parse %s config for user %s: %v", modeName, userID, err)
+			continue
+		}
+		currentMode.Enabled = enabledFromColumn
 
 		defaultMode := defaultModes[modeName]
-		if currentMode != nil && defaultMode != nil {
-			diff := compareModeConfigs(modeName, currentMode, defaultMode)
+		if defaultMode != nil {
+			diff := compareModeConfigs(modeName, &currentMode, defaultMode)
 			diff.IsAdmin = isAdmin
 			response.Modes[modeName] = diff
 			totalChanges += diff.TotalChanges

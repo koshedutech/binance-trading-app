@@ -35,7 +35,7 @@ type GinieAnalyzer struct {
 	// Database-first architecture
 	repo          *database.Repository // Database repository for user settings
 	userID        string               // User ID for multi-tenant configuration
-	settingsCache ModeConfigCache      // Story 6.6: Cache-only settings reads
+	settingsCache ModeConfigCache      // Story 6.6: Cache-only settings reads (also implements SettingsCacheReader)
 
 	// LLM client for AI-based coin selection
 	llmClient *llm.Client
@@ -86,12 +86,9 @@ func NewGinieAnalyzer(
 		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
 	}
 
-	sm := GetSettingsManager()
-	settings, err := sm.LoadSettings()
-	if err != nil {
-		logger.Error("Failed to load settings, using defaults", "error", err)
-		settings = DefaultSettings()
-	}
+	// Story 9.12 Phase 5e: Use DefaultSettings() instead of GetSettingsManager()
+	// Settings will be loaded from cache via settingsCache when SetSettingsCache() is called
+	settings := DefaultSettings()
 
 	g := &GinieAnalyzer{
 		futuresClient:    futuresClient,
@@ -149,21 +146,20 @@ func (g *GinieAnalyzer) SetUserID(userID string) {
 }
 
 // SetSettingsCache sets the settings cache service for cache-only reads (Story 6.6)
+// The cache also implements SettingsCacheReader which includes confluence config methods (Story 9.12 Phase 3)
 func (g *GinieAnalyzer) SetSettingsCache(cache ModeConfigCache) {
 	g.settingsCache = cache
 }
 
-// RefreshSettings reloads settings from SettingsManager
+// RefreshSettings reloads settings from defaults.
+// DEPRECATED (Story 9.12): Settings should be read from cache via settingsCache, not from file.
+// This method is retained for backward compatibility but uses DefaultSettings() instead of file loading.
 func (g *GinieAnalyzer) RefreshSettings() {
-	sm := GetSettingsManager()
 	g.scanLock.Lock()
-	settings, err := sm.LoadSettings()
-	if err != nil {
-		g.logger.Error("Failed to refresh settings, keeping current settings", "error", err)
-	} else {
-		g.settings = settings
-	}
-	g.scanLock.Unlock()
+	defer g.scanLock.Unlock()
+	// Story 9.12 Phase 5e: Use DefaultSettings instead of GetSettingsManager().LoadSettings()
+	// Runtime settings come from settingsCache which reads from DB+Redis
+	g.settings = DefaultSettings()
 }
 
 // DetectTrendDivergence compares two TrendHealth analyses to detect divergence
@@ -1793,9 +1789,9 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	// This will be used throughout the function for all mode-specific parameters
 	var modeConfig *ModeFullConfig
 	ctx := context.Background()
-	sm := GetSettingsManager()
 
-	// Story 6.6: Cache-first pattern for mode config loading
+	// Story 6.6 + Story 9.12 Phase 5e: Cache-first pattern for mode config loading
+	// The cache reads from DB+Redis, no direct SettingsManager calls needed
 	if g.settingsCache != nil && g.userID != "" {
 		// Use cache-first pattern (Story 6.6)
 		dbModeConfig, err := g.settingsCache.GetModeConfig(ctx, g.userID, modeKey)
@@ -1811,26 +1807,6 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			// Log cache load failure but continue with defaults
 			if g.logger != nil {
 				g.logger.Debug("Mode config not found in cache, using defaults",
-					"symbol", symbol,
-					"mode", modeKey,
-					"error", err)
-			}
-		}
-	} else if g.repo != nil && g.userID != "" {
-		// Fallback to DB for legacy mode (no cache available)
-		dbModeConfig, err := sm.GetUserModeConfigFromDB(ctx, g.repo, g.userID, modeKey)
-		if err == nil && dbModeConfig != nil {
-			modeConfig = dbModeConfig
-			if g.logger != nil {
-				g.logger.Debug("Loaded mode config from database",
-					"symbol", symbol,
-					"mode", modeKey,
-					"source", "database")
-			}
-		} else {
-			// Log database load failure but continue with defaults
-			if g.logger != nil {
-				g.logger.Debug("Mode config not found in database, using defaults",
 					"symbol", symbol,
 					"mode", modeKey,
 					"error", err)
@@ -2527,10 +2503,19 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 
 	// Fuse confidence if LLM response is available
 	if llmResponse != nil && !decisionContext.SkippedLLM {
-		// Get mode-specific LLM weight from SettingsManager
-		sm := GetSettingsManager()
-		modeLLMSettings := sm.GetModeLLMSettings(mode)
-		llmWeight := modeLLMSettings.LLMWeight
+		// Story 9.12 Phase 5e: Get mode-specific LLM weight from g.settings instead of GetSettingsManager()
+		llmWeight := 0.35 // Default LLM weight
+		if g.settings != nil && g.settings.ModeLLMSettings != nil {
+			if modeSettings, ok := g.settings.ModeLLMSettings[mode]; ok {
+				llmWeight = modeSettings.LLMWeight
+			}
+		} else {
+			// Fallback to DefaultModeLLMSettings if g.settings is nil
+			defaults := DefaultModeLLMSettings()
+			if modeSettings, ok := defaults[mode]; ok {
+				llmWeight = modeSettings.LLMWeight
+			}
+		}
 		if g.logger != nil {
 			g.logger.Debug("[LLM] Using mode-specific LLM weight",
 				"mode", mode,
@@ -4064,8 +4049,25 @@ func (g *GinieAnalyzer) CheckEntryConfluence(symbol string, klines []binance.Kli
 		return result
 	}
 
-	// === Get per-coin confluence config ===
-	coinConfig := GetSettingsManager().GetCoinConfluenceConfig(symbol)
+	// === Get per-coin confluence config (Story 9.12 Phase 3: cache-first) ===
+	var coinConfig *CoinConfluenceConfig
+	// Try to get from cache via SettingsCacheReader interface (includes confluence config)
+	if reader, ok := g.settingsCache.(SettingsCacheReader); ok && g.userID != "" {
+		ctx := context.Background()
+		cachedConfig, err := reader.GetCoinConfluenceConfigCached(ctx, g.userID, symbol)
+		if err != nil {
+			g.logger.Debug("Failed to get confluence config from cache, using tier defaults", "symbol", symbol, "error", err)
+			coinConfig = DefaultCoinConfluenceConfig(symbol)
+		} else if cachedConfig != nil && cachedConfig.Enabled {
+			coinConfig = cachedConfig
+		} else {
+			// Not in cache or not enabled - use tier-based defaults
+			coinConfig = DefaultCoinConfluenceConfig(symbol)
+		}
+	} else {
+		// No cache available - fall back to tier-based defaults
+		coinConfig = DefaultCoinConfluenceConfig(symbol)
+	}
 	result.Details = append(result.Details, fmt.Sprintf("📊 Using %s tier config (ADX×%.2f, Vol×%.2f)", coinConfig.Tier, coinConfig.ADXMultiplier, coinConfig.VolumeMultiplier))
 
 	currentPrice := klines[len(klines)-1].Close
@@ -4743,9 +4745,9 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 	signal.ADXValue = adx
 
 	// Layer 1.5: Multi-timeframe Trend Alignment (5m/3m/1m weighted consensus)
-	settings, err := GetSettingsManager().LoadSettings()
-	if err != nil {
-		g.logger.Error("Failed to load settings for MTF check, using defaults", "error", err)
+	// Story 9.12 Phase 5e: Use g.settings instead of GetSettingsManager().LoadSettings()
+	settings := g.settings
+	if settings == nil {
 		settings = DefaultSettings()
 	}
 
@@ -5090,9 +5092,9 @@ func (g *GinieAnalyzer) GenerateUltraFastSignal(symbol string) (*UltraFastSignal
 
 // applyUltraFastQualityFilters applies volume, momentum, and candle body filters to the signal
 func (g *GinieAnalyzer) applyUltraFastQualityFilters(signal *UltraFastSignal, klines1m []binance.Kline) {
-	settings, err := GetSettingsManager().LoadSettings()
-	if err != nil {
-		g.logger.Error("Failed to load settings for quality filters, using defaults", "error", err)
+	// Story 9.12 Phase 5e: Use g.settings instead of GetSettingsManager().LoadSettings()
+	settings := g.settings
+	if settings == nil {
 		settings = DefaultSettings()
 	}
 	filtersApplied := []string{}
@@ -5789,9 +5791,9 @@ func (g *GinieAnalyzer) analyzePriceAction(klines []binance.Kline, currentPrice 
 
 // getTrendTimeframe returns the trend timeframe for a given mode from settings
 func (g *GinieAnalyzer) getTrendTimeframe(mode string) string {
-	sm := GetSettingsManager()
-	if sm != nil {
-		if modeConfig, err := sm.GetDefaultModeConfig(mode); err == nil && modeConfig != nil {
+	// Story 9.12 Phase 5e: Use g.settings instead of GetSettingsManager()
+	if g.settings != nil && g.settings.ModeConfigs != nil {
+		if modeConfig, exists := g.settings.ModeConfigs[mode]; exists && modeConfig != nil {
 			if modeConfig.Timeframe != nil && modeConfig.Timeframe.TrendTimeframe != "" {
 				return modeConfig.Timeframe.TrendTimeframe
 			}
@@ -5815,9 +5817,9 @@ func (g *GinieAnalyzer) getTrendTimeframe(mode string) string {
 
 // getEntryTimeframe returns the entry timeframe for a given mode from settings
 func (g *GinieAnalyzer) getEntryTimeframe(mode string) string {
-	sm := GetSettingsManager()
-	if sm != nil {
-		if modeConfig, err := sm.GetDefaultModeConfig(mode); err == nil && modeConfig != nil {
+	// Story 9.12 Phase 5e: Use g.settings instead of GetSettingsManager()
+	if g.settings != nil && g.settings.ModeConfigs != nil {
+		if modeConfig, exists := g.settings.ModeConfigs[mode]; exists && modeConfig != nil {
 			if modeConfig.Timeframe != nil && modeConfig.Timeframe.EntryTimeframe != "" {
 				return modeConfig.Timeframe.EntryTimeframe
 			}

@@ -4,6 +4,7 @@ import (
 	"binance-trading-bot/internal/ai/llm"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/cache"
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/events"
@@ -1715,9 +1716,12 @@ func (s *Server) handleGetSymbolSettings(c *gin.Context) {
 		return
 	}
 
-	// Also get category defaults (still from SettingsManager for now)
-	sm := autopilot.GetSettingsManager()
-	categorySettings := sm.GetCategorySettings()
+	// Get category defaults from cache (Story 9.12 Phase 5b)
+	categorySettings, err := s.settingsCacheService.GetCategorySettings(ctx, userID)
+	if err != nil {
+		log.Printf("[GET-SYMBOL-SETTINGS] Error getting category settings: %v", err)
+		categorySettings = cache.DefaultCategorySettings()
+	}
 
 	// Apply category adjustments to each symbol's effective values
 	type EnrichedSymbolSettings struct {
@@ -1772,24 +1776,40 @@ func (s *Server) handleGetSymbolSettings(c *gin.Context) {
 }
 
 // handleGetSymbolPerformanceReport returns a detailed performance report for all symbols
+// Story 9.12 Phase 5b: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleGetSymbolPerformanceReport(c *gin.Context) {
-	sm := autopilot.GetSettingsManager()
-	report := sm.GetSymbolPerformanceReport()
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get performance report from cache service (Story 9.12)
+	// Using default values for global confidence and max USD
+	report, err := s.settingsCacheService.GetSymbolPerformanceReport(ctx, userID, 50.0, 500.0)
+	if err != nil {
+		log.Printf("[GET-SYMBOL-PERFORMANCE] Error getting performance report: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get performance report")
+		return
+	}
 
 	// Group by category
-	byCategory := make(map[string][]autopilot.SymbolPerformanceReport)
+	byCategory := make(map[string][]cache.SymbolPerformanceReport)
 	for _, r := range report {
 		byCategory[r.Category] = append(byCategory[r.Category], r)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"report":      report,
-		"by_category": byCategory,
+		"report":        report,
+		"by_category":   byCategory,
 		"total_symbols": len(report),
 	})
 }
 
 // handleRefreshSymbolPerformance recalculates symbol performance from database trades
+// Story 9.12 Phase 5b: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleRefreshSymbolPerformance(c *gin.Context) {
 	userID := s.getUserID(c)
 	if userID == "" {
@@ -1819,19 +1839,23 @@ func (s *Server) handleRefreshSymbolPerformance(c *gin.Context) {
 		}
 	}
 
-	// Update symbol settings with new performance data
-	sm := autopilot.GetSettingsManager()
-	updated, err := sm.RecalculateSymbolPerformance(statsMap)
+	// Update symbol settings with new performance data (Story 9.12)
+	updated, err := s.settingsCacheService.RecalculateSymbolPerformance(ctx, userID, statsMap)
 	if err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to update symbol settings: "+err.Error())
 		return
 	}
 
-	// Get updated report
-	report := sm.GetSymbolPerformanceReport()
+	// Get updated report from cache service
+	report, err := s.settingsCacheService.GetSymbolPerformanceReport(ctx, userID, 50.0, 500.0)
+	if err != nil {
+		log.Printf("[REFRESH-PERFORMANCE] Error getting updated report: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get updated report")
+		return
+	}
 
 	// Group by category
-	byCategory := make(map[string][]autopilot.SymbolPerformanceReport)
+	byCategory := make(map[string][]cache.SymbolPerformanceReport)
 	for _, r := range report {
 		byCategory[r.Category] = append(byCategory[r.Category], r)
 	}
@@ -1993,13 +2017,21 @@ func (s *Server) handleBlacklistSymbol(c *gin.Context) {
 		return
 	}
 
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
 	var req struct {
 		Reason string `json:"reason"`
 	}
 	c.ShouldBindJSON(&req) // Optional
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.BlacklistSymbol(symbol, req.Reason); err != nil {
+	ctx := c.Request.Context()
+
+	// Story 9.12 Phase 5b: Blacklist via DB+cache instead of file
+	if err := s.settingsCacheService.BlacklistSymbol(ctx, userID, symbol, req.Reason); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to blacklist symbol: "+err.Error())
 		return
 	}
@@ -2013,6 +2045,7 @@ func (s *Server) handleBlacklistSymbol(c *gin.Context) {
 }
 
 // handleUnblacklistSymbol removes a symbol from the blacklist
+// Story 9.12 Phase 5b: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleUnblacklistSymbol(c *gin.Context) {
 	symbol := c.Param("symbol")
 	if symbol == "" {
@@ -2020,8 +2053,16 @@ func (s *Server) handleUnblacklistSymbol(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UnblacklistSymbol(symbol); err != nil {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Story 9.12 Phase 5b: Unblacklist via DB+cache instead of file
+	if err := s.settingsCacheService.UnblacklistSymbol(ctx, userID, symbol); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to unblacklist symbol: "+err.Error())
 		return
 	}
@@ -2034,7 +2075,14 @@ func (s *Server) handleUnblacklistSymbol(c *gin.Context) {
 }
 
 // handleUpdateCategorySettings updates the default adjustments for performance categories
+// Story 9.12 Phase 5b: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleUpdateCategorySettings(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
+
 	var req struct {
 		ConfidenceBoost map[string]float64 `json:"confidence_boost"`
 		SizeMultiplier  map[string]float64 `json:"size_multiplier"`
@@ -2045,8 +2093,24 @@ func (s *Server) handleUpdateCategorySettings(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
-	if err := sm.UpdateCategorySettings(req.ConfidenceBoost, req.SizeMultiplier); err != nil {
+	ctx := c.Request.Context()
+
+	// Get current settings first
+	currentSettings, err := s.settingsCacheService.GetCategorySettings(ctx, userID)
+	if err != nil {
+		currentSettings = cache.DefaultCategorySettings()
+	}
+
+	// Merge updates
+	if req.ConfidenceBoost != nil {
+		currentSettings["confidence_boost"] = req.ConfidenceBoost
+	}
+	if req.SizeMultiplier != nil {
+		currentSettings["size_multiplier"] = req.SizeMultiplier
+	}
+
+	// Save to cache (Story 9.12 - cache-first, DB integration pending)
+	if err := s.settingsCacheService.SetCategorySettings(ctx, userID, currentSettings); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to update category settings: "+err.Error())
 		return
 	}
@@ -2054,11 +2118,12 @@ func (s *Server) handleUpdateCategorySettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
 		"message":  "Category settings updated",
-		"settings": sm.GetCategorySettings(),
+		"settings": currentSettings,
 	})
 }
 
 // handleGetSymbolsByCategory returns all symbols in a given performance category
+// Story 9.12 Phase 5b: Migrated from file-based SettingsManager to DB+cache
 func (s *Server) handleGetSymbolsByCategory(c *gin.Context) {
 	category := c.Param("category")
 	if category == "" {
@@ -2066,42 +2131,47 @@ func (s *Server) handleGetSymbolsByCategory(c *gin.Context) {
 		return
 	}
 
-	sm := autopilot.GetSettingsManager()
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User not authenticated")
+		return
+	}
 
-	// Map string to category type
-	var perfCategory autopilot.SymbolPerformanceCategory
-	switch category {
-	case "best":
-		perfCategory = autopilot.PerformanceBest
-	case "good":
-		perfCategory = autopilot.PerformanceGood
-	case "neutral":
-		perfCategory = autopilot.PerformanceNeutral
-	case "poor":
-		perfCategory = autopilot.PerformancePoor
-	case "worst":
-		perfCategory = autopilot.PerformanceWorst
-	case "blacklist":
-		perfCategory = autopilot.PerformanceBlacklist
-	default:
+	// Validate category
+	validCategories := map[string]bool{
+		"best": true, "good": true, "neutral": true,
+		"poor": true, "worst": true, "blacklist": true,
+	}
+	if !validCategories[category] {
 		errorResponse(c, http.StatusBadRequest, "Invalid category. Use: best, good, neutral, poor, worst, blacklist")
 		return
 	}
 
-	symbols := sm.GetSymbolsByCategory(perfCategory)
+	ctx := c.Request.Context()
+
+	// Get symbols by category from cache service (Story 9.12)
+	symbols, err := s.settingsCacheService.GetSymbolsByCategory(ctx, userID, category)
+	if err != nil {
+		log.Printf("[GET-SYMBOLS-BY-CATEGORY] Error: %v", err)
+		errorResponse(c, http.StatusInternalServerError, "Failed to get symbols")
+		return
+	}
 
 	// Get effective settings for each symbol
 	symbolDetails := make([]map[string]interface{}, 0, len(symbols))
 	for _, symbol := range symbols {
-		settings := sm.GetSymbolSettings(symbol)
+		settings, _ := s.settingsCacheService.GetSymbolSettings(ctx, userID, symbol)
+		if settings == nil {
+			continue
+		}
 		symbolDetails = append(symbolDetails, map[string]interface{}{
-			"symbol":              symbol,
-			"win_rate":            settings.WinRate,
-			"total_pnl":           settings.TotalPnL,
-			"total_trades":        settings.TotalTrades,
-			"effective_confidence": sm.GetEffectiveConfidence(symbol, 50.0), // Default confidence
-			"effective_max_usd":   sm.GetEffectivePositionSize(symbol, 500), // Default max USD
-			"enabled":             settings.Enabled,
+			"symbol":               symbol,
+			"win_rate":             settings.WinRate,
+			"total_pnl":            settings.TotalPnL,
+			"total_trades":         settings.TotalTrades,
+			"effective_confidence": s.settingsCacheService.GetEffectiveConfidence(ctx, userID, symbol, 50.0),
+			"effective_max_usd":    s.settingsCacheService.GetEffectivePositionSize(ctx, userID, symbol, 500.0),
+			"enabled":              settings.Enabled,
 		})
 	}
 

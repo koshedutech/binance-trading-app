@@ -20,7 +20,9 @@ func (r *Repository) GetUserGinieSettings(ctx context.Context, userID string) (*
 			auto_mode_enabled, auto_mode_max_positions, auto_mode_max_leverage,
 			auto_mode_max_position_size, auto_mode_max_total_usd, auto_mode_allow_averaging,
 			auto_mode_max_averages, auto_mode_min_hold_minutes, auto_mode_quick_profit_mode,
-			auto_mode_min_profit_exit, total_pnl, daily_pnl, total_trades, winning_trades,
+			auto_mode_min_profit_exit,
+			morning_auto_block_enabled, morning_auto_block_hour_utc, morning_auto_block_min_utc,
+			total_pnl, daily_pnl, total_trades, winning_trades,
 			daily_trades, pnl_last_update, created_at, updated_at
 		FROM user_ginie_settings
 		WHERE user_id = $1
@@ -43,6 +45,9 @@ func (r *Repository) GetUserGinieSettings(ctx context.Context, userID string) (*
 		&config.AutoModeMinHoldMinutes,
 		&config.AutoModeQuickProfitMode,
 		&config.AutoModeMinProfitExit,
+		&config.MorningAutoBlockEnabled,
+		&config.MorningAutoBlockHourUTC,
+		&config.MorningAutoBlockMinUTC,
 		&config.TotalPnL,
 		&config.DailyPnL,
 		&config.TotalTrades,
@@ -72,9 +77,11 @@ func (r *Repository) SaveUserGinieSettings(ctx context.Context, config *UserGini
 			auto_mode_enabled, auto_mode_max_positions, auto_mode_max_leverage,
 			auto_mode_max_position_size, auto_mode_max_total_usd, auto_mode_allow_averaging,
 			auto_mode_max_averages, auto_mode_min_hold_minutes, auto_mode_quick_profit_mode,
-			auto_mode_min_profit_exit, total_pnl, daily_pnl, total_trades, winning_trades,
+			auto_mode_min_profit_exit,
+			morning_auto_block_enabled, morning_auto_block_hour_utc, morning_auto_block_min_utc,
+			total_pnl, daily_pnl, total_trades, winning_trades,
 			daily_trades, pnl_last_update
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		ON CONFLICT (user_id) DO UPDATE SET
 			dry_run_mode = EXCLUDED.dry_run_mode,
 			auto_start = EXCLUDED.auto_start,
@@ -89,6 +96,9 @@ func (r *Repository) SaveUserGinieSettings(ctx context.Context, config *UserGini
 			auto_mode_min_hold_minutes = EXCLUDED.auto_mode_min_hold_minutes,
 			auto_mode_quick_profit_mode = EXCLUDED.auto_mode_quick_profit_mode,
 			auto_mode_min_profit_exit = EXCLUDED.auto_mode_min_profit_exit,
+			morning_auto_block_enabled = EXCLUDED.morning_auto_block_enabled,
+			morning_auto_block_hour_utc = EXCLUDED.morning_auto_block_hour_utc,
+			morning_auto_block_min_utc = EXCLUDED.morning_auto_block_min_utc,
 			total_pnl = EXCLUDED.total_pnl,
 			daily_pnl = EXCLUDED.daily_pnl,
 			total_trades = EXCLUDED.total_trades,
@@ -113,6 +123,9 @@ func (r *Repository) SaveUserGinieSettings(ctx context.Context, config *UserGini
 		config.AutoModeMinHoldMinutes,
 		config.AutoModeQuickProfitMode,
 		config.AutoModeMinProfitExit,
+		config.MorningAutoBlockEnabled,
+		config.MorningAutoBlockHourUTC,
+		config.MorningAutoBlockMinUTC,
 		config.TotalPnL,
 		config.DailyPnL,
 		config.TotalTrades,
@@ -210,6 +223,102 @@ func (r *Repository) GetUsersWithAutoStartEnabled(ctx context.Context) ([]string
 	rows, err := r.db.Pool.Query(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query users with auto-start enabled: %w", err)
+	}
+	defer rows.Close()
+
+	var userIDs []string
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, fmt.Errorf("failed to scan user ID: %w", err)
+		}
+		userIDs = append(userIDs, userID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating user IDs: %w", err)
+	}
+
+	return userIDs, nil
+}
+
+// =====================================================
+// MORNING AUTO-BLOCK CONFIG OPERATIONS (Story 9.12 Phase 4)
+// =====================================================
+
+// MorningAutoBlockConfig represents just the morning auto-block settings
+type MorningAutoBlockConfig struct {
+	Enabled   bool `json:"enabled"`
+	HourUTC   int  `json:"hour_utc"`
+	MinuteUTC int  `json:"minute_utc"`
+}
+
+// GetMorningAutoBlockConfig retrieves morning auto-block config for a user
+// Returns defaults if user settings don't exist
+func (r *Repository) GetMorningAutoBlockConfig(ctx context.Context, userID string) (*MorningAutoBlockConfig, error) {
+	query := `
+		SELECT morning_auto_block_enabled, morning_auto_block_hour_utc, morning_auto_block_min_utc
+		FROM user_ginie_settings
+		WHERE user_id = $1
+	`
+
+	config := &MorningAutoBlockConfig{}
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(
+		&config.Enabled,
+		&config.HourUTC,
+		&config.MinuteUTC,
+	)
+
+	if err == pgx.ErrNoRows {
+		// Return defaults if user settings don't exist
+		return &MorningAutoBlockConfig{
+			Enabled:   false,
+			HourUTC:   0,
+			MinuteUTC: 5,
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get morning auto-block config: %w", err)
+	}
+
+	return config, nil
+}
+
+// UpdateMorningAutoBlockConfig updates only the morning auto-block settings
+// Creates the user_ginie_settings row if it doesn't exist
+func (r *Repository) UpdateMorningAutoBlockConfig(ctx context.Context, userID string, config *MorningAutoBlockConfig) error {
+	query := `
+		INSERT INTO user_ginie_settings (
+			user_id,
+			morning_auto_block_enabled, morning_auto_block_hour_utc, morning_auto_block_min_utc
+		) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id) DO UPDATE SET
+			morning_auto_block_enabled = EXCLUDED.morning_auto_block_enabled,
+			morning_auto_block_hour_utc = EXCLUDED.morning_auto_block_hour_utc,
+			morning_auto_block_min_utc = EXCLUDED.morning_auto_block_min_utc,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	_, err := r.db.Pool.Exec(ctx, query, userID, config.Enabled, config.HourUTC, config.MinuteUTC)
+	if err != nil {
+		return fmt.Errorf("failed to update morning auto-block config: %w", err)
+	}
+
+	return nil
+}
+
+// GetUsersWithMorningAutoBlockEnabled returns user IDs that have morning auto-block enabled
+// Used by the morning auto-block scheduler to know which users to process
+func (r *Repository) GetUsersWithMorningAutoBlockEnabled(ctx context.Context) ([]string, error) {
+	query := `
+		SELECT user_id
+		FROM user_ginie_settings
+		WHERE morning_auto_block_enabled = true
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query users with morning auto-block enabled: %w", err)
 	}
 	defer rows.Close()
 

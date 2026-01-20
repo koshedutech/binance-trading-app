@@ -53,7 +53,9 @@ Each release includes:
 | Docker Image | `binance-trading-bot:prod-XXX` |
 | PostgreSQL | Full database dump |
 | Redis | Shared cache snapshot |
-| Configs | `default-settings.json`, `autopilot_settings.json` |
+| Configs | `default-settings.json` |
+
+> **Note:** `autopilot_settings.json` was deprecated in Story 9.12. All settings are now stored in the database and cached in Redis.
 
 ## When to Restore Redis
 

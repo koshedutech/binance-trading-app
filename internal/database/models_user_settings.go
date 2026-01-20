@@ -298,7 +298,7 @@ func DefaultUserEarlyWarning() *UserEarlyWarning {
 // ====== GINIE AUTOPILOT SETTINGS ======
 
 // UserGinieSettings represents per-user Ginie autopilot configuration
-// Matches migration 017_user_ginie_settings.sql
+// Matches migration 017_user_ginie_settings.sql + 043_user_ginie_morning_auto_block.sql
 type UserGinieSettings struct {
 	ID     string `json:"id"`
 	UserID string `json:"user_id"`
@@ -319,6 +319,11 @@ type UserGinieSettings struct {
 	AutoModeMinHoldMinutes  int     `json:"auto_mode_min_hold_minutes"`  // Min hold time (1-1440)
 	AutoModeQuickProfitMode bool    `json:"auto_mode_quick_profit_mode"` // Quick profit mode
 	AutoModeMinProfitExit   float64 `json:"auto_mode_min_profit_exit"`   // Min profit % to exit (0.1-20%)
+
+	// Morning auto-block settings (Story 9.12 Phase 4)
+	MorningAutoBlockEnabled bool `json:"morning_auto_block_enabled"` // Enable morning auto-block (default: false)
+	MorningAutoBlockHourUTC int  `json:"morning_auto_block_hour_utc"` // Hour in UTC (0-23, default: 0)
+	MorningAutoBlockMinUTC  int  `json:"morning_auto_block_min_utc"`  // Minute in UTC (0-59, default: 5)
 
 	// PnL statistics (persisted)
 	TotalPnL      float64    `json:"total_pnl"`       // Lifetime realized PnL USD
@@ -348,6 +353,11 @@ func DefaultUserGinieSettings() *UserGinieSettings {
 		AutoModeMinHoldMinutes:  5,
 		AutoModeQuickProfitMode: false,
 		AutoModeMinProfitExit:   1.5,
+		// Morning auto-block defaults (Story 9.12 Phase 4)
+		MorningAutoBlockEnabled: false,
+		MorningAutoBlockHourUTC: 0,
+		MorningAutoBlockMinUTC:  5,
+		// PnL statistics
 		TotalPnL:                0,
 		DailyPnL:                0,
 		TotalTrades:             0,

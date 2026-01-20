@@ -124,12 +124,13 @@ type SpotController struct {
 }
 
 // NewSpotController creates a new Spot AI controller
+// DEPRECATED (Story 9.12): This loads spot settings from hardcoded defaults.
+// Future enhancement: Load spot settings from database via cache like futures autopilot does.
 func NewSpotController(client binance.BinanceClient, logger *logging.Logger) *SpotController {
 	config := DefaultSpotControllerConfig()
 
-	// Load settings from SettingsManager
-	sm := GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	// Load default settings (hardcoded defaults from DefaultSettings())
+	settings := DefaultSettings()
 
 	config.Enabled = settings.SpotAutopilotEnabled
 	config.DryRun = settings.SpotDryRunMode
@@ -822,9 +823,11 @@ type SpotCoinPreferences struct {
 }
 
 // GetCoinPreferences returns coin preferences
+// DEPRECATED (Story 9.12): Returns hardcoded defaults since file-based settings are phased out.
+// Future enhancement: Read spot coin preferences from database via cache.
 func (sc *SpotController) GetCoinPreferences() *SpotCoinPreferences {
-	sm := GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	// Use hardcoded defaults from DefaultSettings()
+	settings := DefaultSettings()
 
 	return &SpotCoinPreferences{
 		Blacklist:    settings.SpotCoinBlacklist,
@@ -834,18 +837,19 @@ func (sc *SpotController) GetCoinPreferences() *SpotCoinPreferences {
 }
 
 // SetCoinPreferences updates coin preferences (accepts 3 separate args for handler compatibility)
+// DEPRECATED (Story 9.12): File-based settings are phased out. This is now a no-op.
+// Future enhancement: Write spot coin preferences to database via cache write-through.
 func (sc *SpotController) SetCoinPreferences(blacklist, whitelist []string, useWhitelist bool) error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	sm := GetSettingsManager()
-	settings := sm.GetDefaultSettings()
+	// DEPRECATED: File-based settings manager is being phased out.
+	// This method is now a no-op. Coin preferences are not persisted.
+	// Future: Store in database via cache write-through pattern.
+	log.Printf("[SPOT-AUTOPILOT] SetCoinPreferences called (DEPRECATED - no-op): blacklist=%v, whitelist=%v, useWhitelist=%v",
+		blacklist, whitelist, useWhitelist)
 
-	settings.SpotCoinBlacklist = blacklist
-	settings.SpotCoinWhitelist = whitelist
-	settings.SpotUseWhitelist = useWhitelist
-
-	return sm.SaveSettings(settings)
+	return nil
 }
 
 // SetCoinBlacklist sets the coin blacklist
