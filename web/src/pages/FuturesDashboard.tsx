@@ -17,6 +17,7 @@ import TradingModeToggle from '../components/TradingModeToggle';
 import ModeAllocationPanel from '../components/ModeAllocationPanel';
 import ModeSafetyPanel from '../components/ModeSafetyPanel';
 import ModeStrategySettings from '../components/settings/ModeStrategySettings';
+import SystemControlSettings from '../components/settings/SystemControlSettings';
 import { TradeLifecycleTab } from '../components/TradeLifecycle';
 import AccountStatsCard from '../components/AccountStatsCard';
 import PnLSummaryCard from '../components/PnLSummaryCard';
@@ -39,6 +40,7 @@ import {
   TrendingUp,
   Wifi,
   Settings,
+  Sliders,
 } from 'lucide-react';
 
 export default function FuturesDashboard() {
@@ -369,10 +371,10 @@ export default function FuturesDashboard() {
         />
       </div>
 
-      {/* Order Chains / Trade Lifecycle - Between Positions and Orders */}
+      {/* Trade Cycle - Between Positions and Orders */}
       <div className="mb-4">
         <CollapsibleCard
-          title="Order Chains"
+          title="Trade Cycle"
           icon={<Layers className="w-4 h-4" />}
           defaultExpanded={false}
           badge="Lifecycle"
@@ -436,6 +438,19 @@ export default function FuturesDashboard() {
           badgeColor="purple"
         >
           <ModeStrategySettings />
+        </CollapsibleCard>
+      </div>
+
+      {/* System Control Settings - Order tracking & position management systems */}
+      <div className="mb-4">
+        <CollapsibleCard
+          title="System Control"
+          icon={<Sliders className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="System"
+          badgeColor="cyan"
+        >
+          <SystemControlSettings />
         </CollapsibleCard>
       </div>
 

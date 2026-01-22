@@ -237,9 +237,10 @@ var (
 	broadcastModeStatus      BroadcastFunc
 	broadcastSystemStatus    BroadcastFunc
 	broadcastSignalUpdate    BroadcastFunc
-	broadcastPositionUpdate  BroadcastFunc
+	broadcastPositionUpdate     BroadcastFunc
 	broadcastCoinStateUpdate    BroadcastFunc // Epic 11: Position Decision Engine
 	broadcastExitDecisionUpdate BroadcastFunc // Story 10.3: Exit Decision Monitoring
+	broadcastOrderUpdate        BroadcastFunc // Order status updates (placed/cancelled/filled)
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -375,5 +376,18 @@ func BroadcastCoinStateUpdate(userID string, data interface{}) {
 func BroadcastExitDecisionUpdate(userID string, data interface{}) {
 	if broadcastExitDecisionUpdate != nil && userID != "" {
 		go broadcastExitDecisionUpdate(userID, data)
+	}
+}
+
+// SetBroadcastOrderUpdate sets the callback for order update broadcasts
+func SetBroadcastOrderUpdate(fn BroadcastFunc) {
+	broadcastOrderUpdate = fn
+}
+
+// BroadcastOrderUpdate broadcasts order status update to a user
+// Used for order placed, cancelled, or filled events
+func BroadcastOrderUpdate(userID string, data interface{}) {
+	if broadcastOrderUpdate != nil && userID != "" {
+		go broadcastOrderUpdate(userID, data)
 	}
 }

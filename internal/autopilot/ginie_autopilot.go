@@ -1262,6 +1262,12 @@ type GinieAutopilot struct {
 	// Per-mode circuit breaker tracking (Story 2.7 Task 2.7.4)
 	modeCircuitBreakers map[GinieTradingMode]*ModeCircuitBreaker // Mode-specific circuit breaker state
 
+	// System control settings (Epic 7 Enhancement: order tracking and position management system switches)
+	systemControlLoaded  bool   // Whether system control has been loaded
+	orderTrackingSystem  string // "chain", "legacy", or "both"
+	positionMgmtSystem   string // "legacy" or "chain"
+	entryDecisionSystem  string // "legacy" or "chain" (entry decision system switch)
+
 	// Reversal LIMIT order tracking (120s timeout)
 	pendingLimitOrders map[string]*PendingLimitOrder // symbol -> pending LIMIT order
 
@@ -5435,6 +5441,18 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 		return false, fmt.Sprintf("invalid_action: %s", action)
 	}
 
+	// Log entry decision system being used for this trade
+	entrySystem := "legacy"
+	if ga.shouldUseChainEntryDecision() {
+		entrySystem = "chain"
+	}
+	ga.logger.Info("Entry decision system active for trade",
+		"symbol", symbol,
+		"direction", action,
+		"entry_decision_system", entrySystem,
+		"mode", decision.SelectedMode,
+		"confidence", decision.ConfidenceScore)
+
 	// Check funding rate before entry - avoid high fees near funding time
 	isLong := action == "LONG"
 	selectedMode := decision.SelectedMode
@@ -5801,6 +5819,49 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			// Also track in Redis for cross-instance visibility and timeout
 			ga.TrackPendingOrder(symbol, limitOrder.OrderId, string(side), "LIMIT", limitPrice, quantity, "reversal_entry")
 
+			// Epic 7: Create chain and record entry placed for reversal LIMIT order
+			if ga.chainEventWriter != nil && ga.shouldUseChainTracking() && clientOrderBaseID != "" {
+				ctx := context.Background()
+				modeCode := string(mapModeToOrders(decision.SelectedMode))
+
+				// Create the chain record
+				chainReq := orders.CreateChainRequest{
+					UserID:   ga.userID,
+					ChainID:  clientOrderBaseID,
+					Symbol:   symbol,
+					Side:     decision.TradeExecution.Action,
+					ModeCode: modeCode,
+					IsHedge:  false,
+				}
+				if _, err := ga.chainEventWriter.CreateChain(ctx, chainReq); err != nil {
+					ga.logger.Warn("Failed to create order chain for reversal LIMIT entry",
+						"symbol", symbol,
+						"chain_id", clientOrderBaseID,
+						"error", err.Error())
+				} else {
+					// Record entry placed event (fill will be recorded when order fills)
+					placedEvent := orders.ChainEntryPlacedEvent{
+						BinanceOrderID:       limitOrder.OrderId,
+						BinanceClientOrderID: entryClientOrderId,
+						Price:                limitPrice,
+						Quantity:             quantity,
+						BinanceTimestamp:     time.Now().UnixMilli(),
+					}
+					if err := ga.chainEventWriter.RecordEntryPlaced(ctx, clientOrderBaseID, placedEvent); err != nil {
+						ga.logger.Warn("Failed to record entry placed event for reversal LIMIT",
+							"symbol", symbol,
+							"chain_id", clientOrderBaseID,
+							"error", err.Error())
+					}
+
+					ga.logger.Info("Order chain created for reversal LIMIT entry (pending fill)",
+						"symbol", symbol,
+						"chain_id", clientOrderBaseID,
+						"side", decision.TradeExecution.Action,
+						"mode", modeCode)
+				}
+			}
+
 			ga.logger.Info("Reversal LIMIT order placed - awaiting fill",
 				"symbol", symbol,
 				"order_id", limitOrder.OrderId,
@@ -5878,6 +5939,63 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 				"order_id", order.OrderId,
 				"side", side,
 				"fill_price", actualPrice)
+
+			// Epic 7: Create chain and record entry events for MARKET order
+			if ga.chainEventWriter != nil && ga.shouldUseChainTracking() && clientOrderBaseID != "" {
+				ctx := context.Background()
+				modeCode := string(mapModeToOrders(decision.SelectedMode))
+
+				// Create the chain record
+				chainReq := orders.CreateChainRequest{
+					UserID:   ga.userID,
+					ChainID:  clientOrderBaseID,
+					Symbol:   symbol,
+					Side:     decision.TradeExecution.Action,
+					ModeCode: modeCode,
+					IsHedge:  false,
+				}
+				if _, err := ga.chainEventWriter.CreateChain(ctx, chainReq); err != nil {
+					ga.logger.Warn("Failed to create order chain for MARKET entry",
+						"symbol", symbol,
+						"chain_id", clientOrderBaseID,
+						"error", err.Error())
+				} else {
+					// Record entry placed event
+					placedEvent := orders.ChainEntryPlacedEvent{
+						BinanceOrderID:       order.OrderId,
+						BinanceClientOrderID: entryClientOrderId,
+						Price:                actualPrice,
+						Quantity:             actualQty,
+						BinanceTimestamp:     time.Now().UnixMilli(),
+					}
+					if err := ga.chainEventWriter.RecordEntryPlaced(ctx, clientOrderBaseID, placedEvent); err != nil {
+						ga.logger.Warn("Failed to record entry placed event",
+							"symbol", symbol,
+							"chain_id", clientOrderBaseID,
+							"error", err.Error())
+					}
+
+					// Record entry filled event (MARKET orders fill immediately)
+					filledEvent := orders.ChainEntryFilledEvent{
+						FilledPrice:      actualPrice,
+						FilledQuantity:   actualQty,
+						Fees:             0, // Fees tracked separately
+						BinanceTimestamp: time.Now().UnixMilli(),
+					}
+					if err := ga.chainEventWriter.RecordEntryFilled(ctx, clientOrderBaseID, filledEvent); err != nil {
+						ga.logger.Warn("Failed to record entry filled event",
+							"symbol", symbol,
+							"chain_id", clientOrderBaseID,
+							"error", err.Error())
+					}
+
+					ga.logger.Info("Order chain created for MARKET entry",
+						"symbol", symbol,
+						"chain_id", clientOrderBaseID,
+						"side", decision.TradeExecution.Action,
+						"mode", modeCode)
+				}
+			}
 		} else {
 			// Round limit price to symbol precision
 			limitEntryPrice = roundPrice(symbol, limitEntryPrice)
@@ -5929,6 +6047,49 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 
 				// Also track in Redis for cross-instance visibility and timeout
 				ga.TrackPendingOrder(symbol, limitOrder.OrderId, string(side), "LIMIT", limitEntryPrice, quantity, "prev_candle_entry")
+
+				// Epic 7: Create chain and record entry placed for prev candle LIMIT order
+				if ga.chainEventWriter != nil && ga.shouldUseChainTracking() && clientOrderBaseID != "" {
+					ctx := context.Background()
+					modeCode := string(mapModeToOrders(decision.SelectedMode))
+
+					// Create the chain record
+					chainReq := orders.CreateChainRequest{
+						UserID:   ga.userID,
+						ChainID:  clientOrderBaseID,
+						Symbol:   symbol,
+						Side:     decision.TradeExecution.Action,
+						ModeCode: modeCode,
+						IsHedge:  false,
+					}
+					if _, err := ga.chainEventWriter.CreateChain(ctx, chainReq); err != nil {
+						ga.logger.Warn("Failed to create order chain for prev candle LIMIT entry",
+							"symbol", symbol,
+							"chain_id", clientOrderBaseID,
+							"error", err.Error())
+					} else {
+						// Record entry placed event (fill will be recorded when order fills)
+						placedEvent := orders.ChainEntryPlacedEvent{
+							BinanceOrderID:       limitOrder.OrderId,
+							BinanceClientOrderID: entryClientOrderId,
+							Price:                limitEntryPrice,
+							Quantity:             quantity,
+							BinanceTimestamp:     time.Now().UnixMilli(),
+						}
+						if err := ga.chainEventWriter.RecordEntryPlaced(ctx, clientOrderBaseID, placedEvent); err != nil {
+							ga.logger.Warn("Failed to record entry placed event for prev candle LIMIT",
+								"symbol", symbol,
+								"chain_id", clientOrderBaseID,
+								"error", err.Error())
+						}
+
+						ga.logger.Info("Order chain created for prev candle LIMIT entry (pending fill)",
+							"symbol", symbol,
+							"chain_id", clientOrderBaseID,
+							"side", decision.TradeExecution.Action,
+							"mode", modeCode)
+					}
+				}
 
 				timeframe := ga.getEntryTimeframe(decision.SelectedMode)
 				ga.logger.Info("LIMIT order placed at prev candle extreme - awaiting fill",
@@ -6088,7 +6249,8 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			position.FuturesTradeID = tradeID
 
 			// Log position opened event to lifecycle (only for new trades)
-			if shouldLogOpen && ga.eventLogger != nil {
+			// Only log to legacy system if legacy tracking is enabled
+			if shouldLogOpen && ga.eventLogger != nil && ga.shouldUseLegacyTracking() {
 				conditionsMet := make(map[string]interface{})
 				for _, sig := range decision.SignalAnalysis.PrimarySignals {
 					if sig.Met {
@@ -6112,7 +6274,8 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	}
 
 	// Story 7.11: Record position state for trade lifecycle tracking
-	if ga.positionStateInt != nil && entryOrderId > 0 {
+	// Only record when chain-based position management is enabled
+	if ga.shouldUseChainPositionManagement() && ga.positionStateInt != nil && entryOrderId > 0 {
 		go ga.positionStateInt.RecordEntryFill(
 			context.Background(),
 			ga.userID,
@@ -6506,8 +6669,9 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 						"at_breakeven", pos.MovedToBreakeven,
 						"pnl_percent", pnlPercent)
 
-					// Log trailing activation to trade lifecycle
-					if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+					// Log trailing activation to trade lifecycle (legacy system)
+					// Only log if legacy tracking is enabled
+					if ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 						go ga.eventLogger.LogTrailingActivated(
 							context.Background(),
 							pos.FuturesTradeID,
@@ -6891,8 +7055,9 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 					"trailing_active", pos.TrailingActive)
 			}
 
-			// Log TP hit to trade lifecycle
-			if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+			// Log TP hit to trade lifecycle (legacy system)
+			// Only log if legacy tracking is enabled
+			if ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 				// Calculate PnL for this TP level
 				tpConfig := pos.TakeProfits[tpLevel-1]
 				closeQty := pos.OriginalQty * (tpConfig.Percent / 100.0)
@@ -6912,6 +7077,37 @@ func (ga *GinieAutopilot) checkTakeProfits(pos *GiniePosition, currentPrice floa
 					tpPnL,
 					pnlPercent,
 				)
+			}
+
+			// Epic 7: Record TP level filled to chain when using chain-based position management
+			if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
+				// Calculate PnL and fees for this TP level
+				tpConfig := pos.TakeProfits[tpLevel-1]
+				closeQty := pos.OriginalQty * (tpConfig.Percent / 100.0)
+				var tpPnL float64
+				if pos.Side == "LONG" {
+					tpPnL = (currentPrice - pos.EntryPrice) * closeQty
+				} else {
+					tpPnL = (pos.EntryPrice - currentPrice) * closeQty
+				}
+				fees := calculateTradingFee(closeQty, currentPrice)
+
+				ctx := context.Background()
+				tpFilledEvent := orders.ChainTPLevelFilledEvent{
+					Level:            tpLevel,
+					FilledPrice:      currentPrice,
+					FilledQuantity:   closeQty,
+					PnL:              tpPnL,
+					Fees:             fees,
+					BinanceTimestamp: time.Now().UnixMilli(),
+				}
+				if err := ga.chainEventWriter.RecordTPLevelFilled(ctx, pos.ChainBaseID, tpLevel, tpFilledEvent); err != nil {
+					ga.logger.Warn("Failed to record TP level filled event to chain",
+						"symbol", pos.Symbol,
+						"chain_id", pos.ChainBaseID,
+						"tp_level", tpLevel,
+						"error", err.Error())
+				}
 			}
 
 			return tpLevel
@@ -7170,7 +7366,8 @@ func (ga *GinieAutopilot) moveToBreakeven(pos *GiniePosition, reason string) {
 		"reason", reason)
 
 	// Log breakeven event to trade lifecycle
-	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+	// Only log to legacy system if legacy tracking is enabled
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 		go ga.eventLogger.LogMovedToBreakeven(
 			context.Background(),
 			pos.FuturesTradeID,
@@ -7489,6 +7686,27 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 					"attempt", attempt)
 			}
 			tpOrderPlaced = true
+
+			// Epic 7: Record TP level placed to chain when using chain-based position management
+			if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
+				ctx := context.Background()
+				tpPlacedEvent := orders.ChainTPLevelPlacedEvent{
+					Level:                nextTPIndex + 1,
+					BinanceOrderID:       tpOrder.AlgoId,
+					BinanceClientOrderID: tpClientOrderId,
+					Price:                roundedTPPrice,
+					Quantity:             tpQty,
+					BinanceTimestamp:     time.Now().UnixMilli(),
+				}
+				if err := ga.chainEventWriter.RecordTPLevelPlaced(ctx, pos.ChainBaseID, nextTPIndex+1, tpPlacedEvent); err != nil {
+					ga.logger.Warn("Failed to record TP level placed event to chain",
+						"symbol", pos.Symbol,
+						"chain_id", pos.ChainBaseID,
+						"tp_level", nextTPIndex+1,
+						"error", err.Error())
+				}
+			}
+
 			break
 		}
 		ga.logger.Error("Failed to place next take profit order",
@@ -7575,6 +7793,28 @@ func (ga *GinieAutopilot) updateBinanceSLOrderWithReason(pos *GiniePosition, sou
 	// Story 7.12: Log SL modification event (oldPrice provided = modification, not initial)
 	if oldSLPrice > 0 && oldSLPrice != pos.StopLoss {
 		ga.logOrderModificationEvent(pos, "SL", &oldSLPrice, pos.StopLoss, pos.StopLossAlgoID, source, reason, nil)
+
+		// Epic 7: Record SL modification to chain when using chain-based position management
+		if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
+			ctx := context.Background()
+			currentPrice, _ := ga.futuresClient.GetFuturesCurrentPrice(pos.Symbol)
+			modSource := orders.ModificationSource(source)
+			slModEvent := orders.ChainSLModifiedEvent{
+				BinanceOrderID:     pos.StopLossAlgoID,
+				OldPrice:           oldSLPrice,
+				NewPrice:           pos.StopLoss,
+				ModificationSource: modSource,
+				ModificationReason: reason,
+				MarketPrice:        currentPrice,
+				BinanceTimestamp:   time.Now().UnixMilli(),
+			}
+			if err := ga.chainEventWriter.RecordSLModified(ctx, pos.ChainBaseID, slModEvent); err != nil {
+				ga.logger.Warn("Failed to record SL modified event to chain",
+					"symbol", pos.Symbol,
+					"chain_id", pos.ChainBaseID,
+					"error", err.Error())
+			}
+		}
 	}
 }
 
@@ -7676,7 +7916,8 @@ func (ga *GinieAutopilot) logOrderModificationEvent(pos *GiniePosition, orderTyp
 	userID := ga.userID
 
 	// === Story 7.17/7.18: Write to ChainEventWriter (new event sourcing system) ===
-	if ga.chainEventWriter != nil {
+	// Only write if chain tracking is enabled in system control settings
+	if ga.chainEventWriter != nil && ga.shouldUseChainTracking() {
 		ga.writeToChainEventWriter(ctx, pos, chainID, orderType, oldPrice, newPrice, algoId, source, reason)
 	}
 
@@ -8014,8 +8255,9 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 		"net_pnl", pnl,
 		"total_pnl", totalPnL)
 
-	// Log position closed to trade lifecycle
-	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+	// Log position closed to trade lifecycle (legacy system)
+	// Only log if legacy tracking is enabled
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 		go ga.eventLogger.LogPositionClosed(
 			context.Background(),
 			pos.FuturesTradeID,
@@ -8027,6 +8269,26 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 			reason,
 			database.EventSourceGinie,
 		)
+	}
+
+	// Epic 7: Close chain when using chain-based position management
+	// This marks the chain as CLOSED in the order_chains table with PnL and close reason
+	if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
+		ctx := context.Background()
+		if err := ga.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, reason, totalPnL, totalFee); err != nil {
+			ga.logger.Warn("Failed to close order chain for position",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"reason", reason,
+				"error", err.Error())
+		} else {
+			ga.logger.Info("Order chain closed with position",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"reason", reason,
+				"total_pnl", totalPnL,
+				"total_fees", totalFee)
+		}
 	}
 
 	if !ga.config.DryRun && pos.RemainingQty > 0 {
@@ -8344,8 +8606,9 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	// Broadcast position closure to WebSocket clients for real-time UI update
 	ga.broadcastPositionClosure(symbol)
 
-	// Log position closed to trade lifecycle
-	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+	// Log position closed to trade lifecycle (legacy system)
+	// Only log if legacy tracking is enabled
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 		go ga.eventLogger.LogPositionClosed(
 			context.Background(),
 			pos.FuturesTradeID,
@@ -10150,7 +10413,8 @@ func (ga *GinieAutopilot) ForceSyncWithExchange(client ...binance.FuturesClient)
 				position.FuturesTradeID = tradeID
 
 				// Log position synced event to lifecycle (only for new trades)
-				if isNewTrade && ga.eventLogger != nil {
+				// Only log to legacy system if legacy tracking is enabled
+				if isNewTrade && ga.eventLogger != nil && ga.shouldUseLegacyTracking() {
 					conditionsMet := map[string]interface{}{
 						"source":      "force_sync",
 						"sync_reason": "manual_force_sync",
@@ -10441,7 +10705,8 @@ func (ga *GinieAutopilot) SyncWithExchange() (int, error) {
 				position.FuturesTradeID = tradeID
 
 				// Log position synced event to lifecycle (only for new trades)
-				if isNewTrade && ga.eventLogger != nil {
+				// Only log to legacy system if legacy tracking is enabled
+				if isNewTrade && ga.eventLogger != nil && ga.shouldUseLegacyTracking() {
 					conditionsMet := map[string]interface{}{
 						"source":      "exchange_sync",
 						"sync_reason": "app_restart_or_manual_position",
@@ -10839,17 +11104,15 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 		return
 	}
 
-	// Epic 7: Generate ChainBaseID for synced/legacy positions that don't have one
-	// This ensures all SL/TP orders are trackable in the Trade Lifecycle tab
-	if pos.ChainBaseID == "" && ga.clientOrderIdGen != nil {
-		mode := mapModeToOrders(pos.Mode)
-		_, baseID, err := ga.clientOrderIdGen.Generate(context.Background(), mode, orders.OrderTypeEntry)
-		if err == nil && baseID != "" {
-			pos.ChainBaseID = baseID
-			ga.logger.Info("Generated ChainBaseID for legacy position",
-				"symbol", pos.Symbol,
-				"chain_base_id", pos.ChainBaseID)
-		}
+	// Epic 7: Log warning if ChainBaseID is missing - this indicates a bug in entry order handling
+	// DO NOT generate a new ChainBaseID here as that would create multiple chains for the same trade
+	// The chain should have been created when the entry order was placed
+	if pos.ChainBaseID == "" {
+		ga.logger.Warn("ChainBaseID missing for position during SL/TP placement - chain tracking may be incomplete",
+			"symbol", pos.Symbol,
+			"side", pos.Side,
+			"mode", pos.Mode,
+			"source", pos.Source)
 	}
 
 	// Epic 7: Generate clientOrderId for SL order to link with entry order chain
@@ -11075,8 +11338,9 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 
 	pos.LastLLMUpdate = time.Now()
 
-	// Log SL/TP placed event to trade lifecycle
-	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && slOrderPlaced {
+	// Log SL/TP placed event to trade lifecycle (legacy system)
+	// Only log if legacy tracking is enabled in system control settings
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && slOrderPlaced && ga.shouldUseLegacyTracking() {
 		tpLevels := make([]float64, len(pos.TakeProfits))
 		for i, tp := range pos.TakeProfits {
 			tpLevels[i] = tp.Price
@@ -13353,7 +13617,8 @@ func (ga *GinieAutopilot) updatePositionSLTPFromLLM(symbol string, pos *GiniePos
 			"confidence", sltpAnalysis.Confidence)
 
 		// Log SL revised event to trade lifecycle (only if SL was actually updated)
-		if newSL > 0 && ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+		// Only log to legacy system if legacy tracking is enabled
+		if newSL > 0 && ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 			revisionCount, _ := ga.repo.GetDB().CountSLRevisions(context.Background(), pos.FuturesTradeID)
 			go ga.eventLogger.LogSLRevised(
 				context.Background(),
@@ -16939,8 +17204,9 @@ func (ga *GinieAutopilot) executeUltraFastExit(pos *GiniePosition, currentPrice 
 		Confidence: pos.UltraFastSignal.EntryConfidence,
 	})
 
-	// Log position closed to trade lifecycle
-	if ga.eventLogger != nil && pos.FuturesTradeID > 0 {
+	// Log position closed to trade lifecycle (legacy system)
+	// Only log if legacy tracking is enabled
+	if ga.eventLogger != nil && pos.FuturesTradeID > 0 && ga.shouldUseLegacyTracking() {
 		go ga.eventLogger.LogPositionClosed(
 			context.Background(),
 			pos.FuturesTradeID,
@@ -17750,7 +18016,8 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 			ga.logger.Debug("Futures trade record created for ultra-fast", "symbol", symbol, "trade_id", trade.ID)
 
 			// Log position opened event to lifecycle
-			if ga.eventLogger != nil {
+			// Only log to legacy system if legacy tracking is enabled
+			if ga.eventLogger != nil && ga.shouldUseLegacyTracking() {
 				conditionsMet := make(map[string]interface{})
 				conditionsMet["trend_bias"] = signal.TrendBias
 				conditionsMet["trend_strength"] = signal.TrendStrength
@@ -18970,8 +19237,33 @@ func (ga *GinieAutopilot) createPositionFromLimitFill(pending *PendingLimitOrder
 		"stop_loss", stopLoss,
 		"chain_base_id", pending.ChainBaseID)
 
+	// Epic 7: Record entry filled event for LIMIT order
+	// Chain was already created when the LIMIT order was placed
+	if ga.chainEventWriter != nil && ga.shouldUseChainTracking() && pending.ChainBaseID != "" {
+		ctx := context.Background()
+		filledEvent := orders.ChainEntryFilledEvent{
+			FilledPrice:      fillPrice,
+			FilledQuantity:   fillQty,
+			Fees:             0, // Fees tracked separately
+			BinanceTimestamp: time.Now().UnixMilli(),
+		}
+		if err := ga.chainEventWriter.RecordEntryFilled(ctx, pending.ChainBaseID, filledEvent); err != nil {
+			ga.logger.Warn("Failed to record entry filled event for LIMIT fill",
+				"symbol", pending.Symbol,
+				"chain_id", pending.ChainBaseID,
+				"error", err.Error())
+		} else {
+			ga.logger.Info("Entry filled event recorded for LIMIT fill",
+				"symbol", pending.Symbol,
+				"chain_id", pending.ChainBaseID,
+				"fill_price", fillPrice,
+				"fill_qty", fillQty)
+		}
+	}
+
 	// Story 7.11: Record position state for limit fill
-	if ga.positionStateInt != nil && pending.OrderID > 0 {
+	// Only record when chain-based position management is enabled
+	if ga.shouldUseChainPositionManagement() && ga.positionStateInt != nil && pending.OrderID > 0 {
 		// Generate client order ID from chain base
 		entryClientOrderId := ""
 		if pending.ChainBaseID != "" {
@@ -19801,4 +20093,99 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 		// No changes detected - state is same as cached, skip logging spam
 		// This is the efficiency gain from delta processing
 	}
+}
+
+// ==================== SYSTEM CONTROL SETTINGS (Epic 7 Enhancement) ====================
+
+// loadSystemControlSettings loads the user's system control settings from the database
+// This is called once and cached for the lifetime of the autopilot instance
+func (ga *GinieAutopilot) loadSystemControlSettings() {
+	if ga.systemControlLoaded {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	config, err := ga.repo.GetUserSystemControlOrDefault(ctx, ga.userID)
+	if err != nil {
+		ga.logger.Warn("Failed to load system control settings, using defaults",
+			"user_id", ga.userID,
+			"error", err.Error())
+		// Use defaults
+		ga.orderTrackingSystem = database.OrderTrackingChain
+		ga.positionMgmtSystem = database.PositionManagementLegacy
+		ga.entryDecisionSystem = database.EntryDecisionLegacy
+	} else {
+		ga.orderTrackingSystem = config.OrderTrackingSystem
+		ga.positionMgmtSystem = config.PositionManagementSystem
+		ga.entryDecisionSystem = config.EntryDecisionSystem
+	}
+
+	ga.systemControlLoaded = true
+	ga.logger.Info("System control settings loaded",
+		"user_id", ga.userID,
+		"order_tracking", ga.orderTrackingSystem,
+		"position_management", ga.positionMgmtSystem,
+		"entry_decision", ga.entryDecisionSystem)
+
+	// Epic 7: Propagate entry decision system to analyzer for routing
+	if ga.analyzer != nil {
+		ga.analyzer.SetEntryDecisionSystem(ga.entryDecisionSystem)
+	}
+}
+
+// shouldUseChainTracking returns true if order events should be logged to the chain-based system
+func (ga *GinieAutopilot) shouldUseChainTracking() bool {
+	ga.loadSystemControlSettings()
+	return ga.orderTrackingSystem == database.OrderTrackingChain ||
+		ga.orderTrackingSystem == database.OrderTrackingBoth
+}
+
+// shouldUseLegacyTracking returns true if order events should be logged to the legacy system
+func (ga *GinieAutopilot) shouldUseLegacyTracking() bool {
+	ga.loadSystemControlSettings()
+	return ga.orderTrackingSystem == database.OrderTrackingLegacy ||
+		ga.orderTrackingSystem == database.OrderTrackingBoth
+}
+
+// shouldUseChainPositionManagement returns true if position management should use the new chain-based system
+func (ga *GinieAutopilot) shouldUseChainPositionManagement() bool {
+	ga.loadSystemControlSettings()
+	return ga.positionMgmtSystem == database.PositionManagementChain
+}
+
+// shouldUseLegacyPositionManagement returns true if position management should use the legacy system
+func (ga *GinieAutopilot) shouldUseLegacyPositionManagement() bool {
+	ga.loadSystemControlSettings()
+	return ga.positionMgmtSystem == database.PositionManagementLegacy
+}
+
+// shouldUseChainEntryDecision returns true if entry decisions should use the new chain-based system
+func (ga *GinieAutopilot) shouldUseChainEntryDecision() bool {
+	ga.loadSystemControlSettings()
+	return ga.entryDecisionSystem == database.EntryDecisionChain
+}
+
+// shouldUseLegacyEntryDecision returns true if entry decisions should use the legacy Ginie confluence system
+func (ga *GinieAutopilot) shouldUseLegacyEntryDecision() bool {
+	ga.loadSystemControlSettings()
+	return ga.entryDecisionSystem == database.EntryDecisionLegacy
+}
+
+// GetSystemControlSettings returns the current system control settings
+func (ga *GinieAutopilot) GetSystemControlSettings() map[string]string {
+	ga.loadSystemControlSettings()
+	return map[string]string{
+		"order_tracking_system":      ga.orderTrackingSystem,
+		"position_management_system": ga.positionMgmtSystem,
+		"entry_decision_system":      ga.entryDecisionSystem,
+	}
+}
+
+// ReloadSystemControlSettings forces a reload of system control settings from the database
+// This can be called after the user changes their settings
+func (ga *GinieAutopilot) ReloadSystemControlSettings() {
+	ga.systemControlLoaded = false
+	ga.loadSystemControlSettings()
 }

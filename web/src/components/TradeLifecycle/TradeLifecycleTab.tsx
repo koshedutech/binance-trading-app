@@ -492,7 +492,7 @@ export default function TradeLifecycleTab({
       <div className="bg-gray-800 rounded-lg p-6 border border-gray-700">
         <div className="flex items-center justify-center text-gray-400">
           <RefreshCw className="w-5 h-5 animate-spin mr-2" />
-          Loading order chains...
+          Loading trade cycles...
         </div>
       </div>
     );
@@ -569,7 +569,7 @@ export default function TradeLifecycleTab({
                     </span>
                   )}
                   <span className="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded">
-                    {filteredChains.length} chain{filteredChains.length !== 1 ? 's' : ''}
+                    {filteredChains.length} cycle{filteredChains.length !== 1 ? 's' : ''}
                   </span>
                 </div>
                 <div className="flex items-center gap-3">
@@ -671,10 +671,10 @@ export default function TradeLifecycleTab({
                     {filteredChains.length === 0 ? (
                       <div className="text-center py-8">
                         <Layers className="w-12 h-12 mx-auto mb-3 text-gray-600" />
-                        <p className="text-gray-400">No order chains found</p>
+                        <p className="text-gray-400">No trade cycles found</p>
                         <p className="text-sm text-gray-500 mt-1">
                           {chains.length === 0
-                            ? 'Order chains will appear when orders are placed'
+                            ? 'Trade cycles will appear when orders are placed'
                             : 'Try adjusting your filters'}
                         </p>
                       </div>

@@ -381,3 +381,50 @@ func (db *DB) RunOrderChainMigrations(ctx context.Context) error {
 	log.Println("Order Chain database migrations (034-036) completed")
 	return nil
 }
+
+// RunSystemControlMigration executes the system control switches migration (045)
+// This migration creates the user_system_control table for:
+// - Order tracking system selection (chain vs legacy)
+// - Position management system selection (legacy vs chain)
+func (db *DB) RunSystemControlMigration(ctx context.Context) error {
+	log.Println("Running System Control database migration (045)...")
+
+	// Get the project root directory
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Try to find migrations directory
+	migrationsDir := filepath.Join(currentDir, "migrations")
+	if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+		migrationsDir = filepath.Join(currentDir, "..", "migrations")
+		if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+			migrationsDir = filepath.Join(currentDir, "..", "..", "migrations")
+			if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+				return fmt.Errorf("migrations directory not found: %w", err)
+			}
+		}
+	}
+
+	migrationPath := filepath.Join(migrationsDir, "045_user_system_control.sql")
+	log.Printf("Running migration: 045_user_system_control.sql")
+
+	// Read the SQL file
+	sqlContent, err := os.ReadFile(migrationPath)
+	if err != nil {
+		log.Printf("Warning: Failed to read migration file: %v", err)
+		return nil // Don't fail startup
+	}
+
+	// Execute the SQL
+	if _, err := db.Pool.Exec(ctx, string(sqlContent)); err != nil {
+		log.Printf("Warning: Migration 045_user_system_control.sql failed: %v", err)
+		// Continue (table may already exist)
+		return nil
+	}
+
+	log.Printf("Successfully executed migration: 045_user_system_control.sql")
+	log.Println("System Control database migration (045) completed")
+	return nil
+}

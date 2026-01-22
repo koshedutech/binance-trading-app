@@ -1,5 +1,6 @@
 // Story 7.15: Order Tree Node Component
 // Story 7.19: Enhanced with timezone support via formatTime prop
+// Story 7.21: Enhanced with inline modification history using ModificationRowList
 // Enhanced: Added duration counter, buy/sell side, order value display
 // Individual node in the order chain tree structure
 import React, { useState, useCallback, useEffect } from 'react';
@@ -18,9 +19,10 @@ import {
   Edit3,
   Timer,
   DollarSign,
+  History,
 } from 'lucide-react';
 import { ChainOrder, PositionState, ORDER_TYPE_CONFIG, OrderTypeSuffix } from './types';
-import { ModificationTree } from './ModificationHistory';
+import { ModificationRowList, calculateSummaryStats, formatDollarImpact } from './ModificationHistory';
 import type { ModificationEvent, ModifiableOrderType } from './ModificationHistory/types';
 
 // Format duration from timestamp to human readable (e.g., "15m", "2h 30m", "1d 5h")
@@ -447,7 +449,7 @@ export default function OrderTreeNode({
         </div>
       </div>
 
-      {/* Expanded modification history */}
+      {/* Expanded modification history - Story 7.21: Inline row display */}
       {expanded && isModifiable && (
         <div className="mt-2" style={{ marginLeft: `${(depth + 1) * 24}px` }}>
           {loadingMods ? (
@@ -455,14 +457,50 @@ export default function OrderTreeNode({
               Loading modification history...
             </div>
           ) : localModifications.length > 0 ? (
-            <ModificationTree
-              chainId={chainId}
-              orderType={type as ModifiableOrderType}
-              currentPrice={displayPrice}
-              events={localModifications}
-              positionSide={positionSide}
-              compact={true}
-            />
+            <div className="bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
+              {/* Header with summary stats */}
+              {(() => {
+                const summary = calculateSummaryStats(localModifications);
+                return (
+                  <div className="flex items-center gap-3 mb-2 pb-2 border-b border-gray-700/50 text-xs">
+                    <span className="flex items-center gap-1 text-gray-400">
+                      <History className="w-3.5 h-3.5 text-purple-400" />
+                      {summary.totalModifications} modification{summary.totalModifications !== 1 ? 's' : ''}
+                    </span>
+                    <span className="text-gray-600">|</span>
+                    <span className="text-gray-400">
+                      Initial: <span className="font-mono text-gray-300">${summary.initialPrice.toFixed(2)}</span>
+                    </span>
+                    <span className="text-gray-600">|</span>
+                    <span className="text-gray-400">
+                      Current: <span className="font-mono text-green-400">${displayPrice.toFixed(2)}</span>
+                    </span>
+                    <span className="text-gray-600">|</span>
+                    <span className={`font-medium ${summary.netDollarImpact >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      Net: {formatDollarImpact(summary.netDollarImpact)}
+                    </span>
+                    {/* Source breakdown */}
+                    <span className="ml-auto flex items-center gap-2 text-gray-500">
+                      {summary.sources.llmAuto > 0 && (
+                        <span className="text-purple-400">AI: {summary.sources.llmAuto}</span>
+                      )}
+                      {summary.sources.userManual > 0 && (
+                        <span className="text-blue-400">Manual: {summary.sources.userManual}</span>
+                      )}
+                      {summary.sources.trailingStop > 0 && (
+                        <span className="text-yellow-400">Trail: {summary.sources.trailingStop}</span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })()}
+              {/* Modification row list */}
+              <ModificationRowList
+                events={localModifications}
+                orderType={type as ModifiableOrderType}
+                formatTime={formatTime}
+              />
+            </div>
           ) : (
             <div className="text-sm text-gray-500 py-2">
               No modification history available.

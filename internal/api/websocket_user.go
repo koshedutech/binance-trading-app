@@ -284,6 +284,12 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 		// Story 10.3: Exit Decision Monitoring - Real-time exit decision broadcasts
 		BroadcastExitDecisionUpdate(userID, data)
 	})
+	events.SetBroadcastOrderUpdate(func(userID string, data interface{}) {
+		// Order update broadcasts (placed, cancelled, filled)
+		if orderData, ok := data.(map[string]interface{}); ok {
+			BroadcastUserOrderUpdate(userID, orderData)
+		}
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 

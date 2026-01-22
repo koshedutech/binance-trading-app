@@ -17,6 +17,7 @@ import (
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/orders"
 
 	"github.com/gin-gonic/gin"
@@ -593,6 +594,19 @@ func (s *Server) handlePlaceFuturesOrder(c *gin.Context) {
 		response["stopLossError"] = slError
 	}
 
+	// Broadcast ORDER_UPDATE to WebSocket clients for instant UI refresh
+	userID := s.getUserID(c)
+	if userID != "" {
+		events.BroadcastOrderUpdate(userID, map[string]interface{}{
+			"action":   "placed",
+			"orderId":  orderResp.OrderId,
+			"symbol":   req.Symbol,
+			"side":     req.Side,
+			"type":     "regular",
+			"quantity": req.Quantity,
+		})
+	}
+
 	c.JSON(http.StatusOK, response)
 }
 
@@ -619,6 +633,17 @@ func (s *Server) handleCancelFuturesOrder(c *gin.Context) {
 		return
 	}
 
+	// Broadcast ORDER_UPDATE to WebSocket clients for instant UI refresh
+	userID := s.getUserID(c)
+	if userID != "" {
+		events.BroadcastOrderUpdate(userID, map[string]interface{}{
+			"action":  "cancelled",
+			"orderId": orderId,
+			"symbol":  symbol,
+			"type":    "regular",
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Order canceled", "orderId": orderId})
 }
 
@@ -636,6 +661,16 @@ func (s *Server) handleCancelAllFuturesOrders(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Broadcast ORDER_UPDATE to WebSocket clients for instant UI refresh
+	userID := s.getUserID(c)
+	if userID != "" {
+		events.BroadcastOrderUpdate(userID, map[string]interface{}{
+			"action": "cancelled_all",
+			"symbol": symbol,
+			"type":   "regular",
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "All orders canceled", "symbol": symbol})
@@ -1267,6 +1302,17 @@ func (s *Server) handleCancelAlgoOrder(c *gin.Context) {
 		return
 	}
 
+	// Broadcast ORDER_UPDATE to WebSocket clients for instant UI refresh
+	userID := s.getUserID(c)
+	if userID != "" {
+		events.BroadcastOrderUpdate(userID, map[string]interface{}{
+			"action": "cancelled",
+			"algoId": algoId,
+			"symbol": symbol,
+			"type":   "algo",
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Algo order canceled",
 		"algoId":  algoId,
@@ -1288,6 +1334,16 @@ func (s *Server) handleCancelAllAlgoOrders(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Broadcast ORDER_UPDATE to WebSocket clients for instant UI refresh
+	userID := s.getUserID(c)
+	if userID != "" {
+		events.BroadcastOrderUpdate(userID, map[string]interface{}{
+			"action": "cancelled_all",
+			"symbol": symbol,
+			"type":   "algo",
+		})
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1430,6 +1486,17 @@ func (s *Server) handleSetPositionTPSL(c *gin.Context) {
 	if len(errors) > 0 {
 		response["errors"] = errors
 		response["message"] = "Some orders failed"
+	}
+
+	// Broadcast ORDER_UPDATE to WebSocket clients for instant UI refresh
+	userID := s.getUserID(c)
+	if userID != "" {
+		events.BroadcastOrderUpdate(userID, map[string]interface{}{
+			"action":       "tpsl_updated",
+			"symbol":       symbol,
+			"type":         "algo",
+			"positionSide": req.PositionSide,
+		})
 	}
 
 	c.JSON(http.StatusOK, response)

@@ -77,6 +77,11 @@ type GinieAnalyzer struct {
 	strategyLastSwitch   map[string]time.Time // key: mode, value: last switch time
 	strategyLastSelected map[string]string    // key: mode, value: last selected strategy
 	strategySwitchLock   sync.RWMutex
+
+	// Epic 7: Entry decision system control
+	// 'legacy' = Use CheckEntryConfluence (Ginie confluence logic)
+	// 'chain' = Use mode+strategy entry conditions
+	entryDecisionSystem string
 }
 
 // NewGinieAnalyzer creates a new Ginie AI analyzer
@@ -158,6 +163,27 @@ func (g *GinieAnalyzer) SetUserID(userID string) {
 // The cache also implements SettingsCacheReader which includes confluence config methods (Story 9.12 Phase 3)
 func (g *GinieAnalyzer) SetSettingsCache(cache ModeConfigCache) {
 	g.settingsCache = cache
+}
+
+// SetEntryDecisionSystem sets the entry decision system to use ('legacy' or 'chain')
+// Epic 7: System Control enforcement for entry decisions
+func (g *GinieAnalyzer) SetEntryDecisionSystem(system string) {
+	g.entryDecisionSystem = system
+	if g.logger != nil {
+		g.logger.Info("Entry decision system set",
+			"system", system)
+	}
+}
+
+// shouldUseChainEntryDecision returns true if entry decisions should use the chain-based system
+// (mode+strategy entry conditions instead of legacy CheckEntryConfluence)
+func (g *GinieAnalyzer) shouldUseChainEntryDecision() bool {
+	return g.entryDecisionSystem == database.EntryDecisionChain
+}
+
+// shouldUseLegacyEntryDecision returns true if entry decisions should use the legacy Ginie confluence
+func (g *GinieAnalyzer) shouldUseLegacyEntryDecision() bool {
+	return g.entryDecisionSystem == "" || g.entryDecisionSystem == database.EntryDecisionLegacy
 }
 
 // RefreshSettings reloads settings from defaults.
@@ -2197,65 +2223,137 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 			report.TradeExecution.Action = "SHORT"
 		}
 
-		// === ENHANCED ENTRY CONFLUENCE CHECK ===
-		// Check ADX+DI, VWAP, Volume Spike, Pivots, EMA 20/50
-		confluenceResult := g.CheckEntryConfluence(symbol, klines, signals.Direction, mode)
-		report.EntryConfluence = confluenceResult
+		// === ENTRY DECISION SYSTEM CONTROL ROUTING ===
+		// Epic 7: Route entry decision based on system control setting
+		var confluenceResult *EntryConfluenceResult
 
-		if !confluenceResult.Passed {
-			// Confluence failed - block the trade
-			rejectionTracker.EntryConfluence = &EntryConfluenceRejection{
-				Blocked:         true,
-				ConfluenceScore: confluenceResult.ConfluenceScore,
-				RequiredScore:   2, // Lowered from 3 to allow more trades
-				ADXValid:        confluenceResult.ADXValid,
-				VWAPValid:       confluenceResult.VWAPValid,
-				VolumeValid:     confluenceResult.VolumeSpikeValid,
-				PivotValid:      confluenceResult.PivotValid,
-				EMAValid:        confluenceResult.EMAValid,
-				Details:         confluenceResult.Details,
-				Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 2)", confluenceResult.ConfluenceScore),
-			}
-			rejectionTracker.AddRejection(fmt.Sprintf("Entry Confluence: %d/5 (ADX:%v VWAP:%v Vol:%v Pivot:%v EMA:%v)",
-				confluenceResult.ConfluenceScore,
-				confluenceResult.ADXValid,
-				confluenceResult.VWAPValid,
-				confluenceResult.VolumeSpikeValid,
-				confluenceResult.PivotValid,
-				confluenceResult.EMAValid))
-
-			report.Recommendation = RecommendationWait
-			report.RecommendationNote = fmt.Sprintf("Entry confluence failed: %d/5 filters. %s",
-				confluenceResult.ConfluenceScore,
-				strings.Join(confluenceResult.Details, "; "))
-			report.ConfidenceScore = float64(confluenceResult.ConfluenceScore) * 20 // 0-100 based on filters
+		if g.shouldUseChainEntryDecision() {
+			// CHAIN-BASED ENTRY DECISION: Use mode+strategy entry conditions
+			// Strategy was already selected earlier via GetActiveStrategyForMode()
+			// Use strategy's confidence thresholds and entry conditions
 
 			if g.logger != nil {
-				g.logger.Warn("Trade blocked by entry confluence",
+				g.logger.Info("Using CHAIN entry decision system",
+					"symbol", symbol,
+					"direction", signals.Direction,
+					"mode", modeKey,
+					"strategy", activeStrategy,
+					"regime", currentRegime)
+			}
+
+			// Create a confluence result based on strategy config
+			// When using chain entry decision, we rely on strategy's confidence settings
+			confluenceResult = &EntryConfluenceResult{
+				Passed:          true, // Strategy-based decision - confidence check happens below
+				Direction:       signals.Direction,
+				ConfluenceScore: 5, // Full score since we're using strategy-based decision
+				Details:         []string{fmt.Sprintf("Chain entry: strategy=%s, regime=%s", activeStrategy, currentRegime)},
+			}
+
+			// Apply strategy-specific confidence threshold if available
+			if strategyConfig != nil && strategyConfig.Confidence.MinConfidence > 0 {
+				// Check if scan confidence meets strategy threshold
+				// Use TrendScore (0-100) as the confidence metric
+				scanConfidence := int(scan.Trend.TrendScore)
+				if scanConfidence < strategyConfig.Confidence.MinConfidence {
+					confluenceResult.Passed = false
+					confluenceResult.ConfluenceScore = 0
+					confluenceResult.Details = []string{
+						fmt.Sprintf("Strategy confidence not met: %d < %d (min)",
+							scanConfidence, strategyConfig.Confidence.MinConfidence),
+					}
+
+					if g.logger != nil {
+						g.logger.Warn("Trade blocked by strategy confidence threshold",
+							"symbol", symbol,
+							"direction", signals.Direction,
+							"scan_confidence", scanConfidence,
+							"min_confidence", strategyConfig.Confidence.MinConfidence,
+							"strategy", activeStrategy)
+					}
+				}
+			}
+
+			report.EntryConfluence = confluenceResult
+
+			if !confluenceResult.Passed {
+				rejectionTracker.EntryConfluence = &EntryConfluenceRejection{
+					Blocked:         true,
+					ConfluenceScore: confluenceResult.ConfluenceScore,
+					RequiredScore:   strategyConfig.Confidence.MinConfidence,
+					Details:         confluenceResult.Details,
+					Reason:          fmt.Sprintf("Strategy confidence not met: %s", strings.Join(confluenceResult.Details, "; ")),
+				}
+				rejectionTracker.AddRejection(fmt.Sprintf("Strategy Confidence: %s", strings.Join(confluenceResult.Details, "; ")))
+
+				report.Recommendation = RecommendationWait
+				report.RecommendationNote = fmt.Sprintf("Strategy confidence not met: %s", strings.Join(confluenceResult.Details, "; "))
+				report.ConfidenceScore = float64(confluenceResult.ConfluenceScore) * 20
+
+				return report, nil
+			}
+
+		} else {
+			// LEGACY ENTRY DECISION: Use traditional CheckEntryConfluence
+			// Check ADX+DI, VWAP, Volume Spike, Pivots, EMA 20/50
+			confluenceResult = g.CheckEntryConfluence(symbol, klines, signals.Direction, mode)
+			report.EntryConfluence = confluenceResult
+
+			if !confluenceResult.Passed {
+				// Confluence failed - block the trade
+				rejectionTracker.EntryConfluence = &EntryConfluenceRejection{
+					Blocked:         true,
+					ConfluenceScore: confluenceResult.ConfluenceScore,
+					RequiredScore:   2, // Lowered from 3 to allow more trades
+					ADXValid:        confluenceResult.ADXValid,
+					VWAPValid:       confluenceResult.VWAPValid,
+					VolumeValid:     confluenceResult.VolumeSpikeValid,
+					PivotValid:      confluenceResult.PivotValid,
+					EMAValid:        confluenceResult.EMAValid,
+					Details:         confluenceResult.Details,
+					Reason:          fmt.Sprintf("Entry confluence failed: %d/5 filters passed (need 2)", confluenceResult.ConfluenceScore),
+				}
+				rejectionTracker.AddRejection(fmt.Sprintf("Entry Confluence: %d/5 (ADX:%v VWAP:%v Vol:%v Pivot:%v EMA:%v)",
+					confluenceResult.ConfluenceScore,
+					confluenceResult.ADXValid,
+					confluenceResult.VWAPValid,
+					confluenceResult.VolumeSpikeValid,
+					confluenceResult.PivotValid,
+					confluenceResult.EMAValid))
+
+				report.Recommendation = RecommendationWait
+				report.RecommendationNote = fmt.Sprintf("Entry confluence failed: %d/5 filters. %s",
+					confluenceResult.ConfluenceScore,
+					strings.Join(confluenceResult.Details, "; "))
+				report.ConfidenceScore = float64(confluenceResult.ConfluenceScore) * 20 // 0-100 based on filters
+
+				if g.logger != nil {
+					g.logger.Warn("Trade blocked by entry confluence",
+						"symbol", symbol,
+						"direction", signals.Direction,
+						"score", fmt.Sprintf("%d/5", confluenceResult.ConfluenceScore),
+						"adx", confluenceResult.ADXValid,
+						"vwap", confluenceResult.VWAPValid,
+						"volume", confluenceResult.VolumeSpikeValid,
+						"pivot", confluenceResult.PivotValid,
+						"ema", confluenceResult.EMAValid)
+				}
+
+				return report, nil
+			}
+
+			// Legacy confluence passed - log success
+			if g.logger != nil {
+				g.logger.Info("Entry confluence PASSED (legacy)",
 					"symbol", symbol,
 					"direction", signals.Direction,
 					"score", fmt.Sprintf("%d/5", confluenceResult.ConfluenceScore),
-					"adx", confluenceResult.ADXValid,
-					"vwap", confluenceResult.VWAPValid,
-					"volume", confluenceResult.VolumeSpikeValid,
-					"pivot", confluenceResult.PivotValid,
-					"ema", confluenceResult.EMAValid)
+					"adx", fmt.Sprintf("%.1f", confluenceResult.ADXValue),
+					"vwap", fmt.Sprintf("%.4f", confluenceResult.VWAPValue),
+					"volume", fmt.Sprintf("%.2fx", confluenceResult.VolumeRatio),
+					"pivot_zone", confluenceResult.PivotZone,
+					"ema_trend", confluenceResult.EMATrend)
 			}
-
-			return report, nil
-		}
-
-		// Confluence passed - log success
-		if g.logger != nil {
-			g.logger.Info("Entry confluence PASSED",
-				"symbol", symbol,
-				"direction", signals.Direction,
-				"score", fmt.Sprintf("%d/5", confluenceResult.ConfluenceScore),
-				"adx", fmt.Sprintf("%.1f", confluenceResult.ADXValue),
-				"vwap", fmt.Sprintf("%.4f", confluenceResult.VWAPValue),
-				"volume", fmt.Sprintf("%.2fx", confluenceResult.VolumeRatio),
-				"pivot_zone", confluenceResult.PivotZone,
-				"ema_trend", confluenceResult.EMATrend)
 		}
 
 		// Apply reversal entry override if detected and confirmed

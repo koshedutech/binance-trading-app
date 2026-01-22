@@ -247,8 +247,19 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 		log.Printf("[USER-INIT] Initialized %d mode+strategy configs for user %s", modeStrategiesInitialized, userID)
 	}
 
+	// ===== 13. Initialize System Control Settings (Epic 7 Enhancement) =====
+	// System control switches for order tracking and position management systems
+	// Default: order_tracking=chain (new system), position_management=legacy
+	if err := r.InitializeUserSystemControl(ctx, userID); err != nil {
+		log.Printf("[USER-INIT] Warning: Failed to initialize system control: %v", err)
+	} else {
+		defaults := DefaultUserSystemControl()
+		log.Printf("[USER-INIT] Initialized system control for user %s (order_tracking=%s, position_management=%s)",
+			userID, defaults.OrderTrackingSystem, defaults.PositionManagementSystem)
+	}
+
 	// ===== Summary =====
-	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, and %d mode+strategy configs",
+	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, %d mode+strategy configs, and system control",
 		userID, modesInitialized, modesStatsInitialized, modeStrategiesInitialized)
 
 	return nil

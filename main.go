@@ -247,6 +247,13 @@ func main() {
 			log.Printf("Warning: Order Chain migrations failed: %v", err)
 		}
 		logger.Info("Order Chain migrations completed")
+
+		// Run System Control migration (045) - Epic 7 Enhancement: System switches
+		// Creates user_system_control table for order tracking and position management system selection
+		if err := db.RunSystemControlMigration(ctx); err != nil {
+			log.Printf("Warning: System Control migration failed: %v", err)
+		}
+		logger.Info("System Control migration completed")
 	}
 
 	// Create repository early for API key service

@@ -414,6 +414,13 @@ func (s *Server) setupRoutes() {
 			// Load defaults endpoints (Story 4.14)
 			settings.GET("/diff/modes/:mode", s.handleGetModeDiff)
 			settings.POST("/load-defaults", s.handleLoadAllDefaults)
+
+			// System control switches (Epic 7: Chain-based order tracking)
+			settings.GET("/system-control", s.handleGetSystemControl)
+			settings.PUT("/system-control", s.handleUpdateSystemControl)
+			settings.PUT("/system-control/order-tracking", s.handleSetOrderTrackingSystem)
+			settings.PUT("/system-control/position-management", s.handleSetPositionManagementSystem)
+			settings.PUT("/system-control/entry-decision", s.handleSetEntryDecisionSystem)
 		}
 
 		// User profile and API keys endpoints (requires auth)

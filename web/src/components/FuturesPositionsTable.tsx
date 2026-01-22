@@ -148,6 +148,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
 
     // Subscribe to WebSocket events
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+    wsService.subscribe('PNL_UPDATE', handlePositionUpdate); // Also triggered on position close
     wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
     wsService.onConnect(handleConnect);
     wsService.onDisconnect(handleDisconnect);
@@ -160,6 +161,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
 
     return () => {
       wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('PNL_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);

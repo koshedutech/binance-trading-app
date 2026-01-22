@@ -1,6 +1,6 @@
 // Story 7.15: Order Chain Tree Structure UI
 // Hierarchical display: Entry -> Position -> [TP/SL]
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -15,11 +15,12 @@ import {
   History,
   GitBranch,
   Edit3,
+  Check,
 } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import { OrderChain, ChainOrder, ORDER_TYPE_CONFIG, MODE_DISPLAY_NAMES, OrderTypeSuffix, PositionState } from './types';
 import OrderTreeNode, { buildEntryFromPositionState, TreeNodeType } from './OrderTreeNode';
-import { ModificationTree } from './ModificationHistory';
+import { ModificationTree, ModificationRowList, calculateSummaryStats, formatDollarImpact } from './ModificationHistory';
 import type { ModificationEvent, ModifiableOrderType } from './ModificationHistory/types';
 import { futuresApi } from '../../services/futuresApi';
 
@@ -27,11 +28,127 @@ interface ChainCardProps {
   chain: OrderChain;
   compact?: boolean;
   useTreeView?: boolean; // New prop to toggle tree view (default true)
+  // User fee rates for economics calculations
+  makerFeeRate?: number; // Default 0.02% = 0.0002
+  takerFeeRate?: number; // Default 0.04% = 0.0004
 }
 
-export default function ChainCard({ chain, compact = false, useTreeView = true }: ChainCardProps) {
+// Fee calculation helpers (similar to OrderEconomics.tsx)
+interface TPSLEconomics {
+  price: number;
+  expectedPnL: number;
+  expectedPnLPercent: number;
+  entryFee: number;
+  exitFee: number;
+  grossPnL: number;
+  status: string;
+  orderId: number;
+  orderType: string;
+}
+
+function calculateTPEconomics(
+  tpOrder: ChainOrder,
+  positionState: PositionState | undefined,
+  entryOrder: ChainOrder | null,
+  positionSide: 'LONG' | 'SHORT' | 'BOTH' | null,
+  takerFeeRate: number
+): TPSLEconomics | null {
+  if (!positionState && !entryOrder) return null;
+
+  const entryPrice = positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price || 0;
+  const quantity = positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty || 0;
+  const entryValue = positionState?.entryValue || entryPrice * quantity;
+  const entryFees = positionState?.entryFees || entryValue * takerFeeRate; // Assume taker if unknown
+
+  const tpPrice = tpOrder.price || tpOrder.stopPrice || 0;
+  const exitValue = tpPrice * quantity;
+  const exitFee = exitValue * takerFeeRate;
+
+  // Calculate gross and net P&L
+  const priceChange = positionSide === 'LONG'
+    ? tpPrice - entryPrice
+    : entryPrice - tpPrice;
+  const grossPnL = priceChange * quantity;
+  const expectedPnL = grossPnL - entryFees - exitFee;
+  const expectedPnLPercent = entryValue > 0 ? (expectedPnL / entryValue) * 100 : 0;
+
+  return {
+    price: tpPrice,
+    expectedPnL,
+    expectedPnLPercent,
+    entryFee: entryFees,
+    exitFee,
+    grossPnL,
+    status: tpOrder.status,
+    orderId: tpOrder.orderId,
+    orderType: tpOrder.orderType || 'TP',
+  };
+}
+
+function calculateSLEconomics(
+  slOrder: ChainOrder,
+  positionState: PositionState | undefined,
+  entryOrder: ChainOrder | null,
+  positionSide: 'LONG' | 'SHORT' | 'BOTH' | null,
+  takerFeeRate: number
+): TPSLEconomics | null {
+  if (!positionState && !entryOrder) return null;
+
+  const entryPrice = positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price || 0;
+  const quantity = positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty || 0;
+  const entryValue = positionState?.entryValue || entryPrice * quantity;
+  const entryFees = positionState?.entryFees || entryValue * takerFeeRate;
+
+  const slPrice = slOrder.stopPrice || slOrder.price || 0;
+  const exitValue = slPrice * quantity;
+  const exitFee = exitValue * takerFeeRate;
+
+  // Calculate gross and net P&L (negative for SL)
+  const priceChange = positionSide === 'LONG'
+    ? slPrice - entryPrice
+    : entryPrice - slPrice;
+  const grossPnL = priceChange * quantity;
+  const expectedPnL = grossPnL - entryFees - exitFee;
+  const expectedPnLPercent = entryValue > 0 ? (expectedPnL / entryValue) * 100 : 0;
+
+  return {
+    price: slPrice,
+    expectedPnL,
+    expectedPnLPercent,
+    entryFee: entryFees,
+    exitFee,
+    grossPnL,
+    status: slOrder.status,
+    orderId: slOrder.orderId,
+    orderType: 'SL',
+  };
+}
+
+// Format currency with appropriate precision
+function formatCurrency(value: number): string {
+  const absValue = Math.abs(value);
+  if (absValue >= 100) return `$${value.toFixed(2)}`;
+  if (absValue >= 1) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(6)}`;
+}
+
+// Format percentage with sign
+function formatPnLPercent(value: number): string {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+}
+
+export default function ChainCard({
+  chain,
+  compact = false,
+  useTreeView = true,
+  makerFeeRate = 0.0002,  // 0.02% VIP0 maker
+  takerFeeRate = 0.0004,  // 0.04% VIP0 taker
+}: ChainCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [showLegacyView, setShowLegacyView] = useState(false); // Toggle to show old horizontal view
+  const [tpSectionExpanded, setTpSectionExpanded] = useState(false);
+  const [slSectionExpanded, setSlSectionExpanded] = useState(false);
+  const [slModHistoryExpanded, setSlModHistoryExpanded] = useState(false);
   const [modificationData, setModificationData] = useState<Record<ModifiableOrderType, ModificationEvent[]>>({
     SL: [],
     TP1: [],
@@ -149,6 +266,30 @@ export default function ChainCard({ chain, compact = false, useTreeView = true }
     ...chain.tpOrders,
     ...(chain.slOrder ? [chain.slOrder] : []),
   ];
+
+  // Calculate TP economics for all TP orders
+  const tpEconomics = useMemo(() => {
+    return chain.tpOrders.map(tp =>
+      calculateTPEconomics(tp, chain.positionState, entryOrder, chain.positionSide, takerFeeRate)
+    ).filter((e): e is TPSLEconomics => e !== null);
+  }, [chain.tpOrders, chain.positionState, entryOrder, chain.positionSide, takerFeeRate]);
+
+  // Calculate SL economics
+  const slEconomics = useMemo(() => {
+    if (!chain.slOrder) return null;
+    return calculateSLEconomics(chain.slOrder, chain.positionState, entryOrder, chain.positionSide, takerFeeRate);
+  }, [chain.slOrder, chain.positionState, entryOrder, chain.positionSide, takerFeeRate]);
+
+  // Get TP modification counts
+  const tpModCount = useMemo(() => {
+    return chain.tpOrders.reduce((sum, tp) => {
+      const tpType = tp.orderType || 'TP1';
+      return sum + (chain.modificationCounts?.[tpType] || 0);
+    }, 0);
+  }, [chain.tpOrders, chain.modificationCounts]);
+
+  // Get SL modification count
+  const slModCount = chain.modificationCounts?.SL || 0;
 
   return (
     <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
@@ -413,6 +554,217 @@ export default function ChainCard({ chain, compact = false, useTreeView = true }
             )}
           </div>
 
+          {/* Collapsible Take Profit Section */}
+          {tpEconomics.length > 0 && (
+            <div className="bg-gray-900/30 rounded-lg border border-gray-700/50 overflow-hidden">
+              <button
+                onClick={(e) => { e.stopPropagation(); setTpSectionExpanded(!tpSectionExpanded); }}
+                className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  {tpSectionExpanded ? (
+                    <ChevronDown className="w-4 h-4 text-cyan-400" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 text-gray-500" />
+                  )}
+                  <TrendingUp className="w-4 h-4 text-cyan-400" />
+                  <span className="text-sm font-medium text-cyan-400">Take Profit</span>
+                  <span className="text-xs text-gray-500">({tpEconomics.length})</span>
+                  {tpModCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                      {tpModCount} mods
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {/* Show total expected gain */}
+                  <span className="text-sm font-mono text-green-400">
+                    +{formatCurrency(tpEconomics.reduce((sum, tp) => sum + Math.max(0, tp.expectedPnL), 0))}
+                  </span>
+                </div>
+              </button>
+
+              {tpSectionExpanded && (
+                <div className="px-4 pb-3 space-y-2">
+                  {tpEconomics.map((tp) => (
+                    <div
+                      key={tp.orderId}
+                      className="flex items-center justify-between py-2 px-3 bg-gray-800/50 rounded-lg text-sm"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Target className="w-4 h-4 text-cyan-400" />
+                        <span className="font-medium text-cyan-400">{tp.orderType}</span>
+                        <span className="font-mono text-gray-300">${formatPrice(tp.price)}</span>
+                        {chain.modificationCounts?.[tp.orderType] && chain.modificationCounts[tp.orderType] > 0 && (
+                          <span className="px-1 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                            {chain.modificationCounts[tp.orderType]} mods
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <div className="text-right">
+                          <span className={`font-mono ${tp.expectedPnL >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {tp.expectedPnL >= 0 ? '+' : ''}{formatCurrency(tp.expectedPnL)}
+                          </span>
+                          <span className={`ml-2 text-xs ${tp.expectedPnL >= 0 ? 'text-green-400/70' : 'text-red-400/70'}`}>
+                            ({formatPnLPercent(tp.expectedPnLPercent)})
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {tp.status === 'FILLED' ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-green-400" />
+                              <span className="text-xs text-green-400">Hit</span>
+                            </>
+                          ) : tp.status === 'CANCELED' ? (
+                            <span className="text-xs text-gray-500">Cancelled</span>
+                          ) : (
+                            <>
+                              <Clock className="w-3.5 h-3.5 text-yellow-400" />
+                              <span className="text-xs text-yellow-400">Pending</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Collapsible Stop Loss Section */}
+          {slEconomics && (
+            <div className="bg-gray-900/30 rounded-lg border border-gray-700/50 overflow-hidden">
+              <button
+                onClick={(e) => { e.stopPropagation(); setSlSectionExpanded(!slSectionExpanded); }}
+                className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-800/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  {slSectionExpanded ? (
+                    <ChevronDown className="w-4 h-4 text-red-400" />
+                  ) : (
+                    <ChevronRight className="w-4 h-4 text-gray-500" />
+                  )}
+                  <TrendingDown className="w-4 h-4 text-red-400" />
+                  <span className="text-sm font-medium text-red-400">Stop Loss</span>
+                  {slModCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                      {slModCount} mods
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {/* Show max loss */}
+                  <span className="text-sm font-mono text-red-400">
+                    {formatCurrency(slEconomics.expectedPnL)}
+                  </span>
+                </div>
+              </button>
+
+              {slSectionExpanded && (
+                <div className="px-4 pb-3 space-y-2">
+                  {/* SL Main Row */}
+                  <div className="flex items-center justify-between py-2 px-3 bg-gray-800/50 rounded-lg text-sm">
+                    <div className="flex items-center gap-3">
+                      <Shield className="w-4 h-4 text-red-400" />
+                      <span className="font-medium text-red-400">SL</span>
+                      <span className="font-mono text-gray-300">${formatPrice(slEconomics.price)}</span>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="text-right">
+                        <span className="text-gray-400 text-xs mr-2">Max Loss:</span>
+                        <span className="font-mono text-red-400">
+                          {formatCurrency(slEconomics.expectedPnL)}
+                        </span>
+                        <span className="ml-2 text-xs text-red-400/70">
+                          ({formatPnLPercent(slEconomics.expectedPnLPercent)})
+                        </span>
+                      </div>
+                      {slModCount > 0 && (
+                        <span className="text-xs text-gray-400">
+                          Mods: {slModCount}
+                        </span>
+                      )}
+                      <div className="flex items-center gap-1.5">
+                        {slEconomics.status === 'FILLED' ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-red-400" />
+                            <span className="text-xs text-red-400">Hit</span>
+                          </>
+                        ) : slEconomics.status === 'CANCELED' ? (
+                          <span className="text-xs text-gray-500">Cancelled</span>
+                        ) : (
+                          <>
+                            <Shield className="w-3.5 h-3.5 text-green-400" />
+                            <span className="text-xs text-green-400">Active</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* SL Modification History (expandable sub-section) */}
+                  {slModCount > 0 && (
+                    <div className="ml-6">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSlModHistoryExpanded(!slModHistoryExpanded); }}
+                        className="flex items-center gap-2 text-xs text-gray-500 hover:text-gray-400 transition-colors py-1"
+                      >
+                        {slModHistoryExpanded ? (
+                          <ChevronDown className="w-3 h-3" />
+                        ) : (
+                          <ChevronRight className="w-3 h-3" />
+                        )}
+                        <History className="w-3 h-3" />
+                        <span>Modification History ({slModCount})</span>
+                      </button>
+
+                      {slModHistoryExpanded && modificationData.SL.length > 0 && (
+                        <div className="mt-2 ml-4 bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
+                          {/* Summary header */}
+                          {(() => {
+                            const summary = calculateSummaryStats(modificationData.SL);
+                            return (
+                              <div className="flex items-center gap-3 mb-2 pb-2 border-b border-gray-700/50 text-xs">
+                                <span className="flex items-center gap-1 text-gray-400">
+                                  <History className="w-3.5 h-3.5 text-purple-400" />
+                                  {summary.totalModifications} modification{summary.totalModifications !== 1 ? 's' : ''}
+                                </span>
+                                <span className="text-gray-600">|</span>
+                                <span className="text-gray-400">
+                                  Initial: <span className="font-mono text-gray-300">${summary.initialPrice.toFixed(2)}</span>
+                                </span>
+                                <span className="text-gray-600">|</span>
+                                <span className="text-gray-400">
+                                  Current: <span className="font-mono text-green-400">${slEconomics.price.toFixed(2)}</span>
+                                </span>
+                                <span className="text-gray-600">|</span>
+                                <span className={`font-medium ${summary.netDollarImpact >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                  Net: {formatDollarImpact(summary.netDollarImpact)}
+                                </span>
+                              </div>
+                            );
+                          })()}
+                          <ModificationRowList
+                            events={modificationData.SL}
+                            orderType="SL"
+                          />
+                        </div>
+                      )}
+
+                      {slModHistoryExpanded && modificationData.SL.length === 0 && !modificationLoading && (
+                        <div className="mt-2 ml-4 text-xs text-gray-500">
+                          Loading modification history...
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Chain info footer - Show ENTRY values only, not sum of all orders */}
           <div className="pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             <div>
@@ -665,38 +1017,77 @@ function LegacyChainView({
               ) : (
                 <>
                   {/* Stop Loss Modifications */}
-                  {chain.slOrder && (
-                    <ModificationTree
-                      chainId={chain.chainId}
-                      orderType="SL"
-                      currentPrice={chain.slOrder.stopPrice || chain.slOrder.price}
-                      events={modificationData.SL}
-                      positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
-                      compact={true}
-                    />
+                  {chain.slOrder && modificationData.SL.length > 0 && (
+                    <div className="bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
+                      <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-700/50">
+                        <Shield className="w-4 h-4 text-red-400" />
+                        <span className="text-sm font-medium text-red-400">Stop Loss</span>
+                        <span className="text-xs text-gray-500">
+                          (${(chain.slOrder.stopPrice || chain.slOrder.price).toFixed(2)})
+                        </span>
+                        {(() => {
+                          const summary = calculateSummaryStats(modificationData.SL);
+                          return (
+                            <>
+                              <span className="px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                                {summary.totalModifications} mod{summary.totalModifications !== 1 ? 's' : ''}
+                              </span>
+                              <span className={`ml-auto text-xs font-medium ${summary.netDollarImpact >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                Net: {formatDollarImpact(summary.netDollarImpact)}
+                              </span>
+                            </>
+                          );
+                        })()}
+                      </div>
+                      <ModificationRowList
+                        events={modificationData.SL}
+                        orderType="SL"
+                      />
+                    </div>
                   )}
 
                   {/* Take Profit Modifications */}
                   {chain.tpOrders.map((tp) => {
                     const tpType = tp.orderType as ModifiableOrderType;
                     if (!tpType || !['TP1', 'TP2', 'TP3', 'TP4'].includes(tpType)) return null;
+                    const events = modificationData[tpType] || [];
+                    if (events.length === 0) return null;
+                    const summary = calculateSummaryStats(events);
                     return (
-                      <ModificationTree
-                        key={tp.orderId}
-                        chainId={chain.chainId}
-                        orderType={tpType}
-                        currentPrice={tp.price}
-                        events={modificationData[tpType] || []}
-                        positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
-                        compact={true}
-                      />
+                      <div key={tp.orderId} className="bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
+                        <div className="flex items-center gap-2 mb-2 pb-2 border-b border-gray-700/50">
+                          <Target className="w-4 h-4 text-cyan-400" />
+                          <span className="text-sm font-medium text-cyan-400">{tpType}</span>
+                          <span className="text-xs text-gray-500">
+                            (${tp.price.toFixed(2)})
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                            {summary.totalModifications} mod{summary.totalModifications !== 1 ? 's' : ''}
+                          </span>
+                          <span className={`ml-auto text-xs font-medium ${summary.netDollarImpact >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            Net: {formatDollarImpact(summary.netDollarImpact)}
+                          </span>
+                        </div>
+                        <ModificationRowList
+                          events={events}
+                          orderType={tpType}
+                        />
+                      </div>
                     );
                   })}
 
-                  {/* Empty state if no SL/TP orders */}
+                  {/* Empty state if no SL/TP orders or no modifications */}
                   {!chain.slOrder && chain.tpOrders.length === 0 && (
                     <div className="text-sm text-gray-500 py-4 text-center">
                       No SL/TP orders to show modification history for.
+                    </div>
+                  )}
+                  {chain.slOrder && modificationData.SL.length === 0 && chain.tpOrders.every(tp => {
+                    const tpType = tp.orderType as ModifiableOrderType;
+                    return !tpType || (modificationData[tpType] || []).length === 0;
+                  }) && (
+                    <div className="text-sm text-gray-500 py-4 text-center">
+                      No modifications recorded for this chain.
                     </div>
                   )}
                 </>

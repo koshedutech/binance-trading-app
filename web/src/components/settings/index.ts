@@ -7,3 +7,4 @@ export { default as EfficiencyExitSettings } from './EfficiencyExitSettings';
 export { default as DynamicSLTPSettings } from './DynamicSLTPSettings';
 export { default as ModeStrategySettings } from './ModeStrategySettings';
 export { default as StrategySettingsForm } from './StrategySettingsForm';
+export { default as SystemControlSettings } from './SystemControlSettings';

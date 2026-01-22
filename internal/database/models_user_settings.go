@@ -1344,3 +1344,102 @@ func ValidModes() []string {
 func ValidStrategies() []string {
 	return []string{"trend_following", "mean_reversion", "breakout", "range_trading"}
 }
+
+// ====== SYSTEM CONTROL SWITCHES ======
+
+// System control constants
+const (
+	// Order tracking systems
+	OrderTrackingChain  = "chain"  // New chain-based system (order_chains, position_states)
+	OrderTrackingLegacy = "legacy" // Old system (trade_lifecycle_events with source: ginie)
+	OrderTrackingBoth   = "both"   // Log to both systems (for migration/testing)
+
+	// Position management systems
+	PositionManagementLegacy = "legacy" // Old Ginie position management
+	PositionManagementChain  = "chain"  // New chain-based position tracking
+
+	// Entry decision systems
+	EntryDecisionLegacy = "legacy" // Old Ginie confluence system
+	EntryDecisionChain  = "chain"  // New chain-based entry decision system
+)
+
+// UserSystemControl represents per-user system control switches
+// Epic 7 Enhancement: Control switches for selecting between legacy and new trading system components
+type UserSystemControl struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+
+	// Order Tracking System
+	// 'chain' = New chain-based system (order_chains, order_chain_events, position_states)
+	// 'legacy' = Old system (trade_lifecycle_events with source: ginie)
+	// 'both' = Log to both systems (for migration/testing)
+	OrderTrackingSystem string `json:"order_tracking_system"`
+
+	// Position Management System
+	// 'legacy' = Old Ginie position management (current default)
+	// 'chain' = New chain-based position tracking
+	PositionManagementSystem string `json:"position_management_system"`
+
+	// Entry Decision System
+	// 'legacy' = Old Ginie confluence system (current default)
+	// 'chain' = New chain-based entry decision system
+	EntryDecisionSystem string `json:"entry_decision_system"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// DefaultUserSystemControl returns default system control settings
+// Default: chain for order tracking, legacy for position management and entry decision
+func DefaultUserSystemControl() *UserSystemControl {
+	return &UserSystemControl{
+		OrderTrackingSystem:      OrderTrackingChain,       // Use new chain system by default
+		PositionManagementSystem: PositionManagementLegacy, // Keep legacy for now until chain is stable
+		EntryDecisionSystem:      EntryDecisionLegacy,      // Keep legacy Ginie confluence by default
+	}
+}
+
+// IsOrderTrackingChain returns true if order tracking should use the new chain-based system
+func (u *UserSystemControl) IsOrderTrackingChain() bool {
+	return u.OrderTrackingSystem == OrderTrackingChain || u.OrderTrackingSystem == OrderTrackingBoth
+}
+
+// IsOrderTrackingLegacy returns true if order tracking should use the legacy system
+func (u *UserSystemControl) IsOrderTrackingLegacy() bool {
+	return u.OrderTrackingSystem == OrderTrackingLegacy || u.OrderTrackingSystem == OrderTrackingBoth
+}
+
+// IsPositionManagementChain returns true if position management should use the new chain-based system
+func (u *UserSystemControl) IsPositionManagementChain() bool {
+	return u.PositionManagementSystem == PositionManagementChain
+}
+
+// IsPositionManagementLegacy returns true if position management should use the legacy system
+func (u *UserSystemControl) IsPositionManagementLegacy() bool {
+	return u.PositionManagementSystem == PositionManagementLegacy
+}
+
+// IsEntryDecisionChain returns true if entry decision should use the new chain-based system
+func (u *UserSystemControl) IsEntryDecisionChain() bool {
+	return u.EntryDecisionSystem == EntryDecisionChain
+}
+
+// IsEntryDecisionLegacy returns true if entry decision should use the legacy Ginie confluence system
+func (u *UserSystemControl) IsEntryDecisionLegacy() bool {
+	return u.EntryDecisionSystem == EntryDecisionLegacy
+}
+
+// ValidOrderTrackingSystems returns valid order tracking system values
+func ValidOrderTrackingSystems() []string {
+	return []string{OrderTrackingChain, OrderTrackingLegacy, OrderTrackingBoth}
+}
+
+// ValidPositionManagementSystems returns valid position management system values
+func ValidPositionManagementSystems() []string {
+	return []string{PositionManagementLegacy, PositionManagementChain}
+}
+
+// ValidEntryDecisionSystems returns valid entry decision system values
+func ValidEntryDecisionSystems() []string {
+	return []string{EntryDecisionLegacy, EntryDecisionChain}
+}
