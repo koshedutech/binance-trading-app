@@ -254,6 +254,7 @@ export interface StrategyComparisonResponse {
   total_fields: number;
   matching_fields: number;
   differences: StrategyFieldComparison[];
+  all_values?: StrategyFieldComparison[];  // All fields including matches
 }
 
 // ==================== UI State Types ====================

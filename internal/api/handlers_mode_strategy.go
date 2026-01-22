@@ -640,6 +640,7 @@ type StrategyComparisonResponse struct {
 	TotalFields    int                       `json:"total_fields"`
 	MatchingFields int                       `json:"matching_fields"`
 	Differences    []StrategyFieldComparison `json:"differences"`
+	AllValues      []StrategyFieldComparison `json:"all_values"` // All fields including matches
 }
 
 func (s *Server) handleCompareModeStrategy(c *gin.Context) {
@@ -683,24 +684,27 @@ func (s *Server) handleCompareModeStrategy(c *gin.Context) {
 	// Get default config
 	defaultConfig := database.DefaultModeStrategyConfig(mode, strategy)
 
-	// Compare configs and build differences
+	// Compare configs and build differences and all values
 	differences := []StrategyFieldComparison{}
+	allValues := []StrategyFieldComparison{}
 	totalFields := 0
 	matchingFields := 0
 
-	// Helper to compare and add field
+	// Helper to compare and add field (adds to both allValues and differences if not matching)
 	compareField := func(path string, current, defaultVal interface{}) {
 		totalFields++
 		match := compareValues(current, defaultVal)
+		field := StrategyFieldComparison{
+			Path:    path,
+			Current: current,
+			Default: defaultVal,
+			Match:   match,
+		}
+		allValues = append(allValues, field)
 		if match {
 			matchingFields++
 		} else {
-			differences = append(differences, StrategyFieldComparison{
-				Path:    path,
-				Current: current,
-				Default: defaultVal,
-				Match:   false,
-			})
+			differences = append(differences, field)
 		}
 	}
 
@@ -740,22 +744,14 @@ func (s *Server) handleCompareModeStrategy(c *gin.Context) {
 	compareField("scoring.volume_weight", currentConfig.Scoring.VolumeWeight, defaultConfig.Scoring.VolumeWeight)
 	compareField("scoring.sentiment_weight", currentConfig.Scoring.SentimentWeight, defaultConfig.Scoring.SentimentWeight)
 
-	// Compare entry conditions (compare as JSON since it's a map)
-	if currentConfig.EntryConditions != nil || defaultConfig.EntryConditions != nil {
-		currentJSON, _ := json.Marshal(currentConfig.EntryConditions)
-		defaultJSON, _ := json.Marshal(defaultConfig.EntryConditions)
-		if string(currentJSON) != string(defaultJSON) {
-			// Add individual entry condition differences
-			for key, defaultVal := range defaultConfig.EntryConditions {
-				currentVal := currentConfig.EntryConditions[key]
-				compareField("entry_conditions."+key, currentVal, defaultVal)
+	// Compare entry conditions (compare each field individually)
+	if defaultConfig.EntryConditions != nil {
+		for key, defaultVal := range defaultConfig.EntryConditions {
+			currentVal := interface{}(nil)
+			if currentConfig.EntryConditions != nil {
+				currentVal = currentConfig.EntryConditions[key]
 			}
-		} else {
-			// Count entry condition fields as matching
-			for range defaultConfig.EntryConditions {
-				totalFields++
-				matchingFields++
-			}
+			compareField("entry_conditions."+key, currentVal, defaultVal)
 		}
 	}
 
@@ -768,6 +764,7 @@ func (s *Server) handleCompareModeStrategy(c *gin.Context) {
 		TotalFields:    totalFields,
 		MatchingFields: matchingFields,
 		Differences:    differences,
+		AllValues:      allValues,
 	}
 
 	c.JSON(http.StatusOK, response)
