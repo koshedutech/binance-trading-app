@@ -20,6 +20,15 @@ import { RegimeStatsCard } from './RegimeStatsCard';
 import { BlockingReasonChart } from './BlockingReasonChart';
 import { RefreshCw, AlertCircle, BarChart3 } from 'lucide-react';
 
+// Token storage key (must match auth system)
+const ACCESS_TOKEN_KEY = 'access_token';
+
+// Helper to get auth headers for API calls
+function getAuthHeaders(): Record<string, string> {
+  const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 interface DecisionEngineDashboardProps {
   className?: string;
 }
@@ -44,7 +53,8 @@ export function DecisionEngineDashboard({ className = '' }: DecisionEngineDashbo
     try {
       // Try the aggregate endpoint first
       const response = await axios.get<{ success: boolean; data: DashboardStats; error?: string }>(
-        `/api/futures/decision/dashboard/stats?range=${timeRange}`
+        `/api/futures/decision/dashboard/stats?range=${timeRange}`,
+        { headers: getAuthHeaders() }
       );
 
       if (response.data.success && response.data.data) {
@@ -78,7 +88,8 @@ export function DecisionEngineDashboard({ className = '' }: DecisionEngineDashbo
     // Fetch strategy performance
     try {
       const perfResponse = await axios.get<{ success: boolean; performances: StrategyPerformance[] }>(
-        `/api/strategy-performance?range=${timeRange}`
+        `/api/strategy-performance?range=${timeRange}`,
+        { headers: getAuthHeaders() }
       );
       if (perfResponse.data.performances) {
         setStrategyPerformances(perfResponse.data.performances);
@@ -93,7 +104,8 @@ export function DecisionEngineDashboard({ className = '' }: DecisionEngineDashbo
     // Fetch calibration data for default strategy
     try {
       const calibResponse = await axios.get<CalibrationSummary>(
-        '/api/futures/calibration/data/trend_following'
+        '/api/futures/calibration/data/trend_following',
+        { headers: getAuthHeaders() }
       );
       if (calibResponse.data) {
         setCalibrationSummary(calibResponse.data);
@@ -108,7 +120,8 @@ export function DecisionEngineDashboard({ className = '' }: DecisionEngineDashbo
     // Fetch indicator performance for score distribution
     try {
       const indicatorResponse = await axios.get(
-        '/api/futures/indicators/performance/trend_following'
+        '/api/futures/indicators/performance/trend_following',
+        { headers: getAuthHeaders() }
       );
       if (indicatorResponse.data) {
         // Map indicator performance to score distribution format

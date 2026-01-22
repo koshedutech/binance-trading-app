@@ -100,14 +100,67 @@ export async function getModeStrategy(
 
 // ==================== PUT /api/futures/modes/:mode/strategies/:strategy ====================
 // Update a specific strategy configuration
+// Backend expects: { enabled?, priority?, supported_regimes?, settings: {...} }
+// Settings must be nested inside a "settings" object
 export async function updateModeStrategy(
   mode: ModeName,
   strategy: StrategyName,
-  config: UpdateModeStrategyRequest
+  config: UpdateModeStrategyRequest | ModeStrategyConfig
 ): Promise<UpdateModeStrategyResponse> {
+  // Transform flat ModeStrategyConfig to backend-expected format
+  // Backend expects settings fields nested inside a "settings" object
+  const requestBody: {
+    enabled?: boolean;
+    priority?: number;
+    supported_regimes?: string[];
+    settings: Record<string, unknown>;
+  } = {
+    settings: {},
+  };
+
+  // Handle enabled/priority/supported_regimes at top level
+  if ('enabled' in config && config.enabled !== undefined) {
+    requestBody.enabled = config.enabled;
+  }
+  if ('priority' in config && config.priority !== undefined) {
+    requestBody.priority = config.priority;
+  }
+  if ('supported_regimes' in config && config.supported_regimes !== undefined) {
+    requestBody.supported_regimes = config.supported_regimes;
+  }
+
+  // All other settings go inside the "settings" object
+  if ('leverage' in config && config.leverage !== undefined) {
+    requestBody.settings.leverage = config.leverage;
+  }
+  if ('max_positions' in config && config.max_positions !== undefined) {
+    requestBody.settings.max_positions = config.max_positions;
+  }
+  if ('base_size_usd' in config && config.base_size_usd !== undefined) {
+    requestBody.settings.base_size_usd = config.base_size_usd;
+  }
+  if ('timeframe' in config && config.timeframe !== undefined) {
+    requestBody.settings.timeframe = config.timeframe;
+  }
+  if ('sltp' in config && config.sltp !== undefined) {
+    requestBody.settings.sltp = config.sltp;
+  }
+  if ('confidence' in config && config.confidence !== undefined) {
+    requestBody.settings.confidence = config.confidence;
+  }
+  if ('entry_conditions' in config && config.entry_conditions !== undefined) {
+    requestBody.settings.entry_conditions = config.entry_conditions;
+  }
+  if ('exit_conditions' in config && config.exit_conditions !== undefined) {
+    requestBody.settings.exit_conditions = config.exit_conditions;
+  }
+  if ('scoring' in config && config.scoring !== undefined) {
+    requestBody.settings.scoring = config.scoring;
+  }
+
   const response = await axios.put<UpdateModeStrategyResponse>(
     `${BASE_URL}/${mode}/strategies/${strategy}`,
-    config,
+    requestBody,
     { headers: getAuthHeaders() }
   );
   return response.data;

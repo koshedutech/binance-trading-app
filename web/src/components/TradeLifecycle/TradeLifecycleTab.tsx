@@ -13,6 +13,10 @@ import {
   Target,
   Shield,
   History,
+  ChevronDown,
+  ChevronRight,
+  GitBranch,
+  Briefcase,
 } from 'lucide-react';
 import { futuresApi, OrderChainWithState, PositionStateInfo, HistoricalOrderChain } from '../../services/futuresApi';
 import { wsService } from '../../services/websocket';
@@ -52,6 +56,11 @@ export default function TradeLifecycleTab({
     symbol: 'all',
     side: 'all',
   });
+
+  // Section expansion states (must be declared before any early returns)
+  const [tradeCycleExpanded, setTradeCycleExpanded] = useState(true);
+  const [ordersExpanded, setOrdersExpanded] = useState(true);
+  const [positionsExpanded, setPositionsExpanded] = useState(true);
 
   // Helper: Convert API PositionStateInfo to frontend PositionState
   const mapPositionState = (state: PositionStateInfo): PositionState => ({
@@ -457,6 +466,26 @@ export default function TradeLifecycleTab({
     });
   };
 
+  // Calculate position stats from chains that have active positions
+  // Must be before any early returns to follow React hooks rules
+  const positionStats = useMemo(() => {
+    const activePositions = chains.filter(c =>
+      c.positionState &&
+      (c.positionState.status === 'ACTIVE' || c.positionState.status === 'PARTIAL')
+    );
+    const longPositions = activePositions.filter(c => c.positionSide === 'LONG');
+    const shortPositions = activePositions.filter(c => c.positionSide === 'SHORT');
+    const totalPnl = activePositions.reduce((sum, c) => sum + (c.positionState?.realizedPnl || 0), 0);
+
+    return {
+      total: activePositions.length,
+      long: longPositions.length,
+      short: shortPositions.length,
+      totalPnl,
+      positions: activePositions,
+    };
+  }, [chains]);
+
   // Loading state
   if (loading && chains.length === 0) {
     return (
@@ -483,156 +512,341 @@ export default function TradeLifecycleTab({
 
   return (
     <div className="space-y-4">
-      {/* Entry Decision Engine - Separate expandable module */}
-      <EntryDecisionEngineCard defaultExpanded={true} />
-
-      {/* Order Chains Card */}
+      {/* ==================== TRADE CYCLE MAIN CONTAINER ==================== */}
       <div className="bg-gray-800 rounded-lg border border-gray-700">
-        {/* Header */}
-        <div className="p-4 border-b border-gray-700">
-        <div className="flex items-center justify-between mb-4">
+        {/* Trade Cycle Header - Always visible */}
+        <button
+          type="button"
+          onClick={() => setTradeCycleExpanded(!tradeCycleExpanded)}
+          className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-700/30 transition-colors rounded-t-lg"
+        >
           <div className="flex items-center gap-3">
-            <Layers className="w-5 h-5 text-purple-400" />
-            <h3 className="text-lg font-semibold text-gray-200">Order Chains</h3>
-            {isHistoricalMode && (
-              <span className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400">
-                <History className="w-3 h-3" />
-                Historical
-              </span>
+            {tradeCycleExpanded ? (
+              <ChevronDown className="w-5 h-5 text-gray-400" />
+            ) : (
+              <ChevronRight className="w-5 h-5 text-gray-400" />
             )}
-            <ConnectionStatus />
-            <span className="text-sm text-gray-500">
-              ({filteredChains.length} chain{filteredChains.length !== 1 ? 's' : ''})
+            <GitBranch className="w-5 h-5 text-cyan-400" />
+            <span className="font-semibold text-white text-lg">Trade Cycle</span>
+            <span className="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded">
+              Entry → Orders → Positions
             </span>
           </div>
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-purple-400">{stats.activeChains} active orders</span>
+            <span className="text-gray-500">|</span>
+            <span className="text-green-400">{positionStats.total} positions</span>
+          </div>
+        </button>
 
-          <button
-            onClick={() => { setLoading(true); fetchOrders(); }}
-            className="p-1.5 hover:bg-gray-700 rounded transition-colors"
-            title="Refresh"
-          >
-            <RefreshCw className={`w-4 h-4 text-gray-400 ${loading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
+        {/* Trade Cycle Content - Three expandable sections */}
+        {tradeCycleExpanded && (
+          <div className="border-t border-gray-700 p-4 space-y-4">
 
-        {/* Error banner - shows even when we have chains (refresh failure) */}
-        {error && chains.length > 0 && (
-          <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
-            <div className="flex items-center gap-2 text-red-400">
-              <AlertTriangle className="w-4 h-4" />
-              <span className="text-sm">Refresh failed: {error}</span>
+            {/* ==================== SECTION 1: ENTRY DECISION ENGINE ==================== */}
+            <EntryDecisionEngineCard defaultExpanded={true} />
+
+            {/* ==================== SECTION 2: ORDERS ==================== */}
+            <div className="bg-gray-900/50 rounded-lg border border-gray-700">
+              {/* Orders Header - Expandable */}
+              <button
+                type="button"
+                onClick={() => setOrdersExpanded(!ordersExpanded)}
+                className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-700/30 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  {ordersExpanded ? (
+                    <ChevronDown className="w-5 h-5 text-gray-400" />
+                  ) : (
+                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                  )}
+                  <Layers className="w-5 h-5 text-purple-400" />
+                  <span className="font-semibold text-white">Orders</span>
+                  {isHistoricalMode && (
+                    <span className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400">
+                      <History className="w-3 h-3" />
+                      Historical
+                    </span>
+                  )}
+                  <span className="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded">
+                    {filteredChains.length} chain{filteredChains.length !== 1 ? 's' : ''}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <ConnectionStatus />
+                  {!loading && stats.totalChains > 0 && (
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-green-400">{stats.activeChains} active</span>
+                      <span className="text-gray-500">|</span>
+                      <span className="text-yellow-400">{stats.partialChains} partial</span>
+                      <span className="text-gray-500">|</span>
+                      <span className="text-blue-400">{stats.completedChains} done</span>
+                    </div>
+                  )}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setLoading(true); fetchOrders(); }}
+                    className="p-1.5 hover:bg-gray-700 rounded transition-colors"
+                    title="Refresh"
+                  >
+                    <RefreshCw className={`w-4 h-4 text-gray-400 ${loading ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+              </button>
+
+              {/* Orders Content */}
+              {ordersExpanded && (
+                <div className="border-t border-gray-700">
+                  {/* Error banner */}
+                  {error && chains.length > 0 && (
+                    <div className="m-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-red-400">
+                        <AlertTriangle className="w-4 h-4" />
+                        <span className="text-sm">Refresh failed: {error}</span>
+                      </div>
+                      <button
+                        onClick={() => setError(null)}
+                        className="text-red-400 hover:text-red-300 text-sm"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Stats summary */}
+                  <div className="px-4 pt-4">
+                    <div className="grid grid-cols-4 md:grid-cols-8 gap-3 mb-4">
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="text-lg font-semibold text-gray-200">{stats.totalChains}</div>
+                        <div className="text-xs text-gray-500">Total</div>
+                      </div>
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="text-lg font-semibold text-green-400">{stats.activeChains}</div>
+                        <div className="text-xs text-gray-500">Active</div>
+                      </div>
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="text-lg font-semibold text-yellow-400">{stats.partialChains}</div>
+                        <div className="text-xs text-gray-500">Partial</div>
+                      </div>
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="text-lg font-semibold text-blue-400">{stats.completedChains}</div>
+                        <div className="text-xs text-gray-500">Complete</div>
+                      </div>
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="text-lg font-semibold text-gray-200">{stats.totalOrders}</div>
+                        <div className="text-xs text-gray-500">Orders</div>
+                      </div>
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <TrendingUp className="w-3.5 h-3.5 text-green-400" />
+                          <span className="text-lg font-semibold text-green-400">{stats.longChains}</span>
+                        </div>
+                        <div className="text-xs text-gray-500">Long</div>
+                      </div>
+                      <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+                          <span className="text-lg font-semibold text-red-400">{stats.shortChains}</span>
+                        </div>
+                        <div className="text-xs text-gray-500">Short</div>
+                      </div>
+                      {stats.fallbackChains > 0 && (
+                        <div className="bg-gray-800/50 rounded-lg p-2 text-center">
+                          <div className="text-lg font-semibold text-orange-400">{stats.fallbackChains}</div>
+                          <div className="text-xs text-gray-500">Fallback</div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Filters */}
+                    <ChainFilters
+                      filters={filters}
+                      onFilterChange={setFilters}
+                      symbols={symbols}
+                      onReset={resetFilters}
+                    />
+                  </div>
+
+                  {/* Chains list */}
+                  <div className="p-4 space-y-3 max-h-[400px] overflow-y-auto">
+                    {filteredChains.length === 0 ? (
+                      <div className="text-center py-8">
+                        <Layers className="w-12 h-12 mx-auto mb-3 text-gray-600" />
+                        <p className="text-gray-400">No order chains found</p>
+                        <p className="text-sm text-gray-500 mt-1">
+                          {chains.length === 0
+                            ? 'Order chains will appear when orders are placed'
+                            : 'Try adjusting your filters'}
+                        </p>
+                      </div>
+                    ) : (
+                      filteredChains.map((chain) => (
+                        <ChainCard key={chain.chainId} chain={chain} />
+                      ))
+                    )}
+                  </div>
+
+                  {/* Legend */}
+                  <div className="px-4 py-3 border-t border-gray-700 bg-gray-800/30">
+                    <div className="flex items-center gap-6 text-xs text-gray-500">
+                      <span className="font-medium">Order Types:</span>
+                      <div className="flex items-center gap-1">
+                        <TrendingUp className="w-3 h-3 text-green-400" />
+                        <span>Entry</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Target className="w-3 h-3 text-cyan-400" />
+                        <span>Take Profit</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Shield className="w-3 h-3 text-red-400" />
+                        <span>Stop Loss</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Layers className="w-3 h-3 text-blue-400" />
+                        <span>DCA</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Activity className="w-3 h-3 text-purple-400" />
+                        <span>Rebuy</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <BarChart3 className="w-3 h-3 text-yellow-400" />
+                        <span>Hedge</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
-            <button
-              onClick={() => setError(null)}
-              className="text-red-400 hover:text-red-300 text-sm"
-            >
-              Dismiss
-            </button>
+
+            {/* ==================== SECTION 3: POSITIONS ==================== */}
+            <div className="bg-gray-900/50 rounded-lg border border-gray-700">
+              {/* Positions Header - Expandable */}
+              <button
+                type="button"
+                onClick={() => setPositionsExpanded(!positionsExpanded)}
+                className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-700/30 transition-colors"
+              >
+                <div className="flex items-center gap-3">
+                  {positionsExpanded ? (
+                    <ChevronDown className="w-5 h-5 text-gray-400" />
+                  ) : (
+                    <ChevronRight className="w-5 h-5 text-gray-400" />
+                  )}
+                  <Briefcase className="w-5 h-5 text-green-400" />
+                  <span className="font-semibold text-white">Positions</span>
+                  <span className="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded">
+                    {positionStats.total} active position{positionStats.total !== 1 ? 's' : ''}
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  {positionStats.total > 0 && (
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-green-400 flex items-center gap-1">
+                        <TrendingUp className="w-3 h-3" />
+                        {positionStats.long} long
+                      </span>
+                      <span className="text-gray-500">|</span>
+                      <span className="text-red-400 flex items-center gap-1">
+                        <TrendingDown className="w-3 h-3" />
+                        {positionStats.short} short
+                      </span>
+                      {positionStats.totalPnl !== 0 && (
+                        <>
+                          <span className="text-gray-500">|</span>
+                          <span className={positionStats.totalPnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                            PnL: {positionStats.totalPnl >= 0 ? '+' : ''}{positionStats.totalPnl.toFixed(2)} USDT
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </button>
+
+              {/* Positions Content */}
+              {positionsExpanded && (
+                <div className="border-t border-gray-700 p-4">
+                  {positionStats.total === 0 ? (
+                    <div className="text-center py-8">
+                      <Briefcase className="w-12 h-12 mx-auto mb-3 text-gray-600" />
+                      <p className="text-gray-400">No active positions</p>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Positions will appear here when orders are filled and positions are opened.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 max-h-[400px] overflow-y-auto">
+                      {positionStats.positions.map((chain) => (
+                        <div
+                          key={chain.chainId}
+                          className="bg-gray-800/50 rounded-lg p-4 border border-gray-700/50"
+                        >
+                          {/* Position Header */}
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-3">
+                              <span className="font-bold text-white text-lg">{chain.symbol}</span>
+                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
+                                chain.positionSide === 'LONG'
+                                  ? 'bg-green-500/20 text-green-400'
+                                  : 'bg-red-500/20 text-red-400'
+                              }`}>
+                                {chain.positionSide === 'LONG' ? (
+                                  <TrendingUp className="w-3 h-3" />
+                                ) : (
+                                  <TrendingDown className="w-3 h-3" />
+                                )}
+                                {chain.positionSide}
+                              </span>
+                              {chain.modeCode && (
+                                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                                  {chain.modeCode}
+                                </span>
+                              )}
+                            </div>
+                            <span className={`text-sm font-medium ${
+                              (chain.positionState?.realizedPnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                            }`}>
+                              {(chain.positionState?.realizedPnl || 0) >= 0 ? '+' : ''}
+                              {(chain.positionState?.realizedPnl || 0).toFixed(4)} USDT
+                            </span>
+                          </div>
+
+                          {/* Position Details */}
+                          <div className="grid grid-cols-4 gap-4 text-sm">
+                            <div>
+                              <div className="text-xs text-gray-500">Entry Price</div>
+                              <div className="text-gray-200">${chain.positionState?.entryPrice.toFixed(4)}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500">Quantity</div>
+                              <div className="text-gray-200">{chain.positionState?.entryQuantity}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500">Remaining</div>
+                              <div className="text-gray-200">{chain.positionState?.remainingQuantity}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-gray-500">Status</div>
+                              <div className={`${
+                                chain.positionState?.status === 'ACTIVE' ? 'text-green-400' :
+                                chain.positionState?.status === 'PARTIAL' ? 'text-yellow-400' :
+                                'text-gray-400'
+                              }`}>
+                                {chain.positionState?.status}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
           </div>
         )}
-
-        {/* Stats summary */}
-        <div className="grid grid-cols-4 md:grid-cols-8 gap-3 mb-4">
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="text-lg font-semibold text-gray-200">{stats.totalChains}</div>
-            <div className="text-xs text-gray-500">Total</div>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="text-lg font-semibold text-green-400">{stats.activeChains}</div>
-            <div className="text-xs text-gray-500">Active</div>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="text-lg font-semibold text-yellow-400">{stats.partialChains}</div>
-            <div className="text-xs text-gray-500">Partial</div>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="text-lg font-semibold text-blue-400">{stats.completedChains}</div>
-            <div className="text-xs text-gray-500">Complete</div>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="text-lg font-semibold text-gray-200">{stats.totalOrders}</div>
-            <div className="text-xs text-gray-500">Orders</div>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="flex items-center justify-center gap-1">
-              <TrendingUp className="w-3.5 h-3.5 text-green-400" />
-              <span className="text-lg font-semibold text-green-400">{stats.longChains}</span>
-            </div>
-            <div className="text-xs text-gray-500">Long</div>
-          </div>
-          <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-            <div className="flex items-center justify-center gap-1">
-              <TrendingDown className="w-3.5 h-3.5 text-red-400" />
-              <span className="text-lg font-semibold text-red-400">{stats.shortChains}</span>
-            </div>
-            <div className="text-xs text-gray-500">Short</div>
-          </div>
-          {stats.fallbackChains > 0 && (
-            <div className="bg-gray-900/50 rounded-lg p-2 text-center">
-              <div className="text-lg font-semibold text-orange-400">{stats.fallbackChains}</div>
-              <div className="text-xs text-gray-500">Fallback</div>
-            </div>
-          )}
-        </div>
-
-        {/* Filters */}
-        <ChainFilters
-          filters={filters}
-          onFilterChange={setFilters}
-          symbols={symbols}
-          onReset={resetFilters}
-        />
-      </div>
-
-      {/* Chains list */}
-      <div className="p-4 space-y-3 max-h-[600px] overflow-y-auto">
-        {filteredChains.length === 0 ? (
-          <div className="text-center py-8">
-            <Layers className="w-12 h-12 mx-auto mb-3 text-gray-600" />
-            <p className="text-gray-400">No order chains found</p>
-            <p className="text-sm text-gray-500 mt-1">
-              {chains.length === 0
-                ? 'Order chains will appear when orders are placed with structured client order IDs'
-                : 'Try adjusting your filters'}
-            </p>
-          </div>
-        ) : (
-          filteredChains.map((chain) => (
-            <ChainCard key={chain.chainId} chain={chain} />
-          ))
-        )}
-      </div>
-
-      {/* Legend */}
-      <div className="p-4 border-t border-gray-700 bg-gray-900/30">
-        <div className="flex items-center gap-6 text-xs text-gray-500">
-          <span className="font-medium">Order Types:</span>
-          <div className="flex items-center gap-1">
-            <TrendingUp className="w-3 h-3 text-green-400" />
-            <span>Entry</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Target className="w-3 h-3 text-cyan-400" />
-            <span>Take Profit</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Shield className="w-3 h-3 text-red-400" />
-            <span>Stop Loss</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Layers className="w-3 h-3 text-blue-400" />
-            <span>DCA</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Activity className="w-3 h-3 text-purple-400" />
-            <span>Rebuy</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <BarChart3 className="w-3 h-3 text-yellow-400" />
-            <span>Hedge</span>
-          </div>
-        </div>
-      </div>
       </div>
     </div>
   );

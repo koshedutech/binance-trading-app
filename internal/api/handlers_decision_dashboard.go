@@ -146,6 +146,16 @@ type BlockingReasonFrequency struct {
 // handleGetDecisionDashboardStats returns aggregated dashboard statistics.
 // GET /api/futures/decision/dashboard/stats
 func (s *Server) handleGetDecisionDashboardStats(c *gin.Context) {
+	// Get authenticated user ID
+	userIDStr, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+	userID := 0
+	if userIDStr != "" {
+		userID, _ = strconv.Atoi(userIDStr)
+	}
+
 	// Parse time range
 	timeRange := c.DefaultQuery("range", "7d")
 
@@ -164,21 +174,14 @@ func (s *Server) handleGetDecisionDashboardStats(c *gin.Context) {
 		startTime = time.Time{} // All time
 	}
 
-	// Get user ID (if available for per-user stats)
-	userIDStr := c.GetString("user_id")
-	userID := 0
-	if userIDStr != "" {
-		userID, _ = strconv.Atoi(userIDStr)
-	}
-
 	// Build response
 	stats := &DashboardStats{
 		TimeRange:   timeRange,
 		GeneratedAt: now.Format(time.RFC3339),
 	}
 
-	// 1. Get Strategy Performance from trade history
-	stats.StrategyPerformances = s.getStrategyPerformancesForDashboard(c, startTime)
+	// 1. Get Strategy Performance from trade history (pass userID for user-specific data)
+	stats.StrategyPerformances = s.getStrategyPerformancesForDashboard(c, userIDStr, startTime)
 
 	// 2. Get Score Distribution from calibration data
 	stats.ScoreDistribution = s.getScoreDistributionFromCalibration(c, userID)
@@ -199,11 +202,11 @@ func (s *Server) handleGetDecisionDashboardStats(c *gin.Context) {
 }
 
 // getStrategyPerformancesForDashboard aggregates strategy performance data.
-func (s *Server) getStrategyPerformancesForDashboard(c *gin.Context, startTime time.Time) []StrategyPerformanceData {
+func (s *Server) getStrategyPerformancesForDashboard(c *gin.Context, userID string, startTime time.Time) []StrategyPerformanceData {
 	ctx := c.Request.Context()
 
-	// Get trades from database
-	tradesPtr, err := s.repo.GetTradeHistory(ctx, 1000, 0)
+	// Get trades from database for the specific user
+	tradesPtr, err := s.repo.GetTradeHistoryForUser(ctx, userID, 1000, 0)
 	if err != nil {
 		return []StrategyPerformanceData{}
 	}
