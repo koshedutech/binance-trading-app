@@ -62,12 +62,8 @@ func (s *SettingsCacheService) LoadUserSettings(ctx context.Context, userID stri
 	}
 
 	// Load mode+strategy settings (16 keys: 4 modes x 4 strategies) - Story 11.32
-	if userIDInt, err := parseUserIDStringToInt(userID); err != nil {
-		errs = append(errs, fmt.Errorf("mode+strategy: failed to parse userID: %w", err))
-	} else {
-		if err := s.PopulateModeStrategiesFromDB(ctx, userIDInt); err != nil {
-			errs = append(errs, fmt.Errorf("mode+strategy: %w", err))
-		}
+	if err := s.PopulateModeStrategiesFromDB(ctx, userID); err != nil {
+		errs = append(errs, fmt.Errorf("mode+strategy: %w", err))
 	}
 
 	// Load symbol settings (Story 9.12 Phase 1)
@@ -1192,25 +1188,25 @@ var ValidStrategies = []string{"trend_following", "mean_reversion", "breakout", 
 
 // modeStrategyKey generates the cache key for a mode+strategy configuration
 // Format: mode:{userID}:{mode}:{strategy}
-func modeStrategyKey(userID int, mode, strategy string) string {
-	return fmt.Sprintf("mode:%d:%s:%s", userID, mode, strategy)
+func modeStrategyKey(userID string, mode, strategy string) string {
+	return fmt.Sprintf("mode:%s:%s:%s", userID, mode, strategy)
 }
 
 // modeStrategiesPattern generates a pattern for all strategies under a mode
 // Format: mode:{userID}:{mode}:*
-func modeStrategiesPattern(userID int, mode string) string {
-	return fmt.Sprintf("mode:%d:%s:*", userID, mode)
+func modeStrategiesPattern(userID string, mode string) string {
+	return fmt.Sprintf("mode:%s:%s:*", userID, mode)
 }
 
 // allModeStrategiesPattern generates a pattern for all mode+strategy keys for a user
 // Format: mode:{userID}:*
-func allModeStrategiesPattern(userID int) string {
-	return fmt.Sprintf("mode:%d:*", userID)
+func allModeStrategiesPattern(userID string) string {
+	return fmt.Sprintf("mode:%s:*", userID)
 }
 
 // GetModeStrategyConfig retrieves settings for a specific mode+strategy
 // Cache-first with auto-populate from DB on miss
-func (s *SettingsCacheService) GetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) (*database.ModeStrategyConfig, error) {
+func (s *SettingsCacheService) GetModeStrategyConfig(ctx context.Context, userID string, mode, strategy string) (*database.ModeStrategyConfig, error) {
 	if !s.cache.IsHealthy() {
 		return nil, ErrCacheUnavailable
 	}
@@ -1262,7 +1258,7 @@ func (s *SettingsCacheService) GetModeStrategyConfig(ctx context.Context, userID
 
 // SetModeStrategyConfig stores settings for a specific mode+strategy
 // Write-through: DB first, then cache
-func (s *SettingsCacheService) SetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string, config *database.ModeStrategyConfig) error {
+func (s *SettingsCacheService) SetModeStrategyConfig(ctx context.Context, userID string, mode, strategy string, config *database.ModeStrategyConfig) error {
 	// Serialize the config for DB storage
 	settingsJSON, err := json.Marshal(config)
 	if err != nil {
@@ -1308,7 +1304,7 @@ func (s *SettingsCacheService) SetModeStrategyConfig(ctx context.Context, userID
 
 // GetAllStrategiesForMode retrieves all strategy configs for a mode
 // Returns map[strategyName]*ModeStrategyConfig
-func (s *SettingsCacheService) GetAllStrategiesForMode(ctx context.Context, userID int, mode string) (map[string]*database.ModeStrategyConfig, error) {
+func (s *SettingsCacheService) GetAllStrategiesForMode(ctx context.Context, userID string, mode string) (map[string]*database.ModeStrategyConfig, error) {
 	if !s.cache.IsHealthy() {
 		return nil, ErrCacheUnavailable
 	}
@@ -1367,7 +1363,7 @@ func (s *SettingsCacheService) GetAllStrategiesForMode(ctx context.Context, user
 }
 
 // getAllStrategiesFromDB loads all strategies for a mode directly from DB
-func (s *SettingsCacheService) getAllStrategiesFromDB(ctx context.Context, userID int, mode string) (map[string]*database.ModeStrategyConfig, error) {
+func (s *SettingsCacheService) getAllStrategiesFromDB(ctx context.Context, userID string, mode string) (map[string]*database.ModeStrategyConfig, error) {
 	result := make(map[string]*database.ModeStrategyConfig)
 
 	rows, err := s.repo.GetModeStrategies(ctx, userID, mode)
@@ -1405,20 +1401,20 @@ func (s *SettingsCacheService) getAllStrategiesFromDB(ctx context.Context, userI
 }
 
 // InvalidateModeStrategyConfig removes a specific mode+strategy from cache
-func (s *SettingsCacheService) InvalidateModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) error {
+func (s *SettingsCacheService) InvalidateModeStrategyConfig(ctx context.Context, userID string, mode, strategy string) error {
 	key := modeStrategyKey(userID, mode, strategy)
 	return s.cache.Delete(ctx, key)
 }
 
 // InvalidateAllModeStrategies removes all mode+strategy configs for a user
-func (s *SettingsCacheService) InvalidateAllModeStrategies(ctx context.Context, userID int) error {
+func (s *SettingsCacheService) InvalidateAllModeStrategies(ctx context.Context, userID string) error {
 	pattern := allModeStrategiesPattern(userID)
 	return s.cache.DeletePattern(ctx, pattern)
 }
 
 // PopulateModeStrategiesFromDB loads all mode+strategy configs from DB to cache
 // Called on user login to pre-warm the cache
-func (s *SettingsCacheService) PopulateModeStrategiesFromDB(ctx context.Context, userID int) error {
+func (s *SettingsCacheService) PopulateModeStrategiesFromDB(ctx context.Context, userID string) error {
 	if !s.cache.IsHealthy() {
 		return ErrCacheUnavailable
 	}
@@ -1476,7 +1472,7 @@ func (s *SettingsCacheService) PopulateModeStrategiesFromDB(ctx context.Context,
 // 1. Find strategies that support the given regime
 // 2. Among those, select the enabled one with highest priority
 // 3. If none match, return the mode's default strategy
-func (s *SettingsCacheService) GetActiveStrategyForMode(ctx context.Context, userID int, mode string, regime string) (*database.ModeStrategyConfig, string, error) {
+func (s *SettingsCacheService) GetActiveStrategyForMode(ctx context.Context, userID string, mode string, regime string) (*database.ModeStrategyConfig, string, error) {
 	// Get all strategies for this mode
 	strategies, err := s.GetAllStrategiesForMode(ctx, userID, mode)
 	if err != nil {

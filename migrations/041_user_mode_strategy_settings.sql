@@ -18,7 +18,7 @@
 
 CREATE TABLE IF NOT EXISTS user_mode_strategy_settings (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     mode VARCHAR(20) NOT NULL,        -- scalp, swing, position, ultra_fast
     strategy VARCHAR(30) NOT NULL,     -- trend_following, mean_reversion, breakout, range_trading
     enabled BOOLEAN DEFAULT true,

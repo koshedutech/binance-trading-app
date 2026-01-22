@@ -25,7 +25,7 @@ type ModeConfigCache interface {
 	// Story 11.36: Mode+Strategy configuration from cache
 	// GetModeStrategyConfig retrieves settings for a specific mode+strategy combination
 	// Returns cached config or populates from DB on cache miss
-	GetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) (*database.ModeStrategyConfig, error)
+	GetModeStrategyConfig(ctx context.Context, userID string, mode, strategy string) (*database.ModeStrategyConfig, error)
 
 	// Story 11.37: Regime-based strategy selection
 	// GetActiveStrategyForMode retrieves the best strategy for a mode based on market regime
@@ -33,7 +33,7 @@ type ModeConfigCache interface {
 	// 1. Find strategies that support the given regime
 	// 2. Among those, select the enabled one with highest priority
 	// 3. If none match, return the mode's default strategy
-	GetActiveStrategyForMode(ctx context.Context, userID int, mode, regime string) (*database.ModeStrategyConfig, string, error)
+	GetActiveStrategyForMode(ctx context.Context, userID string, mode, regime string) (*database.ModeStrategyConfig, string, error)
 }
 
 // SymbolPerformanceCategory represents a symbol's performance tier

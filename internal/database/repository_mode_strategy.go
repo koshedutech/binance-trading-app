@@ -17,7 +17,7 @@ import (
 // ModeStrategySettingsRow represents a row in the user_mode_strategy_settings table
 type ModeStrategySettingsRow struct {
 	ID        int             `db:"id" json:"id"`
-	UserID    int             `db:"user_id" json:"user_id"`
+	UserID    string          `db:"user_id" json:"user_id"`
 	Mode      string          `db:"mode" json:"mode"`
 	Strategy  string          `db:"strategy" json:"strategy"`
 	Enabled   bool            `db:"enabled" json:"enabled"`
@@ -28,7 +28,7 @@ type ModeStrategySettingsRow struct {
 }
 
 // CreateModeStrategySettings creates a new mode+strategy configuration for a user
-func (r *Repository) CreateModeStrategySettings(ctx context.Context, userID int, mode, strategy string, enabled bool, priority int, settings json.RawMessage) error {
+func (r *Repository) CreateModeStrategySettings(ctx context.Context, userID string, mode, strategy string, enabled bool, priority int, settings json.RawMessage) error {
 	query := `
 		INSERT INTO user_mode_strategy_settings (user_id, mode, strategy, enabled, priority, settings)
 		VALUES ($1, $2, $3, $4, $5, $6)
@@ -45,7 +45,7 @@ func (r *Repository) CreateModeStrategySettings(ctx context.Context, userID int,
 // GetModeStrategySettings retrieves a specific mode+strategy configuration for a user
 // Returns nil if not found (allows calling code to use defaults)
 // Returns error only for actual database errors
-func (r *Repository) GetModeStrategySettings(ctx context.Context, userID int, mode, strategy string) (*ModeStrategySettingsRow, error) {
+func (r *Repository) GetModeStrategySettings(ctx context.Context, userID string, mode, strategy string) (*ModeStrategySettingsRow, error) {
 	query := `
 		SELECT id, user_id, mode, strategy, enabled, priority, settings, created_at, updated_at
 		FROM user_mode_strategy_settings
@@ -76,7 +76,7 @@ func (r *Repository) GetModeStrategySettings(ctx context.Context, userID int, mo
 }
 
 // GetAllModeStrategySettings retrieves all mode+strategy configurations for a user
-func (r *Repository) GetAllModeStrategySettings(ctx context.Context, userID int) ([]*ModeStrategySettingsRow, error) {
+func (r *Repository) GetAllModeStrategySettings(ctx context.Context, userID string) ([]*ModeStrategySettingsRow, error) {
 	query := `
 		SELECT id, user_id, mode, strategy, enabled, priority, settings, created_at, updated_at
 		FROM user_mode_strategy_settings
@@ -118,7 +118,7 @@ func (r *Repository) GetAllModeStrategySettings(ctx context.Context, userID int)
 }
 
 // GetModeStrategies retrieves all strategies for a specific mode for a user
-func (r *Repository) GetModeStrategies(ctx context.Context, userID int, mode string) ([]*ModeStrategySettingsRow, error) {
+func (r *Repository) GetModeStrategies(ctx context.Context, userID string, mode string) ([]*ModeStrategySettingsRow, error) {
 	query := `
 		SELECT id, user_id, mode, strategy, enabled, priority, settings, created_at, updated_at
 		FROM user_mode_strategy_settings
@@ -160,7 +160,7 @@ func (r *Repository) GetModeStrategies(ctx context.Context, userID int, mode str
 }
 
 // UpdateModeStrategySettings updates the settings for a specific mode+strategy
-func (r *Repository) UpdateModeStrategySettings(ctx context.Context, userID int, mode, strategy string, settings json.RawMessage) error {
+func (r *Repository) UpdateModeStrategySettings(ctx context.Context, userID string, mode, strategy string, settings json.RawMessage) error {
 	query := `
 		UPDATE user_mode_strategy_settings
 		SET settings = $4, updated_at = CURRENT_TIMESTAMP
@@ -180,7 +180,7 @@ func (r *Repository) UpdateModeStrategySettings(ctx context.Context, userID int,
 }
 
 // UpdateModeStrategyEnabled updates the enabled status for a specific mode+strategy
-func (r *Repository) UpdateModeStrategyEnabled(ctx context.Context, userID int, mode, strategy string, enabled bool) error {
+func (r *Repository) UpdateModeStrategyEnabled(ctx context.Context, userID string, mode, strategy string, enabled bool) error {
 	query := `
 		UPDATE user_mode_strategy_settings
 		SET enabled = $4, updated_at = CURRENT_TIMESTAMP
@@ -200,7 +200,7 @@ func (r *Repository) UpdateModeStrategyEnabled(ctx context.Context, userID int, 
 }
 
 // DeleteModeStrategySettings deletes a specific mode+strategy configuration
-func (r *Repository) DeleteModeStrategySettings(ctx context.Context, userID int, mode, strategy string) error {
+func (r *Repository) DeleteModeStrategySettings(ctx context.Context, userID string, mode, strategy string) error {
 	query := `
 		DELETE FROM user_mode_strategy_settings
 		WHERE user_id = $1 AND mode = $2 AND strategy = $3
@@ -219,7 +219,7 @@ func (r *Repository) DeleteModeStrategySettings(ctx context.Context, userID int,
 }
 
 // BulkCreateModeStrategySettings creates multiple mode+strategy configurations in a single transaction
-func (r *Repository) BulkCreateModeStrategySettings(ctx context.Context, userID int, configs []ModeStrategySettingsRow) error {
+func (r *Repository) BulkCreateModeStrategySettings(ctx context.Context, userID string, configs []ModeStrategySettingsRow) error {
 	if len(configs) == 0 {
 		return nil
 	}

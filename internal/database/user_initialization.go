@@ -484,13 +484,6 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 func (r *Repository) InitializeUserModeStrategies(ctx context.Context, userID string) error {
 	log.Printf("[USER-INIT-MODESTRAT] Initializing mode+strategy settings for user %s", userID)
 
-	// Convert string userID to int for the mode strategy table
-	// The mode strategy table uses INTEGER user_id for consistency with its schema
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		return fmt.Errorf("failed to parse user ID: %w", err)
-	}
-
 	// Get all valid modes and strategies
 	modes := ValidModes()         // ultra_fast, scalp, swing, position
 	strategies := ValidStrategies() // trend_following, mean_reversion, breakout, range_trading
@@ -510,7 +503,7 @@ func (r *Repository) InitializeUserModeStrategies(ctx context.Context, userID st
 			}
 
 			configs = append(configs, ModeStrategySettingsRow{
-				UserID:   userIDInt,
+				UserID:   userID,
 				Mode:     mode,
 				Strategy: strategy,
 				Enabled:  config.Enabled,
@@ -521,7 +514,7 @@ func (r *Repository) InitializeUserModeStrategies(ctx context.Context, userID st
 	}
 
 	// Bulk create with ON CONFLICT DO NOTHING (idempotent)
-	if err := r.BulkCreateModeStrategySettings(ctx, userIDInt, configs); err != nil {
+	if err := r.BulkCreateModeStrategySettings(ctx, userID, configs); err != nil {
 		return fmt.Errorf("failed to bulk create mode strategy settings: %w", err)
 	}
 

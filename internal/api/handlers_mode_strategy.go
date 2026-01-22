@@ -141,12 +141,6 @@ func (s *Server) handleGetAllModes(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	// Check if settings cache service is available
@@ -161,7 +155,7 @@ func (s *Server) handleGetAllModes(c *gin.Context) {
 
 	// Get all strategies for each mode
 	for mode := range validModes {
-		strategies, err := s.settingsCacheService.GetAllStrategiesForMode(ctx, userIDInt, mode)
+		strategies, err := s.settingsCacheService.GetAllStrategiesForMode(ctx, userID, mode)
 		if err != nil {
 			if err == cache.ErrCacheUnavailable {
 				errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
@@ -202,12 +196,6 @@ func (s *Server) handleGetMode(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -215,7 +203,7 @@ func (s *Server) handleGetMode(c *gin.Context) {
 		return
 	}
 
-	strategies, err := s.settingsCacheService.GetAllStrategiesForMode(ctx, userIDInt, mode)
+	strategies, err := s.settingsCacheService.GetAllStrategiesForMode(ctx, userID, mode)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
 			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
@@ -253,12 +241,6 @@ func (s *Server) handleGetModeStrategies(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -266,7 +248,7 @@ func (s *Server) handleGetModeStrategies(c *gin.Context) {
 		return
 	}
 
-	strategies, err := s.settingsCacheService.GetAllStrategiesForMode(ctx, userIDInt, mode)
+	strategies, err := s.settingsCacheService.GetAllStrategiesForMode(ctx, userID, mode)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
 			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
@@ -311,12 +293,6 @@ func (s *Server) handleGetModeStrategy(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -324,7 +300,7 @@ func (s *Server) handleGetModeStrategy(c *gin.Context) {
 		return
 	}
 
-	config, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userIDInt, mode, strategy)
+	config, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userID, mode, strategy)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
 			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
@@ -361,12 +337,6 @@ func (s *Server) handleUpdateModeStrategy(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	var req UpdateModeStrategyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
@@ -381,7 +351,7 @@ func (s *Server) handleUpdateModeStrategy(c *gin.Context) {
 	}
 
 	// Get existing config
-	existingConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userIDInt, mode, strategy)
+	existingConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userID, mode, strategy)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
 			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
@@ -462,7 +432,7 @@ func (s *Server) handleUpdateModeStrategy(c *gin.Context) {
 	}
 
 	// Save with write-through (DB first, then cache)
-	if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userIDInt, mode, strategy, existingConfig); err != nil {
+	if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userID, mode, strategy, existingConfig); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save config: "+err.Error())
 		return
 	}
@@ -498,12 +468,6 @@ func (s *Server) handleResetModeStrategy(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -515,7 +479,7 @@ func (s *Server) handleResetModeStrategy(c *gin.Context) {
 	defaultConfig := database.DefaultModeStrategyConfig(mode, strategy)
 
 	// Save default config with write-through
-	if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userIDInt, mode, strategy, defaultConfig); err != nil {
+	if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userID, mode, strategy, defaultConfig); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to reset config: "+err.Error())
 		return
 	}
@@ -544,12 +508,6 @@ func (s *Server) handleResetAllModeStrategies(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -563,7 +521,7 @@ func (s *Server) handleResetAllModeStrategies(c *gin.Context) {
 
 	for strategy := range validStrategies {
 		defaultConfig := database.DefaultModeStrategyConfig(mode, strategy)
-		if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userIDInt, mode, strategy, defaultConfig); err != nil {
+		if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userID, mode, strategy, defaultConfig); err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", strategy, err))
 			continue
 		}
@@ -623,12 +581,6 @@ func (s *Server) handleToggleModeStrategy(c *gin.Context, enabled bool) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -637,7 +589,7 @@ func (s *Server) handleToggleModeStrategy(c *gin.Context, enabled bool) {
 	}
 
 	// Get existing config
-	existingConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userIDInt, mode, strategy)
+	existingConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userID, mode, strategy)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
 			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")
@@ -651,7 +603,7 @@ func (s *Server) handleToggleModeStrategy(c *gin.Context, enabled bool) {
 	existingConfig.Enabled = enabled
 
 	// Save with write-through (DB first, then cache)
-	if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userIDInt, mode, strategy, existingConfig); err != nil {
+	if err := s.settingsCacheService.SetModeStrategyConfig(ctx, userID, mode, strategy, existingConfig); err != nil {
 		errorResponse(c, http.StatusInternalServerError, "Failed to save config: "+err.Error())
 		return
 	}
@@ -710,12 +662,6 @@ func (s *Server) handleCompareModeStrategy(c *gin.Context) {
 		return
 	}
 
-	userIDInt, err := parseUserIDToInt(userID)
-	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "Invalid user ID: "+err.Error())
-		return
-	}
-
 	ctx := c.Request.Context()
 
 	if s.settingsCacheService == nil {
@@ -724,7 +670,7 @@ func (s *Server) handleCompareModeStrategy(c *gin.Context) {
 	}
 
 	// Get current user config
-	currentConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userIDInt, mode, strategy)
+	currentConfig, err := s.settingsCacheService.GetModeStrategyConfig(ctx, userID, mode, strategy)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
 			errorResponse(c, http.StatusServiceUnavailable, "Cache service unavailable")

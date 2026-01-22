@@ -12,7 +12,6 @@ import (
 	"math"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1850,66 +1849,63 @@ func (g *GinieAnalyzer) generateDecisionInternal(symbol string, mode GinieTradin
 	}
 
 	if g.settingsCache != nil && g.userID != "" {
-		userIDInt, parseErr := strconv.Atoi(g.userID)
-		if parseErr == nil {
-			// Check cooldown before allowing strategy switch
-			g.strategySwitchLock.RLock()
-			lastSwitch, hasSwitch := g.strategyLastSwitch[modeKey]
-			lastStrategy, hasStrategy := g.strategyLastSelected[modeKey]
-			g.strategySwitchLock.RUnlock()
+		// Check cooldown before allowing strategy switch
+		g.strategySwitchLock.RLock()
+		lastSwitch, hasSwitch := g.strategyLastSwitch[modeKey]
+		lastStrategy, hasStrategy := g.strategyLastSelected[modeKey]
+		g.strategySwitchLock.RUnlock()
 
-			cooldownActive := hasSwitch && time.Since(lastSwitch) < strategySwitchCooldown
+		cooldownActive := hasSwitch && time.Since(lastSwitch) < strategySwitchCooldown
 
-			// Story 11.37: Use GetActiveStrategyForMode with regime-based selection
-			var err error
-			var newStrategy string
-			strategyConfig, newStrategy, err = g.settingsCache.GetActiveStrategyForMode(ctx, userIDInt, modeKey, currentRegime)
-			if err != nil {
-				// Fallback to trend_following if selection fails
-				activeStrategy = "trend_following"
-				strategyConfig, _ = g.settingsCache.GetModeStrategyConfig(ctx, userIDInt, modeKey, activeStrategy)
+		// Story 11.37: Use GetActiveStrategyForMode with regime-based selection
+		var err error
+		var newStrategy string
+		strategyConfig, newStrategy, err = g.settingsCache.GetActiveStrategyForMode(ctx, g.userID, modeKey, currentRegime)
+		if err != nil {
+			// Fallback to trend_following if selection fails
+			activeStrategy = "trend_following"
+			strategyConfig, _ = g.settingsCache.GetModeStrategyConfig(ctx, g.userID, modeKey, activeStrategy)
+			if g.logger != nil {
+				g.logger.Debug("Strategy selection failed, using default",
+					"symbol", symbol,
+					"mode", modeKey,
+					"regime", currentRegime,
+					"strategy", activeStrategy,
+					"error", err.Error())
+			}
+		} else {
+			// Apply cooldown: if different strategy selected but cooldown is active, keep previous
+			if cooldownActive && hasStrategy && newStrategy != lastStrategy {
+				activeStrategy = lastStrategy
+				// Re-fetch the config for the cooldown-preserved strategy
+				strategyConfig, _ = g.settingsCache.GetModeStrategyConfig(ctx, g.userID, modeKey, activeStrategy)
 				if g.logger != nil {
-					g.logger.Debug("Strategy selection failed, using default",
+					g.logger.Debug("Strategy switch blocked by cooldown",
+						"symbol", symbol,
+						"mode", modeKey,
+						"regime", currentRegime,
+						"requested_strategy", newStrategy,
+						"active_strategy", activeStrategy,
+						"cooldown_remaining", (strategySwitchCooldown - time.Since(lastSwitch)).Round(time.Second))
+				}
+			} else {
+				activeStrategy = newStrategy
+				// Update cooldown tracking if strategy changed
+				if !hasStrategy || activeStrategy != lastStrategy {
+					g.strategySwitchLock.Lock()
+					g.strategyLastSwitch[modeKey] = time.Now()
+					g.strategyLastSelected[modeKey] = activeStrategy
+					g.strategySwitchLock.Unlock()
+				}
+				if g.logger != nil {
+					g.logger.Debug("Selected strategy based on market regime",
 						"symbol", symbol,
 						"mode", modeKey,
 						"regime", currentRegime,
 						"strategy", activeStrategy,
-						"error", err.Error())
-				}
-			} else {
-				// Apply cooldown: if different strategy selected but cooldown is active, keep previous
-				if cooldownActive && hasStrategy && newStrategy != lastStrategy {
-					activeStrategy = lastStrategy
-					// Re-fetch the config for the cooldown-preserved strategy
-					strategyConfig, _ = g.settingsCache.GetModeStrategyConfig(ctx, userIDInt, modeKey, activeStrategy)
-					if g.logger != nil {
-						g.logger.Debug("Strategy switch blocked by cooldown",
-							"symbol", symbol,
-							"mode", modeKey,
-							"regime", currentRegime,
-							"requested_strategy", newStrategy,
-							"active_strategy", activeStrategy,
-							"cooldown_remaining", (strategySwitchCooldown - time.Since(lastSwitch)).Round(time.Second))
-					}
-				} else {
-					activeStrategy = newStrategy
-					// Update cooldown tracking if strategy changed
-					if !hasStrategy || activeStrategy != lastStrategy {
-						g.strategySwitchLock.Lock()
-						g.strategyLastSwitch[modeKey] = time.Now()
-						g.strategyLastSelected[modeKey] = activeStrategy
-						g.strategySwitchLock.Unlock()
-					}
-					if g.logger != nil {
-						g.logger.Debug("Selected strategy based on market regime",
-							"symbol", symbol,
-							"mode", modeKey,
-							"regime", currentRegime,
-							"strategy", activeStrategy,
-							"adx", scan.Trend.ADXValue,
-							"atr", scan.Volatility.ATR14,
-							"source", "regime_based")
-					}
+						"adx", scan.Trend.ADXValue,
+						"atr", scan.Volatility.ATR14,
+						"source", "regime_based")
 				}
 			}
 		}
