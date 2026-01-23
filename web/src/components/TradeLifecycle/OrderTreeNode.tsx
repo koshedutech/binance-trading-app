@@ -469,15 +469,15 @@ export default function OrderTreeNode({
                     </span>
                     <span className="text-gray-600">|</span>
                     <span className="text-gray-400">
-                      Initial: <span className="font-mono text-gray-300">${summary.initialPrice.toFixed(2)}</span>
+                      Initial: <span className="font-mono text-gray-300">${(summary.initialPrice ?? 0).toFixed(2)}</span>
                     </span>
                     <span className="text-gray-600">|</span>
                     <span className="text-gray-400">
-                      Current: <span className="font-mono text-green-400">${displayPrice.toFixed(2)}</span>
+                      Current: <span className="font-mono text-green-400">${(displayPrice ?? 0).toFixed(2)}</span>
                     </span>
                     <span className="text-gray-600">|</span>
-                    <span className={`font-medium ${summary.netDollarImpact >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      Net: {formatDollarImpact(summary.netDollarImpact)}
+                    <span className={`font-medium ${(summary.netDollarImpact ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      Net: {formatDollarImpact(summary.netDollarImpact ?? 0)}
                     </span>
                     {/* Source breakdown */}
                     <span className="ml-auto flex items-center gap-2 text-gray-500">

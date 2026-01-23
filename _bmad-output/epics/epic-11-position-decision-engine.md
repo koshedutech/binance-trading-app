@@ -2098,3 +2098,46 @@ default-settings.json → Database → Redis Cache → API → Frontend
 **Full Story:** `_bmad-output/stories/story-11.41-comprehensive-mode-strategy-config.md`
 
 ---
+
+#### Story 11.43: Ravindra Volume Imbalance Strategy Implementation
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Implement Ravindra Rokade's (Stock Niti) Volume Imbalance Strategy as the first R:R based trading strategy. This story introduces:
+
+**Strategy Classification:**
+```
+MODE (Scalp/Swing/Position)
+└── STRATEGY GROUP: BREAKOUT
+    └── SUB-STRATEGY: Ravindra Volume Imbalance
+```
+
+**The Pattern (5 Steps):**
+1. **Reference Candle** - Highest volume + highest price (institutional first buy)
+2. **Liquidity Drain** - Volume declining + price declining (retail stops triggering)
+3. **Exhaustion** - Volume at minimum, price at local low
+4. **Pump** - Volume increasing + price rapidly rising
+5. **Entry** - Price crosses reference candle high
+
+**Risk-Reward Management:**
+- Entry: Reference candle HIGH
+- Stop Loss: Exhaustion LOW
+- Take Profit: Entry + (Risk × 4) = 1:4 R:R
+- Trailing Stop: At 1:2 → Breakeven, At 1:3 → 1:1 level
+
+**Technical Implementation:**
+1. Database: `user_strategy_group_settings` + `user_sub_strategy_settings` tables
+2. Default settings: Full strategy hierarchy in `default-settings.json`
+3. Pattern detector: `volume_imbalance_strategy.go`
+4. Trailing stop manager: `trailing_stop_manager.go`
+5. API endpoints for strategy CRUD
+6. Mode Configuration UI updates
+7. Entry Decision Engine UI updates
+
+**Key Change:** Entry decision shifts from score-based to R:R based for this strategy.
+
+**Story Points:** 21
+
+**Full Story:** `_bmad-output/stories/story-11.43-ravindra-volume-imbalance-strategy.md`
+
+---

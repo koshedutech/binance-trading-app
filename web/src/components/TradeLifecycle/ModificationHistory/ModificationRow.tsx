@@ -111,9 +111,10 @@ function getDirectionDisplay(direction: ImpactDirection, orderType: ModifiableOr
 
 // Format price with appropriate precision
 function formatPrice(price: number): string {
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toFixed(6);
+  const safePrice = price ?? 0;
+  if (safePrice >= 1000) return safePrice.toFixed(2);
+  if (safePrice >= 1) return safePrice.toFixed(4);
+  return safePrice.toFixed(6);
 }
 
 // Default time formatter

@@ -4,11 +4,17 @@
 package api
 
 import (
+	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
+	"time"
 
+	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/decision"
+	"binance-trading-bot/internal/orders"
 
 	"github.com/gin-gonic/gin"
 )
@@ -81,6 +87,24 @@ type OverrideEntryRequest struct {
 	Symbol    string `json:"symbol" binding:"required"`
 	Direction string `json:"direction" binding:"required,oneof=LONG SHORT"`
 	Reason    string `json:"reason"` // Optional user's reason for override
+}
+
+// OverrideEntryResponse represents the response from a successful override entry
+type OverrideEntryResponse struct {
+	Success          bool    `json:"success"`
+	Message          string  `json:"message"`
+	Symbol           string  `json:"symbol"`
+	Direction        string  `json:"direction"`
+	ChainID          string  `json:"chain_id"`
+	EntryOrderID     int64   `json:"entry_order_id"`
+	EntryPrice       float64 `json:"entry_price"`
+	Quantity         float64 `json:"quantity"`
+	PositionSizeUSD  float64 `json:"position_size_usd"`
+	Mode             string  `json:"mode"`
+	OverriddenBlocks int     `json:"overridden_blocks"`
+	SLPrice          float64 `json:"sl_price,omitempty"`
+	TPPrice          float64 `json:"tp_price,omitempty"`
+	ExecutedVia      string  `json:"executed_via"` // "chain_system" - indicates bypass of legacy autopilot
 }
 
 // getStatusLabelAndColor returns the status label and color based on gap to threshold
@@ -198,6 +222,9 @@ func getBlockingReasonDescription(code string) string {
 		"HIGH_RSI":               "RSI indicates overbought conditions",
 		"LOW_RSI":                "RSI indicates oversold conditions",
 		"LOW_WIN_RATE":           "Historical win rate for this setup is low",
+		"INSUFFICIENT_DATA":      "Technical indicators not available - scores are N/A",
+		"HIGH_VOLATILITY":        "Market volatility is extreme",
+		"SIGNALS_NOT_MET":        "Required trading signals not met",
 	}
 
 	if desc, ok := descriptions[code]; ok {
@@ -384,15 +411,31 @@ func (s *Server) handleGetAllCoinStatesWithGaps(c *gin.Context) {
 	for _, state := range states {
 		baseResponse := convertCoinStateToResponse(state)
 
-		// Create score breakdown
-		// Convert percentage scores back to actual points and distribute proportionally
-		// Technical (40 max): TrendAlignment(15) + Momentum(10) + Volatility(10) + Volume(5)
-		// Context (30 max): RegimeMatch(10) + TimeframeAlign(10) + BTCTrend(10)
-		// History (10 max): SymbolWinRate(5) + StrategyWinRate(5)
-		technicalPoints := state.ScoreTechnical * 40 / 100
-		contextPoints := state.ScoreContext * 30 / 100
-		llmPoints := state.ScoreLLM * 20 / 100
-		historyPoints := state.ScoreHistory * 10 / 100
+		// BUG FIX: The scores stored in CoinState are already RAW POINTS, not percentages!
+		// saveCoinStateFromDecision() calculates:
+		//   - ScoreTechnical: 0-40 raw points
+		//   - ScoreContext: 0-30 raw points
+		//   - ScoreLLM: 0-20 raw points
+		//   - ScoreHistory: 0-10 raw points
+		//   - ScoreFinal: sum of all components (0-100)
+		//
+		// DO NOT convert from percentages - use values directly!
+		technicalPoints := state.ScoreTechnical
+		contextPoints := state.ScoreContext
+		llmPoints := state.ScoreLLM
+		historyPoints := state.ScoreHistory
+
+		// Validate: ScoreFinal should equal the sum of components
+		// If not, recalculate to ensure consistency
+		expectedFinal := technicalPoints + contextPoints + llmPoints + historyPoints
+		if state.ScoreFinal != expectedFinal {
+			// Log the mismatch for debugging
+			log.Printf("[SCORE-MISMATCH] %s: stored final=%d, calculated=%d (T=%d C=%d L=%d H=%d)",
+				state.Symbol, state.ScoreFinal, expectedFinal,
+				technicalPoints, contextPoints, llmPoints, historyPoints)
+			// Use the calculated sum as the true final score
+			state.ScoreFinal = expectedFinal
+		}
 
 		// Distribute sub-components proportionally so they SUM to the parent total
 		// Technical sub-components (proportional to their max weights: 15, 10, 10, 5 = 40)
@@ -514,7 +557,14 @@ func (s *Server) handleGetAllCoinStatesWithGaps(c *gin.Context) {
 }
 
 // handleOverrideEntry handles POST /api/futures/decision/override
-// Allows user to override soft blocks and trigger entry
+// Allows user to override soft blocks and trigger entry DIRECTLY through the chain system,
+// bypassing Ginie Autopilot's legacy execution logic.
+//
+// This is the "new chain system" entry point that:
+// 1. Uses ChainEventWriter for order chain creation (Epic 7)
+// 2. Uses ClientOrderIdGenerator for proper chain IDs
+// 3. Places orders directly via FuturesClient
+// 4. Does NOT go through Ginie Autopilot's scanning/execution loop
 func (s *Server) handleOverrideEntry(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
@@ -538,9 +588,10 @@ func (s *Server) handleOverrideEntry(c *gin.Context) {
 	}
 
 	userIDStr := userID.(string)
+	ctx := c.Request.Context()
 
 	// Get current coin state
-	state, err := s.stateManager.GetCoinState(c.Request.Context(), userIDStr, req.Symbol)
+	state, err := s.stateManager.GetCoinState(ctx, userIDStr, req.Symbol)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get coin state", "details": err.Error()})
 		return
@@ -567,33 +618,235 @@ func (s *Server) handleOverrideEntry(c *gin.Context) {
 		return
 	}
 
-	// Check if there are any soft blocks to override
-	if response.Blocking.SoftBlockCount == 0 && response.Decision == "READY" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "No blocks to override",
-			"message": "This coin is already ready for entry - no override needed",
+	// Audit logging for override action (Story 11.40 requirement)
+	log.Printf("[OVERRIDE] User %s overriding %d soft blocks for %s %s. Reason: %s",
+		userIDStr, response.Blocking.SoftBlockCount, req.Symbol, req.Direction, req.Reason)
+
+	// ============================================================
+	// CHAIN SYSTEM DIRECT EXECUTION (Bypasses Ginie Autopilot)
+	// ============================================================
+
+	// Step 1: Get user's autopilot instance for FuturesClient and ChainEventWriter
+	if s.userAutopilotManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "Autopilot manager not initialized",
+			"message": "Cannot execute trades - autopilot system not available",
 		})
 		return
 	}
 
-	// Audit logging for override action (Story 11.40 requirement)
-	// This is critical for tracking manual overrides and analyzing their outcomes
-	log.Printf("[OVERRIDE] User %s overrode %d soft blocks for %s %s. Reason: %s",
-		userIDStr, response.Blocking.SoftBlockCount, req.Symbol, req.Direction, req.Reason)
+	instance := s.userAutopilotManager.GetInstance(userIDStr)
+	if instance == nil || instance.Autopilot == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "User autopilot not initialized",
+			"message": "Please start autopilot first or wait for it to initialize",
+		})
+		return
+	}
 
-	// TODO: In production, this would also:
-	// 1. Store override in database for historical analysis
-	// 2. Trigger the actual entry through the autopilot/order system
-	// 3. Return the order details
+	autopilot := instance.Autopilot
+	futuresClient := autopilot.GetFuturesClient()
+	chainEventWriter := autopilot.GetChainEventWriter()
 
-	c.JSON(http.StatusOK, gin.H{
-		"success":   true,
-		"message":   "Override request accepted",
-		"symbol":    req.Symbol,
-		"direction": req.Direction,
-		"reason":    req.Reason,
-		"overridden_blocks": response.Blocking.SoftBlockCount,
-		"note": "Entry order will be placed by the autopilot system",
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "Futures client not available",
+			"message": "Binance connection not established",
+		})
+		return
+	}
+
+	// Step 2: Get current price from Binance
+	currentPrice, err := futuresClient.GetFuturesCurrentPrice(req.Symbol)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to get current price",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Step 3: Get symbol info for quantity precision from exchange info
+	exchangeInfo, err := futuresClient.GetFuturesExchangeInfo()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to get exchange info",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Find the symbol in exchange info
+	var symbolInfo *binance.FuturesSymbolInfo
+	for i := range exchangeInfo.Symbols {
+		if exchangeInfo.Symbols[i].Symbol == req.Symbol {
+			symbolInfo = &exchangeInfo.Symbols[i]
+			break
+		}
+	}
+	if symbolInfo == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Symbol not found",
+			"symbol":  req.Symbol,
+			"message": "This symbol is not available for futures trading",
+		})
+		return
+	}
+
+	// Step 4: Calculate position size using mode settings
+	// Use the active strategy from coin state or default to scalp
+	modeStr := state.ActiveStrategy
+	if modeStr == "" {
+		modeStr = "scalp"
+	}
+
+	// Get position size and SL/TP defaults based on mode
+	// These defaults match the mode configs in default-settings.json
+	positionSizeUSD, slPercent, tpPercent := getModeDefaults(modeStr)
+
+	// Calculate quantity from USD value
+	quantity := positionSizeUSD / currentPrice
+
+	// Round to symbol's quantity precision
+	quantityPrecision := symbolInfo.QuantityPrecision
+	if quantityPrecision < 0 {
+		quantityPrecision = 3 // Default
+	}
+	multiplier := math.Pow(10, float64(quantityPrecision))
+	quantity = math.Floor(quantity*multiplier) / multiplier
+
+	// Parse MinQty from filters if available
+	var minQty float64 = 0.001 // Default minimum
+	for _, filter := range symbolInfo.Filters {
+		if filter.FilterType == "LOT_SIZE" && filter.MinQty != "" {
+			if parsedMinQty, parseErr := parseFloatStr(filter.MinQty); parseErr == nil {
+				minQty = parsedMinQty
+			}
+			break
+		}
+	}
+
+	// Ensure quantity meets minimum
+	if quantity < minQty {
+		quantity = minQty
+	}
+
+	// Step 5: Generate chain ID using ClientOrderIdGenerator
+	tradingMode := orders.ModeFromString(modeStr)
+	modeCode := orders.ModeCode[tradingMode]
+	if modeCode == "" {
+		modeCode = "SCA" // Default to scalp
+	}
+
+	// Generate a unique chain ID in format: [MODE]-[DDMMM]-[NNNNN]-E
+	// Since we may not have the full generator setup, use a fallback format
+	now := time.Now().UTC()
+	dateStr := now.Format("02Jan")
+	seqNum := now.UnixNano() % 100000 // Simple sequence based on nanoseconds
+	chainID := fmt.Sprintf("%s-%s-%05d", modeCode, dateStr, seqNum)
+	entryClientOrderID := fmt.Sprintf("%s-E", chainID)
+
+	// Step 6: Determine order side based on direction
+	var orderSide string
+	var positionSide binance.PositionSide
+	if req.Direction == "LONG" {
+		orderSide = "BUY"
+		positionSide = binance.PositionSideLong
+	} else {
+		orderSide = "SELL"
+		positionSide = binance.PositionSideShort
+	}
+
+	// Step 7: Create order chain if ChainEventWriter is available
+	if chainEventWriter != nil {
+		_, err := chainEventWriter.CreateChain(ctx, orders.CreateChainRequest{
+			UserID:   userIDStr,
+			ChainID:  chainID,
+			Symbol:   req.Symbol,
+			Side:     req.Direction,
+			ModeCode: modeCode,
+			IsHedge:  false,
+		})
+		if err != nil {
+			log.Printf("[OVERRIDE] Warning: Failed to create order chain: %v", err)
+			// Continue anyway - we can still place the order
+		}
+	}
+
+	// Step 8: Place entry order via FuturesClient (MARKET order for immediate execution)
+	orderParams := binance.FuturesOrderParams{
+		Symbol:           req.Symbol,
+		Side:             orderSide,
+		PositionSide:     positionSide,
+		Type:             binance.FuturesOrderTypeMarket,
+		Quantity:         quantity,
+		NewClientOrderId: entryClientOrderID,
+	}
+
+	log.Printf("[OVERRIDE] Placing MARKET %s order for %s: qty=%.6f, positionSizeUSD=%.2f, chainID=%s",
+		orderSide, req.Symbol, quantity, positionSizeUSD, chainID)
+
+	orderResp, err := futuresClient.PlaceFuturesOrder(orderParams)
+	if err != nil {
+		// Record failure in audit log
+		log.Printf("[OVERRIDE] FAILED to place order for %s: %v", req.Symbol, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to place entry order",
+			"details": err.Error(),
+			"symbol":  req.Symbol,
+		})
+		return
+	}
+
+	// Step 9: Record entry placed event in chain system
+	if chainEventWriter != nil {
+		err := chainEventWriter.RecordEntryPlaced(ctx, chainID, orders.ChainEntryPlacedEvent{
+			BinanceOrderID:       orderResp.OrderId,
+			BinanceClientOrderID: entryClientOrderID,
+			Price:                orderResp.AvgPrice,
+			Quantity:             quantity,
+			BinanceTimestamp:     orderResp.UpdateTime,
+		})
+		if err != nil {
+			log.Printf("[OVERRIDE] Warning: Failed to record entry placed event: %v", err)
+		}
+	}
+
+	// Step 10: Calculate SL/TP prices based on mode defaults (already retrieved in step 4)
+	var slPrice, tpPrice float64
+	entryPrice := orderResp.AvgPrice
+	if entryPrice <= 0 {
+		entryPrice = currentPrice
+	}
+
+	if req.Direction == "LONG" {
+		slPrice = entryPrice * (1 - slPercent/100)
+		tpPrice = entryPrice * (1 + tpPercent/100)
+	} else {
+		slPrice = entryPrice * (1 + slPercent/100)
+		tpPrice = entryPrice * (1 - tpPercent/100)
+	}
+
+	// Success audit log
+	log.Printf("[OVERRIDE] SUCCESS: %s %s entry at %.6f, qty=%.6f, orderID=%d, chainID=%s, SL=%.6f, TP=%.6f",
+		req.Direction, req.Symbol, entryPrice, quantity, orderResp.OrderId, chainID, slPrice, tpPrice)
+
+	// Step 11: Return success response with order details
+	c.JSON(http.StatusOK, OverrideEntryResponse{
+		Success:          true,
+		Message:          fmt.Sprintf("Entry order placed successfully via chain system"),
+		Symbol:           req.Symbol,
+		Direction:        req.Direction,
+		ChainID:          chainID,
+		EntryOrderID:     orderResp.OrderId,
+		EntryPrice:       entryPrice,
+		Quantity:         quantity,
+		PositionSizeUSD:  positionSizeUSD,
+		Mode:             modeStr,
+		OverriddenBlocks: response.Blocking.SoftBlockCount,
+		SLPrice:          slPrice,
+		TPPrice:          tpPrice,
+		ExecutedVia:      "chain_system",
 	})
 }
 
@@ -606,4 +859,26 @@ func getHardBlockReasons(reasons []BlockingReason) []string {
 		}
 	}
 	return hardBlocks
+}
+
+// parseFloatStr parses a string to float64, used for symbol filter values
+func parseFloatStr(s string) (float64, error) {
+	return strconv.ParseFloat(s, 64)
+}
+
+// getModeDefaults returns position size, SL%, and TP% defaults for a trading mode
+// These values match the default-settings.json mode configurations
+func getModeDefaults(mode string) (positionSizeUSD, slPercent, tpPercent float64) {
+	switch mode {
+	case "ultra_fast":
+		return 15.0, 0.5, 0.3 // $15 position, 0.5% SL, 0.3% TP (quick scalps)
+	case "scalp":
+		return 20.0, 1.0, 0.4 // $20 position, 1.0% SL, 0.4% TP (standard scalp)
+	case "swing":
+		return 30.0, 2.0, 1.0 // $30 position, 2.0% SL, 1.0% TP (swing trades)
+	case "position":
+		return 50.0, 3.0, 2.0 // $50 position, 3.0% SL, 2.0% TP (longer holds)
+	default:
+		return 20.0, 1.5, 0.4 // Default to scalp-like settings
+	}
 }

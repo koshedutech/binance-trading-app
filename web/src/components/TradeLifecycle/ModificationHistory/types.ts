@@ -200,20 +200,23 @@ export function getImpactBgColor(direction: ImpactDirection, orderType: Modifiab
 
 // Format dollar amount with sign
 export function formatDollarImpact(amount: number): string {
-  const sign = amount >= 0 ? '+' : '';
-  return `${sign}$${Math.abs(amount).toFixed(2)}`;
+  const safeAmount = amount ?? 0;
+  const sign = safeAmount >= 0 ? '+' : '';
+  return `${sign}$${Math.abs(safeAmount).toFixed(2)}`;
 }
 
 // Format price delta with sign
 export function formatPriceDelta(delta: number): string {
-  const sign = delta >= 0 ? '+' : '';
-  return `${sign}$${Math.abs(delta).toFixed(2)}`;
+  const safeDelta = delta ?? 0;
+  const sign = safeDelta >= 0 ? '+' : '';
+  return `${sign}$${Math.abs(safeDelta).toFixed(2)}`;
 }
 
 // Format percentage with sign
 export function formatPercentChange(percent: number): string {
-  const sign = percent >= 0 ? '+' : '';
-  return `${sign}${percent.toFixed(2)}%`;
+  const safePercent = percent ?? 0;
+  const sign = safePercent >= 0 ? '+' : '';
+  return `${sign}${safePercent.toFixed(2)}%`;
 }
 
 // Calculate summary stats from events
@@ -236,12 +239,16 @@ export function calculateSummaryStats(events: ModificationEvent[]): Modification
   const initial = sorted[0];
   const current = sorted[sorted.length - 1];
 
-  const netPriceChange = current.newPrice - initial.newPrice;
-  const netPriceChangePercent = initial.newPrice > 0
-    ? (netPriceChange / initial.newPrice) * 100
+  // Safe access to newPrice with fallback to 0
+  const initialPrice = initial?.newPrice ?? 0;
+  const currentPrice = current?.newPrice ?? 0;
+
+  const netPriceChange = currentPrice - initialPrice;
+  const netPriceChangePercent = initialPrice > 0
+    ? (netPriceChange / initialPrice) * 100
     : 0;
 
-  const netDollarImpact = events.reduce((sum, e) => sum + e.dollarImpact, 0);
+  const netDollarImpact = events.reduce((sum, e) => sum + (e.dollarImpact ?? 0), 0);
 
   const sources = { llmAuto: 0, userManual: 0, trailingStop: 0 };
   events.forEach(e => {
@@ -255,9 +262,9 @@ export function calculateSummaryStats(events: ModificationEvent[]): Modification
     netPriceChange,
     netPriceChangePercent,
     netDollarImpact,
-    initialPrice: initial.newPrice,
-    currentPrice: current.newPrice,
-    lastModifiedAt: current.createdAt,
+    initialPrice,
+    currentPrice,
+    lastModifiedAt: current?.createdAt ?? new Date().toISOString(),
     sources,
   };
 }

@@ -3194,6 +3194,32 @@ func (ga *GinieAutopilot) Start() error {
 		}
 	}
 
+	// CRITICAL FIX: Load system control settings BEFORE starting trading loops
+	// This ensures the analyzer uses the correct entry decision system (chain vs legacy)
+	// Without this, the analyzer defaults to 'legacy' because entryDecisionSystem is empty string
+	ga.loadSystemControlSettings()
+	ga.logger.Info("System control settings loaded during startup",
+		"entry_decision_system", ga.entryDecisionSystem,
+		"order_tracking_system", ga.orderTrackingSystem,
+		"position_mgmt_system", ga.positionMgmtSystem)
+
+	// SYSTEM CONTROL STATUS: Log whether legacy autopilot entries are enabled or blocked
+	legacyEntriesEnabled := ga.shouldUseLegacyEntryDecision()
+	if legacyEntriesEnabled {
+		ga.logger.Info("╔════════════════════════════════════════════════════════════════╗")
+		ga.logger.Info("║  LEGACY AUTOPILOT ENTRIES: ENABLED                             ║")
+		ga.logger.Info("║  entry_decision_system: " + ga.entryDecisionSystem + "                                    ║")
+		ga.logger.Info("║  Autopilot WILL place orders automatically                     ║")
+		ga.logger.Info("╚════════════════════════════════════════════════════════════════╝")
+	} else {
+		ga.logger.Info("╔════════════════════════════════════════════════════════════════╗")
+		ga.logger.Info("║  LEGACY AUTOPILOT ENTRIES: BLOCKED                             ║")
+		ga.logger.Info("║  entry_decision_system: " + ga.entryDecisionSystem + "                                      ║")
+		ga.logger.Info("║  Autopilot will scan but NOT place orders                      ║")
+		ga.logger.Info("║  Only chain system can place entries                           ║")
+		ga.logger.Info("╚════════════════════════════════════════════════════════════════╝")
+	}
+
 	ga.logger.Info("Starting Ginie Autopilot",
 		"dry_run", ga.config.DryRun,
 		"max_positions", ga.config.MaxPositions,
@@ -5699,6 +5725,19 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 		"mode", decision.SelectedMode,
 		"confidence", decision.ConfidenceScore)
 
+	// SYSTEM CONTROL GATE: Block legacy autopilot entry if system is set to "chain" only
+	// When entry_decision_system = "chain", ONLY the chain system should place orders
+	// The legacy autopilot (this code path) should NOT place orders
+	if ga.shouldUseChainEntryDecision() && !ga.shouldUseLegacyEntryDecision() {
+		ga.logger.Warn("SYSTEM CONTROL GATE: Blocking legacy autopilot entry - entry_decision_system is 'chain'",
+			"symbol", symbol,
+			"direction", action,
+			"entry_decision_system", ga.entryDecisionSystem,
+			"mode", decision.SelectedMode,
+			"hint", "Set entry_decision_system to 'legacy' or 'both' to allow autopilot entries")
+		return false, "system_control_blocked: entry_decision_system is 'chain' - legacy autopilot disabled"
+	}
+
 	// Check funding rate before entry - avoid high fees near funding time
 	isLong := action == "LONG"
 	selectedMode := decision.SelectedMode
@@ -7650,6 +7689,21 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 
 	nextTPIndex := currentTPLevel // currentTPLevel is 1-based, so index for next is same as level
 
+	// RACE CONDITION FIX: Check if TP for this level already exists to prevent duplicates
+	// This can happen when multiple goroutines detect the same TP hit
+	if nextTPIndex < len(pos.TakeProfits) {
+		tpStatus := pos.TakeProfits[nextTPIndex].Status
+		if tpStatus == "placed" || tpStatus == "hit" {
+			ga.logger.Debug("TP order already exists for this level - skipping duplicate placement",
+				"symbol", pos.Symbol,
+				"tp_level", nextTPIndex+1,
+				"status", tpStatus)
+			return
+		}
+		// Mark as placing to prevent concurrent calls
+		pos.TakeProfits[nextTPIndex].Status = "placing"
+	}
+
 	// CRITICAL: If TakeProfits is empty or has insufficient levels, regenerate them
 	// This can happen for synced positions or after config changes
 	if len(pos.TakeProfits) <= 1 && (pos.Mode == GinieModeSwing || pos.Mode == GinieModePosition) {
@@ -7948,6 +8002,11 @@ func (ga *GinieAutopilot) placeNextTPOrder(pos *GiniePosition, currentTPLevel in
 			}
 			tpOrderPlaced = true
 
+			// RACE CONDITION FIX: Update status to "placed" after successful order placement
+			if nextTPIndex < len(pos.TakeProfits) {
+				pos.TakeProfits[nextTPIndex].Status = "placed"
+			}
+
 			// Epic 7: Record TP level placed to chain when using chain-based position management
 			if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
 				ctx := context.Background()
@@ -8084,6 +8143,15 @@ func (ga *GinieAutopilot) updateBinanceSLOrderWithReason(pos *GiniePosition, sou
 func (ga *GinieAutopilot) placeSLOrder(pos *GiniePosition) {
 	// STANDBY CHECK: Block SL placement if this instance is in standby mode (Story 9.6)
 	if err := ga.requireActiveWithSymbol(pos.Symbol, "SL order placement"); err != nil {
+		return
+	}
+
+	// RACE CONDITION FIX: Check if SL order already exists to prevent duplicates
+	// This can happen when multiple goroutines try to place SL for the same position
+	if pos.StopLossAlgoID > 0 {
+		ga.logger.Debug("SL order already exists - skipping duplicate placement",
+			"symbol", pos.Symbol,
+			"existing_algo_id", pos.StopLossAlgoID)
 		return
 	}
 
@@ -19979,173 +20047,271 @@ func (ga *GinieAutopilot) monitorPendingLimitOrders() {
 	}
 }
 
-// checkPendingLimitOrders checks all pending LIMIT orders for fill or timeout
-func (ga *GinieAutopilot) checkPendingLimitOrders() {
-	ga.mu.Lock()
-	defer ga.mu.Unlock()
+// pendingOrderSnapshot holds a snapshot of a pending order for processing outside the lock
+type pendingOrderSnapshot struct {
+	Symbol   string
+	OrderID  int64
+	Quantity float64
+	TimeoutAt time.Time
+	PlacedAt  time.Time
+	Pending  *PendingLimitOrder // Original pointer for position creation
+}
 
+// pendingOrderResult holds the result of checking a pending order
+type pendingOrderResult struct {
+	Symbol      string
+	OrderID     int64
+	Status      string
+	AvgPrice    float64
+	ExecutedQty float64
+	Err         error
+	NeedsCancel bool
+	Pending     *PendingLimitOrder
+}
+
+// checkPendingLimitOrders checks all pending LIMIT orders for fill or timeout
+// RACE CONDITION FIX: Uses snapshot-and-batch approach to avoid unlock/relock pattern
+func (ga *GinieAutopilot) checkPendingLimitOrders() {
+	now := time.Now()
+
+	// PHASE 1: Take snapshot under lock
+	ga.mu.Lock()
 	if len(ga.pendingLimitOrders) == 0 {
+		ga.mu.Unlock()
 		return
 	}
 
-	now := time.Now()
-	toRemove := make([]string, 0)
-
+	// Create snapshot of pending orders
+	snapshots := make([]pendingOrderSnapshot, 0, len(ga.pendingLimitOrders))
 	for symbol, pending := range ga.pendingLimitOrders {
-		// Check if order has been filled by querying order status
-		ga.mu.Unlock()
-		orderStatus, err := ga.futuresClient.GetOrder(symbol, pending.OrderID)
-		ga.mu.Lock()
+		snapshots = append(snapshots, pendingOrderSnapshot{
+			Symbol:    symbol,
+			OrderID:   pending.OrderID,
+			Quantity:  pending.Quantity,
+			TimeoutAt: pending.TimeoutAt,
+			PlacedAt:  pending.PlacedAt,
+			Pending:   pending,
+		})
+	}
+	ga.mu.Unlock()
 
-		if err != nil {
-			ga.logger.Warn("Failed to check LIMIT order status",
-				"symbol", symbol,
-				"order_id", pending.OrderID,
-				"error", err.Error())
-			// Continue to check timeout
-		} else if orderStatus.Status == "FILLED" {
-			// Order filled! Create position
-			ga.logger.Info("Reversal LIMIT order FILLED - creating position",
-				"symbol", symbol,
-				"order_id", pending.OrderID,
-				"fill_price", orderStatus.AvgPrice,
-				"fill_qty", orderStatus.ExecutedQty)
-
-			// Create position from filled order
-			ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
-			toRemove = append(toRemove, symbol)
-			continue
-		} else if orderStatus.Status == "PARTIALLY_FILLED" {
-			// Handle partial fills - prevent zombie orders
-			filledRatio := orderStatus.ExecutedQty / pending.Quantity
-
-			// If more than 80% filled, treat as filled and create position
-			if filledRatio >= 0.8 {
-				ga.logger.Info("LIMIT order sufficiently filled (>=80%) - creating position",
-					"symbol", symbol,
-					"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
-					"filled_qty", orderStatus.ExecutedQty,
-					"requested_qty", pending.Quantity,
-					"order_id", pending.OrderID)
-
-				// Cancel remaining unfilled portion
-				ga.mu.Unlock()
-				_ = ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
-				ga.mu.Lock()
-
-				// Create position with filled quantity
-				ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
-				toRemove = append(toRemove, symbol)
-				continue
-			}
-
-			// If timed out with partial fill, create position with what we have
-			if now.After(pending.TimeoutAt) {
-				if orderStatus.ExecutedQty > 0 {
-					ga.logger.Warn("LIMIT order timed out with partial fill - creating position with filled qty",
-						"symbol", symbol,
-						"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
-						"filled_qty", orderStatus.ExecutedQty,
-						"requested_qty", pending.Quantity,
-						"order_id", pending.OrderID)
-
-					// Cancel remaining
-					ga.mu.Unlock()
-					_ = ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
-					ga.mu.Lock()
-
-					// Create position with partial fill
-					ga.createPositionFromLimitFill(pending, orderStatus.AvgPrice, orderStatus.ExecutedQty)
-				} else {
-					ga.logger.Warn("LIMIT order timed out with zero fill - cancelling",
-						"symbol", symbol,
-						"order_id", pending.OrderID)
-					ga.mu.Unlock()
-					_ = ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
-					ga.mu.Lock()
-				}
-				toRemove = append(toRemove, symbol)
-				continue
-			}
-
-			// Still waiting for more fill - log periodically
-			ga.logger.Debug("LIMIT order partially filled - waiting",
-				"symbol", symbol,
-				"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
-				"filled_qty", orderStatus.ExecutedQty,
-				"requested_qty", pending.Quantity,
-				"time_remaining", pending.TimeoutAt.Sub(now).Round(time.Second),
-				"order_id", pending.OrderID)
-			continue
-		} else if orderStatus.Status == "CANCELED" || orderStatus.Status == "EXPIRED" || orderStatus.Status == "REJECTED" {
-			// Order was cancelled/expired/rejected externally
-			ga.logger.Warn("Reversal LIMIT order was cancelled/expired/rejected externally",
-				"symbol", symbol,
-				"order_id", pending.OrderID,
-				"status", orderStatus.Status)
-			toRemove = append(toRemove, symbol)
-			continue
-		} else if orderStatus.Status == "NEW" {
-			// Order still pending - check timeout
-			if now.After(pending.TimeoutAt) {
-				ga.logger.Warn("LIMIT order timed out in NEW status - never filled, cancelling",
-					"symbol", symbol,
-					"order_id", pending.OrderID,
-					"waited", now.Sub(pending.PlacedAt).Round(time.Second))
-
-				ga.mu.Unlock()
-				err := ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
-				ga.mu.Lock()
-
-				if err != nil {
-					ga.logger.Error("Failed to cancel timed-out LIMIT order",
-						"symbol", symbol,
-						"order_id", pending.OrderID,
-						"error", err.Error())
-				} else {
-					ga.logger.Info("Timed-out LIMIT order cancelled successfully",
-						"symbol", symbol,
-						"order_id", pending.OrderID)
-				}
-
-				toRemove = append(toRemove, symbol)
-			}
-			// Not timed out yet, keep waiting
-			continue
+	// PHASE 2: Fetch all order statuses WITHOUT holding the lock
+	results := make([]pendingOrderResult, len(snapshots))
+	for i, snap := range snapshots {
+		orderStatus, err := ga.futuresClient.GetOrder(snap.Symbol, snap.OrderID)
+		results[i] = pendingOrderResult{
+			Symbol:  snap.Symbol,
+			OrderID: snap.OrderID,
+			Pending: snap.Pending,
+			Err:     err,
 		}
-
-		// Fallback timeout check for any other status
-		if now.After(pending.TimeoutAt) {
-			ga.logger.Warn("Reversal LIMIT order TIMEOUT - unexpected status, cancelling",
-				"symbol", symbol,
-				"order_id", pending.OrderID,
-				"status", orderStatus.Status,
-				"placed_at", pending.PlacedAt.Format(time.RFC3339),
-				"timeout_at", pending.TimeoutAt.Format(time.RFC3339))
-
-			// Cancel the order
-			ga.mu.Unlock()
-			err := ga.futuresClient.CancelFuturesOrder(symbol, pending.OrderID)
-			ga.mu.Lock()
-
-			if err != nil {
-				ga.logger.Error("Failed to cancel timed-out LIMIT order",
-					"symbol", symbol,
-					"order_id", pending.OrderID,
-					"error", err.Error())
-			} else {
-				ga.logger.Info("Timed-out LIMIT order cancelled successfully",
-					"symbol", symbol,
-					"order_id", pending.OrderID)
-			}
-
-			toRemove = append(toRemove, symbol)
+		if err == nil {
+			results[i].Status = orderStatus.Status
+			results[i].AvgPrice = orderStatus.AvgPrice
+			results[i].ExecutedQty = orderStatus.ExecutedQty
 		}
 	}
 
-	// Remove processed orders
-	for _, symbol := range toRemove {
-		delete(ga.pendingLimitOrders, symbol)
+	// PHASE 3: Process results and determine actions
+	type orderAction struct {
+		symbol      string
+		orderID     int64
+		action      string // "create_position", "cancel", "cancel_and_create", "remove"
+		pending     *PendingLimitOrder
+		avgPrice    float64
+		executedQty float64
+		logMsg      string
+	}
+	actions := make([]orderAction, 0)
+
+	for i, result := range results {
+		snap := snapshots[i]
+
+		if result.Err != nil {
+			ga.logger.Warn("Failed to check LIMIT order status",
+				"symbol", result.Symbol,
+				"order_id", result.OrderID,
+				"error", result.Err.Error())
+			// Check timeout even if status fetch failed
+			if now.After(snap.TimeoutAt) {
+				actions = append(actions, orderAction{
+					symbol:  result.Symbol,
+					orderID: result.OrderID,
+					action:  "cancel",
+					pending: result.Pending,
+					logMsg:  "timeout_after_status_error",
+				})
+			}
+			continue
+		}
+
+		switch result.Status {
+		case "FILLED":
+			ga.logger.Info("Reversal LIMIT order FILLED - creating position",
+				"symbol", result.Symbol,
+				"order_id", result.OrderID,
+				"fill_price", result.AvgPrice,
+				"fill_qty", result.ExecutedQty)
+			actions = append(actions, orderAction{
+				symbol:      result.Symbol,
+				orderID:     result.OrderID,
+				action:      "create_position",
+				pending:     result.Pending,
+				avgPrice:    result.AvgPrice,
+				executedQty: result.ExecutedQty,
+			})
+
+		case "PARTIALLY_FILLED":
+			filledRatio := result.ExecutedQty / snap.Quantity
+			if filledRatio >= 0.8 {
+				ga.logger.Info("LIMIT order sufficiently filled (>=80%) - creating position",
+					"symbol", result.Symbol,
+					"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
+					"filled_qty", result.ExecutedQty,
+					"requested_qty", snap.Quantity,
+					"order_id", result.OrderID)
+				actions = append(actions, orderAction{
+					symbol:      result.Symbol,
+					orderID:     result.OrderID,
+					action:      "cancel_and_create",
+					pending:     result.Pending,
+					avgPrice:    result.AvgPrice,
+					executedQty: result.ExecutedQty,
+				})
+			} else if now.After(snap.TimeoutAt) {
+				if result.ExecutedQty > 0 {
+					ga.logger.Warn("LIMIT order timed out with partial fill - creating position with filled qty",
+						"symbol", result.Symbol,
+						"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
+						"filled_qty", result.ExecutedQty,
+						"requested_qty", snap.Quantity,
+						"order_id", result.OrderID)
+					actions = append(actions, orderAction{
+						symbol:      result.Symbol,
+						orderID:     result.OrderID,
+						action:      "cancel_and_create",
+						pending:     result.Pending,
+						avgPrice:    result.AvgPrice,
+						executedQty: result.ExecutedQty,
+					})
+				} else {
+					ga.logger.Warn("LIMIT order timed out with zero fill - cancelling",
+						"symbol", result.Symbol,
+						"order_id", result.OrderID)
+					actions = append(actions, orderAction{
+						symbol:  result.Symbol,
+						orderID: result.OrderID,
+						action:  "cancel",
+						pending: result.Pending,
+					})
+				}
+			} else {
+				ga.logger.Debug("LIMIT order partially filled - waiting",
+					"symbol", result.Symbol,
+					"filled_pct", fmt.Sprintf("%.1f%%", filledRatio*100),
+					"filled_qty", result.ExecutedQty,
+					"requested_qty", snap.Quantity,
+					"time_remaining", snap.TimeoutAt.Sub(now).Round(time.Second),
+					"order_id", result.OrderID)
+			}
+
+		case "CANCELED", "EXPIRED", "REJECTED":
+			ga.logger.Warn("Reversal LIMIT order was cancelled/expired/rejected externally",
+				"symbol", result.Symbol,
+				"order_id", result.OrderID,
+				"status", result.Status)
+			actions = append(actions, orderAction{
+				symbol:  result.Symbol,
+				orderID: result.OrderID,
+				action:  "remove",
+				pending: result.Pending,
+			})
+
+		case "NEW":
+			if now.After(snap.TimeoutAt) {
+				ga.logger.Warn("LIMIT order timed out in NEW status - never filled, cancelling",
+					"symbol", result.Symbol,
+					"order_id", result.OrderID,
+					"waited", now.Sub(snap.PlacedAt).Round(time.Second))
+				actions = append(actions, orderAction{
+					symbol:  result.Symbol,
+					orderID: result.OrderID,
+					action:  "cancel",
+					pending: result.Pending,
+				})
+			}
+
+		default:
+			if now.After(snap.TimeoutAt) {
+				ga.logger.Warn("Reversal LIMIT order TIMEOUT - unexpected status, cancelling",
+					"symbol", result.Symbol,
+					"order_id", result.OrderID,
+					"status", result.Status,
+					"placed_at", snap.PlacedAt.Format(time.RFC3339),
+					"timeout_at", snap.TimeoutAt.Format(time.RFC3339))
+				actions = append(actions, orderAction{
+					symbol:  result.Symbol,
+					orderID: result.OrderID,
+					action:  "cancel",
+					pending: result.Pending,
+				})
+			}
+		}
+	}
+
+	// PHASE 4: Execute cancel orders WITHOUT holding the lock
+	cancelResults := make(map[string]error)
+	for _, act := range actions {
+		if act.action == "cancel" || act.action == "cancel_and_create" {
+			err := ga.futuresClient.CancelFuturesOrder(act.symbol, act.orderID)
+			cancelResults[act.symbol] = err
+			if err != nil {
+				ga.logger.Error("Failed to cancel LIMIT order",
+					"symbol", act.symbol,
+					"order_id", act.orderID,
+					"error", err.Error())
+			} else {
+				ga.logger.Info("LIMIT order cancelled successfully",
+					"symbol", act.symbol,
+					"order_id", act.orderID)
+			}
+		}
+	}
+
+	// PHASE 5: Update state under lock with race condition protection
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	for _, act := range actions {
+		// CRITICAL: Verify order still exists and hasn't been processed by another goroutine
+		currentPending, exists := ga.pendingLimitOrders[act.symbol]
+		if !exists {
+			ga.logger.Debug("Pending order already removed by another goroutine",
+				"symbol", act.symbol,
+				"order_id", act.orderID)
+			continue
+		}
+		// Verify it's the same order (not a new one placed while we were processing)
+		if currentPending.OrderID != act.orderID {
+			ga.logger.Debug("Pending order replaced by newer order",
+				"symbol", act.symbol,
+				"old_order_id", act.orderID,
+				"new_order_id", currentPending.OrderID)
+			continue
+		}
+
+		switch act.action {
+		case "create_position":
+			ga.createPositionFromLimitFill(act.pending, act.avgPrice, act.executedQty)
+			delete(ga.pendingLimitOrders, act.symbol)
+
+		case "cancel_and_create":
+			ga.createPositionFromLimitFill(act.pending, act.avgPrice, act.executedQty)
+			delete(ga.pendingLimitOrders, act.symbol)
+
+		case "cancel", "remove":
+			delete(ga.pendingLimitOrders, act.symbol)
+		}
 	}
 }
 
@@ -20872,14 +21038,25 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 
 	// Extract RSI and EMA values from TechnicalIndicators (ALWAYS populated - Story 11.2 fix)
 	var rsiValue, ema9Value, ema20Value float64
+	hasValidIndicators := false
 	if decision.TechnicalIndicators != nil {
 		rsiValue = decision.TechnicalIndicators.RSI14
 		ema9Value = decision.TechnicalIndicators.EMA9
 		ema20Value = decision.TechnicalIndicators.EMA20
-	} else {
-		// Debug: Log when TechnicalIndicators is nil
-		log.Printf("[DECISION-STATE] WARNING: TechnicalIndicators is nil for %s (mode=%s, recommendation=%s)",
-			symbol, decision.SelectedMode, decision.Recommendation)
+		// Consider indicators valid if we have at least RSI and ADX
+		hasValidIndicators = rsiValue > 0 && decision.MarketConditions.ADX > 0
+	}
+
+	// BUG FIX: Validate data quality - don't save fake/default scores
+	// If TechnicalIndicators is nil or has zero values, mark as INSUFFICIENT_DATA
+	if !hasValidIndicators {
+		log.Printf("[DECISION-STATE] WARNING: Insufficient indicator data for %s (RSI=%.1f, ADX=%.1f, TechIndicators=%v)",
+			symbol, rsiValue, decision.MarketConditions.ADX, decision.TechnicalIndicators != nil)
+		// Add INSUFFICIENT_DATA blocking reason - UI should show "N/A" for scores
+		blockingReasons = append(blockingReasons, "INSUFFICIENT_DATA")
+		if decisionStatus != "BLOCKED" {
+			decisionStatus = "BLOCKED"
+		}
 	}
 
 	// Calculate REAL score components using additive scoring (Story 11.15)

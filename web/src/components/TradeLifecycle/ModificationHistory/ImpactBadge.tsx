@@ -106,7 +106,7 @@ export function PriceDeltaBadge({
   orderType?: ModifiableOrderType;
   size?: 'sm' | 'md';
 }) {
-  if (delta === null || direction === 'INITIAL') {
+  if (delta == null || direction === 'INITIAL') {
     return (
       <span className="text-gray-500 text-xs font-mono">
         (initial)
@@ -122,7 +122,7 @@ export function PriceDeltaBadge({
   return (
     <span className={`font-mono ${sizeClass} ${textColor}`}>
       {sign}${Math.abs(delta).toFixed(2)}
-      {percent !== null && (
+      {percent != null && (
         <span className="text-gray-500 ml-1">
           ({sign}{percent.toFixed(2)}%)
         </span>

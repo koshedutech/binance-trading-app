@@ -167,7 +167,7 @@ export default function ModificationTree({
           </div>
           <div className="flex items-center gap-3">
             <span className="font-mono text-gray-200">
-              ${currentPrice.toFixed(2)}
+              ${(currentPrice ?? 0).toFixed(2)}
             </span>
             {summary.totalModifications > 0 && (
               <ImpactBadge
@@ -258,11 +258,11 @@ export default function ModificationTree({
           <div className="flex items-center gap-4">
             <div className="text-right">
               <div className="font-mono text-lg text-gray-200">
-                ${currentPrice.toFixed(2)}
+                ${(currentPrice ?? 0).toFixed(2)}
               </div>
               {summary.totalModifications > 0 && (
                 <div className="text-xs text-gray-500">
-                  from ${summary.initialPrice.toFixed(2)}
+                  from ${(summary.initialPrice ?? 0).toFixed(2)}
                 </div>
               )}
             </div>
@@ -283,13 +283,13 @@ export default function ModificationTree({
         {!isExpanded && summary.totalModifications > 0 && (
           <div className="mt-2 flex items-center gap-4 text-xs text-gray-500">
             <span>
-              Initial: <span className="text-gray-400 font-mono">${summary.initialPrice.toFixed(2)}</span>
+              Initial: <span className="text-gray-400 font-mono">${(summary.initialPrice ?? 0).toFixed(2)}</span>
             </span>
             <span>
-              Current: <span className="text-gray-400 font-mono">${summary.currentPrice.toFixed(2)}</span>
+              Current: <span className="text-gray-400 font-mono">${(summary.currentPrice ?? 0).toFixed(2)}</span>
             </span>
-            <span className={getImpactColor(summary.netDollarImpact >= 0 ? 'BETTER' : 'WORSE', orderType)}>
-              Net: {formatDollarImpact(summary.netDollarImpact)}
+            <span className={getImpactColor((summary.netDollarImpact ?? 0) >= 0 ? 'BETTER' : 'WORSE', orderType)}>
+              Net: {formatDollarImpact(summary.netDollarImpact ?? 0)}
             </span>
           </div>
         )}
@@ -360,7 +360,7 @@ export default function ModificationTree({
                   <div className="w-3 h-3 rounded-full bg-green-500" />
                   <span className="text-sm text-gray-400">Current:</span>
                   <span className="font-mono text-lg text-green-400">
-                    ${currentPrice.toFixed(2)}
+                    ${(currentPrice ?? 0).toFixed(2)}
                   </span>
                 </div>
 

@@ -54,9 +54,10 @@ export default function ModificationNode({
 
   // Format price with appropriate precision
   const formatPrice = (price: number) => {
-    if (price >= 1000) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(6);
+    const safePrice = price ?? 0;
+    if (safePrice >= 1000) return safePrice.toFixed(2);
+    if (safePrice >= 1) return safePrice.toFixed(4);
+    return safePrice.toFixed(6);
   };
 
   // Story 7.19: Use parent formatTime if provided (with user timezone), fallback to basic format
@@ -310,9 +311,10 @@ export function ModificationNodeCompact({
 }) {
   const sourceIcon = getSourceIcon(event.modificationSource);
   const formatPrice = (price: number) => {
-    if (price >= 1000) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(6);
+    const safePrice = price ?? 0;
+    if (safePrice >= 1000) return safePrice.toFixed(2);
+    if (safePrice >= 1) return safePrice.toFixed(4);
+    return safePrice.toFixed(6);
   };
 
   return (
