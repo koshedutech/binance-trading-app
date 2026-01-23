@@ -576,7 +576,8 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 // checkAndExecuteReentry checks if re-entry conditions are met and executes
 func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice float64) error {
 	sr := pos.ScalpReentry
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 	cycle := sr.GetCurrentCycle()
 
 	if cycle == nil || cycle.ReentryState != ReentryStateWaiting {
@@ -794,7 +795,8 @@ func (g *GinieAutopilot) checkAndExecuteReentry(pos *GiniePosition, currentPrice
 // monitorFinalTrailing monitors the final 20% position with trailing stop
 func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice float64) error {
 	sr := pos.ScalpReentry
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 
 	// Update peak price
 	if pos.Side == "LONG" {
@@ -1446,19 +1448,21 @@ type FuturesOrder struct {
 
 // initHedgeReentryState initializes hedge mode state for a position
 func (g *GinieAutopilot) initHedgeReentryState(pos *GiniePosition) *HedgeReentryState {
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 	sr := pos.ScalpReentry
 
 	state := NewHedgeReentryState(pos.OriginalQty, config)
 	state.OriginalTotalQty = sr.RemainingQuantity
-	state.AddDebugLog(fmt.Sprintf("Hedge mode initialized for %s %s", pos.Symbol, pos.Side))
+	state.AddDebugLog(fmt.Sprintf("Hedge mode initialized for %s %s (strategy=%s)", pos.Symbol, pos.Side, pos.EntryStrategy))
 
 	return state
 }
 
 // checkAndTriggerHedge checks if hedge should be triggered after a TP hit
 func (g *GinieAutopilot) checkAndTriggerHedge(pos *GiniePosition, tpLevel int, sellQty float64, currentPrice float64) {
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 	sr := pos.ScalpReentry
 
 	if !config.HedgeModeEnabled {
@@ -1517,7 +1521,8 @@ func (g *GinieAutopilot) checkNegativeTPTrigger(pos *GiniePosition, currentPrice
 		return
 	}
 
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 
 	if !config.HedgeModeEnabled || !config.TriggerOnLossTP {
 		return
@@ -1848,7 +1853,8 @@ func (g *GinieAutopilot) checkCombinedExit(pos *GiniePosition, currentPrice floa
 		return false, ""
 	}
 
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 	combinedROI := g.calculateCombinedROI(pos, currentPrice)
 
 	if combinedROI >= config.CombinedROIExitPct {
@@ -1870,7 +1876,8 @@ func (g *GinieAutopilot) checkRallyExit(pos *GiniePosition, currentPrice float64
 		return false, ""
 	}
 
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 	if !config.RallyExitEnabled {
 		return false, ""
 	}
@@ -1929,7 +1936,8 @@ func (g *GinieAutopilot) updateHedgeWideSL(pos *GiniePosition) {
 		return
 	}
 
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 
 	klines, err := g.futuresClient.GetFuturesKlines(pos.Symbol, "15m", 20)
 	if err != nil || len(klines) < 14 {
@@ -2018,11 +2026,12 @@ func (g *GinieAutopilot) monitorHedgeMode(pos *GiniePosition, currentPrice float
 		return "", false
 	}
 
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 
 	if sr.HedgeMode == nil && config.HedgeModeEnabled {
 		sr.HedgeMode = g.initHedgeReentryState(pos)
-		log.Printf("[HEDGE-MODE] %s: Initialized HedgeMode state", pos.Symbol)
+		log.Printf("[HEDGE-MODE] %s: Initialized HedgeMode state (strategy=%s)", pos.Symbol, pos.EntryStrategy)
 	}
 
 	g.checkNegativeTPTrigger(pos, currentPrice)
@@ -2080,7 +2089,8 @@ func (g *GinieAutopilot) monitorHedgeTPs(pos *GiniePosition, currentPrice float6
 		return
 	}
 
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 
 	nextTPLevel := hm.HedgeTPLevel + 1
 	if nextTPLevel > 3 {
@@ -2190,7 +2200,8 @@ func (g *GinieAutopilot) executeHedgeTPSell(pos *GiniePosition, tpLevel int, cur
 func (g *GinieAutopilot) activateProfitProtection(pos *GiniePosition, earnedProfit float64, closedSide string) {
 	sr := pos.ScalpReentry
 	hm := sr.HedgeMode
-	config := g.getUserPositionOptimizationConfig()
+	// [Story 11.42] Use strategy-level config with fallback
+	config := *g.getStrategyPositionOptimization(pos)
 
 	if !config.ProfitProtectionEnabled || hm == nil {
 		return

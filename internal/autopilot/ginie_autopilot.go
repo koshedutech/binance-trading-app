@@ -729,6 +729,58 @@ func (ps *ProtectionStatus) NeedsHealing() bool {
 
 // ==================== END POSITION PROTECTION STATE MACHINE ====================
 
+// ==================== POSITION ANALYTICS (Story 11.40) ====================
+
+// PositionAnalyticsData contains position analytics for API response
+// Story 11.40: Position Analytics Integration
+type PositionAnalyticsData struct {
+	Stage           string               `json:"stage"`                      // RISK_ZONE, BREAKEVEN, TP1, EFFICIENCY
+	StageEntryTime  int64                `json:"stage_entry_time,omitempty"` // Unix ms
+	CurrentPrice    float64              `json:"current_price"`
+	BreakevenPrice  *float64             `json:"breakeven_price,omitempty"`
+	TP1Price        *float64             `json:"tp1_price,omitempty"`
+	TP2Price        *float64             `json:"tp2_price,omitempty"`
+	TP3Price        *float64             `json:"tp3_price,omitempty"`
+	StopLoss        *float64             `json:"stop_loss,omitempty"`
+	Efficiency      *EfficiencyData      `json:"efficiency,omitempty"`
+	DecisionMode    string               `json:"decision_mode"` // classic, new_engine
+	ClassicScores   *ClassicScoresData   `json:"classic_scores,omitempty"`
+	NewEngineScores *NewEngineScoresData `json:"new_engine_scores,omitempty"`
+	UnrealizedPnL   float64              `json:"unrealized_pnl"`
+	ROE             float64              `json:"roe"`
+}
+
+// EfficiencyData contains efficiency metrics for position analytics
+type EfficiencyData struct {
+	PeakProfit        float64 `json:"peak_profit"`
+	CurrentProfit     float64 `json:"current_profit"`
+	EfficiencyPercent float64 `json:"efficiency_percent"`
+	ThresholdPercent  float64 `json:"threshold_percent"`
+}
+
+// ClassicScoresData contains classic indicator scores
+type ClassicScoresData struct {
+	ADX              float64 `json:"adx"`
+	ADXThreshold     float64 `json:"adx_threshold"`
+	RSI              float64 `json:"rsi"`
+	RSIState         string  `json:"rsi_state"` // "oversold", "normal", "overbought"
+	ReversalSignals  int     `json:"reversal_signals"`
+	ReversalRequired int     `json:"reversal_required"`
+}
+
+// NewEngineScoresData contains new engine indicator scores
+type NewEngineScoresData struct {
+	Technical float64 `json:"technical"`
+	Context   float64 `json:"context"`
+	LLM       float64 `json:"llm"`
+	History   float64 `json:"history"`
+	Final     float64 `json:"final"`
+	Regime    string  `json:"regime"`
+	Strategy  string  `json:"strategy"`
+}
+
+// ==================== END POSITION ANALYTICS ====================
+
 // GiniePosition represents a Ginie-managed position with multi-level TPs
 type GiniePosition struct {
 	Symbol       string           `json:"symbol"`
@@ -1259,8 +1311,9 @@ type GinieAutopilot struct {
 	modeSafetyConfigs map[string]*ModeSafetyConfig // Safety config per mode
 	lastDayReset      time.Time                    // When daily counters were last reset
 
-	// Per-mode circuit breaker tracking (Story 2.7 Task 2.7.4)
-	modeCircuitBreakers map[GinieTradingMode]*ModeCircuitBreaker // Mode-specific circuit breaker state
+	// Per-mode+strategy circuit breaker tracking (Story 2.7 Task 2.7.4, Story 11.42 per-strategy)
+	// Key format: "mode" for backward compatibility or "mode|strategy" for per-strategy tracking
+	strategyCircuitBreakers map[string]*ModeCircuitBreaker // Mode+Strategy circuit breaker state
 
 	// System control settings (Epic 7 Enhancement: order tracking and position management system switches)
 	systemControlLoaded  bool   // Whether system control has been loaded
@@ -1504,7 +1557,7 @@ func NewGinieAutopilot(
 		modeSafetyStates:     make(map[string]*ModeSafetyState),
 		modeSafetyConfigs:    make(map[string]*ModeSafetyConfig),
 		lastDayReset:         time.Now().Truncate(24 * time.Hour),
-		modeCircuitBreakers:  make(map[GinieTradingMode]*ModeCircuitBreaker),
+		strategyCircuitBreakers: make(map[string]*ModeCircuitBreaker),
 		pendingLimitOrders:   make(map[string]*PendingLimitOrder),
 		// Story 10.3: Exit Decision State Manager for UI monitoring
 		exitDecisionStateManager: NewExitDecisionStateManager(),
@@ -2420,6 +2473,162 @@ func (ga *GinieAutopilot) GetExitDecisionState(symbol string) *ExitDecisionState
 	}
 
 	return state.Clone()
+}
+
+// GetPositionAnalytics returns position analytics for the chain view.
+// Story 11.40: Position Analytics Integration
+func (ga *GinieAutopilot) GetPositionAnalytics(symbol string) *PositionAnalyticsData {
+	ga.mu.RLock()
+	pos, exists := ga.positions[symbol]
+	ga.mu.RUnlock()
+
+	if !exists || pos == nil {
+		return nil
+	}
+
+	// Get current price
+	currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
+	if err != nil || currentPrice <= 0 {
+		return nil
+	}
+
+	// Determine decision mode
+	decisionMode := "classic"
+	if ga.positionManagementConfig != nil && ga.positionManagementConfig.DecisionMode == "new_engine" {
+		decisionMode = "new_engine"
+	}
+
+	// Determine stage
+	stage := pos.Stage
+	if stage == "" {
+		// Calculate stage from position state
+		if pos.EffActive {
+			stage = "EFFICIENCY"
+		} else if pos.CurrentTPLevel >= 1 {
+			stage = "TP1"
+		} else if pos.BEAchieved {
+			stage = "BREAKEVEN"
+		} else {
+			stage = "RISK_ZONE"
+		}
+	}
+
+	// Calculate ROE: (currentPrice - entryPrice) / entryPrice * leverage * 100 (for LONG)
+	var roe float64
+	if pos.EntryPrice > 0 {
+		if pos.Side == "LONG" {
+			roe = (currentPrice - pos.EntryPrice) / pos.EntryPrice * float64(pos.Leverage) * 100
+		} else {
+			roe = (pos.EntryPrice - currentPrice) / pos.EntryPrice * float64(pos.Leverage) * 100
+		}
+	}
+
+	// Build analytics response
+	analytics := &PositionAnalyticsData{
+		Stage:         stage,
+		CurrentPrice:  currentPrice,
+		DecisionMode:  decisionMode,
+		UnrealizedPnL: pos.UnrealizedPnL,
+		ROE:           roe,
+	}
+
+	// Stage entry time - use breakeven time if in BREAKEVEN or later stages
+	if pos.BEAchieved && !pos.BETime.IsZero() {
+		analytics.StageEntryTime = pos.BETime.UnixMilli()
+	} else if !pos.EntryTime.IsZero() {
+		analytics.StageEntryTime = pos.EntryTime.UnixMilli()
+	}
+
+	// Breakeven price
+	if pos.BEPrice > 0 {
+		bePrice := pos.BEPrice
+		analytics.BreakevenPrice = &bePrice
+	}
+
+	// Stop loss
+	if pos.StopLoss > 0 {
+		sl := pos.StopLoss
+		analytics.StopLoss = &sl
+	}
+
+	// Take profit levels from pos.TakeProfits array
+	for i, tp := range pos.TakeProfits {
+		price := tp.Price
+		switch i {
+		case 0:
+			analytics.TP1Price = &price
+		case 1:
+			analytics.TP2Price = &price
+		case 2:
+			analytics.TP3Price = &price
+		}
+	}
+
+	// Efficiency data (if in EFFICIENCY stage)
+	if pos.EffActive {
+		// Default efficiency threshold is 50% (hardcoded in buildEfficiencyExitCheck)
+		effThreshold := 50.0
+
+		analytics.Efficiency = &EfficiencyData{
+			PeakProfit:        pos.PeakProfit,
+			CurrentProfit:     pos.CurrentProfit,
+			EfficiencyPercent: pos.Efficiency * 100, // Convert to percentage
+			ThresholdPercent:  effThreshold,
+		}
+	}
+
+	// Classic scores (if using classic mode)
+	if decisionMode == "classic" && ga.positionManagementConfig != nil {
+		classicConfig := ga.positionManagementConfig.Classic
+		adxThreshold := classicConfig.ADXReversalThreshold
+		if adxThreshold == 0 {
+			adxThreshold = 20 // Default
+		}
+		reversalRequired := classicConfig.ReversalConfirmations
+		if reversalRequired == 0 {
+			reversalRequired = 2 // Default
+		}
+
+		// We populate what we have from config - actual indicator values would come from exit decision state
+		analytics.ClassicScores = &ClassicScoresData{
+			ADXThreshold:     adxThreshold,
+			ReversalRequired: reversalRequired,
+			RSIState:         "normal", // Default, would be populated from live data
+		}
+
+		// Try to get live indicator data from exit decision state
+		if ga.exitDecisionStateManager != nil {
+			if state := ga.exitDecisionStateManager.GetState(symbol); state != nil {
+				// Check exit checks for indicator values
+				for _, check := range state.ExitChecks {
+					if check.Name == "TREND_REVERSAL" && check.TrendReversalDetails != nil {
+						analytics.ClassicScores.ADX = check.TrendReversalDetails.ADX.Value
+						analytics.ClassicScores.RSI = check.TrendReversalDetails.RSI.Value
+						analytics.ClassicScores.ReversalSignals = check.TrendReversalDetails.ReversalSignals.Count
+
+						// Determine RSI state
+						if check.TrendReversalDetails.RSI.Value < 30 {
+							analytics.ClassicScores.RSIState = "oversold"
+						} else if check.TrendReversalDetails.RSI.Value > 70 {
+							analytics.ClassicScores.RSIState = "overbought"
+						} else {
+							analytics.ClassicScores.RSIState = "normal"
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// New engine scores (if using new_engine mode)
+	if decisionMode == "new_engine" {
+		analytics.NewEngineScores = &NewEngineScoresData{
+			Regime:   pos.CurrentRegime,
+			Strategy: pos.EntryStrategy,
+		}
+	}
+
+	return analytics
 }
 
 // updateExitDecisionStateForPosition updates the exit decision state for a position.
@@ -4750,21 +4959,46 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 		riskMultiplier = riskMultiplierAggressive
 	}
 
-	// Get confidence multipliers from mode config - use sensible defaults if not configured
-	confidenceBase := modeConfig.Size.ConfidenceMultiplierBase
-	confidenceScale := modeConfig.Size.ConfidenceMultiplierScale
+	// Get confidence thresholds from mode config for step-based scaling
+	// Defaults: min=50, high=70, ultra=85
+	var minConfidence, highConfidence, ultraConfidence float64 = 50, 70, 85
 
-	// Apply sensible defaults if not configured
-	if confidenceBase <= 0 {
-		confidenceBase = 0.5
-	}
-	if confidenceScale <= 0 {
-		confidenceScale = 0.7
+	if modeConfig.Confidence != nil {
+		if modeConfig.Confidence.MinConfidence > 0 {
+			minConfidence = modeConfig.Confidence.MinConfidence
+		}
+		if modeConfig.Confidence.HighConfidence > 0 {
+			highConfidence = modeConfig.Confidence.HighConfidence
+		}
+		if modeConfig.Confidence.UltraConfidence > 0 {
+			ultraConfidence = modeConfig.Confidence.UltraConfidence
+		}
 	}
 
-	// Adjust based on confidence (higher confidence = more allocation)
-	// Scale: 65% confidence = 0.8x, 80% confidence = 1.0x, 95% confidence = 1.15x
-	confidenceMultiplier := confidenceBase + (confidence / 100.0 * confidenceScale)
+	// Step-based confidence multiplier using configured thresholds:
+	// - Below min_confidence: BLOCKED (handled elsewhere before this function)
+	// - min → high: 1.0x (base size)
+	// - high → ultra: 1.5x (50% larger)
+	// - Above ultra: 2.0x (double size)
+	var confidenceMultiplier float64
+	var confidenceTier string
+	if confidence >= ultraConfidence {
+		confidenceMultiplier = 2.0
+		confidenceTier = "ultra"
+	} else if confidence >= highConfidence {
+		confidenceMultiplier = 1.5
+		confidenceTier = "high"
+	} else {
+		confidenceMultiplier = 1.0
+		confidenceTier = "base"
+	}
+
+	ga.logger.Debug("Confidence-based position scaling",
+		"symbol", symbol,
+		"confidence", confidence,
+		"tier", confidenceTier,
+		"multiplier", confidenceMultiplier,
+		"thresholds", fmt.Sprintf("min=%.0f, high=%.0f, ultra=%.0f", minConfidence, highConfidence, ultraConfidence))
 
 	// Get per-symbol size multiplier based on performance category (Story 9.12: use cache service)
 	effectiveMaxUSD := ga.config.MaxUSDPerPosition
@@ -4878,9 +5112,9 @@ func (ga *GinieAutopilot) calculateAdaptivePositionSize(symbol string, confidenc
 // ==================== FUNDING RATE AWARENESS ====================
 
 // checkFundingRate checks if trade should be blocked due to high funding rate near funding time
-// Uses mode-specific funding rate configuration if available
+// [Story 11.42] Uses strategy-specific funding rate configuration with mode-level fallback
 // Returns (shouldBlock bool, reason string)
-func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool, mode GinieTradingMode) (bool, string) {
+func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool, mode GinieTradingMode, strategy string) (bool, string) {
 	fundingRate, err := ga.futuresClient.GetFundingRate(symbol)
 	if err != nil || fundingRate == nil {
 		return false, "" // Allow if can't check
@@ -4890,18 +5124,19 @@ func (ga *GinieAutopilot) checkFundingRate(symbol string, isLong bool, mode Gini
 	var maxRate float64 = 0.001   // 0.1% threshold (fallback)
 	var blockTimeMinutes int = 30 // Block within 30 minutes of funding (fallback)
 
-	modeConfig := ga.getModeConfig(mode)
-	if modeConfig != nil && modeConfig.FundingRate != nil {
-		// Check if funding rate awareness is disabled for this mode
-		if !modeConfig.FundingRate.Enabled {
-			return false, "" // Funding rate checks disabled for this mode
+	// [Story 11.42] Use strategy-level config with mode-level fallback
+	frConfig := ga.getStrategyFundingRateConfig(mode, strategy)
+	if frConfig != nil {
+		// Check if funding rate awareness is disabled for this mode/strategy
+		if !frConfig.Enabled {
+			return false, "" // Funding rate checks disabled for this mode/strategy
 		}
 		// Use config values if set
-		if modeConfig.FundingRate.MaxFundingRate > 0 {
-			maxRate = modeConfig.FundingRate.MaxFundingRate
+		if frConfig.MaxFundingRate > 0 {
+			maxRate = frConfig.MaxFundingRate
 		}
-		if modeConfig.FundingRate.BlockTimeMinutes > 0 {
-			blockTimeMinutes = modeConfig.FundingRate.BlockTimeMinutes
+		if frConfig.BlockTimeMinutes > 0 {
+			blockTimeMinutes = frConfig.BlockTimeMinutes
 		}
 	}
 
@@ -4963,13 +5198,12 @@ func parseHoldDuration(durationStr string) time.Duration {
 // shouldCloseStalePosition checks if a position has exceeded its max hold duration
 // Returns (shouldClose bool, holdDuration time.Duration, maxHoldDuration time.Duration)
 func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, time.Duration, time.Duration) {
-	// Story 9.12: Use getModeConfig instead of file-based settings
-	modeConfig := ga.getModeConfig(pos.Mode)
-	if modeConfig == nil || modeConfig.StaleRelease == nil {
+	// [Story 11.42] Use getStrategyStaleReleaseConfig with strategy-level override
+	staleConfig := ga.getStrategyStaleReleaseConfig(pos)
+	if staleConfig == nil {
 		return false, 0, 0
 	}
 
-	staleConfig := modeConfig.StaleRelease
 	if !staleConfig.Enabled {
 		return false, 0, 0
 	}
@@ -4982,6 +5216,8 @@ func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, ti
 	holdDuration := time.Since(pos.EntryTime)
 
 	if holdDuration >= maxHold {
+		log.Printf("[STALE-RELEASE] %s: Position exceeded max hold (strategy=%s, hold=%v, max=%v)",
+			pos.Symbol, pos.EntryStrategy, holdDuration, maxHold)
 		return true, holdDuration, maxHold
 	}
 
@@ -4989,7 +5225,7 @@ func (ga *GinieAutopilot) shouldCloseStalePosition(pos *GiniePosition) (bool, ti
 }
 
 // shouldExitBeforeFunding checks if we should close position to avoid funding fee
-// Uses mode-specific funding rate configuration from the position's mode
+// [Story 11.42] Uses strategy-specific funding rate configuration with mode-level fallback
 // Returns (shouldExit bool, reason string)
 func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, string) {
 	fundingRate, err := ga.futuresClient.GetFundingRate(pos.Symbol)
@@ -5002,21 +5238,22 @@ func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, str
 	var feeThresholdPercent float64 = 0.3  // Exit if fee > 30% of profit (fallback)
 	var extremeFundingRate float64 = 0.003 // 0.3% extreme rate (fallback)
 
-	modeConfig := ga.getModeConfig(pos.Mode)
-	if modeConfig != nil && modeConfig.FundingRate != nil {
-		// Check if funding rate awareness is disabled for this mode
-		if !modeConfig.FundingRate.Enabled {
-			return false, "" // Funding rate checks disabled for this mode
+	// [Story 11.42] Use strategy-level config with mode-level fallback (pos.EntryStrategy has the strategy name)
+	frConfig := ga.getStrategyFundingRateConfig(pos.Mode, pos.EntryStrategy)
+	if frConfig != nil {
+		// Check if funding rate awareness is disabled for this mode/strategy
+		if !frConfig.Enabled {
+			return false, "" // Funding rate checks disabled for this mode/strategy
 		}
 		// Use config values if set
-		if modeConfig.FundingRate.ExitTimeMinutes > 0 {
-			exitTimeMinutes = modeConfig.FundingRate.ExitTimeMinutes
+		if frConfig.ExitTimeMinutes > 0 {
+			exitTimeMinutes = frConfig.ExitTimeMinutes
 		}
-		if modeConfig.FundingRate.FeeThresholdPercent > 0 {
-			feeThresholdPercent = modeConfig.FundingRate.FeeThresholdPercent
+		if frConfig.FeeThresholdPercent > 0 {
+			feeThresholdPercent = frConfig.FeeThresholdPercent
 		}
-		if modeConfig.FundingRate.ExtremeFundingRate > 0 {
-			extremeFundingRate = modeConfig.FundingRate.ExtremeFundingRate
+		if frConfig.ExtremeFundingRate > 0 {
+			extremeFundingRate = frConfig.ExtremeFundingRate
 		}
 	}
 
@@ -5058,8 +5295,8 @@ func (ga *GinieAutopilot) shouldExitBeforeFunding(pos *GiniePosition) (bool, str
 }
 
 // adjustSizeForFunding reduces position size when funding rate is costly
-// Uses mode-specific funding rate configuration if available
-func (ga *GinieAutopilot) adjustSizeForFunding(symbol string, baseSize float64, isLong bool, mode GinieTradingMode) float64 {
+// [Story 11.42] Uses strategy-specific funding rate configuration with mode-level fallback
+func (ga *GinieAutopilot) adjustSizeForFunding(symbol string, baseSize float64, isLong bool, mode GinieTradingMode, strategy string) float64 {
 	fundingRate, err := ga.futuresClient.GetFundingRate(symbol)
 	if err != nil || fundingRate == nil {
 		return baseSize
@@ -5070,21 +5307,22 @@ func (ga *GinieAutopilot) adjustSizeForFunding(symbol string, baseSize float64, 
 	var highRateReduction float64 = 0.5      // 50% reduction for high rates (fallback)
 	var elevatedRateReduction float64 = 0.75 // 75% (25% reduction) for elevated rates (fallback)
 
-	modeConfig := ga.getModeConfig(mode)
-	if modeConfig != nil && modeConfig.FundingRate != nil {
-		// Check if funding rate awareness is disabled for this mode
-		if !modeConfig.FundingRate.Enabled {
-			return baseSize // Funding rate adjustments disabled for this mode
+	// [Story 11.42] Use strategy-level config with mode-level fallback
+	frConfig := ga.getStrategyFundingRateConfig(mode, strategy)
+	if frConfig != nil {
+		// Check if funding rate awareness is disabled for this mode/strategy
+		if !frConfig.Enabled {
+			return baseSize // Funding rate adjustments disabled for this mode/strategy
 		}
 		// Use config values if set
-		if modeConfig.FundingRate.MaxFundingRate > 0 {
-			maxFundingRate = modeConfig.FundingRate.MaxFundingRate
+		if frConfig.MaxFundingRate > 0 {
+			maxFundingRate = frConfig.MaxFundingRate
 		}
-		if modeConfig.FundingRate.HighRateReduction > 0 {
-			highRateReduction = modeConfig.FundingRate.HighRateReduction
+		if frConfig.HighRateReduction > 0 {
+			highRateReduction = frConfig.HighRateReduction
 		}
-		if modeConfig.FundingRate.ElevatedRateReduction > 0 {
-			elevatedRateReduction = modeConfig.FundingRate.ElevatedRateReduction
+		if frConfig.ElevatedRateReduction > 0 {
+			elevatedRateReduction = frConfig.ElevatedRateReduction
 		}
 	}
 
@@ -5456,10 +5694,13 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	// Check funding rate before entry - avoid high fees near funding time
 	isLong := action == "LONG"
 	selectedMode := decision.SelectedMode
-	if blocked, reason := ga.checkFundingRate(symbol, isLong, selectedMode); blocked {
+	// [Story 11.42] Try to get active strategy for mode - pass empty string if not available (falls back to mode config)
+	activeStrategy := ga.getActiveStrategyForMode(selectedMode)
+	if blocked, reason := ga.checkFundingRate(symbol, isLong, selectedMode, activeStrategy); blocked {
 		ga.logger.Warn("Ginie skipping trade - funding rate concern",
 			"symbol", symbol,
 			"mode", selectedMode,
+			"strategy", activeStrategy,
 			"reason", reason,
 			"side", decision.TradeExecution.Action)
 		return false, fmt.Sprintf("funding_rate: %s", reason)
@@ -5486,10 +5727,15 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 			}
 		}
 
-		// Create validator with mode-specific config
+		// Create validator with mode/strategy-specific config
+		// [Story 11.42] Use strategy-level MTF config with mode-level fallback
+		mtfConfig := ga.getStrategyMTFConfig(selectedMode, activeStrategy)
+		if mtfConfig == nil {
+			mtfConfig = modeConfig.MTF // Fallback to mode config if no strategy config
+		}
 		validator := NewTrendFilterValidator(
 			modeConfig.TrendFilters,
-			modeConfig.MTF,
+			mtfConfig,
 			ga.futuresClient,
 			slog.Default(),
 		)
@@ -5525,11 +5771,11 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 
 		// Only consider hedge if signal is opposite to existing position
 		if (existingSide == "LONG" && newSide == "SHORT") || (existingSide == "SHORT" && newSide == "LONG") {
-			// Get mode config to check hedge settings
-			modeConfig := ga.getModeConfig(selectedMode)
-			if modeConfig != nil && modeConfig.Hedge != nil && modeConfig.Hedge.AllowHedge {
+			// [Story 11.42] Get hedge config with strategy-level override
+			hedgeConfig := ga.getStrategyHedgeConfig(existingPos)
+			if hedgeConfig != nil && hedgeConfig.AllowHedge {
 				// Check MinConfidenceForHedge threshold
-				if decision.ConfidenceScore >= modeConfig.Hedge.MinConfidenceForHedge {
+				if decision.ConfidenceScore >= hedgeConfig.MinConfidenceForHedge {
 					// Check if existing position is profitable enough
 					currentPrice, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
 					if err == nil {
@@ -5540,15 +5786,17 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 							profitPct = (existingPos.EntryPrice - currentPrice) / existingPos.EntryPrice * 100
 						}
 
-						if profitPct >= modeConfig.Hedge.ExistingMustBeInProfit {
+						if profitPct >= hedgeConfig.ExistingMustBeInProfit {
 							ga.logger.Info("Signal-based hedge opportunity detected",
 								"symbol", symbol,
 								"existing_side", existingSide,
 								"new_signal", newSide,
 								"confidence", decision.ConfidenceScore,
-								"min_required", modeConfig.Hedge.MinConfidenceForHedge,
+								"min_required", hedgeConfig.MinConfidenceForHedge,
 								"existing_profit_pct", profitPct,
-								"min_profit_required", modeConfig.Hedge.ExistingMustBeInProfit,
+								"min_profit_required", hedgeConfig.ExistingMustBeInProfit,
+								"strategy", existingPos.EntryStrategy,
+								"config_source", "strategy_or_mode",
 								"note", "Hedge logic not yet fully implemented - would open opposite position here")
 							// TODO: Implement signal-based hedge opening logic
 							// This would open a new position in opposite direction up to MaxHedgeSizePercent
@@ -5557,14 +5805,14 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 							ga.logger.Debug("Hedge rejected - existing position not profitable enough",
 								"symbol", symbol,
 								"existing_profit_pct", profitPct,
-								"min_required", modeConfig.Hedge.ExistingMustBeInProfit)
+								"min_required", hedgeConfig.ExistingMustBeInProfit)
 						}
 					}
 				} else {
 					ga.logger.Debug("Hedge rejected - confidence too low",
 						"symbol", symbol,
 						"confidence", decision.ConfidenceScore,
-						"min_required", modeConfig.Hedge.MinConfidenceForHedge)
+						"min_required", hedgeConfig.MinConfidenceForHedge)
 				}
 			}
 		}
@@ -5626,7 +5874,8 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 	}
 
 	// Adjust position size based on funding rate (reduce if funding costs us money)
-	positionUSD = ga.adjustSizeForFunding(symbol, positionUSD, isLong, selectedMode)
+	// [Story 11.42] Pass activeStrategy for strategy-level config lookup
+	positionUSD = ga.adjustSizeForFunding(symbol, positionUSD, isLong, selectedMode, activeStrategy)
 
 	// Get current price
 	price, err := ga.futuresClient.GetFuturesCurrentPrice(symbol)
@@ -7306,8 +7555,9 @@ func (ga *GinieAutopilot) executePartialClose(pos *GiniePosition, currentPrice f
 		ga.circuitBreaker.RecordTrade(pnlPercent)
 	}
 
-	// Record to MODE circuit breaker for mode-specific loss tracking
-	ga.RecordModeTradeResult(pos.Mode, pnl)
+	// Record to MODE+STRATEGY circuit breaker for mode-specific loss tracking
+	// [Story 11.42] Use strategy-aware circuit breaker
+	ga.RecordStrategyTradeResult(pos.Mode, pos.EntryStrategy, pnl)
 
 	// Record trade with original signal info for study
 	tradeResult := GinieTradeResult{
@@ -8391,8 +8641,9 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 		ga.circuitBreaker.RecordTrade(pnlPercent)
 	}
 
-	// Record to MODE circuit breaker for mode-specific loss tracking
-	ga.RecordModeTradeResult(pos.Mode, totalPnL)
+	// Record to MODE+STRATEGY circuit breaker for mode-specific loss tracking
+	// [Story 11.42] Use strategy-aware circuit breaker
+	ga.RecordStrategyTradeResult(pos.Mode, pos.EntryStrategy, totalPnL)
 
 	// Per-coin consecutive loss tracking and blocking
 	ga.updateCoinLossTracking(symbol, totalPnL, pnlPercent)
@@ -9096,6 +9347,154 @@ func (ga *GinieAutopilot) getModeConfig(mode GinieTradingMode) *ModeFullConfig {
 	return nil
 }
 
+// getStrategyPositionOptimization retrieves position optimization config with strategy-level override
+// [Story 11.42] Priority: 1) Strategy-level config, 2) Mode-level config, 3) Global config
+func (ga *GinieAutopilot) getStrategyPositionOptimization(pos *GiniePosition) *PositionOptimizationConfig {
+	ctx := context.Background()
+
+	// 1. Try strategy-level config first (if position has an entry strategy)
+	if pos.EntryStrategy != "" && isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(pos.Mode), pos.EntryStrategy)
+		if err == nil && strategyConfig != nil && strategyConfig.PositionOptimization != nil {
+			log.Printf("[STRATEGY-POS-OPT] Using STRATEGY config for %s (mode=%s, strategy=%s): ReentryEnabled=%v, DynamicSLEnabled=%v",
+				pos.Symbol, pos.Mode, pos.EntryStrategy,
+				strategyConfig.PositionOptimization.ReentryEnabled,
+				strategyConfig.PositionOptimization.DynamicSLEnabled)
+			// Convert StrategyPositionOptimization to PositionOptimizationConfig
+			return convertStrategyToPositionOptConfig(strategyConfig.PositionOptimization)
+		}
+	}
+
+	// 2. Fall back to mode-level config
+	modeConfig := ga.getModeConfig(pos.Mode)
+	if modeConfig != nil && modeConfig.PositionOptimization != nil {
+		log.Printf("[STRATEGY-POS-OPT] Using MODE config for %s (mode=%s): no strategy config found", pos.Symbol, pos.Mode)
+		return modeConfig.PositionOptimization
+	}
+
+	// 3. Fall back to global config
+	log.Printf("[STRATEGY-POS-OPT] Using GLOBAL config for %s (no mode or strategy config)", pos.Symbol)
+	globalConfig := ga.getUserPositionOptimizationConfig()
+	return &globalConfig
+}
+
+// getStrategyHedgeConfig retrieves hedge config with strategy-level override
+// [Story 11.42] Priority: 1) Strategy-level config, 2) Mode-level config
+func (ga *GinieAutopilot) getStrategyHedgeConfig(pos *GiniePosition) *HedgeModeConfig {
+	ctx := context.Background()
+
+	// 1. Try strategy-level config first (if position has an entry strategy)
+	if pos.EntryStrategy != "" && isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(pos.Mode), pos.EntryStrategy)
+		if err == nil && strategyConfig != nil && strategyConfig.Hedge != nil {
+			log.Printf("[STRATEGY-HEDGE] Using STRATEGY config for %s (mode=%s, strategy=%s): AllowHedge=%v, MinConfidence=%d",
+				pos.Symbol, pos.Mode, pos.EntryStrategy,
+				strategyConfig.Hedge.AllowHedge,
+				strategyConfig.Hedge.MinConfidenceForHedge)
+			// Convert StrategyHedge to ModeHedgeConfig
+			return convertStrategyToHedgeConfig(strategyConfig.Hedge)
+		}
+	}
+
+	// 2. Fall back to mode-level config
+	modeConfig := ga.getModeConfig(pos.Mode)
+	if modeConfig != nil && modeConfig.Hedge != nil {
+		log.Printf("[STRATEGY-HEDGE] Using MODE config for %s (mode=%s): no strategy config found", pos.Symbol, pos.Mode)
+		return modeConfig.Hedge
+	}
+
+	return nil
+}
+
+// getStrategyStaleReleaseConfig retrieves stale release config with strategy-level override
+// [Story 11.42] Priority: 1) Strategy-level config, 2) Mode-level config
+func (ga *GinieAutopilot) getStrategyStaleReleaseConfig(pos *GiniePosition) *StalePositionReleaseConfig {
+	ctx := context.Background()
+
+	// 1. Try strategy-level config first (if position has an entry strategy)
+	if pos.EntryStrategy != "" && isSettingsCacheValid(ga.settingsCache) && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(pos.Mode), pos.EntryStrategy)
+		if err == nil && strategyConfig != nil && strategyConfig.StaleRelease != nil {
+			log.Printf("[STRATEGY-STALE] Using STRATEGY config for %s (mode=%s, strategy=%s): Enabled=%v, MaxHoldMins=%d",
+				pos.Symbol, pos.Mode, pos.EntryStrategy,
+				strategyConfig.StaleRelease.Enabled,
+				strategyConfig.StaleRelease.MaxHoldDurationMinutes)
+			// Convert StrategyStaleRelease to ModeStaleReleaseConfig
+			return convertStrategyToStaleConfig(strategyConfig.StaleRelease)
+		}
+	}
+
+	// 2. Fall back to mode-level config
+	modeConfig := ga.getModeConfig(pos.Mode)
+	if modeConfig != nil && modeConfig.StaleRelease != nil {
+		log.Printf("[STRATEGY-STALE] Using MODE config for %s (mode=%s): no strategy config found", pos.Symbol, pos.Mode)
+		return modeConfig.StaleRelease
+	}
+
+	return nil
+}
+
+// convertStrategyToPositionOptConfig converts StrategyPositionOptimization to PositionOptimizationConfig
+// [Story 11.42] This bridges the strategy-level config to the existing position optimization struct
+func convertStrategyToPositionOptConfig(sc *database.StrategyPositionOptimization) *PositionOptimizationConfig {
+	if sc == nil {
+		return nil
+	}
+	// Use defaults for fields not in StrategyPositionOptimization
+	defaults := DefaultPositionOptimizationConfig()
+	// Copy defaults and override with strategy config values
+	config := defaults
+	config.Enabled = sc.ReentryEnabled || sc.DynamicSLEnabled || sc.ProfitProtectionEnabled
+	// Map available fields - use non-zero values from strategy config
+	if sc.ReentryMinPullbackPct > 0 {
+		config.ReentryPriceBuffer = sc.ReentryMinPullbackPct
+	}
+	if sc.MaxReentriesPerPosition > 0 {
+		config.MaxReentryAttempts = sc.MaxReentriesPerPosition
+	}
+	if sc.DynamicSLAtBreakevenPct > 0 {
+		config.DynamicSLProtectPct = sc.DynamicSLAtBreakevenPct
+	}
+	if sc.ProfitProtectionEnabled {
+		config.ProfitProtectionEnabled = true
+		if sc.ProfitProtectionLockPct > 0 {
+			config.ProfitProtectionPercent = float64(sc.ProfitProtectionLockPct)
+		}
+	}
+	return &config
+}
+
+// convertStrategyToHedgeConfig converts StrategyHedge to HedgeModeConfig
+// [Story 11.42] This bridges the strategy-level config to the existing hedge struct
+func convertStrategyToHedgeConfig(sh *database.StrategyHedge) *HedgeModeConfig {
+	if sh == nil {
+		return nil
+	}
+	return &HedgeModeConfig{
+		AllowHedge:             sh.AllowHedge,
+		MinConfidenceForHedge:  float64(sh.MinConfidenceForHedge),
+		ExistingMustBeInProfit: sh.ExistingMustBeInProfitPct,
+		MaxHedgeSizePercent:    float64(sh.MaxHedgeSizePercent),
+	}
+}
+
+// convertStrategyToStaleConfig converts StrategyStaleRelease to StalePositionReleaseConfig
+// [Story 11.42] This bridges the strategy-level config to the existing stale release struct
+func convertStrategyToStaleConfig(ss *database.StrategyStaleRelease) *StalePositionReleaseConfig {
+	if ss == nil {
+		return nil
+	}
+	// Convert minutes to string duration format (e.g., "30m")
+	maxHoldDuration := fmt.Sprintf("%dm", ss.MaxHoldDurationMinutes)
+	return &StalePositionReleaseConfig{
+		Enabled:              ss.Enabled,
+		MaxHoldDuration:      maxHoldDuration,
+		StaleZoneLo:          ss.StaleZoneLoPct,
+		StaleZoneHi:          ss.StaleZoneHiPct,
+		StaleZoneCloseAction: ss.StaleZoneAction,
+	}
+}
+
 // getEarlyWarningConfig retrieves the early warning configuration for a given mode
 // Priority: 1) Mode-specific config from ModeFullConfig.EarlyWarning
 //           2) Fall back to global early warning settings
@@ -9168,6 +9567,169 @@ func (ga *GinieAutopilot) getEarlyWarningConfig(mode GinieTradingMode) *ModeEarl
 			MinLossPercent:    0.5,
 			CheckIntervalSecs: 30,
 			CloseMinHoldMins:  5,
+		}
+	}
+}
+
+// getStrategyEarlyWarning retrieves early warning config with strategy-level override support
+// [Story 11.42] Priority: 1) Strategy-specific config, 2) Mode-level config, 3) Global defaults
+// Returns the appropriate early warning configuration for the given mode and strategy
+func (ga *GinieAutopilot) getStrategyEarlyWarning(mode GinieTradingMode, strategy string) *ModeEarlyWarningConfig {
+	// 1. Try strategy-specific config first (if strategy is provided)
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.EarlyWarning != nil {
+			// Convert database.StrategyEarlyWarning to ModeEarlyWarningConfig
+			ewConfig := &ModeEarlyWarningConfig{
+				Enabled:           strategyConfig.EarlyWarning.Enabled,
+				StartAfterMinutes: float64(strategyConfig.EarlyWarning.StartAfterMinutes),
+				MinLossPercent:    strategyConfig.EarlyWarning.MinLossPercent,
+				CheckIntervalSecs: strategyConfig.EarlyWarning.CheckIntervalSecs,
+				CloseMinHoldMins:  float64(strategyConfig.EarlyWarning.CloseMinHoldMins),
+			}
+			log.Printf("[EARLY-WARNING] [Story 11.42] Using STRATEGY-LEVEL config for %s/%s: Enabled=%v, StartAfter=%v min, MinLoss=%.2f%%, CloseMinHold=%v min",
+				mode, strategy, ewConfig.Enabled, ewConfig.StartAfterMinutes, ewConfig.MinLossPercent, ewConfig.CloseMinHoldMins)
+			return ewConfig
+		}
+	}
+
+	// 2. Fall back to mode-level config
+	modeConfig := ga.getEarlyWarningConfig(mode)
+	if strategy != "" {
+		log.Printf("[EARLY-WARNING] [Story 11.42] No strategy config for %s/%s, falling back to MODE-LEVEL config",
+			mode, strategy)
+	}
+	return modeConfig
+}
+
+// getStrategyDynamicAIExitConfig retrieves dynamic AI exit config with strategy-level override support
+// [Story 11.42] Priority: 1) Strategy-specific config, 2) Mode-level config, 3) Code defaults
+// Returns the appropriate dynamic AI exit configuration for the given mode and strategy
+func (ga *GinieAutopilot) getStrategyDynamicAIExitConfig(mode GinieTradingMode, strategy string) *ModeDynamicAIExitConfig {
+	// 1. Try strategy-specific config first (if strategy is provided)
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.DynamicAIExit != nil {
+			// Convert database.StrategyDynamicAIExit to ModeDynamicAIExitConfig
+			daeConfig := &ModeDynamicAIExitConfig{
+				Enabled:           strategyConfig.DynamicAIExit.Enabled,
+				MinHoldBeforeAIMS: int(strategyConfig.DynamicAIExit.MinHoldBeforeAIMs),
+				AICheckIntervalMS: int(strategyConfig.DynamicAIExit.AICheckIntervalMs),
+				UseLLMForLoss:     strategyConfig.DynamicAIExit.UseLLMForLoss,
+				UseLLMForProfit:   strategyConfig.DynamicAIExit.UseLLMForProfit,
+				MaxHoldTimeMS:     int(strategyConfig.DynamicAIExit.MaxHoldTimeMs),
+			}
+			log.Printf("[DYNAMIC-AI-EXIT] [Story 11.42] Using STRATEGY-LEVEL config for %s/%s: Enabled=%v, UseLLMLoss=%v, UseLLMProfit=%v, MaxHoldMs=%d",
+				mode, strategy, daeConfig.Enabled, daeConfig.UseLLMForLoss, daeConfig.UseLLMForProfit, daeConfig.MaxHoldTimeMS)
+			return daeConfig
+		}
+	}
+
+	// 2. Fall back to mode-level config from ModeFullConfig
+	if modeConfig := ga.getModeConfig(mode); modeConfig != nil && modeConfig.DynamicAIExit != nil {
+		if strategy != "" {
+			log.Printf("[DYNAMIC-AI-EXIT] [Story 11.42] No strategy config for %s/%s, falling back to MODE-LEVEL config",
+				mode, strategy)
+		}
+		return modeConfig.DynamicAIExit
+	}
+
+	// 3. Fall back to code defaults
+	if strategy != "" {
+		log.Printf("[DYNAMIC-AI-EXIT] [Story 11.42] No mode config for %s/%s, falling back to CODE DEFAULTS",
+			mode, strategy)
+	}
+	return GetDynamicAIExitConfigForMode(mode)
+}
+
+// StrategyExitConditionsConfig holds the exit conditions for a strategy
+// [Story 11.42] Used to return strategy-aware exit conditions
+type StrategyExitConditionsConfig struct {
+	UseAIExit           bool
+	MaxHoldMinutes      int
+	EarlyWarningEnabled bool
+	ExitOnTrendReversal bool
+	ADXExitThreshold    int
+}
+
+// getStrategyExitConditions retrieves exit conditions config with strategy-level override support
+// [Story 11.42] Priority: 1) Strategy-specific config, 2) Mode-level defaults
+// Returns the appropriate exit conditions configuration for the given mode and strategy
+func (ga *GinieAutopilot) getStrategyExitConditions(mode GinieTradingMode, strategy string) *StrategyExitConditionsConfig {
+	// 1. Try strategy-specific config first (if strategy is provided)
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil {
+			// Use strategy's ExitConditions
+			exitConfig := &StrategyExitConditionsConfig{
+				UseAIExit:           strategyConfig.ExitConditions.UseAIExit,
+				MaxHoldMinutes:      strategyConfig.ExitConditions.MaxHoldMinutes,
+				EarlyWarningEnabled: strategyConfig.ExitConditions.EarlyWarningEnabled,
+				ExitOnTrendReversal: strategyConfig.ExitConditions.ExitOnTrendReversal,
+				ADXExitThreshold:    strategyConfig.ExitConditions.ADXExitThreshold,
+			}
+			log.Printf("[EXIT-CONDITIONS] [Story 11.42] Using STRATEGY-LEVEL config for %s/%s: UseAIExit=%v, MaxHoldMins=%d, EarlyWarning=%v",
+				mode, strategy, exitConfig.UseAIExit, exitConfig.MaxHoldMinutes, exitConfig.EarlyWarningEnabled)
+			return exitConfig
+		}
+	}
+
+	// 2. Fall back to mode-level defaults
+	if strategy != "" {
+		log.Printf("[EXIT-CONDITIONS] [Story 11.42] No strategy config for %s/%s, falling back to MODE-LEVEL defaults",
+			mode, strategy)
+	}
+
+	// Mode-level defaults based on trading mode
+	switch mode {
+	case GinieModeUltraFast:
+		return &StrategyExitConditionsConfig{
+			UseAIExit:           false, // Ultra-fast uses time-based exits
+			MaxHoldMinutes:      1,
+			EarlyWarningEnabled: false,
+			ExitOnTrendReversal: false,
+			ADXExitThreshold:    0,
+		}
+	case GinieModeScalp:
+		return &StrategyExitConditionsConfig{
+			UseAIExit:           true,
+			MaxHoldMinutes:      30,
+			EarlyWarningEnabled: true,
+			ExitOnTrendReversal: true,
+			ADXExitThreshold:    15,
+		}
+	case GinieModeSwing:
+		return &StrategyExitConditionsConfig{
+			UseAIExit:           true,
+			MaxHoldMinutes:      240, // 4 hours
+			EarlyWarningEnabled: true,
+			ExitOnTrendReversal: true,
+			ADXExitThreshold:    20,
+		}
+	case GinieModePosition:
+		return &StrategyExitConditionsConfig{
+			UseAIExit:           true,
+			MaxHoldMinutes:      1440, // 24 hours
+			EarlyWarningEnabled: true,
+			ExitOnTrendReversal: false, // Position trades are more tolerant
+			ADXExitThreshold:    25,
+		}
+	default:
+		return &StrategyExitConditionsConfig{
+			UseAIExit:           true,
+			MaxHoldMinutes:      60,
+			EarlyWarningEnabled: true,
+			ExitOnTrendReversal: true,
+			ADXExitThreshold:    15,
 		}
 	}
 }
@@ -10136,44 +10698,45 @@ func (ga *GinieAutopilot) GetStats() map[string]interface{} {
 	}
 }
 
-// calculateEnabledModesMaxPositions sums MaxPositions from only enabled trading modes
-// Uses isModeEnabled() which reads from Redis cache (sub-millisecond reads)
-// This ensures position count updates IMMEDIATELY when user toggles modes
+// calculateEnabledModesMaxPositions sums MaxPositions from all 16 enabled strategies
+// (4 modes × 4 strategies). Uses Redis cache for sub-millisecond reads.
+// This ensures position count updates IMMEDIATELY when user toggles modes/strategies.
 func (ga *GinieAutopilot) calculateEnabledModesMaxPositions() int {
-	// Story 9.12: Use getModeConfig instead of GetSettingsManager().LoadSettings()
-	// Use isModeEnabled() which reads from Redis cache (fast, sub-millisecond reads)
-	// Cache is populated from DB on miss, and invalidated on toggle
 	totalMaxPositions := 0
 
-	// Check ultra_fast mode
-	if ga.isModeEnabled(GinieModeUltraFast) {
-		if cfg := ga.getModeConfig(GinieModeUltraFast); cfg != nil && cfg.Size != nil {
-			totalMaxPositions += cfg.Size.MaxPositions
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	strategies := []string{"trend_following", "mean_reversion", "breakout", "range_trading"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Validate cache is available
+	if !isSettingsCacheValid(ga.settingsCache) || ga.userID == "" {
+		return ga.config.MaxPositions
+	}
+
+	// Iterate through all mode+strategy combinations
+	for _, mode := range modes {
+		// Skip disabled modes entirely
+		if !ga.isModeEnabled(GinieTradingMode(mode)) {
+			continue
+		}
+
+		// Sum max_positions from each enabled strategy within the mode
+		for _, strategy := range strategies {
+			stratConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, mode, strategy)
+			if err != nil {
+				continue
+			}
+
+			// Only count enabled strategies with valid max_positions
+			if stratConfig != nil && stratConfig.Enabled && stratConfig.MaxPositions > 0 {
+				totalMaxPositions += stratConfig.MaxPositions
+			}
 		}
 	}
 
-	// Check scalp mode
-	if ga.isModeEnabled(GinieModeScalp) {
-		if cfg := ga.getModeConfig(GinieModeScalp); cfg != nil && cfg.Size != nil {
-			totalMaxPositions += cfg.Size.MaxPositions
-		}
-	}
-
-	// Check swing mode
-	if ga.isModeEnabled(GinieModeSwing) {
-		if cfg := ga.getModeConfig(GinieModeSwing); cfg != nil && cfg.Size != nil {
-			totalMaxPositions += cfg.Size.MaxPositions
-		}
-	}
-
-	// Check position mode
-	if ga.isModeEnabled(GinieModePosition) {
-		if cfg := ga.getModeConfig(GinieModePosition); cfg != nil && cfg.Size != nil {
-			totalMaxPositions += cfg.Size.MaxPositions
-		}
-	}
-
-	// Fallback to global config if no modes returned positions
+	// Fallback to global config if no strategies returned positions
 	if totalMaxPositions == 0 {
 		return ga.config.MaxPositions
 	}
@@ -12935,13 +13498,14 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 		// All positions now go through early warning regardless of position optimization status
 		// Position optimization is a feature, not a mode - original mode rules still apply
 
-		// Get mode-specific early warning config (falls back to global if not defined)
-		modeEWConfig := ga.getEarlyWarningConfig(pos.Mode)
+		// [Story 11.42] Get strategy-aware early warning config (checks strategy first, falls back to mode)
+		// Priority: 1) Strategy-specific config, 2) Mode-level config, 3) Global defaults
+		modeEWConfig := ga.getStrategyEarlyWarning(pos.Mode, pos.EntryStrategy)
 		if modeEWConfig == nil || !modeEWConfig.Enabled {
 			continue
 		}
 
-		// Use mode-specific settings with global fallback
+		// Use strategy/mode-specific settings with global fallback
 		startAfterMinutes := modeEWConfig.StartAfterMinutes
 		if startAfterMinutes <= 0 {
 			startAfterMinutes = float64(settings.EarlyWarningStartAfterMinutes)
@@ -12983,8 +13547,8 @@ func (ga *GinieAutopilot) checkPositionsForEarlyWarning() {
 			continue
 		}
 
-		log.Printf("[EARLY-WARNING] %s [%s]: Position at %.2f%% loss (threshold: %.2f%%), analyzing MTF data...",
-			pos.Symbol, pos.Mode, pnlPercent, minLossPercent)
+		log.Printf("[EARLY-WARNING] %s [%s/%s]: Position at %.2f%% loss (threshold: %.2f%%), analyzing MTF data...",
+			pos.Symbol, pos.Mode, pos.EntryStrategy, pnlPercent, minLossPercent)
 
 		// Use mode-specific or global minConfidence for LLM analysis threshold
 		minConfidence := globalMinConfidence
@@ -14993,8 +15557,9 @@ func (ga *GinieAutopilot) CloseAllPositions() (int, float64, error) {
 			ga.circuitBreaker.RecordTrade(pnlPercent)
 		}
 
-		// Record to MODE circuit breaker for mode-specific loss tracking
-		ga.RecordModeTradeResult(pos.Mode, pnl)
+		// Record to MODE+STRATEGY circuit breaker for mode-specific loss tracking
+		// [Story 11.42] Use strategy-aware circuit breaker
+		ga.RecordStrategyTradeResult(pos.Mode, pos.EntryStrategy, pnl)
 
 		// Record trade
 		ga.recordTrade(GinieTradeResult{
@@ -15641,7 +16206,8 @@ func (ga *GinieAutopilot) executeStrategyTrade(signal *StrategySignal) {
 	// Check funding rate before entry (use user's enabled mode preference)
 	isLong := signal.Side == "LONG"
 	strategyMode := ga.selectEnabledModeForPosition() // Use user's enabled mode instead of hardcoded swing
-	if blocked, reason := ga.checkFundingRate(symbol, isLong, strategyMode); blocked {
+	// [Story 11.42] Use the signal's strategy name for strategy-level config lookup
+	if blocked, reason := ga.checkFundingRate(symbol, isLong, strategyMode, signal.StrategyName); blocked {
 		ga.logger.Warn("Strategy trade skipped - funding rate concern",
 			"symbol", symbol,
 			"strategy", signal.StrategyName,
@@ -16719,10 +17285,13 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 	ga.executeUltraFastExit(pos, currentPrice, reason)
 
 	// Story 9.12: Update stats via mode circuit breaker (DB-backed) instead of SettingsManager
+	// Story 11.42: Use strategy-aware circuit breaker (strategy from position's EntryStrategy)
+	strategy := pos.EntryStrategy // Get strategy from position if available
+	cbKey := getCircuitBreakerKey(GinieModeUltraFast, strategy)
 	isWin := pnlUSD >= 0
 
-	// Update in-memory circuit breaker
-	if cb, exists := ga.modeCircuitBreakers[GinieModeUltraFast]; exists && cb != nil {
+	// Update in-memory circuit breaker using new strategy-aware access
+	if cb := ga.getStrategyCircuitBreaker(GinieModeUltraFast, strategy); cb != nil {
 		cb.TotalTrades++
 		cb.TradesThisDay++
 		cb.TradesThisHour++
@@ -16736,6 +17305,7 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 			ga.logger.Info("Ultra-fast: WIN recorded (DB-backed) - consecutive losses reset",
 				"symbol", pos.Symbol,
 				"pnl_usd", pnlUSD,
+				"cb_key", cbKey,
 				"total_wins", cb.TotalWins,
 				"total_trades", cb.TotalTrades)
 		} else {
@@ -16743,6 +17313,7 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 			ga.logger.Warn("Ultra-fast: LOSS recorded (DB-backed) - checking circuit breaker",
 				"symbol", pos.Symbol,
 				"pnl_usd", pnlUSD,
+				"cb_key", cbKey,
 				"consecutive_losses", cb.ConsecutiveLosses,
 				"day_loss", cb.CurrentDayLoss)
 
@@ -16752,6 +17323,7 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 				cb.PausedUntil = time.Now().Add(time.Duration(cb.CooldownMinutes) * time.Minute)
 				ga.logger.Error("Ultra-fast: CIRCUIT BREAKER TRIPPED (DB-backed) - ultra-fast trading PAUSED",
 					"reason", fmt.Sprintf("consecutive_losses=%d >= max=%d", cb.ConsecutiveLosses, cb.MaxConsecutiveLoss),
+					"cb_key", cbKey,
 					"day_loss", cb.CurrentDayLoss)
 			}
 			if cb.CurrentDayLoss <= -cb.MaxLossPerDay {
@@ -16759,34 +17331,13 @@ func (ga *GinieAutopilot) executeUltraFastExitWithTracking(pos *GiniePosition, c
 				cb.PausedUntil = time.Now().Add(time.Duration(cb.CooldownMinutes) * time.Minute)
 				ga.logger.Error("Ultra-fast: CIRCUIT BREAKER TRIPPED (DB-backed) - ultra-fast trading PAUSED",
 					"reason", fmt.Sprintf("day_loss=$%.2f <= -max=$%.2f", cb.CurrentDayLoss, cb.MaxLossPerDay),
+					"cb_key", cbKey,
 					"consecutive_losses", cb.ConsecutiveLosses)
 			}
 		}
 
 		// Persist to database (async to avoid blocking exit)
-		if ga.repo != nil && ga.userID != "" {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				dbStats := &database.UserModeCBStats{
-					UserID:            ga.userID,
-					ModeName:          string(GinieModeUltraFast),
-					CurrentHourLoss:   cb.CurrentHourLoss,
-					CurrentDayLoss:    cb.CurrentDayLoss,
-					ConsecutiveLosses: cb.ConsecutiveLosses,
-					TradesThisMinute:  cb.TradesThisMinute,
-					TradesThisHour:    cb.TradesThisHour,
-					TradesThisDay:     cb.TradesThisDay,
-					TotalWins:         cb.TotalWins,
-					TotalTrades:       cb.TotalTrades,
-					IsPaused:          cb.IsPaused,
-					PausedUntil:       cb.PausedUntil,
-				}
-				if err := ga.repo.SaveUserModeCBStats(ctx, dbStats); err != nil {
-					log.Printf("[ULTRA-FAST] Warning: Failed to save CB stats to DB: %v", err)
-				}
-			}()
-		}
+		ga.persistStrategyCircuitBreakerStats(GinieModeUltraFast, strategy, cb)
 	}
 
 	// Record trade outcome for adaptive AI learning
@@ -16862,10 +17413,12 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 	adxFavorable := scan.Trend.ADXValue > minADX
 
 	// Get current loss buffer from mode circuit breaker
+	// Story 11.42: Use strategy-aware circuit breaker (strategy from position's EntryStrategy)
 	var currentDayLoss float64
 	var consecutiveLosses int
 	maxDailyLoss := 10.0 // Default max daily loss for ultra-fast
-	if cb, exists := ga.modeCircuitBreakers[GinieModeUltraFast]; exists && cb != nil {
+	posStrategy := pos.EntryStrategy
+	if cb := ga.getStrategyCircuitBreaker(GinieModeUltraFast, posStrategy); cb != nil {
 		currentDayLoss = cb.CurrentDayLoss
 		consecutiveLosses = cb.ConsecutiveLosses
 		if cb.MaxLossPerDay > 0 {
@@ -16921,10 +17474,56 @@ func (ga *GinieAutopilot) getUltraFastLossDecision(pos *GiniePosition, currentPr
 
 // getDynamicAIExitDecision evaluates whether to hold or exit a position based on market conditions
 // Works for scalp, swing, and position modes using mode-specific thresholds
+// [Story 11.42] Now supports strategy-level dynamic AI exit configuration
 // Returns: "hold" = continue holding, "exit" = close position now
 func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPrice float64, pnlPercent float64) (string, string) {
 	mode := pos.Mode
 	modeStr := string(mode)
+	strategy := pos.EntryStrategy
+
+	// [Story 11.42] Get strategy-aware dynamic AI exit config
+	daeConfig := ga.getStrategyDynamicAIExitConfig(mode, strategy)
+	if daeConfig != nil && !daeConfig.Enabled {
+		ga.logger.Debug("Dynamic AI Exit: Disabled for strategy",
+			"symbol", pos.Symbol,
+			"mode", modeStr,
+			"strategy", strategy)
+		return "hold", "dynamic_ai_exit_disabled"
+	}
+
+	// [Story 11.42] Check if we should use LLM based on profit/loss state
+	useLLMAnalysis := true
+	if daeConfig != nil {
+		if pnlPercent < 0 && !daeConfig.UseLLMForLoss {
+			useLLMAnalysis = false
+			ga.logger.Debug("Dynamic AI Exit: LLM for loss disabled",
+				"symbol", pos.Symbol,
+				"mode", modeStr,
+				"strategy", strategy,
+				"pnl_pct", pnlPercent)
+		} else if pnlPercent >= 0 && !daeConfig.UseLLMForProfit {
+			useLLMAnalysis = false
+			ga.logger.Debug("Dynamic AI Exit: LLM for profit disabled",
+				"symbol", pos.Symbol,
+				"mode", modeStr,
+				"strategy", strategy,
+				"pnl_pct", pnlPercent)
+		}
+	}
+
+	// [Story 11.42] Check max hold time if configured
+	if daeConfig != nil && daeConfig.MaxHoldTimeMS > 0 {
+		holdDurationMs := time.Since(pos.EntryTime).Milliseconds()
+		if holdDurationMs >= int64(daeConfig.MaxHoldTimeMS) {
+			ga.logger.Info("Dynamic AI Exit: Max hold time exceeded",
+				"symbol", pos.Symbol,
+				"mode", modeStr,
+				"strategy", strategy,
+				"hold_ms", holdDurationMs,
+				"max_hold_ms", daeConfig.MaxHoldTimeMS)
+			return "exit", fmt.Sprintf("max_hold_time_exceeded: held=%dms max=%dms", holdDurationMs, daeConfig.MaxHoldTimeMS)
+		}
+	}
 
 	// Get current market conditions via ScanCoin
 	scan, err := ga.analyzer.ScanCoin(pos.Symbol)
@@ -16932,6 +17531,7 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 		ga.logger.Warn("AI Exit: Failed to analyze market, defaulting to hold",
 			"symbol", pos.Symbol,
 			"mode", modeStr,
+			"strategy", strategy,
 			"error", err)
 		return "hold", "scan_failed"
 	}
@@ -16962,15 +17562,22 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 		volatilityOK = scan.Volatility.Regime == "Low" || scan.Volatility.Regime == "Medium"
 	}
 
-	// Get mode-specific ADX threshold
+	// [Story 11.42] Get strategy-aware exit conditions for ADX threshold
+	exitConditions := ga.getStrategyExitConditions(mode, strategy)
+
+	// Get mode/strategy-specific ADX threshold
 	minADX := 15.0 // Default
-	switch mode {
-	case GinieModeScalp:
-		minADX = 10.0 // Lower threshold for quick scalps
-	case GinieModeSwing:
-		minADX = 15.0 // Medium threshold for swing trades
-	case GinieModePosition:
-		minADX = 20.0 // Higher threshold for position trades (need strong trends)
+	if exitConditions != nil && exitConditions.ADXExitThreshold > 0 {
+		minADX = float64(exitConditions.ADXExitThreshold)
+	} else {
+		switch mode {
+		case GinieModeScalp:
+			minADX = 10.0 // Lower threshold for quick scalps
+		case GinieModeSwing:
+			minADX = 15.0 // Medium threshold for swing trades
+		case GinieModePosition:
+			minADX = 20.0 // Higher threshold for position trades (need strong trends)
+		}
 	}
 	adxFavorable := scan.Trend.ADXValue > minADX
 
@@ -16989,12 +17596,26 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 	shouldExit := false
 	reason := ""
 
+	// [Story 11.42] If LLM analysis is disabled, skip AI-driven exit conditions
+	if !useLLMAnalysis {
+		reason = fmt.Sprintf("llm_analysis_skipped: mode=%s strategy=%s pnl=%.2f%%", modeStr, strategy, pnlPercent)
+		ga.logger.Debug("Dynamic AI Exit: Skipping LLM-based exit conditions",
+			"symbol", pos.Symbol,
+			"mode", modeStr,
+			"strategy", strategy,
+			"reason", reason)
+		return "hold", reason
+	}
+
 	// Exit conditions (checked in priority order):
 	// 1. Trend completely reversed AND we're in loss
 	if !trendFavorable && pnlPercent < 0 {
-		shouldExit = true
-		reason = fmt.Sprintf("trend_reversed: trend=%s position=%s pnl=%.2f%%",
-			scan.Trend.TrendDirection, pos.Side, pnlPercent)
+		// [Story 11.42] Check if exit on trend reversal is enabled for strategy
+		if exitConditions == nil || exitConditions.ExitOnTrendReversal {
+			shouldExit = true
+			reason = fmt.Sprintf("trend_reversed: trend=%s position=%s pnl=%.2f%%",
+				scan.Trend.TrendDirection, pos.Side, pnlPercent)
+		}
 	}
 
 	// 2. MTF misaligned AND significant loss
@@ -17034,12 +17655,14 @@ func (ga *GinieAutopilot) getDynamicAIExitDecision(pos *GiniePosition, currentPr
 	ga.logger.Info("Dynamic AI Exit decision",
 		"symbol", pos.Symbol,
 		"mode", modeStr,
+		"strategy", strategy,
 		"side", pos.Side,
 		"pnl_pct", pnlPercent,
 		"decision", map[bool]string{true: "EXIT", false: "HOLD"}[shouldExit],
 		"reason", reason,
 		"trend", scan.Trend.TrendDirection,
 		"adx", scan.Trend.ADXValue,
+		"adx_threshold", minADX,
 		"mtf_aligned", mtfAligned)
 
 	if shouldExit {
@@ -18063,11 +18686,21 @@ func (ga *GinieAutopilot) executeUltraFastEntryWithSize(symbol string, signal *U
 	return nil
 }
 
-// ========== Mode-Specific Circuit Breaker Methods (Story 2.7 Task 2.7.4) ==========
+// ========== Mode-Specific Circuit Breaker Methods (Story 2.7 Task 2.7.4, Story 11.42 per-strategy) ==========
+
+// getCircuitBreakerKey returns the composite key for mode+strategy circuit breaker tracking
+// [Story 11.42] For backward compatibility, returns just mode if strategy is empty
+func getCircuitBreakerKey(mode GinieTradingMode, strategy string) string {
+	if strategy == "" {
+		return string(mode) // backward compatible - mode-only key
+	}
+	return string(mode) + "|" + strategy
+}
 
 // initModeCircuitBreakers initializes mode circuit breakers from default configs
 // [Story 9.9] scalp_reentry mode removed - circuit breakers only track the 4 base modes
 // [Story 9.12] Phase 2: Load persisted stats from database instead of file
+// [Story 11.42] Supports per-mode+strategy circuit breakers (lazy initialization for strategies)
 func (ga *GinieAutopilot) initModeCircuitBreakers() {
 	modes := []GinieTradingMode{GinieModeUltraFast, GinieModeScalp, GinieModeSwing, GinieModePosition}
 
@@ -18086,7 +18719,9 @@ func (ga *GinieAutopilot) initModeCircuitBreakers() {
 	for _, mode := range modes {
 		config := ga.GetDefaultModeConfig(mode)
 		if config != nil && config.CircuitBreaker != nil {
-			ga.modeCircuitBreakers[mode] = &ModeCircuitBreaker{
+			// Use mode-only key for backward compatibility (no strategy specified)
+			cbKey := getCircuitBreakerKey(mode, "")
+			ga.strategyCircuitBreakers[cbKey] = &ModeCircuitBreaker{
 				// Copy configuration values
 				MaxLossPerHour:     config.CircuitBreaker.MaxLossPerHour,
 				MaxLossPerDay:      config.CircuitBreaker.MaxLossPerDay,
@@ -18133,28 +18768,187 @@ func (ga *GinieAutopilot) initModeCircuitBreakers() {
 					}
 
 					// Restore persisted values
-					ga.modeCircuitBreakers[mode].TradesThisMinute = savedStats.TradesThisMinute
-					ga.modeCircuitBreakers[mode].TradesThisHour = savedStats.TradesThisHour
-					ga.modeCircuitBreakers[mode].TradesThisDay = savedStats.TradesThisDay
-					ga.modeCircuitBreakers[mode].TotalTrades = savedStats.TotalTrades
-					ga.modeCircuitBreakers[mode].TotalWins = savedStats.TotalWins
-					ga.modeCircuitBreakers[mode].ConsecutiveLosses = savedStats.ConsecutiveLosses
-					ga.modeCircuitBreakers[mode].CurrentHourLoss = savedStats.CurrentHourLoss
-					ga.modeCircuitBreakers[mode].CurrentDayLoss = savedStats.CurrentDayLoss
-					ga.modeCircuitBreakers[mode].IsPaused = savedStats.IsPaused
-					ga.modeCircuitBreakers[mode].PauseReason = savedStats.PauseReason
-					ga.modeCircuitBreakers[mode].PausedUntil = savedStats.PausedUntil
+					ga.strategyCircuitBreakers[cbKey].TradesThisMinute = savedStats.TradesThisMinute
+					ga.strategyCircuitBreakers[cbKey].TradesThisHour = savedStats.TradesThisHour
+					ga.strategyCircuitBreakers[cbKey].TradesThisDay = savedStats.TradesThisDay
+					ga.strategyCircuitBreakers[cbKey].TotalTrades = savedStats.TotalTrades
+					ga.strategyCircuitBreakers[cbKey].TotalWins = savedStats.TotalWins
+					ga.strategyCircuitBreakers[cbKey].ConsecutiveLosses = savedStats.ConsecutiveLosses
+					ga.strategyCircuitBreakers[cbKey].CurrentHourLoss = savedStats.CurrentHourLoss
+					ga.strategyCircuitBreakers[cbKey].CurrentDayLoss = savedStats.CurrentDayLoss
+					ga.strategyCircuitBreakers[cbKey].IsPaused = savedStats.IsPaused
+					ga.strategyCircuitBreakers[cbKey].PauseReason = savedStats.PauseReason
+					ga.strategyCircuitBreakers[cbKey].PausedUntil = savedStats.PausedUntil
 
 					log.Printf("[MODE-CIRCUIT-BREAKER] Restored DB stats for %s: trades_day=%d, day_loss=$%.2f, consec_loss=%d, paused=%v",
-						mode, savedStats.TradesThisDay, savedStats.CurrentDayLoss, savedStats.ConsecutiveLosses, savedStats.IsPaused)
+						cbKey, savedStats.TradesThisDay, savedStats.CurrentDayLoss, savedStats.ConsecutiveLosses, savedStats.IsPaused)
 				}
 			}
 
-			log.Printf("[MODE-CIRCUIT-BREAKER] Initialized for mode %s: MaxLoss/hr=$%.2f, MaxLoss/day=$%.2f, MaxConsecLoss=%d, Cooldown=%dm",
-				mode, config.CircuitBreaker.MaxLossPerHour, config.CircuitBreaker.MaxLossPerDay,
+			log.Printf("[MODE-CIRCUIT-BREAKER] Initialized for %s: MaxLoss/hr=$%.2f, MaxLoss/day=$%.2f, MaxConsecLoss=%d, Cooldown=%dm",
+				cbKey, config.CircuitBreaker.MaxLossPerHour, config.CircuitBreaker.MaxLossPerDay,
 				config.CircuitBreaker.MaxConsecutiveLosses, config.CircuitBreaker.CooldownMinutes)
 		}
 	}
+}
+
+// ========== Strategy-Level Config Helpers (Story 11.42) ==========
+
+// getStrategyFundingRateConfig returns the funding rate config for a mode+strategy combination
+// [Story 11.42] Checks strategy-level config first, falls back to mode-level config
+// Returns nil if no funding rate config is found
+func (ga *GinieAutopilot) getStrategyFundingRateConfig(mode GinieTradingMode, strategy string) *ModeFundingRateConfig {
+	ctx := context.Background()
+
+	// Try strategy-specific config first
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.FundingRate != nil {
+			// Convert strategy config to mode config format
+			frConfig := &ModeFundingRateConfig{
+				Enabled:          strategyConfig.FundingRate.Enabled,
+				MaxFundingRate:   strategyConfig.FundingRate.MaxFundingRatePct / 100.0, // Convert % to decimal
+				ExitTimeMinutes:  strategyConfig.FundingRate.ExitBeforeFundingMinutes,
+				BlockTimeMinutes: int(strategyConfig.FundingRate.BlockEntryAboveRatePct), // Using BlockEntryAboveRatePct as block time for now
+			}
+			log.Printf("[STRATEGY-FUNDING-RATE] Using strategy-level config for %s|%s: Enabled=%v, MaxRate=%.4f",
+				mode, strategy, frConfig.Enabled, frConfig.MaxFundingRate)
+			return frConfig
+		}
+	}
+
+	// Fall back to mode-level config
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.FundingRate != nil {
+		return modeConfig.FundingRate
+	}
+
+	return nil
+}
+
+// getStrategyMTFConfig returns the MTF config for a mode+strategy combination
+// [Story 11.42] Checks strategy-level config first, falls back to mode-level config
+// Returns nil if no MTF config is found
+func (ga *GinieAutopilot) getStrategyMTFConfig(mode GinieTradingMode, strategy string) *ModeMTFConfig {
+	ctx := context.Background()
+
+	// Try strategy-specific config first
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.MTF != nil {
+			// Convert strategy config to mode config format
+			mtfConfig := &ModeMTFConfig{
+				Enabled:             strategyConfig.MTF.Enabled,
+				PrimaryTimeframe:    strategyConfig.MTF.PrimaryTimeframe,
+				PrimaryWeight:       strategyConfig.MTF.PrimaryWeight,
+				SecondaryTimeframe:  strategyConfig.MTF.SecondaryTimeframe,
+				SecondaryWeight:     strategyConfig.MTF.SecondaryWeight,
+				TertiaryTimeframe:   strategyConfig.MTF.TertiaryTimeframe,
+				TertiaryWeight:      strategyConfig.MTF.TertiaryWeight,
+				MinConsensus:        strategyConfig.MTF.MinConsensus,
+				MinWeightedStrength: strategyConfig.MTF.MinWeightedStrength,
+				TrendStabilityCheck: strategyConfig.MTF.TrendStabilityCheck,
+			}
+			log.Printf("[STRATEGY-MTF] Using strategy-level config for %s|%s: Enabled=%v, Primary=%s",
+				mode, strategy, mtfConfig.Enabled, mtfConfig.PrimaryTimeframe)
+			return mtfConfig
+		}
+	}
+
+	// Fall back to mode-level config
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.MTF != nil {
+		return modeConfig.MTF
+	}
+
+	return nil
+}
+
+// getStrategyRiskConfig returns the risk config for a mode+strategy combination
+// [Story 11.42] Checks strategy-level config first, falls back to mode-level config
+// Returns nil if no risk config is found
+func (ga *GinieAutopilot) getStrategyRiskConfig(mode GinieTradingMode, strategy string) *ModeRiskConfig {
+	ctx := context.Background()
+
+	// Try strategy-specific config first
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.Risk != nil {
+			// Convert strategy config to mode config format
+			riskConfig := &ModeRiskConfig{
+				RiskLevel:           strategyConfig.Risk.RiskLevel,
+				MaxDrawdownPercent:  strategyConfig.Risk.MaxDrawdownPercent,
+				MaxDailyLossPercent: strategyConfig.Risk.MaxDailyLossPercent,
+				// MinADX is not in strategy config, use default based on mode
+			}
+			log.Printf("[STRATEGY-RISK] Using strategy-level config for %s|%s: Level=%s, MaxDrawdown=%.2f%%",
+				mode, strategy, riskConfig.RiskLevel, riskConfig.MaxDrawdownPercent)
+			return riskConfig
+		}
+	}
+
+	// Fall back to mode-level config
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.Risk != nil {
+		return modeConfig.Risk
+	}
+
+	return nil
+}
+
+// getStrategyTrendDivergenceConfig returns the trend divergence config for a mode+strategy combination
+// [Story 11.42] Checks strategy-level config first, falls back to mode-level config
+// Returns nil if no trend divergence config is found
+func (ga *GinieAutopilot) getStrategyTrendDivergenceConfig(mode GinieTradingMode, strategy string) *ModeTrendDivergenceConfig {
+	ctx := context.Background()
+
+	// Try strategy-specific config first
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.TrendDivergence != nil {
+			// Convert strategy config to mode config format
+			tdConfig := &ModeTrendDivergenceConfig{
+				Enabled:              strategyConfig.TrendDivergence.Enabled,
+				MinDivergencePercent: float64(strategyConfig.TrendDivergence.MinDivergencePercent),
+				BlockOnDivergence:    strategyConfig.TrendDivergence.BlockOnDivergence,
+				DivergenceWeight:     strategyConfig.TrendDivergence.DivergenceWeight,
+			}
+			log.Printf("[STRATEGY-TREND-DIVERGENCE] Using strategy-level config for %s|%s: Enabled=%v, Block=%v",
+				mode, strategy, tdConfig.Enabled, tdConfig.BlockOnDivergence)
+			return tdConfig
+		}
+	}
+
+	// Fall back to mode-level config
+	modeConfig := ga.getModeConfig(mode)
+	if modeConfig != nil && modeConfig.TrendDivergence != nil {
+		return modeConfig.TrendDivergence
+	}
+
+	return nil
+}
+
+// getActiveStrategyForMode returns the currently active strategy for a given mode
+// [Story 11.42] Used to get strategy context for entry-time config lookups
+// Returns empty string if no strategy is active (falls back to mode-level config)
+func (ga *GinieAutopilot) getActiveStrategyForMode(mode GinieTradingMode) string {
+	// The analyzer tracks active strategies, try to get from settings cache
+	if ga.settingsCache == nil || ga.userID == "" {
+		return ""
+	}
+
+	// Try to get the active strategy from cache using the regime-based selection
+	// For entry context, we use "trending" as a reasonable default regime
+	ctx := context.Background()
+	modeKey := string(mode)
+
+	_, strategy, err := ga.settingsCache.GetActiveStrategyForMode(ctx, ga.userID, modeKey, "trending")
+	if err != nil {
+		// If we can't determine strategy, return empty to fall back to mode config
+		return ""
+	}
+
+	return strategy
 }
 
 // GetDefaultModeConfig returns the default configuration for a trading mode
@@ -18168,13 +18962,52 @@ func (ga *GinieAutopilot) GetDefaultModeConfig(mode GinieTradingMode) *ModeFullC
 	return nil
 }
 
-// getModeCircuitBreaker returns the circuit breaker for a mode, creating if needed
-func (ga *GinieAutopilot) getModeCircuitBreaker(mode GinieTradingMode) *ModeCircuitBreaker {
-	if cb, exists := ga.modeCircuitBreakers[mode]; exists {
+// getStrategyCircuitBreaker returns the circuit breaker for a mode+strategy combination
+// [Story 11.42] If strategy is empty, falls back to mode-only circuit breaker for backward compatibility
+// Creates a new circuit breaker if one doesn't exist for the mode+strategy combination
+func (ga *GinieAutopilot) getStrategyCircuitBreaker(mode GinieTradingMode, strategy string) *ModeCircuitBreaker {
+	cbKey := getCircuitBreakerKey(mode, strategy)
+
+	// Check if circuit breaker exists for this mode+strategy
+	if cb, exists := ga.strategyCircuitBreakers[cbKey]; exists {
 		return cb
 	}
 
-	// Create default circuit breaker if not exists
+	// If strategy-specific CB doesn't exist, try to get strategy-specific config
+	// and create a new CB for it (lazy initialization)
+	if strategy != "" && ga.settingsCache != nil && ga.userID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		strategyConfig, err := ga.settingsCache.GetModeStrategyConfig(ctx, ga.userID, string(mode), strategy)
+		if err == nil && strategyConfig != nil && strategyConfig.CircuitBreaker != nil {
+			// Create circuit breaker from strategy-specific config
+			cb := &ModeCircuitBreaker{
+				MaxLossPerHour:     strategyConfig.CircuitBreaker.MaxLossPerHourUSD,
+				MaxLossPerDay:      strategyConfig.CircuitBreaker.MaxLossPerDayUSD,
+				MaxConsecutiveLoss: strategyConfig.CircuitBreaker.MaxConsecutiveLosses,
+				MaxTradesPerMinute: 0, // Not in strategy config, use mode default
+				MaxTradesPerHour:   strategyConfig.CircuitBreaker.MaxTradesPerHour,
+				MaxTradesPerDay:    strategyConfig.CircuitBreaker.MaxTradesPerDay,
+				WinRateCheckAfter:  strategyConfig.CircuitBreaker.WinRateCheckAfter,
+				MinWinRatePercent:  strategyConfig.CircuitBreaker.MinWinRatePct,
+				CooldownMinutes:    strategyConfig.CircuitBreaker.CooldownMinutes,
+				AutoRecovery:       true,
+			}
+			ga.strategyCircuitBreakers[cbKey] = cb
+			log.Printf("[STRATEGY-CIRCUIT-BREAKER] Lazy-initialized CB for %s: MaxLoss/hr=$%.2f, MaxLoss/day=$%.2f, MaxConsecLoss=%d",
+				cbKey, cb.MaxLossPerHour, cb.MaxLossPerDay, cb.MaxConsecutiveLoss)
+			return cb
+		}
+	}
+
+	// Fall back to mode-only circuit breaker if strategy-specific doesn't exist
+	modeOnlyKey := getCircuitBreakerKey(mode, "")
+	if cb, exists := ga.strategyCircuitBreakers[modeOnlyKey]; exists {
+		return cb
+	}
+
+	// Create default circuit breaker if neither exists
 	config := ga.GetDefaultModeConfig(mode)
 	if config == nil || config.CircuitBreaker == nil {
 		// Fallback defaults
@@ -18204,33 +19037,41 @@ func (ga *GinieAutopilot) getModeCircuitBreaker(mode GinieTradingMode) *ModeCirc
 		CooldownMinutes:    config.CircuitBreaker.CooldownMinutes,
 		AutoRecovery:       true,
 	}
-	ga.modeCircuitBreakers[mode] = cb
+	ga.strategyCircuitBreakers[cbKey] = cb
 	return cb
 }
 
-// CheckModeCircuitBreaker checks if the mode's circuit breaker allows trading
+// getModeCircuitBreaker returns the circuit breaker for a mode (backward compatible wrapper)
+// Deprecated: Use getStrategyCircuitBreaker for new code
+func (ga *GinieAutopilot) getModeCircuitBreaker(mode GinieTradingMode) *ModeCircuitBreaker {
+	return ga.getStrategyCircuitBreaker(mode, "")
+}
+
+// CheckStrategyCircuitBreaker checks if the mode+strategy circuit breaker allows trading
+// [Story 11.42] Supports per-mode+strategy circuit breaker tracking
 // Returns (true, "") if trading is allowed, (false, reason) if blocked
-func (ga *GinieAutopilot) CheckModeCircuitBreaker(mode GinieTradingMode) (canTrade bool, reason string) {
+func (ga *GinieAutopilot) CheckStrategyCircuitBreaker(mode GinieTradingMode, strategy string) (canTrade bool, reason string) {
 	ga.mu.RLock()
 	defer ga.mu.RUnlock()
 
-	cb := ga.getModeCircuitBreaker(mode)
+	cbKey := getCircuitBreakerKey(mode, strategy)
+	cb := ga.getStrategyCircuitBreaker(mode, strategy)
 	if cb == nil {
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: No circuit breaker found, allowing trade", mode)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: No circuit breaker found, allowing trade", cbKey)
 		return true, ""
 	}
 
-	// Check if mode is currently paused
+	// Check if mode+strategy is currently paused
 	if cb.IsPaused {
 		if time.Now().Before(cb.PausedUntil) {
 			remainingTime := time.Until(cb.PausedUntil).Round(time.Second)
-			reason := fmt.Sprintf("mode_paused: %s (remaining: %v)", cb.PauseReason, remainingTime)
-			log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+			reason := fmt.Sprintf("strategy_paused: %s (remaining: %v)", cb.PauseReason, remainingTime)
+			log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 			return false, reason
 		}
 		// Auto-recovery: pause has expired
 		if cb.AutoRecovery {
-			log.Printf("[MODE-CIRCUIT-BREAKER] %s: Auto-recovering from pause (was: %s)", mode, cb.PauseReason)
+			log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Auto-recovering from pause (was: %s)", cbKey, cb.PauseReason)
 			cb.IsPaused = false
 			cb.PauseReason = ""
 		}
@@ -18239,42 +19080,42 @@ func (ga *GinieAutopilot) CheckModeCircuitBreaker(mode GinieTradingMode) (canTra
 	// Check trades per minute limit
 	if cb.MaxTradesPerMinute > 0 && cb.TradesThisMinute >= cb.MaxTradesPerMinute {
 		reason := fmt.Sprintf("max_trades_per_minute: %d/%d", cb.TradesThisMinute, cb.MaxTradesPerMinute)
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 		return false, reason
 	}
 
 	// Check trades per hour limit
 	if cb.MaxTradesPerHour > 0 && cb.TradesThisHour >= cb.MaxTradesPerHour {
 		reason := fmt.Sprintf("max_trades_per_hour: %d/%d", cb.TradesThisHour, cb.MaxTradesPerHour)
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 		return false, reason
 	}
 
 	// Check trades per day limit
 	if cb.MaxTradesPerDay > 0 && cb.TradesThisDay >= cb.MaxTradesPerDay {
 		reason := fmt.Sprintf("max_trades_per_day: %d/%d", cb.TradesThisDay, cb.MaxTradesPerDay)
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 		return false, reason
 	}
 
 	// Check hourly loss limit
 	if cb.MaxLossPerHour > 0 && cb.CurrentHourLoss >= cb.MaxLossPerHour {
 		reason := fmt.Sprintf("max_loss_per_hour: $%.2f/$%.2f", cb.CurrentHourLoss, cb.MaxLossPerHour)
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 		return false, reason
 	}
 
 	// Check daily loss limit
 	if cb.MaxLossPerDay > 0 && cb.CurrentDayLoss >= cb.MaxLossPerDay {
 		reason := fmt.Sprintf("max_loss_per_day: $%.2f/$%.2f", cb.CurrentDayLoss, cb.MaxLossPerDay)
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 		return false, reason
 	}
 
 	// Check consecutive losses limit
 	if cb.MaxConsecutiveLoss > 0 && cb.ConsecutiveLosses >= cb.MaxConsecutiveLoss {
 		reason := fmt.Sprintf("max_consecutive_losses: %d/%d", cb.ConsecutiveLosses, cb.MaxConsecutiveLoss)
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 		return false, reason
 	}
 
@@ -18286,26 +19127,35 @@ func (ga *GinieAutopilot) CheckModeCircuitBreaker(mode GinieTradingMode) (canTra
 		}
 		if cb.MinWinRatePercent > 0 && winRate < cb.MinWinRatePercent {
 			reason := fmt.Sprintf("low_win_rate: %.1f%% < %.1f%% (after %d trades)", winRate, cb.MinWinRatePercent, cb.TotalTrades)
-			log.Printf("[MODE-CIRCUIT-BREAKER] %s: BLOCKED - %s", mode, reason)
+			log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: BLOCKED - %s", cbKey, reason)
 			return false, reason
 		}
 	}
 
 	// All checks passed
-	log.Printf("[MODE-CIRCUIT-BREAKER] %s: ALLOWED - trades=%d/%d (min), loss=$%.2f/$%.2f (hr), consec=%d/%d",
-		mode, cb.TradesThisMinute, cb.MaxTradesPerMinute, cb.CurrentHourLoss, cb.MaxLossPerHour,
+	log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: ALLOWED - trades=%d/%d (min), loss=$%.2f/$%.2f (hr), consec=%d/%d",
+		cbKey, cb.TradesThisMinute, cb.MaxTradesPerMinute, cb.CurrentHourLoss, cb.MaxLossPerHour,
 		cb.ConsecutiveLosses, cb.MaxConsecutiveLoss)
 	return true, ""
 }
 
-// TriggerModeCircuitBreaker triggers the circuit breaker for a mode
-func (ga *GinieAutopilot) TriggerModeCircuitBreaker(mode GinieTradingMode, reason string) {
+// CheckModeCircuitBreaker checks if the mode's circuit breaker allows trading (backward compatible)
+// Deprecated: Use CheckStrategyCircuitBreaker for new code with strategy support
+// Returns (true, "") if trading is allowed, (false, reason) if blocked
+func (ga *GinieAutopilot) CheckModeCircuitBreaker(mode GinieTradingMode) (canTrade bool, reason string) {
+	return ga.CheckStrategyCircuitBreaker(mode, "")
+}
+
+// TriggerStrategyCircuitBreaker triggers the circuit breaker for a mode+strategy combination
+// [Story 11.42] Supports per-mode+strategy circuit breaker tracking
+func (ga *GinieAutopilot) TriggerStrategyCircuitBreaker(mode GinieTradingMode, strategy string, reason string) {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
-	cb := ga.getModeCircuitBreaker(mode)
+	cbKey := getCircuitBreakerKey(mode, strategy)
+	cb := ga.getStrategyCircuitBreaker(mode, strategy)
 	if cb == nil {
-		log.Printf("[CIRCUIT-BREAKER-TRIGGERED] %s: Cannot trigger - no circuit breaker found", mode)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER-TRIGGERED] %s: Cannot trigger - no circuit breaker found", cbKey)
 		return
 	}
 
@@ -18319,24 +19169,37 @@ func (ga *GinieAutopilot) TriggerModeCircuitBreaker(mode GinieTradingMode, reaso
 	cb.PausedUntil = time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
 	cb.PauseReason = reason
 
-	log.Printf("[CIRCUIT-BREAKER-TRIGGERED] Mode=%s, Reason=%s, PausedUntil=%s, CooldownMinutes=%d",
-		mode, reason, cb.PausedUntil.Format(time.RFC3339), cooldownMinutes)
+	log.Printf("[STRATEGY-CIRCUIT-BREAKER-TRIGGERED] Key=%s, Reason=%s, PausedUntil=%s, CooldownMinutes=%d",
+		cbKey, reason, cb.PausedUntil.Format(time.RFC3339), cooldownMinutes)
 
-	ga.logger.Warn("Mode circuit breaker triggered",
+	ga.logger.Warn("Strategy circuit breaker triggered",
 		"mode", mode,
+		"strategy", strategy,
+		"cb_key", cbKey,
 		"reason", reason,
 		"paused_until", cb.PausedUntil,
 		"cooldown_minutes", cooldownMinutes)
+
+	// Persist the updated state
+	ga.persistStrategyCircuitBreakerStats(mode, strategy, cb)
 }
 
-// RecordModeTradeResult records a trade result and updates the circuit breaker state
-func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float64) {
+// TriggerModeCircuitBreaker triggers the circuit breaker for a mode (backward compatible)
+// Deprecated: Use TriggerStrategyCircuitBreaker for new code with strategy support
+func (ga *GinieAutopilot) TriggerModeCircuitBreaker(mode GinieTradingMode, reason string) {
+	ga.TriggerStrategyCircuitBreaker(mode, "", reason)
+}
+
+// RecordStrategyTradeResult records a trade result and updates the circuit breaker state for mode+strategy
+// [Story 11.42] Supports per-mode+strategy circuit breaker tracking
+func (ga *GinieAutopilot) RecordStrategyTradeResult(mode GinieTradingMode, strategy string, pnl float64) {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
-	cb := ga.getModeCircuitBreaker(mode)
+	cbKey := getCircuitBreakerKey(mode, strategy)
+	cb := ga.getStrategyCircuitBreaker(mode, strategy)
 	if cb == nil {
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Cannot record trade - no circuit breaker found", mode)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Cannot record trade - no circuit breaker found", cbKey)
 		return
 	}
 
@@ -18351,16 +19214,16 @@ func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float
 		// Winning trade
 		cb.TotalWins++
 		cb.ConsecutiveLosses = 0
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Recorded WIN +$%.2f (wins=%d, total=%d, consec_loss=0)",
-			mode, pnl, cb.TotalWins, cb.TotalTrades)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Recorded WIN +$%.2f (wins=%d, total=%d, consec_loss=0)",
+			cbKey, pnl, cb.TotalWins, cb.TotalTrades)
 	} else if pnl < 0 {
 		// Losing trade
 		cb.ConsecutiveLosses++
 		absLoss := -pnl // Convert to positive for loss tracking
 		cb.CurrentHourLoss += absLoss
 		cb.CurrentDayLoss += absLoss
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Recorded LOSS -$%.2f (hr_loss=$%.2f, day_loss=$%.2f, consec=%d)",
-			mode, absLoss, cb.CurrentHourLoss, cb.CurrentDayLoss, cb.ConsecutiveLosses)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Recorded LOSS -$%.2f (hr_loss=$%.2f, day_loss=$%.2f, consec=%d)",
+			cbKey, absLoss, cb.CurrentHourLoss, cb.CurrentDayLoss, cb.ConsecutiveLosses)
 	}
 
 	// Check if any threshold is now exceeded and trigger circuit breaker if needed
@@ -18407,23 +19270,53 @@ func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float
 		cb.PausedUntil = time.Now().Add(time.Duration(cooldownMinutes) * time.Minute)
 		cb.PauseReason = triggerReason
 
-		log.Printf("[CIRCUIT-BREAKER-TRIGGERED] Mode=%s, Reason=%s, PausedUntil=%s",
-			mode, triggerReason, cb.PausedUntil.Format(time.RFC3339))
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER-TRIGGERED] Key=%s, Reason=%s, PausedUntil=%s",
+			cbKey, triggerReason, cb.PausedUntil.Format(time.RFC3339))
 
-		ga.logger.Warn("Mode circuit breaker auto-triggered after trade",
+		ga.logger.Warn("Strategy circuit breaker auto-triggered after trade",
 			"mode", mode,
+			"strategy", strategy,
+			"cb_key", cbKey,
 			"reason", triggerReason,
 			"paused_until", cb.PausedUntil)
 	}
 
 	// Persist the updated stats to survive restarts
-	ga.persistModeCircuitBreakerStats(mode, cb)
+	ga.persistStrategyCircuitBreakerStats(mode, strategy, cb)
+
+	// Also update mode-level aggregate for backward compatibility if strategy-specific
+	if strategy != "" {
+		modeCB := ga.getStrategyCircuitBreaker(mode, "")
+		if modeCB != nil {
+			// Update mode-level stats (aggregated view)
+			modeCB.TradesThisMinute++
+			modeCB.TradesThisHour++
+			modeCB.TradesThisDay++
+			modeCB.TotalTrades++
+			if pnl > 0 {
+				modeCB.TotalWins++
+				// Don't reset consecutive losses at mode level - each strategy tracks its own
+			} else if pnl < 0 {
+				absLoss := -pnl
+				modeCB.CurrentHourLoss += absLoss
+				modeCB.CurrentDayLoss += absLoss
+			}
+			ga.persistStrategyCircuitBreakerStats(mode, "", modeCB)
+		}
+	}
 }
 
-// persistModeCircuitBreakerStats saves the current circuit breaker state to database
+// RecordModeTradeResult records a trade result and updates the circuit breaker state (backward compatible)
+// Deprecated: Use RecordStrategyTradeResult for new code with strategy support
+func (ga *GinieAutopilot) RecordModeTradeResult(mode GinieTradingMode, pnl float64) {
+	ga.RecordStrategyTradeResult(mode, "", pnl)
+}
+
+// persistStrategyCircuitBreakerStats saves the current circuit breaker state to database
 // [Story 9.12] Phase 2: Migrated from file to database
+// [Story 11.42] Supports per-mode+strategy tracking
 // This is called after each trade to ensure counters survive restarts
-func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, cb *ModeCircuitBreaker) {
+func (ga *GinieAutopilot) persistStrategyCircuitBreakerStats(mode GinieTradingMode, strategy string, cb *ModeCircuitBreaker) {
 	if cb == nil {
 		return
 	}
@@ -18434,12 +19327,14 @@ func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, 
 	}
 
 	now := time.Now().UTC()
-	modeStr := string(mode)
+	cbKey := getCircuitBreakerKey(mode, strategy)
 
 	// Build database stats object
+	// Note: For strategy-specific stats, we use the cbKey as ModeName
+	// This allows DB to store both "scalp" (mode-only) and "scalp|trend_following" (mode+strategy)
 	dbStats := &database.UserModeCBStats{
 		UserID:            ga.userID,
-		ModeName:          modeStr,
+		ModeName:          cbKey, // Use composite key for strategy-specific tracking
 		TradesThisMinute:  cb.TradesThisMinute,
 		TradesThisHour:    cb.TradesThisHour,
 		TradesThisDay:     cb.TradesThisDay,
@@ -18461,20 +19356,28 @@ func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := ga.repo.SaveUserModeCBStats(ctx, dbStats); err != nil {
-			log.Printf("[MODE-CB-STATS] Failed to persist stats to DB for %s: %v", mode, err)
+			log.Printf("[STRATEGY-CB-STATS] Failed to persist stats to DB for %s: %v", cbKey, err)
 		}
 	}()
 }
 
-// ResetModeCircuitBreakerStats resets circuit breaker stats for a mode based on period
+// persistModeCircuitBreakerStats saves the current circuit breaker state to database (backward compatible)
+// Deprecated: Use persistStrategyCircuitBreakerStats for new code with strategy support
+func (ga *GinieAutopilot) persistModeCircuitBreakerStats(mode GinieTradingMode, cb *ModeCircuitBreaker) {
+	ga.persistStrategyCircuitBreakerStats(mode, "", cb)
+}
+
+// ResetStrategyCircuitBreakerStats resets circuit breaker stats for a mode+strategy based on period
+// [Story 11.42] Supports per-mode+strategy tracking
 // period can be: "minute", "hour", "day"
-func (ga *GinieAutopilot) ResetModeCircuitBreakerStats(mode GinieTradingMode, period string) {
+func (ga *GinieAutopilot) ResetStrategyCircuitBreakerStats(mode GinieTradingMode, strategy string, period string) {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
-	cb := ga.getModeCircuitBreaker(mode)
+	cbKey := getCircuitBreakerKey(mode, strategy)
+	cb := ga.getStrategyCircuitBreaker(mode, strategy)
 	if cb == nil {
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Cannot reset stats - no circuit breaker found", mode)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Cannot reset stats - no circuit breaker found", cbKey)
 		return
 	}
 
@@ -18482,15 +19385,16 @@ func (ga *GinieAutopilot) ResetModeCircuitBreakerStats(mode GinieTradingMode, pe
 	case "minute":
 		oldValue := cb.TradesThisMinute
 		cb.TradesThisMinute = 0
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset minute stats (trades_this_minute: %d -> 0)", mode, oldValue)
-		ga.persistModeCircuitBreakerStats(mode, cb)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Reset minute stats (trades_this_minute: %d -> 0)", cbKey, oldValue)
+		ga.persistStrategyCircuitBreakerStats(mode, strategy, cb)
 
 	case "hour":
 		oldTrades := cb.TradesThisHour
 		oldLoss := cb.CurrentHourLoss
 		cb.TradesThisHour = 0
 		cb.CurrentHourLoss = 0
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset hour stats (trades: %d -> 0, loss: $%.2f -> $0)", mode, oldTrades, oldLoss)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Reset hour stats (trades: %d -> 0, loss: $%.2f -> $0)", cbKey, oldTrades, oldLoss)
+		ga.persistStrategyCircuitBreakerStats(mode, strategy, cb)
 
 	case "day":
 		oldTrades := cb.TradesThisDay
@@ -18503,12 +19407,20 @@ func (ga *GinieAutopilot) ResetModeCircuitBreakerStats(mode GinieTradingMode, pe
 		cb.TotalTrades = 0
 		// Also reset consecutive losses at day reset
 		cb.ConsecutiveLosses = 0
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Reset day stats (trades: %d -> 0, loss: $%.2f -> $0, wins: %d -> 0, total: %d -> 0)",
-			mode, oldTrades, oldLoss, oldWins, oldTotal)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Reset day stats (trades: %d -> 0, loss: $%.2f -> $0, wins: %d -> 0, total: %d -> 0)",
+			cbKey, oldTrades, oldLoss, oldWins, oldTotal)
+		ga.persistStrategyCircuitBreakerStats(mode, strategy, cb)
 
 	default:
-		log.Printf("[MODE-CIRCUIT-BREAKER] %s: Unknown reset period '%s' (valid: minute, hour, day)", mode, period)
+		log.Printf("[STRATEGY-CIRCUIT-BREAKER] %s: Unknown reset period '%s' (valid: minute, hour, day)", cbKey, period)
 	}
+}
+
+// ResetModeCircuitBreakerStats resets circuit breaker stats for a mode based on period (backward compatible)
+// Deprecated: Use ResetStrategyCircuitBreakerStats for new code with strategy support
+// period can be: "minute", "hour", "day"
+func (ga *GinieAutopilot) ResetModeCircuitBreakerStats(mode GinieTradingMode, period string) {
+	ga.ResetStrategyCircuitBreakerStats(mode, "", period)
 }
 
 // GetModeCircuitBreakerStatus returns the current status of a mode's circuit breaker

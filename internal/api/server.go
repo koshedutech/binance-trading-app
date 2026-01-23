@@ -244,6 +244,15 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		// Decision Engine coin state (Redis state only)
 		"/api/futures/decision/coins":                  true,
 		"/api/futures/decision/coins/count":            true,
+		// Mode-Strategy endpoints (cache/DB only, no Binance API - Story 11.41)
+		"/api/futures/modes/:mode/strategies":                             true,
+		"/api/futures/modes/:mode/strategies/:strategy":                   true,
+		"/api/futures/modes/:mode/strategies/:strategy/compare":           true,
+		"/api/futures/modes/:mode/strategies/:strategy/enable":            true,
+		"/api/futures/modes/:mode/strategies/:strategy/disable":           true,
+		"/api/futures/modes/:mode/strategies/:strategy/reset":             true,
+		"/api/futures/modes/:mode/strategies/:strategy/sections":          true,
+		"/api/futures/modes/:mode/strategies/:strategy/sections/:section": true,
 	}
 
 	return func(c *gin.Context) {
@@ -899,6 +908,12 @@ func (s *Server) setupRoutes() {
 			futures.GET("/modes/:mode/strategies/:strategy/compare", s.handleCompareModeStrategy)
 			futures.POST("/modes/:mode/reset-all", s.handleResetAllModeStrategies)
 
+			// Story 11.41: Section-level endpoints for mode+strategy config
+			futures.GET("/modes/:mode/strategies/:strategy/sections", s.handleListModeStrategySections)
+			futures.GET("/modes/:mode/strategies/:strategy/sections/:section", s.handleGetModeStrategySection)
+			futures.PUT("/modes/:mode/strategies/:strategy/sections/:section", s.handleUpdateModeStrategySection)
+			futures.POST("/modes/:mode/strategies/:strategy/sections/:section/reset", s.handleResetModeStrategySection)
+
 			// Calibration Data Lifecycle endpoints (Story 11.26)
 			// Manual reset option and confidence indicator for calibration
 			futures.POST("/calibration/reset", s.handleResetCalibration)
@@ -922,6 +937,9 @@ func (s *Server) setupRoutes() {
 			futures.GET("/decision/coin/:symbol", s.handleGetCoinState)
 			futures.GET("/decision/coins", s.handleGetAllCoinStates)
 			futures.GET("/decision/coins/count", s.handleGetCoinStateCount)
+			// Story 11.40: Gap Analysis UI
+			futures.GET("/decision/coins/gaps", s.handleGetAllCoinStatesWithGaps)
+			futures.POST("/decision/override", s.handleOverrideEntry)
 
 			// Position Analytics Dashboard endpoints (Story 10.2)
 			// Historical efficiency analysis, trade categorization, performance metrics

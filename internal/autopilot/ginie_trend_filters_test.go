@@ -133,6 +133,12 @@ func (m *mockFuturesClient) GetAllOrders(symbol string, limit int) ([]binance.Fu
 func (m *mockFuturesClient) GetIncomeHistory(incomeType string, startTime, endTime int64, limit int) ([]binance.IncomeRecord, error) {
 	return nil, nil
 }
+func (m *mockFuturesClient) GetAllOrdersByDateRange(symbol string, startTime, endTime int64, limit int) ([]binance.FuturesOrder, error) {
+	return nil, nil
+}
+func (m *mockFuturesClient) GetTradeHistoryByDateRange(symbol string, startTime, endTime int64, limit int) ([]binance.FuturesTrade, error) {
+	return nil, nil
+}
 
 // ==================== WebSocket ====================
 func (m *mockFuturesClient) GetListenKey() (string, error)             { return "", nil }

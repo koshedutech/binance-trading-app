@@ -569,34 +569,71 @@ func DefaultUserPositionManagement() *UserPositionManagement {
 
 // ModeStrategyConfig represents a complete strategy configuration within a mode
 // Path: modes.{mode}.strategies.{strategy}
+// Story 11.41: Expanded to include all 18 configuration sections per strategy
 type ModeStrategyConfig struct {
 	// Strategy identification
 	Enabled          bool     `json:"enabled"`
 	Priority         int      `json:"priority"`
 	SupportedRegimes []string `json:"supported_regimes"`
 
-	// Position sizing
-	Leverage     int     `json:"leverage"`
-	MaxPositions int     `json:"max_positions"`
-	BaseSizeUSD  float64 `json:"base_size_usd"`
+	// 1. Position sizing (replaces top-level leverage, max_positions, base_size_usd)
+	PositionSizing *StrategyPositionSizing `json:"position_sizing,omitempty"`
+	// Legacy fields for backward compatibility (deprecated, use PositionSizing)
+	Leverage     int     `json:"leverage,omitempty"`
+	MaxPositions int     `json:"max_positions,omitempty"`
+	BaseSizeUSD  float64 `json:"base_size_usd,omitempty"`
 
-	// Timeframes
+	// 2. Timeframes
 	Timeframe StrategyTimeframe `json:"timeframe"`
 
-	// SL/TP configuration
+	// 3. Multi-timeframe analysis
+	MTF *StrategyMTF `json:"mtf,omitempty"`
+
+	// 4. SL/TP configuration (expanded)
 	SLTP StrategySLTP `json:"sltp"`
 
-	// Confidence thresholds
+	// 5. Confidence thresholds
 	Confidence StrategyConfidence `json:"confidence"`
 
-	// Entry conditions (strategy-specific)
-	EntryConditions map[string]interface{} `json:"entry_conditions"`
+	// 6. Entry conditions (expanded, can also use legacy map)
+	EntryConditions     map[string]interface{}   `json:"entry_conditions,omitempty"`
+	EntryConditionsV2   *StrategyEntryConditions `json:"entry_conditions_v2,omitempty"`
 
-	// Exit conditions
+	// 7. Exit conditions (expanded)
 	ExitConditions StrategyExitConditions `json:"exit_conditions"`
 
-	// Scoring weights
+	// 8. Scoring weights (expanded)
 	Scoring StrategyScoring `json:"scoring"`
+
+	// 9. Per-strategy circuit breaker
+	CircuitBreaker *StrategyCircuitBreaker `json:"circuit_breaker,omitempty"`
+
+	// 10. Hedging configuration
+	Hedge *StrategyHedge `json:"hedge,omitempty"`
+
+	// 11. Position averaging
+	Averaging *StrategyAveraging `json:"averaging,omitempty"`
+
+	// 12. Stale position release
+	StaleRelease *StrategyStaleRelease `json:"stale_release,omitempty"`
+
+	// 13. Position optimization (re-entry, dynamic SL, profit protection)
+	PositionOptimization *StrategyPositionOptimization `json:"position_optimization,omitempty"`
+
+	// 14. Funding rate management
+	FundingRate *StrategyFundingRate `json:"funding_rate,omitempty"`
+
+	// 15. Risk management
+	Risk *StrategyRisk `json:"risk,omitempty"`
+
+	// 16. Trend divergence detection
+	TrendDivergence *StrategyTrendDivergence `json:"trend_divergence,omitempty"`
+
+	// 17. Dynamic AI exit
+	DynamicAIExit *StrategyDynamicAIExit `json:"dynamic_ai_exit,omitempty"`
+
+	// 18. Per-strategy early warning
+	EarlyWarning *StrategyEarlyWarning `json:"early_warning,omitempty"`
 }
 
 // StrategyTimeframe contains timeframe settings for a strategy
@@ -606,15 +643,177 @@ type StrategyTimeframe struct {
 	AnalysisTimeframe string `json:"analysis_timeframe"`
 }
 
-// StrategySLTP contains stop-loss and take-profit settings
+// StrategySLTP contains stop-loss and take-profit settings (expanded for Story 11.41)
 type StrategySLTP struct {
 	SLPercent              float64 `json:"sl_percent"`
 	TP1Percent             float64 `json:"tp1_percent"`
+	TP1SellPercent         int     `json:"tp1_sell_percent,omitempty"`
 	TP2Percent             float64 `json:"tp2_percent"`
+	TP2SellPercent         int     `json:"tp2_sell_percent,omitempty"`
 	TP3Percent             float64 `json:"tp3_percent"`
+	TP3SellPercent         int     `json:"tp3_sell_percent,omitempty"`
 	TrailingEnabled        bool    `json:"trailing_enabled"`
 	TrailingActivationPct  float64 `json:"trailing_activation_pct"`
 	TrailingStopPct        float64 `json:"trailing_stop_pct"`
+	UseATRBased            bool    `json:"use_atr_based,omitempty"`
+	ATRSLMultiplier        float64 `json:"atr_sl_multiplier,omitempty"`
+	ATRTPMultiplier        float64 `json:"atr_tp_multiplier,omitempty"`
+	MinSLDistancePct       float64 `json:"min_sl_distance_pct,omitempty"`
+}
+
+// StrategyPositionSizing contains position sizing configuration (Story 11.41)
+type StrategyPositionSizing struct {
+	Leverage            int     `json:"leverage"`
+	MaxPositions        int     `json:"max_positions"`
+	BaseSizeUSD         float64 `json:"base_size_usd"`
+	MaxSizeUSD          float64 `json:"max_size_usd,omitempty"`
+	MinPositionSizeUSD  float64 `json:"min_position_size_usd,omitempty"`
+	SafetyMargin        float64 `json:"safety_margin,omitempty"`
+	AutoSizeEnabled     bool    `json:"auto_size_enabled,omitempty"`
+	AutoSizeMinCoverFee float64 `json:"auto_size_min_cover_fee,omitempty"`
+}
+
+// StrategyMTF contains multi-timeframe analysis settings (Story 11.41)
+type StrategyMTF struct {
+	Enabled             bool    `json:"enabled"`
+	PrimaryTimeframe    string  `json:"primary_timeframe"`
+	PrimaryWeight       float64 `json:"primary_weight"`
+	SecondaryTimeframe  string  `json:"secondary_timeframe"`
+	SecondaryWeight     float64 `json:"secondary_weight"`
+	TertiaryTimeframe   string  `json:"tertiary_timeframe"`
+	TertiaryWeight      float64 `json:"tertiary_weight"`
+	MinConsensus        int     `json:"min_consensus"`
+	MinWeightedStrength float64 `json:"min_weighted_strength"`
+	TrendStabilityCheck bool    `json:"trend_stability_check"`
+}
+
+// StrategyCircuitBreaker contains per-strategy circuit breaker settings (Story 11.41)
+type StrategyCircuitBreaker struct {
+	MaxLossPerHourUSD    float64 `json:"max_loss_per_hour_usd"`
+	MaxLossPerDayUSD     float64 `json:"max_loss_per_day_usd"`
+	MaxConsecutiveLosses int     `json:"max_consecutive_losses"`
+	CooldownMinutes      int     `json:"cooldown_minutes"`
+	MaxTradesPerHour     int     `json:"max_trades_per_hour"`
+	MaxTradesPerDay      int     `json:"max_trades_per_day"`
+	WinRateCheckAfter    int     `json:"win_rate_check_after"`
+	MinWinRatePct        float64 `json:"min_win_rate_pct"`
+}
+
+// StrategyHedge contains hedging configuration (Story 11.41)
+type StrategyHedge struct {
+	AllowHedge                  bool    `json:"allow_hedge"`
+	MinConfidenceForHedge       int     `json:"min_confidence_for_hedge"`
+	ExistingMustBeInProfitPct   float64 `json:"existing_must_be_in_profit_pct"`
+	MaxHedgeSizePercent         int     `json:"max_hedge_size_percent"`
+	AllowSameModeHedge          bool    `json:"allow_same_mode_hedge"`
+	MaxTotalExposureMultiplier  float64 `json:"max_total_exposure_multiplier"`
+}
+
+// StrategyAveraging contains position averaging configuration (Story 11.41)
+type StrategyAveraging struct {
+	AllowAveraging          bool    `json:"allow_averaging"`
+	AverageUpProfitPercent  float64 `json:"average_up_profit_percent"`
+	AverageDownLossPercent  float64 `json:"average_down_loss_percent"`
+	AddSizePercent          int     `json:"add_size_percent"`
+	MaxAverages             int     `json:"max_averages"`
+	MinConfidenceForAverage int     `json:"min_confidence_for_average"`
+	UseLLMForAveraging      bool    `json:"use_llm_for_averaging"`
+	StagedEntryEnabled      bool    `json:"staged_entry_enabled"`
+	StagedEntryLevels       int     `json:"staged_entry_levels"`
+	StagedEntryPercent      []int   `json:"staged_entry_percent,omitempty"`
+}
+
+// StrategyStaleRelease contains stale position release settings (Story 11.41)
+type StrategyStaleRelease struct {
+	Enabled                 bool    `json:"enabled"`
+	MaxHoldDurationMinutes  int     `json:"max_hold_duration_minutes"`
+	MinProfitToKeepPct      float64 `json:"min_profit_to_keep_pct"`
+	MaxLossToForceClosePct  float64 `json:"max_loss_to_force_close_pct"`
+	StaleZoneLoPct          float64 `json:"stale_zone_lo_pct"`
+	StaleZoneHiPct          float64 `json:"stale_zone_hi_pct"`
+	StaleZoneAction         string  `json:"stale_zone_action"`
+}
+
+// StrategyPositionOptimization contains position optimization settings (Story 11.41)
+type StrategyPositionOptimization struct {
+	ReentryEnabled             bool    `json:"reentry_enabled"`
+	ReentryAfterTP1            bool    `json:"reentry_after_tp1"`
+	ReentryMinPullbackPct      float64 `json:"reentry_min_pullback_pct"`
+	MaxReentriesPerPosition    int     `json:"max_reentries_per_position"`
+	DynamicSLEnabled           bool    `json:"dynamic_sl_enabled"`
+	DynamicSLAtBreakevenPct    float64 `json:"dynamic_sl_at_breakeven_pct"`
+	ProfitProtectionEnabled    bool    `json:"profit_protection_enabled"`
+	ProfitProtectionTriggerPct float64 `json:"profit_protection_trigger_pct"`
+	ProfitProtectionLockPct    int     `json:"profit_protection_lock_pct"`
+}
+
+// StrategyFundingRate contains funding rate settings (Story 11.41)
+type StrategyFundingRate struct {
+	Enabled                  bool    `json:"enabled"`
+	MaxFundingRatePct        float64 `json:"max_funding_rate_pct"`
+	ExitBeforeFundingMinutes int     `json:"exit_before_funding_minutes"`
+	BlockEntryAboveRatePct   float64 `json:"block_entry_above_rate_pct"`
+}
+
+// StrategyRisk contains risk management settings (Story 11.41)
+type StrategyRisk struct {
+	RiskLevel            string  `json:"risk_level"`
+	MaxDrawdownPercent   float64 `json:"max_drawdown_percent"`
+	MaxDailyLossPercent  float64 `json:"max_daily_loss_percent"`
+	PositionRiskPercent  float64 `json:"position_risk_percent"`
+}
+
+// StrategyTrendDivergence contains trend divergence detection settings (Story 11.41)
+type StrategyTrendDivergence struct {
+	Enabled              bool    `json:"enabled"`
+	MinDivergencePercent int     `json:"min_divergence_percent"`
+	BlockOnDivergence    bool    `json:"block_on_divergence"`
+	DivergenceWeight     float64 `json:"divergence_weight"`
+}
+
+// StrategyDynamicAIExit contains dynamic AI-based exit settings (Story 11.41)
+type StrategyDynamicAIExit struct {
+	Enabled            bool  `json:"enabled"`
+	MinHoldBeforeAIMs  int64 `json:"min_hold_before_ai_ms"`
+	AICheckIntervalMs  int64 `json:"ai_check_interval_ms"`
+	UseLLMForLoss      bool  `json:"use_llm_for_loss"`
+	UseLLMForProfit    bool  `json:"use_llm_for_profit"`
+	MaxHoldTimeMs      int64 `json:"max_hold_time_ms"`
+}
+
+// StrategyEarlyWarning contains per-strategy early warning settings (Story 11.41)
+type StrategyEarlyWarning struct {
+	Enabled            bool    `json:"enabled"`
+	StartAfterMinutes  int     `json:"start_after_minutes"`
+	MinLossPercent     float64 `json:"min_loss_percent"`
+	CheckIntervalSecs  int     `json:"check_interval_secs"`
+	CloseMinHoldMins   int     `json:"close_min_hold_mins"`
+}
+
+// StrategyEntryConditions contains expanded entry condition settings (Story 11.41)
+type StrategyEntryConditions struct {
+	ADXMin               float64 `json:"adx_min,omitempty"`
+	ADXMax               float64 `json:"adx_max,omitempty"`
+	RSIMin               int     `json:"rsi_min,omitempty"`
+	RSIMax               int     `json:"rsi_max,omitempty"`
+	RequireTrendAlign    bool    `json:"require_trend_align,omitempty"`
+	MinVolumeMultiplier  float64 `json:"min_volume_multiplier,omitempty"`
+	UseLimitEntry        bool    `json:"use_limit_entry,omitempty"`
+	LimitOrderGapPercent float64 `json:"limit_order_gap_percent,omitempty"`
+	MaxLimitGapPercent   float64 `json:"max_limit_gap_percent,omitempty"`
+	// Strategy-specific fields (mean_reversion, breakout, range_trading)
+	RSIOversold            int     `json:"rsi_oversold,omitempty"`
+	RSIOverbought          int     `json:"rsi_overbought,omitempty"`
+	BollingerStd           float64 `json:"bollinger_std,omitempty"`
+	RequirePriceAtBand     bool    `json:"require_price_at_band,omitempty"`
+	BreakoutATRMultiplier  float64 `json:"breakout_atr_multiplier,omitempty"`
+	VolumeSpikeMultiplier  float64 `json:"volume_spike_multiplier,omitempty"`
+	RequireConsolidation   bool    `json:"require_consolidation,omitempty"`
+	ConsolidationBars      int     `json:"consolidation_bars,omitempty"`
+	RangeHighTouch         bool    `json:"range_high_touch,omitempty"`
+	RangeLowTouch          bool    `json:"range_low_touch,omitempty"`
+	RangeWidthATR          float64 `json:"range_width_atr,omitempty"`
+	MinRangeDurationBars   int     `json:"min_range_duration_bars,omitempty"`
 }
 
 // StrategyConfidence contains confidence thresholds
@@ -624,21 +823,25 @@ type StrategyConfidence struct {
 	UltraConfidence int `json:"ultra_confidence"`
 }
 
-// StrategyExitConditions contains exit rule settings
+// StrategyExitConditions contains exit rule settings (expanded for Story 11.41)
 type StrategyExitConditions struct {
-	UseAIExit           bool `json:"use_ai_exit,omitempty"`
-	ExitAtMean          bool `json:"exit_at_mean,omitempty"`
-	ExitAtRangeBoundary bool `json:"exit_at_range_boundary,omitempty"`
-	MaxHoldMinutes      int  `json:"max_hold_minutes"`
-	EarlyWarningEnabled bool `json:"early_warning_enabled"`
+	UseAIExit            bool `json:"use_ai_exit,omitempty"`
+	ExitAtMean           bool `json:"exit_at_mean,omitempty"`
+	ExitAtRangeBoundary  bool `json:"exit_at_range_boundary,omitempty"`
+	MaxHoldMinutes       int  `json:"max_hold_minutes"`
+	EarlyWarningEnabled  bool `json:"early_warning_enabled"`
+	ExitOnTrendReversal  bool `json:"exit_on_trend_reversal,omitempty"`
+	ADXExitThreshold     int  `json:"adx_exit_threshold,omitempty"`
 }
 
-// StrategyScoring contains scoring weight configuration
+// StrategyScoring contains scoring weight configuration (expanded for Story 11.41)
 type StrategyScoring struct {
 	TechnicalWeight int `json:"technical_weight"`
 	MomentumWeight  int `json:"momentum_weight"`
 	VolumeWeight    int `json:"volume_weight"`
 	SentimentWeight int `json:"sentiment_weight"`
+	MinScore        int `json:"min_score,omitempty"`
+	HighScore       int `json:"high_score,omitempty"`
 }
 
 // ModeConfig represents a complete mode configuration with all strategies
@@ -1254,12 +1457,13 @@ func DefaultModeStrategyConfig(modeName, strategyName string) *ModeStrategyConfi
 	// Return the config if it exists, otherwise return a default
 	if modeConfigs, ok := configs[modeName]; ok {
 		if config, ok := modeConfigs[strategyName]; ok {
+			applyDefaultNewSections(config)
 			return config
 		}
 	}
 
 	// Return a minimal default config
-	return &ModeStrategyConfig{
+	config := &ModeStrategyConfig{
 		Enabled:          false,
 		Priority:         99,
 		SupportedRegimes: []string{},
@@ -1292,6 +1496,159 @@ func DefaultModeStrategyConfig(modeName, strategyName string) *ModeStrategyConfi
 			VolumeWeight:    15,
 			SentimentWeight: 15,
 		},
+	}
+	applyDefaultNewSections(config)
+	return config
+}
+
+// applyDefaultNewSections adds default values for the 12 new sections from Story 11.41
+// if they are nil. This ensures the UI always has data to display.
+func applyDefaultNewSections(config *ModeStrategyConfig) {
+	// 1. Position Sizing (structured format)
+	if config.PositionSizing == nil {
+		config.PositionSizing = &StrategyPositionSizing{
+			Leverage:     config.Leverage,
+			MaxPositions: config.MaxPositions,
+			BaseSizeUSD:  config.BaseSizeUSD,
+		}
+	}
+
+	// 3. MTF (Multi-Timeframe)
+	if config.MTF == nil {
+		config.MTF = &StrategyMTF{
+			Enabled:            false,
+			PrimaryTimeframe:   "15m",
+			PrimaryWeight:      50,
+			SecondaryTimeframe: "1h",
+			SecondaryWeight:    30,
+			TertiaryTimeframe:  "4h",
+			TertiaryWeight:     20,
+			MinConsensus:       2,
+			MinWeightedStrength: 60,
+			TrendStabilityCheck: true,
+		}
+	}
+
+	// 9. Circuit Breaker
+	if config.CircuitBreaker == nil {
+		config.CircuitBreaker = &StrategyCircuitBreaker{
+			MaxLossPerHourUSD:     50,
+			MaxLossPerDayUSD:      150,
+			MaxConsecutiveLosses:  3,
+			CooldownMinutes:       30,
+			MaxTradesPerHour:      20,
+			MaxTradesPerDay:       100,
+			WinRateCheckAfter:     10,
+			MinWinRatePct:         35,
+		}
+	}
+
+	// 10. Hedge
+	if config.Hedge == nil {
+		config.Hedge = &StrategyHedge{
+			AllowHedge:                false,
+			MinConfidenceForHedge:     80,
+			ExistingMustBeInProfitPct: 1.0,
+			MaxHedgeSizePercent:       50,
+			AllowSameModeHedge:        false,
+			MaxTotalExposureMultiplier: 1.5,
+		}
+	}
+
+	// 11. Averaging
+	if config.Averaging == nil {
+		config.Averaging = &StrategyAveraging{
+			AllowAveraging:          false,
+			AverageUpProfitPercent:  2.0,
+			AverageDownLossPercent:  2.0,
+			AddSizePercent:          50,
+			MaxAverages:             2,
+			MinConfidenceForAverage: 70,
+			UseLLMForAveraging:      true,
+			StagedEntryEnabled:      false,
+			StagedEntryLevels:       3,
+		}
+	}
+
+	// 12. Stale Release
+	if config.StaleRelease == nil {
+		config.StaleRelease = &StrategyStaleRelease{
+			Enabled:                 true,
+			MaxHoldDurationMinutes:  1440,
+			MinProfitToKeepPct:      0.5,
+			MaxLossToForceClosePct:  5.0,
+			StaleZoneLoPct:          -1.0,
+			StaleZoneHiPct:          0.5,
+			StaleZoneAction:         "llm_decide",
+		}
+	}
+
+	// 13. Position Optimization
+	if config.PositionOptimization == nil {
+		config.PositionOptimization = &StrategyPositionOptimization{
+			ReentryEnabled:              false,
+			ReentryAfterTP1:             true,
+			ReentryMinPullbackPct:       0.5,
+			MaxReentriesPerPosition:     2,
+			DynamicSLEnabled:            true,
+			DynamicSLAtBreakevenPct:     1.0,
+			ProfitProtectionEnabled:     true,
+			ProfitProtectionTriggerPct:  2.0,
+			ProfitProtectionLockPct:     1.0,
+		}
+	}
+
+	// 14. Funding Rate
+	if config.FundingRate == nil {
+		config.FundingRate = &StrategyFundingRate{
+			Enabled:                 true,
+			MaxFundingRatePct:       0.1,
+			ExitBeforeFundingMinutes: 5,
+			BlockEntryAboveRatePct:  0.05,
+		}
+	}
+
+	// 15. Risk
+	if config.Risk == nil {
+		config.Risk = &StrategyRisk{
+			RiskLevel:          "medium",
+			MaxDrawdownPercent: 10,
+			MaxDailyLossPercent: 5,
+			PositionRiskPercent: 2,
+		}
+	}
+
+	// 16. Trend Divergence
+	if config.TrendDivergence == nil {
+		config.TrendDivergence = &StrategyTrendDivergence{
+			Enabled:              true,
+			MinDivergencePercent: 5,
+			BlockOnDivergence:    false,
+			DivergenceWeight:     20,
+		}
+	}
+
+	// 17. Dynamic AI Exit
+	if config.DynamicAIExit == nil {
+		config.DynamicAIExit = &StrategyDynamicAIExit{
+			Enabled:             true,
+			MinHoldBeforeAIMs:   30000,
+			AICheckIntervalMs:   10000,
+			UseLLMForLoss:       true,
+			UseLLMForProfit:     true,
+			MaxHoldTimeMs:       3600000,
+		}
+	}
+
+	// 18. Early Warning
+	if config.EarlyWarning == nil {
+		config.EarlyWarning = &StrategyEarlyWarning{
+			Enabled:           true,
+			StartAfterMinutes: 5,
+			MinLossPercent:    1.0,
+			CheckIntervalSecs: 30,
+			CloseMinHoldMins:  2,
+		}
 	}
 }
 
