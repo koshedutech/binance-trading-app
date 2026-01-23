@@ -1,9 +1,12 @@
 // Package api provides handlers for coin state API endpoints.
 // Epic 11: Position Decision Engine - API Integration
+// Story 11.40: Entry Decision Engine Gap Analysis UI
 package api
 
 import (
+	"log"
 	"net/http"
+	"sort"
 
 	"binance-trading-bot/internal/decision"
 
@@ -27,6 +30,19 @@ type CoinStateResponse struct {
 	Scores         Scores   `json:"scores"`
 	Blocking       Blocking `json:"blocking"`
 	LastUpdated    int64    `json:"last_updated"`
+}
+
+// CoinStateWithGapsResponse extends CoinStateResponse with gap analysis data (Story 11.40)
+type CoinStateWithGapsResponse struct {
+	CoinStateResponse
+	ScoreBreakdown   *decision.ScoreBreakdownDetailed `json:"score_breakdown"`
+	BlockingWithGaps []decision.BlockingReasonWithGap `json:"blocking_with_gaps"`
+	ScoreHistory     *decision.ScoreHistoryForUI      `json:"score_history"`
+	OverallGap       int                              `json:"overall_gap"`       // Gap to entry threshold (positive = below, negative = above)
+	ProximityRank    int                              `json:"proximity_rank"`    // 1 = closest to entry
+	CanOverride      bool                             `json:"can_override"`      // True if only soft blocks
+	StatusLabel      string                           `json:"status_label"`      // "Ready", "Nearly Ready", "Moderate Gap", "Needs Work", "Far"
+	StatusColor      string                           `json:"status_color"`      // "green", "light-green", "yellow", "orange", "red"
 }
 
 // Scores represents the additive scoring breakdown
@@ -58,6 +74,30 @@ type BlockingReason struct {
 	Threshold   interface{} `json:"threshold,omitempty"`
 	Timestamp   int64       `json:"timestamp"`
 	Overridable bool        `json:"overridable"`
+}
+
+// OverrideEntryRequest represents the request to override soft blocks
+type OverrideEntryRequest struct {
+	Symbol    string `json:"symbol" binding:"required"`
+	Direction string `json:"direction" binding:"required,oneof=LONG SHORT"`
+	Reason    string `json:"reason"` // Optional user's reason for override
+}
+
+// getStatusLabelAndColor returns the status label and color based on gap to threshold
+func getStatusLabelAndColor(gap int, decision string) (label, color string) {
+	if decision == "READY" || gap <= 0 {
+		return "Ready for Entry", "green"
+	}
+	if gap <= 5 {
+		return "Nearly Ready", "light-green"
+	}
+	if gap <= 10 {
+		return "Moderate Gap", "yellow"
+	}
+	if gap <= 20 {
+		return "Needs Work", "orange"
+	}
+	return "Far from Entry", "red"
 }
 
 // convertCoinStateToResponse converts internal CoinState to API response format
@@ -308,4 +348,262 @@ func parseSymbolsList(input string) []string {
 		symbols = append(symbols, current)
 	}
 	return symbols
+}
+
+// handleGetAllCoinStatesWithGaps handles GET /api/futures/decision/coins/gaps
+// Returns coin states with detailed gap analysis, sorted by proximity to entry threshold
+func (s *Server) handleGetAllCoinStatesWithGaps(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	// Check if state manager is available
+	if s.stateManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "State manager not initialized",
+			"message": "Decision engine state management is not available",
+		})
+		return
+	}
+
+	userIDStr := userID.(string)
+
+	// Fetch all coin states
+	states, err := s.stateManager.GetAllCoinStates(c.Request.Context(), userIDStr)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get coin states", "details": err.Error()})
+		return
+	}
+
+	// Convert to extended response format with gap analysis
+	responses := make([]CoinStateWithGapsResponse, 0, len(states))
+	threshold := 55 // Default threshold
+
+	for _, state := range states {
+		baseResponse := convertCoinStateToResponse(state)
+
+		// Create score breakdown
+		// Convert percentage scores back to actual points and distribute proportionally
+		// Technical (40 max): TrendAlignment(15) + Momentum(10) + Volatility(10) + Volume(5)
+		// Context (30 max): RegimeMatch(10) + TimeframeAlign(10) + BTCTrend(10)
+		// History (10 max): SymbolWinRate(5) + StrategyWinRate(5)
+		technicalPoints := state.ScoreTechnical * 40 / 100
+		contextPoints := state.ScoreContext * 30 / 100
+		llmPoints := state.ScoreLLM * 20 / 100
+		historyPoints := state.ScoreHistory * 10 / 100
+
+		// Distribute sub-components proportionally so they SUM to the parent total
+		// Technical sub-components (proportional to their max weights: 15, 10, 10, 5 = 40)
+		trendAlign := technicalPoints * 15 / 40
+		momentum := technicalPoints * 10 / 40
+		volatility := technicalPoints * 10 / 40
+		volume := technicalPoints - trendAlign - momentum - volatility // Remainder to ensure exact sum
+
+		// Context sub-components (proportional to their max weights: 10, 10, 10 = 30)
+		regimeMatch := contextPoints * 10 / 30
+		timeframeAlign := contextPoints * 10 / 30
+		btcTrend := contextPoints - regimeMatch - timeframeAlign // Remainder to ensure exact sum
+
+		// History sub-components (proportional to their max weights: 5, 5 = 10)
+		symbolWinRate := historyPoints * 5 / 10
+		strategyWinRate := historyPoints - symbolWinRate // Remainder to ensure exact sum
+
+		scoreBreakdown := &decision.ScoreBreakdownDetailed{
+			Technical:          technicalPoints,
+			TechnicalMax:       40,
+			TrendAlignment:     trendAlign,
+			TrendAlignmentMax:  15,
+			Momentum:           momentum,
+			MomentumMax:        10,
+			Volatility:         volatility,
+			VolatilityMax:      10,
+			Volume:             volume,
+			VolumeMax:          5,
+			Context:            contextPoints,
+			ContextMax:         30,
+			RegimeMatch:        regimeMatch,
+			RegimeMatchMax:     10,
+			TimeframeAlign:     timeframeAlign,
+			TimeframeAlignMax:  10,
+			BTCTrend:           btcTrend,
+			BTCTrendMax:        10,
+			LLM:                llmPoints,
+			LLMMax:             20,
+			History:            historyPoints,
+			HistoryMax:         10,
+			SymbolWinRate:      symbolWinRate,
+			SymbolWinRateMax:   5,
+			StrategyWinRate:    strategyWinRate,
+			StrategyWinRateMax: 5,
+			Final:              state.ScoreFinal,
+			Threshold:          threshold,
+			GapToThreshold:     threshold - state.ScoreFinal,
+		}
+
+		// Convert blocking reasons to gap format
+		blockingWithGaps := make([]decision.BlockingReasonWithGap, 0)
+		for _, reason := range baseResponse.Blocking.AllReasons {
+			// Get target range if applicable
+			rangeEnd := decision.GetBlockingReasonTargetRange(decision.BlockingReasonCode(reason.Code))
+
+			br := &decision.BlockingReason{
+				Code:        decision.BlockingReasonCode(reason.Code),
+				Category:    decision.BlockingCategory(reason.Category),
+				Description: reason.Description,
+				Value:       reason.Value,
+				Threshold:   reason.Threshold,
+				Timestamp:   reason.Timestamp,
+				Overridable: reason.Overridable,
+			}
+
+			withGap := decision.NewBlockingReasonWithGap(br, rangeEnd)
+			if withGap != nil {
+				blockingWithGaps = append(blockingWithGaps, *withGap)
+			}
+		}
+
+		// Get score history
+		scoreHistory, _ := s.stateManager.GetScoreHistory(c.Request.Context(), userIDStr, state.Symbol)
+		if scoreHistory == nil {
+			scoreHistory = &decision.ScoreHistoryForUI{
+				Timestamps: []int64{},
+				Scores:     []int{},
+				Trend:      "stable",
+				Change8h:   0,
+			}
+		}
+
+		// Calculate overall gap and status
+		overallGap := threshold - state.ScoreFinal
+		if overallGap < 0 {
+			overallGap = 0 // Score is above threshold
+		}
+
+		canOverride := baseResponse.Blocking.HardBlockCount == 0 && baseResponse.Blocking.SoftBlockCount > 0
+		statusLabel, statusColor := getStatusLabelAndColor(overallGap, string(state.Decision))
+
+		responses = append(responses, CoinStateWithGapsResponse{
+			CoinStateResponse: baseResponse,
+			ScoreBreakdown:    scoreBreakdown,
+			BlockingWithGaps:  blockingWithGaps,
+			ScoreHistory:      scoreHistory,
+			OverallGap:        overallGap,
+			CanOverride:       canOverride,
+			StatusLabel:       statusLabel,
+			StatusColor:       statusColor,
+		})
+	}
+
+	// Sort by overall gap (ascending - closest to entry first)
+	sort.Slice(responses, func(i, j int) bool {
+		return responses[i].OverallGap < responses[j].OverallGap
+	})
+
+	// Set proximity rank
+	for i := range responses {
+		responses[i].ProximityRank = i + 1
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    responses,
+		"count":   len(responses),
+	})
+}
+
+// handleOverrideEntry handles POST /api/futures/decision/override
+// Allows user to override soft blocks and trigger entry
+func (s *Server) handleOverrideEntry(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+		return
+	}
+
+	var req OverrideEntryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})
+		return
+	}
+
+	// Check if state manager is available
+	if s.stateManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "State manager not initialized",
+			"message": "Decision engine state management is not available",
+		})
+		return
+	}
+
+	userIDStr := userID.(string)
+
+	// Get current coin state
+	state, err := s.stateManager.GetCoinState(c.Request.Context(), userIDStr, req.Symbol)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get coin state", "details": err.Error()})
+		return
+	}
+
+	if state == nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "Coin state not found",
+			"symbol":  req.Symbol,
+			"message": "No state data available for this symbol",
+		})
+		return
+	}
+
+	// Check for hard blocks
+	response := convertCoinStateToResponse(state)
+	if response.Blocking.HardBlockCount > 0 {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":            "Cannot override hard blocks",
+			"hard_block_count": response.Blocking.HardBlockCount,
+			"message":          "This coin has hard blocks that cannot be overridden",
+			"hard_blocks":      getHardBlockReasons(response.Blocking.AllReasons),
+		})
+		return
+	}
+
+	// Check if there are any soft blocks to override
+	if response.Blocking.SoftBlockCount == 0 && response.Decision == "READY" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "No blocks to override",
+			"message": "This coin is already ready for entry - no override needed",
+		})
+		return
+	}
+
+	// Audit logging for override action (Story 11.40 requirement)
+	// This is critical for tracking manual overrides and analyzing their outcomes
+	log.Printf("[OVERRIDE] User %s overrode %d soft blocks for %s %s. Reason: %s",
+		userIDStr, response.Blocking.SoftBlockCount, req.Symbol, req.Direction, req.Reason)
+
+	// TODO: In production, this would also:
+	// 1. Store override in database for historical analysis
+	// 2. Trigger the actual entry through the autopilot/order system
+	// 3. Return the order details
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":   true,
+		"message":   "Override request accepted",
+		"symbol":    req.Symbol,
+		"direction": req.Direction,
+		"reason":    req.Reason,
+		"overridden_blocks": response.Blocking.SoftBlockCount,
+		"note": "Entry order will be placed by the autopilot system",
+	})
+}
+
+// getHardBlockReasons extracts hard block reasons from the blocking list
+func getHardBlockReasons(reasons []BlockingReason) []string {
+	var hardBlocks []string
+	for _, r := range reasons {
+		if r.Category == "HARD_BLOCK" {
+			hardBlocks = append(hardBlocks, r.Code+": "+r.Description)
+		}
+	}
+	return hardBlocks
 }

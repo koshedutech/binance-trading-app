@@ -25,6 +25,7 @@ import {
   Sliders,
   Activity,
   BarChart3,
+  Edit3,
 } from 'lucide-react';
 import {
   loadModeDefaults,
@@ -36,8 +37,8 @@ import {
   FieldComparison,
 } from '../services/futuresApi';
 import modeStrategyApi from '../api/modeStrategy';
-import type { ModeName, StrategyName, ModeStrategyConfig, StrategyComparisonResponse } from '../types/modeStrategy';
-import { STRATEGY_DISPLAY_NAMES, STRATEGY_DESCRIPTIONS } from '../types/modeStrategy';
+import type { ModeName, StrategyName, ModeStrategyConfig } from '../types/modeStrategy';
+import { STRATEGY_DISPLAY_NAMES } from '../types/modeStrategy';
 
 // ==================== INTERFACES ====================
 
@@ -248,20 +249,35 @@ interface StrategySettingGroup {
   fields: string[]; // Field names (not prefixes, since strategy fields are flat)
 }
 
+// Story 11.41: Expanded to include all 18 sections
 const STRATEGY_SETTING_GROUPS: StrategySettingGroup[] = [
   {
-    key: 'position',
-    name: 'Position Settings',
+    key: 'position_sizing',
+    name: 'Position Sizing',
     icon: Sliders,
     iconColor: 'text-blue-400',
-    fields: ['enabled', 'priority', 'leverage', 'max_positions', 'base_size_usd', 'supported_regimes'],
+    fields: ['enabled', 'priority', 'leverage', 'max_positions', 'base_size_usd', 'supported_regimes', 'max_size_usd', 'min_position_size_usd', 'safety_margin', 'auto_size_enabled', 'auto_size_min_cover_fee'],
+  },
+  {
+    key: 'timeframe',
+    name: 'Timeframe',
+    icon: Activity,
+    iconColor: 'text-indigo-400',
+    fields: ['trend_timeframe', 'entry_timeframe', 'analysis_timeframe'],
+  },
+  {
+    key: 'mtf',
+    name: 'Multi-Timeframe (MTF)',
+    icon: BarChart3,
+    iconColor: 'text-violet-400',
+    fields: ['primary_timeframe', 'primary_weight', 'secondary_timeframe', 'secondary_weight', 'tertiary_timeframe', 'tertiary_weight', 'min_consensus', 'min_weighted_strength', 'trend_stability_check'],
   },
   {
     key: 'sltp',
     name: 'Stop Loss / Take Profit',
     icon: Shield,
     iconColor: 'text-red-400',
-    fields: ['sl_percent', 'tp1_percent', 'tp2_percent', 'tp3_percent', 'trailing_enabled', 'trailing_activation_pct', 'trailing_stop_pct'],
+    fields: ['sl_percent', 'tp1_percent', 'tp1_sell_percent', 'tp2_percent', 'tp2_sell_percent', 'tp3_percent', 'tp3_sell_percent', 'trailing_enabled', 'trailing_activation_pct', 'trailing_stop_pct', 'use_atr_based', 'atr_sl_multiplier', 'atr_tp_multiplier', 'min_sl_distance_pct'],
   },
   {
     key: 'confidence',
@@ -271,35 +287,100 @@ const STRATEGY_SETTING_GROUPS: StrategySettingGroup[] = [
     fields: ['min_confidence', 'high_confidence', 'ultra_confidence'],
   },
   {
-    key: 'entry',
+    key: 'entry_conditions',
     name: 'Entry Conditions',
     icon: TrendingUp,
     iconColor: 'text-purple-400',
-    // Different strategies have different entry condition fields
     fields: [
-      // Trend Following
-      'adx_min', 'require_trend_align', 'min_volume_multiplier',
-      // Mean Reversion
+      'adx_min', 'adx_max', 'rsi_min', 'rsi_max', 'require_trend_align', 'min_volume_multiplier', 'use_limit_entry', 'limit_order_gap_percent', 'max_limit_gap_percent',
       'rsi_oversold', 'rsi_overbought', 'bollinger_std', 'require_price_at_band',
-      // Breakout
       'breakout_atr_multiplier', 'volume_spike_multiplier', 'require_consolidation', 'consolidation_bars',
-      // Range Trading
       'range_high_touch', 'range_low_touch', 'range_width_atr', 'min_range_duration_bars',
     ],
   },
   {
-    key: 'exit',
+    key: 'exit_conditions',
     name: 'Exit Conditions',
     icon: Activity,
     iconColor: 'text-yellow-400',
-    fields: ['use_ai_exit', 'exit_at_mean', 'exit_at_range_boundary', 'max_hold_minutes', 'early_warning_enabled'],
+    fields: ['use_ai_exit', 'exit_at_mean', 'exit_at_range_boundary', 'max_hold_minutes', 'early_warning_enabled', 'exit_on_trend_reversal', 'adx_exit_threshold'],
   },
   {
     key: 'scoring',
     name: 'Scoring Weights',
     icon: BarChart3,
     iconColor: 'text-cyan-400',
-    fields: ['technical_weight', 'momentum_weight', 'volume_weight', 'sentiment_weight'],
+    fields: ['technical_weight', 'momentum_weight', 'volume_weight', 'sentiment_weight', 'min_score', 'high_score'],
+  },
+  {
+    key: 'circuit_breaker',
+    name: 'Circuit Breaker',
+    icon: Shield,
+    iconColor: 'text-orange-400',
+    fields: ['max_loss_per_hour_usd', 'max_loss_per_day_usd', 'max_consecutive_losses', 'cooldown_minutes', 'max_trades_per_hour', 'max_trades_per_day', 'win_rate_check_after', 'min_win_rate_pct'],
+  },
+  {
+    key: 'hedge',
+    name: 'Hedging',
+    icon: Shield,
+    iconColor: 'text-teal-400',
+    fields: ['allow_hedge', 'min_confidence_for_hedge', 'existing_must_be_in_profit_pct', 'max_hedge_size_percent', 'allow_same_mode_hedge', 'max_total_exposure_multiplier'],
+  },
+  {
+    key: 'averaging',
+    name: 'Position Averaging',
+    icon: TrendingUp,
+    iconColor: 'text-emerald-400',
+    fields: ['allow_averaging', 'average_up_profit_percent', 'average_down_loss_percent', 'add_size_percent', 'max_averages', 'min_confidence_for_average', 'use_llm_for_averaging', 'staged_entry_enabled', 'staged_entry_levels', 'staged_entry_percent'],
+  },
+  {
+    key: 'stale_release',
+    name: 'Stale Position Release',
+    icon: Activity,
+    iconColor: 'text-amber-400',
+    fields: ['max_hold_duration_minutes', 'min_profit_to_keep_pct', 'max_loss_to_force_close_pct', 'stale_zone_lo_pct', 'stale_zone_hi_pct', 'stale_zone_action'],
+  },
+  {
+    key: 'position_optimization',
+    name: 'Position Optimization',
+    icon: Zap,
+    iconColor: 'text-pink-400',
+    fields: ['reentry_enabled', 'reentry_after_tp1', 'reentry_min_pullback_pct', 'max_reentries_per_position', 'dynamic_sl_enabled', 'dynamic_sl_at_breakeven_pct', 'profit_protection_enabled', 'profit_protection_trigger_pct', 'profit_protection_lock_pct'],
+  },
+  {
+    key: 'funding_rate',
+    name: 'Funding Rate',
+    icon: Wallet,
+    iconColor: 'text-lime-400',
+    fields: ['max_funding_rate_pct', 'exit_before_funding_minutes', 'block_entry_above_rate_pct'],
+  },
+  {
+    key: 'risk',
+    name: 'Risk Management',
+    icon: Shield,
+    iconColor: 'text-rose-400',
+    fields: ['risk_level', 'max_drawdown_percent', 'max_daily_loss_percent', 'position_risk_percent'],
+  },
+  {
+    key: 'trend_divergence',
+    name: 'Trend Divergence',
+    icon: TrendingUp,
+    iconColor: 'text-fuchsia-400',
+    fields: ['min_divergence_percent', 'block_on_divergence', 'divergence_weight'],
+  },
+  {
+    key: 'dynamic_ai_exit',
+    name: 'Dynamic AI Exit',
+    icon: Brain,
+    iconColor: 'text-sky-400',
+    fields: ['min_hold_before_ai_ms', 'ai_check_interval_ms', 'use_llm_for_loss', 'use_llm_for_profit', 'max_hold_time_ms'],
+  },
+  {
+    key: 'early_warning',
+    name: 'Early Warning',
+    icon: AlertTriangle,
+    iconColor: 'text-yellow-500',
+    fields: ['start_after_minutes', 'min_loss_percent', 'check_interval_secs', 'close_min_hold_mins'],
   },
 ];
 
@@ -317,14 +398,41 @@ function groupStrategyFieldsByCategory(allFields: FieldComparison[]): GroupedStr
   const result: GroupedStrategyFields[] = [];
   const usedPaths = new Set<string>();
 
+  // Groups that have a section prefix in the path (e.g., "mtf.enabled", "hedge.allow_hedge")
+  const prefixedGroups = new Set([
+    'mtf', 'circuit_breaker', 'hedge', 'averaging', 'stale_release',
+    'position_optimization', 'funding_rate', 'risk', 'trend_divergence',
+    'dynamic_ai_exit', 'early_warning', 'sltp', 'confidence', 'entry_conditions',
+    'exit_conditions', 'scoring', 'timeframe'
+  ]);
+
   for (const group of STRATEGY_SETTING_GROUPS) {
     const groupFields: FieldComparison[] = [];
 
     for (const field of allFields) {
-      // Extract the field name from the path (e.g., "sltp.sl_percent" -> "sl_percent", or just "leverage" -> "leverage")
-      const fieldName = field.path.includes('.') ? field.path.split('.').pop() || '' : field.path;
+      if (usedPaths.has(field.path)) continue;
 
-      if (group.fields.includes(fieldName) && !usedPaths.has(field.path)) {
+      // Check if field belongs to this group based on path prefix or field name
+      let belongsToGroup = false;
+
+      if (prefixedGroups.has(group.key)) {
+        // For prefixed groups, match if path starts with the group key
+        // e.g., "mtf.enabled" matches group "mtf", "sltp.sl_percent" matches group "sltp"
+        const pathPrefix = field.path.split('.')[0];
+        if (pathPrefix === group.key) {
+          belongsToGroup = true;
+        }
+      } else {
+        // For non-prefixed groups like "position_sizing", match by field name
+        // These are top-level fields like "enabled", "leverage", "max_positions"
+        const fieldName = field.path.includes('.') ? field.path.split('.').pop() || '' : field.path;
+        // Only match if it's a top-level field (no prefix) and the field name is in the group's fields
+        if (!prefixedGroups.has(field.path.split('.')[0]) && group.fields.includes(fieldName)) {
+          belongsToGroup = true;
+        }
+      }
+
+      if (belongsToGroup) {
         groupFields.push(field);
         usedPaths.add(field.path);
       }
@@ -758,6 +866,407 @@ function AdminInput({
   );
 }
 
+// ==================== STRATEGY EDITABLE INPUT COMPONENTS ====================
+
+// Strategy Number Input - Similar to StrategySettingsForm but compact
+function StrategyNumberInput({
+  label,
+  value,
+  defaultValue,
+  onChange,
+  min = 0,
+  max = 100,
+  step = 1,
+  unit = '',
+  description,
+  isEdited = false,
+}: {
+  label: string;
+  value: number | null | undefined;
+  defaultValue: number | null | undefined;
+  onChange: (value: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  description?: string;
+  isEdited?: boolean;
+}) {
+  const displayValue = value ?? defaultValue ?? 0;
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-medium text-gray-300">{label}</label>
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            value={displayValue}
+            onChange={(e) => onChange(Number(e.target.value))}
+            min={min}
+            max={max}
+            step={step}
+            className={`w-20 px-2 py-1 bg-gray-700 border rounded text-white text-right text-xs focus:outline-none focus:ring-2 focus:ring-purple-500 ${
+              isEdited ? 'border-orange-500' : 'border-gray-600'
+            }`}
+          />
+          {unit && <span className="text-xs text-gray-500 w-8">{unit}</span>}
+          {isEdited && <span className="text-orange-400 text-xs">*</span>}
+        </div>
+      </div>
+      {description && (
+        <p className="text-xs text-gray-500">{description}</p>
+      )}
+    </div>
+  );
+}
+
+// Strategy Toggle Input - Similar to StrategySettingsForm but compact
+function StrategyToggleInput({
+  label,
+  checked,
+  defaultChecked,
+  onChange,
+  description,
+  isEdited = false,
+}: {
+  label: string;
+  checked: boolean | null | undefined;
+  defaultChecked: boolean | null | undefined;
+  onChange: (checked: boolean) => void;
+  description?: string;
+  isEdited?: boolean;
+}) {
+  const displayValue = checked ?? defaultChecked ?? false;
+
+  return (
+    <div className="flex items-start justify-between py-1">
+      <div className="flex-1">
+        <label className="text-xs font-medium text-gray-300">{label}</label>
+        {description && (
+          <p className="text-xs text-gray-500 mt-0.5">{description}</p>
+        )}
+      </div>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => onChange(!displayValue)}
+          className={`
+            relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer
+            ${displayValue ? 'bg-purple-600' : 'bg-gray-600'}
+            ${isEdited ? 'ring-2 ring-orange-500' : ''}
+          `}
+        >
+          <span
+            className={`
+              inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform
+              ${displayValue ? 'translate-x-5' : 'translate-x-0.5'}
+            `}
+          />
+        </button>
+        {isEdited && <span className="text-orange-400 text-xs">*</span>}
+      </div>
+    </div>
+  );
+}
+
+// Strategy Slider Input - Similar to StrategySettingsForm but compact
+function StrategySliderInput({
+  label,
+  value,
+  defaultValue,
+  onChange,
+  min,
+  max,
+  step = 1,
+  unit = '',
+  description,
+  isEdited = false,
+}: {
+  label: string;
+  value: number | null | undefined;
+  defaultValue: number | null | undefined;
+  onChange: (value: number) => void;
+  min: number;
+  max: number;
+  step?: number;
+  unit?: string;
+  description?: string;
+  isEdited?: boolean;
+}) {
+  const displayValue = value ?? defaultValue ?? min;
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-medium text-gray-300">{label}</label>
+        <span className={`text-xs font-mono ${isEdited ? 'text-orange-400' : 'text-purple-400'}`}>
+          {displayValue}{unit} {isEdited && '*'}
+        </span>
+      </div>
+      {description && (
+        <p className="text-xs text-gray-500">{description}</p>
+      )}
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={displayValue}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className={`w-full h-1.5 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500 ${
+          isEdited ? 'ring-1 ring-orange-500' : ''
+        }`}
+      />
+      <div className="flex justify-between text-xs text-gray-600">
+        <span>{min}{unit}</span>
+        <span>{max}{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+// Strategy Select Input - Similar to StrategySettingsForm but compact
+function StrategySelectInput({
+  label,
+  value,
+  defaultValue,
+  onChange,
+  options,
+  description,
+  isEdited = false,
+}: {
+  label: string;
+  value: string | null | undefined;
+  defaultValue: string | null | undefined;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  description?: string;
+  isEdited?: boolean;
+}) {
+  const displayValue = value ?? defaultValue ?? '';
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label className="text-xs font-medium text-gray-300">{label}</label>
+        <div className="flex items-center gap-1">
+          <select
+            value={displayValue}
+            onChange={(e) => onChange(e.target.value)}
+            className={`w-24 px-2 py-1 bg-gray-700 border rounded text-white text-xs focus:outline-none focus:ring-2 focus:ring-purple-500 ${
+              isEdited ? 'border-orange-500' : 'border-gray-600'
+            }`}
+          >
+            {options.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          {isEdited && <span className="text-orange-400 text-xs">*</span>}
+        </div>
+      </div>
+      {description && (
+        <p className="text-xs text-gray-500">{description}</p>
+      )}
+    </div>
+  );
+}
+
+// Strategy field type detector for editable inputs
+function getStrategyFieldInputType(path: string, value: any): 'toggle' | 'slider' | 'number' | 'select' | 'text' {
+  const fieldName = path.split('.').pop() || path;
+
+  // Boolean fields
+  if (typeof value === 'boolean') return 'toggle';
+  if (
+    fieldName.startsWith('enabled') ||
+    fieldName.startsWith('use_') ||
+    fieldName.startsWith('allow_') ||
+    fieldName.endsWith('_enabled') ||
+    fieldName.endsWith('_check') ||
+    fieldName === 'block_on_divergence' ||
+    fieldName === 'trailing_enabled' ||
+    fieldName === 'staged_entry_enabled' ||
+    fieldName === 'trend_stability_check' ||
+    fieldName === 'require_trend_align' ||
+    fieldName === 'require_price_at_band' ||
+    fieldName === 'require_consolidation' ||
+    fieldName === 'range_high_touch' ||
+    fieldName === 'range_low_touch' ||
+    fieldName === 'use_ai_exit' ||
+    fieldName === 'exit_at_mean' ||
+    fieldName === 'exit_at_range_boundary' ||
+    fieldName === 'early_warning_enabled' ||
+    fieldName === 'exit_on_trend_reversal'
+  ) {
+    return 'toggle';
+  }
+
+  // Percentage fields (use slider)
+  if (
+    fieldName.endsWith('_percent') ||
+    fieldName.endsWith('_pct') ||
+    fieldName.endsWith('_weight') ||
+    fieldName === 'min_confidence' ||
+    fieldName === 'high_confidence' ||
+    fieldName === 'ultra_confidence' ||
+    fieldName === 'min_win_rate_pct' ||
+    fieldName === 'sl_percent' ||
+    fieldName === 'tp1_percent' ||
+    fieldName === 'tp2_percent' ||
+    fieldName === 'tp3_percent'
+  ) {
+    return 'slider';
+  }
+
+  // Timeframe fields (use select)
+  if (
+    fieldName.endsWith('_timeframe') ||
+    fieldName === 'trend_timeframe' ||
+    fieldName === 'entry_timeframe' ||
+    fieldName === 'analysis_timeframe' ||
+    fieldName === 'primary_timeframe' ||
+    fieldName === 'secondary_timeframe' ||
+    fieldName === 'tertiary_timeframe'
+  ) {
+    return 'select';
+  }
+
+  // Risk level (use select)
+  if (fieldName === 'risk_level' || fieldName === 'stale_zone_action') {
+    return 'select';
+  }
+
+  // Number fields
+  if (typeof value === 'number') return 'number';
+
+  return 'text';
+}
+
+// Get appropriate input props for a strategy field
+function getStrategyFieldConfig(path: string, value: any): {
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  options?: { value: string; label: string }[];
+} {
+  const fieldName = path.split('.').pop() || path;
+
+  // Timeframe options
+  if (fieldName.endsWith('_timeframe')) {
+    return {
+      options: [
+        { value: '1m', label: '1m' },
+        { value: '3m', label: '3m' },
+        { value: '5m', label: '5m' },
+        { value: '15m', label: '15m' },
+        { value: '30m', label: '30m' },
+        { value: '1h', label: '1h' },
+        { value: '2h', label: '2h' },
+        { value: '4h', label: '4h' },
+        { value: '1d', label: '1d' },
+      ],
+    };
+  }
+
+  // Risk level options
+  if (fieldName === 'risk_level') {
+    return {
+      options: [
+        { value: 'low', label: 'Low' },
+        { value: 'medium', label: 'Medium' },
+        { value: 'high', label: 'High' },
+        { value: 'aggressive', label: 'Aggressive' },
+      ],
+    };
+  }
+
+  // Stale zone action options
+  if (fieldName === 'stale_zone_action') {
+    return {
+      options: [
+        { value: 'hold', label: 'Hold' },
+        { value: 'reduce', label: 'Reduce' },
+        { value: 'close', label: 'Close' },
+        { value: 'llm_decide', label: 'LLM Decide' },
+      ],
+    };
+  }
+
+  // Percentage fields
+  if (
+    fieldName === 'min_confidence' ||
+    fieldName === 'high_confidence' ||
+    fieldName === 'ultra_confidence'
+  ) {
+    return { min: 30, max: 100, step: 5, unit: '%' };
+  }
+
+  if (
+    fieldName.endsWith('_weight') ||
+    fieldName === 'primary_weight' ||
+    fieldName === 'secondary_weight' ||
+    fieldName === 'tertiary_weight'
+  ) {
+    return { min: 0, max: 100, step: 5, unit: '%' };
+  }
+
+  if (
+    fieldName === 'sl_percent' ||
+    fieldName === 'tp1_percent' ||
+    fieldName === 'tp2_percent' ||
+    fieldName === 'tp3_percent' ||
+    fieldName.endsWith('_sell_percent')
+  ) {
+    return { min: 0, max: 100, step: 0.5, unit: '%' };
+  }
+
+  if (fieldName.endsWith('_percent') || fieldName.endsWith('_pct')) {
+    return { min: 0, max: 100, step: 0.5, unit: '%' };
+  }
+
+  // Leverage
+  if (fieldName === 'leverage') {
+    return { min: 1, max: 125, step: 1, unit: 'x' };
+  }
+
+  // USD amounts
+  if (fieldName.endsWith('_usd')) {
+    return { min: 10, max: 50000, step: 10, unit: 'USD' };
+  }
+
+  // Minutes
+  if (fieldName.endsWith('_minutes') || fieldName.endsWith('_mins')) {
+    return { min: 1, max: 10080, step: 1, unit: 'min' };
+  }
+
+  // Seconds
+  if (fieldName.endsWith('_secs') || fieldName.endsWith('_seconds')) {
+    return { min: 1, max: 3600, step: 1, unit: 'sec' };
+  }
+
+  // Milliseconds (convert to seconds for display)
+  if (fieldName.endsWith('_ms')) {
+    return { min: 0, max: 3600, step: 1, unit: 'sec' };
+  }
+
+  // Max positions
+  if (fieldName === 'max_positions') {
+    return { min: 1, max: 50, step: 1 };
+  }
+
+  // Priority
+  if (fieldName === 'priority') {
+    return { min: 1, max: 10, step: 1 };
+  }
+
+  // Default number config
+  return { min: 0, max: 1000, step: 1 };
+}
+
 // Field Table for displaying comparison data
 function FieldTable({
   fields,
@@ -896,6 +1405,11 @@ function ModeCard({
   onResetStrategy,
   onResetAllStrategies,
   resettingStrategies,
+  // Strategy editing props
+  editedStrategyValues,
+  onStrategyFieldChange,
+  onSaveStrategy,
+  isSavingStrategy,
 }: {
   comparison: ModeComparisonResult;
   isAdmin: boolean;
@@ -914,6 +1428,11 @@ function ModeCard({
   onResetStrategy?: (strategy: StrategyName) => void;
   onResetAllStrategies?: () => void;
   resettingStrategies?: Set<string>;
+  // Strategy editing props
+  editedStrategyValues?: Record<string, any>;
+  onStrategyFieldChange?: (path: string, value: any) => void;
+  onSaveStrategy?: () => void;
+  isSavingStrategy?: boolean;
 }) {
   const hasEdits = editedValues && Object.keys(editedValues).length > 0;
   const hasStrategies = comparison.strategies && comparison.strategies.length > 0;
@@ -1050,7 +1569,7 @@ function ModeCard({
                       <div className="mt-3 border-t border-purple-500/20 pt-3">
                         <div className="text-sm text-purple-300 mb-2 flex items-center gap-2">
                           <Target className="w-4 h-4" />
-                          Selected: {STRATEGY_DISPLAY_NAMES[selectedStrategy]} - Settings Comparison
+                          Selected: {STRATEGY_DISPLAY_NAMES[selectedStrategy]} - Settings
                         </div>
                         {comparison.strategies
                           .filter(s => s.strategy === selectedStrategy)
@@ -1060,6 +1579,10 @@ function ModeCard({
                               strategy={strategy}
                               mode={comparison.mode}
                               isAdmin={isAdmin}
+                              editedValues={editedStrategyValues}
+                              onFieldChange={onStrategyFieldChange}
+                              onSave={onSaveStrategy}
+                              isSaving={isSavingStrategy}
                             />
                           ))}
                       </div>
@@ -1199,17 +1722,91 @@ function StrategyCard({
   );
 }
 
-// Collapsible Strategy Section Component - for grouped settings
+// Collapsible Strategy Section Component - for grouped settings with editable UI
 function CollapsibleStrategySection({
   groupData,
   expanded,
   onToggle,
+  editMode = false,
+  editedValues = {},
+  onFieldChange,
 }: {
   groupData: GroupedStrategyFields;
   expanded: boolean;
   onToggle: () => void;
+  editMode?: boolean;
+  editedValues?: Record<string, any>;
+  onFieldChange?: (path: string, value: any) => void;
 }) {
   const IconComponent = groupData.group.icon;
+
+  // Check if any field in this group has been edited
+  const hasEdits = groupData.fields.some((field) => editedValues[field.path] !== undefined);
+
+  // Render editable field input based on field type
+  const renderEditableField = (field: FieldComparison) => {
+    const fieldName = field.path.split('.').pop() || field.path;
+    const inputType = getStrategyFieldInputType(field.path, field.current ?? field.default);
+    const config = getStrategyFieldConfig(field.path, field.current ?? field.default);
+    const currentValue = editedValues[field.path] ?? field.current;
+    const isEdited = editedValues[field.path] !== undefined;
+
+    switch (inputType) {
+      case 'toggle':
+        return (
+          <StrategyToggleInput
+            label={fieldName.replace(/_/g, ' ')}
+            checked={currentValue as boolean | null | undefined}
+            defaultChecked={field.default as boolean | null | undefined}
+            onChange={(value) => onFieldChange?.(field.path, value)}
+            isEdited={isEdited}
+          />
+        );
+
+      case 'slider':
+        return (
+          <StrategySliderInput
+            label={fieldName.replace(/_/g, ' ')}
+            value={currentValue as number | null | undefined}
+            defaultValue={field.default as number | null | undefined}
+            onChange={(value) => onFieldChange?.(field.path, value)}
+            min={config.min ?? 0}
+            max={config.max ?? 100}
+            step={config.step ?? 1}
+            unit={config.unit ?? ''}
+            isEdited={isEdited}
+          />
+        );
+
+      case 'select':
+        return (
+          <StrategySelectInput
+            label={fieldName.replace(/_/g, ' ')}
+            value={currentValue as string | null | undefined}
+            defaultValue={field.default as string | null | undefined}
+            onChange={(value) => onFieldChange?.(field.path, value)}
+            options={config.options ?? []}
+            isEdited={isEdited}
+          />
+        );
+
+      case 'number':
+      default:
+        return (
+          <StrategyNumberInput
+            label={fieldName.replace(/_/g, ' ')}
+            value={currentValue as number | null | undefined}
+            defaultValue={field.default as number | null | undefined}
+            onChange={(value) => onFieldChange?.(field.path, value)}
+            min={config.min ?? 0}
+            max={config.max ?? 1000}
+            step={config.step ?? 1}
+            unit={config.unit ?? ''}
+            isEdited={isEdited}
+          />
+        );
+    }
+  };
 
   return (
     <div className="border border-gray-700 rounded-lg overflow-hidden">
@@ -1218,7 +1815,9 @@ function CollapsibleStrategySection({
         type="button"
         onClick={onToggle}
         className={`w-full flex items-center justify-between px-3 py-2 transition-colors ${
-          groupData.allMatch
+          hasEdits
+            ? 'bg-orange-900/30 hover:bg-orange-900/40'
+            : groupData.allMatch
             ? 'bg-green-900/20 hover:bg-green-900/30'
             : 'bg-orange-900/20 hover:bg-orange-900/30'
         }`}
@@ -1231,9 +1830,18 @@ function CollapsibleStrategySection({
           <span className="text-xs text-gray-500">
             ({groupData.matchingFields}/{groupData.totalFields})
           </span>
+          {editMode && (
+            <span className="text-xs text-purple-400 ml-1">
+              <Edit3 className="w-3 h-3 inline" />
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {groupData.allMatch ? (
+          {hasEdits ? (
+            <span className="text-xs px-2 py-0.5 bg-orange-500/30 text-orange-300 rounded font-medium">
+              Modified
+            </span>
+          ) : groupData.allMatch ? (
             <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-400 rounded">
               Match
             </span>
@@ -1250,50 +1858,68 @@ function CollapsibleStrategySection({
         </div>
       </button>
 
-      {/* Section Content */}
+      {/* Section Content - Editable or Read-only */}
       {expanded && (
-        <div className="bg-gray-900/30 border-t border-gray-700">
-          <table className="w-full text-xs">
-            <thead className="bg-gray-800/50">
-              <tr className="text-gray-400 border-b border-gray-700/50">
-                <th className="text-left p-2 pl-3 font-medium">Setting</th>
-                <th className="text-left p-2 font-medium">Current</th>
-                <th className="text-left p-2 font-medium">Default</th>
-                <th className="text-left p-2 pr-3 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className="bg-gray-900/30 border-t border-gray-700 p-3 space-y-2">
+          {editMode && onFieldChange ? (
+            // Editable Mode - Show proper UI controls
+            <div className="grid gap-3">
               {groupData.fields.map((field) => (
-                <tr
-                  key={field.path}
-                  className={`border-b border-gray-700/30 last:border-0 ${
-                    field.match ? 'bg-green-900/5' : 'bg-orange-900/10'
-                  }`}
-                >
-                  <td className="p-2 pl-3 font-mono text-gray-300">
-                    {field.path.split('.').pop() || field.path}
-                  </td>
-                  <td className={`p-2 font-mono ${field.match ? 'text-green-400' : 'text-orange-400'}`}>
-                    {formatValue(field.current)}
-                  </td>
-                  <td className="p-2 font-mono text-blue-400">
-                    {formatValue(field.default)}
-                  </td>
-                  <td className="p-2 pr-3">
-                    {field.match ? (
-                      <span className="text-green-400 flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3" />
-                      </span>
-                    ) : (
-                      <span className="text-orange-400 flex items-center gap-1">
-                        <XCircle className="w-3 h-3" />
-                      </span>
-                    )}
-                  </td>
-                </tr>
+                <div key={field.path} className="relative">
+                  {renderEditableField(field)}
+                  {/* Show default value hint when different */}
+                  {!field.match && editedValues[field.path] === undefined && (
+                    <div className="mt-0.5 text-xs text-blue-400/70">
+                      Default: {formatValue(field.default)}
+                    </div>
+                  )}
+                </div>
               ))}
-            </tbody>
-          </table>
+            </div>
+          ) : (
+            // Read-only Mode - Show comparison table
+            <table className="w-full text-xs">
+              <thead className="bg-gray-800/50">
+                <tr className="text-gray-400 border-b border-gray-700/50">
+                  <th className="text-left p-2 pl-3 font-medium">Setting</th>
+                  <th className="text-left p-2 font-medium">Current</th>
+                  <th className="text-left p-2 font-medium">Default</th>
+                  <th className="text-left p-2 pr-3 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groupData.fields.map((field) => (
+                  <tr
+                    key={field.path}
+                    className={`border-b border-gray-700/30 last:border-0 ${
+                      field.match ? 'bg-green-900/5' : 'bg-orange-900/10'
+                    }`}
+                  >
+                    <td className="p-2 pl-3 font-mono text-gray-300">
+                      {field.path.split('.').pop() || field.path}
+                    </td>
+                    <td className={`p-2 font-mono ${field.match ? 'text-green-400' : 'text-orange-400'}`}>
+                      {formatValue(field.current)}
+                    </td>
+                    <td className="p-2 font-mono text-blue-400">
+                      {formatValue(field.default)}
+                    </td>
+                    <td className="p-2 pr-3">
+                      {field.match ? (
+                        <span className="text-green-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                        </span>
+                      ) : (
+                        <span className="text-orange-400 flex items-center gap-1">
+                          <XCircle className="w-3 h-3" />
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       )}
     </div>
@@ -1302,20 +1928,28 @@ function CollapsibleStrategySection({
 
 // Strategy Settings Expansion Panel (Story 11.34)
 // Shows ALL settings with grouped collapsible sections when strategy is selected
+// Enhanced with editable UI controls
 function StrategySettingsPanel({
   strategy,
-  // Note: mode parameter reserved for future use (e.g., mode-specific formatting)
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  mode: _mode,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  isAdmin: _isAdmin,
+  mode,
+  isAdmin,
+  editedValues = {},
+  onFieldChange,
+  onSave,
+  isSaving = false,
 }: {
   strategy: StrategyComparisonResult;
   mode: string;
   isAdmin: boolean;
+  editedValues?: Record<string, any>;
+  onFieldChange?: (path: string, value: any) => void;
+  onSave?: () => void;
+  isSaving?: boolean;
 }) {
   // Track which sections are expanded (default: Position Settings expanded)
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['position']));
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['position_sizing']));
+  // Toggle between edit and view mode
+  const [editMode, setEditMode] = useState(false);
 
   const toggleSection = (key: string) => {
     setExpandedSections(prev => {
@@ -1328,6 +1962,9 @@ function StrategySettingsPanel({
       return next;
     });
   };
+
+  // Check if there are unsaved changes
+  const hasEdits = Object.keys(editedValues).length > 0;
 
   if (strategy.isLoading) {
     return (
@@ -1364,21 +2001,66 @@ function StrategySettingsPanel({
 
   return (
     <div className="p-3">
-      {/* Summary Header */}
-      <div className="text-xs text-gray-400 mb-3 flex items-center justify-between">
-        <span>
-          {strategy.allMatch
-            ? `All ${strategy.totalFields} settings match defaults`
-            : `${strategy.matchingFields}/${strategy.totalFields} settings match defaults (${strategy.differentFields} differences)`}
-        </span>
-        <span className={strategy.allMatch ? 'text-green-400' : 'text-orange-400'}>
-          {strategy.allMatch ? (
-            <CheckCircle2 className="w-4 h-4 inline" />
-          ) : (
-            <XCircle className="w-4 h-4 inline" />
+      {/* Header with Edit Mode Toggle and Save Button */}
+      <div className="flex items-center justify-between mb-3 pb-2 border-b border-gray-700/50">
+        <div className="text-xs text-gray-400 flex items-center gap-2">
+          <span>
+            {strategy.allMatch
+              ? `All ${strategy.totalFields} settings match defaults`
+              : `${strategy.matchingFields}/${strategy.totalFields} match (${strategy.differentFields} diff)`}
+          </span>
+          <span className={strategy.allMatch ? 'text-green-400' : 'text-orange-400'}>
+            {strategy.allMatch ? (
+              <CheckCircle2 className="w-3.5 h-3.5 inline" />
+            ) : (
+              <XCircle className="w-3.5 h-3.5 inline" />
+            )}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Edit Mode Toggle */}
+          <button
+            onClick={() => setEditMode(!editMode)}
+            className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors ${
+              editMode
+                ? 'bg-purple-600 text-white'
+                : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+            }`}
+          >
+            <Edit3 className="w-3 h-3" />
+            {editMode ? 'Editing' : 'Edit'}
+          </button>
+
+          {/* Save Button - Only show when in edit mode and has changes */}
+          {editMode && hasEdits && onSave && (
+            <button
+              onClick={onSave}
+              disabled={isSaving}
+              className="flex items-center gap-1 px-3 py-1 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded text-xs transition-colors"
+            >
+              {isSaving ? (
+                <>
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Save className="w-3 h-3" />
+                  Save ({Object.keys(editedValues).length})
+                </>
+              )}
+            </button>
           )}
-        </span>
+        </div>
       </div>
+
+      {/* Unsaved Changes Warning */}
+      {hasEdits && (
+        <div className="mb-3 p-2 bg-orange-500/10 border border-orange-500/30 rounded text-xs text-orange-400 flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5" />
+          <span>{Object.keys(editedValues).length} unsaved changes</span>
+        </div>
+      )}
 
       {/* Grouped Collapsible Sections */}
       <div className="space-y-2 max-h-[500px] overflow-y-auto">
@@ -1388,6 +2070,9 @@ function StrategySettingsPanel({
             groupData={groupData}
             expanded={expandedSections.has(groupData.group.key)}
             onToggle={() => toggleSection(groupData.group.key)}
+            editMode={editMode}
+            editedValues={editedValues}
+            onFieldChange={onFieldChange}
           />
         ))}
       </div>
@@ -1604,6 +2289,10 @@ export default function SettingsComparisonView({
   // Strategy states (Story 11.34)
   const [selectedStrategies, setSelectedStrategies] = useState<Record<string, StrategyName | null>>({});
   const [resettingStrategies, setResettingStrategies] = useState<Set<string>>(new Set());
+
+  // Edited strategy values state - keyed by "mode:strategy"
+  const [editedStrategyValues, setEditedStrategyValues] = useState<Record<string, Record<string, any>>>({});
+  const [savingStrategies, setSavingStrategies] = useState<Set<string>>(new Set());
 
   // Edited values state (for admin mode)
   const [editedModeValues, setEditedModeValues] = useState<Record<string, Record<string, any>>>({});
@@ -2161,6 +2850,85 @@ export default function SettingsComparisonView({
     return modeStrategies;
   }, [resettingStrategies]);
 
+  // ==================== STRATEGY EDITING HANDLERS ====================
+
+  // Handle strategy field change
+  const handleStrategyFieldChange = useCallback((mode: string, strategy: StrategyName, path: string, value: any) => {
+    const key = `${mode}:${strategy}`;
+    setEditedStrategyValues(prev => ({
+      ...prev,
+      [key]: {
+        ...(prev[key] || {}),
+        [path]: value,
+      },
+    }));
+  }, []);
+
+  // Save strategy settings
+  const handleSaveStrategy = useCallback(async (mode: string, strategy: StrategyName) => {
+    const key = `${mode}:${strategy}`;
+    const changes = editedStrategyValues[key];
+    if (!changes || Object.keys(changes).length === 0) return;
+
+    setSavingStrategies(prev => new Set(prev).add(key));
+
+    try {
+      // Build the update payload from edited values
+      // Group changes by their section prefix
+      const updatePayload: Record<string, any> = {};
+
+      Object.entries(changes).forEach(([path, value]) => {
+        // Handle nested paths like "sltp.sl_percent" or "confidence.min_confidence"
+        const parts = path.split('.');
+        if (parts.length === 2) {
+          // Nested field like "sltp.sl_percent"
+          const [section, field] = parts;
+          if (!updatePayload[section]) {
+            updatePayload[section] = {};
+          }
+          updatePayload[section][field] = value;
+        } else {
+          // Top-level field like "enabled", "leverage", "priority"
+          updatePayload[path] = value;
+        }
+      });
+
+      // Call the API to save the strategy
+      await modeStrategyApi.updateModeStrategy(mode as ModeName, strategy, updatePayload);
+
+      // Clear the edited values for this strategy
+      setEditedStrategyValues(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+
+      // Reload comparisons to reflect changes
+      loadAllComparisons();
+    } catch (err: any) {
+      console.error(`Failed to save strategy ${strategy} for mode ${mode}:`, err);
+      setError(`Failed to save ${STRATEGY_DISPLAY_NAMES[strategy]} strategy: ${err?.response?.data?.error || err?.message || 'Unknown error'}`);
+    } finally {
+      setSavingStrategies(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, [editedStrategyValues, loadAllComparisons]);
+
+  // Get edited values for a specific mode+strategy
+  const getStrategyEditedValues = useCallback((mode: string, strategy: StrategyName): Record<string, any> => {
+    const key = `${mode}:${strategy}`;
+    return editedStrategyValues[key] || {};
+  }, [editedStrategyValues]);
+
+  // Check if a strategy is being saved
+  const isStrategySaving = useCallback((mode: string, strategy: StrategyName): boolean => {
+    const key = `${mode}:${strategy}`;
+    return savingStrategies.has(key);
+  }, [savingStrategies]);
+
   // ==================== SUMMARY STATS ====================
 
   const modeStats = useMemo(() => {
@@ -2269,34 +3037,42 @@ export default function SettingsComparisonView({
 
           {/* Mode Cards */}
           <div className="space-y-4">
-            {modeComparisons.map((comparison) => (
-              <ModeCard
-                key={comparison.mode}
-                comparison={comparison}
-                isAdmin={isAdmin}
-                isExpanded={expandedModes.has(comparison.mode)}
-                expandedGroups={expandedGroups}
-                onToggleExpand={() => toggleModeExpanded(comparison.mode)}
-                onToggleGroup={toggleGroupExpanded}
-                onResetMode={onResetMode ? () => onResetMode(comparison.mode) : undefined}
-                onResetGroup={
-                  onResetModeGroup ? (group) => onResetModeGroup(comparison.mode, group) : undefined
-                }
-                onSaveMode={
-                  onSaveMode && editedModeValues[comparison.mode]
-                    ? () => onSaveMode(comparison.mode, editedModeValues[comparison.mode])
-                    : undefined
-                }
-                editedValues={editedModeValues[comparison.mode]}
-                onFieldChange={(path, value) => handleModeFieldChange(comparison.mode, path, value)}
-                // Strategy props (Story 11.34)
-                selectedStrategy={selectedStrategies[comparison.mode] || null}
-                onSelectStrategy={(strategy) => handleSelectStrategy(comparison.mode, strategy)}
-                onResetStrategy={(strategy) => handleResetStrategy(comparison.mode, strategy)}
-                onResetAllStrategies={() => handleResetAllStrategiesInMode(comparison.mode)}
-                resettingStrategies={getModeResettingStrategies(comparison.mode)}
-              />
-            ))}
+            {modeComparisons.map((comparison) => {
+              const selectedStrategy = selectedStrategies[comparison.mode];
+              return (
+                <ModeCard
+                  key={comparison.mode}
+                  comparison={comparison}
+                  isAdmin={isAdmin}
+                  isExpanded={expandedModes.has(comparison.mode)}
+                  expandedGroups={expandedGroups}
+                  onToggleExpand={() => toggleModeExpanded(comparison.mode)}
+                  onToggleGroup={toggleGroupExpanded}
+                  onResetMode={onResetMode ? () => onResetMode(comparison.mode) : undefined}
+                  onResetGroup={
+                    onResetModeGroup ? (group) => onResetModeGroup(comparison.mode, group) : undefined
+                  }
+                  onSaveMode={
+                    onSaveMode && editedModeValues[comparison.mode]
+                      ? () => onSaveMode(comparison.mode, editedModeValues[comparison.mode])
+                      : undefined
+                  }
+                  editedValues={editedModeValues[comparison.mode]}
+                  onFieldChange={(path, value) => handleModeFieldChange(comparison.mode, path, value)}
+                  // Strategy props (Story 11.34)
+                  selectedStrategy={selectedStrategy || null}
+                  onSelectStrategy={(strategy) => handleSelectStrategy(comparison.mode, strategy)}
+                  onResetStrategy={(strategy) => handleResetStrategy(comparison.mode, strategy)}
+                  onResetAllStrategies={() => handleResetAllStrategiesInMode(comparison.mode)}
+                  resettingStrategies={getModeResettingStrategies(comparison.mode)}
+                  // Strategy editing props
+                  editedStrategyValues={selectedStrategy ? getStrategyEditedValues(comparison.mode, selectedStrategy) : undefined}
+                  onStrategyFieldChange={selectedStrategy ? (path, value) => handleStrategyFieldChange(comparison.mode, selectedStrategy, path, value) : undefined}
+                  onSaveStrategy={selectedStrategy ? () => handleSaveStrategy(comparison.mode, selectedStrategy) : undefined}
+                  isSavingStrategy={selectedStrategy ? isStrategySaving(comparison.mode, selectedStrategy) : false}
+                />
+              );
+            })}
           </div>
         </div>
       </SectionHeader>

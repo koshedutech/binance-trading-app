@@ -652,7 +652,7 @@ func (ts *TestableSettingsCacheService) UpdateCircuitBreaker(ctx context.Context
 // ============================================================================
 
 // GetModeStrategyConfig retrieves settings for a specific mode+strategy
-func (ts *TestableSettingsCacheService) GetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) (*database.ModeStrategyConfig, error) {
+func (ts *TestableSettingsCacheService) GetModeStrategyConfig(ctx context.Context, userID string, mode, strategy string) (*database.ModeStrategyConfig, error) {
 	if !ts.mockCache.IsHealthy() {
 		return nil, ErrCacheUnavailable
 	}
@@ -676,7 +676,7 @@ func (ts *TestableSettingsCacheService) GetModeStrategyConfig(ctx context.Contex
 }
 
 // SetModeStrategyConfig stores settings for a specific mode+strategy
-func (ts *TestableSettingsCacheService) SetModeStrategyConfig(ctx context.Context, userID int, mode, strategy string, config *database.ModeStrategyConfig) error {
+func (ts *TestableSettingsCacheService) SetModeStrategyConfig(ctx context.Context, userID string, mode, strategy string, config *database.ModeStrategyConfig) error {
 	key := modeStrategyKey(userID, mode, strategy)
 	if ts.mockCache.IsHealthy() {
 		data, _ := json.Marshal(config)
@@ -686,7 +686,7 @@ func (ts *TestableSettingsCacheService) SetModeStrategyConfig(ctx context.Contex
 }
 
 // GetAllStrategiesForMode retrieves all strategy configs for a mode
-func (ts *TestableSettingsCacheService) GetAllStrategiesForMode(ctx context.Context, userID int, mode string) (map[string]*database.ModeStrategyConfig, error) {
+func (ts *TestableSettingsCacheService) GetAllStrategiesForMode(ctx context.Context, userID string, mode string) (map[string]*database.ModeStrategyConfig, error) {
 	if !ts.mockCache.IsHealthy() {
 		return nil, ErrCacheUnavailable
 	}
@@ -712,19 +712,19 @@ func (ts *TestableSettingsCacheService) GetAllStrategiesForMode(ctx context.Cont
 }
 
 // InvalidateModeStrategyConfig removes a specific mode+strategy from cache
-func (ts *TestableSettingsCacheService) InvalidateModeStrategyConfig(ctx context.Context, userID int, mode, strategy string) error {
+func (ts *TestableSettingsCacheService) InvalidateModeStrategyConfig(ctx context.Context, userID string, mode, strategy string) error {
 	key := modeStrategyKey(userID, mode, strategy)
 	return ts.mockCache.Delete(ctx, key)
 }
 
 // InvalidateAllModeStrategies removes all mode+strategy configs for a user
-func (ts *TestableSettingsCacheService) InvalidateAllModeStrategies(ctx context.Context, userID int) error {
+func (ts *TestableSettingsCacheService) InvalidateAllModeStrategies(ctx context.Context, userID string) error {
 	pattern := allModeStrategiesPattern(userID)
 	return ts.mockCache.DeletePattern(ctx, pattern)
 }
 
 // PopulateModeStrategiesFromDB loads all mode+strategy configs from DB to cache
-func (ts *TestableSettingsCacheService) PopulateModeStrategiesFromDB(ctx context.Context, userID int) error {
+func (ts *TestableSettingsCacheService) PopulateModeStrategiesFromDB(ctx context.Context, userID string) error {
 	if !ts.mockCache.IsHealthy() {
 		return ErrCacheUnavailable
 	}
@@ -1453,21 +1453,21 @@ func findSubstring(s, substr string) bool {
 // TestModeStrategyKey tests the key generation for mode+strategy configs
 func TestModeStrategyKey(t *testing.T) {
 	tests := []struct {
-		userID   int
+		userID   string
 		mode     string
 		strategy string
 		expected string
 	}{
-		{123, "scalp", "trend_following", "mode:123:scalp:trend_following"},
-		{456, "swing", "mean_reversion", "mode:456:swing:mean_reversion"},
-		{789, "position", "breakout", "mode:789:position:breakout"},
-		{1, "ultra_fast", "range_trading", "mode:1:ultra_fast:range_trading"},
+		{"123", "scalp", "trend_following", "mode:123:scalp:trend_following"},
+		{"456", "swing", "mean_reversion", "mode:456:swing:mean_reversion"},
+		{"789", "position", "breakout", "mode:789:position:breakout"},
+		{"1", "ultra_fast", "range_trading", "mode:1:ultra_fast:range_trading"},
 	}
 
 	for _, tt := range tests {
 		result := modeStrategyKey(tt.userID, tt.mode, tt.strategy)
 		if result != tt.expected {
-			t.Errorf("modeStrategyKey(%d, %s, %s) = %s; want %s",
+			t.Errorf("modeStrategyKey(%s, %s, %s) = %s; want %s",
 				tt.userID, tt.mode, tt.strategy, result, tt.expected)
 		}
 	}
@@ -1476,18 +1476,18 @@ func TestModeStrategyKey(t *testing.T) {
 // TestModeStrategiesPattern tests the pattern generation for mode strategies
 func TestModeStrategiesPattern(t *testing.T) {
 	tests := []struct {
-		userID   int
+		userID   string
 		mode     string
 		expected string
 	}{
-		{123, "scalp", "mode:123:scalp:*"},
-		{456, "swing", "mode:456:swing:*"},
+		{"123", "scalp", "mode:123:scalp:*"},
+		{"456", "swing", "mode:456:swing:*"},
 	}
 
 	for _, tt := range tests {
 		result := modeStrategiesPattern(tt.userID, tt.mode)
 		if result != tt.expected {
-			t.Errorf("modeStrategiesPattern(%d, %s) = %s; want %s",
+			t.Errorf("modeStrategiesPattern(%s, %s) = %s; want %s",
 				tt.userID, tt.mode, result, tt.expected)
 		}
 	}
@@ -1496,17 +1496,17 @@ func TestModeStrategiesPattern(t *testing.T) {
 // TestAllModeStrategiesPattern tests the pattern for all user mode strategies
 func TestAllModeStrategiesPattern(t *testing.T) {
 	tests := []struct {
-		userID   int
+		userID   string
 		expected string
 	}{
-		{123, "mode:123:*"},
-		{456, "mode:456:*"},
+		{"123", "mode:123:*"},
+		{"456", "mode:456:*"},
 	}
 
 	for _, tt := range tests {
 		result := allModeStrategiesPattern(tt.userID)
 		if result != tt.expected {
-			t.Errorf("allModeStrategiesPattern(%d) = %s; want %s",
+			t.Errorf("allModeStrategiesPattern(%s) = %s; want %s",
 				tt.userID, result, tt.expected)
 		}
 	}
@@ -1531,7 +1531,7 @@ func TestGetModeStrategyConfig_CacheHit(t *testing.T) {
 	ts.mockCache.data[cacheKey] = string(data)
 
 	// Act: Get mode strategy config
-	result, err := ts.GetModeStrategyConfig(ctx, 123, "scalp", "trend_following")
+	result, err := ts.GetModeStrategyConfig(ctx, "123", "scalp", "trend_following")
 
 	// Assert: No error
 	if err != nil {
@@ -1567,7 +1567,7 @@ func TestGetModeStrategyConfig_CacheUnavailable(t *testing.T) {
 	ts.mockCache.healthy = false
 
 	// Act: Get mode strategy config
-	_, err := ts.GetModeStrategyConfig(ctx, 123, "scalp", "trend_following")
+	_, err := ts.GetModeStrategyConfig(ctx, "123", "scalp", "trend_following")
 
 	// Assert: Should return ErrCacheUnavailable
 	if err == nil {
@@ -1593,7 +1593,7 @@ func TestSetModeStrategyConfig_WriteThrough(t *testing.T) {
 	}
 
 	// Act: Set mode strategy config
-	err := ts.SetModeStrategyConfig(ctx, 123, "scalp", "trend_following", config)
+	err := ts.SetModeStrategyConfig(ctx, "123", "scalp", "trend_following", config)
 
 	// Assert: No error
 	if err != nil {
@@ -1622,7 +1622,7 @@ func TestInvalidateModeStrategyConfig(t *testing.T) {
 	ts.mockCache.data[cacheKey] = `{"enabled": true}`
 
 	// Act: Invalidate
-	err := ts.InvalidateModeStrategyConfig(ctx, 123, "scalp", "trend_following")
+	err := ts.InvalidateModeStrategyConfig(ctx, "123", "scalp", "trend_following")
 
 	// Assert: No error
 	if err != nil {
@@ -1644,7 +1644,7 @@ func TestInvalidateAllModeStrategies(t *testing.T) {
 	ctx := context.Background()
 
 	// Act: Invalidate all mode strategies for user
-	err := ts.InvalidateAllModeStrategies(ctx, 123)
+	err := ts.InvalidateAllModeStrategies(ctx, "123")
 
 	// Assert: No error
 	if err != nil {
@@ -1682,7 +1682,7 @@ func TestGetAllStrategiesForMode_AllFromCache(t *testing.T) {
 	}
 
 	// Act: Get all strategies for mode
-	result, err := ts.GetAllStrategiesForMode(ctx, 123, "scalp")
+	result, err := ts.GetAllStrategiesForMode(ctx, "123", "scalp")
 
 	// Assert: No error
 	if err != nil {
@@ -1713,7 +1713,7 @@ func TestGetAllStrategiesForMode_CacheUnavailable(t *testing.T) {
 	ts.mockCache.healthy = false
 
 	// Act: Get all strategies
-	_, err := ts.GetAllStrategiesForMode(ctx, 123, "scalp")
+	_, err := ts.GetAllStrategiesForMode(ctx, "123", "scalp")
 
 	// Assert: Should return ErrCacheUnavailable
 	if err == nil {
@@ -1733,7 +1733,7 @@ func TestPopulateModeStrategiesFromDB_CacheUnavailable(t *testing.T) {
 	ts.mockCache.healthy = false
 
 	// Act: Try to populate
-	err := ts.PopulateModeStrategiesFromDB(ctx, 123)
+	err := ts.PopulateModeStrategiesFromDB(ctx, "123")
 
 	// Assert: Should return ErrCacheUnavailable
 	if err == nil {

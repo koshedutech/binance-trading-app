@@ -849,3 +849,230 @@ func TestADXScoringZones(t *testing.T) {
 		})
 	}
 }
+
+// ==================== Story 11.40 Gap Analysis Tests ====================
+
+// TestNewScoreBreakdownDetailed tests the detailed breakdown conversion
+func TestNewScoreBreakdownDetailed(t *testing.T) {
+	t.Run("nil ScoreBreakdown returns nil", func(t *testing.T) {
+		result := NewScoreBreakdownDetailed(nil)
+		if result != nil {
+			t.Error("expected nil result for nil input")
+		}
+	})
+
+	t.Run("converts full breakdown with all components", func(t *testing.T) {
+		// Create a complete score breakdown with all components
+		breakdown := NewScoreBreakdown("BTCUSDT")
+
+		// Technical component
+		tech := NewComponentScore(DimensionTechnical, MaxTechnicalScore)
+		tech.Details["trend_alignment"] = 12.0
+		tech.Details["momentum"] = 8.0
+		tech.Details["volatility"] = 7.0
+		tech.Details["volume"] = 4.0
+		tech.SetScore(31.0)
+		breakdown.AddComponent(*tech)
+
+		// Context component
+		ctx := NewComponentScore(DimensionContext, MaxContextScore)
+		ctx.Details["regime_match"] = 8.0
+		ctx.Details["timeframe_alignment"] = 7.0
+		ctx.Details["btc_trend"] = 6.0
+		ctx.SetScore(21.0)
+		breakdown.AddComponent(*ctx)
+
+		// LLM component
+		llm := NewComponentScore(DimensionLLM, MaxLLMScore)
+		llm.SetScore(15.0)
+		breakdown.AddComponent(*llm)
+
+		// History component
+		hist := NewComponentScore(DimensionHistory, MaxHistoryScore)
+		hist.Details["symbol_score"] = 4.0
+		hist.Details["strategy_score"] = 3.0
+		hist.SetScore(7.0)
+		breakdown.AddComponent(*hist)
+
+		breakdown.CalculateFinal(55)
+
+		// Convert to detailed
+		detailed := NewScoreBreakdownDetailed(breakdown)
+
+		if detailed == nil {
+			t.Fatal("expected non-nil result")
+		}
+
+		// Check technical scores
+		if detailed.Technical != 31 {
+			t.Errorf("expected technical=31, got %d", detailed.Technical)
+		}
+		if detailed.TechnicalMax != 40 {
+			t.Errorf("expected technical_max=40, got %d", detailed.TechnicalMax)
+		}
+		if detailed.TrendAlignment != 12 {
+			t.Errorf("expected trend_alignment=12, got %d", detailed.TrendAlignment)
+		}
+		if detailed.Momentum != 8 {
+			t.Errorf("expected momentum=8, got %d", detailed.Momentum)
+		}
+		if detailed.Volatility != 7 {
+			t.Errorf("expected volatility=7, got %d", detailed.Volatility)
+		}
+		if detailed.Volume != 4 {
+			t.Errorf("expected volume=4, got %d", detailed.Volume)
+		}
+
+		// Check context scores
+		if detailed.Context != 21 {
+			t.Errorf("expected context=21, got %d", detailed.Context)
+		}
+		if detailed.RegimeMatch != 8 {
+			t.Errorf("expected regime_match=8, got %d", detailed.RegimeMatch)
+		}
+		if detailed.TimeframeAlign != 7 {
+			t.Errorf("expected timeframe_align=7, got %d", detailed.TimeframeAlign)
+		}
+		if detailed.BTCTrend != 6 {
+			t.Errorf("expected btc_trend=6, got %d", detailed.BTCTrend)
+		}
+
+		// Check LLM scores
+		if detailed.LLM != 15 {
+			t.Errorf("expected llm=15, got %d", detailed.LLM)
+		}
+		if detailed.LLMMax != 20 {
+			t.Errorf("expected llm_max=20, got %d", detailed.LLMMax)
+		}
+
+		// Check history scores
+		if detailed.History != 7 {
+			t.Errorf("expected history=7, got %d", detailed.History)
+		}
+		if detailed.SymbolWinRate != 4 {
+			t.Errorf("expected symbol_winrate=4, got %d", detailed.SymbolWinRate)
+		}
+		if detailed.StrategyWinRate != 3 {
+			t.Errorf("expected strategy_winrate=3, got %d", detailed.StrategyWinRate)
+		}
+
+		// Check final and gap
+		if detailed.Threshold != 55 {
+			t.Errorf("expected threshold=55, got %d", detailed.Threshold)
+		}
+	})
+
+	t.Run("handles missing components gracefully", func(t *testing.T) {
+		breakdown := NewScoreBreakdown("TESTUSDT")
+		breakdown.CalculateFinal(55)
+
+		detailed := NewScoreBreakdownDetailed(breakdown)
+
+		if detailed == nil {
+			t.Fatal("expected non-nil result")
+		}
+
+		// All scores should be zero but not crash
+		if detailed.Technical != 0 {
+			t.Errorf("expected technical=0, got %d", detailed.Technical)
+		}
+		if detailed.Context != 0 {
+			t.Errorf("expected context=0, got %d", detailed.Context)
+		}
+		if detailed.LLM != 0 {
+			t.Errorf("expected llm=0, got %d", detailed.LLM)
+		}
+		if detailed.History != 0 {
+			t.Errorf("expected history=0, got %d", detailed.History)
+		}
+	})
+
+	t.Run("calculates correct gap to threshold", func(t *testing.T) {
+		breakdown := NewScoreBreakdown("ETHUSDT")
+
+		tech := NewComponentScore(DimensionTechnical, MaxTechnicalScore)
+		tech.SetScore(20.0)
+		breakdown.AddComponent(*tech)
+
+		breakdown.CalculateFinal(55)
+
+		detailed := NewScoreBreakdownDetailed(breakdown)
+
+		// Normalized score is 20/40*100 = 50, gap is 55 - 50 = 5
+		if detailed.GapToThreshold < 0 {
+			t.Error("gap should be positive when below threshold")
+		}
+	})
+}
+
+// TestScoreHistoryForUI tests the UI-optimized score history
+func TestScoreHistoryForUI(t *testing.T) {
+	t.Run("calculates rising trend", func(t *testing.T) {
+		history := &ScoreHistoryForUI{
+			Timestamps: []int64{1, 2, 3, 4, 5},
+			Scores:     []int{40, 42, 45, 48, 52},
+		}
+		history.CalculateTrend()
+
+		if history.Trend != "rising" {
+			t.Errorf("expected trend=rising, got %s", history.Trend)
+		}
+		if history.Change8h != 12 {
+			t.Errorf("expected change_8h=12, got %d", history.Change8h)
+		}
+	})
+
+	t.Run("calculates falling trend", func(t *testing.T) {
+		history := &ScoreHistoryForUI{
+			Timestamps: []int64{1, 2, 3, 4, 5},
+			Scores:     []int{60, 55, 50, 48, 45},
+		}
+		history.CalculateTrend()
+
+		if history.Trend != "falling" {
+			t.Errorf("expected trend=falling, got %s", history.Trend)
+		}
+		if history.Change8h != -15 {
+			t.Errorf("expected change_8h=-15, got %d", history.Change8h)
+		}
+	})
+
+	t.Run("calculates stable trend", func(t *testing.T) {
+		history := &ScoreHistoryForUI{
+			Timestamps: []int64{1, 2, 3, 4, 5},
+			Scores:     []int{50, 51, 49, 52, 51},
+		}
+		history.CalculateTrend()
+
+		if history.Trend != "stable" {
+			t.Errorf("expected trend=stable, got %s", history.Trend)
+		}
+	})
+
+	t.Run("handles empty history", func(t *testing.T) {
+		history := &ScoreHistoryForUI{
+			Timestamps: []int64{},
+			Scores:     []int{},
+		}
+		history.CalculateTrend()
+
+		if history.Trend != "stable" {
+			t.Errorf("expected trend=stable for empty, got %s", history.Trend)
+		}
+		if history.Change8h != 0 {
+			t.Errorf("expected change_8h=0 for empty, got %d", history.Change8h)
+		}
+	})
+
+	t.Run("handles single entry", func(t *testing.T) {
+		history := &ScoreHistoryForUI{
+			Timestamps: []int64{1},
+			Scores:     []int{55},
+		}
+		history.CalculateTrend()
+
+		if history.Trend != "stable" {
+			t.Errorf("expected trend=stable for single, got %s", history.Trend)
+		}
+	})
+}

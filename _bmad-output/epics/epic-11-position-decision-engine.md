@@ -1067,8 +1067,10 @@ SCANNING (Coin Search)
 | **G: Execution** | 11.19-11.22 | Decision output, actors, UI, dashboard |
 | **H: Settings** | 11.23-11.27 | Settings structure, UI, calibration storage & display |
 | **I: Mode-Strategy Architecture** | 11.28-11.33 | Mode→Strategy hierarchy, settings migration |
+| **J: UI Enhancements** | 11.40 | Entry Decision Engine Gap Analysis UI |
+| **K: Configuration Amendment** | 11.41 | Comprehensive Mode-Strategy Config with all 184 fields |
 
-**Total Stories:** 33
+**Total Stories:** 41
 
 ---
 
@@ -1601,10 +1603,498 @@ interface ModeStrategyConfig {
 - Calculation engine
 - Performance tracker
 
-### Phase 6: UI & Integration (Stories 11.19-11.22, 11.24, 11.27, 11.33)
+### Phase 6: UI & Integration (Stories 11.19-11.22, 11.24, 11.27, 11.33, 11.40)
 - Decision output interface
 - Actor tracking
 - Position card UI
 - Performance dashboard
 - Mode-Strategy UI
 - Calibration Display UI
+- Entry Decision Engine Gap Analysis UI
+
+---
+
+## PART J: Entry Decision Engine UI Enhancements
+
+### Story 11.40: Entry Decision Engine Gap Analysis UI
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Redesign the Entry Decision Engine UI to provide clear, actionable gap analysis showing exactly what's blocking entry and how close each coin is to qualifying.
+
+#### Problem Statement
+
+Current UI issues:
+1. **Misleading 100% Ready Display** - Shows 100% even when not entering trades
+2. **Hidden Score Details** - Sub-component scores not visible (trend alignment, RSI score, ADX score, etc.)
+3. **No Gap Direction** - Doesn't show if values need to increase (↑) or decrease (↓)
+4. **No Proximity Ranking** - Coins not sorted by how close they are to entry
+5. **Missing Override Controls** - No way to manually override soft blocks
+
+#### Solution Overview
+
+Create a "Gap Analysis Dashboard" that shows:
+- **Gap to Entry** - How many points/values away from qualifying
+- **Directional Gaps** - ↑ (need more) or ↓ (need less) indicators
+- **Sub-component Breakdown** - All scoring details visible
+- **Proximity Sorting** - Closest to entry shown first
+- **Override Controls** - Manual entry for soft blocks only
+
+#### Backend Changes
+
+**1. Expand Score Response Structure**
+
+Add sub-component scores to API response:
+
+```go
+// internal/decision/scoring.go - Add detailed breakdown
+
+type ScoreBreakdown struct {
+    // Technical (0-40)
+    Technical          int     `json:"technical"`
+    TechnicalMax       int     `json:"technical_max"`       // 40
+    TrendAlignment     int     `json:"trend_alignment"`     // 0-15
+    TrendAlignmentMax  int     `json:"trend_alignment_max"` // 15
+    Momentum           int     `json:"momentum"`            // 0-10
+    MomentumMax        int     `json:"momentum_max"`        // 10
+    Volatility         int     `json:"volatility"`          // 0-10
+    VolatilityMax      int     `json:"volatility_max"`      // 10
+    Volume             int     `json:"volume"`              // 0-5
+    VolumeMax          int     `json:"volume_max"`          // 5
+
+    // Context (0-30)
+    Context            int     `json:"context"`
+    ContextMax         int     `json:"context_max"`         // 30
+    RegimeMatch        int     `json:"regime_match"`        // 0-10
+    RegimeMatchMax     int     `json:"regime_match_max"`    // 10
+    TimeframeAlign     int     `json:"timeframe_align"`     // 0-10
+    TimeframeAlignMax  int     `json:"timeframe_align_max"` // 10
+    BTCTrend           int     `json:"btc_trend"`           // 0-10
+    BTCTrendMax        int     `json:"btc_trend_max"`       // 10
+
+    // LLM (0-20)
+    LLM                int     `json:"llm"`
+    LLMMax             int     `json:"llm_max"`             // 20
+
+    // History (0-10)
+    History            int     `json:"history"`
+    HistoryMax         int     `json:"history_max"`         // 10
+    SymbolWinRate      int     `json:"symbol_winrate"`      // 0-5
+    SymbolWinRateMax   int     `json:"symbol_winrate_max"`  // 5
+    StrategyWinRate    int     `json:"strategy_winrate"`    // 0-5
+    StrategyWinRateMax int     `json:"strategy_winrate_max"`// 5
+
+    // Final
+    Final              int     `json:"final"`
+    Threshold          int     `json:"threshold"`           // 55
+    GapToThreshold     int     `json:"gap_to_threshold"`    // Can be negative (above) or positive (below)
+}
+```
+
+**2. Add Gap Calculations to Blocking Reasons**
+
+```go
+// internal/decision/blocking.go - Add directional gaps
+
+type BlockingReasonWithGap struct {
+    Code           string  `json:"code"`
+    Category       string  `json:"category"`       // HARD_BLOCK, SOFT_BLOCK, WARNING
+    Description    string  `json:"description"`
+    CurrentValue   float64 `json:"current_value"`
+    TargetValue    float64 `json:"target_value"`   // Single target or range start
+    TargetRangeEnd float64 `json:"target_range_end,omitempty"` // For range targets like RSI 40-60
+    Gap            float64 `json:"gap"`            // Absolute gap value
+    GapDirection   string  `json:"gap_direction"`  // "up" (↑), "down" (↓), "in_range" (✓)
+    GapDisplay     string  `json:"gap_display"`    // "↑3.2", "↓8", "✓ In Range"
+    Overridable    bool    `json:"overridable"`
+}
+
+// Example gaps:
+// RSI: 68, Target: 40-60 → Gap: 8, Direction: "down", Display: "↓8"
+// RSI: 32, Target: 40-60 → Gap: 8, Direction: "up", Display: "↑8"
+// RSI: 52, Target: 40-60 → Gap: 0, Direction: "in_range", Display: "✓ In Range"
+// ADX: 18, Target: ≥25 → Gap: 7, Direction: "up", Display: "↑7"
+// Score: 48, Target: ≥55 → Gap: 7, Direction: "up", Display: "↑7"
+```
+
+**3. Add Historical Score Tracking**
+
+```go
+// internal/decision/state_manager.go - Track score history
+
+type ScoreHistory struct {
+    Timestamps []int64   `json:"timestamps"` // Unix ms, 8 hours of data
+    Scores     []int     `json:"scores"`     // Corresponding scores
+    Trend      string    `json:"trend"`      // "rising", "falling", "stable"
+    Change8h   int       `json:"change_8h"`  // Score change over 8 hours
+}
+
+// Store in Redis: coin:history:{symbol}
+// Append new score every 5 minutes, keep 8 hours = 96 data points
+```
+
+**4. Add Manual Override Endpoint**
+
+```go
+// internal/api/handlers_coin_state.go
+
+// POST /api/futures/decision/override/{symbol}
+type OverrideEntryRequest struct {
+    Symbol    string `json:"symbol"`
+    Direction string `json:"direction"` // "LONG" or "SHORT"
+    Reason    string `json:"reason"`    // User's reason for override
+}
+
+// Only allows override if:
+// - No hard blocks exist
+// - At least one soft block exists (otherwise normal entry would work)
+// - User is authenticated
+```
+
+#### Frontend Changes
+
+**1. New TypeScript Types**
+
+```typescript
+// web/src/types/futures.ts
+
+interface ScoreBreakdown {
+  // Technical
+  technical: number;
+  technical_max: number;
+  trend_alignment: number;
+  trend_alignment_max: number;
+  momentum: number;
+  momentum_max: number;
+  volatility: number;
+  volatility_max: number;
+  volume: number;
+  volume_max: number;
+
+  // Context
+  context: number;
+  context_max: number;
+  regime_match: number;
+  regime_match_max: number;
+  timeframe_align: number;
+  timeframe_align_max: number;
+  btc_trend: number;
+  btc_trend_max: number;
+
+  // LLM & History
+  llm: number;
+  llm_max: number;
+  history: number;
+  history_max: number;
+  symbol_winrate: number;
+  symbol_winrate_max: number;
+  strategy_winrate: number;
+  strategy_winrate_max: number;
+
+  // Final
+  final: number;
+  threshold: number;
+  gap_to_threshold: number;
+}
+
+interface BlockingReasonWithGap {
+  code: string;
+  category: 'HARD_BLOCK' | 'SOFT_BLOCK' | 'WARNING';
+  description: string;
+  current_value: number;
+  target_value: number;
+  target_range_end?: number;
+  gap: number;
+  gap_direction: 'up' | 'down' | 'in_range';
+  gap_display: string;
+  overridable: boolean;
+}
+
+interface ScoreHistory {
+  timestamps: number[];
+  scores: number[];
+  trend: 'rising' | 'falling' | 'stable';
+  change_8h: number;
+}
+
+interface CoinStateWithGaps extends CoinStateResponse {
+  score_breakdown: ScoreBreakdown;
+  blocking_with_gaps: BlockingReasonWithGap[];
+  score_history: ScoreHistory;
+  overall_gap: number;        // Gap to entry threshold
+  proximity_rank: number;      // 1 = closest to entry
+  can_override: boolean;       // True if only soft blocks
+}
+```
+
+**2. Gap Visualization Component**
+
+```tsx
+// web/src/components/TradeLifecycle/GapIndicator.tsx
+
+interface GapIndicatorProps {
+  currentValue: number;
+  targetValue: number;
+  targetRangeEnd?: number;
+  label: string;
+  unit?: string;
+}
+
+// Visual representation:
+// - Progress bar showing current position
+// - Target zone highlighted
+// - Arrow showing direction needed
+// - Color coding: green (in range), orange (close), red (far)
+```
+
+**3. Score Breakdown Tree Component**
+
+```tsx
+// web/src/components/TradeLifecycle/ScoreBreakdownTree.tsx
+
+// Hierarchical display:
+// Final Score: 51.8 / 55 needed (Gap: ↑3.2)
+// ├── Technical: 28/40 (70%)
+// │   ├── Trend Alignment: 15/15 ✓
+// │   ├── RSI/Momentum: 5/10 (RSI: 68, Target: 40-60, Gap: ↓8)
+// │   ├── ADX/Volatility: 6/10 (ADX: 22, Target: ≥25, Gap: ↑3)
+// │   └── Volume: 2/5
+// ├── Context: 18/30 (60%)
+// │   ├── Regime Match: 10/10 ✓
+// │   ├── TF Alignment: 5/10 (1H: BULL, 15M: NEUTRAL)
+// │   └── BTC Trend: 3/10
+// ├── LLM: 14/20 (70%)
+// └── History: 7/10 (70%)
+```
+
+**4. Score History Sparkline**
+
+```tsx
+// web/src/components/TradeLifecycle/ScoreSparkline.tsx
+
+// Mini chart showing:
+// - 8 hours of score history
+// - Threshold line
+// - Trend indicator (↗ Rising, ↘ Falling, → Stable)
+// - Change over period (+4.2 or -3.1)
+```
+
+**5. Override Button Component**
+
+```tsx
+// web/src/components/TradeLifecycle/OverrideEntryButton.tsx
+
+// Shows only when:
+// - hard_block_count === 0
+// - soft_block_count > 0
+
+// Confirmation dialog with:
+// - List of soft blocks being overridden
+// - Warning about risk
+// - Direction selection (LONG/SHORT)
+// - Optional reason input
+```
+
+**6. Updated EntryDecisionEngineCard**
+
+```tsx
+// web/src/components/TradeLifecycle/EntryDecisionEngineCard.tsx
+
+// Key changes:
+// 1. Sort coins by gap_to_threshold (ascending = closest first)
+// 2. Auto-expand top 3 coins
+// 3. Collapse coins ranked 4+
+// 4. Show gap display prominently
+// 5. Include score breakdown tree
+// 6. Add sparkline for history
+// 7. Add override button when applicable
+// 8. Status labels based on gap range
+```
+
+#### UI Layout
+
+```
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║  ENTRY DECISION ENGINE - Gap Analysis                                          ║
+║  Sort: [Closest to Entry ▼]  │  View: [All ▼]  │  Auto-refresh: 5s            ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║                                                                                ║
+║ ┌──────────────────────────────────────────────────────────────────────────┐  ║
+║ │ #1  ETHUSDT  LONG                                      🟢 Nearly Ready   │  ║
+║ │ ═══════════════════════════════════════════════════════════════════════  │  ║
+║ │                                                                          │  ║
+║ │  SCORE: 51.8 / 55 threshold                    GAP: ↑3.2 pts            │  ║
+║ │  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ║
+║ │  0                               51.8│55                           100   │  ║
+║ │                                                                          │  ║
+║ │  TREND (8h): ↗ Rising (+4.2)  47.6 → 51.8     ⚡ Approaching threshold!   │  ║
+║ │              ╲    ╱╲    ╱╲    ╱                                          │  ║
+║ │               ╲  ╱  ╲  ╱  ╲  ╱ ─ ─ 55 threshold                          │  ║
+║ │                ╲╱    ╲╱    ╲╱                                            │  ║
+║ │                                                                          │  ║
+║ │  ┌─ TECHNICAL  28/40 (70%) ──────────────────────────────────────────┐  │  ║
+║ │  │  Trend Alignment   15/15   ✓ 1H: BULL  15M: BULL  (aligned)       │  │  ║
+║ │  │  RSI/Momentum       5/10   RSI: 68  Target: 40-60  Gap: ↓8        │  │  ║
+║ │  │                            ├──[40═══50═══60]──┤  ▲68               │  │  ║
+║ │  │  ADX/Volatility     6/10   ADX: 22  Target: ≥25  Gap: ↑3          │  │  ║
+║ │  │                            ├────────────▲22│25┤                    │  │  ║
+║ │  │  Volume             2/5    Average volume                          │  │  ║
+║ │  └───────────────────────────────────────────────────────────────────┘  │  ║
+║ │                                                                          │  ║
+║ │  ┌─ CONTEXT  18/30 (60%) ────────────────────────────────────────────┐  │  ║
+║ │  │  Regime Match      10/10   ✓ TRENDING + Trend Following strategy  │  │  ║
+║ │  │  TF Alignment       5/10   ⚠️ 1H: BULL, 15M: NEUTRAL  (partial)    │  │  ║
+║ │  │  BTC Trend          3/10   BTC: Neutral                            │  │  ║
+║ │  └───────────────────────────────────────────────────────────────────┘  │  ║
+║ │                                                                          │  ║
+║ │  ┌─ LLM  14/20 (70%) ────────────────────────────────────────────────┐  │  ║
+║ │  │  AI Confidence: 70%   Recommendation: LONG with caution           │  │  ║
+║ │  └───────────────────────────────────────────────────────────────────┘  │  ║
+║ │                                                                          │  ║
+║ │  ┌─ HISTORY  7/10 (70%) ─────────────────────────────────────────────┐  │  ║
+║ │  │  ETHUSDT Win Rate: 65%  (3.3/5)    Strategy Win Rate: 58%  (2.9/5)│  │  ║
+║ │  └───────────────────────────────────────────────────────────────────┘  │  ║
+║ │                                                                          │  ║
+║ │  BLOCKS: ⛔0 Hard  ⚠️1 Soft                                              │  ║
+║ │  • [SOFT] SCORE_BELOW_THRESHOLD: 51.8 < 55 (Gap: ↑3.2)                  │  ║
+║ │                                                                          │  ║
+║ │  ┌────────────────────────────────────────────────────────────────┐     │  ║
+║ │  │  ⚠️ Override Available (no hard blocks)                        │     │  ║
+║ │  │  [🔓 Override & Enter LONG]                                     │     │  ║
+║ │  └────────────────────────────────────────────────────────────────┘     │  ║
+║ └──────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                                ║
+║ ┌──────────────────────────────────────────────────────────────────────────┐  ║
+║ │ #2  BTCUSDT  LONG  (EXPANDED)                          🟢 Nearly Ready   │  ║
+║ │ ... full breakdown ...                                                   │  ║
+║ └──────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                                ║
+║ ┌──────────────────────────────────────────────────────────────────────────┐  ║
+║ │ #3  SOLUSDT  SHORT  (EXPANDED)                         🟡 Moderate Gap   │  ║
+║ │ ... full breakdown ...                                                   │  ║
+║ └──────────────────────────────────────────────────────────────────────────┘  ║
+║                                                                                ║
+║ ┌────────────────────────────────────────────────────────────────────────┐    ║
+║ │ #4  XRPUSDT   GAP: ↑12.3   Score: 42.7/55   🟠 Needs Work   [▼ Expand] │    ║
+║ └────────────────────────────────────────────────────────────────────────┘    ║
+║                                                                                ║
+║ ┌────────────────────────────────────────────────────────────────────────┐    ║
+║ │ #5  ADAUSDT   GAP: ↑18.7   Score: 36.3/55   🔴 Far          [▼ Expand] │    ║
+║ └────────────────────────────────────────────────────────────────────────┘    ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+```
+
+#### Status Labels
+
+| Gap Range | Label | Color | Emoji |
+|-----------|-------|-------|-------|
+| 0 (READY) | Ready for Entry | Green | ✅ |
+| 1-5 pts | Nearly Ready | Light Green | 🟢 |
+| 5-10 pts | Moderate Gap | Yellow | 🟡 |
+| 10-20 pts | Needs Work | Orange | 🟠 |
+| 20+ pts | Far from Entry | Red | 🔴 |
+
+#### Acceptance Criteria
+
+**Backend:**
+- [ ] ScoreBreakdown includes all sub-component scores with max values
+- [ ] BlockingReasonWithGap includes directional gaps (up/down/in_range)
+- [ ] Gap calculations correct for single targets (≥25) and ranges (40-60)
+- [ ] ScoreHistory stored in Redis with 8 hours of 5-minute samples
+- [ ] Override endpoint validates no hard blocks before allowing
+- [ ] API returns coins sorted by gap_to_threshold ascending
+
+**Frontend:**
+- [ ] Coins sorted by proximity (closest to entry first)
+- [ ] Top 3 coins auto-expanded, 4+ collapsed
+- [ ] Gap display shows direction (↑/↓) and value
+- [ ] Score breakdown tree with all components visible
+- [ ] Mini indicators for RSI/ADX showing current vs target range
+- [ ] 8-hour sparkline with threshold line
+- [ ] Trend indicator (Rising/Falling/Stable) with change value
+- [ ] Override button only appears when can_override=true
+- [ ] Override confirmation dialog with warning
+- [ ] Status labels color-coded by gap range
+- [ ] Real-time updates every 5 seconds
+
+**Testing:**
+- [ ] Gap calculation unit tests (up, down, in_range scenarios)
+- [ ] Score breakdown correctness tests
+- [ ] Override validation tests
+- [ ] UI component tests for expansion/collapse
+- [ ] Integration test for full flow
+
+#### Files to Modify
+
+**Backend:**
+| File | Changes |
+|------|---------|
+| `internal/decision/scoring.go` | Add ScoreBreakdown struct |
+| `internal/decision/score_calculator.go` | Calculate and return sub-components |
+| `internal/decision/blocking.go` | Add BlockingReasonWithGap with directional gaps |
+| `internal/decision/coin_state.go` | Add ScoreHistory, expand CoinState |
+| `internal/decision/state_manager.go` | Store/retrieve score history |
+| `internal/api/handlers_coin_state.go` | Add override endpoint, expand response |
+
+**Frontend:**
+| File | Changes |
+|------|---------|
+| `web/src/types/futures.ts` | Add new type definitions |
+| `web/src/services/futuresApi.ts` | Add override API call |
+| `web/src/components/TradeLifecycle/EntryDecisionEngineCard.tsx` | Complete redesign |
+| `web/src/components/TradeLifecycle/GapIndicator.tsx` | New component |
+| `web/src/components/TradeLifecycle/ScoreBreakdownTree.tsx` | New component |
+| `web/src/components/TradeLifecycle/ScoreSparkline.tsx` | New component |
+| `web/src/components/TradeLifecycle/OverrideEntryButton.tsx` | New component |
+
+#### Dependencies
+
+- Story 11.15 (Additive Score Calculator) - Must be implemented
+- Story 11.18 (Blocking Reason Tracker) - Must be implemented
+- Story 11.1 (Redis State Management) - Must be implemented
+
+#### Story Points: 13
+
+---
+
+#### Story 11.41: Comprehensive Mode-Strategy Configuration Amendment
+**Priority:** P0
+**Status:** Ready for Implementation
+
+Comprehensively amend the mode-strategy configuration to include ALL essential trading fields from the legacy `mode_configs` system (184 fields) into the new `modes` structure. Addresses critical gaps:
+
+**Missing Configuration Sections:**
+- TP Cut Percentages (tp1/2/3_sell_percent) - how much position to cut at each TP level
+- MTF (Multi-Timeframe) settings per strategy
+- Circuit Breaker per strategy
+- Hedge settings per strategy
+- Averaging/DCA per strategy
+- Stale Release per strategy
+- Position Optimization per strategy
+- Funding Rate per strategy
+- Risk settings per strategy
+- Trend Divergence per strategy
+- Detailed Dynamic AI Exit per strategy
+- Detailed Early Warning per strategy
+
+**Settings Lifecycle Compliance:**
+```
+default-settings.json → Database → Redis Cache → API → Frontend
+```
+
+**Implementation Scope:**
+1. Amend `default-settings.json` with 18 configuration sections per strategy
+2. Update Go structs with all sub-structs
+3. Database migration for expanded JSONB structure
+4. Redis cache layer updates
+5. API endpoint expansion
+6. Reset Settings page with grouped sections
+7. Futures page Mode Strategy Settings UI
+
+**Total Configuration:** ~107 fields per strategy × 4 strategies × 4 modes = 1,712 configurable parameters
+
+**Story Points:** 21
+
+**Full Story:** `_bmad-output/stories/story-11.41-comprehensive-mode-strategy-config.md`
+
+---

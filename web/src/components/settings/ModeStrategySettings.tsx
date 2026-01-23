@@ -308,6 +308,7 @@ export default function ModeStrategySettings({
   };
 
   // Handle strategy settings update
+  // Story 11.41: Expanded to include all 18 sections
   const handleStrategyUpdate = async (config: ModeStrategyConfig) => {
     if (!modeConfig || isSaving) return;
 
@@ -318,19 +319,35 @@ export default function ModeStrategySettings({
       const response = await modeStrategyApi.updateModeStrategy(currentMode, activeStrategy, config);
 
       // Transform response.data (ModeStrategyResponse) to ModeStrategyConfig
+      // Story 11.41: Include all 18 sections
       const updatedConfig: ModeStrategyConfig = {
         enabled: response.data.enabled,
         priority: response.data.priority,
         supported_regimes: response.data.supported_regimes,
+        // Legacy position sizing fields
         leverage: response.data.settings.leverage,
         max_positions: response.data.settings.max_positions,
         base_size_usd: response.data.settings.base_size_usd,
+        // Required sections
         timeframe: response.data.settings.timeframe,
         sltp: response.data.settings.sltp,
         confidence: response.data.settings.confidence,
         entry_conditions: response.data.settings.entry_conditions || {},
         exit_conditions: response.data.settings.exit_conditions,
         scoring: response.data.settings.scoring,
+        // Story 11.41: All 18 sections (optional)
+        position_sizing: response.data.settings.position_sizing,
+        mtf: response.data.settings.mtf,
+        circuit_breaker: response.data.settings.circuit_breaker,
+        hedge: response.data.settings.hedge,
+        averaging: response.data.settings.averaging,
+        stale_release: response.data.settings.stale_release,
+        position_optimization: response.data.settings.position_optimization,
+        funding_rate: response.data.settings.funding_rate,
+        risk: response.data.settings.risk,
+        trend_divergence: response.data.settings.trend_divergence,
+        dynamic_ai_exit: response.data.settings.dynamic_ai_exit,
+        early_warning: response.data.settings.early_warning,
       };
 
       // Update local state
@@ -352,6 +369,7 @@ export default function ModeStrategySettings({
   };
 
   // Handle reset to defaults
+  // Story 11.41: Expanded to include all 18 sections
   const handleReset = async () => {
     if (!modeConfig || isResetting) return;
 
@@ -362,19 +380,35 @@ export default function ModeStrategySettings({
       const response = await modeStrategyApi.resetModeStrategy(currentMode, activeStrategy);
 
       // Transform response.data (ModeStrategyResponse) to ModeStrategyConfig
+      // Story 11.41: Include all 18 sections
       const resetConfig: ModeStrategyConfig = {
         enabled: response.data.enabled,
         priority: response.data.priority,
         supported_regimes: response.data.supported_regimes,
+        // Legacy position sizing fields
         leverage: response.data.settings.leverage,
         max_positions: response.data.settings.max_positions,
         base_size_usd: response.data.settings.base_size_usd,
+        // Required sections
         timeframe: response.data.settings.timeframe,
         sltp: response.data.settings.sltp,
         confidence: response.data.settings.confidence,
         entry_conditions: response.data.settings.entry_conditions || {},
         exit_conditions: response.data.settings.exit_conditions,
         scoring: response.data.settings.scoring,
+        // Story 11.41: All 18 sections (optional)
+        position_sizing: response.data.settings.position_sizing,
+        mtf: response.data.settings.mtf,
+        circuit_breaker: response.data.settings.circuit_breaker,
+        hedge: response.data.settings.hedge,
+        averaging: response.data.settings.averaging,
+        stale_release: response.data.settings.stale_release,
+        position_optimization: response.data.settings.position_optimization,
+        funding_rate: response.data.settings.funding_rate,
+        risk: response.data.settings.risk,
+        trend_divergence: response.data.settings.trend_divergence,
+        dynamic_ai_exit: response.data.settings.dynamic_ai_exit,
+        early_warning: response.data.settings.early_warning,
       };
 
       // Update local state

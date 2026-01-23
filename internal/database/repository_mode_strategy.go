@@ -173,7 +173,7 @@ func (r *Repository) UpdateModeStrategySettings(ctx context.Context, userID stri
 	}
 
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("mode strategy settings not found for user %d, mode %s, strategy %s", userID, mode, strategy)
+		return fmt.Errorf("mode strategy settings not found for user %s, mode %s, strategy %s", userID, mode, strategy)
 	}
 
 	return nil
@@ -193,7 +193,7 @@ func (r *Repository) UpdateModeStrategyEnabled(ctx context.Context, userID strin
 	}
 
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("mode strategy settings not found for user %d, mode %s, strategy %s", userID, mode, strategy)
+		return fmt.Errorf("mode strategy settings not found for user %s, mode %s, strategy %s", userID, mode, strategy)
 	}
 
 	return nil
@@ -212,7 +212,7 @@ func (r *Repository) DeleteModeStrategySettings(ctx context.Context, userID stri
 	}
 
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("mode strategy settings not found for user %d, mode %s, strategy %s", userID, mode, strategy)
+		return fmt.Errorf("mode strategy settings not found for user %s, mode %s, strategy %s", userID, mode, strategy)
 	}
 
 	return nil

@@ -5065,6 +5065,8 @@ export default function GiniePanel() {
                   const isExpanded = expandedPosition === pos.symbol;
 
                   // Show PositionCardExpanded when expanded and data is loaded
+                  // Note: showAdvancedFeatures=false for legacy system - advanced AI features
+                  // (Exit Decision Monitor, New Engine Scores) only available in new chain system
                   if (isExpanded && expandedPositionData && expandedPositionData.symbol === pos.symbol) {
                     return (
                       <PositionCardExpanded
@@ -5074,6 +5076,7 @@ export default function GiniePanel() {
                         onClose={handleClosePosition}
                         onRefresh={handleRefreshExpandedPosition}
                         onCollapse={handleCollapsePosition}
+                        showAdvancedFeatures={false}
                       />
                     );
                   }

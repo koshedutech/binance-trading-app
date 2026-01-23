@@ -354,6 +354,28 @@ class FuturesAPIService {
     return data.count || 0;
   }
 
+  /**
+   * Get all coin states with gap analysis data (Story 11.40)
+   * Returns coins sorted by proximity to entry threshold
+   */
+  async getAllCoinStatesWithGaps(): Promise<CoinStateWithGapsResponse[]> {
+    const { data } = await this.client.get<{ success: boolean; data: CoinStateWithGapsResponse[]; count: number }>('/decision/coins/gaps');
+    return data.data || [];
+  }
+
+  /**
+   * Override soft blocks and trigger entry (Story 11.40)
+   * Only works if there are no hard blocks
+   */
+  async overrideEntry(symbol: string, direction: 'LONG' | 'SHORT', reason?: string): Promise<OverrideEntryResponse> {
+    const { data } = await this.client.post<OverrideEntryResponse>('/decision/override', {
+      symbol,
+      direction,
+      reason,
+    });
+    return data;
+  }
+
   // ==================== MARKET DATA ====================
 
   async getFundingRate(symbol: string): Promise<FundingRate> {
@@ -4672,6 +4694,99 @@ export interface CoinStateResponse {
   scores: CoinStateScores;
   blocking: CoinStateBlocking;
   last_updated: number;
+}
+
+// ==================== GAP ANALYSIS TYPES (Story 11.40) ====================
+
+// Gap direction for blocking reasons
+export type GapDirection = 'up' | 'down' | 'in_range';
+
+// Detailed score breakdown with all sub-component scores
+export interface ScoreBreakdownDetailed {
+  // Technical (0-40)
+  technical: number;
+  technical_max: number;
+  trend_alignment: number;
+  trend_alignment_max: number;
+  momentum: number;
+  momentum_max: number;
+  volatility: number;
+  volatility_max: number;
+  volume: number;
+  volume_max: number;
+
+  // Context (0-30)
+  context: number;
+  context_max: number;
+  regime_match: number;
+  regime_match_max: number;
+  timeframe_align: number;
+  timeframe_align_max: number;
+  btc_trend: number;
+  btc_trend_max: number;
+
+  // LLM (0-20)
+  llm: number;
+  llm_max: number;
+
+  // History (0-10)
+  history: number;
+  history_max: number;
+  symbol_winrate: number;
+  symbol_winrate_max: number;
+  strategy_winrate: number;
+  strategy_winrate_max: number;
+
+  // Final score and gap
+  final: number;
+  threshold: number;
+  gap_to_threshold: number;
+}
+
+// Blocking reason with directional gap information
+export interface BlockingReasonWithGap {
+  code: string;
+  category: 'HARD_BLOCK' | 'SOFT_BLOCK' | 'WARNING';
+  description: string;
+  current_value: number;
+  target_value: number;
+  target_range_end?: number;
+  gap: number;
+  gap_direction: GapDirection;
+  gap_display: string;
+  overridable: boolean;
+  timestamp: number;
+}
+
+// Score history for UI display (8 hours of data)
+export interface ScoreHistoryForUI {
+  timestamps: number[];
+  scores: number[];
+  trend: 'rising' | 'falling' | 'stable';
+  change_8h: number;
+}
+
+// Extended coin state with gap analysis data
+export interface CoinStateWithGapsResponse extends CoinStateResponse {
+  score_breakdown: ScoreBreakdownDetailed;
+  blocking_with_gaps: BlockingReasonWithGap[];
+  score_history: ScoreHistoryForUI;
+  overall_gap: number;
+  proximity_rank: number;
+  can_override: boolean;
+  status_label: string;
+  status_color: 'green' | 'light-green' | 'yellow' | 'orange' | 'red';
+}
+
+// Override entry response
+export interface OverrideEntryResponse {
+  success: boolean;
+  message: string;
+  symbol: string;
+  direction: string;
+  reason?: string;
+  overridden_blocks: number;
+  note: string;
 }
 
 // Export singleton instance

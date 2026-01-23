@@ -244,6 +244,156 @@ type ScoreHistory struct {
 	MaxSize int `json:"max_size"`
 }
 
+// ScoreBreakdownDetailed provides a detailed breakdown with all sub-component scores for UI display
+// This is the expanded response format for the Gap Analysis UI (Story 11.40)
+type ScoreBreakdownDetailed struct {
+	// Technical (0-40)
+	Technical         int `json:"technical"`
+	TechnicalMax      int `json:"technical_max"`       // 40
+	TrendAlignment    int `json:"trend_alignment"`     // 0-15
+	TrendAlignmentMax int `json:"trend_alignment_max"` // 15
+	Momentum          int `json:"momentum"`            // 0-10
+	MomentumMax       int `json:"momentum_max"`        // 10
+	Volatility        int `json:"volatility"`          // 0-10
+	VolatilityMax     int `json:"volatility_max"`      // 10
+	Volume            int `json:"volume"`              // 0-5
+	VolumeMax         int `json:"volume_max"`          // 5
+
+	// Context (0-30)
+	Context           int `json:"context"`
+	ContextMax        int `json:"context_max"`          // 30
+	RegimeMatch       int `json:"regime_match"`         // 0-10
+	RegimeMatchMax    int `json:"regime_match_max"`     // 10
+	TimeframeAlign    int `json:"timeframe_align"`      // 0-10
+	TimeframeAlignMax int `json:"timeframe_align_max"`  // 10
+	BTCTrend          int `json:"btc_trend"`            // 0-10
+	BTCTrendMax       int `json:"btc_trend_max"`        // 10
+
+	// LLM (0-20)
+	LLM    int `json:"llm"`
+	LLMMax int `json:"llm_max"` // 20
+
+	// History (0-10)
+	History            int `json:"history"`
+	HistoryMax         int `json:"history_max"`           // 10
+	SymbolWinRate      int `json:"symbol_winrate"`        // 0-5
+	SymbolWinRateMax   int `json:"symbol_winrate_max"`    // 5
+	StrategyWinRate    int `json:"strategy_winrate"`      // 0-5
+	StrategyWinRateMax int `json:"strategy_winrate_max"`  // 5
+
+	// Final score and gap
+	Final          int `json:"final"`
+	Threshold      int `json:"threshold"`        // 55
+	GapToThreshold int `json:"gap_to_threshold"` // Positive if below threshold, negative if above
+}
+
+// NewScoreBreakdownDetailed creates a ScoreBreakdownDetailed from a ScoreBreakdown
+func NewScoreBreakdownDetailed(sb *ScoreBreakdown) *ScoreBreakdownDetailed {
+	if sb == nil {
+		return nil
+	}
+
+	detailed := &ScoreBreakdownDetailed{
+		TechnicalMax:       int(MaxTechnicalScore),
+		TrendAlignmentMax:  int(MaxTrendAlignmentScore),
+		MomentumMax:        int(MaxMomentumScore),
+		VolatilityMax:      int(MaxVolatilityScore),
+		VolumeMax:          int(MaxVolumeScore),
+		ContextMax:         int(MaxContextScore),
+		RegimeMatchMax:     int(MaxRegimeMatchScore),
+		TimeframeAlignMax:  int(MaxTimeframeAlignScore),
+		BTCTrendMax:        int(MaxBTCTrendScore),
+		LLMMax:             int(MaxLLMScore),
+		HistoryMax:         int(MaxHistoryScore),
+		SymbolWinRateMax:   int(MaxSymbolWinRateScore),
+		StrategyWinRateMax: int(MaxStrategyWinRateScore),
+		Final:              int(sb.NormalizedScore),
+		Threshold:          int(sb.Threshold),
+		GapToThreshold:     int(sb.Threshold - sb.NormalizedScore),
+	}
+
+	// Extract technical component
+	if tech := sb.GetComponent(DimensionTechnical); tech != nil {
+		detailed.Technical = int(tech.Score)
+		if val, ok := tech.Details["trend_alignment"]; ok {
+			detailed.TrendAlignment = int(val)
+		}
+		if val, ok := tech.Details["momentum"]; ok {
+			detailed.Momentum = int(val)
+		}
+		if val, ok := tech.Details["volatility"]; ok {
+			detailed.Volatility = int(val)
+		}
+		if val, ok := tech.Details["volume"]; ok {
+			detailed.Volume = int(val)
+		}
+	}
+
+	// Extract context component
+	if ctx := sb.GetComponent(DimensionContext); ctx != nil {
+		detailed.Context = int(ctx.Score)
+		if val, ok := ctx.Details["regime_match"]; ok {
+			detailed.RegimeMatch = int(val)
+		}
+		if val, ok := ctx.Details["timeframe_alignment"]; ok {
+			detailed.TimeframeAlign = int(val)
+		}
+		if val, ok := ctx.Details["btc_trend"]; ok {
+			detailed.BTCTrend = int(val)
+		}
+	}
+
+	// Extract LLM component
+	if llm := sb.GetComponent(DimensionLLM); llm != nil {
+		detailed.LLM = int(llm.Score)
+	}
+
+	// Extract history component
+	if hist := sb.GetComponent(DimensionHistory); hist != nil {
+		detailed.History = int(hist.Score)
+		if val, ok := hist.Details["symbol_score"]; ok {
+			detailed.SymbolWinRate = int(val)
+		}
+		if val, ok := hist.Details["strategy_score"]; ok {
+			detailed.StrategyWinRate = int(val)
+		}
+	}
+
+	return detailed
+}
+
+// ScoreHistoryForUI represents the score history optimized for UI display
+// Keeps 8 hours of 5-minute samples (96 data points)
+type ScoreHistoryForUI struct {
+	Timestamps []int64 `json:"timestamps"` // Unix ms, 8 hours of data
+	Scores     []int   `json:"scores"`     // Corresponding final scores
+	Trend      string  `json:"trend"`      // "rising", "falling", "stable"
+	Change8h   int     `json:"change_8h"`  // Score change over 8 hours
+}
+
+// CalculateTrend calculates the trend direction based on score history
+func (sh *ScoreHistoryForUI) CalculateTrend() {
+	if len(sh.Scores) < 2 {
+		sh.Trend = "stable"
+		sh.Change8h = 0
+		return
+	}
+
+	// Get first and last scores
+	first := sh.Scores[0]
+	last := sh.Scores[len(sh.Scores)-1]
+	sh.Change8h = last - first
+
+	// Determine trend based on change
+	if sh.Change8h > 3 {
+		sh.Trend = "rising"
+	} else if sh.Change8h < -3 {
+		sh.Trend = "falling"
+	} else {
+		sh.Trend = "stable"
+	}
+}
+
 // NewScoreHistory creates a new ScoreHistory with the given max size
 func NewScoreHistory(symbol string, maxSize int) *ScoreHistory {
 	if maxSize <= 0 {

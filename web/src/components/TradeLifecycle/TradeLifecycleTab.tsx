@@ -173,14 +173,21 @@ export default function TradeLifecycleTab({
       hedgeOrder: null,
       hedgeSLOrder: null,
       hedgeTPOrder: null,
-      status: (histChain.status === 'CLOSED' ? 'completed' :
-              histChain.status === 'CANCELLED' ? 'cancelled' :
-              histChain.status === 'PARTIAL' ? 'partial' : 'active') as 'active' | 'partial' | 'completed' | 'cancelled',
+      // Story 7.21: Case-insensitive status mapping, default to 'completed' for historical chains
+      status: (() => {
+        const normalizedStatus = (histChain.status || '').toUpperCase();
+        if (normalizedStatus === 'CLOSED') return 'completed';
+        if (normalizedStatus === 'CANCELLED') return 'cancelled';
+        if (normalizedStatus === 'PARTIAL') return 'partial';
+        if (normalizedStatus === 'ACTIVE') return 'active';
+        return 'completed'; // Default to completed for unknown historical statuses
+      })() as 'active' | 'partial' | 'completed' | 'cancelled',
       totalValue: histChain.entryPrice * histChain.entryQuantity,
       filledValue: histChain.entryPrice * histChain.entryQuantity,
       pnl: histChain.realizedPnl,
-      createdAt: new Date(histChain.createdAt).getTime(),
-      updatedAt: new Date(histChain.updatedAt).getTime(),
+      // Story 7.21 fix: Handle invalid/missing date strings to prevent NaN timestamps
+      createdAt: histChain.createdAt ? new Date(histChain.createdAt).getTime() || Date.now() : Date.now(),
+      updatedAt: histChain.updatedAt ? new Date(histChain.updatedAt).getTime() || Date.now() : Date.now(),
       isFallback: histChain.chainId.includes('FALLBACK'),
       positionState: {
         id: 0,
@@ -194,7 +201,13 @@ export default function TradeLifecycleTab({
         entryValue: histChain.entryPrice * histChain.entryQuantity,
         entryFees: histChain.totalFees,
         entryFilledAt: histChain.createdAt,
-        status: histChain.status as 'ACTIVE' | 'PARTIAL' | 'CLOSED',
+        // Story 7.21 fix: Map historical status to valid PositionState status
+        status: (() => {
+          const normalizedStatus = (histChain.status || '').toUpperCase();
+          if (normalizedStatus === 'ACTIVE') return 'ACTIVE';
+          if (normalizedStatus === 'PARTIAL') return 'PARTIAL';
+          return 'CLOSED'; // CLOSED, CANCELLED, and unknown statuses map to CLOSED
+        })() as 'ACTIVE' | 'PARTIAL' | 'CLOSED',
         remainingQuantity: histChain.remainingQuantity,
         realizedPnl: histChain.realizedPnl,
         createdAt: histChain.createdAt,
@@ -244,10 +257,37 @@ export default function TradeLifecycleTab({
       // Story 7.15: Use new getOrderChainsWithState API (for active orders from Binance)
       const response = await futuresApi.getOrderChainsWithState();
 
+      // Story 7.21: Fetch and merge recent historical orders (last 7 days) with active orders
+      // This ensures completed trades are always visible alongside active ones
+      let historicalChains: OrderChain[] = [];
+      try {
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const histResponse = await futuresApi.getHistoricalOrderChains({
+          symbol: filters.symbol !== 'all' ? filters.symbol : undefined,
+          mode: filters.mode !== 'all' ? filters.mode : undefined,
+          status: filters.status !== 'all' ? filters.status as 'active' | 'partial' | 'closed' | 'cancelled' : undefined,
+          dateFrom: sevenDaysAgo.toISOString().split('T')[0],
+          limit: 50,
+        });
+        if (histResponse && histResponse.chains) {
+          historicalChains = histResponse.chains.map(mapHistoricalOrderChain);
+        }
+      } catch (histErr) {
+        console.warn('Failed to fetch historical orders, continuing with active only:', histErr);
+        // Continue with active orders only - historical fetch is non-blocking
+      }
+
       if (!response || !response.chains) {
         // Fallback to old API if new endpoint fails or returns empty
         const fallbackResponse = await futuresApi.getAllOrders();
         if (!fallbackResponse) {
+          // Story 7.21: Even if active orders fail, show historical orders if available
+          if (historicalChains.length > 0) {
+            setChains(historicalChains);
+            setError(null);
+            return;
+          }
           setChains([]);
           setError(null);
           return;
@@ -345,14 +385,29 @@ export default function TradeLifecycleTab({
         }
 
         const grouped = groupOrdersIntoChains(chainOrders);
-        setChains(grouped);
+        // Story 7.21: Merge fallback active orders with historical orders
+        const activeChainIds = new Set(grouped.map(c => c.chainId));
+        const mergedChains = [
+          ...grouped,
+          ...historicalChains.filter(h => !activeChainIds.has(h.chainId))
+        ];
+        setChains(mergedChains);
         setError(null);
         return;
       }
 
       // Story 7.15: Map new API response to OrderChain format
-      const mappedChains = response.chains.map(mapOrderChainWithState);
-      setChains(mappedChains);
+      const activeChains = response.chains.map(mapOrderChainWithState);
+
+      // Story 7.21: Merge active orders with historical orders (deduplicate by chainId)
+      // Active orders take priority over historical (they have more detail)
+      const activeChainIds = new Set(activeChains.map(c => c.chainId));
+      const mergedChains = [
+        ...activeChains,
+        ...historicalChains.filter(h => !activeChainIds.has(h.chainId))
+      ];
+
+      setChains(mergedChains);
       setError(null);
     } catch (err) {
       console.error('Failed to fetch orders:', err);
@@ -384,6 +439,17 @@ export default function TradeLifecycleTab({
       fetchOrders();
     };
 
+    const handlePositionUpdate = (event: WSEvent) => {
+      // On position update, refresh chains to update position state
+      // This ensures positions section shows current data
+      fetchOrders();
+    };
+
+    const handlePnlUpdate = (event: WSEvent) => {
+      // On PnL update (position close), refresh chains to show closed positions
+      fetchOrders();
+    };
+
     const handleConnect = () => {
       // Refresh data on reconnect to sync any missed events
       fetchOrders();
@@ -392,6 +458,8 @@ export default function TradeLifecycleTab({
     // Subscribe to WebSocket events
     wsService.subscribe('CHAIN_UPDATE', handleChainUpdate);
     wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+    wsService.subscribe('PNL_UPDATE', handlePnlUpdate);
     wsService.onConnect(handleConnect);
 
     // Register with fallbackManager for centralized fallback polling
@@ -400,6 +468,8 @@ export default function TradeLifecycleTab({
     return () => {
       wsService.unsubscribe('CHAIN_UPDATE', handleChainUpdate);
       wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('PNL_UPDATE', handlePnlUpdate);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction(FALLBACK_KEY);
     };
@@ -528,6 +598,9 @@ export default function TradeLifecycleTab({
             )}
             <GitBranch className="w-5 h-5 text-cyan-400" />
             <span className="font-semibold text-white text-lg">Trade Cycle</span>
+            <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded font-medium">
+              Lifecycle
+            </span>
             <span className="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded">
               Entry → Orders → Positions
             </span>
@@ -761,6 +834,14 @@ export default function TradeLifecycleTab({
                       )}
                     </div>
                   )}
+                  {/* Manual refresh button for positions */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setLoading(true); fetchOrders(); }}
+                    className="p-1.5 hover:bg-gray-700 rounded transition-colors"
+                    title="Refresh positions"
+                  >
+                    <RefreshCw className={`w-4 h-4 text-gray-400 ${loading ? 'animate-spin' : ''}`} />
+                  </button>
                 </div>
               </button>
 
@@ -816,7 +897,7 @@ export default function TradeLifecycleTab({
                           <div className="grid grid-cols-4 gap-4 text-sm">
                             <div>
                               <div className="text-xs text-gray-500">Entry Price</div>
-                              <div className="text-gray-200">${chain.positionState?.entryPrice.toFixed(4)}</div>
+                              <div className="text-gray-200">${(chain.positionState?.entryPrice || 0).toFixed(4)}</div>
                             </div>
                             <div>
                               <div className="text-xs text-gray-500">Quantity</div>

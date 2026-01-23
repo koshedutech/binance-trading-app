@@ -15,6 +15,18 @@ import {
   CheckCircle2,
   Loader2,
   Info,
+  Clock,
+  Layers,
+  AlertTriangle,
+  Scale,
+  PlusCircle,
+  Timer,
+  Zap,
+  DollarSign,
+  AlertCircle,
+  GitBranch,
+  Brain,
+  Bell,
 } from 'lucide-react';
 import type {
   StrategyName,
@@ -24,9 +36,32 @@ import type {
   ScoringConfig,
   ExitConditionsConfig,
   ExpandedSections,
+  StrategyTimeframe,
+  MTFConfig,
+  StrategyCircuitBreakerConfig,
+  HedgeConfig,
+  AveragingConfig,
+  StaleReleaseConfig,
+  PositionOptimizationConfig,
+  FundingRateConfig,
+  RiskConfig,
+  TrendDivergenceConfig,
+  DynamicAIExitConfig,
+  StrategyEarlyWarningConfig,
 } from '../../types/modeStrategy';
 import {
   DEFAULT_EXPANDED_SECTIONS,
+  DEFAULT_MTF_CONFIG,
+  DEFAULT_CIRCUIT_BREAKER_CONFIG,
+  DEFAULT_HEDGE_CONFIG,
+  DEFAULT_AVERAGING_CONFIG,
+  DEFAULT_STALE_RELEASE_CONFIG,
+  DEFAULT_POSITION_OPTIMIZATION_CONFIG,
+  DEFAULT_FUNDING_RATE_CONFIG,
+  DEFAULT_RISK_CONFIG,
+  DEFAULT_TREND_DIVERGENCE_CONFIG,
+  DEFAULT_DYNAMIC_AI_EXIT_CONFIG,
+  DEFAULT_EARLY_WARNING_CONFIG,
   isTrendEntryConditions,
   isMeanReversionEntryConditions,
   isBreakoutEntryConditions,
@@ -243,6 +278,1027 @@ function SliderInput({
   );
 }
 
+// ==================== Select Input Component ====================
+
+interface SelectInputProps {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  description?: string;
+  disabled?: boolean;
+}
+
+function SelectInput({
+  label,
+  value,
+  onChange,
+  options,
+  description,
+  disabled = false,
+}: SelectInputProps) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-medium text-gray-300">{label}</label>
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          className="w-32 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+        >
+          {options.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {description && (
+        <p className="text-xs text-gray-500">{description}</p>
+      )}
+    </div>
+  );
+}
+
+// ==================== Timeframe Options ====================
+
+const TIMEFRAME_OPTIONS = [
+  { value: '1m', label: '1 min' },
+  { value: '3m', label: '3 min' },
+  { value: '5m', label: '5 min' },
+  { value: '15m', label: '15 min' },
+  { value: '30m', label: '30 min' },
+  { value: '1h', label: '1 hour' },
+  { value: '2h', label: '2 hours' },
+  { value: '4h', label: '4 hours' },
+  { value: '1d', label: '1 day' },
+];
+
+const RISK_LEVEL_OPTIONS = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'aggressive', label: 'Aggressive' },
+];
+
+const STALE_ACTION_OPTIONS = [
+  { value: 'hold', label: 'Hold' },
+  { value: 'reduce', label: 'Reduce' },
+  { value: 'close', label: 'Close' },
+  { value: 'llm_decide', label: 'LLM Decide' },
+];
+
+// ==================== Timeframe Section ====================
+
+interface TimeframeSectionProps {
+  timeframe: StrategyTimeframe;
+  onChange: (updates: Partial<StrategyTimeframe>) => void;
+  disabled?: boolean;
+}
+
+function TimeframeSection({ timeframe, onChange, disabled }: TimeframeSectionProps) {
+  return (
+    <>
+      <SelectInput
+        label="Trend Timeframe"
+        value={timeframe.trend_timeframe}
+        onChange={(v) => onChange({ trend_timeframe: v })}
+        options={TIMEFRAME_OPTIONS}
+        description="Timeframe for trend analysis"
+        disabled={disabled}
+      />
+      <SelectInput
+        label="Entry Timeframe"
+        value={timeframe.entry_timeframe}
+        onChange={(v) => onChange({ entry_timeframe: v })}
+        options={TIMEFRAME_OPTIONS}
+        description="Timeframe for entry signals"
+        disabled={disabled}
+      />
+      <SelectInput
+        label="Analysis Timeframe"
+        value={timeframe.analysis_timeframe}
+        onChange={(v) => onChange({ analysis_timeframe: v })}
+        options={TIMEFRAME_OPTIONS}
+        description="Timeframe for general analysis"
+        disabled={disabled}
+      />
+    </>
+  );
+}
+
+// ==================== MTF Section ====================
+
+interface MTFSectionProps {
+  mtf: MTFConfig;
+  onChange: (updates: Partial<MTFConfig>) => void;
+  disabled?: boolean;
+}
+
+function MTFSection({ mtf, onChange, disabled }: MTFSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Enable MTF Analysis"
+        checked={mtf.enabled}
+        onChange={(v) => onChange({ enabled: v })}
+        description="Use multi-timeframe analysis for entry decisions"
+        disabled={disabled}
+      />
+      {mtf.enabled && (
+        <>
+          <div className="grid grid-cols-2 gap-4">
+            <SelectInput
+              label="Primary TF"
+              value={mtf.primary_timeframe}
+              onChange={(v) => onChange({ primary_timeframe: v })}
+              options={TIMEFRAME_OPTIONS}
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Primary Weight"
+              value={mtf.primary_weight}
+              onChange={(v) => onChange({ primary_weight: v })}
+              min={0}
+              max={100}
+              step={5}
+              unit="%"
+              disabled={disabled}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <SelectInput
+              label="Secondary TF"
+              value={mtf.secondary_timeframe}
+              onChange={(v) => onChange({ secondary_timeframe: v })}
+              options={TIMEFRAME_OPTIONS}
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Secondary Weight"
+              value={mtf.secondary_weight}
+              onChange={(v) => onChange({ secondary_weight: v })}
+              min={0}
+              max={100}
+              step={5}
+              unit="%"
+              disabled={disabled}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <SelectInput
+              label="Tertiary TF"
+              value={mtf.tertiary_timeframe}
+              onChange={(v) => onChange({ tertiary_timeframe: v })}
+              options={TIMEFRAME_OPTIONS}
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Tertiary Weight"
+              value={mtf.tertiary_weight}
+              onChange={(v) => onChange({ tertiary_weight: v })}
+              min={0}
+              max={100}
+              step={5}
+              unit="%"
+              disabled={disabled}
+            />
+          </div>
+          <NumberInput
+            label="Min Consensus"
+            value={mtf.min_consensus}
+            onChange={(v) => onChange({ min_consensus: v })}
+            min={1}
+            max={3}
+            step={1}
+            description="Minimum timeframes that must agree"
+            disabled={disabled}
+          />
+          <SliderInput
+            label="Min Weighted Strength"
+            value={mtf.min_weighted_strength}
+            onChange={(v) => onChange({ min_weighted_strength: v })}
+            min={0}
+            max={100}
+            step={5}
+            unit="%"
+            description="Minimum combined weighted strength required"
+            disabled={disabled}
+          />
+          <ToggleInput
+            label="Trend Stability Check"
+            checked={mtf.trend_stability_check}
+            onChange={(v) => onChange({ trend_stability_check: v })}
+            description="Check trend stability across timeframes"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Circuit Breaker Section ====================
+
+interface CircuitBreakerSectionProps {
+  circuitBreaker: StrategyCircuitBreakerConfig;
+  onChange: (updates: Partial<StrategyCircuitBreakerConfig>) => void;
+  disabled?: boolean;
+}
+
+function CircuitBreakerSection({ circuitBreaker, onChange, disabled }: CircuitBreakerSectionProps) {
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-4">
+        <NumberInput
+          label="Max Loss/Hour"
+          value={circuitBreaker.max_loss_per_hour_usd}
+          onChange={(v) => onChange({ max_loss_per_hour_usd: v })}
+          min={0}
+          max={10000}
+          step={50}
+          unit="USD"
+          disabled={disabled}
+        />
+        <NumberInput
+          label="Max Loss/Day"
+          value={circuitBreaker.max_loss_per_day_usd}
+          onChange={(v) => onChange({ max_loss_per_day_usd: v })}
+          min={0}
+          max={50000}
+          step={100}
+          unit="USD"
+          disabled={disabled}
+        />
+      </div>
+      <NumberInput
+        label="Max Consecutive Losses"
+        value={circuitBreaker.max_consecutive_losses}
+        onChange={(v) => onChange({ max_consecutive_losses: v })}
+        min={1}
+        max={20}
+        description="Trigger cooldown after this many losses"
+        disabled={disabled}
+      />
+      <NumberInput
+        label="Cooldown Period"
+        value={circuitBreaker.cooldown_minutes}
+        onChange={(v) => onChange({ cooldown_minutes: v })}
+        min={1}
+        max={1440}
+        unit="min"
+        description="Pause trading after circuit breaker triggers"
+        disabled={disabled}
+      />
+      <div className="grid grid-cols-2 gap-4">
+        <NumberInput
+          label="Max Trades/Hour"
+          value={circuitBreaker.max_trades_per_hour}
+          onChange={(v) => onChange({ max_trades_per_hour: v })}
+          min={1}
+          max={100}
+          disabled={disabled}
+        />
+        <NumberInput
+          label="Max Trades/Day"
+          value={circuitBreaker.max_trades_per_day}
+          onChange={(v) => onChange({ max_trades_per_day: v })}
+          min={1}
+          max={500}
+          disabled={disabled}
+        />
+      </div>
+      <div className="border-t border-gray-700 pt-4 mt-4">
+        <h4 className="text-sm font-medium text-gray-400 mb-3">Win Rate Check</h4>
+        <NumberInput
+          label="Check After Trades"
+          value={circuitBreaker.win_rate_check_after}
+          onChange={(v) => onChange({ win_rate_check_after: v })}
+          min={1}
+          max={50}
+          description="Start checking win rate after this many trades"
+          disabled={disabled}
+        />
+        <SliderInput
+          label="Min Win Rate"
+          value={circuitBreaker.min_win_rate_pct}
+          onChange={(v) => onChange({ min_win_rate_pct: v })}
+          min={0}
+          max={100}
+          step={5}
+          unit="%"
+          description="Trigger circuit breaker if win rate falls below"
+          disabled={disabled}
+        />
+      </div>
+    </>
+  );
+}
+
+// ==================== Hedge Section ====================
+
+interface HedgeSectionProps {
+  hedge: HedgeConfig;
+  onChange: (updates: Partial<HedgeConfig>) => void;
+  disabled?: boolean;
+}
+
+function HedgeSection({ hedge, onChange, disabled }: HedgeSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Allow Hedging"
+        checked={hedge.allow_hedge}
+        onChange={(v) => onChange({ allow_hedge: v })}
+        description="Allow opening opposite positions to hedge"
+        disabled={disabled}
+      />
+      {hedge.allow_hedge && (
+        <>
+          <SliderInput
+            label="Min Confidence for Hedge"
+            value={hedge.min_confidence_for_hedge}
+            onChange={(v) => onChange({ min_confidence_for_hedge: v })}
+            min={50}
+            max={95}
+            step={5}
+            unit="%"
+            description="Minimum confidence to open hedge position"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Existing Must Be In Profit"
+            value={hedge.existing_must_be_in_profit_pct}
+            onChange={(v) => onChange({ existing_must_be_in_profit_pct: v })}
+            min={0}
+            max={50}
+            step={0.5}
+            unit="%"
+            description="Existing position must have this profit to hedge"
+            disabled={disabled}
+          />
+          <SliderInput
+            label="Max Hedge Size"
+            value={hedge.max_hedge_size_percent}
+            onChange={(v) => onChange({ max_hedge_size_percent: v })}
+            min={10}
+            max={100}
+            step={10}
+            unit="%"
+            description="Maximum hedge size as % of original position"
+            disabled={disabled}
+          />
+          <ToggleInput
+            label="Allow Same Mode Hedge"
+            checked={hedge.allow_same_mode_hedge}
+            onChange={(v) => onChange({ allow_same_mode_hedge: v })}
+            description="Allow hedging within the same trading mode"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Max Total Exposure"
+            value={hedge.max_total_exposure_multiplier}
+            onChange={(v) => onChange({ max_total_exposure_multiplier: v })}
+            min={1}
+            max={5}
+            step={0.5}
+            unit="x"
+            description="Maximum combined exposure multiplier"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Averaging Section ====================
+
+interface AveragingSectionProps {
+  averaging: AveragingConfig;
+  onChange: (updates: Partial<AveragingConfig>) => void;
+  disabled?: boolean;
+}
+
+function AveragingSection({ averaging, onChange, disabled }: AveragingSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Allow Averaging"
+        checked={averaging.allow_averaging}
+        onChange={(v) => onChange({ allow_averaging: v })}
+        description="Allow adding to existing positions"
+        disabled={disabled}
+      />
+      {averaging.allow_averaging && (
+        <>
+          <div className="grid grid-cols-2 gap-4">
+            <NumberInput
+              label="Average Up After"
+              value={averaging.average_up_profit_percent}
+              onChange={(v) => onChange({ average_up_profit_percent: v })}
+              min={0.5}
+              max={20}
+              step={0.5}
+              unit="%"
+              description="Add when in profit"
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Average Down After"
+              value={averaging.average_down_loss_percent}
+              onChange={(v) => onChange({ average_down_loss_percent: v })}
+              min={0.5}
+              max={20}
+              step={0.5}
+              unit="%"
+              description="Add when at loss"
+              disabled={disabled}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <NumberInput
+              label="Add Size"
+              value={averaging.add_size_percent}
+              onChange={(v) => onChange({ add_size_percent: v })}
+              min={10}
+              max={100}
+              step={10}
+              unit="%"
+              description="Size of add as % of original"
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Max Averages"
+              value={averaging.max_averages}
+              onChange={(v) => onChange({ max_averages: v })}
+              min={1}
+              max={10}
+              description="Maximum number of adds"
+              disabled={disabled}
+            />
+          </div>
+          <SliderInput
+            label="Min Confidence"
+            value={averaging.min_confidence_for_average}
+            onChange={(v) => onChange({ min_confidence_for_average: v })}
+            min={50}
+            max={95}
+            step={5}
+            unit="%"
+            description="Minimum confidence for averaging"
+            disabled={disabled}
+          />
+          <ToggleInput
+            label="Use LLM for Averaging"
+            checked={averaging.use_llm_for_averaging}
+            onChange={(v) => onChange({ use_llm_for_averaging: v })}
+            description="Let AI decide when to average"
+            disabled={disabled}
+          />
+          <div className="border-t border-gray-700 pt-4 mt-4">
+            <ToggleInput
+              label="Staged Entry"
+              checked={averaging.staged_entry_enabled}
+              onChange={(v) => onChange({ staged_entry_enabled: v })}
+              description="Split initial entry into stages"
+              disabled={disabled}
+            />
+            {averaging.staged_entry_enabled && (
+              <NumberInput
+                label="Entry Levels"
+                value={averaging.staged_entry_levels}
+                onChange={(v) => onChange({ staged_entry_levels: v })}
+                min={2}
+                max={5}
+                description="Number of staged entry levels"
+                disabled={disabled}
+              />
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Stale Release Section ====================
+
+interface StaleReleaseSectionProps {
+  staleRelease: StaleReleaseConfig;
+  onChange: (updates: Partial<StaleReleaseConfig>) => void;
+  disabled?: boolean;
+}
+
+function StaleReleaseSection({ staleRelease, onChange, disabled }: StaleReleaseSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Enable Stale Release"
+        checked={staleRelease.enabled}
+        onChange={(v) => onChange({ enabled: v })}
+        description="Automatically release stale positions"
+        disabled={disabled}
+      />
+      {staleRelease.enabled && (
+        <>
+          <NumberInput
+            label="Max Hold Duration"
+            value={staleRelease.max_hold_duration_minutes}
+            onChange={(v) => onChange({ max_hold_duration_minutes: v })}
+            min={1}
+            max={10080}
+            unit="min"
+            description="Maximum time before forced action"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Min Profit to Keep"
+            value={staleRelease.min_profit_to_keep_pct}
+            onChange={(v) => onChange({ min_profit_to_keep_pct: v })}
+            min={0}
+            max={10}
+            step={0.1}
+            unit="%"
+            description="Keep position if profit above this"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Max Loss to Force Close"
+            value={staleRelease.max_loss_to_force_close_pct}
+            onChange={(v) => onChange({ max_loss_to_force_close_pct: v })}
+            min={0}
+            max={20}
+            step={0.1}
+            unit="%"
+            description="Force close if loss exceeds this"
+            disabled={disabled}
+          />
+          <div className="border-t border-gray-700 pt-4 mt-4">
+            <h4 className="text-sm font-medium text-gray-400 mb-3">Stale Zone</h4>
+            <div className="grid grid-cols-2 gap-4">
+              <NumberInput
+                label="Zone Low"
+                value={staleRelease.stale_zone_lo_pct}
+                onChange={(v) => onChange({ stale_zone_lo_pct: v })}
+                min={-10}
+                max={0}
+                step={0.1}
+                unit="%"
+                disabled={disabled}
+              />
+              <NumberInput
+                label="Zone High"
+                value={staleRelease.stale_zone_hi_pct}
+                onChange={(v) => onChange({ stale_zone_hi_pct: v })}
+                min={0}
+                max={10}
+                step={0.1}
+                unit="%"
+                disabled={disabled}
+              />
+            </div>
+            <SelectInput
+              label="Zone Action"
+              value={staleRelease.stale_zone_action}
+              onChange={(v) => onChange({ stale_zone_action: v })}
+              options={STALE_ACTION_OPTIONS}
+              description="Action when position is in stale zone"
+              disabled={disabled}
+            />
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Position Optimization Section ====================
+
+interface PositionOptimizationSectionProps {
+  optimization: PositionOptimizationConfig;
+  onChange: (updates: Partial<PositionOptimizationConfig>) => void;
+  disabled?: boolean;
+}
+
+function PositionOptimizationSection({ optimization, onChange, disabled }: PositionOptimizationSectionProps) {
+  return (
+    <>
+      <div className="space-y-4">
+        <h4 className="text-sm font-medium text-gray-400">Re-Entry Settings</h4>
+        <ToggleInput
+          label="Enable Re-Entry"
+          checked={optimization.reentry_enabled}
+          onChange={(v) => onChange({ reentry_enabled: v })}
+          description="Allow re-entry after partial exit"
+          disabled={disabled}
+        />
+        {optimization.reentry_enabled && (
+          <>
+            <ToggleInput
+              label="Re-Entry After TP1"
+              checked={optimization.reentry_after_tp1}
+              onChange={(v) => onChange({ reentry_after_tp1: v })}
+              description="Allow re-entry after hitting TP1"
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Min Pullback"
+              value={optimization.reentry_min_pullback_pct}
+              onChange={(v) => onChange({ reentry_min_pullback_pct: v })}
+              min={0.1}
+              max={10}
+              step={0.1}
+              unit="%"
+              description="Minimum pullback before re-entry"
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Max Re-Entries"
+              value={optimization.max_reentries_per_position}
+              onChange={(v) => onChange({ max_reentries_per_position: v })}
+              min={0}
+              max={10}
+              description="Maximum re-entries per position"
+              disabled={disabled}
+            />
+          </>
+        )}
+      </div>
+
+      <div className="border-t border-gray-700 pt-4 mt-4">
+        <h4 className="text-sm font-medium text-gray-400 mb-3">Dynamic Stop Loss</h4>
+        <ToggleInput
+          label="Enable Dynamic SL"
+          checked={optimization.dynamic_sl_enabled}
+          onChange={(v) => onChange({ dynamic_sl_enabled: v })}
+          description="Move SL to breakeven when in profit"
+          disabled={disabled}
+        />
+        {optimization.dynamic_sl_enabled && (
+          <NumberInput
+            label="Move SL at Profit"
+            value={optimization.dynamic_sl_at_breakeven_pct}
+            onChange={(v) => onChange({ dynamic_sl_at_breakeven_pct: v })}
+            min={0.5}
+            max={10}
+            step={0.1}
+            unit="%"
+            description="Move SL to breakeven at this profit"
+            disabled={disabled}
+          />
+        )}
+      </div>
+
+      <div className="border-t border-gray-700 pt-4 mt-4">
+        <h4 className="text-sm font-medium text-gray-400 mb-3">Profit Protection</h4>
+        <ToggleInput
+          label="Enable Profit Protection"
+          checked={optimization.profit_protection_enabled}
+          onChange={(v) => onChange({ profit_protection_enabled: v })}
+          description="Lock in profits when threshold reached"
+          disabled={disabled}
+        />
+        {optimization.profit_protection_enabled && (
+          <div className="grid grid-cols-2 gap-4">
+            <NumberInput
+              label="Trigger At"
+              value={optimization.profit_protection_trigger_pct}
+              onChange={(v) => onChange({ profit_protection_trigger_pct: v })}
+              min={1}
+              max={20}
+              step={0.5}
+              unit="%"
+              description="Activate at this profit"
+              disabled={disabled}
+            />
+            <NumberInput
+              label="Lock In"
+              value={optimization.profit_protection_lock_pct}
+              onChange={(v) => onChange({ profit_protection_lock_pct: v })}
+              min={0.5}
+              max={15}
+              step={0.5}
+              unit="%"
+              description="Lock in this profit"
+              disabled={disabled}
+            />
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+// ==================== Funding Rate Section ====================
+
+interface FundingRateSectionProps {
+  fundingRate: FundingRateConfig;
+  onChange: (updates: Partial<FundingRateConfig>) => void;
+  disabled?: boolean;
+}
+
+function FundingRateSection({ fundingRate, onChange, disabled }: FundingRateSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Enable Funding Rate Management"
+        checked={fundingRate.enabled}
+        onChange={(v) => onChange({ enabled: v })}
+        description="Manage positions around funding rate events"
+        disabled={disabled}
+      />
+      {fundingRate.enabled && (
+        <>
+          <NumberInput
+            label="Max Funding Rate"
+            value={fundingRate.max_funding_rate_pct}
+            onChange={(v) => onChange({ max_funding_rate_pct: v })}
+            min={0.01}
+            max={1}
+            step={0.01}
+            unit="%"
+            description="Maximum acceptable funding rate"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Exit Before Funding"
+            value={fundingRate.exit_before_funding_minutes}
+            onChange={(v) => onChange({ exit_before_funding_minutes: v })}
+            min={0}
+            max={60}
+            unit="min"
+            description="Exit this many minutes before funding"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Block Entry Above"
+            value={fundingRate.block_entry_above_rate_pct}
+            onChange={(v) => onChange({ block_entry_above_rate_pct: v })}
+            min={0.01}
+            max={1}
+            step={0.01}
+            unit="%"
+            description="Block new entries above this rate"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Risk Section ====================
+
+interface RiskSectionProps {
+  risk: RiskConfig;
+  onChange: (updates: Partial<RiskConfig>) => void;
+  disabled?: boolean;
+}
+
+function RiskSection({ risk, onChange, disabled }: RiskSectionProps) {
+  return (
+    <>
+      <SelectInput
+        label="Risk Level"
+        value={risk.risk_level}
+        onChange={(v) => onChange({ risk_level: v })}
+        options={RISK_LEVEL_OPTIONS}
+        description="Overall risk tolerance for this strategy"
+        disabled={disabled}
+      />
+      <SliderInput
+        label="Max Drawdown"
+        value={risk.max_drawdown_percent}
+        onChange={(v) => onChange({ max_drawdown_percent: v })}
+        min={1}
+        max={50}
+        step={1}
+        unit="%"
+        description="Maximum allowable drawdown"
+        disabled={disabled}
+        accentColor="accent-red-500"
+      />
+      <SliderInput
+        label="Max Daily Loss"
+        value={risk.max_daily_loss_percent}
+        onChange={(v) => onChange({ max_daily_loss_percent: v })}
+        min={1}
+        max={20}
+        step={1}
+        unit="%"
+        description="Maximum loss per day"
+        disabled={disabled}
+        accentColor="accent-red-500"
+      />
+      <SliderInput
+        label="Position Risk"
+        value={risk.position_risk_percent}
+        onChange={(v) => onChange({ position_risk_percent: v })}
+        min={0.5}
+        max={10}
+        step={0.5}
+        unit="%"
+        description="Risk per position as % of capital"
+        disabled={disabled}
+      />
+    </>
+  );
+}
+
+// ==================== Trend Divergence Section ====================
+
+interface TrendDivergenceSectionProps {
+  divergence: TrendDivergenceConfig;
+  onChange: (updates: Partial<TrendDivergenceConfig>) => void;
+  disabled?: boolean;
+}
+
+function TrendDivergenceSection({ divergence, onChange, disabled }: TrendDivergenceSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Enable Divergence Detection"
+        checked={divergence.enabled}
+        onChange={(v) => onChange({ enabled: v })}
+        description="Detect price/indicator divergence"
+        disabled={disabled}
+      />
+      {divergence.enabled && (
+        <>
+          <NumberInput
+            label="Min Divergence"
+            value={divergence.min_divergence_percent}
+            onChange={(v) => onChange({ min_divergence_percent: v })}
+            min={0.5}
+            max={20}
+            step={0.5}
+            unit="%"
+            description="Minimum divergence to trigger"
+            disabled={disabled}
+          />
+          <ToggleInput
+            label="Block on Divergence"
+            checked={divergence.block_on_divergence}
+            onChange={(v) => onChange({ block_on_divergence: v })}
+            description="Block entries when divergence detected"
+            disabled={disabled}
+          />
+          <SliderInput
+            label="Divergence Weight"
+            value={divergence.divergence_weight}
+            onChange={(v) => onChange({ divergence_weight: v })}
+            min={0}
+            max={100}
+            step={5}
+            unit="%"
+            description="Weight in entry decision"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Dynamic AI Exit Section ====================
+
+interface DynamicAIExitSectionProps {
+  aiExit: DynamicAIExitConfig;
+  onChange: (updates: Partial<DynamicAIExitConfig>) => void;
+  disabled?: boolean;
+}
+
+function DynamicAIExitSection({ aiExit, onChange, disabled }: DynamicAIExitSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Enable AI Exit"
+        checked={aiExit.enabled}
+        onChange={(v) => onChange({ enabled: v })}
+        description="Use AI/LLM for exit decisions"
+        disabled={disabled}
+      />
+      {aiExit.enabled && (
+        <>
+          <NumberInput
+            label="Min Hold Before AI"
+            value={Math.round(aiExit.min_hold_before_ai_ms / 1000)}
+            onChange={(v) => onChange({ min_hold_before_ai_ms: v * 1000 })}
+            min={0}
+            max={3600}
+            unit="sec"
+            description="Minimum hold time before AI can exit"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="AI Check Interval"
+            value={Math.round(aiExit.ai_check_interval_ms / 1000)}
+            onChange={(v) => onChange({ ai_check_interval_ms: v * 1000 })}
+            min={5}
+            max={300}
+            unit="sec"
+            description="How often AI evaluates position"
+            disabled={disabled}
+          />
+          <ToggleInput
+            label="Use LLM for Loss"
+            checked={aiExit.use_llm_for_loss}
+            onChange={(v) => onChange({ use_llm_for_loss: v })}
+            description="Let AI decide when to exit losing positions"
+            disabled={disabled}
+          />
+          <ToggleInput
+            label="Use LLM for Profit"
+            checked={aiExit.use_llm_for_profit}
+            onChange={(v) => onChange({ use_llm_for_profit: v })}
+            description="Let AI decide when to exit winning positions"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Max Hold Time"
+            value={Math.round(aiExit.max_hold_time_ms / 60000)}
+            onChange={(v) => onChange({ max_hold_time_ms: v * 60000 })}
+            min={1}
+            max={10080}
+            unit="min"
+            description="Maximum hold time (AI will force exit)"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+// ==================== Early Warning Section ====================
+
+interface EarlyWarningSectionProps {
+  earlyWarning: StrategyEarlyWarningConfig;
+  onChange: (updates: Partial<StrategyEarlyWarningConfig>) => void;
+  disabled?: boolean;
+}
+
+function EarlyWarningSection({ earlyWarning, onChange, disabled }: EarlyWarningSectionProps) {
+  return (
+    <>
+      <ToggleInput
+        label="Enable Early Warning"
+        checked={earlyWarning.enabled}
+        onChange={(v) => onChange({ enabled: v })}
+        description="Monitor underwater positions for early exit"
+        disabled={disabled}
+      />
+      {earlyWarning.enabled && (
+        <>
+          <NumberInput
+            label="Start After"
+            value={earlyWarning.start_after_minutes}
+            onChange={(v) => onChange({ start_after_minutes: v })}
+            min={1}
+            max={120}
+            unit="min"
+            description="Start monitoring after this time"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Min Loss Trigger"
+            value={earlyWarning.min_loss_percent}
+            onChange={(v) => onChange({ min_loss_percent: v })}
+            min={0.1}
+            max={10}
+            step={0.1}
+            unit="%"
+            description="Minimum loss to trigger warning"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Check Interval"
+            value={earlyWarning.check_interval_secs}
+            onChange={(v) => onChange({ check_interval_secs: v })}
+            min={5}
+            max={300}
+            unit="sec"
+            description="How often to check position"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="Close Min Hold"
+            value={earlyWarning.close_min_hold_mins}
+            onChange={(v) => onChange({ close_min_hold_mins: v })}
+            min={1}
+            max={60}
+            unit="min"
+            description="Minimum hold before early close allowed"
+            disabled={disabled}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
 // ==================== Position Settings Section ====================
 
 interface PositionSettingsSectionProps {
@@ -368,6 +1424,42 @@ function SLTPSettingsSection({ sltp, onChange, disabled }: SLTPSettingsSectionPr
             max={50}
             step={0.1}
             unit="%"
+            disabled={disabled}
+          />
+        </div>
+        <h4 className="text-sm font-medium text-gray-400 mt-4">Position Cut % at Each TP</h4>
+        <div className="grid grid-cols-3 gap-3">
+          <NumberInput
+            label="TP1 Sell"
+            value={sltp.tp1_sell_percent ?? 33}
+            onChange={(v) => onChange({ tp1_sell_percent: v })}
+            min={0}
+            max={100}
+            step={5}
+            unit="%"
+            description="% to close at TP1"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="TP2 Sell"
+            value={sltp.tp2_sell_percent ?? 33}
+            onChange={(v) => onChange({ tp2_sell_percent: v })}
+            min={0}
+            max={100}
+            step={5}
+            unit="%"
+            description="% to close at TP2"
+            disabled={disabled}
+          />
+          <NumberInput
+            label="TP3 Sell"
+            value={sltp.tp3_sell_percent ?? 34}
+            onChange={(v) => onChange({ tp3_sell_percent: v })}
+            min={0}
+            max={100}
+            step={5}
+            unit="%"
+            description="% to close at TP3"
             disabled={disabled}
           />
         </div>
@@ -863,6 +1955,114 @@ export default function StrategySettingsForm({
     setHasChanges(true);
   }, []);
 
+  // Update timeframe config
+  const updateTimeframe = useCallback((updates: Partial<StrategyTimeframe>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      timeframe: { ...prev.timeframe, ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update MTF config
+  const updateMTF = useCallback((updates: Partial<MTFConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      mtf: { ...(prev.mtf || {} as MTFConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update circuit breaker config
+  const updateCircuitBreaker = useCallback((updates: Partial<StrategyCircuitBreakerConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      circuit_breaker: { ...(prev.circuit_breaker || {} as StrategyCircuitBreakerConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update hedge config
+  const updateHedge = useCallback((updates: Partial<HedgeConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      hedge: { ...(prev.hedge || {} as HedgeConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update averaging config
+  const updateAveraging = useCallback((updates: Partial<AveragingConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      averaging: { ...(prev.averaging || {} as AveragingConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update stale release config
+  const updateStaleRelease = useCallback((updates: Partial<StaleReleaseConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      stale_release: { ...(prev.stale_release || {} as StaleReleaseConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update position optimization config
+  const updatePositionOptimization = useCallback((updates: Partial<PositionOptimizationConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      position_optimization: { ...(prev.position_optimization || {} as PositionOptimizationConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update funding rate config
+  const updateFundingRate = useCallback((updates: Partial<FundingRateConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      funding_rate: { ...(prev.funding_rate || {} as FundingRateConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update risk config
+  const updateRisk = useCallback((updates: Partial<RiskConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      risk: { ...(prev.risk || {} as RiskConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update trend divergence config
+  const updateTrendDivergence = useCallback((updates: Partial<TrendDivergenceConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      trend_divergence: { ...(prev.trend_divergence || {} as TrendDivergenceConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update dynamic AI exit config
+  const updateDynamicAIExit = useCallback((updates: Partial<DynamicAIExitConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      dynamic_ai_exit: { ...(prev.dynamic_ai_exit || {} as DynamicAIExitConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
+  // Update early warning config
+  const updateEarlyWarning = useCallback((updates: Partial<StrategyEarlyWarningConfig>) => {
+    setLocalConfig((prev) => ({
+      ...prev,
+      early_warning: { ...(prev.early_warning || {} as StrategyEarlyWarningConfig), ...updates },
+    }));
+    setHasChanges(true);
+  }, []);
+
   // Handle save
   const handleSave = async () => {
     await onSave(localConfig);
@@ -896,8 +2096,8 @@ export default function StrategySettingsForm({
           title="Position Settings"
           icon={<Sliders className="w-4 h-4" />}
           iconColor="text-blue-400"
-          expanded={expandedSections.position}
-          onToggle={() => toggleSection('position')}
+          expanded={expandedSections.position_sizing}
+          onToggle={() => toggleSection('position_sizing')}
         >
           <PositionSettingsSection
             config={localConfig}
@@ -941,8 +2141,8 @@ export default function StrategySettingsForm({
           title="Entry Conditions"
           icon={<TrendingUp className="w-4 h-4" />}
           iconColor="text-purple-400"
-          expanded={expandedSections.entry}
-          onToggle={() => toggleSection('entry')}
+          expanded={expandedSections.entry_conditions}
+          onToggle={() => toggleSection('entry_conditions')}
         >
           <EntryConditionsSection
             strategyName={strategyName}
@@ -957,8 +2157,8 @@ export default function StrategySettingsForm({
           title="Exit Conditions"
           icon={<Activity className="w-4 h-4" />}
           iconColor="text-yellow-400"
-          expanded={expandedSections.exit}
-          onToggle={() => toggleSection('exit')}
+          expanded={expandedSections.exit_conditions}
+          onToggle={() => toggleSection('exit_conditions')}
         >
           <ExitConditionsSection
             exit={localConfig.exit_conditions}
@@ -978,6 +2178,186 @@ export default function StrategySettingsForm({
           <ScoringSection
             scoring={localConfig.scoring}
             onChange={updateScoring}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Timeframe Settings */}
+        <CollapsibleSection
+          title="Timeframe"
+          icon={<Clock className="w-4 h-4" />}
+          iconColor="text-orange-400"
+          expanded={expandedSections.timeframe}
+          onToggle={() => toggleSection('timeframe')}
+        >
+          <TimeframeSection
+            timeframe={localConfig.timeframe}
+            onChange={updateTimeframe}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Multi-Timeframe Analysis */}
+        <CollapsibleSection
+          title="Multi-Timeframe Analysis"
+          icon={<Layers className="w-4 h-4" />}
+          iconColor="text-indigo-400"
+          expanded={expandedSections.mtf}
+          onToggle={() => toggleSection('mtf')}
+        >
+          <MTFSection
+            mtf={localConfig.mtf || DEFAULT_MTF_CONFIG}
+            onChange={updateMTF}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Circuit Breaker */}
+        <CollapsibleSection
+          title="Circuit Breaker"
+          icon={<AlertTriangle className="w-4 h-4" />}
+          iconColor="text-red-500"
+          expanded={expandedSections.circuit_breaker}
+          onToggle={() => toggleSection('circuit_breaker')}
+        >
+          <CircuitBreakerSection
+            circuitBreaker={localConfig.circuit_breaker || DEFAULT_CIRCUIT_BREAKER_CONFIG}
+            onChange={updateCircuitBreaker}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Hedging */}
+        <CollapsibleSection
+          title="Hedging"
+          icon={<Scale className="w-4 h-4" />}
+          iconColor="text-teal-400"
+          expanded={expandedSections.hedge}
+          onToggle={() => toggleSection('hedge')}
+        >
+          <HedgeSection
+            hedge={localConfig.hedge || DEFAULT_HEDGE_CONFIG}
+            onChange={updateHedge}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Position Averaging */}
+        <CollapsibleSection
+          title="Position Averaging"
+          icon={<PlusCircle className="w-4 h-4" />}
+          iconColor="text-lime-400"
+          expanded={expandedSections.averaging}
+          onToggle={() => toggleSection('averaging')}
+        >
+          <AveragingSection
+            averaging={localConfig.averaging || DEFAULT_AVERAGING_CONFIG}
+            onChange={updateAveraging}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Stale Position Release */}
+        <CollapsibleSection
+          title="Stale Position Release"
+          icon={<Timer className="w-4 h-4" />}
+          iconColor="text-amber-400"
+          expanded={expandedSections.stale_release}
+          onToggle={() => toggleSection('stale_release')}
+        >
+          <StaleReleaseSection
+            staleRelease={localConfig.stale_release || DEFAULT_STALE_RELEASE_CONFIG}
+            onChange={updateStaleRelease}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Position Optimization */}
+        <CollapsibleSection
+          title="Position Optimization"
+          icon={<Zap className="w-4 h-4" />}
+          iconColor="text-pink-400"
+          expanded={expandedSections.position_optimization}
+          onToggle={() => toggleSection('position_optimization')}
+        >
+          <PositionOptimizationSection
+            optimization={localConfig.position_optimization || DEFAULT_POSITION_OPTIMIZATION_CONFIG}
+            onChange={updatePositionOptimization}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Funding Rate */}
+        <CollapsibleSection
+          title="Funding Rate"
+          icon={<DollarSign className="w-4 h-4" />}
+          iconColor="text-emerald-400"
+          expanded={expandedSections.funding_rate}
+          onToggle={() => toggleSection('funding_rate')}
+        >
+          <FundingRateSection
+            fundingRate={localConfig.funding_rate || DEFAULT_FUNDING_RATE_CONFIG}
+            onChange={updateFundingRate}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Risk Management */}
+        <CollapsibleSection
+          title="Risk Management"
+          icon={<AlertCircle className="w-4 h-4" />}
+          iconColor="text-rose-400"
+          expanded={expandedSections.risk}
+          onToggle={() => toggleSection('risk')}
+        >
+          <RiskSection
+            risk={localConfig.risk || DEFAULT_RISK_CONFIG}
+            onChange={updateRisk}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Trend Divergence */}
+        <CollapsibleSection
+          title="Trend Divergence"
+          icon={<GitBranch className="w-4 h-4" />}
+          iconColor="text-violet-400"
+          expanded={expandedSections.trend_divergence}
+          onToggle={() => toggleSection('trend_divergence')}
+        >
+          <TrendDivergenceSection
+            divergence={localConfig.trend_divergence || DEFAULT_TREND_DIVERGENCE_CONFIG}
+            onChange={updateTrendDivergence}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Dynamic AI Exit */}
+        <CollapsibleSection
+          title="Dynamic AI Exit"
+          icon={<Brain className="w-4 h-4" />}
+          iconColor="text-fuchsia-400"
+          expanded={expandedSections.dynamic_ai_exit}
+          onToggle={() => toggleSection('dynamic_ai_exit')}
+        >
+          <DynamicAIExitSection
+            aiExit={localConfig.dynamic_ai_exit || DEFAULT_DYNAMIC_AI_EXIT_CONFIG}
+            onChange={updateDynamicAIExit}
+            disabled={isDisabled}
+          />
+        </CollapsibleSection>
+
+        {/* Story 11.41: Early Warning */}
+        <CollapsibleSection
+          title="Early Warning"
+          icon={<Bell className="w-4 h-4" />}
+          iconColor="text-sky-400"
+          expanded={expandedSections.early_warning}
+          onToggle={() => toggleSection('early_warning')}
+        >
+          <EarlyWarningSection
+            earlyWarning={localConfig.early_warning || DEFAULT_EARLY_WARNING_CONFIG}
+            onChange={updateEarlyWarning}
             disabled={isDisabled}
           />
         </CollapsibleSection>

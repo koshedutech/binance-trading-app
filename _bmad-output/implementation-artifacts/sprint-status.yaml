@@ -132,7 +132,7 @@ development_status:
   #   - Redis caching for active chains
   #   - User timezone support
   # ============================================================================
-  epic-7: done  # ALL 20 STORIES COMPLETE - QA VERIFIED 2026-01-18
+  epic-7: in-progress  # Reopened for Story 7.21 (Order Chain Display Fixes)
   7-1-client-order-id-generation: done          # internal/orders/client_order_id.go
   7-2-daily-sequence-storage-in-redis: done     # cache_service.go:IncrementDailySequence
   7-3-order-chain-tracking: done                 # All chain tracking complete: DB migration, ChainTracker, H/HSL/HTP/DCA suffixes, tests
@@ -156,6 +156,8 @@ development_status:
   7-18-autopilot-event-integration: done # P0 - Wire into GinieAutopilot - DONE 2026-01-18 (SL/TP events)
   7-19-order-chain-tree-ui-restructure: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
   7-20-order-chain-redis-cache-layer: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-18
+  # Part L: Bug Fixes (added 2026-01-23)
+  7-21-order-chain-data-display-fixes: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-23
   epic-7-retrospective: optional
 
   # ============================================================================
@@ -242,7 +244,7 @@ development_status:
   #   market regime detection, multi-strategy framework, calibration layer
   # Dependencies: Epic 6 (Redis), Epic 10 (Position Management)
   # ============================================================================
-  epic-11: in-progress  # Reopened for Story 11.34
+  epic-11: in-progress  # Reopened for Story 11.40 (Entry Decision Engine Gap Analysis UI)
   # Part A: Infrastructure (P0)
   11-1-redis-state-management: done  # QA PASSED 2026-01-17
   11-2-delta-update-processor: done  # QA PASSED 2026-01-17
@@ -293,10 +295,16 @@ development_status:
   11-37-wire-strategy-selection: done  # Completed 2026-01-20
   11-38-reset-settings-comparison-new-structure: done  # Completed 2026-01-20 - Added backend compare endpoint
   11-39-futures-mode-strategy-data-wiring: done  # Completed 2026-01-20 - Verified all API wiring working
-  epic-11-retrospective: done  # Completed 2026-01-20
+  # Part J: Entry Decision Engine UI Enhancements (added 2026-01-23)
+  11-40-entry-decision-engine-gap-analysis-ui: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-23 (frontend tests missing)
+  # Part K: Configuration Amendment (added 2026-01-23)
+  11-41-comprehensive-mode-strategy-config: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-23
+  epic-11-retrospective: optional  # Reopened for Story 11.41
   # ============================================================================
-  # EPIC 11 - 39 stories total (ALL COMPLETE)
-  # Part K completed 2026-01-20 - mode-strategy runtime integration done
+  # EPIC 11 - 41 stories total (ALL COMPLETE)
+  # Part J added 2026-01-23 - Entry Decision Engine Gap Analysis UI
+  # Part K added 2026-01-23 - Configuration Amendment (Story 11.41)
+  # Story 11.40 completed 2026-01-23 with CODE REVIEW PASSED + QA CONCERNS
   # ============================================================================
 
   # ============================================================================

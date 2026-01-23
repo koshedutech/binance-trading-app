@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import TradeLifecycleEvents from './TradeLifecycleEvents';
 
-type TabType = 'live' | 'orders' | 'history' | 'ai_trades' | 'lifecycle';
+type TabType = 'orders' | 'history' | 'ai_trades' | 'lifecycle';
 
 interface RegularOrder {
   orderId: number;
@@ -98,8 +98,8 @@ interface AIDecisionFromAPI {
 }
 
 export default function FuturesOrdersHistory() {
-  const [activeTab, setActiveTab] = useState<TabType>('live');
-  const [isLiveMode, setIsLiveMode] = useState(true);
+  // Simplified: Removed 'live' tab as it was redundant with 'orders'
+  const [activeTab, setActiveTab] = useState<TabType>('orders');
   const [loading, setLoading] = useState(false);
   const [regularOrders, setRegularOrders] = useState<RegularOrder[]>([]);
   const [algoOrders, setAlgoOrders] = useState<AlgoOrder[]>([]);
@@ -154,7 +154,7 @@ export default function FuturesOrdersHistory() {
 
   // Fetch data when tab changes
   useEffect(() => {
-    if (activeTab === 'live' || activeTab === 'orders') {
+    if (activeTab === 'orders') {
       fetchOrders();
     } else if (activeTab === 'history') {
       fetchTrades();
@@ -273,8 +273,8 @@ export default function FuturesOrdersHistory() {
     }
   };
 
+  // Simplified tabs - removed redundant 'Live' tab (Trade Lifecycle handles live/historical)
   const tabs = [
-    { id: 'live' as TabType, label: 'Live', icon: Activity, badge: 'LIVE' },
     { id: 'orders' as TabType, label: 'Open Orders', icon: FileText, count: regularOrders.length + algoOrders.length },
     { id: 'history' as TabType, label: 'Trade History', icon: History },
     { id: 'ai_trades' as TabType, label: 'AI Decisions', icon: Brain, count: aiDecisions.length > 0 ? aiDecisions.length : undefined },
@@ -289,30 +289,15 @@ export default function FuturesOrdersHistory() {
           {tabs.map((tab) => (
             <button
               key={tab.id}
-              onClick={() => {
-                setActiveTab(tab.id);
-                if (tab.id === 'live') {
-                  setIsLiveMode(true);
-                }
-              }}
+              onClick={() => setActiveTab(tab.id)}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === tab.id
-                  ? tab.id === 'live'
-                    ? 'border-green-500 text-green-500'
-                    : 'border-yellow-500 text-yellow-500'
+                  ? 'border-yellow-500 text-yellow-500'
                   : 'border-transparent text-gray-400 hover:text-white'
               }`}
             >
-              <tab.icon className={`w-4 h-4 ${tab.id === 'live' && activeTab === 'live' ? 'animate-pulse' : ''}`} />
+              <tab.icon className="w-4 h-4" />
               {tab.label}
-              {'badge' in tab && tab.badge && (
-                <span className="relative flex items-center">
-                  <span className="absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75 animate-ping"></span>
-                  <span className="relative px-1.5 py-0.5 bg-green-500/20 text-green-500 text-xs rounded font-bold">
-                    {tab.badge}
-                  </span>
-                </span>
-              )}
               {tab.count !== undefined && tab.count > 0 && (
                 <span className="px-1.5 py-0.5 bg-yellow-500/20 text-yellow-500 text-xs rounded">
                   {tab.count}
@@ -336,7 +321,7 @@ export default function FuturesOrdersHistory() {
 
           <button
             onClick={() => {
-              if (activeTab === 'live' || activeTab === 'orders') fetchOrders();
+              if (activeTab === 'orders') fetchOrders();
               else if (activeTab === 'history') fetchTrades();
               else if (activeTab === 'ai_trades') fetchAIDecisions();
             }}
@@ -349,17 +334,6 @@ export default function FuturesOrdersHistory() {
 
       {/* Tab Content */}
       <div className="overflow-x-auto max-h-96">
-        {activeTab === 'live' && (
-          <LiveOrdersContent
-            regularOrders={regularOrders}
-            algoOrders={algoOrders}
-            loading={loading}
-            isLiveMode={isLiveMode}
-            onCancelOrder={handleCancelOrder}
-            onCancelAlgoOrder={handleCancelAlgoOrder}
-            onReturnToLive={() => setIsLiveMode(true)}
-          />
-        )}
         {activeTab === 'orders' && (
           <OpenOrdersContent
             regularOrders={regularOrders}
@@ -387,221 +361,6 @@ export default function FuturesOrdersHistory() {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-// Live Orders Content - Real-time view with live indicator
-function LiveOrdersContent({
-  regularOrders,
-  algoOrders,
-  loading,
-  isLiveMode,
-  onCancelOrder,
-  onCancelAlgoOrder,
-  onReturnToLive,
-}: {
-  regularOrders: RegularOrder[];
-  algoOrders: AlgoOrder[];
-  loading: boolean;
-  isLiveMode: boolean;
-  onCancelOrder: (symbol: string, orderId: number) => void;
-  onCancelAlgoOrder: (symbol: string, algoId: number) => void;
-  onReturnToLive: () => void;
-}) {
-  const totalOrders = regularOrders.length + algoOrders.length;
-
-  if (loading && regularOrders.length === 0 && algoOrders.length === 0) {
-    return (
-      <div className="text-center text-gray-400 py-8">
-        <RefreshCw className="w-8 h-8 mx-auto mb-2 animate-spin opacity-30" />
-        <p>Loading live orders...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className={`${isLiveMode ? 'ring-1 ring-green-500/30' : ''}`}>
-      {/* Live Mode Header */}
-      <div className="px-4 py-2 bg-gradient-to-r from-green-900/30 to-gray-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="relative flex h-3 w-3">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
-            </span>
-            <span className="text-green-400 font-medium text-sm">LIVE</span>
-          </div>
-          <span className="text-gray-400 text-sm">
-            {totalOrders} active order{totalOrders !== 1 ? 's' : ''}
-          </span>
-        </div>
-        {!isLiveMode && (
-          <button
-            onClick={onReturnToLive}
-            className="flex items-center gap-2 px-3 py-1.5 bg-green-500/20 hover:bg-green-500/30 text-green-400 text-sm rounded-lg transition-colors"
-          >
-            <Activity className="w-4 h-4" />
-            Return to Live
-          </button>
-        )}
-      </div>
-
-      {totalOrders === 0 ? (
-        <div className="text-center text-gray-400 py-8">
-          <Activity className="w-8 h-8 mx-auto mb-2 opacity-30 text-green-500" />
-          <p>No active orders</p>
-          <p className="text-xs mt-1 text-gray-500">Orders will appear here in real-time</p>
-        </div>
-      ) : (
-        <>
-          {/* Regular Orders Section */}
-          {regularOrders.length > 0 && (
-            <div>
-              <div className="px-4 py-2 bg-gray-800/50 text-sm font-medium text-gray-300 flex items-center gap-2">
-                <Clock className="w-4 h-4 text-green-400" />
-                Regular Orders ({regularOrders.length})
-              </div>
-              <table className="w-full text-sm">
-                <thead className="bg-gray-800/50">
-                  <tr className="text-gray-400">
-                    <th className="text-left py-2 px-4 font-medium">Time</th>
-                    <th className="text-left py-2 px-4 font-medium">Symbol</th>
-                    <th className="text-left py-2 px-4 font-medium">Type</th>
-                    <th className="text-left py-2 px-4 font-medium">Side</th>
-                    <th className="text-right py-2 px-4 font-medium">Price</th>
-                    <th className="text-right py-2 px-4 font-medium">Amount</th>
-                    <th className="text-right py-2 px-4 font-medium">Filled</th>
-                    <th className="text-center py-2 px-4 font-medium">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {regularOrders.map((order) => (
-                    <tr key={order.orderId} className="border-b border-gray-800 hover:bg-gray-800/50">
-                      <td className="py-2 px-4 text-gray-400 text-xs">
-                        {formatDistanceToNow(new Date(order.time), { addSuffix: true })}
-                      </td>
-                      <td className="py-2 px-4 font-medium">{order.symbol}</td>
-                      <td className="py-2 px-4 text-gray-400">{order.type}</td>
-                      <td className={`py-2 px-4 ${order.side === 'BUY' ? 'text-green-500' : 'text-red-500'}`}>
-                        {order.side}
-                        {order.positionSide !== 'BOTH' && (
-                          <span className="text-gray-500 text-xs ml-1">({order.positionSide})</span>
-                        )}
-                      </td>
-                      <td className="py-2 px-4 text-right font-mono">
-                        {order.stopPrice && order.stopPrice > 0 ? (
-                          <div>
-                            <div className="text-yellow-400">{formatPrice(order.stopPrice)}</div>
-                            <div className="text-xs text-gray-500">- {formatPrice(order.price)}</div>
-                          </div>
-                        ) : (
-                          formatPrice(order.price)
-                        )}
-                      </td>
-                      <td className="py-2 px-4 text-right font-mono">{formatQuantity(order.origQty)}</td>
-                      <td className="py-2 px-4 text-right">
-                        <span className={order.executedQty > 0 ? 'text-yellow-500' : ''}>
-                          {formatQuantity(order.executedQty)} / {formatQuantity(order.origQty)}
-                        </span>
-                      </td>
-                      <td className="py-2 px-4 text-center">
-                        <button
-                          onClick={() => onCancelOrder(order.symbol, order.orderId)}
-                          className="p-1 hover:bg-red-500/20 rounded text-red-500"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* Conditional/Algo Orders Section */}
-          {algoOrders.length > 0 && (
-            <div>
-              <div className="px-4 py-2 bg-gray-800/50 text-sm font-medium text-gray-300 flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-yellow-500" />
-                Conditional Orders - TP/SL ({algoOrders.length})
-              </div>
-              <table className="w-full text-sm">
-                <thead className="bg-gray-800/50">
-                  <tr className="text-gray-400">
-                    <th className="text-left py-2 px-4 font-medium">Time</th>
-                    <th className="text-left py-2 px-4 font-medium">Symbol</th>
-                    <th className="text-left py-2 px-4 font-medium">Type</th>
-                    <th className="text-left py-2 px-4 font-medium">Side</th>
-                    <th className="text-right py-2 px-4 font-medium">Trigger</th>
-                    <th className="text-right py-2 px-4 font-medium">Qty</th>
-                    <th className="text-left py-2 px-4 font-medium">Status</th>
-                    <th className="text-center py-2 px-4 font-medium">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {algoOrders.map((order) => {
-                    const isTP = order.orderType === 'TAKE_PROFIT_MARKET' || order.orderType === 'TAKE_PROFIT';
-                    const isSL = order.orderType === 'STOP_MARKET' || order.orderType === 'STOP';
-                    const triggerPrice = parseFloat(order.triggerPrice) || 0;
-                    const qty = parseFloat(order.quantity) || 0;
-                    return (
-                      <tr key={order.algoId} className="border-b border-gray-800 hover:bg-gray-800/50">
-                        <td className="py-2 px-4 text-gray-400 text-xs">
-                          {formatDistanceToNow(new Date(order.createTime), { addSuffix: true })}
-                        </td>
-                        <td className="py-2 px-4 font-medium">{order.symbol}</td>
-                        <td className="py-2 px-4">
-                          <div className="flex items-center gap-1">
-                            {isTP ? (
-                              <><Target className="w-3 h-3 text-green-500" /><span className="text-green-400">TP</span></>
-                            ) : isSL ? (
-                              <><Shield className="w-3 h-3 text-red-500" /><span className="text-red-400">SL</span></>
-                            ) : (
-                              <span className="text-gray-400">{order.orderType}</span>
-                            )}
-                          </div>
-                        </td>
-                        <td className={`py-2 px-4 ${order.side === 'BUY' ? 'text-green-500' : 'text-red-500'}`}>
-                          {order.side}
-                          {order.positionSide !== 'BOTH' && (
-                            <span className="text-gray-500 text-xs ml-1">({order.positionSide})</span>
-                          )}
-                        </td>
-                        <td className="py-2 px-4 text-right font-mono text-yellow-400">
-                          {formatPrice(triggerPrice)}
-                        </td>
-                        <td className="py-2 px-4 text-right font-mono">
-                          {order.closePosition ? <span className="text-purple-400">Close All</span> : formatQuantity(qty)}
-                        </td>
-                        <td className="py-2 px-4">
-                          <span className={`px-2 py-0.5 rounded text-xs ${
-                            order.algoStatus === 'EXECUTING' ? 'bg-green-500/20 text-green-400' :
-                            order.algoStatus === 'NEW' ? 'bg-blue-500/20 text-blue-400' :
-                            order.algoStatus === 'PENDING' ? 'bg-yellow-500/20 text-yellow-400' :
-                            'bg-gray-500/20 text-gray-400'
-                          }`}>
-                            {order.algoStatus}
-                          </span>
-                        </td>
-                        <td className="py-2 px-4 text-center">
-                          <button
-                            onClick={() => onCancelAlgoOrder(order.symbol, order.algoId)}
-                            className="p-1 hover:bg-red-500/20 rounded text-red-500"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
-      )}
     </div>
   );
 }

@@ -1,47 +1,20 @@
 {
   "positions": {
-    "ADAUSDT": {
-      "symbol": "ADAUSDT",
-      "side": "LONG",
+    "DOTUSDT": {
+      "symbol": "DOTUSDT",
+      "side": "SHORT",
       "mode": "scalp",
-      "current_tp_level": 1,
+      "current_tp_level": 0,
       "scalp_reentry": {
         "enabled": true,
-        "current_cycle": 1,
-        "cycles": [
-          {
-            "cycle_number": 1,
-            "tp_level": 1,
-            "mode": "position_optimization",
-            "side": "LONG",
-            "sell_price": 0.3598,
-            "sell_quantity": 29,
-            "sell_pnl": 0.04350000000000004,
-            "sell_order_id": 0,
-            "sell_time": "2026-01-22T16:02:34.857966539Z",
-            "reentry_target_price": 0.3583,
-            "reentry_quantity": 14.5,
-            "reentry_state": "WAITING",
-            "reentry_attempts": 0,
-            "reentry_order_id": 0,
-            "reentry_order_placed_at": "0001-01-01T00:00:00Z",
-            "reentry_filled_price": 0,
-            "reentry_filled_qty": 0,
-            "reentry_fill_time": "0001-01-01T00:00:00Z",
-            "start_time": "2026-01-22T16:02:34.857984443Z",
-            "end_time": "0001-01-01T00:00:00Z",
-            "duration": "",
-            "outcome": "",
-            "outcome_pnl": 0,
-            "outcome_reason": ""
-          }
-        ],
-        "accumulated_profit": 0.04350000000000004,
-        "tp_level_unlocked": 1,
-        "next_tp_blocked": true,
-        "original_entry_price": 0.3583,
-        "current_breakeven": 0.3583,
-        "remaining_quantity": 40,
+        "current_cycle": 0,
+        "cycles": [],
+        "accumulated_profit": 0,
+        "tp_level_unlocked": 0,
+        "next_tp_blocked": false,
+        "original_entry_price": 1.93,
+        "current_breakeven": 1.93,
+        "remaining_quantity": 103,
         "dynamic_sl_active": false,
         "dynamic_sl_price": 0,
         "protected_profit": 0,
@@ -58,45 +31,17 @@
         "successful_reentries": 0,
         "skipped_reentries": 0,
         "total_cycle_pnl": 0,
-        "started_at": "2026-01-22T15:57:31.370504513Z",
-        "last_update": "2026-01-22T16:02:34.858940854Z",
+        "started_at": "2026-01-23T10:54:34.19918115Z",
+        "last_update": "2026-01-23T10:54:34.199329005Z",
         "debug_log": [
-          "15:57:31: [Story 9.9] Initialized position_optimization for ADAUSDT LONG @ 0.35830000 (mode: scalp, TP1=0.4%, TP2=0.7%, TP3=1.0%)",
-          "15:57:31: Monitoring: price=0.35780000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:57:34: Monitoring: price=0.35770000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:57:39: Monitoring: price=0.35780000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:58:33: Monitoring: price=0.35800000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:58:33: Monitoring: price=0.35800000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:58:34: Monitoring: price=0.35800000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:59:31: Monitoring: price=0.35820000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:59:31: Monitoring: price=0.35840000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:59:34: Monitoring: price=0.35820000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:59:39: Monitoring: price=0.35840000, tpUnlocked=0, blocked=false, cycles=0",
-          "15:59:44: Monitoring: price=0.35840000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:00:30: Monitoring: price=0.35920000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:00:30: Monitoring: price=0.35920000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:00:34: Monitoring: price=0.35920000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:00:39: Monitoring: price=0.35930000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:01:30: Monitoring: price=0.35900000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:01:30: Monitoring: price=0.35900000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:01:34: Monitoring: price=0.35900000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:01:39: Monitoring: price=0.35910000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:02:30: Monitoring: price=0.35970000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:02:31: TP1: Target profit 0.40%, sell 30% of position",
-          "16:02:31: TP1: Position qty 98.000000 below exchange min 100.000000 (value $35.25) - NEEDS MANUAL INTERVENTION",
-          "16:02:31: Monitoring: price=0.35970000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:02:32: TP1: Target profit 0.40%, sell 30% of position",
-          "16:02:32: TP1: Position qty 98.000000 below exchange min 100.000000 (value $35.26) - NEEDS MANUAL INTERVENTION",
-          "16:02:34: Monitoring: price=0.35980000, tpUnlocked=0, blocked=false, cycles=0",
-          "16:02:34: TP1 EXCHANGE FILL: profit 0.40%, sold 29.0000 (30% of remaining)",
-          "16:02:34: Waiting for re-entry at breakeven 0.35830000"
+          "10:54:34: [Story 9.9] Initialized position_optimization for DOTUSDT SHORT @ 1.93000000 (mode: scalp, TP1=0.4%, TP2=0.7%, TP3=1.0%)"
         ],
-        "needs_manual_intervention": true,
-        "manual_intervention_reason": "Position quantity 98.000000 is below exchange minimum 100.000000 (value $35.26). Cannot execute TP1 sell. Please close manually.",
-        "manual_intervention_alert_at": "2026-01-22T16:02:32Z"
+        "needs_manual_intervention": false,
+        "manual_intervention_reason": "",
+        "manual_intervention_alert_at": ""
       },
-      "saved_at": "2026-01-22T16:02:34.859950077Z"
+      "saved_at": "2026-01-23T10:54:34.208796335Z"
     }
   },
-  "updated_at": "2026-01-22T16:02:34.859933874Z"
+  "updated_at": "2026-01-23T10:54:34.208772826Z"
 }

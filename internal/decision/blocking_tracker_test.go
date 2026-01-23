@@ -1006,3 +1006,255 @@ func BenchmarkGetBlockingSummary(b *testing.B) {
 		tracker.GetBlockingSummary(reasons)
 	}
 }
+
+// ==================== Story 11.40 Gap Analysis Tests ====================
+
+// TestCalculateGap tests the CalculateGap function for gap analysis UI
+func TestCalculateGap(t *testing.T) {
+	testCases := []struct {
+		name           string
+		currentValue   float64
+		targetValue    float64
+		targetRangeEnd float64
+		expectedGap    float64
+		expectedDir    GapDirection
+		expectDisplay  string
+	}{
+		// Single target tests
+		{
+			name:           "below single target - needs to go up",
+			currentValue:   45,
+			targetValue:    55,
+			targetRangeEnd: 0,
+			expectedGap:    10,
+			expectedDir:    GapDirectionUp,
+			expectDisplay:  "↑10.0",
+		},
+		{
+			name:           "at single target - met",
+			currentValue:   55,
+			targetValue:    55,
+			targetRangeEnd: 0,
+			expectedGap:    0,
+			expectedDir:    GapDirectionInRange,
+			expectDisplay:  "✓ Met",
+		},
+		{
+			name:           "above single target - needs to go down",
+			currentValue:   70,
+			targetValue:    55,
+			targetRangeEnd: 0,
+			expectedGap:    15,
+			expectedDir:    GapDirectionDown,
+			expectDisplay:  "↓15.0",
+		},
+		// Range target tests (e.g., RSI optimal range 40-60)
+		{
+			name:           "below range - needs to go up",
+			currentValue:   30,
+			targetValue:    40,
+			targetRangeEnd: 60,
+			expectedGap:    10,
+			expectedDir:    GapDirectionUp,
+			expectDisplay:  "↑10.0",
+		},
+		{
+			name:           "in range - met",
+			currentValue:   50,
+			targetValue:    40,
+			targetRangeEnd: 60,
+			expectedGap:    0,
+			expectedDir:    GapDirectionInRange,
+			expectDisplay:  "✓ In Range",
+		},
+		{
+			name:           "above range - needs to go down",
+			currentValue:   75,
+			targetValue:    40,
+			targetRangeEnd: 60,
+			expectedGap:    15,
+			expectedDir:    GapDirectionDown,
+			expectDisplay:  "↓15.0",
+		},
+		{
+			name:           "at range lower boundary - in range",
+			currentValue:   40,
+			targetValue:    40,
+			targetRangeEnd: 60,
+			expectedGap:    0,
+			expectedDir:    GapDirectionInRange,
+			expectDisplay:  "✓ In Range",
+		},
+		{
+			name:           "at range upper boundary - in range",
+			currentValue:   60,
+			targetValue:    40,
+			targetRangeEnd: 60,
+			expectedGap:    0,
+			expectedDir:    GapDirectionInRange,
+			expectDisplay:  "✓ In Range",
+		},
+		// Edge cases
+		{
+			name:           "small gap with decimal",
+			currentValue:   52.3,
+			targetValue:    55,
+			targetRangeEnd: 0,
+			expectedGap:    2.7,
+			expectedDir:    GapDirectionUp,
+			expectDisplay:  "↑2.7",
+		},
+		{
+			name:           "zero values",
+			currentValue:   0,
+			targetValue:    0,
+			targetRangeEnd: 0,
+			expectedGap:    0,
+			expectedDir:    GapDirectionInRange,
+			expectDisplay:  "✓ Met",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			gap, dir, display := CalculateGap(tc.currentValue, tc.targetValue, tc.targetRangeEnd)
+
+			// Check gap value (allow small floating point tolerance)
+			if diff := gap - tc.expectedGap; diff > 0.01 || diff < -0.01 {
+				t.Errorf("expected gap=%.2f, got %.2f", tc.expectedGap, gap)
+			}
+
+			if dir != tc.expectedDir {
+				t.Errorf("expected direction=%s, got %s", tc.expectedDir, dir)
+			}
+
+			if display != tc.expectDisplay {
+				t.Errorf("expected display=%q, got %q", tc.expectDisplay, display)
+			}
+		})
+	}
+}
+
+// TestNewBlockingReasonWithGap tests BlockingReasonWithGap creation
+func TestNewBlockingReasonWithGap(t *testing.T) {
+	t.Run("nil BlockingReason returns nil", func(t *testing.T) {
+		result := NewBlockingReasonWithGap(nil, 0)
+		if result != nil {
+			t.Error("expected nil result for nil input")
+		}
+	})
+
+	t.Run("creates gap from BlockingReason with float64 values", func(t *testing.T) {
+		br := &BlockingReason{
+			Code:        ReasonADXTooLow,
+			Category:    CategoryHardBlock,
+			Description: "ADX is below threshold",
+			Value:       float64(10),
+			Threshold:   float64(25),
+			Timestamp:   1234567890,
+			Overridable: false,
+		}
+
+		result := NewBlockingReasonWithGap(br, 0)
+
+		if result == nil {
+			t.Fatal("expected non-nil result")
+		}
+		if result.Code != "ADX_TOO_LOW" {
+			t.Errorf("expected code=ADX_TOO_LOW, got %s", result.Code)
+		}
+		if result.Category != "HARD_BLOCK" {
+			t.Errorf("expected category=HARD_BLOCK, got %s", result.Category)
+		}
+		if result.CurrentValue != 10 {
+			t.Errorf("expected currentValue=10, got %.1f", result.CurrentValue)
+		}
+		if result.TargetValue != 25 {
+			t.Errorf("expected targetValue=25, got %.1f", result.TargetValue)
+		}
+		if result.Gap != 15 {
+			t.Errorf("expected gap=15, got %.1f", result.Gap)
+		}
+		if result.GapDirection != GapDirectionUp {
+			t.Errorf("expected direction=up, got %s", result.GapDirection)
+		}
+		if !result.Overridable != true {
+			t.Error("expected overridable=false")
+		}
+	})
+
+	t.Run("creates gap from BlockingReason with int values", func(t *testing.T) {
+		br := &BlockingReason{
+			Code:        ReasonScoreBelowThreshold,
+			Category:    CategorySoftBlock,
+			Description: "Score is below threshold",
+			Value:       int(45),
+			Threshold:   int(55),
+			Timestamp:   1234567890,
+			Overridable: true,
+		}
+
+		result := NewBlockingReasonWithGap(br, 0)
+
+		if result == nil {
+			t.Fatal("expected non-nil result")
+		}
+		if result.CurrentValue != 45 {
+			t.Errorf("expected currentValue=45, got %.1f", result.CurrentValue)
+		}
+		if result.TargetValue != 55 {
+			t.Errorf("expected targetValue=55, got %.1f", result.TargetValue)
+		}
+	})
+
+	t.Run("handles range target (RSI)", func(t *testing.T) {
+		br := &BlockingReason{
+			Code:        ReasonWeakMomentum,
+			Category:    CategorySoftBlock,
+			Description: "RSI not in optimal range",
+			Value:       float64(30),
+			Threshold:   float64(40),
+			Timestamp:   1234567890,
+			Overridable: true,
+		}
+
+		result := NewBlockingReasonWithGap(br, 60) // Range 40-60
+
+		if result == nil {
+			t.Fatal("expected non-nil result")
+		}
+		if result.TargetRangeEnd != 60 {
+			t.Errorf("expected targetRangeEnd=60, got %.1f", result.TargetRangeEnd)
+		}
+		if result.Gap != 10 {
+			t.Errorf("expected gap=10 (30 to 40), got %.1f", result.Gap)
+		}
+		if result.GapDirection != GapDirectionUp {
+			t.Errorf("expected direction=up, got %s", result.GapDirection)
+		}
+	})
+}
+
+// TestGetBlockingReasonTargetRange tests target range lookup
+func TestGetBlockingReasonTargetRange(t *testing.T) {
+	testCases := []struct {
+		code          BlockingReasonCode
+		expectedRange float64
+	}{
+		{ReasonHighRSI, 0},
+		{ReasonLowRSI, 0},
+		{ReasonWeakMomentum, 60},
+		{ReasonADXTooLow, 0},
+		{ReasonScoreBelowThreshold, 0},
+		{ReasonTrendDivergence, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(string(tc.code), func(t *testing.T) {
+			result := GetBlockingReasonTargetRange(tc.code)
+			if result != tc.expectedRange {
+				t.Errorf("expected range=%.1f, got %.1f", tc.expectedRange, result)
+			}
+		})
+	}
+}

@@ -3483,6 +3483,11 @@ func (ga *GinieAutopilot) runMainLoop() {
 	baseTicker := time.NewTicker(time.Duration(ga.config.ScalpScanInterval) * time.Second)
 	defer baseTicker.Stop()
 
+	// Position broadcast ticker - send position updates to WebSocket every 1 second
+	// This enables real-time UI updates without frontend polling
+	positionBroadcastTicker := time.NewTicker(1 * time.Second)
+	defer positionBroadcastTicker.Stop()
+
 	// Track last scan times for each mode
 	lastScalpScan := time.Now()
 	lastSwingScan := time.Now()
@@ -3513,6 +3518,9 @@ func (ga *GinieAutopilot) runMainLoop() {
 			lastUltraFastScan = time.Time{}
 			// NOTE: scalp_reentry doesn't need separate scan reset - it uses scalp mode scanning
 			log.Println("[GINIE] Config reload complete - next scan will use fresh settings")
+		case <-positionBroadcastTicker.C:
+			// Broadcast current positions to WebSocket for real-time UI updates
+			ga.broadcastPositionStatus()
 		case <-baseTicker.C:
 			now := time.Now()
 
@@ -6611,6 +6619,9 @@ func (ga *GinieAutopilot) executeTradeWithResult(decision *GinieDecisionReport) 
 		},
 	})
 
+	// Broadcast position open immediately for real-time UI update
+	ga.broadcastPositionOpen(symbol)
+
 	// Trade execution was successful
 	return true, "executed"
 }
@@ -8905,6 +8916,59 @@ func (ga *GinieAutopilot) broadcastPositionClosure(symbol string) {
 	ga.logger.Debug("Broadcast position closure",
 		"symbol", symbol,
 		"remaining_positions", len(positions))
+}
+
+// broadcastPositionOpen notifies frontend immediately when a new position is opened
+// This provides instant feedback - user sees new position appear within milliseconds
+func (ga *GinieAutopilot) broadcastPositionOpen(symbol string) {
+	ga.broadcastPositionStatus()
+	ga.logger.Debug("Broadcast position open", "symbol", symbol)
+}
+
+// broadcastPositionStatus broadcasts current positions to WebSocket for real-time UI updates
+// Called: 1) Immediately on position open/close (event-driven)
+//         2) Periodically every 5 seconds for PnL/price updates (interval-based)
+func (ga *GinieAutopilot) broadcastPositionStatus() {
+	if ga.userID == "" {
+		return
+	}
+
+	// Build positions list with full details for UI display
+	positions := make([]map[string]interface{}, 0)
+	ga.mu.RLock()
+	for sym, pos := range ga.positions {
+		// Build take profits array if available
+		var takeProfits []map[string]interface{}
+		if pos.TakeProfits != nil {
+			for i, tp := range pos.TakeProfits {
+				takeProfits = append(takeProfits, map[string]interface{}{
+					"level":    i + 1,
+					"status":   tp.Status,
+					"percent":  tp.Percent,
+					"gain_pct": tp.GainPct,
+				})
+			}
+		}
+
+		positions = append(positions, map[string]interface{}{
+			"symbol":           sym,
+			"side":             pos.Side,
+			"mode":             pos.Mode,
+			"entry_price":      pos.EntryPrice,
+			"original_qty":     pos.OriginalQty,
+			"remaining_qty":    pos.RemainingQty,
+			"position_amt":     pos.RemainingQty, // Alias for compatibility
+			"unrealized_profit": pos.UnrealizedPnL,
+			"realized_pnl":     pos.RealizedPnL,
+			"current_tp_level": pos.CurrentTPLevel,
+			"take_profits":     takeProfits,
+		})
+	}
+	ga.mu.RUnlock()
+
+	// Always broadcast current positions (including empty array when no positions)
+	// This ensures frontend stays in sync and stale positions are cleared
+	events.BroadcastPositionUpdate(ga.userID, positions)
 }
 
 // updateCalibrationOnClose updates calibration data when a position is closed.
@@ -20988,18 +21052,26 @@ func (ga *GinieAutopilot) saveCoinStateFromDecision(symbol string, decision *Gin
 			len(changedFields), symbol, changedFields, scoreTechnical, scoreContext, scoreLLM, scoreHistory, scoreFinal, rsiValue)
 
 		// Broadcast state update with all relevant data to frontend via WebSocket
+		// Include complete data so frontend can update state directly without API calls
 		events.BroadcastCoinStateUpdate(ga.userID, map[string]interface{}{
-			"symbol":          symbol,
-			"changed_fields":  changedFields,
-			"regime":          regime,
-			"decision":        decisionStatus,
-			"score_technical": scoreTechnical,
-			"score_context":   scoreContext,
-			"score_llm":       scoreLLM,
-			"score_history":   scoreHistory,
-			"score_final":     scoreFinal,
-			"rsi":             rsiValue,
-			"adx":             decision.MarketConditions.ADX,
+			"symbol":           symbol,
+			"changed_fields":   changedFields,
+			"regime":           regime,
+			"decision":         decisionStatus,
+			"score_technical":  scoreTechnical,
+			"score_context":    scoreContext,
+			"score_llm":        scoreLLM,
+			"score_history":    scoreHistory,
+			"score_final":      scoreFinal,
+			"rsi":              rsiValue,
+			"adx":              decision.MarketConditions.ADX,
+			"price":            entryPrice,
+			"atr":              decision.MarketConditions.ATR,
+			"ema_9":            ema9Value,
+			"ema_21":           ema20Value,
+			"trend_1h":         trend1H,
+			"blocking_reasons": blockingReasons,
+			"active_strategy":  string(decision.SelectedMode),
 		})
 	} else {
 		// No changes detected - state is same as cached, skip logging spam
@@ -21024,10 +21096,10 @@ func (ga *GinieAutopilot) loadSystemControlSettings() {
 		ga.logger.Warn("Failed to load system control settings, using defaults",
 			"user_id", ga.userID,
 			"error", err.Error())
-		// Use defaults
+		// Use defaults - all chain-based for the new system
 		ga.orderTrackingSystem = database.OrderTrackingChain
-		ga.positionMgmtSystem = database.PositionManagementLegacy
-		ga.entryDecisionSystem = database.EntryDecisionLegacy
+		ga.positionMgmtSystem = database.PositionManagementChain
+		ga.entryDecisionSystem = database.EntryDecisionChain
 	} else {
 		ga.orderTrackingSystem = config.OrderTrackingSystem
 		ga.positionMgmtSystem = config.PositionManagementSystem

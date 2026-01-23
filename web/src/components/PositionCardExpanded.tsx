@@ -162,7 +162,9 @@ interface PriceLevelsDisplayProps {
 
 function PriceLevelsDisplay({ position }: PriceLevelsDisplayProps) {
   const levels = calculatePriceLevels(position);
-  const isLong = position.side === 'LONG';
+
+  // Sort levels by price (high to low) to detect overlapping positions
+  const sortedLevels = [...levels].sort((a, b) => b.price - a.price);
 
   // Calculate price range for positioning
   const prices = levels.map(l => l.price);
@@ -174,27 +176,42 @@ function PriceLevelsDisplay({ position }: PriceLevelsDisplayProps) {
     return ((price - minPrice) / range) * 100;
   };
 
+  // Calculate vertical positions and detect overlaps (labels need ~10% min spacing)
+  const labelPositions: { level: typeof levels[0]; y: number; side: 'left' | 'right' }[] = [];
+  sortedLevels.forEach((level, idx) => {
+    const y = 100 - getPosition(level.price);
+    // Alternate sides to prevent overlap, starting with right
+    const side = idx % 2 === 0 ? 'right' : 'left';
+    labelPositions.push({ level, y, side });
+  });
+
   return (
-    <div className="relative h-32 bg-gray-800 rounded-lg p-4">
-      {/* Price scale */}
-      <div className="absolute left-0 top-0 bottom-0 w-16 flex flex-col justify-between text-xs text-gray-500 py-2">
+    <div className="relative h-40 bg-gray-800 rounded-lg p-4">
+      {/* Price scale - simplified */}
+      <div className="absolute left-0 top-0 bottom-0 w-14 flex flex-col justify-between text-[10px] text-gray-500 py-2">
         <span>{formatPositionPrice(maxPrice)}</span>
         <span>{formatPositionPrice(minPrice)}</span>
       </div>
 
       {/* Price levels */}
-      <div className="relative ml-16 h-full">
-        {levels.map((level, idx) => {
-          const position_y = 100 - getPosition(level.price);
+      <div className="relative ml-14 mr-2 h-full">
+        {labelPositions.map(({ level, y, side }, idx) => {
+          const isCurrentPrice = level.type === 'current';
 
           return (
             <div
               key={`${level.type}-${idx}`}
               className="absolute left-0 right-0 flex items-center"
-              style={{ top: `${position_y}%` }}
+              style={{ top: `${Math.max(2, Math.min(98, y))}%`, transform: 'translateY(-50%)' }}
             >
-              <div className={`w-full h-px ${level.type === 'current' ? 'bg-white' : 'bg-gray-600'}`} />
-              <span className={`absolute right-0 px-2 py-0.5 rounded text-xs ${level.color} bg-gray-900`}>
+              {/* Line */}
+              <div className={`w-full h-px ${isCurrentPrice ? 'bg-white' : 'bg-gray-600'}`} />
+              {/* Label - alternating sides */}
+              <span
+                className={`absolute px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap ${level.color} bg-gray-900/95 border border-gray-700 ${
+                  side === 'right' ? 'right-0' : 'left-0'
+                }`}
+              >
                 {level.label}: {formatPositionPrice(level.price)}
               </span>
             </div>
@@ -203,10 +220,10 @@ function PriceLevelsDisplay({ position }: PriceLevelsDisplayProps) {
 
         {/* Current price indicator */}
         <div
-          className="absolute left-0 flex items-center"
-          style={{ top: `${100 - getPosition(position.current_price)}%` }}
+          className="absolute left-0 flex items-center z-10"
+          style={{ top: `${100 - getPosition(position.current_price)}%`, transform: 'translateY(-50%)' }}
         >
-          <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
+          <div className="w-2 h-2 bg-white rounded-full animate-pulse shadow-lg shadow-white/50" />
         </div>
       </div>
     </div>
@@ -451,6 +468,9 @@ interface PositionCardExpandedProps {
   onClose?: (symbol: string) => void;
   onRefresh?: (symbol: string) => void;
   onCollapse?: (symbol: string) => void;
+  /** Show advanced AI features (Exit Decision Monitor, New Engine Scores, Classic Indicators).
+   *  Set to false for legacy/basic display mode. Default: true */
+  showAdvancedFeatures?: boolean;
 }
 
 export default function PositionCardExpanded({
@@ -459,6 +479,7 @@ export default function PositionCardExpanded({
   onClose,
   onRefresh,
   onCollapse,
+  showAdvancedFeatures = true,
 }: PositionCardExpandedProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [exitMonitorExpanded, setExitMonitorExpanded] = useState(false);
@@ -581,43 +602,45 @@ export default function PositionCardExpanded({
               <EfficiencyMetricsDisplay metrics={position.efficiency} />
             )}
 
-            {/* Indicator scores based on decision mode */}
-            {position.decision_mode === 'classic' && position.classic_scores && (
+            {/* Indicator scores based on decision mode - only show in advanced mode */}
+            {showAdvancedFeatures && position.decision_mode === 'classic' && position.classic_scores && (
               <ClassicIndicatorDisplay scores={position.classic_scores} />
             )}
-            {position.decision_mode === 'new_engine' && position.new_engine_scores && (
+            {showAdvancedFeatures && position.decision_mode === 'new_engine' && position.new_engine_scores && (
               <NewEngineIndicatorDisplay scores={position.new_engine_scores} />
             )}
           </div>
 
-          {/* Story 10.3: Exit Decision Monitor - Collapsible Section */}
-          <div className="border border-gray-700 rounded-lg overflow-hidden">
-            <button
-              type="button"
-              onClick={() => setExitMonitorExpanded(!exitMonitorExpanded)}
-              className="w-full px-4 py-3 flex items-center justify-between bg-gray-800/50 hover:bg-gray-700/50 transition-colors"
-            >
-              <div className="flex items-center gap-2">
-                <Eye className="w-4 h-4 text-purple-400" />
-                <span className="text-sm font-medium text-gray-300">Exit Decision Monitor</span>
-                <span className="text-xs text-gray-500">(Real-time exit signals)</span>
-              </div>
-              {exitMonitorExpanded ? (
-                <ChevronDown className="w-4 h-4 text-gray-400" />
-              ) : (
-                <ChevronRight className="w-4 h-4 text-gray-400" />
+          {/* Story 10.3: Exit Decision Monitor - Collapsible Section (only in advanced mode) */}
+          {showAdvancedFeatures && (
+            <div className="border border-gray-700 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setExitMonitorExpanded(!exitMonitorExpanded)}
+                className="w-full px-4 py-3 flex items-center justify-between bg-gray-800/50 hover:bg-gray-700/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Eye className="w-4 h-4 text-purple-400" />
+                  <span className="text-sm font-medium text-gray-300">Exit Decision Monitor</span>
+                  <span className="text-xs text-gray-500">(Real-time exit signals)</span>
+                </div>
+                {exitMonitorExpanded ? (
+                  <ChevronDown className="w-4 h-4 text-gray-400" />
+                ) : (
+                  <ChevronRight className="w-4 h-4 text-gray-400" />
+                )}
+              </button>
+              {exitMonitorExpanded && (
+                <div className="p-4 border-t border-gray-700">
+                  <ExitDecisionMonitor
+                    symbol={position.symbol}
+                    isExpanded={exitMonitorExpanded}
+                    onRefresh={() => onRefresh?.(position.symbol)}
+                  />
+                </div>
               )}
-            </button>
-            {exitMonitorExpanded && (
-              <div className="p-4 border-t border-gray-700">
-                <ExitDecisionMonitor
-                  symbol={position.symbol}
-                  isExpanded={exitMonitorExpanded}
-                  onRefresh={() => onRefresh?.(position.symbol)}
-                />
-              </div>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Actions */}
           <div className="pt-3 border-t border-gray-700 flex items-center justify-between">

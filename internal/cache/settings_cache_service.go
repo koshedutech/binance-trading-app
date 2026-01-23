@@ -1537,6 +1537,300 @@ func (s *SettingsCacheService) GetActiveStrategyForMode(ctx context.Context, use
 }
 
 // ============================================================================
+// MODE-STRATEGY SECTION-LEVEL OPERATIONS (Story 11.41)
+// Get/Set specific sections (e.g., "sltp", "mtf", "circuit_breaker") within a strategy
+// ============================================================================
+
+// ModeStrategySectionNames lists all valid section names for mode-strategy configs
+var ModeStrategySectionNames = []string{
+	"position_sizing",
+	"timeframe",
+	"mtf",
+	"sltp",
+	"confidence",
+	"entry_conditions",
+	"exit_conditions",
+	"scoring",
+	"circuit_breaker",
+	"hedge",
+	"averaging",
+	"stale_release",
+	"position_optimization",
+	"funding_rate",
+	"risk",
+	"trend_divergence",
+	"dynamic_ai_exit",
+	"early_warning",
+}
+
+// GetModeStrategySection retrieves a specific section from a mode+strategy config
+// Returns the section data as JSON bytes, or nil if section doesn't exist
+func (s *SettingsCacheService) GetModeStrategySection(ctx context.Context, userID, mode, strategy, section string) ([]byte, error) {
+	// First get the full config
+	config, err := s.GetModeStrategyConfig(ctx, userID, mode, strategy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mode strategy config: %w", err)
+	}
+
+	// Extract the requested section
+	sectionData, err := extractModeStrategySection(config, section)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract section %s: %w", section, err)
+	}
+
+	// Marshal the section data to JSON
+	sectionJSON, err := json.Marshal(sectionData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal section %s: %w", section, err)
+	}
+
+	return sectionJSON, nil
+}
+
+// SetModeStrategySection updates a specific section within a mode+strategy config
+// Write-through: DB first, then cache
+func (s *SettingsCacheService) SetModeStrategySection(ctx context.Context, userID, mode, strategy, section string, sectionData []byte) error {
+	// First get the full config
+	config, err := s.GetModeStrategyConfig(ctx, userID, mode, strategy)
+	if err != nil {
+		return fmt.Errorf("failed to get mode strategy config: %w", err)
+	}
+
+	// Merge the section data into the config
+	if err := mergeModeStrategySection(config, section, sectionData); err != nil {
+		return fmt.Errorf("failed to merge section %s: %w", section, err)
+	}
+
+	// Save the updated config (write-through to DB and cache)
+	if err := s.SetModeStrategyConfig(ctx, userID, mode, strategy, config); err != nil {
+		return fmt.Errorf("failed to save updated config: %w", err)
+	}
+
+	return nil
+}
+
+// extractModeStrategySection extracts a specific section from ModeStrategyConfig
+func extractModeStrategySection(config *database.ModeStrategyConfig, section string) (interface{}, error) {
+	switch section {
+	case "position_sizing":
+		if config.PositionSizing != nil {
+			return config.PositionSizing, nil
+		}
+		// Return legacy fields if PositionSizing is nil
+		return &database.StrategyPositionSizing{
+			Leverage:     config.Leverage,
+			MaxPositions: config.MaxPositions,
+			BaseSizeUSD:  config.BaseSizeUSD,
+		}, nil
+	case "timeframe":
+		return &config.Timeframe, nil
+	case "mtf":
+		return config.MTF, nil
+	case "sltp":
+		return &config.SLTP, nil
+	case "confidence":
+		return &config.Confidence, nil
+	case "entry_conditions":
+		// Return v2 if available, otherwise legacy map
+		if config.EntryConditionsV2 != nil {
+			return config.EntryConditionsV2, nil
+		}
+		return config.EntryConditions, nil
+	case "exit_conditions":
+		return &config.ExitConditions, nil
+	case "scoring":
+		return &config.Scoring, nil
+	case "circuit_breaker":
+		return config.CircuitBreaker, nil
+	case "hedge":
+		return config.Hedge, nil
+	case "averaging":
+		return config.Averaging, nil
+	case "stale_release":
+		return config.StaleRelease, nil
+	case "position_optimization":
+		return config.PositionOptimization, nil
+	case "funding_rate":
+		return config.FundingRate, nil
+	case "risk":
+		return config.Risk, nil
+	case "trend_divergence":
+		return config.TrendDivergence, nil
+	case "dynamic_ai_exit":
+		return config.DynamicAIExit, nil
+	case "early_warning":
+		return config.EarlyWarning, nil
+	default:
+		return nil, fmt.Errorf("unknown section: %s", section)
+	}
+}
+
+// mergeModeStrategySection merges section data into a ModeStrategyConfig
+func mergeModeStrategySection(config *database.ModeStrategyConfig, section string, data []byte) error {
+	var err error
+	switch section {
+	case "position_sizing":
+		var ps database.StrategyPositionSizing
+		if err = json.Unmarshal(data, &ps); err == nil {
+			config.PositionSizing = &ps
+			// Also update legacy fields for backward compatibility
+			config.Leverage = ps.Leverage
+			config.MaxPositions = ps.MaxPositions
+			config.BaseSizeUSD = ps.BaseSizeUSD
+		}
+	case "timeframe":
+		err = json.Unmarshal(data, &config.Timeframe)
+	case "mtf":
+		var mtf database.StrategyMTF
+		if err = json.Unmarshal(data, &mtf); err == nil {
+			config.MTF = &mtf
+		}
+	case "sltp":
+		err = json.Unmarshal(data, &config.SLTP)
+	case "confidence":
+		err = json.Unmarshal(data, &config.Confidence)
+	case "entry_conditions":
+		// Try to parse as v2 first
+		var ec database.StrategyEntryConditions
+		if err = json.Unmarshal(data, &ec); err == nil {
+			config.EntryConditionsV2 = &ec
+		} else {
+			// Fall back to legacy map
+			var ecMap map[string]interface{}
+			if err = json.Unmarshal(data, &ecMap); err == nil {
+				config.EntryConditions = ecMap
+			}
+		}
+	case "exit_conditions":
+		err = json.Unmarshal(data, &config.ExitConditions)
+	case "scoring":
+		err = json.Unmarshal(data, &config.Scoring)
+	case "circuit_breaker":
+		var cb database.StrategyCircuitBreaker
+		if err = json.Unmarshal(data, &cb); err == nil {
+			config.CircuitBreaker = &cb
+		}
+	case "hedge":
+		var h database.StrategyHedge
+		if err = json.Unmarshal(data, &h); err == nil {
+			config.Hedge = &h
+		}
+	case "averaging":
+		var a database.StrategyAveraging
+		if err = json.Unmarshal(data, &a); err == nil {
+			config.Averaging = &a
+		}
+	case "stale_release":
+		var sr database.StrategyStaleRelease
+		if err = json.Unmarshal(data, &sr); err == nil {
+			config.StaleRelease = &sr
+		}
+	case "position_optimization":
+		var po database.StrategyPositionOptimization
+		if err = json.Unmarshal(data, &po); err == nil {
+			config.PositionOptimization = &po
+		}
+	case "funding_rate":
+		var fr database.StrategyFundingRate
+		if err = json.Unmarshal(data, &fr); err == nil {
+			config.FundingRate = &fr
+		}
+	case "risk":
+		var r database.StrategyRisk
+		if err = json.Unmarshal(data, &r); err == nil {
+			config.Risk = &r
+		}
+	case "trend_divergence":
+		var td database.StrategyTrendDivergence
+		if err = json.Unmarshal(data, &td); err == nil {
+			config.TrendDivergence = &td
+		}
+	case "dynamic_ai_exit":
+		var dae database.StrategyDynamicAIExit
+		if err = json.Unmarshal(data, &dae); err == nil {
+			config.DynamicAIExit = &dae
+		}
+	case "early_warning":
+		var ew database.StrategyEarlyWarning
+		if err = json.Unmarshal(data, &ew); err == nil {
+			config.EarlyWarning = &ew
+		}
+	default:
+		return fmt.Errorf("unknown section: %s", section)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal section %s: %w", section, err)
+	}
+
+	return nil
+}
+
+// ResetModeStrategySection resets a specific section to default values
+// Loads defaults from default-settings.json "modes" section
+func (s *SettingsCacheService) ResetModeStrategySection(ctx context.Context, userID, mode, strategy, section string) error {
+	// Load default config from default-settings.json
+	defaultConfig, err := s.loadDefaultModeStrategyConfig(mode, strategy)
+	if err != nil {
+		return fmt.Errorf("failed to load default config: %w", err)
+	}
+
+	// Extract the default section data
+	defaultSectionData, err := extractModeStrategySection(defaultConfig, section)
+	if err != nil {
+		return fmt.Errorf("failed to extract default section %s: %w", section, err)
+	}
+
+	// Marshal to JSON
+	sectionJSON, err := json.Marshal(defaultSectionData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal default section %s: %w", section, err)
+	}
+
+	// Set the section with default values
+	return s.SetModeStrategySection(ctx, userID, mode, strategy, section, sectionJSON)
+}
+
+// loadDefaultModeStrategyConfig loads a default ModeStrategyConfig from default-settings.json
+func (s *SettingsCacheService) loadDefaultModeStrategyConfig(mode, strategy string) (*database.ModeStrategyConfig, error) {
+	// Try to load from default-settings.json "modes" section first
+	configJSON, err := s.loadDefaultModeStrategyConfigJSON(mode, strategy)
+	if err == nil && configJSON != nil {
+		var config database.ModeStrategyConfig
+		if err := json.Unmarshal(configJSON, &config); err == nil {
+			return &config, nil
+		}
+		s.logger.Warn("Failed to parse default mode strategy config from JSON", "mode", mode, "strategy", strategy, "error", err)
+	}
+
+	// Fallback to hardcoded defaults
+	return database.DefaultModeStrategyConfig(mode, strategy), nil
+}
+
+// loadDefaultModeStrategyConfigJSON loads raw JSON for a mode+strategy from default-settings.json
+func (s *SettingsCacheService) loadDefaultModeStrategyConfigJSON(mode, strategy string) (json.RawMessage, error) {
+	// Try admin defaults cache first
+	adminKey := fmt.Sprintf("admin:defaults:mode:%s:strategy:%s", mode, strategy)
+	cached, err := s.cache.Get(context.Background(), adminKey)
+	if err == nil && cached != "" {
+		return json.RawMessage(cached), nil
+	}
+
+	// Load directly from default-settings.json
+	data, err := autopilot.GetDefaultModeStrategyConfigJSON(mode, strategy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache for future use
+	if s.cache.IsHealthy() && data != nil {
+		s.cache.Set(context.Background(), adminKey, string(data), 24*time.Hour)
+	}
+
+	return data, nil
+}
+
+// ============================================================================
 // SYMBOL SETTINGS CACHE (Story 9.12 Phase 1)
 // ============================================================================
 

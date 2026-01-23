@@ -31,21 +31,12 @@ func (s *Server) handleGetExitDecisionState(c *gin.Context) {
 		return
 	}
 
-	// Get user ID from context (set by auth middleware)
-	userID, exists := c.Get("userID")
-	if !exists {
+	// Get user ID from context (set by auth middleware as "user_id")
+	userIDStr := s.getUserID(c)
+	if userIDStr == "" {
 		c.JSON(http.StatusUnauthorized, ExitDecisionResponse{
 			Success: false,
 			Error:   "User not authenticated",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, ExitDecisionResponse{
-			Success: false,
-			Error:   "Invalid user ID",
 		})
 		return
 	}

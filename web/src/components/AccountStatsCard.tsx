@@ -28,6 +28,9 @@ export default function AccountStatsCard() {
   const marginUsed = useFuturesStore(selectTotalMarginUsed);
   const totalUnrealizedPnl = useFuturesStore(selectTotalUnrealizedPnl);
   const activePositions = useFuturesStore(selectActivePositions);
+  // Get fetch functions from store for real-time updates
+  const fetchAccountInfo = useFuturesStore((state) => state.fetchAccountInfo);
+  const fetchPositions = useFuturesStore((state) => state.fetchPositions);
 
   const [autopilotStats, setAutopilotStats] = useState<AutopilotStats | null>(null);
   const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
@@ -71,12 +74,26 @@ export default function AccountStatsCard() {
       }
     };
 
+    // Handle position updates - refresh positions when they change
+    const handlePositionUpdate = () => {
+      fetchPositions();
+      fetchAutopilotStatus();
+    };
+
+    // Handle balance updates - refresh account info when balance changes
+    const handleBalanceUpdate = () => {
+      fetchAccountInfo();
+    };
+
     // Listen for mode config changes from GiniePanel
     const handleModeConfigUpdate = () => {
       fetchAutopilotStatus();
     };
 
     wsService.subscribe('GINIE_STATUS_UPDATE', handleGinieUpdate);
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
+    wsService.subscribe('BALANCE_UPDATE', handleBalanceUpdate);
+    wsService.subscribe('PNL_UPDATE', handlePositionUpdate); // PnL update means position closed
     window.addEventListener('mode-config-updated', handleModeConfigUpdate);
 
     // Fallback polling when WebSocket disconnected
@@ -84,6 +101,8 @@ export default function AccountStatsCard() {
       if (!fallbackRef.current) {
         fallbackRef.current = setInterval(() => {
           fetchAutopilotStatus();
+          fetchPositions();
+          fetchAccountInfo();
         }, 60000);
       }
     };
@@ -94,6 +113,8 @@ export default function AccountStatsCard() {
         fallbackRef.current = null;
       }
       fetchAutopilotStatus();
+      fetchPositions();
+      fetchAccountInfo();
     };
 
     wsService.onDisconnect(startFallback);
@@ -108,13 +129,16 @@ export default function AccountStatsCard() {
 
     return () => {
       wsService.unsubscribe('GINIE_STATUS_UPDATE', handleGinieUpdate);
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('BALANCE_UPDATE', handleBalanceUpdate);
+      wsService.unsubscribe('PNL_UPDATE', handlePositionUpdate);
       window.removeEventListener('mode-config-updated', handleModeConfigUpdate);
       if (fallbackRef.current) {
         clearInterval(fallbackRef.current);
         fallbackRef.current = null;
       }
     };
-  }, [fetchAutopilotStatus]);
+  }, [fetchAutopilotStatus, fetchPositions, fetchAccountInfo]);
 
   // Track WebSocket connection status
   useEffect(() => {

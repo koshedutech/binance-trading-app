@@ -491,48 +491,145 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 
 // InitializeUserModeStrategies creates 16 mode+strategy records (4 modes x 4 strategies) for a new user
 // Story 11.32: Mode-Strategy User Initialization
-// This function is idempotent - safe to run multiple times (uses INSERT ON CONFLICT DO NOTHING)
+// Story 11.41: Updated to load full 18-section configs from default-settings.json "modes" section
+// This function is idempotent - safe to run multiple times (uses INSERT ON CONFLICT DO UPDATE)
 func (r *Repository) InitializeUserModeStrategies(ctx context.Context, userID string) error {
 	log.Printf("[USER-INIT-MODESTRAT] Initializing mode+strategy settings for user %s", userID)
 
 	// Get all valid modes and strategies
-	modes := ValidModes()         // ultra_fast, scalp, swing, position
+	modes := ValidModes()           // ultra_fast, scalp, swing, position
 	strategies := ValidStrategies() // trend_following, mean_reversion, breakout, range_trading
+
+	// Try to load full configs from default-settings.json "modes" section (Story 11.41)
+	allModeStrategyConfigs, err := loadModeStrategyConfigsFromDefaults()
+	useJSONDefaults := err == nil && len(allModeStrategyConfigs) > 0
+	if err != nil {
+		log.Printf("[USER-INIT-MODESTRAT] Warning: Could not load from default-settings.json modes section: %v, using hardcoded defaults", err)
+	} else if len(allModeStrategyConfigs) > 0 {
+		log.Printf("[USER-INIT-MODESTRAT] Using full 18-section configs from default-settings.json modes section")
+	}
 
 	// Build bulk insert configs
 	var configs []ModeStrategySettingsRow
 	for _, mode := range modes {
 		for _, strategy := range strategies {
-			// Get default config for this mode+strategy combination
-			config := DefaultModeStrategyConfig(mode, strategy)
+			var settingsJSON json.RawMessage
+			var enabled bool
+			var priority int
 
-			// Serialize config to JSON
-			settingsJSON, err := json.Marshal(config)
-			if err != nil {
-				log.Printf("[USER-INIT-MODESTRAT] Warning: Failed to marshal config for %s/%s: %v", mode, strategy, err)
-				continue
+			if useJSONDefaults {
+				// Try to get full config from default-settings.json "modes" section
+				if modeConfigs, ok := allModeStrategyConfigs[mode]; ok {
+					if strategyJSON, ok := modeConfigs[strategy]; ok {
+						settingsJSON = strategyJSON
+
+						// Parse just the enabled and priority fields
+						var basicConfig struct {
+							Enabled  bool `json:"enabled"`
+							Priority int  `json:"priority"`
+						}
+						if err := json.Unmarshal(strategyJSON, &basicConfig); err == nil {
+							enabled = basicConfig.Enabled
+							priority = basicConfig.Priority
+						} else {
+							// Fallback to hardcoded defaults for enabled/priority
+							config := DefaultModeStrategyConfig(mode, strategy)
+							enabled = config.Enabled
+							priority = config.Priority
+						}
+					}
+				}
+			}
+
+			// Fallback to hardcoded defaults if JSON loading failed
+			if settingsJSON == nil {
+				config := DefaultModeStrategyConfig(mode, strategy)
+				enabled = config.Enabled
+				priority = config.Priority
+				settingsJSON, err = json.Marshal(config)
+				if err != nil {
+					log.Printf("[USER-INIT-MODESTRAT] Warning: Failed to marshal config for %s/%s: %v", mode, strategy, err)
+					continue
+				}
 			}
 
 			configs = append(configs, ModeStrategySettingsRow{
 				UserID:   userID,
 				Mode:     mode,
 				Strategy: strategy,
-				Enabled:  config.Enabled,
-				Priority: config.Priority,
+				Enabled:  enabled,
+				Priority: priority,
 				Settings: settingsJSON,
 			})
 		}
 	}
 
-	// Bulk create with ON CONFLICT DO NOTHING (idempotent)
+	// Bulk create with ON CONFLICT DO UPDATE (idempotent, and allows re-initialization)
 	if err := r.BulkCreateModeStrategySettings(ctx, userID, configs); err != nil {
 		return fmt.Errorf("failed to bulk create mode strategy settings: %w", err)
 	}
 
-	log.Printf("[USER-INIT-MODESTRAT] Successfully initialized %d mode+strategy configs for user %s (4 modes x 4 strategies)",
-		len(configs), userID)
+	log.Printf("[USER-INIT-MODESTRAT] Successfully initialized %d mode+strategy configs for user %s (4 modes x 4 strategies, using %s)",
+		len(configs), userID, map[bool]string{true: "default-settings.json", false: "hardcoded defaults"}[useJSONDefaults])
 
 	return nil
+}
+
+// loadModeStrategyConfigsFromDefaults loads all mode-strategy configs from default-settings.json "modes" section
+// Returns map[mode][strategy]json.RawMessage with full 18-section configs
+func loadModeStrategyConfigsFromDefaults() (map[string]map[string]json.RawMessage, error) {
+	// Load default-settings.json
+	defaultsJSON, err := os.ReadFile("default-settings.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read default-settings.json: %w", err)
+	}
+
+	// Parse the modes section
+	var defaults struct {
+		Modes struct {
+			Scalp     modeWrapper `json:"scalp"`
+			Swing     modeWrapper `json:"swing"`
+			Position  modeWrapper `json:"position"`
+			UltraFast modeWrapper `json:"ultra_fast"`
+		} `json:"modes"`
+	}
+
+	if err := json.Unmarshal(defaultsJSON, &defaults); err != nil {
+		return nil, fmt.Errorf("failed to parse default-settings.json: %w", err)
+	}
+
+	// Build the result map
+	result := make(map[string]map[string]json.RawMessage)
+
+	modeWrappers := map[string]*modeWrapper{
+		"scalp":      &defaults.Modes.Scalp,
+		"swing":      &defaults.Modes.Swing,
+		"position":   &defaults.Modes.Position,
+		"ultra_fast": &defaults.Modes.UltraFast,
+	}
+
+	for modeName, wrapper := range modeWrappers {
+		if len(wrapper.Strategies) > 0 {
+			result[modeName] = make(map[string]json.RawMessage)
+			for strategyName, strategyJSON := range wrapper.Strategies {
+				// Make a copy to prevent mutation
+				result[modeName][strategyName] = append(json.RawMessage{}, strategyJSON...)
+			}
+		}
+	}
+
+	if len(result) == 0 {
+		return nil, fmt.Errorf("no mode-strategy configs found in modes section")
+	}
+
+	return result, nil
+}
+
+// modeWrapper is a helper struct for parsing mode configs from default-settings.json
+type modeWrapper struct {
+	Name       string                     `json:"name"`
+	Enabled    bool                       `json:"enabled"`
+	Strategies map[string]json.RawMessage `json:"strategies"`
 }
 
 // parseUserIDToInt converts a string user ID to integer

@@ -1747,12 +1747,12 @@ type UserSystemControl struct {
 }
 
 // DefaultUserSystemControl returns default system control settings
-// Default: chain for order tracking, legacy for position management and entry decision
+// Default: chain for all systems (order tracking, position management, entry decision)
 func DefaultUserSystemControl() *UserSystemControl {
 	return &UserSystemControl{
-		OrderTrackingSystem:      OrderTrackingChain,       // Use new chain system by default
-		PositionManagementSystem: PositionManagementLegacy, // Keep legacy for now until chain is stable
-		EntryDecisionSystem:      EntryDecisionLegacy,      // Keep legacy Ginie confluence by default
+		OrderTrackingSystem:      OrderTrackingChain,      // Use new chain system by default
+		PositionManagementSystem: PositionManagementChain, // Use new chain system by default
+		EntryDecisionSystem:      EntryDecisionChain,      // Use new chain system by default
 	}
 }
 

@@ -118,6 +118,46 @@ export interface OrderChain {
   modificationCounts?: Record<string, number>; // e.g., {"SL": 3, "TP1": 2}
   // Story 7.19: Hedge position state for combined P&L calculation
   hedgePositionState?: PositionState;
+  // Story 11.40: Position Analytics for Chain View
+  positionAnalytics?: PositionAnalyticsData;
+}
+
+// Story 11.40: Position Analytics for Chain View
+export interface PositionAnalyticsData {
+  stage: 'RISK_ZONE' | 'BREAKEVEN' | 'TP1' | 'EFFICIENCY';
+  stage_entry_time?: number;
+  current_price: number;
+  breakeven_price?: number;
+  tp1_price?: number;
+  tp2_price?: number;
+  tp3_price?: number;
+  stop_loss?: number;
+  efficiency?: {
+    peak_profit: number;
+    current_profit: number;
+    efficiency_percent: number;
+    threshold_percent: number;
+  };
+  decision_mode: 'classic' | 'new_engine';
+  classic_scores?: {
+    adx: number;
+    adx_threshold: number;
+    rsi: number;
+    rsi_state: 'oversold' | 'normal' | 'overbought';
+    reversal_signals: number;
+    reversal_required: number;
+  };
+  new_engine_scores?: {
+    technical: number;
+    context: number;
+    llm: number;
+    history: number;
+    final: number;
+    regime: string;
+    strategy: string;
+  };
+  unrealized_pnl: number;
+  roe: number;
 }
 
 // Filter options for chains

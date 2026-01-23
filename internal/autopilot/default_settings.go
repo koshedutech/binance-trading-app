@@ -30,6 +30,30 @@ type DefaultSettingsFile struct {
 	SafetySettings       *SafetySettingsAllModes        `json:"safety_settings,omitempty"`
 	SettingsRiskIndex    SettingsRiskIndex              `json:"_settings_risk_index"`
 	// NOTE: Global EarlyWarning removed - early warning is now per-mode only (see ModeEarlyWarningConfig)
+
+	// Story 11.41: New hierarchical mode-strategy configuration
+	// This replaces the flat mode_configs with per-strategy settings
+	Modes ModesConfigWrapper `json:"modes,omitempty"`
+}
+
+// ModesConfigWrapper wraps the modes configuration from default-settings.json
+// Uses json.RawMessage for flexible parsing of mode-specific strategies
+type ModesConfigWrapper struct {
+	Description string                               `json:"_description,omitempty"`
+	Version     string                               `json:"_version,omitempty"`
+	Scalp       ModeConfigWrapper                    `json:"scalp,omitempty"`
+	Swing       ModeConfigWrapper                    `json:"swing,omitempty"`
+	Position    ModeConfigWrapper                    `json:"position,omitempty"`
+	UltraFast   ModeConfigWrapper                    `json:"ultra_fast,omitempty"`
+}
+
+// ModeConfigWrapper represents a mode with its strategies in default-settings.json
+type ModeConfigWrapper struct {
+	Name               string                         `json:"name,omitempty"`
+	Enabled            bool                           `json:"enabled"`
+	DefaultStrategy    string                         `json:"default_strategy,omitempty"`
+	AutoSelectStrategy bool                           `json:"auto_select_strategy"`
+	Strategies         map[string]json.RawMessage     `json:"strategies,omitempty"`
 }
 
 // SafetySettingsAllModes contains safety settings for all trading modes
@@ -436,4 +460,85 @@ func GetDefaultTrendFiltersForMode(modeName string) *TrendFiltersConfig {
 	}
 
 	return &copy
+}
+
+// ============================================================================
+// MODE-STRATEGY DEFAULTS (Story 11.41)
+// Load full 18-section strategy configurations from the "modes" section
+// ============================================================================
+
+// GetDefaultModeStrategyConfigJSON returns the raw JSON for a mode+strategy from default-settings.json
+// This preserves all 18 sections without needing Go structs for every field
+func GetDefaultModeStrategyConfigJSON(modeName, strategyName string) (json.RawMessage, error) {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load defaults: %w", err)
+	}
+
+	// Get the appropriate mode wrapper
+	var modeWrapper *ModeConfigWrapper
+	switch modeName {
+	case "scalp":
+		modeWrapper = &defaults.Modes.Scalp
+	case "swing":
+		modeWrapper = &defaults.Modes.Swing
+	case "position":
+		modeWrapper = &defaults.Modes.Position
+	case "ultra_fast":
+		modeWrapper = &defaults.Modes.UltraFast
+	default:
+		return nil, fmt.Errorf("unknown mode: %s", modeName)
+	}
+
+	// Get the strategy JSON
+	strategyJSON, exists := modeWrapper.Strategies[strategyName]
+	if !exists {
+		return nil, fmt.Errorf("strategy %s not found in mode %s", strategyName, modeName)
+	}
+
+	// Return a copy to prevent mutation
+	return append(json.RawMessage{}, strategyJSON...), nil
+}
+
+// GetAllDefaultModeStrategyConfigsJSON returns all mode+strategy configs as raw JSON
+// Returns map[mode][strategy]json.RawMessage
+func GetAllDefaultModeStrategyConfigsJSON() (map[string]map[string]json.RawMessage, error) {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load defaults: %w", err)
+	}
+
+	result := make(map[string]map[string]json.RawMessage)
+
+	modeWrappers := map[string]*ModeConfigWrapper{
+		"scalp":      &defaults.Modes.Scalp,
+		"swing":      &defaults.Modes.Swing,
+		"position":   &defaults.Modes.Position,
+		"ultra_fast": &defaults.Modes.UltraFast,
+	}
+
+	for modeName, wrapper := range modeWrappers {
+		result[modeName] = make(map[string]json.RawMessage)
+		for strategyName, strategyJSON := range wrapper.Strategies {
+			// Copy to prevent mutation
+			result[modeName][strategyName] = append(json.RawMessage{}, strategyJSON...)
+		}
+	}
+
+	return result, nil
+}
+
+// HasModesSection checks if the default-settings.json has the new "modes" section
+// This is used to determine whether to use the new mode-strategy configs or fallback to hardcoded defaults
+func HasModesSection() bool {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		return false
+	}
+
+	// Check if at least one mode has strategies defined
+	return len(defaults.Modes.Scalp.Strategies) > 0 ||
+		len(defaults.Modes.Swing.Strategies) > 0 ||
+		len(defaults.Modes.Position.Strategies) > 0 ||
+		len(defaults.Modes.UltraFast.Strategies) > 0
 }

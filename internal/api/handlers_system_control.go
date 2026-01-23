@@ -147,8 +147,12 @@ func (s *Server) handleUpdateSystemControl(c *gin.Context) {
 	log.Printf("[SYSTEM-CONTROL] Updated for user %s: order_tracking=%s, position_management=%s, entry_decision=%s",
 		userID, config.OrderTrackingSystem, config.PositionManagementSystem, config.EntryDecisionSystem)
 
-	// Note: System control settings are read directly from database
-	// No cache invalidation needed as we don't cache these settings yet
+	// CRITICAL: Notify the running autopilot to reload system control settings
+	// The autopilot caches these settings, so we must explicitly trigger a reload
+	if autopilot := s.getGinieAutopilotForUser(c); autopilot != nil {
+		autopilot.ReloadSystemControlSettings()
+		log.Printf("[SYSTEM-CONTROL] Reloaded system control settings in autopilot for user %s", userID)
+	}
 
 	c.JSON(http.StatusOK, SystemControlResponse{
 		OrderTrackingSystem:      config.OrderTrackingSystem,
@@ -186,6 +190,11 @@ func (s *Server) handleSetOrderTrackingSystem(c *gin.Context) {
 
 	log.Printf("[SYSTEM-CONTROL] Order tracking updated for user %s: %s", userID, req.System)
 
+	// Reload autopilot settings
+	if autopilot := s.getGinieAutopilotForUser(c); autopilot != nil {
+		autopilot.ReloadSystemControlSettings()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"order_tracking_system": req.System,
 		"message":               "Order tracking system updated successfully",
@@ -218,6 +227,11 @@ func (s *Server) handleSetPositionManagementSystem(c *gin.Context) {
 
 	log.Printf("[SYSTEM-CONTROL] Position management updated for user %s: %s", userID, req.System)
 
+	// Reload autopilot settings
+	if autopilot := s.getGinieAutopilotForUser(c); autopilot != nil {
+		autopilot.ReloadSystemControlSettings()
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"position_management_system": req.System,
 		"message":                    "Position management system updated successfully",
@@ -249,6 +263,11 @@ func (s *Server) handleSetEntryDecisionSystem(c *gin.Context) {
 	}
 
 	log.Printf("[SYSTEM-CONTROL] Entry decision updated for user %s: %s", userID, req.System)
+
+	// Reload autopilot settings
+	if autopilot := s.getGinieAutopilotForUser(c); autopilot != nil {
+		autopilot.ReloadSystemControlSettings()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"entry_decision_system": req.System,

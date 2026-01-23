@@ -71,8 +71,19 @@ export default function PositionOptimizationMonitor() {
     fetchModeConfigs();
   }, [fetchPositions, fetchModeConfigs]);
 
+  // Fallback polling every 10 seconds (WebSocket provides real-time updates every 1 second)
+  // Polling serves as a backup in case WebSocket connection is lost
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetchPositions();
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [fetchPositions]);
+
   // WebSocket subscription for real-time updates
   useEffect(() => {
+    // Handle Ginie status updates (start/stop events with positions)
     const handleGinieUpdate = (event: WSEvent) => {
       const status = event.data.status as GinieStatusPayload;
       if (status?.positions) {
@@ -80,9 +91,48 @@ export default function PositionOptimizationMonitor() {
       }
     };
 
+    // Handle position updates (when positions change - closures, updates)
+    const handlePositionUpdate = (event: WSEvent) => {
+      // POSITION_UPDATE sends positions directly in event.data
+      if (Array.isArray(event.data)) {
+        // Map the position data to our Position interface
+        const updatedPositions = event.data.map((pos: {
+          symbol: string;
+          side: string;
+          entry_price: number;
+          position_amt?: number;
+          remaining_qty?: number;
+          original_qty?: number;
+          unrealized_profit?: number;
+          current_tp_level?: number;
+          mode?: string;
+          take_profits?: Array<{
+            level: number;
+            status: string;
+            percent: number;
+            gain_pct: number;
+          }>;
+        }) => ({
+          symbol: pos.symbol,
+          side: pos.side as 'LONG' | 'SHORT',
+          mode: pos.mode || 'scalp',
+          entry_price: pos.entry_price,
+          original_qty: pos.original_qty || pos.position_amt || 0,
+          remaining_qty: pos.remaining_qty || pos.position_amt || 0,
+          unrealized_pnl: pos.unrealized_profit || 0,
+          realized_pnl: 0, // Not sent in POSITION_UPDATE
+          current_tp_level: pos.current_tp_level || 0,
+          take_profits: pos.take_profits,
+        })) as Position[];
+        setPositions(updatedPositions);
+      }
+    };
+
     wsService.subscribe('GINIE_STATUS_UPDATE', handleGinieUpdate);
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
     return () => {
       wsService.unsubscribe('GINIE_STATUS_UPDATE', handleGinieUpdate);
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
     };
   }, []);
 

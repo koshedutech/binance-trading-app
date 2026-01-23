@@ -273,3 +273,149 @@ func NewBlockingHistoryEntry(symbol string, reasons []BlockingReason) *BlockingH
 		Timestamp: time.Now().UnixMilli(),
 	}
 }
+
+// GapDirection represents the direction of the gap to target
+type GapDirection string
+
+const (
+	// GapDirectionUp means value needs to increase to reach target
+	GapDirectionUp GapDirection = "up"
+	// GapDirectionDown means value needs to decrease to reach target
+	GapDirectionDown GapDirection = "down"
+	// GapDirectionInRange means value is within target range
+	GapDirectionInRange GapDirection = "in_range"
+)
+
+// BlockingReasonWithGap extends BlockingReason with directional gap information for UI display
+// This is used by the Gap Analysis UI (Story 11.40)
+type BlockingReasonWithGap struct {
+	// Code is the unique identifier for this blocking reason
+	Code string `json:"code"`
+	// Category is the severity level (HARD_BLOCK, SOFT_BLOCK, WARNING)
+	Category string `json:"category"`
+	// Description is a human-readable explanation
+	Description string `json:"description"`
+	// CurrentValue is the actual value that caused the block
+	CurrentValue float64 `json:"current_value"`
+	// TargetValue is the threshold it needs to reach (single target or range start)
+	TargetValue float64 `json:"target_value"`
+	// TargetRangeEnd is the end of target range for range-based conditions (e.g., RSI 40-60)
+	TargetRangeEnd float64 `json:"target_range_end,omitempty"`
+	// Gap is the absolute gap value to target
+	Gap float64 `json:"gap"`
+	// GapDirection indicates if value needs to go up, down, or is in range
+	GapDirection GapDirection `json:"gap_direction"`
+	// GapDisplay is a formatted string for UI display (e.g., "↑3.2", "↓8", "✓ In Range")
+	GapDisplay string `json:"gap_display"`
+	// Overridable indicates if user can override this block
+	Overridable bool `json:"overridable"`
+	// Timestamp is when this reason was recorded (Unix milliseconds)
+	Timestamp int64 `json:"timestamp"`
+}
+
+// CalculateGap computes the gap and direction for a blocking reason
+// For single targets (e.g., ADX >= 25): gap = target - current
+// For range targets (e.g., RSI 40-60): gap = distance to nearest boundary
+func CalculateGap(currentValue, targetValue, targetRangeEnd float64) (gap float64, direction GapDirection, display string) {
+	// Range target (e.g., RSI 40-60)
+	if targetRangeEnd > 0 && targetRangeEnd > targetValue {
+		if currentValue < targetValue {
+			// Below range - needs to go up
+			gap = targetValue - currentValue
+			direction = GapDirectionUp
+			display = fmt.Sprintf("↑%.1f", gap)
+		} else if currentValue > targetRangeEnd {
+			// Above range - needs to go down
+			gap = currentValue - targetRangeEnd
+			direction = GapDirectionDown
+			display = fmt.Sprintf("↓%.1f", gap)
+		} else {
+			// In range
+			gap = 0
+			direction = GapDirectionInRange
+			display = "✓ In Range"
+		}
+		return
+	}
+
+	// Single target (e.g., ADX >= 25 or Score >= 55)
+	if currentValue < targetValue {
+		gap = targetValue - currentValue
+		direction = GapDirectionUp
+		display = fmt.Sprintf("↑%.1f", gap)
+	} else if currentValue > targetValue {
+		gap = currentValue - targetValue
+		direction = GapDirectionDown
+		display = fmt.Sprintf("↓%.1f", gap)
+	} else {
+		gap = 0
+		direction = GapDirectionInRange
+		display = "✓ Met"
+	}
+	return
+}
+
+// NewBlockingReasonWithGap creates a BlockingReasonWithGap from a BlockingReason with gap calculations
+func NewBlockingReasonWithGap(br *BlockingReason, targetRangeEnd float64) *BlockingReasonWithGap {
+	if br == nil {
+		return nil
+	}
+
+	result := &BlockingReasonWithGap{
+		Code:        string(br.Code),
+		Category:    string(br.Category),
+		Description: br.Description,
+		Overridable: br.Overridable,
+		Timestamp:   br.Timestamp,
+	}
+
+	// Extract current value
+	if br.Value != nil {
+		switch v := br.Value.(type) {
+		case float64:
+			result.CurrentValue = v
+		case int:
+			result.CurrentValue = float64(v)
+		case int64:
+			result.CurrentValue = float64(v)
+		}
+	}
+
+	// Extract target value
+	if br.Threshold != nil {
+		switch v := br.Threshold.(type) {
+		case float64:
+			result.TargetValue = v
+		case int:
+			result.TargetValue = float64(v)
+		case int64:
+			result.TargetValue = float64(v)
+		}
+	}
+
+	result.TargetRangeEnd = targetRangeEnd
+
+	// Calculate gap
+	result.Gap, result.GapDirection, result.GapDisplay = CalculateGap(result.CurrentValue, result.TargetValue, result.TargetRangeEnd)
+
+	return result
+}
+
+// GetBlockingReasonTargetRange returns the target range end for specific blocking codes
+// This is used to determine if a blocking condition has a range target vs single target
+func GetBlockingReasonTargetRange(code BlockingReasonCode) float64 {
+	// RSI-based conditions have range targets
+	switch code {
+	case ReasonHighRSI:
+		// RSI should be <= 70 (target range 0-70)
+		return 0 // No range end, it's a max threshold
+	case ReasonLowRSI:
+		// RSI should be >= 30 (target is 30, no range)
+		return 0
+	case ReasonWeakMomentum:
+		// RSI optimal is 40-60
+		return 60 // Target range 40-60
+	default:
+		return 0 // Single target
+	}
+}

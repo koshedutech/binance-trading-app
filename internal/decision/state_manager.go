@@ -421,3 +421,114 @@ func (sm *StateManager) CountUserStates(ctx context.Context, userID string) (int
 
 	return count, nil
 }
+
+// Score History Management for Gap Analysis UI (Story 11.40)
+// Stores 8 hours of 5-minute score samples (96 data points max)
+
+const (
+	// PrefixScoreHistory is the Redis key pattern for score history lists
+	// Format: decision:history:{userID}:{symbol}
+	PrefixScoreHistory = "decision:history:%s:%s"
+	// ScoreHistoryTTL is the TTL for score history data (8 hours)
+	ScoreHistoryTTL = 8 * time.Hour
+	// MaxScoreHistoryEntries is the max number of entries to keep (8 hours * 12 per hour = 96)
+	MaxScoreHistoryEntries = 96
+)
+
+// ScoreHistoryKey generates the Redis key for a symbol's score history.
+func ScoreHistoryKey(userID, symbol string) string {
+	userID = sanitizeKeyComponent(userID)
+	symbol = sanitizeKeyComponent(symbol)
+	return fmt.Sprintf(PrefixScoreHistory, userID, symbol)
+}
+
+// ScoreHistoryEntry represents a single score entry in history
+type ScoreHistoryEntry struct {
+	Timestamp int64 `json:"t"`
+	Score     int   `json:"s"`
+}
+
+// AddScoreToHistory appends a score to the symbol's history list.
+// Keeps only the most recent MaxScoreHistoryEntries entries.
+func (sm *StateManager) AddScoreToHistory(ctx context.Context, userID, symbol string, score int) error {
+	if userID == "" || symbol == "" {
+		return fmt.Errorf("userID and symbol are required")
+	}
+
+	key := ScoreHistoryKey(userID, symbol)
+	timestamp := time.Now().UnixMilli()
+
+	// Create entry as JSON
+	entry, err := json.Marshal(ScoreHistoryEntry{
+		Timestamp: timestamp,
+		Score:     score,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal score entry: %w", err)
+	}
+
+	// Use pipeline for atomic operations
+	pipe := sm.client.Pipeline()
+
+	// Push to list (right side = newest)
+	pipe.RPush(ctx, key, string(entry))
+
+	// Trim to keep only the most recent entries
+	pipe.LTrim(ctx, key, -MaxScoreHistoryEntries, -1)
+
+	// Set/refresh TTL
+	pipe.Expire(ctx, key, ScoreHistoryTTL)
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to add score to history: %w", err)
+	}
+
+	return nil
+}
+
+// GetScoreHistory retrieves the score history for a symbol.
+// Returns a ScoreHistoryForUI optimized for frontend display.
+func (sm *StateManager) GetScoreHistory(ctx context.Context, userID, symbol string) (*ScoreHistoryForUI, error) {
+	if userID == "" || symbol == "" {
+		return nil, fmt.Errorf("userID and symbol are required")
+	}
+
+	key := ScoreHistoryKey(userID, symbol)
+
+	// Get all entries from the list
+	entries, err := sm.client.LRange(ctx, key, 0, -1).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get score history: %w", err)
+	}
+
+	history := &ScoreHistoryForUI{
+		Timestamps: make([]int64, 0, len(entries)),
+		Scores:     make([]int, 0, len(entries)),
+	}
+
+	for _, entry := range entries {
+		var e ScoreHistoryEntry
+		if err := json.Unmarshal([]byte(entry), &e); err != nil {
+			log.Printf("[DECISION] Failed to parse score history entry: %v", err)
+			continue
+		}
+		history.Timestamps = append(history.Timestamps, e.Timestamp)
+		history.Scores = append(history.Scores, e.Score)
+	}
+
+	// Calculate trend
+	history.CalculateTrend()
+
+	return history, nil
+}
+
+// ClearScoreHistory removes all score history for a symbol.
+func (sm *StateManager) ClearScoreHistory(ctx context.Context, userID, symbol string) error {
+	if userID == "" || symbol == "" {
+		return fmt.Errorf("userID and symbol are required")
+	}
+
+	key := ScoreHistoryKey(userID, symbol)
+	return sm.client.Del(ctx, key).Err()
+}

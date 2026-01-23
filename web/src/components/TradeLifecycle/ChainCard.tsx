@@ -17,8 +17,16 @@ import {
   Edit3,
   Check,
 } from 'lucide-react';
-import { formatDistanceToNow, format } from 'date-fns';
-import { OrderChain, ChainOrder, ORDER_TYPE_CONFIG, MODE_DISPLAY_NAMES, OrderTypeSuffix, PositionState } from './types';
+import { OrderChain, ChainOrder, ORDER_TYPE_CONFIG, MODE_DISPLAY_NAMES, OrderTypeSuffix, PositionState, PositionAnalyticsData } from './types';
+import {
+  StageBadge,
+  StageTimeline,
+  EfficiencyMetricsDisplay,
+  ClassicIndicatorDisplay,
+  NewEngineIndicatorDisplay,
+  DecisionModeBadge,
+} from '../PositionCardExpanded';
+import { useUserTimezone } from './hooks/useUserTimezone';
 import OrderTreeNode, { buildEntryFromPositionState, TreeNodeType } from './OrderTreeNode';
 import { ModificationTree, ModificationRowList, calculateSummaryStats, formatDollarImpact } from './ModificationHistory';
 import type { ModificationEvent, ModifiableOrderType } from './ModificationHistory/types';
@@ -149,6 +157,7 @@ export default function ChainCard({
   const [tpSectionExpanded, setTpSectionExpanded] = useState(false);
   const [slSectionExpanded, setSlSectionExpanded] = useState(false);
   const [slModHistoryExpanded, setSlModHistoryExpanded] = useState(false);
+  const [analyticsExpanded, setAnalyticsExpanded] = useState(false); // Story 11.40: Position Analytics expansion
   const [modificationData, setModificationData] = useState<Record<ModifiableOrderType, ModificationEvent[]>>({
     SL: [],
     TP1: [],
@@ -158,6 +167,9 @@ export default function ChainCard({
   });
   const [modificationLoading, setModificationLoading] = useState(false);
   const [modificationsLoaded, setModificationsLoaded] = useState(false);
+
+  // Use user's timezone for all datetime displays
+  const { formatDateTime } = useUserTimezone();
 
   // Fetch modification history when expanded (lazy load)
   useEffect(() => {
@@ -334,16 +346,33 @@ export default function ChainCard({
             </span>
           )}
 
-          {/* Position state indicator */}
-          {chain.positionState && (
-            <span className={`px-1.5 py-0.5 rounded text-xs ${
-              chain.positionState.status === 'ACTIVE' ? 'bg-green-500/20 text-green-400' :
-              chain.positionState.status === 'PARTIAL' ? 'bg-yellow-500/20 text-yellow-400' :
-              'bg-blue-500/20 text-blue-400'
-            }`}>
-              {chain.positionState.status}
-            </span>
-          )}
+          {/* Story 7.21: Position state indicator - only show if different from chain status */}
+          {/* Map chain status to position state status for comparison:
+              chain 'active' = position 'ACTIVE'
+              chain 'partial' = position 'PARTIAL'
+              chain 'completed' = position 'CLOSED'
+              chain 'cancelled' = (no equivalent, always show)
+          */}
+          {chain.positionState && (() => {
+            // Determine if position state status would duplicate chain status badge
+            const positionStatus = chain.positionState.status;
+            // Map chain status to position state equivalent
+            const statusEquivalent =
+              (chain.status === 'active' && positionStatus === 'ACTIVE') ||
+              (chain.status === 'partial' && positionStatus === 'PARTIAL') ||
+              (chain.status === 'completed' && positionStatus === 'CLOSED');
+            // Don't show duplicate badge
+            if (statusEquivalent) return null;
+            return (
+              <span className={`px-1.5 py-0.5 rounded text-xs ${
+                positionStatus === 'ACTIVE' ? 'bg-green-500/20 text-green-400' :
+                positionStatus === 'PARTIAL' ? 'bg-yellow-500/20 text-yellow-400' :
+                'bg-blue-500/20 text-blue-400'
+              }`}>
+                {positionStatus}
+              </span>
+            );
+          })()}
         </div>
 
         <div className="flex items-center gap-4">
@@ -360,10 +389,10 @@ export default function ChainCard({
             <span>{chain.orders.length} orders</span>
           </div>
 
-          {/* Time */}
+          {/* Time - User's timezone */}
           <div className="flex items-center gap-1.5 text-gray-500 text-xs">
             <Clock className="w-3 h-3" />
-            <span>{formatDistanceToNow(chain.createdAt, { addSuffix: true })}</span>
+            <span>{formatDateTime(chain.createdAt)}</span>
           </div>
         </div>
       </div>
@@ -553,6 +582,93 @@ export default function ChainCard({
               </div>
             )}
           </div>
+
+          {/* Story 11.40: Position Analytics Section */}
+          {chain.positionAnalytics && (
+            <div className="border border-gray-700 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setAnalyticsExpanded(!analyticsExpanded); }}
+                className="w-full px-4 py-3 flex items-center justify-between bg-gray-800/50 hover:bg-gray-700/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-purple-400" />
+                  <span className="text-sm font-medium text-gray-300">Position Analytics</span>
+                  <StageBadge stage={chain.positionAnalytics.stage} compact />
+                  <DecisionModeBadge mode={chain.positionAnalytics.decision_mode} />
+                </div>
+                <div className="flex items-center gap-3">
+                  {/* P&L */}
+                  <span className={`text-sm font-semibold ${chain.positionAnalytics.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {chain.positionAnalytics.unrealized_pnl >= 0 ? '+' : ''}{chain.positionAnalytics.unrealized_pnl.toFixed(2)} USDT
+                  </span>
+                  {analyticsExpanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
+                </div>
+              </button>
+
+              {analyticsExpanded && (
+                <div className="p-4 border-t border-gray-700 space-y-4">
+                  {/* Stage Timeline */}
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-400 mb-3">Position Stage</h4>
+                    <StageTimeline
+                      currentStage={chain.positionAnalytics.stage}
+                      stageEntryTime={chain.positionAnalytics.stage_entry_time}
+                    />
+                  </div>
+
+                  {/* Price Levels Overview */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="bg-gray-800/50 rounded-lg p-3">
+                      <span className="text-xs text-gray-500 block mb-1">Current Price</span>
+                      <span className="text-sm font-mono text-white">${chain.positionAnalytics.current_price.toFixed(2)}</span>
+                    </div>
+                    {chain.positionAnalytics.breakeven_price && (
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <span className="text-xs text-gray-500 block mb-1">Breakeven</span>
+                        <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {chain.positionAnalytics.tp1_price && (
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <span className="text-xs text-gray-500 block mb-1">TP1</span>
+                        <span className="text-sm font-mono text-green-400">${chain.positionAnalytics.tp1_price.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {chain.positionAnalytics.stop_loss && (
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <span className="text-xs text-gray-500 block mb-1">Stop Loss</span>
+                        <span className="text-sm font-mono text-red-400">${chain.positionAnalytics.stop_loss.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Efficiency Metrics (when in EFFICIENCY stage) */}
+                  {chain.positionAnalytics.stage === 'EFFICIENCY' && chain.positionAnalytics.efficiency && (
+                    <EfficiencyMetricsDisplay metrics={chain.positionAnalytics.efficiency} />
+                  )}
+
+                  {/* Indicator Scores based on decision mode */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {chain.positionAnalytics.decision_mode === 'classic' && chain.positionAnalytics.classic_scores && (
+                      <ClassicIndicatorDisplay scores={chain.positionAnalytics.classic_scores} />
+                    )}
+                    {chain.positionAnalytics.decision_mode === 'new_engine' && chain.positionAnalytics.new_engine_scores && (
+                      <NewEngineIndicatorDisplay scores={chain.positionAnalytics.new_engine_scores} />
+                    )}
+                  </div>
+
+                  {/* ROE Display */}
+                  <div className="flex items-center justify-between pt-3 border-t border-gray-700">
+                    <span className="text-sm text-gray-400">Return on Equity (ROE)</span>
+                    <span className={`text-sm font-semibold ${chain.positionAnalytics.roe >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {chain.positionAnalytics.roe >= 0 ? '+' : ''}{chain.positionAnalytics.roe.toFixed(2)}%
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Collapsible Take Profit Section */}
           {tpEconomics.length > 0 && (
@@ -770,13 +886,13 @@ export default function ChainCard({
             <div>
               <span className="text-gray-500">Created:</span>
               <span className="ml-2 text-gray-300">
-                {format(chain.createdAt, 'MMM dd, HH:mm:ss')}
+                {formatDateTime(chain.createdAt)}
               </span>
             </div>
             <div>
               <span className="text-gray-500">Updated:</span>
               <span className="ml-2 text-gray-300">
-                {format(chain.updatedAt, 'MMM dd, HH:mm:ss')}
+                {formatDateTime(chain.updatedAt)}
               </span>
             </div>
             <div>
@@ -814,6 +930,7 @@ export default function ChainCard({
           modificationData={modificationData}
           modificationLoading={modificationLoading}
           formatPrice={formatPrice}
+          formatDateTime={formatDateTime}
           onToggleToTree={() => setShowLegacyView(false)}
           showToggle={useTreeView}
         />
@@ -828,6 +945,7 @@ interface LegacyChainViewProps {
   modificationData: Record<ModifiableOrderType, ModificationEvent[]>;
   modificationLoading: boolean;
   formatPrice: (price: number) => string;
+  formatDateTime: (input: string | number) => string; // Story 7.21 fix: Add formatDateTime prop
   onToggleToTree: () => void;
   showToggle: boolean;
 }
@@ -837,10 +955,87 @@ function LegacyChainView({
   modificationData,
   modificationLoading,
   formatPrice,
+  formatDateTime,
   onToggleToTree,
   showToggle,
 }: LegacyChainViewProps) {
   const [showModificationHistory, setShowModificationHistory] = useState(false);
+
+  // Story 7.21: Handle historical chains with no order details
+  // Historical chains from DB don't have individual order records from Binance
+  if (chain.orders.length === 0) {
+    return (
+      <div className="border-t border-gray-700 p-4">
+        {/* View Toggle */}
+        {showToggle && (
+          <div className="flex items-center justify-between mb-4">
+            <h4 className="text-sm font-medium text-gray-400 flex items-center gap-2">
+              <Activity className="w-4 h-4" />
+              Order Details (List View)
+            </h4>
+            <button
+              onClick={(e) => { e.stopPropagation(); onToggleToTree(); }}
+              className="text-xs text-purple-400 hover:text-purple-300 transition-colors"
+            >
+              Switch to Tree View
+            </button>
+          </div>
+        )}
+
+        {/* Fallback UI for historical chains without order details */}
+        <div className="text-center py-6 text-gray-500">
+          <History className="w-8 h-8 mx-auto mb-2" />
+          <p className="font-medium">Historical Chain</p>
+          <p className="text-sm mt-1">Order details not available from Binance</p>
+
+          {/* Show what data we do have from the position state */}
+          {chain.positionState && (
+            <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-left max-w-md mx-auto">
+              <div className="bg-gray-800/50 rounded-lg p-2">
+                <span className="text-xs text-gray-500 block">Entry Price</span>
+                <span className="text-sm font-mono text-gray-300">
+                  ${chain.positionState.entryPrice?.toFixed(4) || 'N/A'}
+                </span>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-2">
+                <span className="text-xs text-gray-500 block">Quantity</span>
+                <span className="text-sm font-mono text-gray-300">
+                  {chain.positionState.entryQuantity || 'N/A'}
+                </span>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-2">
+                <span className="text-xs text-gray-500 block">Status</span>
+                <span className={`text-sm ${
+                  chain.positionState.status === 'ACTIVE' ? 'text-green-400' :
+                  chain.positionState.status === 'PARTIAL' ? 'text-yellow-400' :
+                  chain.positionState.status === 'CLOSED' ? 'text-blue-400' :
+                  'text-gray-400'
+                }`}>
+                  {chain.positionState.status}
+                </span>
+              </div>
+              <div className="bg-gray-800/50 rounded-lg p-2">
+                <span className="text-xs text-gray-500 block">Realized PnL</span>
+                <span className={`text-sm font-mono ${
+                  (chain.positionState.realizedPnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
+                }`}>
+                  {(chain.positionState.realizedPnl || 0) >= 0 ? '+' : ''}
+                  ${(chain.positionState.realizedPnl || 0).toFixed(4)}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* If no position state, show basic chain info */}
+          {!chain.positionState && (
+            <div className="mt-4 text-xs text-gray-600">
+              Chain ID: {chain.chainId} | Status: {chain.status}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   // Get order type badge
   const getOrderTypeBadge = (orderType: OrderTypeSuffix | null) => {
@@ -1023,7 +1218,7 @@ function LegacyChainView({
                         <Shield className="w-4 h-4 text-red-400" />
                         <span className="text-sm font-medium text-red-400">Stop Loss</span>
                         <span className="text-xs text-gray-500">
-                          (${(chain.slOrder.stopPrice || chain.slOrder.price).toFixed(2)})
+                          (${(chain.slOrder.stopPrice || chain.slOrder.price || 0).toFixed(2)})
                         </span>
                         {(() => {
                           const summary = calculateSummaryStats(modificationData.SL);
@@ -1059,7 +1254,7 @@ function LegacyChainView({
                           <Target className="w-4 h-4 text-cyan-400" />
                           <span className="text-sm font-medium text-cyan-400">{tpType}</span>
                           <span className="text-xs text-gray-500">
-                            (${tp.price.toFixed(2)})
+                            (${(tp.price || 0).toFixed(2)})
                           </span>
                           <span className="px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
                             {summary.totalModifications} mod{summary.totalModifications !== 1 ? 's' : ''}
@@ -1102,13 +1297,13 @@ function LegacyChainView({
         <div>
           <span className="text-gray-500">Created:</span>
           <span className="ml-2 text-gray-300">
-            {format(chain.createdAt, 'MMM dd, HH:mm:ss')}
+            {formatDateTime(chain.createdAt)}
           </span>
         </div>
         <div>
           <span className="text-gray-500">Updated:</span>
           <span className="ml-2 text-gray-300">
-            {format(chain.updatedAt, 'MMM dd, HH:mm:ss')}
+            {formatDateTime(chain.updatedAt)}
           </span>
         </div>
         <div>

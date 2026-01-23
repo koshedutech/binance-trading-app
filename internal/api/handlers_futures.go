@@ -727,6 +727,54 @@ func (s *Server) handleGetAllFuturesOrders(c *gin.Context) {
 // ==================== ORDER CHAINS WITH STATE ====================
 // Story 7.14: Order Chain Backend Integration
 
+// EfficiencyInfo contains efficiency metrics for position analytics
+type EfficiencyInfo struct {
+	PeakProfit        float64 `json:"peak_profit"`
+	CurrentProfit     float64 `json:"current_profit"`
+	EfficiencyPercent float64 `json:"efficiency_percent"`
+	ThresholdPercent  float64 `json:"threshold_percent"`
+}
+
+// ClassicScoresInfo contains classic indicator scores
+type ClassicScoresInfo struct {
+	ADX              float64 `json:"adx"`
+	ADXThreshold     float64 `json:"adx_threshold"`
+	RSI              float64 `json:"rsi"`
+	RSIState         string  `json:"rsi_state"` // "oversold", "normal", "overbought"
+	ReversalSignals  int     `json:"reversal_signals"`
+	ReversalRequired int     `json:"reversal_required"`
+}
+
+// NewEngineScoresInfo contains new engine indicator scores
+type NewEngineScoresInfo struct {
+	Technical float64 `json:"technical"`
+	Context   float64 `json:"context"`
+	LLM       float64 `json:"llm"`
+	History   float64 `json:"history"`
+	Final     float64 `json:"final"`
+	Regime    string  `json:"regime"`
+	Strategy  string  `json:"strategy"`
+}
+
+// PositionAnalyticsInfo contains position analytics for the chain view
+// Story 11.40: Position Analytics Integration
+type PositionAnalyticsInfo struct {
+	Stage           string               `json:"stage"`                      // RISK_ZONE, BREAKEVEN, TP1, EFFICIENCY
+	StageEntryTime  int64                `json:"stage_entry_time,omitempty"` // Unix ms
+	CurrentPrice    float64              `json:"current_price"`
+	BreakevenPrice  *float64             `json:"breakeven_price,omitempty"`
+	TP1Price        *float64             `json:"tp1_price,omitempty"`
+	TP2Price        *float64             `json:"tp2_price,omitempty"`
+	TP3Price        *float64             `json:"tp3_price,omitempty"`
+	StopLoss        *float64             `json:"stop_loss,omitempty"`
+	Efficiency      *EfficiencyInfo      `json:"efficiency,omitempty"`
+	DecisionMode    string               `json:"decision_mode"` // classic, new_engine
+	ClassicScores   *ClassicScoresInfo   `json:"classic_scores,omitempty"`
+	NewEngineScores *NewEngineScoresInfo `json:"new_engine_scores,omitempty"`
+	UnrealizedPnL   float64              `json:"unrealized_pnl"`
+	ROE             float64              `json:"roe"`
+}
+
 // OrderChainWithState represents an order chain with associated position state and modification counts
 type OrderChainWithState struct {
 	ChainID            string                 `json:"chain_id"`
@@ -735,6 +783,7 @@ type OrderChainWithState struct {
 	PositionSide       string                 `json:"position_side"`
 	Orders             []ChainOrderInfo       `json:"orders"`
 	PositionState      *PositionStateInfo     `json:"position_state,omitempty"`
+	PositionAnalytics  *PositionAnalyticsInfo `json:"position_analytics,omitempty"` // Story 11.40
 	ModificationCounts map[string]int         `json:"modification_counts"`
 	Status             string                 `json:"status"` // active, partial, closed
 	TotalValue         float64                `json:"total_value"`
@@ -1020,6 +1069,14 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		if counts, exists := modCounts[chainID]; exists {
 			chain.ModificationCounts = counts
 		}
+
+		// Story 11.40: Add position analytics for active positions
+		if chain.PositionState != nil && chain.Status == "active" {
+			analytics := s.getPositionAnalyticsForChain(c, chain.Symbol)
+			if analytics != nil {
+				chain.PositionAnalytics = analytics
+			}
+		}
 	}
 
 	// 7. Apply status filter
@@ -1088,6 +1145,93 @@ func extractOrderTypeFromClientOrderID(clientOrderID string) string {
 		return parts[len(parts)-1]
 	}
 	return ""
+}
+
+// getPositionAnalyticsForChain gets position analytics for a chain symbol
+// Story 11.40: Position Analytics Integration
+func (s *Server) getPositionAnalyticsForChain(c *gin.Context, symbol string) *PositionAnalyticsInfo {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return nil
+	}
+
+	if s.userAutopilotManager == nil {
+		return nil
+	}
+
+	instance := s.userAutopilotManager.GetInstance(userID)
+	if instance == nil || instance.Autopilot == nil {
+		return nil
+	}
+
+	data := instance.Autopilot.GetPositionAnalytics(symbol)
+	if data == nil {
+		return nil
+	}
+
+	// Convert autopilot.PositionAnalyticsData to API response type PositionAnalyticsInfo
+	analytics := &PositionAnalyticsInfo{
+		Stage:         data.Stage,
+		StageEntryTime: data.StageEntryTime,
+		CurrentPrice:  data.CurrentPrice,
+		DecisionMode:  data.DecisionMode,
+		UnrealizedPnL: data.UnrealizedPnL,
+		ROE:           data.ROE,
+	}
+
+	// Copy optional pointer fields
+	if data.BreakevenPrice != nil {
+		analytics.BreakevenPrice = data.BreakevenPrice
+	}
+	if data.TP1Price != nil {
+		analytics.TP1Price = data.TP1Price
+	}
+	if data.TP2Price != nil {
+		analytics.TP2Price = data.TP2Price
+	}
+	if data.TP3Price != nil {
+		analytics.TP3Price = data.TP3Price
+	}
+	if data.StopLoss != nil {
+		analytics.StopLoss = data.StopLoss
+	}
+
+	// Convert efficiency data
+	if data.Efficiency != nil {
+		analytics.Efficiency = &EfficiencyInfo{
+			PeakProfit:        data.Efficiency.PeakProfit,
+			CurrentProfit:     data.Efficiency.CurrentProfit,
+			EfficiencyPercent: data.Efficiency.EfficiencyPercent,
+			ThresholdPercent:  data.Efficiency.ThresholdPercent,
+		}
+	}
+
+	// Convert classic scores
+	if data.ClassicScores != nil {
+		analytics.ClassicScores = &ClassicScoresInfo{
+			ADX:              data.ClassicScores.ADX,
+			ADXThreshold:     data.ClassicScores.ADXThreshold,
+			RSI:              data.ClassicScores.RSI,
+			RSIState:         data.ClassicScores.RSIState,
+			ReversalSignals:  data.ClassicScores.ReversalSignals,
+			ReversalRequired: data.ClassicScores.ReversalRequired,
+		}
+	}
+
+	// Convert new engine scores
+	if data.NewEngineScores != nil {
+		analytics.NewEngineScores = &NewEngineScoresInfo{
+			Technical: data.NewEngineScores.Technical,
+			Context:   data.NewEngineScores.Context,
+			LLM:       data.NewEngineScores.LLM,
+			History:   data.NewEngineScores.History,
+			Final:     data.NewEngineScores.Final,
+			Regime:    data.NewEngineScores.Regime,
+			Strategy:  data.NewEngineScores.Strategy,
+		}
+	}
+
+	return analytics
 }
 
 // ==================== END ORDER CHAINS WITH STATE ====================

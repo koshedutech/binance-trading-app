@@ -373,15 +373,7 @@ export default function FuturesDashboard() {
 
       {/* Trade Cycle - Between Positions and Orders */}
       <div className="mb-4">
-        <CollapsibleCard
-          title="Trade Cycle"
-          icon={<Layers className="w-4 h-4" />}
-          defaultExpanded={false}
-          badge="Lifecycle"
-          badgeColor="purple"
-        >
-          <TradeLifecycleTab />
-        </CollapsibleCard>
+        <TradeLifecycleTab />
       </div>
 
       {/* Open Orders & Trade History */}

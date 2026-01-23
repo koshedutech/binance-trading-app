@@ -5,6 +5,7 @@ import axios from 'axios';
 import type {
   ModeName,
   StrategyName,
+  SectionName,
   ModeConfig,
   ModeStrategyConfig,
   GetModeStrategiesResponse,
@@ -13,6 +14,11 @@ import type {
   UpdateModeStrategyResponse,
   ResetModeStrategyResponse,
   StrategyComparisonResponse,
+  // Story 11.41: Section-level types
+  GetSectionResponse,
+  UpdateSectionResponse,
+  ResetSectionResponse,
+  ListSectionsResponse,
 } from '../types/modeStrategy';
 
 // Token storage key
@@ -71,6 +77,7 @@ export async function getModeStrategies(mode: ModeName): Promise<ModeConfig> {
 // ==================== GET /api/futures/modes/:mode/strategies/:strategy ====================
 // Get a specific strategy configuration
 // Backend returns ModeStrategyResponse directly
+// Story 11.41: Expanded to include all 18 sections
 export async function getModeStrategy(
   mode: ModeName,
   strategy: StrategyName
@@ -86,15 +93,30 @@ export async function getModeStrategy(
     enabled: stratResp.enabled,
     priority: stratResp.priority,
     supported_regimes: stratResp.supported_regimes,
+    // Legacy position sizing fields (backward compatibility)
     leverage: stratResp.settings.leverage,
     max_positions: stratResp.settings.max_positions,
     base_size_usd: stratResp.settings.base_size_usd,
+    // Required sections
     timeframe: stratResp.settings.timeframe,
     sltp: stratResp.settings.sltp,
     confidence: stratResp.settings.confidence,
     entry_conditions: stratResp.settings.entry_conditions || {},
     exit_conditions: stratResp.settings.exit_conditions,
     scoring: stratResp.settings.scoring,
+    // Story 11.41: All 18 sections (optional)
+    position_sizing: stratResp.settings.position_sizing,
+    mtf: stratResp.settings.mtf,
+    circuit_breaker: stratResp.settings.circuit_breaker,
+    hedge: stratResp.settings.hedge,
+    averaging: stratResp.settings.averaging,
+    stale_release: stratResp.settings.stale_release,
+    position_optimization: stratResp.settings.position_optimization,
+    funding_rate: stratResp.settings.funding_rate,
+    risk: stratResp.settings.risk,
+    trend_divergence: stratResp.settings.trend_divergence,
+    dynamic_ai_exit: stratResp.settings.dynamic_ai_exit,
+    early_warning: stratResp.settings.early_warning,
   };
 }
 
@@ -102,6 +124,7 @@ export async function getModeStrategy(
 // Update a specific strategy configuration
 // Backend expects: { enabled?, priority?, supported_regimes?, settings: {...} }
 // Settings must be nested inside a "settings" object
+// Story 11.41: Expanded to support all 18 sections
 export async function updateModeStrategy(
   mode: ModeName,
   strategy: StrategyName,
@@ -129,7 +152,7 @@ export async function updateModeStrategy(
     requestBody.supported_regimes = config.supported_regimes;
   }
 
-  // All other settings go inside the "settings" object
+  // Legacy position sizing fields (for backward compatibility)
   if ('leverage' in config && config.leverage !== undefined) {
     requestBody.settings.leverage = config.leverage;
   }
@@ -139,6 +162,8 @@ export async function updateModeStrategy(
   if ('base_size_usd' in config && config.base_size_usd !== undefined) {
     requestBody.settings.base_size_usd = config.base_size_usd;
   }
+
+  // Required sections
   if ('timeframe' in config && config.timeframe !== undefined) {
     requestBody.settings.timeframe = config.timeframe;
   }
@@ -156,6 +181,44 @@ export async function updateModeStrategy(
   }
   if ('scoring' in config && config.scoring !== undefined) {
     requestBody.settings.scoring = config.scoring;
+  }
+
+  // Story 11.41: All 18 sections support
+  if ('position_sizing' in config && config.position_sizing !== undefined) {
+    requestBody.settings.position_sizing = config.position_sizing;
+  }
+  if ('mtf' in config && config.mtf !== undefined) {
+    requestBody.settings.mtf = config.mtf;
+  }
+  if ('circuit_breaker' in config && config.circuit_breaker !== undefined) {
+    requestBody.settings.circuit_breaker = config.circuit_breaker;
+  }
+  if ('hedge' in config && config.hedge !== undefined) {
+    requestBody.settings.hedge = config.hedge;
+  }
+  if ('averaging' in config && config.averaging !== undefined) {
+    requestBody.settings.averaging = config.averaging;
+  }
+  if ('stale_release' in config && config.stale_release !== undefined) {
+    requestBody.settings.stale_release = config.stale_release;
+  }
+  if ('position_optimization' in config && config.position_optimization !== undefined) {
+    requestBody.settings.position_optimization = config.position_optimization;
+  }
+  if ('funding_rate' in config && config.funding_rate !== undefined) {
+    requestBody.settings.funding_rate = config.funding_rate;
+  }
+  if ('risk' in config && config.risk !== undefined) {
+    requestBody.settings.risk = config.risk;
+  }
+  if ('trend_divergence' in config && config.trend_divergence !== undefined) {
+    requestBody.settings.trend_divergence = config.trend_divergence;
+  }
+  if ('dynamic_ai_exit' in config && config.dynamic_ai_exit !== undefined) {
+    requestBody.settings.dynamic_ai_exit = config.dynamic_ai_exit;
+  }
+  if ('early_warning' in config && config.early_warning !== undefined) {
+    requestBody.settings.early_warning = config.early_warning;
   }
 
   const response = await axios.put<UpdateModeStrategyResponse>(
@@ -323,6 +386,66 @@ export async function updateStrategyPosition(
   return updateModeStrategy(mode, strategy, position);
 }
 
+// ==================== Story 11.41: Section-Level API Functions ====================
+
+// GET /api/futures/modes/:mode/strategies/:strategy/sections
+// List all sections for a mode+strategy
+export async function getModeStrategySections(
+  mode: ModeName,
+  strategy: StrategyName
+): Promise<ListSectionsResponse> {
+  const response = await axios.get<ListSectionsResponse>(
+    `${BASE_URL}/${mode}/strategies/${strategy}/sections`,
+    { headers: getAuthHeaders() }
+  );
+  return response.data;
+}
+
+// GET /api/futures/modes/:mode/strategies/:strategy/sections/:section
+// Get a specific section
+export async function getModeStrategySection(
+  mode: ModeName,
+  strategy: StrategyName,
+  section: SectionName
+): Promise<GetSectionResponse> {
+  const response = await axios.get<GetSectionResponse>(
+    `${BASE_URL}/${mode}/strategies/${strategy}/sections/${section}`,
+    { headers: getAuthHeaders() }
+  );
+  return response.data;
+}
+
+// PUT /api/futures/modes/:mode/strategies/:strategy/sections/:section
+// Update a specific section
+export async function updateModeStrategySection(
+  mode: ModeName,
+  strategy: StrategyName,
+  section: SectionName,
+  data: unknown
+): Promise<UpdateSectionResponse> {
+  const response = await axios.put<UpdateSectionResponse>(
+    `${BASE_URL}/${mode}/strategies/${strategy}/sections/${section}`,
+    data,
+    { headers: getAuthHeaders() }
+  );
+  return response.data;
+}
+
+// POST /api/futures/modes/:mode/strategies/:strategy/sections/:section/reset
+// Reset a specific section to defaults
+export async function resetModeStrategySection(
+  mode: ModeName,
+  strategy: StrategyName,
+  section: SectionName
+): Promise<ResetSectionResponse> {
+  const response = await axios.post<ResetSectionResponse>(
+    `${BASE_URL}/${mode}/strategies/${strategy}/sections/${section}/reset`,
+    {},
+    { headers: getAuthHeaders() }
+  );
+  return response.data;
+}
+
 // Default export for convenience
 const modeStrategyApi = {
   getModeStrategies,
@@ -341,6 +464,11 @@ const modeStrategyApi = {
   updateStrategyExitConditions,
   updateStrategyScoring,
   updateStrategyPosition,
+  // Story 11.41: Section-level functions
+  getModeStrategySections,
+  getModeStrategySection,
+  updateModeStrategySection,
+  resetModeStrategySection,
 };
 
 export default modeStrategyApi;

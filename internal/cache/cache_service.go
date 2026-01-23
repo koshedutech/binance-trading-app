@@ -5,6 +5,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -14,6 +15,13 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
+
+// isContextError returns true if the error is due to context cancellation or deadline.
+// These are client-side issues (user navigated away, request timeout) and should NOT
+// trigger the circuit breaker as they don't indicate Redis health problems.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
 
 // CacheService provides Redis-based caching with graceful degradation.
 // When Redis is unavailable, operations return errors that callers should handle
@@ -161,7 +169,10 @@ func (cs *CacheService) Get(ctx context.Context, key string) (string, error) {
 		if err == redis.Nil {
 			return "", err // Cache miss, not a failure
 		}
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return "", fmt.Errorf("redis get failed: %w", err)
 	}
 
@@ -179,7 +190,10 @@ func (cs *CacheService) MGet(ctx context.Context, keys ...string) ([]interface{}
 
 	result, err := cs.client.MGet(ctx, keys...).Result()
 	if err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return nil, fmt.Errorf("redis mget failed: %w", err)
 	}
 
@@ -210,7 +224,10 @@ func (cs *CacheService) Set(ctx context.Context, key string, value interface{}, 
 	}
 
 	if err := cs.client.Set(ctx, key, data, ttl).Err(); err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return fmt.Errorf("redis set failed: %w", err)
 	}
 
@@ -227,7 +244,10 @@ func (cs *CacheService) Delete(ctx context.Context, key string) error {
 	}
 
 	if err := cs.client.Del(ctx, key).Err(); err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return fmt.Errorf("redis delete failed: %w", err)
 	}
 
@@ -246,13 +266,19 @@ func (cs *CacheService) DeletePattern(ctx context.Context, pattern string) error
 	iter := cs.client.Scan(ctx, 0, pattern, 100).Iterator()
 	for iter.Next(ctx) {
 		if err := cs.client.Del(ctx, iter.Val()).Err(); err != nil {
-			cs.recordFailure()
+			// Don't count context cancellation as Redis failure - it's a client-side issue
+			if !isContextError(err) {
+				cs.recordFailure()
+			}
 			return fmt.Errorf("redis delete pattern failed: %w", err)
 		}
 	}
 
 	if err := iter.Err(); err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return fmt.Errorf("redis scan failed: %w", err)
 	}
 
@@ -275,7 +301,10 @@ func (cs *CacheService) IncrementDailySequence(ctx context.Context, userID, date
 	// INCR is atomic - perfect for sequence generation
 	val, err := cs.client.Incr(ctx, key).Result()
 	if err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return 0, fmt.Errorf("redis incr failed: %w", err)
 	}
 
@@ -305,7 +334,10 @@ func (cs *CacheService) GetCurrentSequence(ctx context.Context, userID, dateKey 
 			// Key not found - no sequences generated yet for this date
 			return 0, nil
 		}
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return 0, fmt.Errorf("redis get sequence failed: %w", err)
 	}
 
@@ -345,7 +377,10 @@ func (cs *CacheService) ZAdd(ctx context.Context, key string, score float64, mem
 
 	z := redis.Z{Score: score, Member: member}
 	if err := cs.client.ZAdd(ctx, key, z).Err(); err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return fmt.Errorf("ZAdd failed: %w", err)
 	}
 
@@ -370,7 +405,10 @@ func (cs *CacheService) ZRangeWithScores(ctx context.Context, key string, start,
 
 	result, err := cs.client.ZRangeWithScores(ctx, key, start, stop).Result()
 	if err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return nil, fmt.Errorf("ZRangeWithScores failed: %w", err)
 	}
 
@@ -397,7 +435,10 @@ func (cs *CacheService) Expire(ctx context.Context, key string, ttl time.Duratio
 	}
 
 	if err := cs.client.Expire(ctx, key, ttl).Err(); err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return fmt.Errorf("Expire failed: %w", err)
 	}
 
@@ -416,7 +457,10 @@ func (cs *CacheService) Close() error {
 // Ping checks Redis connectivity.
 func (cs *CacheService) Ping(ctx context.Context) error {
 	if err := cs.client.Ping(ctx).Err(); err != nil {
-		cs.recordFailure()
+		// Don't count context cancellation as Redis failure - it's a client-side issue
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
 		return err
 	}
 	cs.recordSuccess()
@@ -501,7 +545,10 @@ func (cs *CacheService) ScanKeys(ctx context.Context, pattern string, maxKeys in
 		var err error
 		scanKeys, cursor, err = cs.client.Scan(ctx, cursor, pattern, 100).Result()
 		if err != nil {
-			cs.recordFailure()
+			// Don't count context cancellation as Redis failure - it's a client-side issue
+			if !isContextError(err) {
+				cs.recordFailure()
+			}
 			return nil, fmt.Errorf("redis scan failed: %w", err)
 		}
 
