@@ -71,3 +71,4 @@ web/node_modules/
 releases/
 !releases/.gitkeep
 binance-bot
+ginie_position_state.json
