@@ -1,20 +1,47 @@
 {
   "positions": {
-    "DOTUSDT": {
-      "symbol": "DOTUSDT",
+    "AVAXUSDT": {
+      "symbol": "AVAXUSDT",
       "side": "SHORT",
       "mode": "scalp",
-      "current_tp_level": 0,
+      "current_tp_level": 1,
       "scalp_reentry": {
         "enabled": true,
         "current_cycle": 0,
-        "cycles": [],
-        "accumulated_profit": 0,
-        "tp_level_unlocked": 0,
+        "cycles": [
+          {
+            "cycle_number": 1,
+            "tp_level": 1,
+            "mode": "position_optimization",
+            "side": "SHORT",
+            "sell_price": 12.089,
+            "sell_quantity": 2,
+            "sell_pnl": -0.0259999999999998,
+            "sell_order_id": 0,
+            "sell_time": "2026-01-23T15:10:42.895834221Z",
+            "reentry_target_price": 0,
+            "reentry_quantity": 0,
+            "reentry_state": "NONE",
+            "reentry_attempts": 0,
+            "reentry_order_id": 0,
+            "reentry_order_placed_at": "0001-01-01T00:00:00Z",
+            "reentry_filled_price": 0,
+            "reentry_filled_qty": 0,
+            "reentry_fill_time": "0001-01-01T00:00:00Z",
+            "start_time": "2026-01-23T15:10:42.895849325Z",
+            "end_time": "2026-01-23T15:10:43.188222778Z",
+            "duration": "",
+            "outcome": "full_close_small_position",
+            "outcome_pnl": 0,
+            "outcome_reason": "position_below_min_qty"
+          }
+        ],
+        "accumulated_profit": -0.0259999999999998,
+        "tp_level_unlocked": 1,
         "next_tp_blocked": false,
-        "original_entry_price": 1.93,
-        "current_breakeven": 1.93,
-        "remaining_quantity": 103,
+        "original_entry_price": 12.076,
+        "current_breakeven": 12.076,
+        "remaining_quantity": 0,
         "dynamic_sl_active": false,
         "dynamic_sl_price": 0,
         "protected_profit": 0,
@@ -26,22 +53,32 @@
         "final_trailing_active": false,
         "reentry_percent": 0.5,
         "reentry_price_buffer": 0.0005,
-        "total_cycles_completed": 0,
+        "total_cycles_completed": 1,
         "total_reentries": 0,
         "successful_reentries": 0,
         "skipped_reentries": 0,
-        "total_cycle_pnl": 0,
-        "started_at": "2026-01-23T10:54:34.19918115Z",
-        "last_update": "2026-01-23T10:54:34.199329005Z",
+        "total_cycle_pnl": -0.0259999999999998,
+        "started_at": "2026-01-23T15:07:42.734133692Z",
+        "last_update": "2026-01-23T15:10:43.188238782Z",
         "debug_log": [
-          "10:54:34: [Story 9.9] Initialized position_optimization for DOTUSDT SHORT @ 1.93000000 (mode: scalp, TP1=0.4%, TP2=0.7%, TP3=1.0%)"
+          "15:07:42: [Story 9.9] Initialized position_optimization for AVAXUSDT SHORT @ 12.07600000 (mode: scalp, TP1=0.4%, TP2=0.7%, TP3=1.0%)",
+          "15:07:43: Monitoring: price=12.08600000, tpUnlocked=0, blocked=false, cycles=0",
+          "15:07:43: Monitoring: price=12.08500000, tpUnlocked=0, blocked=false, cycles=0",
+          "15:08:42: Monitoring: price=12.09000000, tpUnlocked=0, blocked=false, cycles=0",
+          "15:08:42: Monitoring: price=12.09000000, tpUnlocked=0, blocked=false, cycles=0",
+          "15:09:42: Monitoring: price=12.07300000, tpUnlocked=0, blocked=false, cycles=0",
+          "15:10:13: Monitoring: price=0.00000000, tpUnlocked=0, blocked=false, cycles=0",
+          "15:10:42: TP1: Target profit 0.40%, sell 30% of position",
+          "15:10:42: TP1: Partial qty 0.0000 below min, closing 100% (2.0000) instead",
+          "15:10:42: TP1 hit at 12.08900000! Selling 2.0000 (100% of remaining)",
+          "15:10:43: TP1: Position fully closed (small position handling). Total profit: -0.0260"
         ],
         "needs_manual_intervention": false,
         "manual_intervention_reason": "",
         "manual_intervention_alert_at": ""
       },
-      "saved_at": "2026-01-23T10:54:34.208796335Z"
+      "saved_at": "2026-01-23T15:10:43.194480032Z"
     }
   },
-  "updated_at": "2026-01-23T10:54:34.208772826Z"
+  "updated_at": "2026-01-23T15:10:43.194463127Z"
 }
