@@ -387,8 +387,11 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sellQty = g.roundQuantity(pos.Symbol, sellQty)
 	minQty := g.getMinQuantity(pos.Symbol)
 
-	// USD-based minimum threshold for position value
-	const minPositionValueUSD = 10.0
+	// USD-based minimum threshold for position value - use config value (default $10)
+	minPositionValueUSD := config.MinPositionSizeUSD
+	if minPositionValueUSD <= 0 {
+		minPositionValueUSD = 10.0 // Fallback to $10 if not configured
+	}
 
 	// Handle small positions: if partial sell is below minimum, close entire remaining
 	if sellQty < minQty {
@@ -847,8 +850,11 @@ func (g *GinieAutopilot) monitorFinalTrailing(pos *GiniePosition, currentPrice f
 		finalQty := g.roundQuantity(pos.Symbol, sr.FinalPortionQty)
 		minQty := g.getMinQuantity(pos.Symbol)
 
-		// USD-based minimum threshold for position value
-		const minPositionValueUSD = 10.0
+		// USD-based minimum threshold for position value - use config value (default $10)
+		minPositionValueUSD := config.MinPositionSizeUSD
+		if minPositionValueUSD <= 0 {
+			minPositionValueUSD = 10.0 // Fallback to $10 if not configured
+		}
 
 		if finalQty < minQty {
 			sr.AddDebugLog(fmt.Sprintf("Final portion qty %.8f below minimum %.8f, using minimum", finalQty, minQty))
