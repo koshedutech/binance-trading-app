@@ -299,12 +299,24 @@ development_status:
   11-40-entry-decision-engine-gap-analysis-ui: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-23 (frontend tests missing)
   # Part K: Configuration Amendment (added 2026-01-23)
   11-41-comprehensive-mode-strategy-config: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-23
-  epic-11-retrospective: optional  # Reopened for Story 11.41
+  # Part L: R:R Based Trading Strategies (added 2026-01-24)
+  # Story 11.43 split into sub-stories after QA FAIL (37.5% AC coverage)
+  11-43-ravindra-volume-imbalance-strategy: done  # Core pattern detection complete - CODE REVIEW PASSED 2026-01-24
+  11-44-volume-imbalance-database-schema: ready-for-dev  # P0 - Migration, repository, cache, user init
+  11-45-volume-imbalance-api-endpoints: backlog  # P1 - Strategy group/sub-strategy APIs (blocked by 11.44)
+  11-46-volume-imbalance-ui-components: backlog  # P1 - Mode Config UI, Entry Decision Engine UI (blocked by 11.44, 11.45)
+  11-47-volume-imbalance-llm-validation: backlog  # P2 - LLM validation integration
+  epic-11-retrospective: optional  # Reopened for Volume Imbalance sub-stories
   # ============================================================================
-  # EPIC 11 - 41 stories total (ALL COMPLETE)
+  # EPIC 11 - 46 stories total (42 original + 4 Volume Imbalance sub-stories)
   # Part J added 2026-01-23 - Entry Decision Engine Gap Analysis UI
   # Part K added 2026-01-23 - Configuration Amendment (Story 11.41)
-  # Story 11.40 completed 2026-01-23 with CODE REVIEW PASSED + QA CONCERNS
+  # Part L added 2026-01-24 - R:R Based Trading Strategies
+  #   11.43: Core pattern detection (3-step model) - DONE
+  #   11.44: Database schema & repository - READY
+  #   11.45: API endpoints - BLOCKED
+  #   11.46: UI components - BLOCKED
+  #   11.47: LLM validation - BLOCKED
   # ============================================================================
 
   # ============================================================================

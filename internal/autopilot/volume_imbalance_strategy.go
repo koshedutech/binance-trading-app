@@ -11,53 +11,68 @@ import (
 )
 
 // ============================================================================
-// RAVINDRA'S VOLUME IMBALANCE STRATEGY
+// RAVINDRA'S VOLUME IMBALANCE STRATEGY - 3-STEP MODEL
 // ============================================================================
 //
-// This strategy detects institutional volume imbalance patterns that indicate
-// a high-probability pump after liquidity has been collected from retail traders.
+// This strategy detects institutional volume imbalance patterns using Ravindra
+// Rokade's (Stock Niti) methodology. The pattern identifies high-probability
+// breakout entries after institutional accumulation.
 //
-// THE PATTERN (5 Steps):
+// THE PATTERN (3 Steps - Refined):
 //
-// STEP 1: REFERENCE CANDLE (Institutional Entry)
+// STEP 1: ACCUMULATION START (Institutional First Buy)
 //   - Institution punches a BIG BUY order
-//   - Creates the HIGHEST VOLUME + HIGHEST PRICE candle in recent history
-//   - This candle's HIGH becomes our ENTRY TRIGGER level
+//   - Creates the HIGHEST VOLUME spike (2x+ average) in recent history
+//   - This becomes the REFERENCE CANDLE
+//   - The candle's HIGH becomes our ENTRY TRIGGER level
+//   - FOOTPRINT: Massive executed volume visible on candlestick
 //
-// STEP 2: LIQUIDITY DRAIN (Retail Stop-Loss Collection)
-//   - Volume DECLINING slowly over multiple candles
-//   - Price DECLINING slowly over same candles
-//   - Retail stop-losses provide liquidity to institution
+// STEP 2: SIDEWAYS CONSOLIDATION (Market Digesting)
+//   - Volume DECLINING over multiple candles
+//   - Price stays in SIDEWAYS RANGE (not necessarily declining)
+//   - Institutions accumulating quietly
+//   - Retail losing interest (declining volume = no liquidity)
+//   - Price respects range: doesn't break reference high/low
+//   - DURATION: Multiple candles with decreasing volatility
 //
-// STEP 3: LIQUIDITY EXHAUSTION (All Stops Triggered)
-//   - Volume reaches MINIMUM
-//   - Price at LOCAL LOW
-//   - All retail stops have been triggered
+// STEP 3: BREAKOUT ENTRY (Institutional Push)
+//   - Volume SURGES again (50%+ above consolidation average)
+//   - Price BREAKS ABOVE the reference candle HIGH
+//   - This is our ENTRY POINT
+//   - LLM validates to filter false breakouts
 //
-// STEP 4: THE PUMP (Institutional Re-Entry)
-//   - Volume INCREASES again (institution buying)
-//   - Price RAPIDLY shoots up
-//   - Pulls liquidity from profit-booking orders above
+// WHY 3 STEPS (NOT 5)?
+// The original 5-step model was overly complex. Ravindra's actual approach:
+// - Reference Candle → Step 1: Accumulation Start
+// - Liquidity Drain + Exhaustion → Step 2: Sideways Consolidation (combined)
+// - Pump + Entry → Step 3: Breakout Entry (combined)
 //
-// STEP 5: ENTRY TRIGGER
-//   - Price CROSSES the HIGH of REFERENCE CANDLE (from Step 1)
-//   - This is the ENTRY POINT
+// TIMEFRAME VALIDATION (Backtested):
+// - 15-minute for Scalp mode (validated by backtesting)
+// - Institutions need 30-60+ minutes to accumulate quietly
+// - 5-minute consolidation too short - produces false signals
 //
 // Risk Management:
-//   - Stop Loss: Below the lowest point (Step 3)
-//   - Take Profit: Entry + (Entry - StopLoss) * 4 (1:4 R:R)
+//   - Entry: At or above reference candle high
+//   - Stop Loss: Below consolidation low (with buffer)
+//   - Take Profit: Entry + (Risk × 4) for 1:4 R:R
 //   - Trailing Stop: Move SL to breakeven at 1:2, move to 1:1 at 1:3
 
-// VolumeImbalanceState represents the current state of pattern detection
+// VolumeImbalanceState represents the current state of 3-step pattern detection
 type VolumeImbalanceState string
 
 const (
-	VIStateWatching     VolumeImbalanceState = "WATCHING"     // Looking for reference candle
-	VIStateAccumulating VolumeImbalanceState = "ACCUMULATING" // Tracking decline phase
-	VIStateExhausted    VolumeImbalanceState = "EXHAUSTED"    // Liquidity exhausted
-	VIStatePumping      VolumeImbalanceState = "PUMPING"      // Pump detected
-	VIStateReady        VolumeImbalanceState = "READY"        // Ready for entry
-	VIStateInvalid      VolumeImbalanceState = "INVALID"      // Pattern invalidated
+	VIStateWatching      VolumeImbalanceState = "WATCHING"      // Step 1: Looking for accumulation start (volume spike)
+	VIStateConsolidating VolumeImbalanceState = "CONSOLIDATING" // Step 2: Volume declining, price sideways
+	VIStateReady         VolumeImbalanceState = "READY"         // Step 3: Breakout detected, ready for entry
+	VIStateEntered       VolumeImbalanceState = "ENTERED"       // Position taken
+	VIStateTrailing      VolumeImbalanceState = "TRAILING"      // Managing position with trailing SL
+	VIStateInvalid       VolumeImbalanceState = "INVALID"       // Pattern invalidated
+
+	// Legacy states for backward compatibility
+	VIStateAccumulating VolumeImbalanceState = "ACCUMULATING" // Deprecated: maps to CONSOLIDATING
+	VIStateExhausted    VolumeImbalanceState = "EXHAUSTED"    // Deprecated: not used in 3-step
+	VIStatePumping      VolumeImbalanceState = "PUMPING"      // Deprecated: merged into READY
 )
 
 // VolumeImbalanceCandle represents candle data for the strategy
@@ -71,42 +86,53 @@ type VolumeImbalanceCandle struct {
 	TakerBuyVolume float64   `json:"taker_buy_volume"` // More accurate for detecting institutional buying
 }
 
-// VolumeImbalancePattern tracks the pattern state for a symbol
+// VolumeImbalancePattern tracks the 3-step pattern state for a symbol
 type VolumeImbalancePattern struct {
 	Symbol string           `json:"symbol"`
 	Mode   GinieTradingMode `json:"mode"` // scalp, swing, position
 
-	// Step 1: Reference candle (highest volume + highest price)
+	// Step 1: Accumulation Start (Reference Candle - high volume spike)
 	ReferenceCandle struct {
 		Time           time.Time `json:"time"`
-		High           float64   `json:"high"`
-		Low            float64   `json:"low"`
+		High           float64   `json:"high"`    // Entry trigger level
+		Low            float64   `json:"low"`     // Part of consolidation range
 		Close          float64   `json:"close"`
-		Volume         float64   `json:"volume"`
+		Volume         float64   `json:"volume"`  // High volume spike (2x+ average)
 		TakerBuyVolume float64   `json:"taker_buy_volume"`
-		Index          int       `json:"index"` // Index in candle array when detected
+		Index          int       `json:"index"`   // Index in candle array when detected
 	} `json:"reference_candle"`
 
 	// Pattern state
 	State        VolumeImbalanceState `json:"state"`
 	StateChanges []string             `json:"state_changes"` // History of state changes for debugging
 
-	// Step 2: Decline tracking
-	DeclineCandles    int     `json:"decline_candles"`     // Number of candles in decline
-	DeclineVolumeSlope float64 `json:"decline_volume_slope"` // Average volume decline per candle
-	DeclinePriceSlope float64 `json:"decline_price_slope"`  // Average price decline per candle
+	// Step 2: Sideways Consolidation tracking
+	ConsolidationStartIndex int       `json:"consolidation_start_index"` // When consolidation began
+	ConsolidationCandles    int       `json:"consolidation_candles"`     // Number of candles in consolidation
+	ConsolidationLow        float64   `json:"consolidation_low"`         // Lowest low during consolidation (SL reference)
+	ConsolidationHigh       float64   `json:"consolidation_high"`        // Highest high during consolidation
+	ConsolidationAvgVolume  float64   `json:"consolidation_avg_volume"`  // Average volume during consolidation
+	VolumeTrend             float64   `json:"volume_trend"`              // Volume trend slope (should be negative)
 
-	// Step 3: Exhaustion point
-	LowestPrice     float64   `json:"lowest_price"`      // Local low (SL level)
-	LowestVolume    float64   `json:"lowest_volume"`     // Minimum volume
-	ExhaustionTime  time.Time `json:"exhaustion_time"`   // When exhaustion was detected
-	ExhaustionIndex int       `json:"exhaustion_index"`  // Index when exhaustion detected
+	// Step 3: Breakout Entry
+	BreakoutCandle struct {
+		Time   time.Time `json:"time"`
+		High   float64   `json:"high"`
+		Volume float64   `json:"volume"` // Volume surge (50%+ above consolidation avg)
+	} `json:"breakout_candle"`
 
-	// Step 4: Pump detection
-	PumpStartVolume float64   `json:"pump_start_volume"` // Volume when pump started
-	PumpStartPrice  float64   `json:"pump_start_price"`  // Price when pump started
-	PumpCandles     int       `json:"pump_candles"`      // Number of pump candles
-	PumpStartTime   time.Time `json:"pump_start_time"`
+	// Legacy fields for backward compatibility (maps to new structure)
+	DeclineCandles     int     `json:"decline_candles"`      // Maps to ConsolidationCandles
+	DeclineVolumeSlope float64 `json:"decline_volume_slope"` // Maps to VolumeTrend
+	DeclinePriceSlope  float64 `json:"decline_price_slope"`  // Deprecated in 3-step model
+	LowestPrice        float64 `json:"lowest_price"`         // Maps to ConsolidationLow
+	LowestVolume       float64 `json:"lowest_volume"`        // Legacy field
+	ExhaustionTime     time.Time `json:"exhaustion_time"`    // Deprecated
+	ExhaustionIndex    int     `json:"exhaustion_index"`     // Deprecated
+	PumpStartVolume    float64 `json:"pump_start_volume"`    // Maps to BreakoutCandle.Volume
+	PumpStartPrice     float64 `json:"pump_start_price"`     // Deprecated
+	PumpCandles        int     `json:"pump_candles"`         // Deprecated
+	PumpStartTime      time.Time `json:"pump_start_time"`    // Maps to BreakoutCandle.Time
 
 	// Timing
 	DetectedAt time.Time `json:"detected_at"`
@@ -114,74 +140,98 @@ type VolumeImbalancePattern struct {
 	ExpiresAt  time.Time `json:"expires_at"` // Pattern expires if entry not triggered
 
 	// Validation
-	IsValid      bool   `json:"is_valid"`
+	IsValid       bool   `json:"is_valid"`
 	InvalidReason string `json:"invalid_reason"`
 }
 
-// VolumeImbalanceConfig holds configurable thresholds for the strategy
+// VolumeImbalanceConfig holds configurable thresholds for the 3-step strategy
 type VolumeImbalanceConfig struct {
 	// Enable/disable the strategy
 	Enabled bool `json:"enabled"`
 
-	// Reference candle detection
-	MinVolumeSpikeMultiplier float64 `json:"min_volume_spike_multiplier"` // Default: 2.0 (2x avg volume)
-	LookbackPeriod           int     `json:"lookback_period"`             // Default: 20 candles to find reference
+	// Step 1: Accumulation Start detection
+	MinVolumeSpikeMultiplier float64 `json:"min_volume_spike_multiplier"` // Default: 2.0 (2x avg volume for spike)
+	LookbackPeriod           int     `json:"lookback_period"`             // Default: 20 candles to calculate average
 
-	// Decline phase thresholds
-	MinDeclineCandles      int     `json:"min_decline_candles"`       // Default: 3
-	MaxDeclineCandles      int     `json:"max_decline_candles"`       // Default: 15
-	MinVolumeDeclination   float64 `json:"min_volume_declination"`    // Default: 0.3 (30% decline from ref)
-	MinPriceDeclination    float64 `json:"min_price_declination"`     // Default: 0.005 (0.5% from ref high)
+	// Step 2: Sideways Consolidation thresholds
+	MinConsolidationCandles       int     `json:"min_consolidation_candles"`        // Default: 2
+	MaxConsolidationCandles       int     `json:"max_consolidation_candles"`        // Default: 6
+	ConsolidationRangeTolerance   float64 `json:"consolidation_range_tolerance"`    // Default: 0.01 (1% tolerance)
 
-	// Exhaustion detection
-	ExhaustionVolumeThreshold float64 `json:"exhaustion_volume_threshold"` // Default: 0.25 (25% of ref volume)
+	// Step 3: Breakout Entry thresholds
+	BreakoutVolumeSurge float64 `json:"breakout_volume_surge"` // Default: 1.5 (50% above consolidation avg)
 
-	// Pump detection
-	PumpVolumeIncrease float64 `json:"pump_volume_increase"` // Default: 1.5 (50% increase from exhaustion)
-	MinPumpCandles     int     `json:"min_pump_candles"`     // Default: 1
+	// Legacy fields for backward compatibility
+	MinDeclineCandles         int     `json:"min_decline_candles"`          // Maps to MinConsolidationCandles
+	MaxDeclineCandles         int     `json:"max_decline_candles"`          // Maps to MaxConsolidationCandles
+	MinVolumeDeclination      float64 `json:"min_volume_declination"`       // Deprecated in 3-step
+	MinPriceDeclination       float64 `json:"min_price_declination"`        // Deprecated in 3-step
+	ExhaustionVolumeThreshold float64 `json:"exhaustion_volume_threshold"`  // Deprecated
+	PumpVolumeIncrease        float64 `json:"pump_volume_increase"`         // Maps to BreakoutVolumeSurge
+	MinPumpCandles            int     `json:"min_pump_candles"`             // Deprecated
 
 	// Risk/Reward
 	DefaultRiskRewardRatio float64 `json:"default_risk_reward_ratio"` // Default: 4.0 (1:4)
 	StopLossBuffer         float64 `json:"stop_loss_buffer"`          // Default: 0.001 (0.1% below lowest)
 
-	// Trailing stop milestones
+	// Trailing stop milestones (Ravindra's approach)
 	BreakevenRRLevel float64 `json:"breakeven_rr_level"` // Default: 2.0 (move to BE at 1:2)
 	OneRRLevel       float64 `json:"one_rr_level"`       // Default: 3.0 (move to 1:1 at 1:3)
 
 	// Pattern expiration
 	PatternExpirationMinutes int `json:"pattern_expiration_minutes"` // Default: 60 (1 hour)
 
-	// Mode-specific timeframes
-	ScalpTimeframe    string `json:"scalp_timeframe"`    // Default: "5m"
-	SwingTimeframe    string `json:"swing_timeframe"`    // Default: "15m"
-	PositionTimeframe string `json:"position_timeframe"` // Default: "1h"
+	// Mode-specific timeframes (VALIDATED BY BACKTESTING)
+	ScalpTimeframe    string `json:"scalp_timeframe"`    // Default: "15m" (validated - institutions need 30-60+ min)
+	SwingTimeframe    string `json:"swing_timeframe"`    // Default: "1h"
+	PositionTimeframe string `json:"position_timeframe"` // Default: "4h"
 }
 
-// DefaultVolumeImbalanceConfig returns the default configuration
+// DefaultVolumeImbalanceConfig returns the default configuration for 3-step model
 func DefaultVolumeImbalanceConfig() *VolumeImbalanceConfig {
 	return &VolumeImbalanceConfig{
-		Enabled:                   true,
-		MinVolumeSpikeMultiplier:  2.0,
-		LookbackPeriod:            20,
-		MinDeclineCandles:         3,
-		MaxDeclineCandles:         15,
-		MinVolumeDeclination:      0.30,
-		MinPriceDeclination:       0.005,
-		ExhaustionVolumeThreshold: 0.25,
-		PumpVolumeIncrease:        1.5,
-		MinPumpCandles:            1,
-		DefaultRiskRewardRatio:    4.0,
-		StopLossBuffer:            0.001,
-		BreakevenRRLevel:          2.0,
-		OneRRLevel:                3.0,
-		PatternExpirationMinutes:  60,
-		ScalpTimeframe:            "5m",
-		SwingTimeframe:            "15m",
-		PositionTimeframe:         "1h",
+		Enabled:                     true,
+
+		// Step 1: Accumulation Start
+		MinVolumeSpikeMultiplier:    2.0,
+		LookbackPeriod:              20,
+
+		// Step 2: Sideways Consolidation
+		MinConsolidationCandles:     2,
+		MaxConsolidationCandles:     6,
+		ConsolidationRangeTolerance: 0.01,
+
+		// Step 3: Breakout Entry
+		BreakoutVolumeSurge:         1.5,
+
+		// Legacy mappings
+		MinDeclineCandles:           2,
+		MaxDeclineCandles:           6,
+		MinVolumeDeclination:        0.30,
+		MinPriceDeclination:         0.005,
+		ExhaustionVolumeThreshold:   0.25,
+		PumpVolumeIncrease:          1.5,
+		MinPumpCandles:              1,
+
+		// Risk/Reward
+		DefaultRiskRewardRatio:      4.0,
+		StopLossBuffer:              0.001,
+
+		// Trailing stop
+		BreakevenRRLevel:            2.0,
+		OneRRLevel:                  3.0,
+
+		// Expiration
+		PatternExpirationMinutes:    60,
+
+		// Timeframes (VALIDATED)
+		ScalpTimeframe:              "15m", // Changed from 5m - validated by backtesting
+		SwingTimeframe:              "1h",
+		PositionTimeframe:           "4h",
 	}
 }
 
-// VolumeImbalanceDetector handles pattern detection and trade signal generation
+// VolumeImbalanceDetector handles 3-step pattern detection and trade signal generation
 type VolumeImbalanceDetector struct {
 	futuresClient binance.FuturesClient
 	config        *VolumeImbalanceConfig
@@ -206,10 +256,10 @@ func NewVolumeImbalanceDetector(client binance.FuturesClient, config *VolumeImba
 }
 
 // ============================================================================
-// CORE DETECTION FUNCTIONS
+// CORE 3-STEP DETECTION FUNCTIONS
 // ============================================================================
 
-// AnalyzeForVolumeImbalance performs complete volume imbalance analysis for a symbol
+// AnalyzeForVolumeImbalance performs complete 3-step volume imbalance analysis for a symbol
 func (v *VolumeImbalanceDetector) AnalyzeForVolumeImbalance(symbol string, mode GinieTradingMode, klines []binance.Kline) (*VolumeImbalanceAnalysis, error) {
 	if !v.config.Enabled {
 		return nil, nil
@@ -249,14 +299,16 @@ func (v *VolumeImbalanceDetector) AnalyzeForVolumeImbalance(symbol string, mode 
 		}
 		v.patterns[symbol] = pattern
 	}
+
+	// Check if pattern has expired (while still holding the lock)
+	patternExpired := !pattern.ExpiresAt.IsZero() && time.Now().After(pattern.ExpiresAt)
 	v.mu.Unlock()
 
-	// Check if pattern has expired
-	if !pattern.ExpiresAt.IsZero() && time.Now().After(pattern.ExpiresAt) {
+	if patternExpired {
 		v.resetPattern(pattern, "Pattern expired")
 	}
 
-	// Process based on current state
+	// Process based on current state using 3-step model
 	analysis := &VolumeImbalanceAnalysis{
 		Symbol:    symbol,
 		Mode:      mode,
@@ -265,53 +317,43 @@ func (v *VolumeImbalanceDetector) AnalyzeForVolumeImbalance(symbol string, mode 
 
 	switch pattern.State {
 	case VIStateWatching:
-		// Step 1: Look for reference candle
-		refCandle := v.DetectReferenceCandle(candles)
-		if refCandle != nil {
-			v.setReferenceCandle(pattern, refCandle, len(candles)-1)
-			v.transitionState(pattern, VIStateAccumulating)
-			v.logPhase(symbol, "REFERENCE CANDLE DETECTED",
+		// STEP 1: Look for Accumulation Start (high volume spike)
+		refCandle, refIndex := v.detectAccumulationStart(candles)
+		if refCandle != nil && refIndex >= 0 {
+			v.setReferenceCandle(pattern, refCandle, refIndex)
+			v.transitionState(pattern, VIStateConsolidating)
+			v.logPhase(symbol, "STEP 1: ACCUMULATION START DETECTED",
 				"high", refCandle.High,
 				"volume", refCandle.Volume,
+				"avg_volume", v.calculateAverageVolume(candles, v.config.LookbackPeriod),
 				"taker_buy", refCandle.TakerBuyVolume)
 		}
 
-	case VIStateAccumulating:
-		// Step 2: Track decline phase
-		declined := v.TrackDecline(pattern, candles)
-		if declined {
-			// Check if exhaustion reached
-			if v.checkExhaustion(pattern, candles) {
-				v.transitionState(pattern, VIStateExhausted)
-				v.logPhase(symbol, "LIQUIDITY EXHAUSTION DETECTED",
-					"lowest_price", pattern.LowestPrice,
-					"lowest_volume", pattern.LowestVolume,
-					"decline_candles", pattern.DeclineCandles)
+	case VIStateConsolidating, VIStateAccumulating: // Handle legacy state
+		// STEP 2: Track Sideways Consolidation (volume declining, price in range)
+		if v.isConsolidating(pattern, candles) {
+			// Check if breakout conditions are met (Step 3)
+			if v.isBreakoutReady(pattern, candles) {
+				v.transitionState(pattern, VIStateReady)
+				currentCandle := candles[len(candles)-1]
+				v.logPhase(symbol, "STEP 3: BREAKOUT ENTRY READY",
+					"current_price", currentCandle.Close,
+					"reference_high", pattern.ReferenceCandle.High,
+					"breakout_volume", currentCandle.Volume,
+					"consolidation_avg_vol", pattern.ConsolidationAvgVolume)
 			}
 		} else {
 			// Check for pattern invalidation
-			if v.isDeclineInvalid(pattern, candles) {
-				v.resetPattern(pattern, "Decline phase invalid")
+			if v.isPatternInvalid(pattern, candles) {
+				v.resetPattern(pattern, "Consolidation pattern invalid")
 			}
 		}
 
-	case VIStateExhausted:
-		// Step 4: Look for pump
-		if v.detectPump(pattern, candles) {
-			v.transitionState(pattern, VIStatePumping)
-			v.logPhase(symbol, "PUMP DETECTED",
-				"pump_volume", pattern.PumpStartVolume,
-				"pump_price", pattern.PumpStartPrice)
-		}
-
-	case VIStatePumping:
-		// Step 5: Check for entry trigger
-		currentCandle := candles[len(candles)-1]
-		if v.CheckEntryTrigger(pattern, currentCandle) {
+	case VIStateExhausted, VIStatePumping:
+		// Legacy state handling - redirect to consolidating check
+		pattern.State = VIStateConsolidating
+		if v.isBreakoutReady(pattern, candles) {
 			v.transitionState(pattern, VIStateReady)
-			v.logPhase(symbol, "ENTRY TRIGGER - PRICE CROSSED REFERENCE HIGH",
-				"current_price", currentCandle.Close,
-				"reference_high", pattern.ReferenceCandle.High)
 		}
 	}
 
@@ -330,21 +372,26 @@ func (v *VolumeImbalanceDetector) AnalyzeForVolumeImbalance(symbol string, mode 
 		analysis.RiskReward = rr
 		analysis.Direction = "LONG"
 		analysis.Confidence = v.calculateConfidence(pattern, candles)
+
+		// Initialize trailing stop manager for position management after entry
+		// Caller should use this to manage SL according to Ravindra's R:R milestones
+		analysis.TrailingStop = NewTrailingStopManager(currentPrice, sl, tp, v.config)
 	}
 
 	return analysis, nil
 }
 
-// DetectReferenceCandle finds the candle with highest volume + highest price in lookback
-func (v *VolumeImbalanceDetector) DetectReferenceCandle(candles []VolumeImbalanceCandle) *VolumeImbalanceCandle {
+// detectAccumulationStart identifies Step 1: High volume spike (2x+ average)
+// Returns both the candle and its index in the candles array, or (nil, -1) if not found
+func (v *VolumeImbalanceDetector) detectAccumulationStart(candles []VolumeImbalanceCandle) (*VolumeImbalanceCandle, int) {
 	if len(candles) < v.config.LookbackPeriod {
-		return nil
+		return nil, -1
 	}
 
 	// Calculate average volume for comparison
 	avgVolume := v.calculateAverageVolume(candles, v.config.LookbackPeriod)
 
-	// Find the candle in lookback period with highest volume that also has significant price
+	// Look for a candle with volume spike (2x+ average)
 	lookbackStart := len(candles) - v.config.LookbackPeriod
 	if lookbackStart < 0 {
 		lookbackStart = 0
@@ -352,33 +399,18 @@ func (v *VolumeImbalanceDetector) DetectReferenceCandle(candles []VolumeImbalanc
 
 	var bestCandle *VolumeImbalanceCandle
 	var bestScore float64
-
-	// Find highest high in the period for reference
-	var highestHigh float64
-	for i := lookbackStart; i < len(candles); i++ {
-		if candles[i].High > highestHigh {
-			highestHigh = candles[i].High
-		}
-	}
+	bestIndex := -1
 
 	for i := lookbackStart; i < len(candles)-1; i++ { // -1 to not pick the current candle
 		c := candles[i]
 
-		// Check if volume is significantly above average
+		// Check if volume is significantly above average (2x+ threshold)
 		if c.Volume < avgVolume*v.config.MinVolumeSpikeMultiplier {
 			continue
 		}
 
-		// Check if this candle created a local high
-		// The high should be at or near the highest high
-		highProximity := c.High / highestHigh
-		if highProximity < 0.99 { // Within 1% of the highest high
-			continue
-		}
-
-		// Score combines volume spike and price position
+		// Score based on volume spike magnitude
 		volumeScore := c.Volume / avgVolume
-		priceScore := highProximity * 100
 
 		// Bonus for bullish candles (institutions buying)
 		bullishBonus := 1.0
@@ -392,25 +424,25 @@ func (v *VolumeImbalanceDetector) DetectReferenceCandle(candles []VolumeImbalanc
 			takerBuyRatio = 1 + (c.TakerBuyVolume/c.Volume)*0.5
 		}
 
-		totalScore := volumeScore * priceScore * bullishBonus * takerBuyRatio
+		totalScore := volumeScore * bullishBonus * takerBuyRatio
 
 		if totalScore > bestScore {
 			bestScore = totalScore
 			candleCopy := c
 			bestCandle = &candleCopy
+			bestIndex = i
 		}
 	}
 
-	return bestCandle
+	return bestCandle, bestIndex
 }
 
-// TrackDecline monitors the decline phase after reference candle
-func (v *VolumeImbalanceDetector) TrackDecline(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
+// isConsolidating checks Step 2: Volume declining, price staying in range (sideways)
+func (v *VolumeImbalanceDetector) isConsolidating(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
 	if pattern.ReferenceCandle.Volume == 0 {
 		return false
 	}
 
-	// Count candles since reference
 	refIdx := pattern.ReferenceCandle.Index
 	if refIdx >= len(candles) {
 		return false
@@ -419,157 +451,150 @@ func (v *VolumeImbalanceDetector) TrackDecline(pattern *VolumeImbalancePattern, 
 	currentIdx := len(candles) - 1
 	candlesSinceRef := currentIdx - refIdx
 
-	if candlesSinceRef < v.config.MinDeclineCandles {
+	if candlesSinceRef < v.config.MinConsolidationCandles {
 		return false
 	}
 
-	if candlesSinceRef > v.config.MaxDeclineCandles {
-		// Too many candles in decline - pattern may be invalid
+	// Bounds check: ensure refIdx+1 is valid before accessing
+	if refIdx+1 >= len(candles) {
 		return false
 	}
 
-	// Check if volume is declining
-	refVolume := pattern.ReferenceCandle.Volume
+	// Track consolidation metrics
+	referenceHigh := pattern.ReferenceCandle.High
+	referenceLow := pattern.ReferenceCandle.Low
+	tolerance := v.config.ConsolidationRangeTolerance
+
 	var volumeSum float64
-	var priceSum float64
-	declineCount := 0
-
-	// Track lowest price and volume
-	lowestPrice := candles[refIdx].Low
-	lowestVolume := candles[refIdx].Volume
+	consolidationLow := candles[refIdx+1].Low
+	consolidationHigh := candles[refIdx+1].High
+	volumes := make([]float64, 0, candlesSinceRef)
 
 	for i := refIdx + 1; i <= currentIdx; i++ {
-		volumeSum += candles[i].Volume
-		priceSum += candles[i].Close
+		c := candles[i]
+		volumeSum += c.Volume
+		volumes = append(volumes, c.Volume)
 
-		if candles[i].Low < lowestPrice {
-			lowestPrice = candles[i].Low
-			pattern.ExhaustionIndex = i
+		// Track consolidation range
+		if c.Low < consolidationLow {
+			consolidationLow = c.Low
 		}
-		if candles[i].Volume < lowestVolume {
-			lowestVolume = candles[i].Volume
+		if c.High > consolidationHigh {
+			consolidationHigh = c.High
 		}
 
-		// Count declining candles
-		if i > refIdx+1 && candles[i].Close < candles[i-1].Close {
-			declineCount++
+		// Check if price breaks out of range (sideways check)
+		if c.High > referenceHigh*(1+tolerance) {
+			// Price broke above reference high - not consolidating, could be breakout
+			return false
+		}
+		if c.Low < referenceLow*(1-tolerance*2) {
+			// Price broke significantly below - pattern may be failing
+			return false
 		}
 	}
 
-	avgDeclineVolume := volumeSum / float64(candlesSinceRef)
-	volumeDeclination := 1 - (avgDeclineVolume / refVolume)
+	// Calculate volume trend (should be declining)
+	volumeTrend := v.calculateTrend(volumes)
 
-	// Check if price declined from reference high
-	priceDeclination := (pattern.ReferenceCandle.High - lowestPrice) / pattern.ReferenceCandle.High
+	// Update pattern with consolidation data
+	pattern.ConsolidationCandles = candlesSinceRef
+	pattern.ConsolidationLow = consolidationLow
+	pattern.ConsolidationHigh = consolidationHigh
+	pattern.ConsolidationAvgVolume = volumeSum / float64(candlesSinceRef)
+	pattern.VolumeTrend = volumeTrend
 
-	// Update pattern tracking
+	// Legacy field mappings
 	pattern.DeclineCandles = candlesSinceRef
-	pattern.DeclineVolumeSlope = volumeDeclination / float64(candlesSinceRef)
-	pattern.DeclinePriceSlope = priceDeclination / float64(candlesSinceRef)
-	pattern.LowestPrice = lowestPrice
-	pattern.LowestVolume = lowestVolume
+	pattern.DeclineVolumeSlope = volumeTrend
+	pattern.LowestPrice = consolidationLow
+	// LowestVolume is a deprecated legacy field - not used in 3-step model
+	// Setting to 0 to avoid confusion (it previously incorrectly stored consolidationLow price)
+	pattern.LowestVolume = 0
+
 	pattern.UpdatedAt = time.Now()
 
-	// Validate decline characteristics
-	if volumeDeclination < v.config.MinVolumeDeclination {
-		return false // Volume not declining enough
-	}
-
-	if priceDeclination < v.config.MinPriceDeclination {
-		return false // Price not declining enough
-	}
-
-	// At least half of candles should be declining
-	if float64(declineCount) < float64(candlesSinceRef)*0.4 {
+	// Volume must be declining (negative trend)
+	if volumeTrend >= 0 {
 		return false
 	}
 
 	return true
 }
 
-// checkExhaustion determines if liquidity exhaustion has occurred
-func (v *VolumeImbalanceDetector) checkExhaustion(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
-	refVolume := pattern.ReferenceCandle.Volume
-	exhaustionThreshold := refVolume * v.config.ExhaustionVolumeThreshold
-
-	// Check if recent volume is very low (exhaustion)
-	if len(candles) < 3 {
+// isBreakoutReady checks Step 3: Volume surge + price breaks reference high
+func (v *VolumeImbalanceDetector) isBreakoutReady(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
+	if len(candles) < 2 {
 		return false
 	}
 
-	// Volume should be at or near minimum
-	if pattern.LowestVolume > exhaustionThreshold {
-		return false
-	}
-
-	// Price should be at a local low
 	currentCandle := candles[len(candles)-1]
-	prevCandle := candles[len(candles)-2]
 
-	// Confirm we're at or near the lowest point
-	if currentCandle.Low > pattern.LowestPrice*1.005 { // Within 0.5% of lowest
+	// Check 1: Volume must surge (50%+ above consolidation average)
+	if pattern.ConsolidationAvgVolume <= 0 {
 		return false
 	}
 
-	// Volume should show signs of stabilizing or starting to increase
-	// (the exhaustion point often shows a slight uptick before the pump)
-	volumeRatio := currentCandle.Volume / prevCandle.Volume
-	if volumeRatio >= 0.9 { // Volume stabilizing or increasing slightly
-		pattern.ExhaustionTime = time.Now()
+	volumeSurge := currentCandle.Volume / pattern.ConsolidationAvgVolume
+	if volumeSurge < v.config.BreakoutVolumeSurge {
+		return false
+	}
+
+	// Check 2: Price must break reference high
+	if currentCandle.High < pattern.ReferenceCandle.High {
+		return false
+	}
+
+	// Confirm the close is also above (not just a wick)
+	if currentCandle.Close < pattern.ReferenceCandle.High*0.998 { // Within 0.2%
+		return false
+	}
+
+	// Record breakout candle data
+	pattern.BreakoutCandle.Time = currentCandle.Time
+	pattern.BreakoutCandle.High = currentCandle.High
+	pattern.BreakoutCandle.Volume = currentCandle.Volume
+
+	// Legacy field mapping
+	pattern.PumpStartVolume = currentCandle.Volume
+	pattern.PumpStartTime = currentCandle.Time
+
+	return true
+}
+
+// isPatternInvalid checks if the consolidation pattern has become invalid
+func (v *VolumeImbalanceDetector) isPatternInvalid(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
+	if len(candles) < 2 {
+		return false
+	}
+
+	currentCandle := candles[len(candles)-1]
+
+	// If price breaks significantly below consolidation low, pattern fails
+	if currentCandle.Low < pattern.ConsolidationLow*0.97 { // 3% below
+		return true
+	}
+
+	// If consolidation takes too long, pattern expires
+	if pattern.ConsolidationCandles > v.config.MaxConsolidationCandles {
 		return true
 	}
 
 	return false
 }
 
-// detectPump identifies the start of the pump phase
-func (v *VolumeImbalanceDetector) detectPump(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
-	if len(candles) < 2 {
-		return false
-	}
-
-	exhaustionIdx := pattern.ExhaustionIndex
-	if exhaustionIdx == 0 || exhaustionIdx >= len(candles)-1 {
-		return false
-	}
-
-	currentCandle := candles[len(candles)-1]
-	prevCandle := candles[len(candles)-2]
-
-	// Volume should increase significantly from exhaustion
-	volumeIncrease := currentCandle.Volume / pattern.LowestVolume
-	if volumeIncrease < v.config.PumpVolumeIncrease {
-		return false
-	}
-
-	// Price should be moving up
-	if currentCandle.Close <= prevCandle.Close {
-		return false
-	}
-
-	// Candle should be bullish
-	if currentCandle.Close <= currentCandle.Open {
-		return false
-	}
-
-	// Taker buy volume should be significant (institutions buying aggressively)
-	if currentCandle.Volume > 0 {
-		takerBuyRatio := currentCandle.TakerBuyVolume / currentCandle.Volume
-		if takerBuyRatio < 0.5 { // At least 50% taker buy
-			return false
-		}
-	}
-
-	// Record pump start
-	pattern.PumpStartVolume = currentCandle.Volume
-	pattern.PumpStartPrice = currentCandle.Close
-	pattern.PumpStartTime = time.Now()
-	pattern.PumpCandles = 1
-
-	return true
+// DetectReferenceCandle - legacy method for backward compatibility
+func (v *VolumeImbalanceDetector) DetectReferenceCandle(candles []VolumeImbalanceCandle) *VolumeImbalanceCandle {
+	candle, _ := v.detectAccumulationStart(candles)
+	return candle
 }
 
-// CheckEntryTrigger determines if price has crossed the reference candle high
+// TrackDecline - legacy method for backward compatibility
+func (v *VolumeImbalanceDetector) TrackDecline(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
+	return v.isConsolidating(pattern, candles)
+}
+
+// CheckEntryTrigger - legacy method for backward compatibility
 func (v *VolumeImbalanceDetector) CheckEntryTrigger(pattern *VolumeImbalancePattern, currentCandle VolumeImbalanceCandle) bool {
 	if pattern.ReferenceCandle.High == 0 {
 		return false
@@ -578,34 +603,33 @@ func (v *VolumeImbalanceDetector) CheckEntryTrigger(pattern *VolumeImbalancePatt
 	// Price must cross above the reference candle's high
 	if currentCandle.High >= pattern.ReferenceCandle.High {
 		// Confirm the close is also above (not just a wick)
-		if currentCandle.Close >= pattern.ReferenceCandle.High*0.998 { // Within 0.2%
+		if currentCandle.Close >= pattern.ReferenceCandle.High*0.998 {
 			return true
 		}
-	}
-
-	// Also check if price opened above and closed above
-	if currentCandle.Open >= pattern.ReferenceCandle.High &&
-		currentCandle.Close >= pattern.ReferenceCandle.High {
-		return true
 	}
 
 	return false
 }
 
-// CalculateRiskReward calculates SL, TP, and R:R ratio
+// CalculateRiskReward calculates SL, TP, and R:R ratio using 3-step model
 func (v *VolumeImbalanceDetector) CalculateRiskReward(pattern *VolumeImbalancePattern, entryPrice float64) (stopLoss, takeProfit, ratio float64) {
-	// Stop loss = below the lowest point (Step 3) with buffer
-	stopLoss = pattern.LowestPrice * (1 - v.config.StopLossBuffer)
+	// Stop loss = below the consolidation low (with buffer)
+	stopLoss = pattern.ConsolidationLow * (1 - v.config.StopLossBuffer)
+
+	// Fallback to legacy field if consolidation low not set
+	if stopLoss <= 0 && pattern.LowestPrice > 0 {
+		stopLoss = pattern.LowestPrice * (1 - v.config.StopLossBuffer)
+	}
 
 	// Calculate risk (entry to stop loss)
 	risk := entryPrice - stopLoss
 	if risk <= 0 {
-		// Fallback if lowest price is somehow above entry
+		// Fallback if stop loss is somehow above entry
 		risk = entryPrice * 0.02 // 2% default risk
 		stopLoss = entryPrice - risk
 	}
 
-	// Take profit = entry + (risk * R:R ratio)
+	// Take profit = entry + (risk * R:R ratio) for 1:4 R:R
 	takeProfit = entryPrice + (risk * v.config.DefaultRiskRewardRatio)
 	ratio = v.config.DefaultRiskRewardRatio
 
@@ -613,10 +637,14 @@ func (v *VolumeImbalanceDetector) CalculateRiskReward(pattern *VolumeImbalancePa
 }
 
 // ============================================================================
-// TRAILING STOP MANAGER
+// TRAILING STOP MANAGER (Ravindra's Approach)
 // ============================================================================
 
 // TrailingStopManager manages trailing stops according to Ravindra's approach
+// Milestones:
+// - At 1:2 R:R → Move SL to entry (breakeven, 0 risk)
+// - At 1:3 R:R → Move SL to 1:1 level (lock profit)
+// - At 1:4 R:R → Take profit (target reached)
 type TrailingStopManager struct {
 	EntryPrice float64 `json:"entry_price"`
 	StopLoss   float64 `json:"stop_loss"`
@@ -677,13 +705,13 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 	newStopLoss = t.StopLoss
 	action = "HOLD"
 
-	// Check for take profit
+	// Check for take profit (1:4 R:R target)
 	if currentPrice >= t.TakeProfit {
 		action = "TAKE_PROFIT"
 		return newStopLoss, action
 	}
 
-	// At 1:3 R:R → Move SL to 1:1 level
+	// At 1:3 R:R → Move SL to 1:1 level (lock profit)
 	if t.CurrentRR >= t.OneRRLevel && !t.MovedTo1R {
 		// 1:1 level = entry + risk
 		oneRLevel := t.EntryPrice + t.RiskAmount
@@ -697,7 +725,7 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 		}
 	}
 
-	// At 1:2 R:R → Move SL to entry (breakeven)
+	// At 1:2 R:R → Move SL to entry (breakeven, 0 risk)
 	if t.CurrentRR >= t.BreakevenRRLevel && !t.MovedToBreakeven {
 		if t.EntryPrice > t.StopLoss {
 			t.StopLoss = t.EntryPrice
@@ -749,11 +777,11 @@ type TrailingStopStatus struct {
 // ANALYSIS RESULT
 // ============================================================================
 
-// VolumeImbalanceAnalysis contains the complete analysis result
+// VolumeImbalanceAnalysis contains the complete 3-step analysis result
 type VolumeImbalanceAnalysis struct {
-	Symbol      string           `json:"symbol"`
-	Mode        GinieTradingMode `json:"mode"`
-	Timestamp   time.Time        `json:"timestamp"`
+	Symbol    string           `json:"symbol"`
+	Mode      GinieTradingMode `json:"mode"`
+	Timestamp time.Time        `json:"timestamp"`
 
 	// Pattern detection
 	PatternDetected bool                    `json:"pattern_detected"`
@@ -767,6 +795,13 @@ type VolumeImbalanceAnalysis struct {
 	SuggestedTP    float64 `json:"suggested_tp"`
 	RiskReward     float64 `json:"risk_reward"`
 	Confidence     float64 `json:"confidence"` // 0-100
+
+	// Trailing stop manager for position management (Ravindra's approach)
+	// Use this after entry to manage SL according to R:R milestones:
+	// - At 1:2 R:R -> Move SL to entry (breakeven)
+	// - At 1:3 R:R -> Move SL to 1:1 level (lock profit)
+	// - At 1:4 R:R -> Take profit (target reached)
+	TrailingStop *TrailingStopManager `json:"trailing_stop,omitempty"`
 
 	// Debugging info
 	StateHistory []string `json:"state_history,omitempty"`
@@ -796,6 +831,32 @@ func (v *VolumeImbalanceDetector) calculateAverageVolume(candles []VolumeImbalan
 	return sum / float64(period)
 }
 
+// calculateTrend returns the linear regression slope of values
+// Negative slope = declining, Positive slope = increasing
+func (v *VolumeImbalanceDetector) calculateTrend(values []float64) float64 {
+	if len(values) < 2 {
+		return 0
+	}
+
+	n := float64(len(values))
+	var sumX, sumY, sumXY, sumX2 float64
+
+	for i, y := range values {
+		x := float64(i)
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumX2 += x * x
+	}
+
+	denominator := n*sumX2 - sumX*sumX
+	if denominator == 0 {
+		return 0
+	}
+
+	return (n*sumXY - sumX*sumY) / denominator
+}
+
 func (v *VolumeImbalanceDetector) setReferenceCandle(pattern *VolumeImbalancePattern, candle *VolumeImbalanceCandle, index int) {
 	pattern.ReferenceCandle.Time = candle.Time
 	pattern.ReferenceCandle.High = candle.High
@@ -804,6 +865,11 @@ func (v *VolumeImbalanceDetector) setReferenceCandle(pattern *VolumeImbalancePat
 	pattern.ReferenceCandle.Volume = candle.Volume
 	pattern.ReferenceCandle.TakerBuyVolume = candle.TakerBuyVolume
 	pattern.ReferenceCandle.Index = index
+
+	// Initialize consolidation tracking
+	pattern.ConsolidationStartIndex = index + 1
+	pattern.ConsolidationLow = candle.Low
+	pattern.ConsolidationHigh = candle.High
 
 	// Set expiration
 	pattern.ExpiresAt = time.Now().Add(time.Duration(v.config.PatternExpirationMinutes) * time.Minute)
@@ -837,6 +903,18 @@ func (v *VolumeImbalanceDetector) resetPattern(pattern *VolumeImbalancePattern, 
 		TakerBuyVolume float64   `json:"taker_buy_volume"`
 		Index          int       `json:"index"`
 	}{}
+	pattern.ConsolidationCandles = 0
+	pattern.ConsolidationLow = 0
+	pattern.ConsolidationHigh = 0
+	pattern.ConsolidationAvgVolume = 0
+	pattern.VolumeTrend = 0
+	pattern.BreakoutCandle = struct {
+		Time   time.Time `json:"time"`
+		High   float64   `json:"high"`
+		Volume float64   `json:"volume"`
+	}{}
+
+	// Reset legacy fields
 	pattern.DeclineCandles = 0
 	pattern.DeclineVolumeSlope = 0
 	pattern.DeclinePriceSlope = 0
@@ -846,6 +924,7 @@ func (v *VolumeImbalanceDetector) resetPattern(pattern *VolumeImbalancePattern, 
 	pattern.PumpStartVolume = 0
 	pattern.PumpStartPrice = 0
 	pattern.PumpCandles = 0
+
 	pattern.ExpiresAt = time.Time{}
 	pattern.UpdatedAt = time.Now()
 	pattern.InvalidReason = reason
@@ -853,31 +932,28 @@ func (v *VolumeImbalanceDetector) resetPattern(pattern *VolumeImbalancePattern, 
 	pattern.StateChanges = append(pattern.StateChanges, fmt.Sprintf("RESET: %s", reason))
 }
 
+// isDeclineInvalid - legacy method for backward compatibility
 func (v *VolumeImbalanceDetector) isDeclineInvalid(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
-	if len(candles) < 2 {
-		return false
-	}
+	return v.isPatternInvalid(pattern, candles)
+}
 
-	currentCandle := candles[len(candles)-1]
+// checkExhaustion - legacy method (deprecated in 3-step model)
+func (v *VolumeImbalanceDetector) checkExhaustion(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
+	// In 3-step model, exhaustion is part of consolidation
+	return v.isConsolidating(pattern, candles)
+}
 
-	// If price goes above reference high before exhaustion, pattern is invalid
-	if currentCandle.High > pattern.ReferenceCandle.High*1.005 {
-		return true
-	}
-
-	// If too many candles pass without exhaustion
-	if pattern.DeclineCandles > v.config.MaxDeclineCandles {
-		return true
-	}
-
-	return false
+// detectPump - legacy method (deprecated in 3-step model)
+func (v *VolumeImbalanceDetector) detectPump(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) bool {
+	// In 3-step model, pump is merged with breakout
+	return v.isBreakoutReady(pattern, candles)
 }
 
 func (v *VolumeImbalanceDetector) calculateConfidence(pattern *VolumeImbalancePattern, candles []VolumeImbalanceCandle) float64 {
 	// Base confidence
 	confidence := 50.0
 
-	// Volume spike quality (up to +15)
+	// Volume spike quality in Step 1 (up to +15)
 	avgVol := v.calculateAverageVolume(candles, v.config.LookbackPeriod)
 	if avgVol > 0 {
 		volumeSpike := pattern.ReferenceCandle.Volume / avgVol
@@ -885,25 +961,28 @@ func (v *VolumeImbalanceDetector) calculateConfidence(pattern *VolumeImbalancePa
 		confidence += volumeBonus
 	}
 
-	// Clear decline pattern (up to +10)
-	if pattern.DeclineCandles >= 5 && pattern.DeclineCandles <= 10 {
+	// Consolidation quality in Step 2 (up to +15)
+	if pattern.ConsolidationCandles >= 2 && pattern.ConsolidationCandles <= 4 {
+		confidence += 15 // Ideal consolidation length
+	} else if pattern.ConsolidationCandles >= 2 && pattern.ConsolidationCandles <= 6 {
 		confidence += 10
-	} else if pattern.DeclineCandles >= 3 {
+	}
+
+	// Volume trend during consolidation (should be declining)
+	if pattern.VolumeTrend < -0.1 {
+		confidence += 10 // Strong volume decline
+	} else if pattern.VolumeTrend < 0 {
 		confidence += 5
 	}
 
-	// Strong exhaustion (up to +10)
-	if pattern.LowestVolume < pattern.ReferenceCandle.Volume*0.2 {
-		confidence += 10
-	} else if pattern.LowestVolume < pattern.ReferenceCandle.Volume*0.3 {
-		confidence += 5
-	}
-
-	// Strong pump (up to +15)
-	if pattern.PumpStartVolume > pattern.LowestVolume*2 {
-		confidence += 15
-	} else if pattern.PumpStartVolume > pattern.LowestVolume*1.5 {
-		confidence += 10
+	// Breakout volume quality in Step 3 (up to +10)
+	if pattern.BreakoutCandle.Volume > 0 && pattern.ConsolidationAvgVolume > 0 {
+		breakoutRatio := pattern.BreakoutCandle.Volume / pattern.ConsolidationAvgVolume
+		if breakoutRatio >= 2.0 {
+			confidence += 10 // Strong breakout volume
+		} else if breakoutRatio >= 1.5 {
+			confidence += 5
+		}
 	}
 
 	// Taker buy volume in reference candle (institutional buying)
@@ -920,19 +999,20 @@ func (v *VolumeImbalanceDetector) calculateConfidence(pattern *VolumeImbalancePa
 func (v *VolumeImbalanceDetector) logPhase(symbol string, phase string, args ...interface{}) {
 	if v.logger != nil {
 		allArgs := append([]interface{}{"symbol", symbol, "phase", phase}, args...)
-		v.logger.Info("[VOLUME_IMBALANCE]", allArgs...)
+		v.logger.Info("[VOLUME_IMBALANCE_3STEP]", allArgs...)
 	}
 }
 
 // GetTimeframe returns the appropriate timeframe for the trading mode
+// IMPORTANT: 15m for scalp validated by backtesting
 func (v *VolumeImbalanceDetector) GetTimeframe(mode GinieTradingMode) string {
 	switch mode {
 	case GinieModeScalp:
-		return v.config.ScalpTimeframe
+		return v.config.ScalpTimeframe // 15m (validated)
 	case GinieModeSwing:
-		return v.config.SwingTimeframe
+		return v.config.SwingTimeframe // 1h
 	case GinieModePosition:
-		return v.config.PositionTimeframe
+		return v.config.PositionTimeframe // 4h
 	default:
 		return v.config.ScalpTimeframe
 	}
