@@ -104,6 +104,9 @@ type Server struct {
 
 	// Epic 11: State manager for coin state management
 	stateManager *decision.StateManager
+
+	// Story 11.45: Strategy hierarchy cache service for sub-strategy settings
+	strategyHierarchyCacheService *cache.StrategyHierarchyCacheService
 }
 
 // ServerConfig holds server configuration
@@ -253,6 +256,16 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/modes/:mode/strategies/:strategy/reset":             true,
 		"/api/futures/modes/:mode/strategies/:strategy/sections":          true,
 		"/api/futures/modes/:mode/strategies/:strategy/sections/:section": true,
+		// Strategy Hierarchy endpoints (cache/DB only, no Binance API - Story 11.45)
+		"/api/futures/strategy-groups/:mode":                             true,
+		"/api/futures/strategy-groups/:mode/:group":                      true,
+		"/api/futures/strategy-groups/:mode/:group/compare":              true,
+		"/api/futures/sub-strategies/:mode/:group":                       true,
+		"/api/futures/sub-strategies/:mode/:group/:strategy":             true,
+		"/api/futures/sub-strategies/:mode/:group/:strategy/compare":     true,
+		"/api/futures/patterns/volume-imbalance":                         true,
+		"/api/futures/patterns/volume-imbalance/:symbol":                 true,
+		"/api/futures/enabled-strategies":                                true,
 	}
 
 	return func(c *gin.Context) {
@@ -947,6 +960,24 @@ func (s *Server) setupRoutes() {
 			futures.GET("/position-analytics/efficiency-timeline", s.handleGetEfficiencyTimeline)
 			futures.GET("/position-analytics/distribution", s.handleGetTradeDistribution)
 			futures.GET("/position-analytics/export", s.handleExportPositionAnalytics)
+
+			// Strategy Hierarchy endpoints (Story 11.45: Volume Imbalance API)
+			// Mode -> Strategy Group -> Sub-Strategy architecture
+			futures.GET("/strategy-groups/:mode", s.handleGetStrategyGroupsForMode)
+			futures.PUT("/strategy-groups/:mode/:group", s.handleUpdateStrategyGroup)
+			futures.GET("/strategy-groups/:mode/:group/compare", s.handleCompareStrategyGroup)
+
+			// Sub-Strategy endpoints
+			futures.GET("/sub-strategies/:mode/:group", s.handleGetSubStrategiesForGroup)
+			futures.PUT("/sub-strategies/:mode/:group/:strategy", s.handleUpdateSubStrategy)
+			futures.GET("/sub-strategies/:mode/:group/:strategy/compare", s.handleCompareSubStrategy)
+
+			// Pattern State endpoints (Volume Imbalance detector states)
+			futures.GET("/patterns/volume-imbalance", s.handleGetVolumeImbalancePatterns)
+			futures.GET("/patterns/volume-imbalance/:symbol", s.handleGetVolumeImbalancePatternForSymbol)
+
+			// Enabled Strategies (quick lookup for active sub-strategies)
+			futures.GET("/enabled-strategies", s.handleGetEnabledStrategies)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================
@@ -1250,4 +1281,15 @@ func (s *Server) SetStateManager(sm *decision.StateManager) {
 // GetStateManager returns the decision engine state manager.
 func (s *Server) GetStateManager() *decision.StateManager {
 	return s.stateManager
+}
+
+// SetStrategyHierarchyCacheService sets the strategy hierarchy cache service.
+// Story 11.45: Volume Imbalance API Endpoints
+func (s *Server) SetStrategyHierarchyCacheService(svc *cache.StrategyHierarchyCacheService) {
+	s.strategyHierarchyCacheService = svc
+}
+
+// GetStrategyHierarchyCacheService returns the strategy hierarchy cache service.
+func (s *Server) GetStrategyHierarchyCacheService() *cache.StrategyHierarchyCacheService {
+	return s.strategyHierarchyCacheService
 }

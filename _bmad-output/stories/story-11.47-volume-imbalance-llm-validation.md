@@ -6,7 +6,7 @@
 **Epic:** Epic 11 - Position Decision Engine
 **Parent Story:** 11.43 (Ravindra Volume Imbalance Strategy)
 **Priority:** P2 (Medium)
-**Status:** Blocked (depends on 11.43 core logic)
+**Status:** Done
 **Created:** 2026-01-24
 
 ---

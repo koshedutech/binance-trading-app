@@ -6,7 +6,7 @@
 **Epic:** Epic 11 - Position Decision Engine
 **Parent Story:** 11.43 (Ravindra Volume Imbalance Strategy)
 **Priority:** P0 (Critical)
-**Status:** Ready for Development
+**Status:** Done
 **Created:** 2026-01-24
 
 ---
@@ -174,25 +174,25 @@ When a new user is created:
 ## Acceptance Criteria
 
 ### AC1: Database Tables Created
-- [ ] Migration 047 creates `user_strategy_group_settings` table
-- [ ] Migration 047 creates `user_sub_strategy_settings` table
-- [ ] Unique constraints prevent duplicate entries
-- [ ] Indexes created for performance
+- [x] Migration 047 creates `user_strategy_group_settings` table
+- [x] Migration 047 creates `user_sub_strategy_settings` table
+- [x] Unique constraints prevent duplicate entries
+- [x] Indexes created for performance (6 indexes + GIN for JSONB)
 
 ### AC2: Repository Layer
-- [ ] CRUD operations for strategy group settings
-- [ ] CRUD operations for sub-strategy settings
-- [ ] GetEnabledStrategies returns all active sub-strategies
+- [x] CRUD operations for strategy group settings
+- [x] CRUD operations for sub-strategy settings
+- [x] GetEnabledStrategies returns all active sub-strategies
 
 ### AC3: Cache Integration
-- [ ] Strategy settings cached in Redis
-- [ ] Cache invalidation on update
-- [ ] Cache-first read pattern
+- [x] Strategy settings cached in Redis
+- [x] Cache invalidation on update
+- [x] Cache-first read pattern
 
 ### AC4: User Initialization
-- [ ] New users get default strategy settings from default-settings.json
-- [ ] All modes/groups/sub-strategies initialized
-- [ ] Cache populated on user creation
+- [x] New users get default strategy settings from default-settings.json
+- [x] All modes/groups/sub-strategies initialized
+- [x] Cache populated on user creation
 
 ---
 

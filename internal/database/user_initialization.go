@@ -258,9 +258,23 @@ func (r *Repository) InitializeUserDefaultSettings(ctx context.Context, userID s
 			userID, defaults.OrderTrackingSystem, defaults.PositionManagementSystem)
 	}
 
+	// ===== 14. Initialize Strategy Hierarchy Settings (Story 11.44) =====
+	// Strategy hierarchy: Mode -> Strategy Group (breakout, trending, range, volatile) -> Sub-Strategy
+	strategyGroupsInitialized := 0
+	subStrategiesInitialized := 0
+	if err := r.InitializeUserStrategyHierarchy(ctx, userID); err != nil {
+		log.Printf("[USER-INIT] Warning: Failed to initialize strategy hierarchy: %v", err)
+	} else {
+		// Count initialized: 4 modes x 4 groups = 16 strategy groups, plus sub-strategies
+		strategyGroupsInitialized = 16
+		subStrategiesInitialized = 4 // Currently only ravindra_volume_imbalance in 2 modes, classic_breakout in 1
+		log.Printf("[USER-INIT] Initialized strategy hierarchy for user %s (%d groups, %d sub-strategies)",
+			userID, strategyGroupsInitialized, subStrategiesInitialized)
+	}
+
 	// ===== Summary =====
-	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, %d mode+strategy configs, and system control",
-		userID, modesInitialized, modesStatsInitialized, modeStrategiesInitialized)
+	log.Printf("[USER-INIT] Successfully initialized ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, %d mode+strategy configs, system control, and %d strategy groups + %d sub-strategies",
+		userID, modesInitialized, modesStatsInitialized, modeStrategiesInitialized, strategyGroupsInitialized, subStrategiesInitialized)
 
 	return nil
 }
@@ -483,8 +497,21 @@ func (r *Repository) RestoreUserDefaultSettings(ctx context.Context, userID stri
 		log.Printf("[USER-RESTORE] Restored %d mode+strategy configs for user %s", modeStrategiesRestored, userID)
 	}
 
-	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, and %d mode+strategy configs",
-		userID, modesRestored, modesStatsRestored, modeStrategiesRestored)
+	// ===== 13. Restore Strategy Hierarchy Settings (Story 11.44) =====
+	// Reset all strategy groups and sub-strategies to defaults
+	strategyGroupsRestored := 0
+	subStrategiesRestored := 0
+	if err := r.InitializeUserStrategyHierarchy(ctx, userID); err != nil {
+		log.Printf("[USER-RESTORE] Warning: Failed to restore strategy hierarchy: %v", err)
+	} else {
+		strategyGroupsRestored = 16 // 4 modes x 4 groups
+		subStrategiesRestored = 4   // Current sub-strategies defined in defaults
+		log.Printf("[USER-RESTORE] Restored strategy hierarchy for user %s (%d groups, %d sub-strategies)",
+			userID, strategyGroupsRestored, subStrategiesRestored)
+	}
+
+	log.Printf("[USER-RESTORE] Successfully restored ALL settings for user %s: %d mode configs, circuit breaker, LLM, capital allocation, early warning, Ginie, Spot, %d mode CB stats, safety settings, global trading, position management, %d mode+strategy configs, and %d strategy groups + %d sub-strategies",
+		userID, modesRestored, modesStatsRestored, modeStrategiesRestored, strategyGroupsRestored, subStrategiesRestored)
 
 	return nil
 }
@@ -656,4 +683,224 @@ func parseUserIDToInt(userID string) (int, error) {
 	}
 
 	return id, nil
+}
+
+// =====================================================
+// STRATEGY HIERARCHY INITIALIZATION (Story 11.44)
+// =====================================================
+
+// InitializeUserStrategyHierarchy creates strategy hierarchy settings for a new user
+// Reads from default-settings.json strategy_hierarchy section
+// Creates records in user_strategy_group_settings and user_sub_strategy_settings
+func (r *Repository) InitializeUserStrategyHierarchy(ctx context.Context, userID string) error {
+	log.Printf("[USER-INIT-STRAT-HIER] Initializing strategy hierarchy for user %s", userID)
+
+	// Load strategy_hierarchy from default-settings.json
+	strategyHierarchy, err := loadStrategyHierarchyFromDefaults()
+	if err != nil {
+		log.Printf("[USER-INIT-STRAT-HIER] Warning: Could not load strategy_hierarchy from defaults: %v, using hardcoded defaults", err)
+		return r.initializeStrategyHierarchyHardcoded(ctx, userID)
+	}
+
+	var strategyGroups []*StrategyGroupSettings
+	var subStrategies []*SubStrategySettings
+
+	// Process each mode in the hierarchy
+	for mode, modeData := range strategyHierarchy {
+		for groupName, groupData := range modeData.StrategyGroups {
+			// Create strategy group
+			sg := &StrategyGroupSettings{
+				UserID:              userID,
+				Mode:                mode,
+				StrategyGroup:       groupName,
+				Enabled:             groupData.Enabled,
+				Timeframe:           getStringOrDefault(groupData.BaseSettings.Timeframe, "15m"),
+				PositionSizePercent: getFloatOrDefault(groupData.BaseSettings.PositionSizePercent, 2.0),
+				MaxLeverage:         getIntOrDefault(groupData.BaseSettings.MaxLeverage, 10),
+				MaxPositions:        getIntOrDefault(groupData.BaseSettings.MaxPositions, 3),
+				MinVolumeUSDT:       getFloatOrDefault(groupData.BaseSettings.MinVolumeUSDT, 1000000),
+			}
+			strategyGroups = append(strategyGroups, sg)
+
+			// Create sub-strategies
+			for subName, subData := range groupData.SubStrategies {
+				settingsJSON, _ := json.Marshal(subData.Settings)
+				ss := &SubStrategySettings{
+					UserID:        userID,
+					Mode:          mode,
+					StrategyGroup: groupName,
+					SubStrategy:   subName,
+					Enabled:       subData.Enabled,
+					Settings:      settingsJSON,
+				}
+				subStrategies = append(subStrategies, ss)
+			}
+		}
+	}
+
+	// Bulk insert strategy groups
+	if err := r.BulkUpsertStrategyGroups(ctx, strategyGroups); err != nil {
+		return fmt.Errorf("failed to bulk insert strategy groups: %w", err)
+	}
+
+	// Bulk insert sub-strategies
+	if err := r.BulkUpsertSubStrategies(ctx, subStrategies); err != nil {
+		return fmt.Errorf("failed to bulk insert sub-strategies: %w", err)
+	}
+
+	log.Printf("[USER-INIT-STRAT-HIER] Initialized %d strategy groups and %d sub-strategies for user %s",
+		len(strategyGroups), len(subStrategies), userID)
+
+	return nil
+}
+
+// initializeStrategyHierarchyHardcoded creates default strategy hierarchy when JSON loading fails
+func (r *Repository) initializeStrategyHierarchyHardcoded(ctx context.Context, userID string) error {
+	modes := []string{"scalp", "swing", "position", "ultra_fast"}
+	groups := []string{"breakout", "trending", "range", "volatile"}
+
+	var strategyGroups []*StrategyGroupSettings
+
+	for _, mode := range modes {
+		for _, group := range groups {
+			// Only enable breakout for scalp mode by default
+			enabled := mode == "scalp" && group == "breakout"
+
+			sg := &StrategyGroupSettings{
+				UserID:              userID,
+				Mode:                mode,
+				StrategyGroup:       group,
+				Enabled:             enabled,
+				Timeframe:           "15m",
+				PositionSizePercent: 2.0,
+				MaxLeverage:         10,
+				MaxPositions:        3,
+				MinVolumeUSDT:       1000000,
+			}
+			strategyGroups = append(strategyGroups, sg)
+		}
+	}
+
+	// Bulk insert strategy groups
+	if err := r.BulkUpsertStrategyGroups(ctx, strategyGroups); err != nil {
+		return fmt.Errorf("failed to bulk insert strategy groups: %w", err)
+	}
+
+	// Create default ravindra_volume_imbalance sub-strategy for scalp/breakout
+	defaultSettings := json.RawMessage(`{
+		"min_rr_ratio": "1:4",
+		"llm_validation": true,
+		"trailing_stop": {
+			"enabled": true,
+			"milestones": [
+				{"at_rr": "1:2", "move_sl_to": "entry"},
+				{"at_rr": "1:3", "move_sl_to": "1:1"}
+			],
+			"target_rr": "1:4"
+		},
+		"pattern_detection": {
+			"reference_lookback_candles": 20,
+			"min_consolidation_candles": 2,
+			"max_consolidation_candles": 6,
+			"volume_spike_threshold": 2.0,
+			"breakout_volume_surge": 1.5,
+			"consolidation_range_tolerance": 0.01
+		}
+	}`)
+
+	ss := &SubStrategySettings{
+		UserID:        userID,
+		Mode:          "scalp",
+		StrategyGroup: "breakout",
+		SubStrategy:   "ravindra_volume_imbalance",
+		Enabled:       true,
+		Settings:      defaultSettings,
+	}
+
+	if err := r.UpsertSubStrategySettings(ctx, ss); err != nil {
+		return fmt.Errorf("failed to insert default sub-strategy: %w", err)
+	}
+
+	log.Printf("[USER-INIT-STRAT-HIER] Initialized %d strategy groups and 1 sub-strategy (hardcoded) for user %s",
+		len(strategyGroups), userID)
+
+	return nil
+}
+
+// =====================================================
+// STRATEGY HIERARCHY PARSING HELPERS
+// =====================================================
+
+// strategyHierarchyMode represents a mode's strategy groups in default-settings.json
+type strategyHierarchyMode struct {
+	StrategyGroups map[string]strategyHierarchyGroup `json:"strategy_groups"`
+}
+
+// strategyHierarchyGroup represents a strategy group configuration
+type strategyHierarchyGroup struct {
+	Enabled       bool                              `json:"enabled"`
+	BaseSettings  strategyHierarchyBaseSettings     `json:"base_settings"`
+	SubStrategies map[string]strategyHierarchySubStrategy `json:"sub_strategies"`
+}
+
+// strategyHierarchyBaseSettings represents base settings inherited by sub-strategies
+type strategyHierarchyBaseSettings struct {
+	Timeframe           string  `json:"timeframe"`
+	PositionSizePercent float64 `json:"position_size_percent"`
+	MaxLeverage         int     `json:"max_leverage"`
+	MaxPositions        int     `json:"max_positions"`
+	MinVolumeUSDT       float64 `json:"min_volume_usdt"`
+}
+
+// strategyHierarchySubStrategy represents a sub-strategy configuration
+type strategyHierarchySubStrategy struct {
+	Enabled  bool                   `json:"enabled"`
+	Settings map[string]interface{} `json:"settings"`
+}
+
+// loadStrategyHierarchyFromDefaults loads strategy_hierarchy section from default-settings.json
+func loadStrategyHierarchyFromDefaults() (map[string]strategyHierarchyMode, error) {
+	defaultsJSON, err := os.ReadFile("default-settings.json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read default-settings.json: %w", err)
+	}
+
+	var defaults struct {
+		StrategyHierarchy map[string]strategyHierarchyMode `json:"strategy_hierarchy"`
+	}
+
+	if err := json.Unmarshal(defaultsJSON, &defaults); err != nil {
+		return nil, fmt.Errorf("failed to parse default-settings.json: %w", err)
+	}
+
+	if len(defaults.StrategyHierarchy) == 0 {
+		return nil, fmt.Errorf("no strategy_hierarchy found in defaults")
+	}
+
+	// Filter out the _description key if present
+	delete(defaults.StrategyHierarchy, "_description")
+
+	return defaults.StrategyHierarchy, nil
+}
+
+// Helper functions for default values
+func getStringOrDefault(value string, defaultValue string) string {
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}
+
+func getFloatOrDefault(value float64, defaultValue float64) float64 {
+	if value == 0 {
+		return defaultValue
+	}
+	return value
+}
+
+func getIntOrDefault(value int, defaultValue int) int {
+	if value == 0 {
+		return defaultValue
+	}
+	return value
 }

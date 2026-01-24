@@ -185,6 +185,9 @@ type VolumeImbalanceConfig struct {
 	ScalpTimeframe    string `json:"scalp_timeframe"`    // Default: "15m" (validated - institutions need 30-60+ min)
 	SwingTimeframe    string `json:"swing_timeframe"`    // Default: "1h"
 	PositionTimeframe string `json:"position_timeframe"` // Default: "4h"
+
+	// Story 11.47: LLM Validation for pattern filtering
+	LLMValidation bool `json:"llm_validation"` // Default: true (enable LLM validation before entry)
 }
 
 // DefaultVolumeImbalanceConfig returns the default configuration for 3-step model
@@ -228,6 +231,9 @@ func DefaultVolumeImbalanceConfig() *VolumeImbalanceConfig {
 		ScalpTimeframe:              "15m", // Changed from 5m - validated by backtesting
 		SwingTimeframe:              "1h",
 		PositionTimeframe:           "4h",
+
+		// Story 11.47: LLM Validation
+		LLMValidation:               true, // Enable by default
 	}
 }
 
@@ -240,6 +246,9 @@ type VolumeImbalanceDetector struct {
 	// Active patterns by symbol
 	patterns map[string]*VolumeImbalancePattern
 	mu       sync.RWMutex
+
+	// Story 11.47: LLM Validation for pattern filtering
+	llmValidator *VolumeImbalanceLLMValidator
 }
 
 // NewVolumeImbalanceDetector creates a new volume imbalance detector
@@ -1060,4 +1069,32 @@ func (v *VolumeImbalanceDetector) CleanupExpiredPatterns() int {
 	}
 
 	return removed
+}
+
+// ============================================================================
+// STORY 11.47: LLM VALIDATION INTEGRATION
+// ============================================================================
+
+// SetLLMValidator sets the LLM validator for pattern filtering
+func (v *VolumeImbalanceDetector) SetLLMValidator(validator *VolumeImbalanceLLMValidator) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.llmValidator = validator
+	if v.logger != nil && validator != nil {
+		v.logger.Info("[VOLUME_IMBALANCE] LLM validator configured", "enabled", validator.IsEnabled())
+	}
+}
+
+// GetLLMValidator returns the LLM validator
+func (v *VolumeImbalanceDetector) GetLLMValidator() *VolumeImbalanceLLMValidator {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.llmValidator
+}
+
+// IsLLMValidationEnabled returns whether LLM validation is configured and enabled
+func (v *VolumeImbalanceDetector) IsLLMValidationEnabled() bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.config.LLMValidation && v.llmValidator != nil && v.llmValidator.IsEnabled()
 }

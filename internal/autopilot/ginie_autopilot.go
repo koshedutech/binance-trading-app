@@ -1379,6 +1379,9 @@ type GinieAutopilot struct {
 
 	// Story 10.3: Exit Decision State Manager for UI monitoring
 	exitDecisionStateManager *ExitDecisionStateManager
+
+	// Story 11.43: Volume Imbalance Strategy (Ravindra's 3-step pattern detection)
+	volumeImbalanceDetector *VolumeImbalanceDetector
 }
 
 // generateClientOrderId generates a new client order ID for an entry order.
@@ -8440,6 +8443,18 @@ func (ga *GinieAutopilot) SetChainEventWriter(writer *orders.ChainEventWriter) {
 // GetChainEventWriter returns the chain event writer (for testing/API access)
 func (ga *GinieAutopilot) GetChainEventWriter() *orders.ChainEventWriter {
 	return ga.chainEventWriter
+}
+
+// GetVolumeImbalanceDetector returns the volume imbalance detector for pattern state access.
+// Story 11.45: API Endpoints for volume imbalance pattern states
+func (ga *GinieAutopilot) GetVolumeImbalanceDetector() *VolumeImbalanceDetector {
+	return ga.volumeImbalanceDetector
+}
+
+// SetVolumeImbalanceDetector sets the volume imbalance detector.
+// Story 11.43: Volume Imbalance Strategy implementation
+func (ga *GinieAutopilot) SetVolumeImbalanceDetector(detector *VolumeImbalanceDetector) {
+	ga.volumeImbalanceDetector = detector
 }
 
 // checkTrailingStop checks if trailing stop is triggered
