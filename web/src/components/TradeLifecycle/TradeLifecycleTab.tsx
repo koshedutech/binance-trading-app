@@ -25,6 +25,8 @@ import { ConnectionStatus } from '../ConnectionStatus';
 import ChainCard from './ChainCard';
 import ChainFilters from './ChainFilters';
 import EntryDecisionEngineCard from './EntryDecisionEngineCard';
+import { VolumeImbalanceCard } from '../EntryDecisionEngine';
+import { useVolumeImbalancePatterns } from '../../hooks/useStrategyHierarchy';
 import {
   OrderChain,
   ChainOrder,
@@ -61,6 +63,9 @@ export default function TradeLifecycleTab({
   const [tradeCycleExpanded, setTradeCycleExpanded] = useState(true);
   const [ordersExpanded, setOrdersExpanded] = useState(true);
   const [positionsExpanded, setPositionsExpanded] = useState(true);
+
+  // Volume Imbalance patterns for Entry Decision Engine
+  const { patterns: volumeImbalancePatterns, isLoading: patternsLoading } = useVolumeImbalancePatterns();
 
   // Helper: Convert API PositionStateInfo to frontend PositionState
   const mapPositionState = (state: PositionStateInfo): PositionState => ({
@@ -618,6 +623,32 @@ export default function TradeLifecycleTab({
 
             {/* ==================== SECTION 1: ENTRY DECISION ENGINE ==================== */}
             <EntryDecisionEngineCard defaultExpanded={true} />
+
+            {/* ==================== SECTION 1.5: VOLUME IMBALANCE PATTERNS ==================== */}
+            {volumeImbalancePatterns.length > 0 && (
+              <div className="bg-gray-900/50 rounded-lg border border-purple-500/30 p-4">
+                <h3 className="text-sm font-semibold text-purple-400 mb-3 flex items-center gap-2">
+                  <Activity className="w-4 h-4" />
+                  Volume Imbalance Patterns ({volumeImbalancePatterns.length})
+                </h3>
+                <div className="grid gap-3">
+                  {volumeImbalancePatterns.map((pattern) => (
+                    <VolumeImbalanceCard
+                      key={pattern.id}
+                      pattern={pattern}
+                      onExecute={async (id) => {
+                        console.log('Execute pattern:', id);
+                        // TODO: Integrate with autopilot entry execution
+                      }}
+                      onSkip={async (id, reason) => {
+                        console.log('Skip pattern:', id, reason);
+                        // TODO: Integrate with pattern skip API
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* ==================== SECTION 2: ORDERS ==================== */}
             <div className="bg-gray-900/50 rounded-lg border border-gray-700">
