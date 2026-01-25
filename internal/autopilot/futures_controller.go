@@ -962,10 +962,25 @@ func (fc *FuturesController) SetStateManager(sm StateManagerInterface) {
 }
 
 // StartGinieAutopilot starts the Ginie autonomous trading
+// NOTE: Always starts Ginie for scanning. When entry_decision_system is "chain",
+// Ginie scans but doesn't place orders (blocked at entry time).
 func (fc *FuturesController) StartGinieAutopilot() error {
 	if fc.ginieAutopilot == nil {
 		return fmt.Errorf("Ginie autopilot not initialized")
 	}
+
+	// Check system control settings for logging purposes
+	defaults := database.DefaultUserSystemControl()
+	isChainMode := defaults.IsEntryDecisionChain() && !defaults.IsEntryDecisionLegacy()
+
+	// Always start Ginie for SCANNING purposes
+	// When chain mode: Ginie scans but order placement is blocked at entry time
+	// When legacy/both mode: Ginie scans AND places orders
+	fc.logger.Info("Starting Ginie autopilot for scanning",
+		"entry_decision_system", defaults.EntryDecisionSystem,
+		"chain_mode", isChainMode,
+		"orders_enabled", !isChainMode)
+
 	return fc.ginieAutopilot.Start()
 }
 

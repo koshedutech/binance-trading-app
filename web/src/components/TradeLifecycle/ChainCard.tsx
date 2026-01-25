@@ -132,17 +132,19 @@ function calculateSLEconomics(
   };
 }
 
-// Format currency with appropriate precision
-function formatCurrency(value: number): string {
-  const absValue = Math.abs(value);
-  if (absValue >= 100) return `$${value.toFixed(2)}`;
-  if (absValue >= 1) return `$${value.toFixed(4)}`;
-  return `$${value.toFixed(6)}`;
+// Format currency with appropriate precision (null-safe)
+function formatCurrency(value: number | null | undefined): string {
+  const safeValue = value ?? 0;
+  const absValue = Math.abs(safeValue);
+  if (absValue >= 100) return `$${safeValue.toFixed(2)}`;
+  if (absValue >= 1) return `$${safeValue.toFixed(4)}`;
+  return `$${safeValue.toFixed(6)}`;
 }
 
-// Format percentage with sign
-function formatPnLPercent(value: number): string {
-  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+// Format percentage with sign (null-safe)
+function formatPnLPercent(value: number | null | undefined): string {
+  const safeValue = value ?? 0;
+  return `${safeValue >= 0 ? '+' : ''}${safeValue.toFixed(2)}%`;
 }
 
 export default function ChainCard({
@@ -254,11 +256,12 @@ export default function ChainCard({
     );
   };
 
-  // Format price
-  const formatPrice = (price: number) => {
-    if (price >= 1000) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    return price.toFixed(8);
+  // Format price (null-safe)
+  const formatPrice = (price: number | null | undefined) => {
+    const safePrice = price ?? 0;
+    if (safePrice >= 1000) return safePrice.toFixed(2);
+    if (safePrice >= 1) return safePrice.toFixed(4);
+    return safePrice.toFixed(8);
   };
 
   // Direction icon
@@ -599,8 +602,8 @@ export default function ChainCard({
                 </div>
                 <div className="flex items-center gap-3">
                   {/* P&L */}
-                  <span className={`text-sm font-semibold ${chain.positionAnalytics.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {chain.positionAnalytics.unrealized_pnl >= 0 ? '+' : ''}{chain.positionAnalytics.unrealized_pnl.toFixed(2)} USDT
+                  <span className={`text-sm font-semibold ${(chain.positionAnalytics.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {(chain.positionAnalytics.unrealized_pnl ?? 0) >= 0 ? '+' : ''}{(chain.positionAnalytics.unrealized_pnl ?? 0).toFixed(2)} USDT
                   </span>
                   {analyticsExpanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
                 </div>
@@ -621,7 +624,7 @@ export default function ChainCard({
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-gray-800/50 rounded-lg p-3">
                       <span className="text-xs text-gray-500 block mb-1">Current Price</span>
-                      <span className="text-sm font-mono text-white">${chain.positionAnalytics.current_price.toFixed(2)}</span>
+                      <span className="text-sm font-mono text-white">${(chain.positionAnalytics.current_price ?? 0).toFixed(2)}</span>
                     </div>
                     {chain.positionAnalytics.breakeven_price && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
@@ -661,8 +664,8 @@ export default function ChainCard({
                   {/* ROE Display */}
                   <div className="flex items-center justify-between pt-3 border-t border-gray-700">
                     <span className="text-sm text-gray-400">Return on Equity (ROE)</span>
-                    <span className={`text-sm font-semibold ${chain.positionAnalytics.roe >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {chain.positionAnalytics.roe >= 0 ? '+' : ''}{chain.positionAnalytics.roe.toFixed(2)}%
+                    <span className={`text-sm font-semibold ${(chain.positionAnalytics.roe ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {(chain.positionAnalytics.roe ?? 0) >= 0 ? '+' : ''}{(chain.positionAnalytics.roe ?? 0).toFixed(2)}%
                     </span>
                   </div>
                 </div>
@@ -899,9 +902,9 @@ export default function ChainCard({
               <span className="text-gray-500">Entry Value:</span>
               <span className="ml-2 text-gray-300 font-mono">
                 {chain.positionState ? (
-                  `$${chain.positionState.entryValue.toFixed(2)}`
+                  `$${(chain.positionState.entryValue ?? 0).toFixed(2)}`
                 ) : entryOrder ? (
-                  `$${((entryOrder.stopPrice || entryOrder.price) * entryOrder.origQty).toFixed(2)}`
+                  `$${(((entryOrder.stopPrice || entryOrder.price) ?? 0) * (entryOrder.origQty ?? 0)).toFixed(2)}`
                 ) : (
                   <span className="text-gray-500">N/A</span>
                 )}
@@ -911,9 +914,9 @@ export default function ChainCard({
               <span className="text-gray-500">Filled Value:</span>
               <span className="ml-2 text-gray-300 font-mono">
                 {chain.positionState ? (
-                  `$${chain.positionState.entryValue.toFixed(2)}`
+                  `$${(chain.positionState.entryValue ?? 0).toFixed(2)}`
                 ) : entryOrder && entryOrder.status === 'FILLED' ? (
-                  `$${((entryOrder.avgPrice || entryOrder.price) * entryOrder.executedQty).toFixed(2)}`
+                  `$${(((entryOrder.avgPrice || entryOrder.price) ?? 0) * (entryOrder.executedQty ?? 0)).toFixed(2)}`
                 ) : (
                   <span className="text-gray-500">$0.00</span>
                 )}
@@ -1085,7 +1088,7 @@ function LegacyChainView({
         </div>
         <div>
           <div className="text-gray-300 font-mono">
-            {order.executedQty.toFixed(4)}/{order.origQty.toFixed(4)}
+            {(order.executedQty ?? 0).toFixed(4)}/{(order.origQty ?? 0).toFixed(4)}
           </div>
           <div className="text-xs text-gray-500">Filled/Total</div>
         </div>
@@ -1309,13 +1312,13 @@ function LegacyChainView({
         <div>
           <span className="text-gray-500">Total Value:</span>
           <span className="ml-2 text-gray-300 font-mono">
-            ${chain.totalValue.toFixed(2)}
+            ${(chain.totalValue ?? 0).toFixed(2)}
           </span>
         </div>
         <div>
           <span className="text-gray-500">Filled Value:</span>
           <span className="ml-2 text-gray-300 font-mono">
-            ${chain.filledValue.toFixed(2)}
+            ${(chain.filledValue ?? 0).toFixed(2)}
           </span>
         </div>
       </div>

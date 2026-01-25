@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { RefreshCw, AlertTriangle, CheckCircle2, Loader2, Settings } from 'lucide-react';
+import { RefreshCw, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react';
 import {
   loadModeDefaults,
   loadCircuitBreakerDefaults,
@@ -14,10 +14,8 @@ import {
 } from '../services/futuresApi';
 import SettingsComparisonView from '../components/SettingsComparisonView';
 // DecisionEngineSettings removed - strategy settings are now nested inside modes via SettingsComparisonView
+// Story 11.43-11.46: Sub-strategies (Ravindra Volume Imbalance) are now displayed INSIDE the Breakout strategy in SettingsComparisonView
 import { useAuth } from '../contexts/AuthContext';
-import { StrategyGroupPanel } from '../components/ModeConfiguration';
-import { useStrategyGroups, useUpdateStrategyGroup } from '../hooks/useStrategyHierarchy';
-// StrategyName import removed - Decision Engine settings now managed via SettingsComparisonView
 
 // Toast notification types
 interface ToastMessage {
@@ -25,16 +23,16 @@ interface ToastMessage {
   text: string;
 }
 
+// CRITICAL: Define modes array OUTSIDE component to prevent infinite re-render loop
+// When passed as inline array literal, it creates a new object each render,
+// causing useCallback dependencies to change and triggering infinite data fetching
+const TRADING_MODES = ['ultra_fast', 'scalp', 'swing', 'position'] as const;
+
 export default function ResetSettings() {
   const { user } = useAuth();
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [selectedStrategyMode, setSelectedStrategyMode] = useState<string>('scalp');
-
-  // Strategy hierarchy hooks
-  const { groups: strategyGroups, isLoading: strategyGroupsLoading } = useStrategyGroups(selectedStrategyMode);
-  const updateStrategyGroup = useUpdateStrategyGroup();
 
   // Determine if user is admin
   const isAdmin = user?.is_admin || user?.email === 'admin@binance-bot.local';
@@ -371,9 +369,10 @@ export default function ResetSettings() {
         </div>
 
         {/* Unified Settings Comparison View */}
+        {/* Story 11.43-11.46: Sub-strategies (Ravindra Volume Imbalance) are now displayed INSIDE the Breakout strategy */}
         <SettingsComparisonView
           key={refreshKey}
-          modes={['ultra_fast', 'scalp', 'swing', 'position']}
+          modes={TRADING_MODES}
           isAdmin={isAdmin}
           // Mode resets
           onResetAllModes={handleResetAllModes}
@@ -389,68 +388,6 @@ export default function ResetSettings() {
           onSaveMode={isAdmin ? handleSaveMode : undefined}
           onSaveOtherSetting={isAdmin ? handleSaveOtherSetting : undefined}
         />
-
-        {/* Strategy Hierarchy Section - Story 11.43-11.46 */}
-        <div className="mt-8">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-3">
-              <Settings className="w-6 h-6 text-purple-400" />
-              <div>
-                <h2 className="text-xl font-bold text-white">Strategy Hierarchy</h2>
-                <p className="text-sm text-gray-400">Configure strategy groups and sub-strategies per mode</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-gray-400">Mode:</span>
-              <select
-                value={selectedStrategyMode}
-                onChange={(e) => setSelectedStrategyMode(e.target.value)}
-                className="bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500"
-              >
-                <option value="ultra_fast">Ultra Fast</option>
-                <option value="scalp">Scalp</option>
-                <option value="swing">Swing</option>
-                <option value="position">Position</option>
-              </select>
-            </div>
-          </div>
-
-          {strategyGroupsLoading ? (
-            <div className="flex items-center justify-center py-8">
-              <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
-              <span className="ml-2 text-gray-400">Loading strategy groups...</span>
-            </div>
-          ) : strategyGroups.length > 0 ? (
-            <div className="grid gap-4">
-              {strategyGroups.map((group) => (
-                <StrategyGroupPanel
-                  key={`${selectedStrategyMode}-${group.strategy_group}`}
-                  mode={selectedStrategyMode}
-                  group={group}
-                  onUpdate={async (updates) => {
-                    try {
-                      await updateStrategyGroup.mutateAsync({
-                        mode: selectedStrategyMode,
-                        group: group.strategy_group,
-                        settings: updates,
-                      });
-                      showToast('success', `${group.strategy_group} settings updated`);
-                    } catch (error: any) {
-                      showToast('error', error.message || 'Failed to update settings');
-                    }
-                  }}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="bg-gray-800 rounded-lg p-6 text-center">
-              <p className="text-gray-400">No strategy groups configured for {selectedStrategyMode} mode.</p>
-              <p className="text-sm text-gray-500 mt-2">Strategy groups will appear here once configured in the backend.</p>
-            </div>
-          )}
-        </div>
-
-        {/* Decision Engine Settings removed - strategy settings are now nested inside modes above */}
       </div>
     </div>
   );

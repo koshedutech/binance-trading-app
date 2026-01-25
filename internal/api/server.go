@@ -266,6 +266,21 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/patterns/volume-imbalance":                         true,
 		"/api/futures/patterns/volume-imbalance/:symbol":                 true,
 		"/api/futures/enabled-strategies":                                true,
+		// Chain Entry Runner endpoints (internal state only)
+		"/api/futures/chain-entry/status":                                true,
+		// Coin Profiler endpoints (internal state only - Epic 14)
+		"/api/futures/coin-profiler/status":                              true,
+		"/api/futures/coin-profiler/coins":                               true,
+		"/api/futures/coin-profiler/coins/:symbol":                       true,
+		"/api/futures/coin-profiler/requirements":                        true,
+		// Entry Decision API endpoints (internal state only - Story 14.12)
+		"/api/futures/entry-decision/strategies":                         true,
+		"/api/futures/entry-decision/strategies/:mode":                   true,
+		"/api/futures/entry-decision/candidates":                         true,
+		"/api/futures/entry-decision/pattern/:symbol":                    true,
+		"/api/futures/entry-decision/score/:symbol":                      true,
+		// Position Controller endpoints (internal state only - Story 10.4)
+		"/api/futures/position-controller/status":                        true,
 	}
 
 	return func(c *gin.Context) {
@@ -443,6 +458,16 @@ func (s *Server) setupRoutes() {
 			settings.PUT("/system-control/order-tracking", s.handleSetOrderTrackingSystem)
 			settings.PUT("/system-control/position-management", s.handleSetPositionManagementSystem)
 			settings.PUT("/system-control/entry-decision", s.handleSetEntryDecisionSystem)
+		}
+
+		// Trading Controller endpoints (Story 14.14: Chain Trading System ON/OFF)
+		// Controls Entry Decision and Exit Decision independently of Ginie Autopilot
+		trading := api.Group("/trading")
+		{
+			trading.GET("/state", s.handleGetTradingState)
+			trading.PUT("/state", s.handleSetTradingState)
+			trading.POST("/enable", s.handleEnableTrading)
+			trading.POST("/disable", s.handleDisableTrading)
 		}
 
 		// User profile and API keys endpoints (requires auth)
@@ -978,6 +1003,36 @@ func (s *Server) setupRoutes() {
 
 			// Enabled Strategies (quick lookup for active sub-strategies)
 			futures.GET("/enabled-strategies", s.handleGetEnabledStrategies)
+
+			// Chain Entry Runner endpoints (Epic 11: Automatic chain-based entries)
+			// These run independently of Ginie Autopilot when entry_decision_system = "chain"
+			futures.GET("/chain-entry/status", s.handleGetChainEntryRunnerStatus)
+			futures.POST("/chain-entry/start", s.handleStartChainEntryRunner)
+			futures.POST("/chain-entry/stop", s.handleStopChainEntryRunner)
+
+			// Coin Profiler endpoints (Epic 14: Chain Trading System)
+			// Real-time WebSocket data collection for Entry Decision and Exit Decision
+			futures.GET("/coin-profiler/status", s.handleGetCoinProfilerStatus)
+			futures.GET("/coin-profiler/coins", s.handleGetCoinProfilerCoins)
+			futures.GET("/coin-profiler/coins/:symbol", s.handleGetCoinProfilerCoin)
+			futures.GET("/coin-profiler/requirements", s.handleGetCoinProfilerRequirements)
+			futures.POST("/coin-profiler/start", s.handleStartCoinProfiler)
+			futures.POST("/coin-profiler/stop", s.handleStopCoinProfiler)
+
+			// Entry Decision API endpoints (Story 14.12: Entry Decision System API)
+			// Strategy-first view of entry opportunities
+			futures.GET("/entry-decision/strategies", s.handleGetEntryDecisionStrategies)
+			futures.GET("/entry-decision/strategies/:mode", s.handleGetEntryDecisionStrategiesForMode)
+			futures.GET("/entry-decision/candidates", s.handleGetEntryCandidates)
+			futures.GET("/entry-decision/pattern/:symbol", s.handleGetPatternProgress)
+			futures.GET("/entry-decision/score/:symbol", s.handleGetScoreBreakdown)
+
+			// Position Controller endpoints (Story 10.4: Exit Signal Executor)
+			// Executes exit signals from Exit Decision Service on Binance
+			futures.GET("/position-controller/status", s.GetPositionControllerStatus)
+			futures.POST("/position-controller/heal", s.TriggerPositionControllerHeal)
+			futures.POST("/position-controller/start", s.StartPositionController)
+			futures.POST("/position-controller/stop", s.StopPositionController)
 		}
 
 		// ==================== SPOT AUTOPILOT ENDPOINTS ====================

@@ -65,9 +65,9 @@ function formatCountdown(remainingMs: number): string {
 // Entry orders have 180s timeout for LIMIT orders
 const ENTRY_ORDER_TIMEOUT_MS = 180 * 1000; // 180 seconds
 
-// Format order value (price * quantity)
-function formatValue(price: number, quantity: number): string {
-  const value = price * quantity;
+// Format order value (price * quantity) - null-safe
+function formatValue(price: number | null | undefined, quantity: number | null | undefined): string {
+  const value = (price ?? 0) * (quantity ?? 0);
   if (value >= 1000) return `$${value.toFixed(2)}`;
   if (value >= 1) return `$${value.toFixed(4)}`;
   return `$${value.toFixed(6)}`;
@@ -134,11 +134,12 @@ function getStatusIndicator(status: string) {
   return statusConfig[status] || statusConfig.NEW;
 }
 
-// Format price based on magnitude
-function formatPrice(price: number): string {
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toFixed(8);
+// Format price based on magnitude (null-safe)
+function formatPrice(price: number | null | undefined): string {
+  const safePrice = price ?? 0;
+  if (safePrice >= 1000) return safePrice.toFixed(2);
+  if (safePrice >= 1) return safePrice.toFixed(4);
+  return safePrice.toFixed(8);
 }
 
 // Default time formatter (fallback to simple format)
@@ -377,24 +378,24 @@ export default function OrderTreeNode({
           {type === 'POSITION' && positionState && (
             <>
               <div className="text-right ml-3">
-                <span className="text-gray-300 font-mono text-sm">{positionState.entryQuantity.toFixed(4)}</span>
+                <span className="text-gray-300 font-mono text-sm">{(positionState.entryQuantity ?? 0).toFixed(4)}</span>
                 <span className="text-xs text-gray-500 ml-1">Qty</span>
               </div>
               {/* Position value */}
               <div className="text-right ml-3">
                 <span className="text-gray-300 font-mono text-sm">
-                  {formatValue(positionState.entryPrice, positionState.entryQuantity)}
+                  {formatValue(positionState.entryPrice ?? 0, positionState.entryQuantity ?? 0)}
                 </span>
                 <span className="text-xs text-gray-500 ml-1">Value</span>
               </div>
-              {positionState.realizedPnl !== 0 && (
+              {(positionState.realizedPnl ?? 0) !== 0 && (
                 <div className="text-right ml-3">
                   <span
                     className={`font-mono text-sm ${
-                      positionState.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'
+                      (positionState.realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
                     }`}
                   >
-                    {positionState.realizedPnl >= 0 ? '+' : ''}${positionState.realizedPnl.toFixed(2)}
+                    {(positionState.realizedPnl ?? 0) >= 0 ? '+' : ''}${(positionState.realizedPnl ?? 0).toFixed(2)}
                   </span>
                   <span className="text-xs text-gray-500 ml-1">P&L</span>
                 </div>
@@ -407,8 +408,8 @@ export default function OrderTreeNode({
             <>
               <div className="text-right ml-3">
                 <span className="text-gray-300 font-mono text-sm">
-                  {order.executedQty > 0 ? `${order.executedQty.toFixed(4)}/` : ''}
-                  {order.origQty.toFixed(4)}
+                  {(order.executedQty ?? 0) > 0 ? `${(order.executedQty ?? 0).toFixed(4)}/` : ''}
+                  {(order.origQty ?? 0).toFixed(4)}
                 </span>
                 <span className="text-xs text-gray-500 ml-1">Qty</span>
               </div>

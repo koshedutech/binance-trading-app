@@ -6756,6 +6756,25 @@ func (ga *GinieAutopilot) monitorAllPositions() {
 	}
 	log.Printf("[GINIE-MONITOR-DEBUG] Positions in monitoring: %v", posSymbols)
 
+	// [Epic 14] Filter out chain system positions - let chain system manage them
+	filteredSnapshots := make([]positionSnapshot, 0, len(snapshots))
+	for _, snap := range snapshots {
+		if ga.repo != nil && ga.repo.GetDB() != nil {
+			ctx := context.Background()
+			isChainPos, err := ga.repo.GetDB().IsChainSystemPosition(ctx, ga.userID, snap.symbol)
+			if err != nil {
+				log.Printf("[GINIE-MONITOR] Error checking chain position for %s: %v", snap.symbol, err)
+			} else if isChainPos {
+				log.Printf("[GINIE-MONITOR] Skipping chain system position: %s (userID=%s)", snap.symbol, ga.userID)
+				continue
+			}
+		} else {
+			log.Printf("[GINIE-MONITOR] repo nil check: repo=%v, getDB=%v", ga.repo != nil, ga.repo != nil && ga.repo.GetDB() != nil)
+		}
+		filteredSnapshots = append(filteredSnapshots, snap)
+	}
+	snapshots = filteredSnapshots
+
 	// PHASE 2: Fetch prices OUTSIDE the lock (network calls)
 	prices := make(map[string]float64)
 	for _, snap := range snapshots {
@@ -8635,6 +8654,24 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 		}
 	}
 
+	// FIX: Also close the position state in the database
+	if ga.positionStateInt != nil && pos.ChainBaseID != "" {
+		ctx := context.Background()
+		if err := ga.positionStateInt.RecordPositionClose(ctx, ga.userID, pos.ChainBaseID, totalPnL, reason); err != nil {
+			ga.logger.Warn("Failed to close position state",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"reason", reason,
+				"error", err.Error())
+		} else {
+			ga.logger.Info("Position state closed",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"reason", reason,
+				"total_pnl", totalPnL)
+		}
+	}
+
 	if !ga.config.DryRun && pos.RemainingQty > 0 {
 		// Place close order using LIMIT to avoid slippage on SL/Trailing closes
 		// This is critical for SL/Trailing stop to avoid worst-case execution
@@ -8965,6 +9002,39 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 			reason,
 			database.EventSourceGinie,
 		)
+	}
+
+	// Epic 7: Close chain when using chain-based position management
+	if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
+		ctx := context.Background()
+		if err := ga.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, reason, totalPnL, exitFee); err != nil {
+			ga.logger.Warn("Failed to close order chain for market close",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"error", err.Error())
+		} else {
+			ga.logger.Info("Order chain closed with market order",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"reason", reason,
+				"total_pnl", totalPnL)
+		}
+	}
+
+	// FIX: Also close the position state in the database
+	if ga.positionStateInt != nil && pos.ChainBaseID != "" {
+		ctx := context.Background()
+		if err := ga.positionStateInt.RecordPositionClose(ctx, ga.userID, pos.ChainBaseID, totalPnL, reason); err != nil {
+			ga.logger.Warn("Failed to close position state for market close",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"error", err.Error())
+		} else {
+			ga.logger.Info("Position state closed for market close",
+				"symbol", symbol,
+				"chain_id", pos.ChainBaseID,
+				"total_pnl", totalPnL)
+		}
 	}
 
 	log.Printf("[MARKET-CLOSE] %s: Position closed successfully via MARKET order (reason: %s)", symbol, reason)
@@ -13056,6 +13126,23 @@ func (ga *GinieAutopilot) reconcilePositions() {
 				side = "SHORT"
 			}
 			qty := math.Abs(exchangePos.PositionAmt)
+
+			// [Epic 14] Skip chain system positions - let chain system manage them
+			if ga.repo != nil && ga.repo.GetDB() != nil {
+				ctx := context.Background()
+				isChainPos, err := ga.repo.GetDB().IsChainSystemPosition(ctx, ga.userID, exchangePos.Symbol)
+				if err != nil {
+					ga.logger.Warn("Failed to check if position is chain-created",
+						"symbol", exchangePos.Symbol,
+						"error", err)
+				} else if isChainPos {
+					ga.logger.Info("CHAIN SYSTEM POSITION: Skipping Ginie management - let chain system handle",
+						"symbol", exchangePos.Symbol,
+						"side", side,
+						"quantity", qty)
+					continue
+				}
+			}
 
 			// Select mode based on user's enabled modes (fixes hardcoded swing bypass)
 			externalMode := ga.selectEnabledModeForPosition()

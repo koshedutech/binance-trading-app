@@ -1612,6 +1612,139 @@ class FuturesAPIService {
     return data;
   }
 
+  // ==================== COIN PROFILER (Epic 14) ====================
+
+  async getCoinProfilerStatus(): Promise<{
+    running: boolean;
+    connected: boolean;
+    symbol_count: number;
+    subscription_count: number;
+    updates_per_second: number;
+    last_update_time: string;
+    last_error: string;
+    reconnect_count: number;
+    started_at: string;
+    uptime: string;
+  }> {
+    const { data } = await this.client.get('/coin-profiler/status');
+    return data;
+  }
+
+  async getCoinProfilerCoins(): Promise<{
+    coins: Array<{
+      symbol: string;
+      price: number;
+      volume_24h: number;
+      volatility: number;
+      timeframes: Record<string, {
+        timeframe: string;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        volume: number;
+        taker_buy_vol: number;
+        taker_sell_vol: number;
+        quote_volume: number;
+        trade_count: number;
+        is_closed_bar: boolean;
+        open_time: string;
+        close_time: string;
+        updated_at: string;
+      }>;
+      source: 'strategy' | 'position' | 'both';
+      strategies: string[];
+      updated_at: string;
+    }>;
+    total: number;
+  }> {
+    const { data } = await this.client.get('/coin-profiler/coins');
+    return data;
+  }
+
+  async getCoinProfilerCoin(symbol: string): Promise<{
+    symbol: string;
+    price: number;
+    volume_24h: number;
+    volatility: number;
+    timeframes: Record<string, {
+      timeframe: string;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+      taker_buy_vol: number;
+      taker_sell_vol: number;
+      quote_volume: number;
+      trade_count: number;
+      is_closed_bar: boolean;
+      open_time: string;
+      close_time: string;
+      updated_at: string;
+    }>;
+    source: 'strategy' | 'position' | 'both';
+    strategies: string[];
+    updated_at: string;
+  }> {
+    const { data } = await this.client.get(`/coin-profiler/coins/${symbol}`);
+    return data;
+  }
+
+  async getCoinProfilerRequirements(): Promise<{
+    all_timeframes: string[];
+    all_data_fields: string[];
+    total_strategies: number;
+    subscriptions: Record<string, {
+      timeframes: string[];
+      source: string;
+      strategy: string;
+    }>;
+  }> {
+    const { data } = await this.client.get('/coin-profiler/requirements');
+    return data;
+  }
+
+  async startCoinProfiler(): Promise<{
+    success: boolean;
+    message: string;
+    status?: {
+      running: boolean;
+      connected: boolean;
+      symbol_count: number;
+      subscription_count: number;
+      updates_per_second: number;
+      last_update_time: string;
+      last_error: string;
+      reconnect_count: number;
+      started_at: string;
+      uptime: string;
+    };
+  }> {
+    const { data } = await this.client.post('/coin-profiler/start');
+    return data;
+  }
+
+  async stopCoinProfiler(): Promise<{
+    success: boolean;
+    message: string;
+    status?: {
+      running: boolean;
+      connected: boolean;
+      symbol_count: number;
+      subscription_count: number;
+      updates_per_second: number;
+      last_update_time: string;
+      last_error: string;
+      reconnect_count: number;
+      started_at: string;
+      uptime: string;
+    };
+  }> {
+    const { data } = await this.client.post('/coin-profiler/stop');
+    return data;
+  }
+
   // ==================== SYMBOL PERFORMANCE SETTINGS ====================
 
   async getSymbolPerformanceSettings(): Promise<{

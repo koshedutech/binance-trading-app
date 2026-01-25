@@ -39,6 +39,9 @@ import {
 import modeStrategyApi from '../api/modeStrategy';
 import type { ModeName, StrategyName, ModeStrategyConfig } from '../types/modeStrategy';
 import { STRATEGY_DISPLAY_NAMES } from '../types/modeStrategy';
+// Story 11.43-11.46: Import sub-strategies hook and types for Ravindra Volume Imbalance
+import { useSubStrategies, useUpdateSubStrategy } from '../hooks/useStrategyHierarchy';
+import type { SubStrategySettings, VolumeImbalanceSettings } from '../types/strategyHierarchy';
 
 // ==================== INTERFACES ====================
 
@@ -2064,6 +2067,18 @@ function StrategySettingsPanel({
 
       {/* Grouped Collapsible Sections */}
       <div className="space-y-2 max-h-[500px] overflow-y-auto">
+        {/* Story 11.43-11.46: Sub-Strategies Section for Breakout Strategy - BEFORE other settings */}
+        {strategy.strategy === 'breakout' && (
+          <SubStrategiesSection
+            mode={mode}
+            expandedSections={expandedSections}
+            onToggleSection={toggleSection}
+            editMode={editMode}
+            onFieldChange={onFieldChange}
+            onRefresh={() => window.location.reload()}
+          />
+        )}
+
         {groupedFields.map((groupData) => (
           <CollapsibleStrategySection
             key={groupData.group.key}
@@ -2076,6 +2091,604 @@ function StrategySettingsPanel({
           />
         ))}
       </div>
+    </div>
+  );
+}
+
+// Story 11.43-11.46: Sub-Strategies Section Component
+// Displays sub-strategies (e.g., Ravindra Volume Imbalance) inside the Breakout strategy
+// Enhanced to follow CollapsibleStrategySection pattern with field comparisons and editing support
+function SubStrategiesSection({
+  mode,
+  expandedSections,
+  onToggleSection,
+  editMode = false,
+  onFieldChange,
+  onRefresh: parentRefresh,
+}: {
+  mode: string;
+  expandedSections: Set<string>;
+  onToggleSection: (key: string) => void;
+  editMode?: boolean;
+  onFieldChange?: (path: string, value: any) => void;
+  onRefresh?: () => void;
+}) {
+  const { subStrategies, isLoading, error, refresh } = useSubStrategies(mode, 'breakout');
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
+          <div className="flex items-center gap-2 px-4 py-3 bg-purple-900/20 border-b border-purple-500/30">
+            <Loader2 className="w-5 h-5 text-purple-400 animate-spin" />
+            <span className="text-sm font-semibold text-purple-300">Loading sub-strategies...</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-4">
+        <div className="border border-red-500/30 rounded-lg overflow-hidden bg-red-900/10">
+          <div className="flex items-center gap-2 px-4 py-3 bg-red-900/20">
+            <AlertTriangle className="w-5 h-5 text-red-400" />
+            <span className="text-sm text-red-400">Failed to load sub-strategies: {error}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (subStrategies.length === 0) {
+    return null; // No sub-strategies to show
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Sub-Strategies Section with clear header - matches Futures page UI */}
+      <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
+        <div className="flex items-center gap-2 px-4 py-3 bg-purple-900/20 border-b border-purple-500/30">
+          <Zap className="w-5 h-5 text-purple-400" />
+          <span className="text-sm font-semibold text-purple-300">Sub-Strategies</span>
+          <span className="px-2 py-0.5 text-xs bg-purple-500/20 text-purple-300 rounded">
+            {subStrategies.length}
+          </span>
+          {editMode && (
+            <span className="ml-2 text-xs text-purple-400">
+              <Edit3 className="w-3 h-3 inline" /> Editing
+            </span>
+          )}
+        </div>
+        <div className="p-3 space-y-2">
+          {subStrategies.map((subStrategy) => (
+            <SubStrategyCollapsibleSection
+              key={subStrategy.sub_strategy}
+              subStrategy={subStrategy}
+              mode={mode}
+              expanded={expandedSections.has(`sub_strategy_${subStrategy.sub_strategy}`)}
+              onToggle={() => onToggleSection(`sub_strategy_${subStrategy.sub_strategy}`)}
+              onRefresh={refresh}
+              editMode={editMode}
+              onFieldChange={onFieldChange}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Divider between Sub-Strategies and Main Strategy Settings - matches Futures page UI */}
+      <div className="flex items-center gap-3 py-2">
+        <div className="flex-1 border-t border-gray-600"></div>
+        <span className="text-xs text-gray-500 font-medium uppercase tracking-wider">Breakout Main Settings</span>
+        <div className="flex-1 border-t border-gray-600"></div>
+      </div>
+    </div>
+  );
+}
+
+// Story 11.43-11.46: Sub-Strategy Collapsible Section Component
+// Follows the same pattern as CollapsibleStrategySection with field comparisons and editing support
+function SubStrategyCollapsibleSection({
+  subStrategy,
+  mode,
+  expanded,
+  onToggle,
+  onRefresh,
+  editMode = false,
+  onFieldChange,
+}: {
+  subStrategy: SubStrategySettings;
+  mode: string;
+  expanded: boolean;
+  onToggle: () => void;
+  onRefresh?: () => Promise<void>;
+  editMode?: boolean;
+  onFieldChange?: (path: string, value: any) => void;
+}) {
+  // Type guard for Volume Imbalance settings
+  // Use sub_strategy field for identification (not id which is the DB UUID)
+  const subStrategyName = subStrategy.sub_strategy;
+  const isVolumeImbalance = subStrategyName === 'ravindra_volume_imbalance';
+  const settings = subStrategy.settings as VolumeImbalanceSettings | undefined;
+  const [isResetting, setIsResetting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Track local edits for sub-strategy fields
+  const [localEditedValues, setLocalEditedValues] = useState<Record<string, any>>({});
+
+  // Use the update hook for API calls
+  // IMPORTANT: Pass sub_strategy name (not id) to the hook - API expects strategy name
+  const { mutate: updateSubStrategy, isLoading: isUpdating } = useUpdateSubStrategy(
+    mode,
+    'breakout',
+    subStrategyName
+  );
+
+  // Get display name from sub_strategy field (not id)
+  const displayName = subStrategyName === 'ravindra_volume_imbalance'
+    ? 'Ravindra Volume Imbalance'
+    : subStrategyName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+  // Default settings for reset - these are the baseline values
+  const defaultSettings: VolumeImbalanceSettings = {
+    enabled: false,
+    risk_reward: { risk: 1, reward: 4, min_ratio: 3 },
+    llm_validation_enabled: true,
+    trailing_stop: {
+      enabled: true,
+      activation_profit_pct: 1.0,
+      initial_trail_pct: 0.5,
+      milestones: [],
+    },
+    pattern_detection: {
+      min_volume_ratio: 2.0,
+      consolidation_time_mins: 15,
+      breakout_confirmation_candles: 2,
+      max_pattern_age_mins: 60,
+      require_htf_confirmation: true,
+      htf_timeframe: '1h',
+    },
+    max_concurrent_patterns: 5,
+    priority: 1,
+  };
+
+  // Handle local field change
+  const handleLocalFieldChange = (path: string, value: any) => {
+    setLocalEditedValues(prev => ({ ...prev, [path]: value }));
+    // Also notify parent if provided
+    onFieldChange?.(`sub_strategy.${subStrategyName}.${path}`, value);
+  };
+
+  // Handle save edits
+  const handleSave = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isSaving || isUpdating || Object.keys(localEditedValues).length === 0) return;
+
+    setIsSaving(true);
+    setSaveError(null);
+
+    try {
+      // Build the settings object from edits
+      const updatedSettings: Partial<VolumeImbalanceSettings> = {
+        ...(settings || defaultSettings),
+      };
+
+      // Apply edits to the settings object
+      for (const [path, value] of Object.entries(localEditedValues)) {
+        if (path === 'enabled') {
+          // enabled is at the subStrategy level, not inside settings
+          continue;
+        }
+        const parts = path.split('.');
+        if (parts.length === 1) {
+          (updatedSettings as any)[parts[0]] = value;
+        } else if (parts.length === 2) {
+          if (!(updatedSettings as any)[parts[0]]) {
+            (updatedSettings as any)[parts[0]] = {};
+          }
+          (updatedSettings as any)[parts[0]][parts[1]] = value;
+        }
+      }
+
+      // Send update to API
+      await updateSubStrategy({
+        enabled: localEditedValues['enabled'] !== undefined ? localEditedValues['enabled'] : subStrategy.enabled,
+        settings: updatedSettings,
+      });
+
+      // Clear local edits and refresh
+      setLocalEditedValues({});
+      await onRefresh?.();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save sub-strategy');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Handle reset to defaults
+  const handleReset = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isResetting || isUpdating) return;
+
+    setIsResetting(true);
+    setResetError(null);
+
+    try {
+      // Reset all settings to defaults - send the complete settings object
+      await updateSubStrategy({
+        enabled: defaultSettings.enabled,
+        priority: defaultSettings.priority,
+        settings: defaultSettings,
+      });
+      // Clear local edits and refresh data after reset
+      setLocalEditedValues({});
+      await onRefresh?.();
+    } catch (err) {
+      setResetError(err instanceof Error ? err.message : 'Failed to reset sub-strategy');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  // Create field comparison list
+  const fieldComparisons: { path: string; current: any; default: any; match: boolean; inputType: 'toggle' | 'number' | 'slider' }[] = [];
+
+  if (settings) {
+    // Basic fields
+    fieldComparisons.push({
+      path: 'enabled',
+      current: subStrategy.enabled,
+      default: defaultSettings.enabled,
+      match: subStrategy.enabled === defaultSettings.enabled,
+      inputType: 'toggle',
+    });
+    fieldComparisons.push({
+      path: 'priority',
+      current: settings.priority,
+      default: defaultSettings.priority,
+      match: settings.priority === defaultSettings.priority,
+      inputType: 'number',
+    });
+    fieldComparisons.push({
+      path: 'llm_validation_enabled',
+      current: settings.llm_validation_enabled,
+      default: defaultSettings.llm_validation_enabled,
+      match: settings.llm_validation_enabled === defaultSettings.llm_validation_enabled,
+      inputType: 'toggle',
+    });
+    fieldComparisons.push({
+      path: 'max_concurrent_patterns',
+      current: settings.max_concurrent_patterns,
+      default: defaultSettings.max_concurrent_patterns,
+      match: settings.max_concurrent_patterns === defaultSettings.max_concurrent_patterns,
+      inputType: 'number',
+    });
+
+    // Risk/Reward fields
+    if (settings.risk_reward) {
+      fieldComparisons.push({
+        path: 'risk_reward.risk',
+        current: settings.risk_reward.risk,
+        default: defaultSettings.risk_reward.risk,
+        match: settings.risk_reward.risk === defaultSettings.risk_reward.risk,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'risk_reward.reward',
+        current: settings.risk_reward.reward,
+        default: defaultSettings.risk_reward.reward,
+        match: settings.risk_reward.reward === defaultSettings.risk_reward.reward,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'risk_reward.min_ratio',
+        current: settings.risk_reward.min_ratio,
+        default: defaultSettings.risk_reward.min_ratio,
+        match: settings.risk_reward.min_ratio === defaultSettings.risk_reward.min_ratio,
+        inputType: 'number',
+      });
+    }
+
+    // Pattern Detection fields
+    if (settings.pattern_detection) {
+      fieldComparisons.push({
+        path: 'pattern_detection.min_volume_ratio',
+        current: settings.pattern_detection.min_volume_ratio,
+        default: defaultSettings.pattern_detection.min_volume_ratio,
+        match: settings.pattern_detection.min_volume_ratio === defaultSettings.pattern_detection.min_volume_ratio,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.consolidation_time_mins',
+        current: settings.pattern_detection.consolidation_time_mins,
+        default: defaultSettings.pattern_detection.consolidation_time_mins,
+        match: settings.pattern_detection.consolidation_time_mins === defaultSettings.pattern_detection.consolidation_time_mins,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.breakout_confirmation_candles',
+        current: settings.pattern_detection.breakout_confirmation_candles,
+        default: defaultSettings.pattern_detection.breakout_confirmation_candles,
+        match: settings.pattern_detection.breakout_confirmation_candles === defaultSettings.pattern_detection.breakout_confirmation_candles,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.max_pattern_age_mins',
+        current: settings.pattern_detection.max_pattern_age_mins,
+        default: defaultSettings.pattern_detection.max_pattern_age_mins,
+        match: settings.pattern_detection.max_pattern_age_mins === defaultSettings.pattern_detection.max_pattern_age_mins,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.require_htf_confirmation',
+        current: settings.pattern_detection.require_htf_confirmation,
+        default: defaultSettings.pattern_detection.require_htf_confirmation,
+        match: settings.pattern_detection.require_htf_confirmation === defaultSettings.pattern_detection.require_htf_confirmation,
+        inputType: 'toggle',
+      });
+    }
+
+    // Trailing Stop fields
+    if (settings.trailing_stop) {
+      fieldComparisons.push({
+        path: 'trailing_stop.enabled',
+        current: settings.trailing_stop.enabled,
+        default: defaultSettings.trailing_stop.enabled,
+        match: settings.trailing_stop.enabled === defaultSettings.trailing_stop.enabled,
+        inputType: 'toggle',
+      });
+      fieldComparisons.push({
+        path: 'trailing_stop.activation_profit_pct',
+        current: settings.trailing_stop.activation_profit_pct,
+        default: defaultSettings.trailing_stop.activation_profit_pct,
+        match: settings.trailing_stop.activation_profit_pct === defaultSettings.trailing_stop.activation_profit_pct,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'trailing_stop.initial_trail_pct',
+        current: settings.trailing_stop.initial_trail_pct,
+        default: defaultSettings.trailing_stop.initial_trail_pct,
+        match: settings.trailing_stop.initial_trail_pct === defaultSettings.trailing_stop.initial_trail_pct,
+        inputType: 'slider',
+      });
+    }
+  }
+
+  const matchingFields = fieldComparisons.filter(f => f.match).length;
+  const totalFields = fieldComparisons.length;
+  const differentFields = totalFields - matchingFields;
+  const allMatch = differentFields === 0;
+  const hasLocalEdits = Object.keys(localEditedValues).length > 0;
+
+  // Render editable field input based on field type
+  const renderEditableField = (field: { path: string; current: any; default: any; match: boolean; inputType: 'toggle' | 'number' | 'slider' }) => {
+    const fieldName = field.path.split('.').pop() || field.path;
+    const currentValue = localEditedValues[field.path] ?? field.current;
+    const isEdited = localEditedValues[field.path] !== undefined;
+
+    switch (field.inputType) {
+      case 'toggle':
+        return (
+          <StrategyToggleInput
+            label={fieldName.replace(/_/g, ' ')}
+            checked={currentValue as boolean | null | undefined}
+            defaultChecked={field.default as boolean | null | undefined}
+            onChange={(value) => handleLocalFieldChange(field.path, value)}
+            isEdited={isEdited}
+          />
+        );
+
+      case 'slider':
+        return (
+          <StrategySliderInput
+            label={fieldName.replace(/_/g, ' ')}
+            value={currentValue as number | null | undefined}
+            defaultValue={field.default as number | null | undefined}
+            onChange={(value) => handleLocalFieldChange(field.path, value)}
+            min={0}
+            max={field.path.includes('pct') ? 10 : 100}
+            step={field.path.includes('pct') ? 0.1 : 0.5}
+            unit={field.path.includes('pct') ? '%' : ''}
+            isEdited={isEdited}
+          />
+        );
+
+      case 'number':
+      default:
+        return (
+          <StrategyNumberInput
+            label={fieldName.replace(/_/g, ' ')}
+            value={currentValue as number | null | undefined}
+            defaultValue={field.default as number | null | undefined}
+            onChange={(value) => handleLocalFieldChange(field.path, value)}
+            min={0}
+            max={field.path.includes('mins') ? 120 : 100}
+            step={1}
+            unit={field.path.includes('mins') ? 'min' : ''}
+            isEdited={isEdited}
+          />
+        );
+    }
+  };
+
+  return (
+    <div className="border border-gray-700 rounded-lg overflow-hidden">
+      {/* Section Header - follows CollapsibleStrategySection pattern */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`w-full flex items-center justify-between px-3 py-2 transition-colors ${
+          hasLocalEdits
+            ? 'bg-orange-900/30 hover:bg-orange-900/40'
+            : allMatch
+            ? 'bg-green-900/20 hover:bg-green-900/30'
+            : 'bg-orange-900/20 hover:bg-orange-900/30'
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-purple-400">
+            <Zap className="w-4 h-4" />
+          </span>
+          <span className="font-medium text-gray-200 text-sm">{displayName}</span>
+          <span className="text-xs text-gray-500">
+            ({matchingFields}/{totalFields})
+          </span>
+          {/* Enable/Disable Badge */}
+          <span className={`px-2 py-0.5 text-xs rounded ${
+            subStrategy.enabled
+              ? 'bg-green-500/20 text-green-400'
+              : 'bg-gray-600/20 text-gray-500'
+          }`}>
+            {subStrategy.enabled ? 'ON' : 'OFF'}
+          </span>
+          {editMode && (
+            <span className="text-xs text-purple-400 ml-1">
+              <Edit3 className="w-3 h-3 inline" />
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Save Button - only show when in edit mode and has local edits */}
+          {editMode && hasLocalEdits && (
+            <div
+              onClick={handleSave}
+              className={`
+                flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer
+                bg-green-600/20 text-green-400 hover:bg-green-600/30
+                ${isSaving ? 'opacity-50 cursor-wait' : ''}
+              `}
+              title="Save changes"
+            >
+              {isSaving ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Save className="w-3 h-3" />
+              )}
+              Save
+            </div>
+          )}
+          {/* Reset Button - only show when there are differences */}
+          {!allMatch && (
+            <div
+              onClick={handleReset}
+              className={`
+                flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer
+                bg-blue-600/20 text-blue-400 hover:bg-blue-600/30
+                ${isResetting ? 'opacity-50 cursor-wait' : ''}
+              `}
+              title="Reset to defaults"
+            >
+              {isResetting ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3 h-3" />
+              )}
+              Reset
+            </div>
+          )}
+          {hasLocalEdits ? (
+            <span className="text-xs px-2 py-0.5 bg-orange-500/30 text-orange-300 rounded font-medium">
+              Modified
+            </span>
+          ) : allMatch ? (
+            <span className="text-xs px-2 py-0.5 bg-green-500/20 text-green-400 rounded">
+              Match
+            </span>
+          ) : (
+            <span className="text-xs px-2 py-0.5 bg-orange-500/20 text-orange-400 rounded">
+              {differentFields} diff
+            </span>
+          )}
+          {expanded ? (
+            <ChevronDown className="w-4 h-4 text-gray-400" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-gray-400" />
+          )}
+        </div>
+      </button>
+
+      {/* Error Messages */}
+      {(resetError || saveError) && (
+        <div className="px-3 py-2 bg-red-900/20 border-t border-red-500/30 flex items-center gap-2">
+          <AlertTriangle className="w-3 h-3 text-red-400" />
+          <span className="text-xs text-red-400">{resetError || saveError}</span>
+        </div>
+      )}
+
+      {/* Section Content - Editable or Read-only */}
+      {expanded && (
+        <div className="bg-gray-900/30 border-t border-gray-700 p-3">
+          {isVolumeImbalance && (
+            <div className="mb-3 text-xs text-gray-400 italic">
+              3-step pattern: Accumulation → Consolidation → Breakout
+            </div>
+          )}
+
+          {editMode ? (
+            // Editable Mode - Show proper UI controls
+            <div className="grid gap-3">
+              {fieldComparisons.map((field) => (
+                <div key={field.path} className="relative">
+                  {renderEditableField(field)}
+                  {/* Show default value hint when different */}
+                  {!field.match && localEditedValues[field.path] === undefined && (
+                    <div className="mt-0.5 text-xs text-blue-400/70">
+                      Default: {formatValue(field.default)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            // Read-only Mode - Show comparison table
+            <table className="w-full text-xs">
+              <thead className="bg-gray-800/50">
+                <tr className="text-gray-400 border-b border-gray-700/50">
+                  <th className="text-left p-2 pl-3 font-medium">Setting</th>
+                  <th className="text-left p-2 font-medium">Current</th>
+                  <th className="text-left p-2 font-medium">Default</th>
+                  <th className="text-left p-2 pr-3 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fieldComparisons.map((field) => (
+                  <tr
+                    key={field.path}
+                    className={`border-b border-gray-700/30 last:border-0 ${
+                      field.match ? 'bg-green-900/5' : 'bg-orange-900/10'
+                    }`}
+                  >
+                    <td className="p-2 pl-3 font-mono text-gray-300">
+                      {field.path.split('.').pop() || field.path}
+                    </td>
+                    <td className={`p-2 font-mono ${field.match ? 'text-green-400' : 'text-orange-400'}`}>
+                      {formatValue(field.current)}
+                    </td>
+                    <td className="p-2 font-mono text-blue-400">
+                      {formatValue(field.default)}
+                    </td>
+                    <td className="p-2 pr-3">
+                      {field.match ? (
+                        <span className="text-green-400 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                        </span>
+                      ) : (
+                        <span className="text-orange-400 flex items-center gap-1">
+                          <XCircle className="w-3 h-3" />
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }

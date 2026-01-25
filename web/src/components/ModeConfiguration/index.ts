@@ -3,3 +3,4 @@
 
 export { default as StrategyGroupPanel } from './StrategyGroupPanel';
 export { default as SubStrategySettingsModal } from './SubStrategySettingsModal';
+export { StrategyGroupCard } from './StrategyGroupCard';

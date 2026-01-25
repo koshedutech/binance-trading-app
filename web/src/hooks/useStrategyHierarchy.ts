@@ -72,7 +72,7 @@ export function useStrategyGroups(mode: string): UseStrategyGroupsResult {
 
     try {
       const response = await apiService.get<GetStrategyGroupsResponse>(
-        `/strategy-hierarchy/${mode}/groups`
+        `/futures/strategy-groups/${mode}`
       );
       setGroups(response.data.groups || []);
     } catch (err) {
@@ -114,7 +114,7 @@ export function useSubStrategies(mode: string, group: string): UseSubStrategiesR
 
     try {
       const response = await apiService.get<GetSubStrategiesResponse>(
-        `/strategy-hierarchy/${mode}/groups/${group}/sub-strategies`
+        `/futures/sub-strategies/${mode}/${group}`
       );
       setSubStrategies(response.data.sub_strategies || []);
     } catch (err) {
@@ -176,7 +176,7 @@ export function useVolumeImbalancePatterns(): UseVolumeImbalancePatternsResult {
   const fetchPatterns = useCallback(async () => {
     try {
       const response = await apiService.get<GetVolumeImbalancePatternsResponse>(
-        '/volume-imbalance/patterns'
+        '/futures/patterns/volume-imbalance'
       );
 
       // Only update if we haven't received WebSocket data recently
@@ -253,24 +253,35 @@ export function useVolumeImbalancePatterns(): UseVolumeImbalancePatternsResult {
 // ==================== Update Strategy Group Hook ====================
 
 /**
- * Hook to update a strategy group
+ * Request type for updating strategy group with mode and group in the call
  */
-export function useUpdateStrategyGroup(
-  mode: string,
-  groupId: string
-): UseMutationResult<UpdateStrategyGroupRequest> {
+interface UpdateStrategyGroupMutationRequest {
+  mode: string;
+  group: string;
+  settings: Partial<UpdateStrategyGroupRequest>;
+}
+
+/**
+ * Hook to update a strategy group (dynamic mode/group in mutation call)
+ */
+export function useUpdateStrategyGroup(): {
+  mutateAsync: (data: UpdateStrategyGroupMutationRequest) => Promise<UpdateResponse>;
+  isLoading: boolean;
+  error: string | null;
+  reset: () => void;
+} {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const mutate = useCallback(
-    async (data: UpdateStrategyGroupRequest): Promise<UpdateResponse> => {
+  const mutateAsync = useCallback(
+    async (data: UpdateStrategyGroupMutationRequest): Promise<UpdateResponse> => {
       setIsLoading(true);
       setError(null);
 
       try {
         const response = await apiService.put<UpdateResponse>(
-          `/strategy-hierarchy/${mode}/groups/${groupId}`,
-          data
+          `/futures/strategy-groups/${data.mode}/${data.group}`,
+          data.settings
         );
         return response.data;
       } catch (err) {
@@ -281,7 +292,7 @@ export function useUpdateStrategyGroup(
         setIsLoading(false);
       }
     },
-    [mode, groupId]
+    []
   );
 
   const reset = useCallback(() => {
@@ -289,7 +300,7 @@ export function useUpdateStrategyGroup(
   }, []);
 
   return {
-    mutate,
+    mutateAsync,
     isLoading,
     error,
     reset,
@@ -316,7 +327,7 @@ export function useUpdateSubStrategy(
 
       try {
         const response = await apiService.put<UpdateResponse>(
-          `/strategy-hierarchy/${mode}/groups/${groupId}/sub-strategies/${subStrategyId}`,
+          `/futures/sub-strategies/${mode}/${groupId}/${subStrategyId}`,
           data
         );
         return response.data;
@@ -363,7 +374,7 @@ export function usePatternAction(): {
 
     try {
       const response = await apiService.post<UpdateResponse>(
-        `/volume-imbalance/patterns/${patternId}/execute`
+        `/futures/patterns/volume-imbalance/${patternId}/execute`
       );
       return response.data;
     } catch (err) {
@@ -381,7 +392,7 @@ export function usePatternAction(): {
 
     try {
       const response = await apiService.post<UpdateResponse>(
-        `/volume-imbalance/patterns/${patternId}/skip`,
+        `/futures/patterns/volume-imbalance/${patternId}/skip`,
         { reason }
       );
       return response.data;

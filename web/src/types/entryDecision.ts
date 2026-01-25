@@ -1,0 +1,376 @@
+// Entry Decision System Types
+// Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
+
+// ==================== Strategy Types ====================
+
+/**
+ * Strategy evaluation type
+ */
+export type StrategyType = 'pattern' | 'score';
+
+/**
+ * Pattern status for pattern-based strategies
+ */
+export type PatternStatus =
+  | 'watching'
+  | 'accumulation'
+  | 'consolidating'
+  | 'ready'
+  | 'failed'
+  | 'expired';
+
+/**
+ * Trading mode
+ */
+export type TradingMode = 'scalp' | 'swing' | 'position' | 'ultra_fast';
+
+// ==================== Coin Match Types ====================
+
+/**
+ * Represents a single coin's match status against a strategy
+ */
+export interface CoinMatch {
+  /** Coin symbol (e.g., "BTCUSDT") */
+  symbol: string;
+  /** Last update timestamp */
+  updated_at: string;
+
+  // Pattern-based fields
+  /** Current step (1, 2, 3, etc.) for pattern strategies */
+  step?: number;
+  /** Current pattern status */
+  status?: PatternStatus;
+  /** Human-readable details (e.g., "3/6 candles") */
+  details?: string;
+
+  // Score-based fields
+  /** Score value (0-100) for score strategies */
+  score?: number;
+  /** Whether score meets threshold */
+  ready?: boolean;
+
+  // Additional context
+  /** Trade direction */
+  direction?: 'long' | 'short' | 'neutral';
+  /** Current price for reference */
+  current_price?: number;
+  /** 24h volume for reference */
+  volume_24h?: number;
+}
+
+// ==================== Strategy Match Types ====================
+
+/**
+ * Requirements for a strategy
+ */
+export interface StrategyRequirements {
+  /** Required timeframes */
+  timeframes: string[];
+  /** Required data fields */
+  data_fields?: string[];
+  /** Filter criteria */
+  filters?: Record<string, unknown>;
+  /** Human-readable description */
+  description?: string;
+}
+
+/**
+ * Represents a strategy with all matching coins
+ */
+export interface StrategyMatch {
+  /** Trading mode: "scalp", "swing", "position" */
+  mode: string;
+  /** Strategy name: "volume_imbalance", "trend_following" */
+  strategy: string;
+  /** Sub-strategy name: "ravindra_volume_imbalance" */
+  sub_strategy: string;
+
+  /** Strategy type: "pattern" or "score" */
+  type: StrategyType;
+  /** Primary timeframe */
+  timeframe: string;
+  /** All required timeframes */
+  timeframes?: string[];
+  /** Score threshold (for score-based only) */
+  threshold?: number;
+  /** Whether this strategy is enabled */
+  enabled: boolean;
+
+  /** All coins being tracked by this strategy */
+  coins: CoinMatch[];
+
+  /** Strategy requirements for UI display */
+  requirements?: StrategyRequirements;
+
+  /** Last update timestamp */
+  updated_at: string;
+}
+
+// ==================== Mode Grouping Types ====================
+
+/**
+ * Groups strategies by trading mode
+ */
+export interface ModeStrategies {
+  /** Trading mode */
+  mode: string;
+  /** All strategies in this mode */
+  strategies: StrategyMatch[];
+  /** Whether this mode is enabled */
+  enabled: boolean;
+}
+
+// ==================== API Response Types ====================
+
+/**
+ * Response from GET /api/futures/entry-decision/strategies
+ */
+export interface EntryDecisionStrategiesResponse {
+  /** All enabled strategies with their matching coins */
+  strategies: StrategyMatch[];
+  /** Strategies grouped by mode */
+  by_mode?: ModeStrategies[];
+  /** Total number of strategies */
+  total_strategies: number;
+  /** Number of enabled strategies */
+  enabled_strategies: number;
+  /** Total coins ready for entry */
+  total_coins_ready: number;
+  /** Total coins being watched */
+  total_coins_watching: number;
+  /** Response timestamp */
+  updated_at: string;
+}
+
+/**
+ * Step detail for pattern progress
+ */
+export interface StepDetail {
+  /** Step number (1-based) */
+  step_number: number;
+  /** Step name (e.g., "Volume Spike") */
+  name: string;
+  /** Whether step is completed */
+  completed: boolean;
+  /** Completion timestamp */
+  completed_at?: string;
+  /** Progress display (e.g., "3/6 candles") */
+  progress: string;
+  /** Additional context */
+  details: string;
+}
+
+/**
+ * Response from GET /api/futures/entry-decision/pattern/:symbol
+ */
+export interface PatternProgressResponse {
+  /** Coin symbol */
+  symbol: string;
+  /** Trading mode */
+  mode: string;
+  /** Strategy name */
+  strategy: string;
+  /** Sub-strategy name */
+  sub_strategy: string;
+  /** Timeframe */
+  timeframe: string;
+  /** Current step (1-based) */
+  current_step: number;
+  /** Total steps in pattern */
+  total_steps: number;
+  /** Pattern status */
+  status: string;
+  /** Details for each step */
+  step_details: StepDetail[];
+  /** Trade direction */
+  direction?: string;
+  /** When pattern tracking started */
+  started_at: string;
+  /** Last update */
+  updated_at: string;
+  /** When pattern expires */
+  expires_at?: string;
+}
+
+/**
+ * Response from GET /api/futures/entry-decision/score/:symbol
+ */
+export interface ScoreBreakdownResponse {
+  /** Coin symbol */
+  symbol: string;
+  /** Total score (0-100) */
+  score: number;
+  /** Trade direction */
+  direction: string;
+  /** Whether score meets threshold */
+  ready: boolean;
+  /** Score threshold */
+  threshold: number;
+  /** Score component breakdown */
+  components: Record<string, number>;
+  /** Last update */
+  updated_at: string;
+}
+
+/**
+ * Entry candidate for ready coins
+ */
+export interface EntryCandidate {
+  /** Coin symbol */
+  symbol: string;
+  /** Current price */
+  current_price: number;
+  /** Trading mode */
+  mode: string;
+  /** Strategy name */
+  strategy: string;
+  /** Sub-strategy name */
+  sub_strategy?: string;
+  /** Strategy type */
+  type: StrategyType;
+  /** Timeframe */
+  timeframe: string;
+
+  // Pattern-based
+  /** Current step */
+  step?: number;
+  /** Pattern status */
+  status?: PatternStatus;
+  /** Progress details */
+  details?: string;
+
+  // Score-based
+  /** Score value */
+  score?: number;
+  /** Score threshold */
+  threshold?: number;
+
+  /** Trade direction */
+  direction: string;
+  /** Priority (higher = more urgent) */
+  priority: number;
+  /** Confidence level */
+  confidence?: number;
+  /** Last update */
+  updated_at: string;
+}
+
+/**
+ * Response from GET /api/futures/entry-decision/candidates
+ */
+export interface EntryCandidatesResponse {
+  /** All coins ready for entry */
+  candidates: EntryCandidate[];
+  /** Total number of candidates */
+  total_candidates: number;
+  /** Response timestamp */
+  updated_at: string;
+}
+
+// ==================== Display Constants ====================
+
+/**
+ * Mode display names
+ */
+export const MODE_DISPLAY_NAMES: Record<string, string> = {
+  scalp: 'Scalp Mode',
+  swing: 'Swing Mode',
+  position: 'Position Mode',
+  ultra_fast: 'Ultra Fast Mode',
+};
+
+/**
+ * Mode colors for UI
+ */
+export const MODE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  scalp: {
+    bg: 'bg-blue-500/20',
+    text: 'text-blue-400',
+    border: 'border-blue-500/30',
+  },
+  swing: {
+    bg: 'bg-green-500/20',
+    text: 'text-green-400',
+    border: 'border-green-500/30',
+  },
+  position: {
+    bg: 'bg-purple-500/20',
+    text: 'text-purple-400',
+    border: 'border-purple-500/30',
+  },
+  ultra_fast: {
+    bg: 'bg-orange-500/20',
+    text: 'text-orange-400',
+    border: 'border-orange-500/30',
+  },
+};
+
+/**
+ * Pattern status colors
+ */
+export const PATTERN_STATUS_COLORS: Record<PatternStatus, { bg: string; text: string }> = {
+  watching: { bg: 'bg-gray-500/20', text: 'text-gray-400' },
+  accumulation: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
+  consolidating: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' },
+  ready: { bg: 'bg-green-500/20', text: 'text-green-400' },
+  failed: { bg: 'bg-red-500/20', text: 'text-red-400' },
+  expired: { bg: 'bg-gray-500/20', text: 'text-gray-500' },
+};
+
+/**
+ * Pattern status display labels
+ */
+export const PATTERN_STATUS_LABELS: Record<PatternStatus, string> = {
+  watching: 'Watching',
+  accumulation: 'Accumulation',
+  consolidating: 'Consolidating',
+  ready: 'Ready',
+  failed: 'Failed',
+  expired: 'Expired',
+};
+
+// ==================== Utility Functions ====================
+
+/**
+ * Check if a coin match is ready for entry
+ */
+export function isCoinReady(coin: CoinMatch): boolean {
+  // Pattern-based check
+  if (coin.status) {
+    return coin.status === 'ready';
+  }
+  // Score-based check
+  return coin.ready === true;
+}
+
+/**
+ * Format strategy name for display
+ */
+export function formatStrategyName(strategy: string, subStrategy?: string): string {
+  const formatted = strategy.split('_').map(word =>
+    word.charAt(0).toUpperCase() + word.slice(1)
+  ).join(' ');
+
+  if (subStrategy) {
+    const subFormatted = subStrategy.split('_').map(word =>
+      word.charAt(0).toUpperCase() + word.slice(1)
+    ).join(' ');
+    return `${formatted} - ${subFormatted}`;
+  }
+
+  return formatted;
+}
+
+/**
+ * Get count of ready coins in a strategy
+ */
+export function getReadyCount(strategy: StrategyMatch): number {
+  return strategy.coins.filter(isCoinReady).length;
+}
+
+/**
+ * Get count of watching coins in a strategy
+ */
+export function getWatchingCount(strategy: StrategyMatch): number {
+  return strategy.coins.length - getReadyCount(strategy);
+}

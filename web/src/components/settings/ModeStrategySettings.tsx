@@ -11,10 +11,14 @@ import {
   BarChart3,
   AlertTriangle,
   CheckCircle2,
+  XCircle,
   Loader2,
   ChevronDown,
+  ChevronUp,
+  ChevronRight,
   Power,
   PowerOff,
+  RefreshCw,
 } from 'lucide-react';
 import type {
   ModeName,
@@ -31,6 +35,9 @@ import {
 } from '../../types/modeStrategy';
 import modeStrategyApi from '../../api/modeStrategy';
 import StrategySettingsForm from './StrategySettingsForm';
+// Story 11.43-11.46: Import sub-strategies hook and types for Ravindra Volume Imbalance
+import { useSubStrategies, useUpdateSubStrategy } from '../../hooks/useStrategyHierarchy';
+import type { SubStrategySettings, VolumeImbalanceSettings } from '../../types/strategyHierarchy';
 
 // ==================== Interfaces ====================
 
@@ -454,6 +461,14 @@ export default function ModeStrategySettings({
     setComparison(null);
   }, [activeStrategy, currentMode]);
 
+  // Handle sub-strategy toggle
+  const handleSubStrategyToggle = useCallback((subStrategyId: string, enabled: boolean) => {
+    // Log the toggle for now - can be enhanced with success message
+    console.log(`Sub-strategy ${subStrategyId} ${enabled ? 'enabled' : 'disabled'}`);
+    setSuccessMessage(`Sub-strategy ${enabled ? 'enabled' : 'disabled'}`);
+    setTimeout(() => setSuccessMessage(null), 2000);
+  }, []);
+
   const isDisabled = disabled || isLoadingMode || isSaving || isResetting;
   const strategyEntries = modeConfig
     ? (Object.entries(modeConfig.strategies) as [StrategyName, ModeStrategyConfig][])
@@ -599,6 +614,11 @@ export default function ModeStrategySettings({
               </div>
             )}
 
+            {/* Story 11.43-11.46: Sub-Strategies Section for Breakout - BEFORE Strategy Settings Form */}
+            {activeStrategy === 'breakout' && (
+              <SubStrategiesSection mode={currentMode} onToggle={handleSubStrategyToggle} />
+            )}
+
             {/* Strategy Settings Form */}
             <StrategySettingsForm
               strategyName={activeStrategy}
@@ -612,6 +632,800 @@ export default function ModeStrategySettings({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+// Helper function for formatting values in comparison tables
+function formatValue(value: any): string {
+  if (value === null || value === undefined) return 'N/A';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'number') {
+    if (Number.isInteger(value)) return value.toLocaleString();
+    return value.toFixed(4).replace(/\.?0+$/, '');
+  }
+  if (Array.isArray(value)) return value.length > 0 ? value.join(', ') : '[]';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+// Story 11.43-11.46: Sub-Strategies Section Component
+// Displays sub-strategies (e.g., Ravindra Volume Imbalance) inside the Breakout strategy
+// Enhanced to follow CollapsibleStrategySection pattern with field comparisons and functional toggle
+function SubStrategiesSection({
+  mode,
+  onToggle,
+}: {
+  mode: string;
+  onToggle?: (subStrategyId: string, enabled: boolean) => void;
+}) {
+  const { subStrategies, isLoading, error, refresh } = useSubStrategies(mode, 'breakout');
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
+
+  const toggleSection = (key: string) => {
+    setExpandedSections(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  if (isLoading) {
+    return (
+      <div className="border border-gray-700 rounded-lg overflow-hidden mb-4">
+        <div className="p-3 bg-purple-900/20 flex items-center gap-2">
+          <Loader2 className="w-4 h-4 text-purple-400 animate-spin" />
+          <span className="text-sm text-purple-300">Loading sub-strategies...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border border-red-500/30 rounded-lg overflow-hidden mb-4">
+        <div className="p-3 bg-red-900/20 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-red-400" />
+          <span className="text-sm text-red-400">Failed to load sub-strategies: {error}</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (subStrategies.length === 0) {
+    return null; // No sub-strategies to show
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Sub-Strategies Section with clear header */}
+      <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
+        <div className="flex items-center gap-2 px-4 py-3 bg-purple-900/20 border-b border-purple-500/30">
+          <Zap className="w-5 h-5 text-purple-400" />
+          <span className="text-sm font-semibold text-purple-300">Sub-Strategies</span>
+          <span className="px-2 py-0.5 text-xs bg-purple-500/20 text-purple-300 rounded">
+            {subStrategies.length}
+          </span>
+        </div>
+        <div className="p-3 space-y-2">
+          {subStrategies.map((subStrategy) => (
+            <SubStrategyCollapsibleSection
+              key={subStrategy.sub_strategy}
+              subStrategy={subStrategy}
+              mode={mode}
+              expanded={expandedSections.has(`sub_strategy_${subStrategy.sub_strategy}`)}
+              onToggle={() => toggleSection(`sub_strategy_${subStrategy.sub_strategy}`)}
+              onEnabledChange={onToggle}
+              onRefresh={refresh}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Divider between Sub-Strategies and Main Strategy Settings */}
+      <div className="flex items-center gap-3 py-2">
+        <div className="flex-1 border-t border-gray-600"></div>
+        <span className="text-xs text-gray-500 font-medium uppercase tracking-wider">Breakout Main Settings</span>
+        <div className="flex-1 border-t border-gray-600"></div>
+      </div>
+    </div>
+  );
+}
+
+// Story 11.43-11.46: Sub-Strategy Collapsible Section Component
+// Updated to use proper form inputs instead of comparison table
+function SubStrategyCollapsibleSection({
+  subStrategy,
+  mode,
+  expanded,
+  onToggle,
+  onEnabledChange,
+  onRefresh,
+}: {
+  subStrategy: SubStrategySettings;
+  mode: string;
+  expanded: boolean;
+  onToggle: () => void;
+  onEnabledChange?: (subStrategyId: string, enabled: boolean) => void;
+  onRefresh?: () => Promise<void>;
+}) {
+  // Type guard for Volume Imbalance settings
+  // Use sub_strategy field for identification (not id which is the DB UUID)
+  const subStrategyName = subStrategy.sub_strategy;
+  const isVolumeImbalance = subStrategyName === 'ravindra_volume_imbalance';
+  const settings = subStrategy.settings as VolumeImbalanceSettings | undefined;
+  const [isToggling, setIsToggling] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+  const [hasChanges, setHasChanges] = useState(false);
+
+  // Default settings for initialization and reset
+  const defaultSettings: VolumeImbalanceSettings = {
+    enabled: false,
+    risk_reward: { risk: 1, reward: 4, min_ratio: 3 },
+    llm_validation_enabled: true,
+    trailing_stop: {
+      enabled: true,
+      activation_profit_pct: 1.0,
+      initial_trail_pct: 0.5,
+      milestones: [],
+    },
+    pattern_detection: {
+      min_volume_ratio: 2.0,
+      consolidation_time_mins: 15,
+      breakout_confirmation_candles: 2,
+      max_pattern_age_mins: 60,
+      require_htf_confirmation: true,
+      htf_timeframe: '1h',
+    },
+    max_concurrent_patterns: 5,
+    priority: 1,
+  };
+
+  // Local state for form editing - initialize with defaults merged with settings
+  const [localSettings, setLocalSettings] = useState<VolumeImbalanceSettings>(() => {
+    if (settings) {
+      return {
+        ...defaultSettings,
+        ...settings,
+        risk_reward: { ...defaultSettings.risk_reward, ...(settings.risk_reward || {}) },
+        trailing_stop: { ...defaultSettings.trailing_stop, ...(settings.trailing_stop || {}) },
+        pattern_detection: { ...defaultSettings.pattern_detection, ...(settings.pattern_detection || {}) },
+      };
+    }
+    return defaultSettings;
+  });
+
+  // Update local settings when settings change
+  React.useEffect(() => {
+    if (settings) {
+      setLocalSettings({
+        ...defaultSettings,
+        ...settings,
+        risk_reward: { ...defaultSettings.risk_reward, ...(settings.risk_reward || {}) },
+        trailing_stop: { ...defaultSettings.trailing_stop, ...(settings.trailing_stop || {}) },
+        pattern_detection: { ...defaultSettings.pattern_detection, ...(settings.pattern_detection || {}) },
+      });
+      setHasChanges(false);
+    }
+  }, [settings]);
+
+  // Use the update hook for toggling enabled state
+  // IMPORTANT: Pass sub_strategy name (not id) to the hook - API expects strategy name
+  const { mutate: updateSubStrategy, isLoading: isUpdating } = useUpdateSubStrategy(
+    mode,
+    'breakout',
+    subStrategyName
+  );
+
+  // Get display name from sub_strategy field (not id)
+  const displayName = subStrategyName === 'ravindra_volume_imbalance'
+    ? 'Ravindra Volume Imbalance'
+    : subStrategyName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+  // Handle enable/disable toggle
+  const handleToggleEnabled = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isToggling || isUpdating || isResetting || isSaving) return;
+
+    const newEnabled = !subStrategy.enabled;
+    setIsToggling(true);
+    setToggleError(null);
+
+    try {
+      await updateSubStrategy({ enabled: newEnabled });
+      // Notify parent and refresh data - use sub_strategy name
+      onEnabledChange?.(subStrategyName, newEnabled);
+      await onRefresh?.();
+    } catch (err) {
+      setToggleError(err instanceof Error ? err.message : 'Failed to toggle sub-strategy');
+    } finally {
+      setIsToggling(false);
+    }
+  };
+
+  // Handle reset to defaults
+  const handleReset = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isResetting || isUpdating || isToggling || isSaving) return;
+
+    setIsResetting(true);
+    setToggleError(null);
+
+    try {
+      // Reset all settings to defaults - send the complete settings object
+      await updateSubStrategy({
+        enabled: defaultSettings.enabled,
+        priority: defaultSettings.priority,
+        settings: defaultSettings,
+      });
+      // Update local state to defaults
+      setLocalSettings(defaultSettings);
+      // Refresh data after reset
+      await onRefresh?.();
+      setHasChanges(false);
+    } catch (err) {
+      setToggleError(err instanceof Error ? err.message : 'Failed to reset sub-strategy');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  // Handle save
+  const handleSave = async () => {
+    if (!localSettings || isSaving || isUpdating || isToggling || isResetting) return;
+
+    setIsSaving(true);
+    setToggleError(null);
+
+    try {
+      await updateSubStrategy({
+        enabled: subStrategy.enabled,
+        priority: localSettings.priority,
+        settings: {
+          priority: localSettings.priority,
+          llm_validation_enabled: localSettings.llm_validation_enabled,
+          max_concurrent_patterns: localSettings.max_concurrent_patterns,
+          risk_reward: localSettings.risk_reward,
+          trailing_stop: localSettings.trailing_stop,
+          pattern_detection: localSettings.pattern_detection,
+        },
+      });
+      await onRefresh?.();
+      setHasChanges(false);
+    } catch (err) {
+      setToggleError(err instanceof Error ? err.message : 'Failed to save sub-strategy settings');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  // Update local settings helper
+  const updateLocalSettings = (updates: Partial<VolumeImbalanceSettings>) => {
+    if (!localSettings) return;
+    setLocalSettings({ ...localSettings, ...updates });
+    setHasChanges(true);
+  };
+
+  // Create field comparison list for header status
+  const fieldComparisons: { path: string; current: any; default: any; match: boolean }[] = [];
+
+  if (settings) {
+    fieldComparisons.push({
+      path: 'enabled',
+      current: subStrategy.enabled,
+      default: defaultSettings.enabled,
+      match: subStrategy.enabled === defaultSettings.enabled,
+    });
+    fieldComparisons.push({
+      path: 'priority',
+      current: settings.priority,
+      default: defaultSettings.priority,
+      match: settings.priority === defaultSettings.priority,
+    });
+    if (settings.risk_reward) {
+      fieldComparisons.push({
+        path: 'risk_reward.risk',
+        current: settings.risk_reward.risk,
+        default: defaultSettings.risk_reward.risk,
+        match: settings.risk_reward.risk === defaultSettings.risk_reward.risk,
+      });
+    }
+    if (settings.pattern_detection) {
+      fieldComparisons.push({
+        path: 'pattern_detection.min_volume_ratio',
+        current: settings.pattern_detection.min_volume_ratio,
+        default: defaultSettings.pattern_detection.min_volume_ratio,
+        match: settings.pattern_detection.min_volume_ratio === defaultSettings.pattern_detection.min_volume_ratio,
+      });
+    }
+    if (settings.trailing_stop) {
+      fieldComparisons.push({
+        path: 'trailing_stop.enabled',
+        current: settings.trailing_stop.enabled,
+        default: defaultSettings.trailing_stop.enabled,
+        match: settings.trailing_stop.enabled === defaultSettings.trailing_stop.enabled,
+      });
+    }
+  }
+
+  const matchingFields = fieldComparisons.filter(f => f.match).length;
+  const totalFields = fieldComparisons.length;
+  const differentFields = totalFields - matchingFields;
+  const allMatch = differentFields === 0;
+
+  const isDisabled = isToggling || isUpdating || isResetting || isSaving;
+
+  // HTF Timeframe options
+  const htfTimeframeOptions = [
+    { value: '15m', label: '15 min' },
+    { value: '1h', label: '1 hour' },
+    { value: '4h', label: '4 hours' },
+  ];
+
+  return (
+    <div className="border border-gray-700 rounded-lg overflow-hidden">
+      {/* Section Header - follows CollapsibleStrategySection pattern */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className={`w-full flex items-center justify-between px-3 py-2 transition-colors ${
+          allMatch
+            ? 'bg-green-900/20 hover:bg-green-900/30'
+            : 'bg-orange-900/20 hover:bg-orange-900/30'
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-purple-400">
+            <Zap className="w-4 h-4" />
+          </span>
+          <span className="font-medium text-gray-200 text-sm">{displayName}</span>
+          {/* Enable/Disable Toggle - Functional */}
+          <div
+            onClick={handleToggleEnabled}
+            className={`
+              flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer
+              ${subStrategy.enabled
+                ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                : 'bg-gray-600/20 text-gray-500 hover:bg-gray-600/30'}
+              ${(isToggling || isUpdating) ? 'opacity-50 cursor-wait' : ''}
+            `}
+          >
+            {(isToggling || isUpdating) ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : subStrategy.enabled ? (
+              <Power className="w-3 h-3" />
+            ) : (
+              <PowerOff className="w-3 h-3" />
+            )}
+            {subStrategy.enabled ? 'ON' : 'OFF'}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Reset Button - only show when there are differences */}
+          {!allMatch && (
+            <div
+              onClick={handleReset}
+              className={`
+                flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer
+                bg-blue-600/20 text-blue-400 hover:bg-blue-600/30
+                ${isResetting ? 'opacity-50 cursor-wait' : ''}
+              `}
+              title="Reset to defaults"
+            >
+              {isResetting ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3 h-3" />
+              )}
+              Reset
+            </div>
+          )}
+          {expanded ? (
+            <ChevronDown className="w-4 h-4 text-gray-400" />
+          ) : (
+            <ChevronRight className="w-4 h-4 text-gray-400" />
+          )}
+        </div>
+      </button>
+
+      {/* Toggle Error */}
+      {toggleError && (
+        <div className="px-3 py-2 bg-red-900/20 border-t border-red-500/30 flex items-center gap-2">
+          <AlertTriangle className="w-3 h-3 text-red-400" />
+          <span className="text-xs text-red-400">{toggleError}</span>
+        </div>
+      )}
+
+      {/* Section Content - Editable Form */}
+      {expanded && localSettings && (
+        <div className="bg-gray-800/50 border-t border-gray-700 p-4 space-y-6">
+          {isVolumeImbalance && (
+            <div className="text-xs text-gray-400 italic border-b border-gray-700 pb-3">
+              3-step pattern: Accumulation - Consolidation - Breakout
+            </div>
+          )}
+
+          {/* Basic Settings */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <Settings2 className="w-4 h-4 text-blue-400" />
+              Basic Settings
+            </h4>
+            <div className="grid grid-cols-2 gap-4 pl-6">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Priority</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={localSettings.priority}
+                      onChange={(e) => updateLocalSettings({ priority: Number(e.target.value) })}
+                      min={1}
+                      max={10}
+                      step={1}
+                      disabled={isDisabled}
+                      className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500">Lower = higher priority</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Risk/Reward */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <Target className="w-4 h-4 text-green-400" />
+              Risk/Reward
+            </h4>
+            <div className="grid grid-cols-3 gap-4 pl-6">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Risk</label>
+                  <input
+                    type="number"
+                    value={localSettings.risk_reward.risk}
+                    onChange={(e) => updateLocalSettings({
+                      risk_reward: { ...localSettings.risk_reward, risk: Number(e.target.value) }
+                    })}
+                    min={0.1}
+                    max={10}
+                    step={0.1}
+                    disabled={isDisabled}
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Reward</label>
+                  <input
+                    type="number"
+                    value={localSettings.risk_reward.reward}
+                    onChange={(e) => updateLocalSettings({
+                      risk_reward: { ...localSettings.risk_reward, reward: Number(e.target.value) }
+                    })}
+                    min={0.1}
+                    max={20}
+                    step={0.1}
+                    disabled={isDisabled}
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Min Ratio</label>
+                  <input
+                    type="number"
+                    value={localSettings.risk_reward.min_ratio}
+                    onChange={(e) => updateLocalSettings({
+                      risk_reward: { ...localSettings.risk_reward, min_ratio: Number(e.target.value) }
+                    })}
+                    min={1}
+                    max={10}
+                    step={0.5}
+                    disabled={isDisabled}
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Pattern Detection */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <BarChart3 className="w-4 h-4 text-cyan-400" />
+              Pattern Detection
+            </h4>
+            <div className="grid grid-cols-2 gap-4 pl-6">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Min Volume Ratio</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={localSettings.pattern_detection.min_volume_ratio}
+                      onChange={(e) => updateLocalSettings({
+                        pattern_detection: { ...localSettings.pattern_detection, min_volume_ratio: Number(e.target.value) }
+                      })}
+                      min={1}
+                      max={10}
+                      step={0.1}
+                      disabled={isDisabled}
+                      className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    />
+                    <span className="text-xs text-gray-500 w-4">x</span>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Consolidation Time</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={localSettings.pattern_detection.consolidation_time_mins}
+                      onChange={(e) => updateLocalSettings({
+                        pattern_detection: { ...localSettings.pattern_detection, consolidation_time_mins: Number(e.target.value) }
+                      })}
+                      min={1}
+                      max={120}
+                      step={1}
+                      disabled={isDisabled}
+                      className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    />
+                    <span className="text-xs text-gray-500 w-4">m</span>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Breakout Confirm Candles</label>
+                  <input
+                    type="number"
+                    value={localSettings.pattern_detection.breakout_confirmation_candles}
+                    onChange={(e) => updateLocalSettings({
+                      pattern_detection: { ...localSettings.pattern_detection, breakout_confirmation_candles: Number(e.target.value) }
+                    })}
+                    min={1}
+                    max={10}
+                    step={1}
+                    disabled={isDisabled}
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Max Pattern Age</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={localSettings.pattern_detection.max_pattern_age_mins}
+                      onChange={(e) => updateLocalSettings({
+                        pattern_detection: { ...localSettings.pattern_detection, max_pattern_age_mins: Number(e.target.value) }
+                      })}
+                      min={5}
+                      max={480}
+                      step={5}
+                      disabled={isDisabled}
+                      className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    />
+                    <span className="text-xs text-gray-500 w-4">m</span>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-start justify-between py-2 col-span-2">
+                <div className="flex-1">
+                  <label className="text-sm font-medium text-gray-300">Require HTF Confirmation</label>
+                  <p className="text-xs text-gray-500 mt-1">Require higher timeframe confirmation before entry</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !isDisabled && updateLocalSettings({
+                    pattern_detection: { ...localSettings.pattern_detection, require_htf_confirmation: !localSettings.pattern_detection.require_htf_confirmation }
+                  })}
+                  disabled={isDisabled}
+                  className={`
+                    relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                    ${localSettings.pattern_detection.require_htf_confirmation ? 'bg-purple-600' : 'bg-gray-600'}
+                    ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                  `}
+                >
+                  <span
+                    className={`
+                      inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                      ${localSettings.pattern_detection.require_htf_confirmation ? 'translate-x-6' : 'translate-x-1'}
+                    `}
+                  />
+                </button>
+              </div>
+              {localSettings.pattern_detection.require_htf_confirmation && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">HTF Timeframe</label>
+                    <select
+                      value={localSettings.pattern_detection.htf_timeframe}
+                      onChange={(e) => updateLocalSettings({
+                        pattern_detection: { ...localSettings.pattern_detection, htf_timeframe: e.target.value }
+                      })}
+                      disabled={isDisabled}
+                      className="w-24 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    >
+                      {htfTimeframeOptions.map((opt) => (
+                        <option key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Trailing Stop */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-yellow-400" />
+              Trailing Stop
+            </h4>
+            <div className="pl-6 space-y-4">
+              <div className="flex items-start justify-between py-2">
+                <div className="flex-1">
+                  <label className="text-sm font-medium text-gray-300">Enable Trailing Stop</label>
+                  <p className="text-xs text-gray-500 mt-1">Lock in profits as price moves favorably</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !isDisabled && updateLocalSettings({
+                    trailing_stop: { ...localSettings.trailing_stop, enabled: !localSettings.trailing_stop.enabled }
+                  })}
+                  disabled={isDisabled}
+                  className={`
+                    relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                    ${localSettings.trailing_stop.enabled ? 'bg-purple-600' : 'bg-gray-600'}
+                    ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                  `}
+                >
+                  <span
+                    className={`
+                      inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                      ${localSettings.trailing_stop.enabled ? 'translate-x-6' : 'translate-x-1'}
+                    `}
+                  />
+                </button>
+              </div>
+              {localSettings.trailing_stop.enabled && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-medium text-gray-300">Activation Profit</label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={localSettings.trailing_stop.activation_profit_pct}
+                          onChange={(e) => updateLocalSettings({
+                            trailing_stop: { ...localSettings.trailing_stop, activation_profit_pct: Number(e.target.value) }
+                          })}
+                          min={0.1}
+                          max={10}
+                          step={0.1}
+                          disabled={isDisabled}
+                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                        />
+                        <span className="text-xs text-gray-500 w-4">%</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-sm font-medium text-gray-300">Initial Trail</label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={localSettings.trailing_stop.initial_trail_pct}
+                          onChange={(e) => updateLocalSettings({
+                            trailing_stop: { ...localSettings.trailing_stop, initial_trail_pct: Number(e.target.value) }
+                          })}
+                          min={0.1}
+                          max={5}
+                          step={0.1}
+                          disabled={isDisabled}
+                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                        />
+                        <span className="text-xs text-gray-500 w-4">%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Other Settings */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <Settings2 className="w-4 h-4 text-purple-400" />
+              Other
+            </h4>
+            <div className="pl-6 space-y-4">
+              <div className="flex items-start justify-between py-2">
+                <div className="flex-1">
+                  <label className="text-sm font-medium text-gray-300">LLM Validation</label>
+                  <p className="text-xs text-gray-500 mt-1">Use AI to validate pattern before execution</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !isDisabled && updateLocalSettings({ llm_validation_enabled: !localSettings.llm_validation_enabled })}
+                  disabled={isDisabled}
+                  className={`
+                    relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                    ${localSettings.llm_validation_enabled ? 'bg-purple-600' : 'bg-gray-600'}
+                    ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                  `}
+                >
+                  <span
+                    className={`
+                      inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                      ${localSettings.llm_validation_enabled ? 'translate-x-6' : 'translate-x-1'}
+                    `}
+                  />
+                </button>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Max Concurrent Patterns</label>
+                  <input
+                    type="number"
+                    value={localSettings.max_concurrent_patterns}
+                    onChange={(e) => updateLocalSettings({ max_concurrent_patterns: Number(e.target.value) })}
+                    min={1}
+                    max={20}
+                    step={1}
+                    disabled={isDisabled}
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  />
+                </div>
+                <p className="text-xs text-gray-500">Maximum patterns to track simultaneously</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Save Button */}
+          {hasChanges && (
+            <div className="flex justify-end pt-4 border-t border-gray-700">
+              <button
+                type="button"
+                onClick={handleSave}
+                disabled={isDisabled}
+                className="flex items-center gap-2 px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    Save Changes
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

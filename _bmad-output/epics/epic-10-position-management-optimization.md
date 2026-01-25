@@ -5,9 +5,9 @@
 **Epic ID:** EPIC-10
 **Status:** Done
 **Created:** 2026-01-14
-**Last Updated:** 2026-01-20
+**Last Updated:** 2026-01-25
 **Priority:** High
-**Stories:** 3 total (3 done)
+**Stories:** 4 total (4 done)
 
 ---
 
@@ -114,6 +114,23 @@ Real-time exit decision monitoring for open positions:
 - New Engine mode display (strategy, regime, exit signal strength)
 - WebSocket real-time updates
 - Integration into PositionCardExpanded
+
+### Story 10.4: Position Controller - Exit Signal Executor
+**Priority:** P1
+**Status:** In Progress
+**File:** `story-10.4-position-controller.md`
+
+Simple signal-to-action executor that replaces Ginie's position management:
+- Subscribes to Exit Decision Service signals
+- Executes SL/TP order updates on Binance when signals arrive
+- Protection heal: ensures SL/TP orders exist on Binance
+- Uses Chain system settings (not old Ginie mode settings)
+- Lightweight design: no AI agents, no learning engine
+- Enables complete disabling of Ginie autopilot
+
+**Key Difference from Ginie:**
+- Ginie: Monitors + Decides + Executes (all-in-one, complex)
+- New: Exit Decision Service decides → Position Controller executes (separation of concerns)
 
 ---
 

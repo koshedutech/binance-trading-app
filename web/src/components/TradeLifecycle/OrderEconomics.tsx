@@ -28,23 +28,26 @@ interface OrderEconomicsProps {
   slPrice?: number;
 }
 
-// Format currency with appropriate precision
-function formatCurrency(value: number, decimals = 4): string {
-  if (Math.abs(value) >= 100) return `$${value.toFixed(2)}`;
-  if (Math.abs(value) >= 1) return `$${value.toFixed(4)}`;
-  return `$${value.toFixed(decimals)}`;
+// Format currency with appropriate precision (null-safe)
+function formatCurrency(value: number | null | undefined, decimals = 4): string {
+  const safeValue = value ?? 0;
+  if (Math.abs(safeValue) >= 100) return `$${safeValue.toFixed(2)}`;
+  if (Math.abs(safeValue) >= 1) return `$${safeValue.toFixed(4)}`;
+  return `$${safeValue.toFixed(decimals)}`;
 }
 
-// Format percentage
-function formatPercent(value: number): string {
-  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(4)}%`;
+// Format percentage (null-safe)
+function formatPercent(value: number | null | undefined): string {
+  const safeValue = value ?? 0;
+  return `${safeValue >= 0 ? '+' : ''}${(safeValue * 100).toFixed(4)}%`;
 }
 
-// Format price based on magnitude
-function formatPrice(price: number): string {
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toFixed(8);
+// Format price based on magnitude (null-safe)
+function formatPrice(price: number | null | undefined): string {
+  const safePrice = price ?? 0;
+  if (safePrice >= 1000) return safePrice.toFixed(2);
+  if (safePrice >= 1) return safePrice.toFixed(4);
+  return safePrice.toFixed(8);
 }
 
 export default function OrderEconomics({
@@ -205,7 +208,7 @@ export default function OrderEconomics({
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-400">Quantity:</span>
-                  <span className="text-gray-200 font-mono">{economics.quantity.toFixed(4)}</span>
+                  <span className="text-gray-200 font-mono">{(economics.quantity ?? 0).toFixed(4)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-400">Entry Value:</span>
@@ -237,7 +240,7 @@ export default function OrderEconomics({
                 </div>
                 <div className="flex justify-between text-xs text-gray-500">
                   <span className="pl-2">Rate:</span>
-                  <span>{(economics.entryFees / economics.entryValue * 100).toFixed(4)}%</span>
+                  <span>{(economics.entryValue ? (economics.entryFees / economics.entryValue * 100) : 0).toFixed(4)}%</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-400">Exit Fee (est):</span>
@@ -245,7 +248,7 @@ export default function OrderEconomics({
                 </div>
                 <div className="flex justify-between text-xs text-gray-500">
                   <span className="pl-2">Assuming TAKER:</span>
-                  <span>{(economics.takerFeeRate * 100).toFixed(2)}%</span>
+                  <span>{((economics.takerFeeRate ?? 0) * 100).toFixed(2)}%</span>
                 </div>
                 <div className="border-t border-gray-700 pt-2 flex justify-between font-medium">
                   <span className="text-gray-300">Total Fees:</span>

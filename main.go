@@ -917,6 +917,8 @@ func main() {
 	var settingsCache *cache.SettingsCacheService
 	// Story 6.4: Declare adminDefaultsCache outside the block so it's accessible for API server wiring
 	var adminDefaultsCache *cache.AdminDefaultsCacheService
+	// Story 11.44: Declare strategyHierarchyCacheService for strategy hierarchy API
+	var strategyHierarchyCacheService *cache.StrategyHierarchyCacheService
 	if futuresAutopilotController != nil {
 		// Create LLM config for per-user AI analyzers
 		llmConfig := llm.DefaultAnalyzerConfig()
@@ -956,6 +958,12 @@ func main() {
 			// Wire to AdminSyncService for cache invalidation on admin settings sync
 			autopilot.GetAdminSyncService().SetCacheInvalidator(adminDefaultsCache)
 			logger.Info("AdminDefaultsCacheService initialized and wired to AdminSyncService")
+		}
+
+		// Story 11.44: Create StrategyHierarchyCacheService for strategy hierarchy API
+		if cacheService != nil && cacheService.IsHealthy() {
+			strategyHierarchyCacheService = cache.NewStrategyHierarchyCacheService(cacheService, repo, logger)
+			logger.Info("StrategyHierarchyCacheService initialized for strategy hierarchy API")
 		}
 
 		userAutopilotManager = autopilot.NewUserAutopilotManager(
@@ -1073,6 +1081,12 @@ func main() {
 		logger.Info("AdminDefaultsCacheService set on API server for settings comparison")
 	}
 
+	// Story 11.44: Set the StrategyHierarchyCacheService on the server for strategy hierarchy API
+	if strategyHierarchyCacheService != nil {
+		server.SetStrategyHierarchyCacheService(strategyHierarchyCacheService)
+		logger.Info("StrategyHierarchyCacheService set on API server for strategy hierarchy API")
+	}
+
 	// Epic 8: Set the SettlementService on the server for daily P&L analytics
 	if settlementService != nil {
 		server.SetSettlementService(settlementService)
@@ -1108,9 +1122,36 @@ func main() {
 				if userAutopilotManager != nil {
 					userAutopilotManager.SetStateManager(adapter)
 					logger.Info("StateManager adapter set on UserAutopilotManager for multi-user Entry Decision Engine")
+
+					// Epic 11: Set ChainStateProvider for ChainEntryRunner
+					// Uses adapter to avoid circular imports between autopilot and decision packages
+					chainStateAdapter := newChainStateProviderAdapter(stateManager)
+					userAutopilotManager.SetChainStateProvider(chainStateAdapter)
+					logger.Info("ChainStateProvider set on UserAutopilotManager for ChainEntryRunner")
 				}
 			}
+
+			// Epic 11: Create ChainEventWriter for chain-based entry tracking
+			// ChainEntryRunner uses this to record order chains when placing entries
+			chainEventWriterDB := database.NewChainEventWriterDBAdapter(repo.GetDB())
+			chainEventWriterLogger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "ChainEventWriter").Logger()
+			chainEventWriter := orders.NewChainEventWriter(chainEventWriterDB, chainEventWriterLogger)
+			if chainEventWriter != nil && userAutopilotManager != nil {
+				userAutopilotManager.SetChainEventWriter(chainEventWriter)
+				logger.Info("ChainEventWriter set on UserAutopilotManager for chain entry tracking")
+			}
 		}
+	}
+
+	// Story 14.14: Initialize TradingController for Chain Trading System ON/OFF toggle
+	// This manages trading state independently of Ginie Autopilot
+	if cacheService != nil && cacheService.IsHealthy() {
+		autopilot.InitTradingController(repo, cacheService)
+		logger.Info("TradingController initialized for Chain Trading System")
+	} else {
+		// Initialize without cache for legacy mode
+		autopilot.InitTradingController(repo, nil)
+		logger.Info("TradingController initialized without cache (legacy mode)")
 	}
 
 	// Wire up WebSocket broadcast callbacks for User Data Stream updates
@@ -2084,4 +2125,64 @@ func (a *stateManagerAdapter) UpdateCoinStateDelta(ctx context.Context, userID, 
 	}
 
 	return result.ChangedFields, nil
+}
+
+// ========================================================================
+// Epic 11: ChainStateProvider Adapter for ChainEntryRunner
+// ========================================================================
+
+// chainStateProviderAdapter adapts decision.StateManager to autopilot.ChainStateProvider.
+// This breaks the circular dependency between autopilot and decision packages by
+// converting decision.CoinState to autopilot.ChainCoinState.
+type chainStateProviderAdapter struct {
+	sm *decision.StateManager
+}
+
+// newChainStateProviderAdapter creates a new adapter wrapping a decision.StateManager.
+func newChainStateProviderAdapter(sm *decision.StateManager) *chainStateProviderAdapter {
+	if sm == nil {
+		return nil
+	}
+	return &chainStateProviderAdapter{sm: sm}
+}
+
+// GetAllChainCoinStates implements autopilot.ChainStateProvider by converting decision.CoinState to ChainCoinState.
+func (a *chainStateProviderAdapter) GetAllChainCoinStates(ctx context.Context, userID string) ([]*autopilot.ChainCoinState, error) {
+	if a.sm == nil {
+		return nil, nil
+	}
+
+	// Get all coin states from the decision.StateManager
+	decisionStates, err := a.sm.GetAllCoinStates(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to autopilot.ChainCoinState
+	result := make([]*autopilot.ChainCoinState, 0, len(decisionStates))
+	for _, ds := range decisionStates {
+		cs := &autopilot.ChainCoinState{
+			Symbol:          ds.Symbol,
+			Price:           ds.Price,
+			Regime:          string(ds.Regime),
+			ActiveStrategy:  ds.ActiveStrategy,
+			Decision:        string(ds.Decision),
+			ADX:             ds.ADX,
+			ATR:             ds.ATR,
+			RSI:             ds.RSI,
+			EMA9:            ds.EMA9,
+			EMA21:           ds.EMA21,
+			Trend1H:         string(ds.Trend1H),
+			Trend15M:        string(ds.Trend15M),
+			ScoreTechnical:  ds.ScoreTechnical,
+			ScoreContext:    ds.ScoreContext,
+			ScoreLLM:        ds.ScoreLLM,
+			ScoreHistory:    ds.ScoreHistory,
+			ScoreFinal:      ds.ScoreFinal,
+			BlockingReasons: ds.BlockingReasons,
+		}
+		result = append(result, cs)
+	}
+
+	return result, nil
 }

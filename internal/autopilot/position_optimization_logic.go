@@ -291,6 +291,28 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 		sr.TotalCyclePnL = sr.AccumulatedProfit
 		sr.LastUpdate = time.Now()
 		pos.IsClosing = true
+
+		// FIX: Close the order chain and position state when position is fully closed via exchange
+		if g.shouldUseChainPositionManagement() && g.chainEventWriter != nil && pos.ChainBaseID != "" {
+			ctx := context.Background()
+			closeReason := "TP_HIT"
+			totalFee := pos.EntryFeeUSD + pos.ExitFeeUSD
+			if err := g.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, closeReason, sr.AccumulatedProfit, totalFee); err != nil {
+				log.Printf("[POSITION-OPT] WARNING: Failed to close order chain %s: %v", pos.ChainBaseID, err)
+			} else {
+				log.Printf("[POSITION-OPT] Order chain %s closed (exchange fill) with pnl=%.4f", pos.ChainBaseID, sr.AccumulatedProfit)
+			}
+		}
+
+		if g.positionStateInt != nil && pos.ChainBaseID != "" {
+			ctx := context.Background()
+			if err := g.positionStateInt.RecordPositionClose(ctx, g.userID, pos.ChainBaseID, sr.AccumulatedProfit, "TP_HIT"); err != nil {
+				log.Printf("[POSITION-OPT] WARNING: Failed to close position state for chain %s: %v", pos.ChainBaseID, err)
+			} else {
+				log.Printf("[POSITION-OPT] Position state for chain %s closed with pnl=%.4f", pos.ChainBaseID, sr.AccumulatedProfit)
+			}
+		}
+
 		go g.SavePositionState()
 		return nil
 	}
@@ -527,6 +549,30 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 		sr.TotalCyclePnL = sr.AccumulatedProfit
 		sr.LastUpdate = time.Now()
 		pos.IsClosing = true
+
+		// FIX: Close the order chain and position state when position is fully closed
+		// This was missing, causing chains to remain ACTIVE in database
+		if g.shouldUseChainPositionManagement() && g.chainEventWriter != nil && pos.ChainBaseID != "" {
+			ctx := context.Background()
+			closeReason := "TP_HIT"
+			totalFee := pos.EntryFeeUSD + pos.ExitFeeUSD
+			if err := g.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, closeReason, sr.AccumulatedProfit, totalFee); err != nil {
+				log.Printf("[POSITION-OPT] WARNING: Failed to close order chain %s: %v", pos.ChainBaseID, err)
+			} else {
+				log.Printf("[POSITION-OPT] Order chain %s closed with reason=%s, pnl=%.4f", pos.ChainBaseID, closeReason, sr.AccumulatedProfit)
+			}
+		}
+
+		// FIX: Also close the position state in the database
+		if g.positionStateInt != nil && pos.ChainBaseID != "" {
+			ctx := context.Background()
+			if err := g.positionStateInt.RecordPositionClose(ctx, g.userID, pos.ChainBaseID, sr.AccumulatedProfit, "TP_HIT"); err != nil {
+				log.Printf("[POSITION-OPT] WARNING: Failed to close position state for chain %s: %v", pos.ChainBaseID, err)
+			} else {
+				log.Printf("[POSITION-OPT] Position state for chain %s closed with pnl=%.4f", pos.ChainBaseID, sr.AccumulatedProfit)
+			}
+		}
+
 		go g.SavePositionState()
 		return nil
 	}

@@ -224,6 +224,33 @@ func (db *DB) GetPositionsByUserID(ctx context.Context, userID string, status st
 	return positions, nil
 }
 
+// IsChainSystemPosition checks if a symbol has an active position created by the chain system
+// Chain system positions have chain IDs starting with SCA-, SWI-, POS-, or ULT-
+// Checks both order_chains and position_states tables
+func (db *DB) IsChainSystemPosition(ctx context.Context, userID string, symbol string) (bool, error) {
+	if db.Pool == nil {
+		return false, nil
+	}
+
+	// Check order_chains table (primary source for chain system entries)
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM order_chains
+			WHERE user_id = $1
+			AND symbol = $2
+			AND status NOT IN ('CLOSED', 'CANCELLED', 'EXPIRED')
+			AND (chain_id LIKE 'SCA-%' OR chain_id LIKE 'SWI-%' OR chain_id LIKE 'POS-%' OR chain_id LIKE 'ULT-%')
+		)`
+
+	var exists bool
+	err := db.Pool.QueryRow(ctx, query, userID, symbol).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check chain system position: %w", err)
+	}
+
+	return exists, nil
+}
+
 // GetPositionBySymbol retrieves a position by symbol and status
 func (db *DB) GetPositionBySymbol(ctx context.Context, userID string, symbol string, status string) (*orders.PositionState, error) {
 	if db.Pool == nil {

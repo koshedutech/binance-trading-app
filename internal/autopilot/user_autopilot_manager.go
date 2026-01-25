@@ -4,7 +4,9 @@ import (
 	"binance-trading-bot/internal/ai/llm"
 	"binance-trading-bot/internal/apikeys"
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/coinprofiler"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/exitdecision"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
 	"context"
@@ -19,13 +21,21 @@ import (
 // - GinieAutopilot (positions, trades, daily stats)
 // - FuturesClient (user's Binance API keys)
 // - LLMAnalyzer (user's AI API key)
+// - ChainEntryRunner (automatic chain-based entries when entry_decision_system="chain")
+// - CoinProfiler (real-time WebSocket data collection for Chain Trading System)
+// - ExitDecisionService (monitors positions for TP/SL/trailing stop exits)
+// - PositionController (Story 10.4: executes exit signals on Binance)
 type UserAutopilotInstance struct {
-	UserID        string
-	FuturesClient binance.FuturesClient
-	LLMAnalyzer   *llm.Analyzer
-	Autopilot     *GinieAutopilot
-	CreatedAt     time.Time
-	LastActive    time.Time
+	UserID              string
+	FuturesClient       binance.FuturesClient
+	LLMAnalyzer         *llm.Analyzer
+	Autopilot           *GinieAutopilot
+	ChainEntryRunner    *ChainEntryRunner              // Automatic chain entries (independent of Ginie)
+	CoinProfiler        *coinprofiler.CoinProfiler     // Epic 14: Real-time data collection
+	ExitDecisionService *exitdecision.Service          // Epic 14: Exit signal monitoring
+	PositionController  *PositionController            // Story 10.4: Exit signal executor
+	CreatedAt           time.Time
+	LastActive          time.Time
 
 	mu sync.RWMutex
 }
@@ -36,6 +46,38 @@ func (u *UserAutopilotInstance) IsRunning() bool {
 		return false
 	}
 	return u.Autopilot.IsRunning()
+}
+
+// IsChainEntryRunnerRunning returns whether this user's chain entry runner is active
+func (u *UserAutopilotInstance) IsChainEntryRunnerRunning() bool {
+	if u.ChainEntryRunner == nil {
+		return false
+	}
+	return u.ChainEntryRunner.IsRunning()
+}
+
+// IsCoinProfilerRunning returns whether this user's coin profiler is active
+func (u *UserAutopilotInstance) IsCoinProfilerRunning() bool {
+	if u.CoinProfiler == nil {
+		return false
+	}
+	return u.CoinProfiler.IsRunning()
+}
+
+// IsExitDecisionRunning returns whether this user's exit decision service is active
+func (u *UserAutopilotInstance) IsExitDecisionRunning() bool {
+	if u.ExitDecisionService == nil {
+		return false
+	}
+	return u.ExitDecisionService.IsRunning()
+}
+
+// IsPositionControllerRunning returns whether this user's position controller is active
+func (u *UserAutopilotInstance) IsPositionControllerRunning() bool {
+	if u.PositionController == nil {
+		return false
+	}
+	return u.PositionController.IsRunning()
 }
 
 // TouchLastActive updates the last active timestamp
@@ -85,6 +127,12 @@ type UserAutopilotManager struct {
 
 	// Epic 7: Position state integration for trade lifecycle tracking
 	positionStateInt *PositionStateIntegration
+
+	// Epic 11: ChainEventWriter for chain-based entry tracking
+	chainEventWriter *orders.ChainEventWriter
+
+	// Epic 11: ChainStateProvider for ChainEntryRunner (interface to avoid circular imports)
+	chainStateProvider ChainStateProvider
 
 	mu sync.RWMutex
 }
@@ -165,6 +213,42 @@ func (m *UserAutopilotManager) SetSettingsCache(cache SettingsCacheReader) {
 	if propagated > 0 {
 		m.logger.Info("SettingsCache propagated to existing user autopilots", "count", propagated)
 	}
+}
+
+// SetChainEventWriter sets the chain event writer for recording order chain events (Epic 11)
+// This is called from main.go after the ChainEventWriter is initialized
+func (m *UserAutopilotManager) SetChainEventWriter(cew *orders.ChainEventWriter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.chainEventWriter = cew
+	m.logger.Info("ChainEventWriter set on UserAutopilotManager for chain-based entry tracking")
+
+	// Propagate to existing ChainEntryRunners
+	m.instances.Range(func(key, value interface{}) bool {
+		instance := value.(*UserAutopilotInstance)
+		if instance.ChainEntryRunner != nil {
+			instance.ChainEntryRunner.SetChainEventWriter(cew)
+		}
+		return true
+	})
+}
+
+// SetChainStateProvider sets the chain state provider for ChainEntryRunner (Epic 11)
+// This is called from main.go after the StateManager is initialized
+func (m *UserAutopilotManager) SetChainStateProvider(sp ChainStateProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.chainStateProvider = sp
+	m.logger.Info("ChainStateProvider set on UserAutopilotManager for ChainEntryRunner")
+
+	// Propagate to existing ChainEntryRunners
+	m.instances.Range(func(key, value interface{}) bool {
+		instance := value.(*UserAutopilotInstance)
+		if instance.ChainEntryRunner != nil {
+			instance.ChainEntryRunner.SetStateProvider(sp)
+		}
+		return true
+	})
 }
 
 // cleanupLoop periodically removes idle user sessions
@@ -347,14 +431,60 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.logger.Info("PositionStateIntegration set on user autopilot for trade lifecycle", "user_id", userID)
 	}
 
-	instance := &UserAutopilotInstance{
-		UserID:        userID,
-		FuturesClient: futuresClient,
-		LLMAnalyzer:   llmAnalyzer,
-		Autopilot:     autopilot,
-		CreatedAt:     time.Now(),
-		LastActive:    time.Now(),
+	// Epic 11: Create ChainEntryRunner for automatic chain-based entries
+	// This runs independently of GinieAutopilot when entry_decision_system = "chain"
+	var chainEntryRunner *ChainEntryRunner
+	if m.chainStateProvider != nil {
+		chainEntryRunner = NewChainEntryRunner(
+			userID,
+			m.chainStateProvider,
+			futuresClient,
+			m.chainEventWriter,
+			m.settingsCache,
+			m.repo,
+			m.logger,
+			nil, // Use default config
+		)
+		m.logger.Info("ChainEntryRunner created for user", "user_id", userID)
 	}
+
+	// Epic 14: Create CoinProfiler for real-time WebSocket data collection
+	coinProfiler := coinprofiler.NewCoinProfiler(nil, m.logger) // Use default config
+	m.logger.Info("CoinProfiler created for user", "user_id", userID)
+
+	// Epic 14: Create ExitDecisionService for position exit monitoring
+	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)
+	exitDecisionSvc := exitdecision.NewService(nil, nil, nil) // Providers wired after creation
+	m.logger.Info("ExitDecisionService created for user", "user_id", userID)
+
+	// Story 10.4: Create PositionController for executing exit signals on Binance
+	// PositionController subscribes to ExitDecisionService signals and executes SL/TP updates
+	positionController := NewPositionController(
+		futuresClient,
+		exitDecisionSvc,
+		m.chainEventWriter,
+		nil, // Use default config
+		userID,
+	)
+	m.logger.Info("PositionController created for user", "user_id", userID)
+
+	instance := &UserAutopilotInstance{
+		UserID:              userID,
+		FuturesClient:       futuresClient,
+		LLMAnalyzer:         llmAnalyzer,
+		Autopilot:           autopilot,
+		ChainEntryRunner:    chainEntryRunner,
+		CoinProfiler:        coinProfiler,        // Epic 14: Real-time data collection
+		ExitDecisionService: exitDecisionSvc,     // Epic 14: Exit signal monitoring
+		PositionController:  positionController,  // Story 10.4: Exit signal executor
+		CreatedAt:           time.Now(),
+		LastActive:          time.Now(),
+	}
+
+	// Wire ExitDecisionService providers (after all components are created)
+	// This connects CoinProfiler as price provider and Autopilot as position provider
+	WireExitDecisionProviders(exitDecisionSvc, coinProfiler, autopilot, userID)
+	m.logger.Info("ExitDecisionService providers wired", "user_id", userID)
 
 	// Store instance (use LoadOrStore to handle race conditions)
 	actual, loaded := m.instances.LoadOrStore(userID, instance)
@@ -369,10 +499,25 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	if m.repo != nil {
 		tradingConfig, err := m.repo.GetUserTradingConfig(ctx, userID)
 		if err == nil && tradingConfig != nil && tradingConfig.AutopilotEnabled {
-			m.logger.Info("Per-user auto-start enabled, starting autopilot",
+			// Check system control to decide which systems to start
+			systemControl, scErr := m.repo.GetUserSystemControlOrDefault(ctx, userID)
+			isChainMode := scErr == nil && systemControl != nil && systemControl.IsEntryDecisionChain() && !systemControl.IsEntryDecisionLegacy()
+
+			// Always start Ginie Autopilot for SCANNING
+			// When chain mode: Ginie scans but doesn't place orders (blocked at entry time)
+			// When legacy mode: Ginie scans AND places orders
+			m.logger.Info("Per-user auto-start enabled, starting autopilot for scanning",
 				"user_id", userID,
-				"autopilot_enabled", tradingConfig.AutopilotEnabled)
+				"autopilot_enabled", tradingConfig.AutopilotEnabled,
+				"chain_mode", isChainMode)
 			autopilot.Start()
+
+			// When chain mode is active, also start ChainEntryRunner for order execution
+			if isChainMode && chainEntryRunner != nil {
+				m.logger.Info("Auto-starting ChainEntryRunner for chain-based entries",
+					"user_id", userID)
+				chainEntryRunner.Start()
+			}
 		}
 	}
 
@@ -389,7 +534,8 @@ func (m *UserAutopilotManager) GetInstance(userID string) *UserAutopilotInstance
 	return nil
 }
 
-// StartAutopilot starts the autopilot for a specific user
+// StartAutopilot starts the autopilot for a specific user.
+// When entry_decision_system = "chain", also starts ChainEntryRunner for order execution.
 func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string) error {
 	instance, err := m.GetOrCreateInstance(ctx, userID)
 	if err != nil {
@@ -400,28 +546,53 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 		return nil // Already running
 	}
 
-	m.logger.Info("Starting autopilot for user", "user_id", userID)
+	// Check if chain mode is active
+	var isChainMode bool
+	if m.repo != nil {
+		systemControl, scErr := m.repo.GetUserSystemControlOrDefault(ctx, userID)
+		if scErr == nil && systemControl != nil {
+			isChainMode = systemControl.IsEntryDecisionChain() && !systemControl.IsEntryDecisionLegacy()
+		}
+	}
+
+	// Always start Ginie for scanning
+	m.logger.Info("Starting autopilot for user",
+		"user_id", userID,
+		"chain_mode", isChainMode)
 	instance.Autopilot.Start()
 	instance.TouchLastActive()
+
+	// When chain mode is active, also start ChainEntryRunner for order execution
+	if isChainMode && instance.ChainEntryRunner != nil && !instance.ChainEntryRunner.IsRunning() {
+		m.logger.Info("Also starting ChainEntryRunner for chain-based entries",
+			"user_id", userID)
+		instance.ChainEntryRunner.Start()
+	}
 
 	return nil
 }
 
-// StopAutopilot stops the autopilot for a specific user
+// StopAutopilot stops the autopilot for a specific user.
+// Also stops ChainEntryRunner if running.
 func (m *UserAutopilotManager) StopAutopilot(userID string) error {
 	instance := m.GetInstance(userID)
 	if instance == nil {
 		return nil // Nothing to stop
 	}
 
-	if !instance.Autopilot.IsRunning() {
-		return nil // Already stopped
+	// Stop Ginie if running
+	if instance.Autopilot.IsRunning() {
+		m.logger.Info("Stopping autopilot for user", "user_id", userID)
+		instance.Autopilot.Stop()
 	}
 
-	m.logger.Info("Stopping autopilot for user", "user_id", userID)
-	instance.Autopilot.Stop()
-	instance.TouchLastActive()
+	// Also stop ChainEntryRunner if running
+	if instance.ChainEntryRunner != nil && instance.ChainEntryRunner.IsRunning() {
+		m.logger.Info("Also stopping ChainEntryRunner", "user_id", userID)
+		instance.ChainEntryRunner.Stop()
+	}
 
+	instance.TouchLastActive()
 	return nil
 }
 
@@ -551,10 +722,34 @@ func (m *UserAutopilotManager) Shutdown() {
 	close(m.cleanupStop)
 	m.cleanupWg.Wait()
 
-	// Stop all running autopilots
+	// Stop all running autopilots, chain entry runners, coin profilers, position controllers, and exit decision services
+	// Shutdown order: PositionController -> ExitDecision -> CoinProfiler -> ChainEntryRunner -> Autopilot (reverse of startup)
 	m.instances.Range(func(key, value any) bool {
 		userID := key.(string)
 		instance := value.(*UserAutopilotInstance)
+
+		// Story 10.4: Stop PositionController first (it consumes exit signals)
+		if instance.IsPositionControllerRunning() {
+			m.logger.Info("Stopping position controller for user during shutdown", "user_id", userID)
+			instance.PositionController.Stop()
+		}
+
+		// Epic 14: Stop ExitDecisionService (it depends on CoinProfiler and positions)
+		if instance.IsExitDecisionRunning() {
+			m.logger.Info("Stopping exit decision service for user during shutdown", "user_id", userID)
+			instance.ExitDecisionService.Stop()
+		}
+
+		// Epic 14: Stop CoinProfiler during shutdown
+		if instance.IsCoinProfilerRunning() {
+			m.logger.Info("Stopping coin profiler for user during shutdown", "user_id", userID)
+			instance.CoinProfiler.Stop()
+		}
+
+		if instance.IsChainEntryRunnerRunning() {
+			m.logger.Info("Stopping chain entry runner for user during shutdown", "user_id", userID)
+			instance.ChainEntryRunner.Stop()
+		}
 
 		if instance.IsRunning() {
 			m.logger.Info("Stopping autopilot for user during shutdown", "user_id", userID)
@@ -564,6 +759,96 @@ func (m *UserAutopilotManager) Shutdown() {
 	})
 
 	m.logger.Info("UserAutopilotManager shutdown complete")
+}
+
+// StartChainEntryRunner starts the chain entry runner for a specific user
+func (m *UserAutopilotManager) StartChainEntryRunner(ctx context.Context, userID string) error {
+	instance, err := m.GetOrCreateInstance(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if instance.ChainEntryRunner == nil {
+		return fmt.Errorf("chain entry runner not initialized for user %s", userID)
+	}
+
+	if instance.ChainEntryRunner.IsRunning() {
+		return nil // Already running
+	}
+
+	m.logger.Info("Starting chain entry runner for user", "user_id", userID)
+	instance.ChainEntryRunner.Start()
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// StopChainEntryRunner stops the chain entry runner for a specific user
+func (m *UserAutopilotManager) StopChainEntryRunner(userID string) error {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil // Nothing to stop
+	}
+
+	if instance.ChainEntryRunner == nil {
+		return nil // No chain entry runner
+	}
+
+	if !instance.ChainEntryRunner.IsRunning() {
+		return nil // Already stopped
+	}
+
+	m.logger.Info("Stopping chain entry runner for user", "user_id", userID)
+	instance.ChainEntryRunner.Stop()
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// GetChainEntryRunnerStatus returns the status of the chain entry runner for a user
+func (m *UserAutopilotManager) GetChainEntryRunnerStatus(userID string) *ChainEntryRunnerStatus {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return &ChainEntryRunnerStatus{
+			UserID:  userID,
+			Running: false,
+			Message: "No autopilot instance",
+		}
+	}
+
+	if instance.ChainEntryRunner == nil {
+		return &ChainEntryRunnerStatus{
+			UserID:  userID,
+			Running: false,
+			Message: "Chain entry runner not initialized",
+		}
+	}
+
+	stats := instance.ChainEntryRunner.GetStats()
+
+	return &ChainEntryRunnerStatus{
+		UserID:            userID,
+		Running:           instance.ChainEntryRunner.IsRunning(),
+		TotalScans:        stats.TotalScans,
+		TotalEntries:      stats.TotalEntries,
+		SuccessfulEntries: stats.SuccessfulEntries,
+		FailedEntries:     stats.FailedEntries,
+		LastScanTime:      stats.LastScanTime,
+		LastEntryTime:     stats.LastEntryTime,
+	}
+}
+
+// ChainEntryRunnerStatus provides status for a user's chain entry runner
+type ChainEntryRunnerStatus struct {
+	UserID            string    `json:"user_id"`
+	Running           bool      `json:"running"`
+	TotalScans        int       `json:"total_scans"`
+	TotalEntries      int       `json:"total_entries"`
+	SuccessfulEntries int       `json:"successful_entries"`
+	FailedEntries     int       `json:"failed_entries"`
+	LastScanTime      time.Time `json:"last_scan_time,omitempty"`
+	LastEntryTime     time.Time `json:"last_entry_time,omitempty"`
+	Message           string    `json:"message,omitempty"`
 }
 
 // UpdateUserDryRun updates the dry run mode for a specific user
@@ -592,9 +877,15 @@ func (m *UserAutopilotManager) RefreshUserClient(ctx context.Context, userID str
 	}
 
 	// Stop autopilot if running
-	wasRunning := instance.IsRunning()
-	if wasRunning {
+	wasAutopilotRunning := instance.IsRunning()
+	if wasAutopilotRunning {
 		instance.Autopilot.Stop()
+	}
+
+	// Stop chain entry runner if running
+	wasChainRunnerRunning := instance.IsChainEntryRunnerRunning()
+	if wasChainRunnerRunning {
+		instance.ChainEntryRunner.Stop()
 	}
 
 	// Get new client
@@ -607,11 +898,17 @@ func (m *UserAutopilotManager) RefreshUserClient(ctx context.Context, userID str
 	instance.mu.Lock()
 	instance.FuturesClient = newClient
 	instance.Autopilot.SetFuturesClient(newClient)
+	if instance.ChainEntryRunner != nil {
+		instance.ChainEntryRunner.SetFuturesClient(newClient)
+	}
 	instance.mu.Unlock()
 
 	// Restart if was running
-	if wasRunning {
+	if wasAutopilotRunning {
 		instance.Autopilot.Start()
+	}
+	if wasChainRunnerRunning && instance.ChainEntryRunner != nil {
+		instance.ChainEntryRunner.Start()
 	}
 
 	m.logger.Info("Refreshed client for user", "user_id", userID)
@@ -653,6 +950,7 @@ func (m *UserAutopilotManager) GetManagerStatus() *ManagerStatus {
 
 // AutoStartFromSettings checks the database for users with auto-start enabled and starts their autopilots
 // This should be called after server initialization to restore Ginie state from before restart
+// NOTE: Only auto-starts if entry_decision_system is "legacy" - chain mode cannot place trades via legacy autopilot
 func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error {
 	// Query database for users with auto_start = true
 	if m.repo == nil {
@@ -675,9 +973,25 @@ func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error 
 	// Start autopilot for each user with auto-start enabled
 	var startErrors []error
 	for _, userID := range users {
+		// Check system control settings to determine which systems to start
+		systemControl, err := m.repo.GetUserSystemControlOrDefault(ctx, userID)
+		if err != nil {
+			m.logger.Warn("Failed to get system control settings for auto-start check",
+				"user_id", userID,
+				"error", err)
+			// Continue with auto-start on error (fail-open for backwards compatibility)
+		}
+
+		isChainMode := systemControl != nil && systemControl.IsEntryDecisionChain() && !systemControl.IsEntryDecisionLegacy()
+
+		// Always start Ginie Autopilot for SCANNING purposes
+		// When entry_decision_system = "chain", Ginie scans but doesn't place orders (blocked at entry time)
+		// When entry_decision_system = "legacy" or "both", Ginie scans AND places orders
 		m.logger.Info("Auto-starting Ginie from database settings",
 			"user_id", userID,
-			"auto_start", true)
+			"auto_start", true,
+			"entry_decision_system", systemControl.EntryDecisionSystem,
+			"chain_mode", isChainMode)
 
 		if err := m.StartAutopilot(ctx, userID); err != nil {
 			m.logger.Error("Failed to auto-start Ginie for user",
@@ -687,8 +1001,20 @@ func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error 
 			continue
 		}
 
-		m.logger.Info("Ginie auto-started successfully",
+		m.logger.Info("Ginie auto-started successfully (scanning enabled)",
 			"user_id", userID)
+
+		// When chain mode is active, also start ChainEntryRunner for order execution
+		if isChainMode {
+			if err := m.StartChainEntryRunner(ctx, userID); err != nil {
+				m.logger.Warn("Failed to start ChainEntryRunner (scanning will continue via Ginie)",
+					"user_id", userID,
+					"error", err)
+			} else {
+				m.logger.Info("ChainEntryRunner auto-started for chain-based entries",
+					"user_id", userID)
+			}
+		}
 	}
 
 	if len(startErrors) > 0 {
@@ -696,4 +1022,269 @@ func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error 
 	}
 
 	return nil
+}
+
+// ==================== Epic 14: CoinProfiler Management ====================
+
+// StartCoinProfiler starts the coin profiler for a specific user
+func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID string) error {
+	instance, err := m.GetOrCreateInstance(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if instance.CoinProfiler == nil {
+		return fmt.Errorf("coin profiler not initialized for user %s", userID)
+	}
+
+	if instance.CoinProfiler.IsRunning() {
+		return nil // Already running
+	}
+
+	m.logger.Info("Starting coin profiler for user", "user_id", userID)
+	if err := instance.CoinProfiler.Start(); err != nil {
+		return fmt.Errorf("failed to start coin profiler: %w", err)
+	}
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// StopCoinProfiler stops the coin profiler for a specific user
+func (m *UserAutopilotManager) StopCoinProfiler(userID string) error {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil // Nothing to stop
+	}
+
+	if instance.CoinProfiler == nil {
+		return nil // No coin profiler
+	}
+
+	if !instance.CoinProfiler.IsRunning() {
+		return nil // Already stopped
+	}
+
+	m.logger.Info("Stopping coin profiler for user", "user_id", userID)
+	if err := instance.CoinProfiler.Stop(); err != nil {
+		return fmt.Errorf("failed to stop coin profiler: %w", err)
+	}
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// GetCoinProfilerStatus returns the status of the coin profiler for a user
+func (m *UserAutopilotManager) GetCoinProfilerStatus(userID string) *coinprofiler.CoinProfilerStatus {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return &coinprofiler.CoinProfilerStatus{
+			Running: false,
+		}
+	}
+
+	if instance.CoinProfiler == nil {
+		return &coinprofiler.CoinProfilerStatus{
+			Running:   false,
+			LastError: "Coin profiler not initialized",
+		}
+	}
+
+	return instance.CoinProfiler.GetStatus()
+}
+
+// GetCoinProfiler returns the coin profiler instance for a user (for advanced operations)
+func (m *UserAutopilotManager) GetCoinProfiler(userID string) *coinprofiler.CoinProfiler {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil
+	}
+	return instance.CoinProfiler
+}
+
+// ==================== Epic 14: ExitDecisionService Management ====================
+
+// StartExitDecisionService starts the exit decision service for a specific user.
+// This service monitors positions and generates exit signals even when Trading is OFF.
+func (m *UserAutopilotManager) StartExitDecisionService(ctx context.Context, userID string) error {
+	instance, err := m.GetOrCreateInstance(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if instance.ExitDecisionService == nil {
+		return fmt.Errorf("exit decision service not initialized for user %s", userID)
+	}
+
+	if instance.ExitDecisionService.IsRunning() {
+		return nil // Already running
+	}
+
+	m.logger.Info("Starting exit decision service for user", "user_id", userID)
+	if err := instance.ExitDecisionService.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start exit decision service: %w", err)
+	}
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// StopExitDecisionService stops the exit decision service for a specific user.
+func (m *UserAutopilotManager) StopExitDecisionService(userID string) error {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil // Nothing to stop
+	}
+
+	if instance.ExitDecisionService == nil {
+		return nil // No exit decision service
+	}
+
+	if !instance.ExitDecisionService.IsRunning() {
+		return nil // Already stopped
+	}
+
+	m.logger.Info("Stopping exit decision service for user", "user_id", userID)
+	if err := instance.ExitDecisionService.Stop(); err != nil {
+		return fmt.Errorf("failed to stop exit decision service: %w", err)
+	}
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// GetExitDecisionStatus returns the status of the exit decision service for a user.
+func (m *UserAutopilotManager) GetExitDecisionStatus(userID string) *exitdecision.ServiceStatus {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return &exitdecision.ServiceStatus{
+			Running: false,
+		}
+	}
+
+	if instance.ExitDecisionService == nil {
+		return &exitdecision.ServiceStatus{
+			Running:   false,
+			LastError: "Exit decision service not initialized",
+		}
+	}
+
+	return instance.ExitDecisionService.GetStatus()
+}
+
+// GetExitDecisionService returns the exit decision service instance for a user.
+func (m *UserAutopilotManager) GetExitDecisionService(userID string) *exitdecision.Service {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil
+	}
+	return instance.ExitDecisionService
+}
+
+// GetExitSignals returns pending exit signals for a user.
+func (m *UserAutopilotManager) GetExitSignals(ctx context.Context, userID string) ([]exitdecision.ExitSignal, error) {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return []exitdecision.ExitSignal{}, nil
+	}
+
+	if instance.ExitDecisionService == nil {
+		return []exitdecision.ExitSignal{}, nil
+	}
+
+	return instance.ExitDecisionService.GetExitSignals(ctx, userID)
+}
+
+// ==================== Story 10.4: PositionController Management ====================
+
+// StartPositionController starts the position controller for a specific user.
+// The PositionController executes exit signals from ExitDecisionService on Binance.
+// It should only be started when entry_decision_system = "chain".
+func (m *UserAutopilotManager) StartPositionController(ctx context.Context, userID string) error {
+	instance, err := m.GetOrCreateInstance(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	if instance.PositionController == nil {
+		return fmt.Errorf("position controller not initialized for user %s", userID)
+	}
+
+	if instance.PositionController.IsRunning() {
+		return nil // Already running
+	}
+
+	m.logger.Info("Starting position controller for user", "user_id", userID)
+	if err := instance.PositionController.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start position controller: %w", err)
+	}
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// StopPositionController stops the position controller for a specific user.
+func (m *UserAutopilotManager) StopPositionController(userID string) error {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil // Nothing to stop
+	}
+
+	if instance.PositionController == nil {
+		return nil // No position controller
+	}
+
+	if !instance.PositionController.IsRunning() {
+		return nil // Already stopped
+	}
+
+	m.logger.Info("Stopping position controller for user", "user_id", userID)
+	if err := instance.PositionController.Stop(); err != nil {
+		return fmt.Errorf("failed to stop position controller: %w", err)
+	}
+	instance.TouchLastActive()
+
+	return nil
+}
+
+// GetPositionControllerStatus returns the status of the position controller for a user.
+func (m *UserAutopilotManager) GetPositionControllerStatus(userID string) *PositionControllerStatus {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return &PositionControllerStatus{
+			Running: false,
+		}
+	}
+
+	if instance.PositionController == nil {
+		return &PositionControllerStatus{
+			Running:   false,
+			LastError: "Position controller not initialized",
+		}
+	}
+
+	return instance.PositionController.GetStatus()
+}
+
+// GetPositionController returns the position controller instance for a user.
+func (m *UserAutopilotManager) GetPositionController(userID string) *PositionController {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil
+	}
+	return instance.PositionController
+}
+
+// TriggerPositionControllerHeal triggers an immediate protection heal check for a user.
+func (m *UserAutopilotManager) TriggerPositionControllerHeal(userID string) error {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return fmt.Errorf("no autopilot instance for user %s", userID)
+	}
+
+	if instance.PositionController == nil {
+		return fmt.Errorf("position controller not initialized for user %s", userID)
+	}
+
+	return instance.PositionController.HealNow()
 }

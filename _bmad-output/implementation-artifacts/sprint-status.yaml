@@ -230,11 +230,12 @@ development_status:
   #   - Position Analytics Dashboard with charts, metrics, export
   #   - Exit Decision Monitoring UI (Story 10.3 - NEW)
   # ============================================================================
-  epic-10: done  # ALL 3 STORIES COMPLETE 2026-01-20
+  epic-10: done  # ALL 4 STORIES COMPLETE 2026-01-25
   10-1-position-management-efficiency-exit-system: done  # CODE REVIEW PASSED + INTEGRATION COMPLETE 2026-01-19
   10-2-position-analytics-dashboard: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-20
   10-3-exit-decision-monitoring-ui: done  # CODE REVIEW PASSED 2026-01-20
-  epic-10-retrospective: optional
+  10-4-position-controller: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-25
+  epic-10-retrospective: done  # Retrospective completed 2026-01-25
 
   # ============================================================================
   # EPIC 11: Position Decision Engine
@@ -366,3 +367,38 @@ development_status:
   epic-13: in-progress
   13-1-pnl-summary-caching-historical-navigation: done  # CODE REVIEW PASSED + QA CONCERNS 2026-01-18
   epic-13-retrospective: optional
+
+  # ============================================================================
+  # EPIC 14: Chain Trading System - Coin Profiler & Entry Decision Enhancement
+  # Created: 2026-01-25
+  # Total Stories: 18
+  # Description: Build complete Chain Trading System that operates independently
+  #   of legacy Ginie Autopilot. Coin Profiler for WebSocket data, Entry Decision
+  #   enhancement for strategy-first view, Trading ON/OFF control.
+  # Dependencies: Epic 11 (Strategy Hierarchy), Epic 10 (Position Management),
+  #               Epic 6 (Redis), Epic 7 (Order Chains)
+  # ============================================================================
+  epic-14: done
+  # Part A: Coin Profiler Core
+  14-1-coin-profiler-core: done  # Core Service Structure - QA PASSED 2026-01-25
+  14-2-strategy-requirements: done  # Strategy Requirement Aggregation - CODE REVIEW FIXED 2026-01-25
+  14-3-position-requirements: done  # Position Requirement Aggregation - CODE REVIEW FIXED 2026-01-25
+  14-4-websocket-collection: done  # WebSocket Data Collection - IMPLEMENTED 2026-01-25
+  14-5-redis-storage: done  # Redis Storage - IMPLEMENTED 2026-01-25
+  14-6-coin-profiler-api: done  # API Endpoints - IMPLEMENTED 2026-01-25
+  14-7-coin-profiler-ui: done  # Frontend UI Component - IMPLEMENTED 2026-01-25
+  # Part B: Entry Decision System Enhancement
+  14-8-strategy-first-types: done  # Strategy-First Data Structure - CODE REVIEW FIXED 2026-01-25
+  14-9-pattern-matcher: done  # Pattern Matcher (Volume Imbalance) - IMPLEMENTED 2026-01-25
+  14-10-score-calculator: done  # Score Calculator (Trend Following) - IMPLEMENTED 2026-01-25
+  14-11-strategy-reader: done  # Strategy Reader & Matcher - IMPLEMENTED 2026-01-25
+  14-12-entry-decision-api: done  # API Enhancement - IMPLEMENTED 2026-01-25
+  14-13-entry-decision-ui: done  # Frontend UI Enhancement - IMPLEMENTED 2026-01-25
+  # Part C: Trading Control & Integration
+  14-14-trading-controller: done  # Trading Controller - ON/OFF - IMPLEMENTED 2026-01-25
+  14-15-trading-ui: done  # Trading Controller - Frontend - IMPLEMENTED 2026-01-25
+  14-16-exit-decision: done  # Exit Decision Integration - IMPLEMENTED 2026-01-25
+  # Part D: Wiring & Main Integration
+  14-17-main-integration: done  # Main.go Integration - IMPLEMENTED 2026-01-25
+  14-18-db-migrations: done  # Database Migrations - VERIFIED 2026-01-25
+  epic-14-retrospective: optional

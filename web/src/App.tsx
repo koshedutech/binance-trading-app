@@ -1,10 +1,9 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from './store';
 import { useFuturesStore } from './store/futuresStore';
 import { apiService } from './services/api';
 import { wsService } from './services/websocket';
-import { futuresApi } from './services/futuresApi';
 import { fallbackManager } from './services/fallbackPollingManager';
 import { setSyncingState } from './hooks/useWebSocketStatus';
 import { AuthProvider, useAuth, ProtectedRoute } from './contexts/AuthContext';
@@ -47,41 +46,16 @@ function AppContent() {
     resetState,
   } = useStore();
 
-  // Track if we've already auto-started Ginie for this session
-  const ginieAutoStarted = useRef(false);
-
   useEffect(() => {
     // Only initialize data and websocket when authenticated
     if (!isAuthenticated || isLoading) {
       return;
     }
 
-    // Auto-start Ginie autopilot on login (runs once per session)
-    const autoStartGinie = async () => {
-      if (ginieAutoStarted.current) {
-        return; // Already started this session
-      }
-
-      try {
-        // Check current Ginie status
-        const status = await futuresApi.getGinieAutopilotStatus();
-
-        if (!status.stats?.running) {
-          // Ginie not running - auto-start it
-          console.log('[AUTO-START] Starting Ginie autopilot...');
-          await futuresApi.toggleGinie(true);
-          console.log('[AUTO-START] Ginie autopilot started successfully');
-        } else {
-          console.log('[AUTO-START] Ginie already running, skipping auto-start');
-        }
-
-        ginieAutoStarted.current = true;
-      } catch (error) {
-        console.error('[AUTO-START] Failed to auto-start Ginie:', error);
-        // Don't retry - let user manually start if needed
-        ginieAutoStarted.current = true;
-      }
-    };
+    // NOTE: Ginie auto-start is now handled by the BACKEND based on:
+    // 1. User's auto_start setting in database
+    // 2. System control entry_decision_system setting
+    // Frontend should NOT auto-start Ginie - user must manually toggle or backend handles it
 
     // Initialize data fetching
     const initializeData = async () => {
@@ -105,9 +79,6 @@ function AppContent() {
         setScreenerResults(screener);
         setMetrics(metrics);
         setConnected(true);
-
-        // Auto-start Ginie after successful data initialization
-        autoStartGinie();
       } catch (error) {
         console.error('Failed to initialize data:', error);
         setConnected(false);
@@ -261,7 +232,6 @@ function AppContent() {
       wsService.disconnect();
       resetState();  // Reset main store
       useFuturesStore.getState().resetState();  // Reset futures store - CRITICAL for multi-user isolation
-      ginieAutoStarted.current = false;  // Reset auto-start flag for next login
     };
   }, [isAuthenticated, isLoading]);
 

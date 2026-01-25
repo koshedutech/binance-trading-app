@@ -1,6 +1,7 @@
 // Story 7.15: Order Chain Tree Structure UI
 // Updated to use getOrderChainsWithState API for position state and modification counts
 // Enhanced: Added date range filtering with historical orders API
+// Story 14.15: Added Trading Toggle for ON/OFF control
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Layers,
@@ -26,7 +27,9 @@ import ChainCard from './ChainCard';
 import ChainFilters from './ChainFilters';
 import EntryDecisionEngineCard from './EntryDecisionEngineCard';
 import { VolumeImbalanceCard } from '../EntryDecisionEngine';
+import { StrategyFirstView } from '../EntryDecision';
 import { useVolumeImbalancePatterns } from '../../hooks/useStrategyHierarchy';
+import { TradingToggle } from '../TradingControl';
 import {
   OrderChain,
   ChainOrder,
@@ -590,12 +593,13 @@ export default function TradeLifecycleTab({
       {/* ==================== TRADE CYCLE MAIN CONTAINER ==================== */}
       <div className="bg-gray-800 rounded-lg border border-gray-700">
         {/* Trade Cycle Header - Always visible */}
-        <button
-          type="button"
-          onClick={() => setTradeCycleExpanded(!tradeCycleExpanded)}
-          className="w-full flex items-center justify-between px-4 py-3 hover:bg-gray-700/30 transition-colors rounded-t-lg"
-        >
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between px-4 py-3 rounded-t-lg">
+          {/* Left side: Expandable title button */}
+          <button
+            type="button"
+            onClick={() => setTradeCycleExpanded(!tradeCycleExpanded)}
+            className="flex items-center gap-3 hover:bg-gray-700/30 transition-colors rounded-lg px-2 py-1 -ml-2"
+          >
             {tradeCycleExpanded ? (
               <ChevronDown className="w-5 h-5 text-gray-400" />
             ) : (
@@ -609,13 +613,21 @@ export default function TradeLifecycleTab({
             <span className="text-xs text-gray-400 bg-gray-700 px-2 py-0.5 rounded">
               Entry → Orders → Positions
             </span>
+          </button>
+
+          {/* Right side: Trading Toggle + Stats */}
+          <div className="flex items-center gap-4">
+            {/* Story 14.15: Trading ON/OFF Toggle - Prominent control */}
+            <TradingToggle compact />
+
+            {/* Stats summary */}
+            <div className="flex items-center gap-3 text-xs">
+              <span className="text-purple-400">{stats.activeChains} active orders</span>
+              <span className="text-gray-500">|</span>
+              <span className="text-green-400">{positionStats.total} positions</span>
+            </div>
           </div>
-          <div className="flex items-center gap-3 text-xs">
-            <span className="text-purple-400">{stats.activeChains} active orders</span>
-            <span className="text-gray-500">|</span>
-            <span className="text-green-400">{positionStats.total} positions</span>
-          </div>
-        </button>
+        </div>
 
         {/* Trade Cycle Content - Three expandable sections */}
         {tradeCycleExpanded && (
@@ -623,6 +635,15 @@ export default function TradeLifecycleTab({
 
             {/* ==================== SECTION 1: ENTRY DECISION ENGINE ==================== */}
             <EntryDecisionEngineCard defaultExpanded={true} />
+
+            {/* ==================== SECTION 1.25: STRATEGY-FIRST VIEW (Story 14.13) ==================== */}
+            <StrategyFirstView
+              defaultExpanded={false}
+              onCoinSelect={(symbol, strategy) => {
+                console.log('Selected coin:', symbol, 'from strategy:', strategy.strategy);
+                // TODO: Navigate to coin details or trigger entry flow
+              }}
+            />
 
             {/* ==================== SECTION 1.5: VOLUME IMBALANCE PATTERNS ==================== */}
             {volumeImbalancePatterns.length > 0 && (

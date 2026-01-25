@@ -239,18 +239,18 @@ export interface StrategyGroupSettings {
  * Generic sub-strategy settings (base interface)
  */
 export interface SubStrategySettings {
-  /** Sub-strategy identifier */
+  /** Database record identifier (UUID) */
   id: string;
-  /** Parent group identifier */
-  group_id: string;
+  /** Sub-strategy identifier (e.g., 'ravindra_volume_imbalance') - used for API calls */
+  sub_strategy: string;
+  /** Trading mode (e.g., 'scalp', 'swing') */
+  mode: string;
+  /** Strategy group (e.g., 'breakout') */
+  strategy_group: string;
   /** Whether enabled */
   enabled: boolean;
-  /** Priority */
-  priority: number;
   /** Strategy-specific settings (type varies) */
   settings: VolumeImbalanceSettings | Record<string, unknown>;
-  /** Last updated timestamp */
-  updated_at: number;
 }
 
 // ==================== API Response Types ====================
