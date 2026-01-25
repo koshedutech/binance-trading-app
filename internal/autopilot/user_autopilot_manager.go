@@ -496,27 +496,20 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	m.logger.Info("Created new autopilot instance for user", "user_id", userID)
 
 	// Check per-user auto-start setting from database
+	// AC10.4.5: Use StartAutopilot to ensure consistent chain/legacy mode handling
 	if m.repo != nil {
 		tradingConfig, err := m.repo.GetUserTradingConfig(ctx, userID)
 		if err == nil && tradingConfig != nil && tradingConfig.AutopilotEnabled {
-			// Check system control to decide which systems to start
-			systemControl, scErr := m.repo.GetUserSystemControlOrDefault(ctx, userID)
-			isChainMode := scErr == nil && systemControl != nil && systemControl.IsEntryDecisionChain() && !systemControl.IsEntryDecisionLegacy()
-
-			// Always start Ginie Autopilot for SCANNING
-			// When chain mode: Ginie scans but doesn't place orders (blocked at entry time)
-			// When legacy mode: Ginie scans AND places orders
-			m.logger.Info("Per-user auto-start enabled, starting autopilot for scanning",
+			m.logger.Info("Per-user auto-start enabled, delegating to StartAutopilot",
 				"user_id", userID,
-				"autopilot_enabled", tradingConfig.AutopilotEnabled,
-				"chain_mode", isChainMode)
-			autopilot.Start()
+				"autopilot_enabled", tradingConfig.AutopilotEnabled)
 
-			// When chain mode is active, also start ChainEntryRunner for order execution
-			if isChainMode && chainEntryRunner != nil {
-				m.logger.Info("Auto-starting ChainEntryRunner for chain-based entries",
-					"user_id", userID)
-				chainEntryRunner.Start()
+			// Note: StartAutopilot checks if already running, so this is safe
+			// It also handles chain mode properly (AC10.4.5)
+			if err := m.StartAutopilot(ctx, userID); err != nil {
+				m.logger.Error("Failed to auto-start autopilot",
+					"user_id", userID,
+					"error", err)
 			}
 		}
 	}
@@ -535,7 +528,12 @@ func (m *UserAutopilotManager) GetInstance(userID string) *UserAutopilotInstance
 }
 
 // StartAutopilot starts the autopilot for a specific user.
-// When entry_decision_system = "chain", also starts ChainEntryRunner for order execution.
+// AC10.4.5: When entry_decision_system = "chain":
+//   - Ginie scans but position monitoring is DISABLED (SkipPositionMonitoring=true)
+//   - Position Controller handles all position management (SL/TP updates)
+//   - Chain system components are started: CoinProfiler, ExitDecisionService, PositionController, ChainEntryRunner
+// When entry_decision_system = "legacy":
+//   - Ginie runs normally with full position monitoring
 func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string) error {
 	instance, err := m.GetOrCreateInstance(ctx, userID)
 	if err != nil {
@@ -555,41 +553,122 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 		}
 	}
 
-	// Always start Ginie for scanning
-	m.logger.Info("Starting autopilot for user",
+	// AC10.4.5: Configure Ginie based on entry decision system
+	if isChainMode {
+		// Chain mode: Ginie scans only, Position Controller manages positions
+		instance.Autopilot.SetSkipPositionMonitoring(true)
+		m.logger.Info("╔════════════════════════════════════════════════════════════════╗",
+			"user_id", userID)
+		m.logger.Info("║  CHAIN MODE ACTIVE - Starting Chain Trading System             ║",
+			"user_id", userID)
+		m.logger.Info("║  Ginie: Scanning ENABLED, Position Monitoring DISABLED         ║",
+			"user_id", userID)
+		m.logger.Info("║  Position Controller: Will handle all SL/TP management         ║",
+			"user_id", userID)
+		m.logger.Info("╚════════════════════════════════════════════════════════════════╝",
+			"user_id", userID)
+	} else {
+		// Legacy mode: Ginie handles everything
+		instance.Autopilot.SetSkipPositionMonitoring(false)
+		m.logger.Info("Starting autopilot in LEGACY mode (full Ginie position monitoring)",
+			"user_id", userID)
+	}
+
+	// Start Ginie (scanning always enabled, position monitoring conditional)
+	m.logger.Info("Starting Ginie autopilot",
 		"user_id", userID,
-		"chain_mode", isChainMode)
+		"chain_mode", isChainMode,
+		"skip_position_monitoring", isChainMode)
 	instance.Autopilot.Start()
 	instance.TouchLastActive()
 
-	// When chain mode is active, also start ChainEntryRunner for order execution
-	if isChainMode && instance.ChainEntryRunner != nil && !instance.ChainEntryRunner.IsRunning() {
-		m.logger.Info("Also starting ChainEntryRunner for chain-based entries",
-			"user_id", userID)
-		instance.ChainEntryRunner.Start()
+	// AC10.4.5: When chain mode is active, start all Chain Trading System components
+	if isChainMode {
+		// 1. Start CoinProfiler (real-time WebSocket data collection)
+		if instance.CoinProfiler != nil && !instance.CoinProfiler.IsRunning() {
+			m.logger.Info("Starting CoinProfiler for chain system", "user_id", userID)
+			if err := instance.CoinProfiler.Start(); err != nil {
+				m.logger.Error("Failed to start CoinProfiler", "user_id", userID, "error", err)
+			}
+		}
+
+		// 2. Start ExitDecisionService (monitors positions for exit signals)
+		if instance.ExitDecisionService != nil && !instance.ExitDecisionService.IsRunning() {
+			m.logger.Info("Starting ExitDecisionService for chain system", "user_id", userID)
+			if err := instance.ExitDecisionService.Start(ctx); err != nil {
+				m.logger.Error("Failed to start ExitDecisionService", "user_id", userID, "error", err)
+			}
+		}
+
+		// 3. Start PositionController (executes exit signals on Binance)
+		if instance.PositionController != nil && !instance.PositionController.IsRunning() {
+			m.logger.Info("Starting PositionController for chain system", "user_id", userID)
+			if err := instance.PositionController.Start(ctx); err != nil {
+				m.logger.Error("Failed to start PositionController", "user_id", userID, "error", err)
+			}
+		}
+
+		// 4. Start ChainEntryRunner (automatic chain-based entries)
+		if instance.ChainEntryRunner != nil && !instance.ChainEntryRunner.IsRunning() {
+			m.logger.Info("Starting ChainEntryRunner for chain system", "user_id", userID)
+			instance.ChainEntryRunner.Start()
+		}
+
+		m.logger.Info("Chain Trading System fully started",
+			"user_id", userID,
+			"coin_profiler", instance.IsCoinProfilerRunning(),
+			"exit_decision", instance.IsExitDecisionRunning(),
+			"position_controller", instance.IsPositionControllerRunning(),
+			"chain_entry_runner", instance.IsChainEntryRunnerRunning())
 	}
 
 	return nil
 }
 
 // StopAutopilot stops the autopilot for a specific user.
-// Also stops ChainEntryRunner if running.
+// AC10.4.5: Also stops all Chain Trading System components if running.
+// Shutdown order: PositionController -> ExitDecision -> CoinProfiler -> ChainEntryRunner -> Ginie
 func (m *UserAutopilotManager) StopAutopilot(userID string) error {
 	instance := m.GetInstance(userID)
 	if instance == nil {
 		return nil // Nothing to stop
 	}
 
-	// Stop Ginie if running
-	if instance.Autopilot.IsRunning() {
-		m.logger.Info("Stopping autopilot for user", "user_id", userID)
-		instance.Autopilot.Stop()
+	// AC10.4.5: Stop Chain Trading System components in reverse order of dependencies
+	// 1. Stop PositionController first (it consumes exit signals)
+	if instance.PositionController != nil && instance.PositionController.IsRunning() {
+		m.logger.Info("Stopping PositionController", "user_id", userID)
+		if err := instance.PositionController.Stop(); err != nil {
+			m.logger.Error("Failed to stop PositionController", "user_id", userID, "error", err)
+		}
 	}
 
-	// Also stop ChainEntryRunner if running
+	// 2. Stop ExitDecisionService (produces exit signals)
+	if instance.ExitDecisionService != nil && instance.ExitDecisionService.IsRunning() {
+		m.logger.Info("Stopping ExitDecisionService", "user_id", userID)
+		if err := instance.ExitDecisionService.Stop(); err != nil {
+			m.logger.Error("Failed to stop ExitDecisionService", "user_id", userID, "error", err)
+		}
+	}
+
+	// 3. Stop CoinProfiler (provides price data)
+	if instance.CoinProfiler != nil && instance.CoinProfiler.IsRunning() {
+		m.logger.Info("Stopping CoinProfiler", "user_id", userID)
+		if err := instance.CoinProfiler.Stop(); err != nil {
+			m.logger.Error("Failed to stop CoinProfiler", "user_id", userID, "error", err)
+		}
+	}
+
+	// 4. Stop ChainEntryRunner
 	if instance.ChainEntryRunner != nil && instance.ChainEntryRunner.IsRunning() {
-		m.logger.Info("Also stopping ChainEntryRunner", "user_id", userID)
+		m.logger.Info("Stopping ChainEntryRunner", "user_id", userID)
 		instance.ChainEntryRunner.Stop()
+	}
+
+	// 5. Stop Ginie if running
+	if instance.Autopilot.IsRunning() {
+		m.logger.Info("Stopping Ginie autopilot", "user_id", userID)
+		instance.Autopilot.Stop()
 	}
 
 	instance.TouchLastActive()
@@ -950,7 +1029,9 @@ func (m *UserAutopilotManager) GetManagerStatus() *ManagerStatus {
 
 // AutoStartFromSettings checks the database for users with auto-start enabled and starts their autopilots
 // This should be called after server initialization to restore Ginie state from before restart
-// NOTE: Only auto-starts if entry_decision_system is "legacy" - chain mode cannot place trades via legacy autopilot
+// AC10.4.5: StartAutopilot handles chain/legacy mode properly:
+//   - Chain mode: Ginie scans only + all chain components (CoinProfiler, ExitDecision, PositionController, ChainEntryRunner)
+//   - Legacy mode: Ginie handles everything (scanning + position management)
 func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error {
 	// Query database for users with auto_start = true
 	if m.repo == nil {
@@ -971,54 +1052,46 @@ func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error 
 	}
 
 	// Start autopilot for each user with auto-start enabled
+	// AC10.4.5: StartAutopilot handles chain/legacy mode automatically
 	var startErrors []error
 	for _, userID := range users {
-		// Check system control settings to determine which systems to start
+		// Log the system control settings for debugging
 		systemControl, err := m.repo.GetUserSystemControlOrDefault(ctx, userID)
 		if err != nil {
 			m.logger.Warn("Failed to get system control settings for auto-start check",
 				"user_id", userID,
 				"error", err)
-			// Continue with auto-start on error (fail-open for backwards compatibility)
 		}
 
-		isChainMode := systemControl != nil && systemControl.IsEntryDecisionChain() && !systemControl.IsEntryDecisionLegacy()
+		entrySystem := "unknown"
+		if systemControl != nil {
+			entrySystem = systemControl.EntryDecisionSystem
+		}
 
-		// Always start Ginie Autopilot for SCANNING purposes
-		// When entry_decision_system = "chain", Ginie scans but doesn't place orders (blocked at entry time)
-		// When entry_decision_system = "legacy" or "both", Ginie scans AND places orders
-		m.logger.Info("Auto-starting Ginie from database settings",
+		m.logger.Info("Auto-starting from database settings",
 			"user_id", userID,
 			"auto_start", true,
-			"entry_decision_system", systemControl.EntryDecisionSystem,
-			"chain_mode", isChainMode)
+			"entry_decision_system", entrySystem)
 
+		// AC10.4.5: StartAutopilot handles everything:
+		// - Sets SkipPositionMonitoring based on chain/legacy mode
+		// - Starts Ginie (always for scanning)
+		// - Starts chain components if chain mode (CoinProfiler, ExitDecision, PositionController, ChainEntryRunner)
 		if err := m.StartAutopilot(ctx, userID); err != nil {
-			m.logger.Error("Failed to auto-start Ginie for user",
+			m.logger.Error("Failed to auto-start for user",
 				"user_id", userID,
 				"error", err)
 			startErrors = append(startErrors, fmt.Errorf("user %s: %w", userID, err))
 			continue
 		}
 
-		m.logger.Info("Ginie auto-started successfully (scanning enabled)",
-			"user_id", userID)
-
-		// When chain mode is active, also start ChainEntryRunner for order execution
-		if isChainMode {
-			if err := m.StartChainEntryRunner(ctx, userID); err != nil {
-				m.logger.Warn("Failed to start ChainEntryRunner (scanning will continue via Ginie)",
-					"user_id", userID,
-					"error", err)
-			} else {
-				m.logger.Info("ChainEntryRunner auto-started for chain-based entries",
-					"user_id", userID)
-			}
-		}
+		m.logger.Info("Auto-start completed successfully",
+			"user_id", userID,
+			"entry_decision_system", entrySystem)
 	}
 
 	if len(startErrors) > 0 {
-		return fmt.Errorf("failed to auto-start Ginie for %d user(s): %v", len(startErrors), startErrors[0])
+		return fmt.Errorf("failed to auto-start for %d user(s): %v", len(startErrors), startErrors[0])
 	}
 
 	return nil

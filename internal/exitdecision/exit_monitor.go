@@ -16,7 +16,8 @@ import (
 
 // ExitMonitor monitors positions for exit conditions.
 type ExitMonitor struct {
-	config *Config
+	config     *Config
+	safeguards *Safeguards
 }
 
 // NewExitMonitor creates a new exit monitor with the given configuration.
@@ -24,7 +25,23 @@ func NewExitMonitor(config *Config) *ExitMonitor {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	return &ExitMonitor{config: config}
+
+	var safeguards *Safeguards
+	if config.Safeguards != nil {
+		safeguards = NewSafeguards(config.Safeguards, config.DebugMode)
+	} else {
+		safeguards = NewSafeguards(DefaultSafeguardsConfig(), config.DebugMode)
+	}
+
+	return &ExitMonitor{
+		config:     config,
+		safeguards: safeguards,
+	}
+}
+
+// GetSafeguards returns the safeguards instance for direct access.
+func (em *ExitMonitor) GetSafeguards() *Safeguards {
+	return em.safeguards
 }
 
 // CheckPosition evaluates a position for exit conditions.
@@ -332,6 +349,7 @@ func (em *ExitMonitor) checkTrailingStop(pos Position, currentPrice float64, use
 // ============================================================================
 
 // checkEfficiencyExit checks if efficiency has dropped below threshold.
+// This method now includes safeguard checks (Story 10.1 Phase 2).
 func (em *ExitMonitor) checkEfficiencyExit(pos Position, currentPrice float64, userID string) *ExitSignal {
 	if !pos.IsEfficiencyActive() {
 		return nil
@@ -340,9 +358,46 @@ func (em *ExitMonitor) checkEfficiencyExit(pos Position, currentPrice float64, u
 	efficiency := pos.GetEfficiency()
 	threshold := em.config.DefaultEfficiencyThreshold
 
+	// Determine if efficiency is below threshold
+	isBelowThreshold := efficiency < threshold && efficiency > 0
+
+	// Apply safeguards if efficiency is below threshold
+	if isBelowThreshold && em.safeguards != nil {
+		safeguardResult := em.safeguards.CheckEfficiencyExitSafeguards(pos, currentPrice, isBelowThreshold)
+
+		if !safeguardResult.Allowed {
+			// Exit blocked by safeguards - return warning signal instead of immediate exit
+			side := pos.GetSide()
+			entryPrice := pos.GetEntryPrice()
+			pnlPct := em.calculatePnLPercent(entryPrice, currentPrice, side)
+
+			// Build reason with safeguard info
+			blockedBy := ""
+			if len(safeguardResult.BlockedBy) > 0 {
+				blockedBy = fmt.Sprintf(" [Blocked by: %v]", safeguardResult.BlockedBy)
+			}
+
+			return &ExitSignal{
+				Symbol:               pos.GetSymbol(),
+				Mode:                 pos.GetMode(),
+				Side:                 side,
+				ExitType:             ExitTypeEfficiency,
+				TriggerPrice:         0,
+				CurrentPrice:         currentPrice,
+				EntryPrice:           entryPrice,
+				Urgency:              UrgencyMonitor, // Downgraded from Immediate due to safeguards
+				UnrealizedPnLPercent: pnlPct,
+				DistanceToExitPct:    0,
+				Reason:               fmt.Sprintf("Efficiency at %.1f%% (threshold: %.1f%%) - exit pending safeguard checks%s", efficiency*100, threshold*100, blockedBy),
+				Timestamp:            time.Now(),
+				UserID:               userID,
+			}
+		}
+	}
+
 	// Efficiency is currentProfit / peakProfit
 	// When efficiency drops below threshold, we should exit to lock in remaining profit
-	if efficiency < threshold && efficiency > 0 {
+	if isBelowThreshold {
 		side := pos.GetSide()
 		entryPrice := pos.GetEntryPrice()
 		pnlPct := em.calculatePnLPercent(entryPrice, currentPrice, side)
@@ -389,6 +444,23 @@ func (em *ExitMonitor) checkEfficiencyExit(pos Position, currentPrice float64, u
 	}
 
 	return nil
+}
+
+// CheckEfficiencyExitWithSafeguards is a public method to check efficiency exit with full safeguard details.
+// Returns the exit signal and safeguard result for transparency.
+func (em *ExitMonitor) CheckEfficiencyExitWithSafeguards(pos Position, currentPrice float64, userID string) (*ExitSignal, *EfficiencyExitSafeguardResult) {
+	if !pos.IsEfficiencyActive() || em.safeguards == nil {
+		return em.checkEfficiencyExit(pos, currentPrice, userID), nil
+	}
+
+	efficiency := pos.GetEfficiency()
+	threshold := em.config.DefaultEfficiencyThreshold
+	isBelowThreshold := efficiency < threshold && efficiency > 0
+
+	safeguardResult := em.safeguards.CheckEfficiencyExitSafeguards(pos, currentPrice, isBelowThreshold)
+	signal := em.checkEfficiencyExit(pos, currentPrice, userID)
+
+	return signal, safeguardResult
 }
 
 // ============================================================================

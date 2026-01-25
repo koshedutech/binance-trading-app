@@ -12,27 +12,29 @@ import (
 
 // MockPosition implements the Position interface for testing.
 type MockPosition struct {
-	symbol         string
-	mode           string
-	side           string
-	entryPrice     float64
-	currentPrice   float64
-	originalQty    float64
-	remainingQty   float64
-	entryTime      time.Time
-	tpLevels       []TakeProfitLevel
-	currentTPLevel int
-	slPrice        float64
-	movedToBE      bool
-	trailingActive bool
-	trailingPct    float64
-	trailingActPct float64
-	highestPrice   float64
-	lowestPrice    float64
-	effActive      bool
-	peakProfit     float64
-	currentProfit  float64
-	efficiency     float64
+	symbol          string
+	mode            string
+	side            string
+	entryPrice      float64
+	currentPrice    float64
+	originalQty     float64
+	remainingQty    float64
+	entryTime       time.Time
+	tpLevels        []TakeProfitLevel
+	currentTPLevel  int
+	slPrice         float64
+	movedToBE       bool
+	trailingActive  bool
+	trailingPct     float64
+	trailingActPct  float64
+	highestPrice    float64
+	lowestPrice     float64
+	effActive       bool
+	peakProfit      float64
+	currentProfit   float64
+	efficiency      float64
+	breakevenPrice  float64   // S3: Breakeven verification
+	lastPriceUpdate time.Time // S4: Stale data detection
 }
 
 func (m *MockPosition) GetSymbol() string            { return m.symbol }
@@ -56,6 +58,21 @@ func (m *MockPosition) IsEfficiencyActive() bool     { return m.effActive }
 func (m *MockPosition) GetPeakProfit() float64       { return m.peakProfit }
 func (m *MockPosition) GetCurrentProfit() float64    { return m.currentProfit }
 func (m *MockPosition) GetEfficiency() float64       { return m.efficiency }
+
+// Safeguard methods (Story 10.1 Phase 2)
+func (m *MockPosition) GetBreakevenPrice() float64 {
+	if m.breakevenPrice > 0 {
+		return m.breakevenPrice
+	}
+	return m.entryPrice // Default to entry price
+}
+
+func (m *MockPosition) GetLastPriceUpdate() time.Time {
+	if m.lastPriceUpdate.IsZero() {
+		return time.Now() // Default to now for backward compatibility
+	}
+	return m.lastPriceUpdate
+}
 
 // ============================================================================
 // EXIT MONITOR TESTS
@@ -451,6 +468,15 @@ func TestCheckEfficiencyExit_Triggered(t *testing.T) {
 	config.EnableTPMonitoring = false
 	config.EnableTrailingMonitoring = false
 	config.DefaultEfficiencyThreshold = 0.5
+	// Disable safeguards to test basic efficiency exit behavior
+	config.Safeguards = &SafeguardsConfig{
+		EnableMinHoldTime:            false,
+		EnableWhipsawPrevention:      false,
+		EnableBreakevenVerification:  false,
+		EnableStaleDataDetection:     false,
+		EnableNewEngineFallback:      false,
+		BlockModeChangeWithOpenPositions: false,
+	}
 	monitor := NewExitMonitor(config)
 	ctx := context.Background()
 
@@ -477,6 +503,60 @@ func TestCheckEfficiencyExit_Triggered(t *testing.T) {
 	}
 	if signal.Urgency != UrgencyImmediate {
 		t.Errorf("Expected immediate urgency, got %s", signal.Urgency)
+	}
+}
+
+func TestCheckEfficiencyExit_TriggeredWithSafeguards(t *testing.T) {
+	config := DefaultConfig()
+	config.EnableSLMonitoring = false
+	config.EnableTPMonitoring = false
+	config.EnableTrailingMonitoring = false
+	config.DefaultEfficiencyThreshold = 0.5
+	// Enable safeguards with minimal requirements
+	config.Safeguards = &SafeguardsConfig{
+		EnableMinHoldTime:            true,
+		MinHoldBeforeEfficiencyMins:  map[string]int{"scalp": 1},
+		EnableWhipsawPrevention:      true,
+		ConsecutiveSignalsRequired:   1, // Only 1 signal required
+		EnableBreakevenVerification:  true,
+		EnableStaleDataDetection:     true,
+		MaxPriceDataAgeSecs:          60,
+		EnableNewEngineFallback:      false,
+		BlockModeChangeWithOpenPositions: false,
+	}
+	monitor := NewExitMonitor(config)
+	ctx := context.Background()
+
+	// Position that passes all safeguards
+	pos := &MockPosition{
+		symbol:          "BTCUSDT",
+		mode:            "scalp",
+		side:            "LONG",
+		entryPrice:      50000.0,
+		entryTime:       time.Now().Add(-5 * time.Minute), // Past min hold
+		effActive:       true,
+		peakProfit:      5.0,
+		currentProfit:   2.0, // Positive profit
+		efficiency:      0.4, // Below threshold
+		breakevenPrice:  50000.0,
+		lastPriceUpdate: time.Now(), // Fresh data
+	}
+
+	// Price above breakeven
+	currentPrice := 51000.0
+
+	signal, err := monitor.CheckPosition(ctx, pos, currentPrice, "user1")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if signal == nil {
+		t.Fatal("Expected efficiency exit signal")
+	}
+	if signal.ExitType != ExitTypeEfficiency {
+		t.Errorf("Expected efficiency exit type, got %s", signal.ExitType)
+	}
+	if signal.Urgency != UrgencyImmediate {
+		t.Errorf("Expected immediate urgency when all safeguards pass, got %s", signal.Urgency)
 	}
 }
 

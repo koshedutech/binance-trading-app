@@ -66,9 +66,10 @@ func (a *CoinProfilerPriceAdapter) GetPrices(ctx context.Context, symbols []stri
 
 // GiniePositionAdapter wraps GiniePosition to implement exitdecision.Position interface.
 type GiniePositionAdapter struct {
-	pos          *GiniePosition
-	currentPrice float64 // Injected from price provider
-	peakProfit   float64 // Tracked for efficiency calculation
+	pos             *GiniePosition
+	currentPrice    float64   // Injected from price provider
+	peakProfit      float64   // Tracked for efficiency calculation
+	lastPriceUpdate time.Time // Timestamp of last price update (S4: Stale data detection)
 }
 
 // NewGiniePositionAdapter creates a new adapter.
@@ -83,8 +84,10 @@ func NewGiniePositionAdapter(pos *GiniePosition) *GiniePositionAdapter {
 }
 
 // SetCurrentPrice sets the current market price (called by position provider).
+// Also updates the last price update timestamp for stale data detection (S4).
 func (a *GiniePositionAdapter) SetCurrentPrice(price float64) {
 	a.currentPrice = price
+	a.lastPriceUpdate = time.Now()
 }
 
 // GetSymbol returns the position symbol.
@@ -214,6 +217,29 @@ func (a *GiniePositionAdapter) UpdatePeakProfit() {
 	if a.pos.UnrealizedPnL > a.peakProfit {
 		a.peakProfit = a.pos.UnrealizedPnL
 	}
+}
+
+// GetBreakevenPrice returns the breakeven price for the position.
+// Story 10.1 Phase 2 - S3: Breakeven verification safeguard.
+// Breakeven price = entry price + fees (for longs) or entry price - fees (for shorts).
+func (a *GiniePositionAdapter) GetBreakevenPrice() float64 {
+	// If SL has moved to breakeven, return entry price (with buffer already applied in SL)
+	if a.pos.MovedToBreakeven {
+		return a.pos.EntryPrice
+	}
+	// If not at breakeven yet, return 0 to indicate no breakeven price set
+	return 0
+}
+
+// GetLastPriceUpdate returns the timestamp of the last price update.
+// Story 10.1 Phase 2 - S4: Stale data detection safeguard.
+func (a *GiniePositionAdapter) GetLastPriceUpdate() time.Time {
+	// Return the tracked price update timestamp
+	// If never updated, use entry time as fallback
+	if a.lastPriceUpdate.IsZero() {
+		return a.pos.EntryTime
+	}
+	return a.lastPriceUpdate
 }
 
 // ============================================================================

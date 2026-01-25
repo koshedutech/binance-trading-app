@@ -106,6 +106,13 @@ type Position interface {
 	GetPeakProfit() float64
 	GetCurrentProfit() float64
 	GetEfficiency() float64
+
+	// Safeguard methods (Story 10.1 Phase 2)
+	// S3: Breakeven verification
+	GetBreakevenPrice() float64
+
+	// S4: Stale data detection
+	GetLastPriceUpdate() time.Time
 }
 
 // TakeProfitLevel represents a take profit level configuration.
@@ -209,6 +216,9 @@ type Config struct {
 	EnableTrailingMonitoring   bool `json:"enable_trailing_monitoring"`
 	EnableEfficiencyMonitoring bool `json:"enable_efficiency_monitoring"`
 
+	// Safeguards configuration (Story 10.1 Phase 2)
+	Safeguards *SafeguardsConfig `json:"safeguards"`
+
 	// Debug mode
 	DebugMode bool `json:"debug_mode"`
 }
@@ -236,8 +246,103 @@ func DefaultConfig() *Config {
 		EnableTrailingMonitoring:   true,
 		EnableEfficiencyMonitoring: true,
 
+		// Safeguards enabled by default
+		Safeguards: DefaultSafeguardsConfig(),
+
 		DebugMode: false,
 	}
+}
+
+// ============================================================================
+// SAFEGUARDS CONFIGURATION (Story 10.1 Phase 2)
+// ============================================================================
+
+// SafeguardsConfig holds configuration for exit decision safeguards.
+// These safeguards prevent common failure scenarios in exit decisions.
+type SafeguardsConfig struct {
+	// S1: Minimum Hold Time Before Efficiency Exit
+	// Prevents exiting within seconds of entry due to early price fluctuations.
+	EnableMinHoldTime            bool              `json:"enable_min_hold_time"`
+	MinHoldBeforeEfficiencyMins  map[string]int    `json:"min_hold_before_efficiency_mins"` // mode -> minutes
+
+	// S2: Consecutive Signal Requirement (Whipsaw Prevention)
+	// Prevents false exits during normal price oscillation by requiring multiple signals.
+	EnableWhipsawPrevention      bool `json:"enable_whipsaw_prevention"`
+	ConsecutiveSignalsRequired   int  `json:"consecutive_signals_required"`    // Default: 3
+	ConsecutiveSignalWindowSecs  int  `json:"consecutive_signal_window_secs"`  // Time window for consecutive signals
+
+	// S3: Breakeven Verification Before Efficiency Exit
+	// Prevents efficiency exit when price is below breakeven (invalid efficiency calculation).
+	EnableBreakevenVerification  bool `json:"enable_breakeven_verification"`
+
+	// S4: Stale Data Detection
+	// Prevents decisions based on outdated price or trend data.
+	EnableStaleDataDetection     bool `json:"enable_stale_data_detection"`
+	MaxPriceDataAgeSecs          int  `json:"max_price_data_age_secs"`    // Default: 5
+	MaxTrendDataAgeSecs          int  `json:"max_trend_data_age_secs"`    // Default: 30
+
+	// S5: Epic 11 Integration Safeguards
+	// Ensures graceful fallback to Classic mode when New Engine components fail.
+	EnableNewEngineFallback      bool `json:"enable_new_engine_fallback"`
+	FallbackToClassicOnError     bool `json:"fallback_to_classic_on_error"`
+	MinIndicatorsRequired        int  `json:"min_indicators_required"`     // Default: 1
+	RegimeChangeConfirmationSecs int  `json:"regime_change_confirmation_secs"` // Default: 60
+
+	// S6: Decision Mode Consistency
+	// Prevents mode changes while positions are open to avoid inconsistent behavior.
+	BlockModeChangeWithOpenPositions bool `json:"block_mode_change_with_open_positions"`
+}
+
+// DefaultSafeguardsConfig returns sensible defaults for all safeguards.
+func DefaultSafeguardsConfig() *SafeguardsConfig {
+	return &SafeguardsConfig{
+		// S1: Min Hold Time
+		EnableMinHoldTime: true,
+		MinHoldBeforeEfficiencyMins: map[string]int{
+			"ultra_fast": 1,
+			"scalp":      2,
+			"swing":      5,
+			"position":   15,
+		},
+
+		// S2: Whipsaw Prevention
+		EnableWhipsawPrevention:     true,
+		ConsecutiveSignalsRequired:  3,
+		ConsecutiveSignalWindowSecs: 10,
+
+		// S3: Breakeven Verification
+		EnableBreakevenVerification: true,
+
+		// S4: Stale Data Detection
+		EnableStaleDataDetection: true,
+		MaxPriceDataAgeSecs:      5,
+		MaxTrendDataAgeSecs:      30,
+
+		// S5: New Engine Fallback
+		EnableNewEngineFallback:      true,
+		FallbackToClassicOnError:     true,
+		MinIndicatorsRequired:        1,
+		RegimeChangeConfirmationSecs: 60,
+
+		// S6: Mode Consistency
+		BlockModeChangeWithOpenPositions: true,
+	}
+}
+
+// SafeguardResult represents the result of a safeguard check.
+type SafeguardResult struct {
+	Safeguard     string `json:"safeguard"`      // S1, S2, S3, S4, S5, S6
+	Blocked       bool   `json:"blocked"`        // Whether the exit was blocked
+	Reason        string `json:"reason"`         // Human-readable reason
+	FallbackUsed  bool   `json:"fallback_used"`  // Whether fallback mode was used (S5)
+}
+
+// ConsecutiveSignalTracker tracks consecutive signals for whipsaw prevention (S2).
+type ConsecutiveSignalTracker struct {
+	Symbol                    string    `json:"symbol"`
+	ConsecutiveBelowThreshold int       `json:"consec_below"`
+	LastBelowThresholdTime    time.Time `json:"below_ts"`
+	LastResetTime             time.Time `json:"reset_ts"`
 }
 
 // ============================================================================
@@ -261,4 +366,8 @@ type monitoredPosition struct {
 	SignalCount  int64
 	HighestPrice float64
 	LowestPrice  float64
+
+	// Safeguard tracking (S2)
+	ConsecutiveBelowThreshold int
+	LastBelowThresholdTime    time.Time
 }

@@ -593,6 +593,11 @@ type GinieAutopilotConfig struct {
 	ScalpROIThreshold          float64 `json:"scalp_roi_threshold"`            // Book at 5%+ ROI (after fees)
 	SwingROIThreshold          float64 `json:"swing_roi_threshold"`            // Book at 8%+ ROI (after fees)
 	PositionROIThreshold       float64 `json:"position_roi_threshold"`         // Book at 10%+ ROI (after fees)
+
+	// === CHAIN SYSTEM INTEGRATION (AC10.4.5) ===
+	// When entry_decision_system="chain", Position Controller handles SL/TP management
+	// and Ginie's position monitoring should be disabled to avoid conflicts.
+	SkipPositionMonitoring bool `json:"skip_position_monitoring"` // Skip position monitoring loop (chain mode)
 }
 
 // DefaultGinieAutopilotConfig returns default configuration
@@ -2082,6 +2087,20 @@ func (ga *GinieAutopilot) SetSettingsCache(cache SettingsCacheReader) {
 	}
 }
 
+// SetSkipPositionMonitoring enables/disables position monitoring.
+// AC10.4.5: When entry_decision_system="chain", Position Controller handles SL/TP management.
+// Ginie's position monitoring loop should be skipped to avoid conflicts.
+func (ga *GinieAutopilot) SetSkipPositionMonitoring(skip bool) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+	ga.config.SkipPositionMonitoring = skip
+	if ga.logger != nil {
+		ga.logger.Info("Position monitoring skip flag updated",
+			"skip", skip,
+			"reason", "chain system takes over position management")
+	}
+}
+
 // initializePositionManagement initializes Epic 10 Position Management components.
 // This sets up the stage manager, decision evaluator, and configuration.
 // Components work alongside existing trailing SL/TP logic with priority:
@@ -3235,32 +3254,43 @@ func (ga *GinieAutopilot) Start() error {
 	ga.wg.Add(1)
 	go ga.runMainLoop()
 
-	// Start position monitoring loop
-	ga.wg.Add(1)
-	go ga.runPositionMonitor()
-
-	// Start adaptive SL/TP monitor (uses LLM to continuously adjust SL/TP)
-	if ga.config.AdaptiveSLTPEnabled && ga.llmAnalyzer != nil {
+	// AC10.4.5: Skip position monitoring when chain system is active
+	// When SkipPositionMonitoring=true, Position Controller handles all position management
+	// (SL/TP updates, trailing stops, early exit decisions)
+	if ga.config.SkipPositionMonitoring {
+		ga.logger.Info("╔════════════════════════════════════════════════════════════════╗")
+		ga.logger.Info("║  GINIE POSITION MONITORING: DISABLED (Chain Mode)              ║")
+		ga.logger.Info("║  Position Controller handles SL/TP management                  ║")
+		ga.logger.Info("║  Skipping: runPositionMonitor, adaptiveSLTP, earlyWarning      ║")
+		ga.logger.Info("╚════════════════════════════════════════════════════════════════╝")
+	} else {
+		// Start position monitoring loop (legacy mode)
 		ga.wg.Add(1)
-		go ga.runAdaptiveSLTPMonitor()
-		ga.logger.Info("Adaptive SL/TP monitor started with LLM")
-	}
+		go ga.runPositionMonitor()
 
-	// Start early warning monitor (multi-timeframe LLM analysis for early loss detection)
-	// Story 9.12: Check mode configs for early warning - default is enabled
-	earlyWarningEnabled := true // Default to enabled
-	if ga.llmAnalyzer != nil {
-		ga.wg.Add(1)
-		go ga.runEarlyWarningMonitor()
-		ga.logger.Info("Early warning monitor started with LLM", "enabled", earlyWarningEnabled)
-	}
+		// Start adaptive SL/TP monitor (uses LLM to continuously adjust SL/TP)
+		if ga.config.AdaptiveSLTPEnabled && ga.llmAnalyzer != nil {
+			ga.wg.Add(1)
+			go ga.runAdaptiveSLTPMonitor()
+			ga.logger.Info("Adaptive SL/TP monitor started with LLM")
+		}
 
-	// Start ultra-fast scalping monitor (500ms polling for rapid exits)
-	// Uses isModeEnabled() for real-time DB read to respect current mode state
-	if ga.isModeEnabled(GinieModeUltraFast) {
-		ga.wg.Add(1)
-		go ga.monitorUltraFastPositions()
-		ga.logger.Info("Ultra-fast scalping monitor started - 500ms polling enabled")
+		// Start early warning monitor (multi-timeframe LLM analysis for early loss detection)
+		// Story 9.12: Check mode configs for early warning - default is enabled
+		earlyWarningEnabled := true // Default to enabled
+		if ga.llmAnalyzer != nil {
+			ga.wg.Add(1)
+			go ga.runEarlyWarningMonitor()
+			ga.logger.Info("Early warning monitor started with LLM", "enabled", earlyWarningEnabled)
+		}
+
+		// Start ultra-fast scalping monitor (500ms polling for rapid exits)
+		// Uses isModeEnabled() for real-time DB read to respect current mode state
+		if ga.isModeEnabled(GinieModeUltraFast) {
+			ga.wg.Add(1)
+			go ga.monitorUltraFastPositions()
+			ga.logger.Info("Ultra-fast scalping monitor started - 500ms polling enabled")
+		}
 	}
 
 	// Start daily reset goroutine (tracked in WaitGroup for clean shutdown)
