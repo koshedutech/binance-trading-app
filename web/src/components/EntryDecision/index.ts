@@ -22,3 +22,6 @@ export {
   ScoreBreakdownBar,
   ScoreBreakdownFull,
 } from './ScoreDisplay';
+
+// Pattern list container (Story 11.46)
+export { default as PatternList } from './PatternList';

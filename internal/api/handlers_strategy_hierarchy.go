@@ -3,9 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
+	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/cache"
 	"binance-trading-bot/internal/database"
 
@@ -802,8 +804,28 @@ func convertPatternToResponse(p interface{}) PatternStateResponse {
 }
 
 // getDefaultStrategyGroup returns default settings for a strategy group
+// Loads from default-settings.json if available, otherwise uses hardcoded fallbacks
 func getDefaultStrategyGroup(mode, group, userID string) *database.StrategyGroupSettings {
-	// Default settings based on mode and group
+	// Try to load from default-settings.json first
+	if autopilot.HasStrategyHierarchy() {
+		groupDefaults, err := autopilot.GetStrategyGroupDefaults(mode, group)
+		if err == nil && groupDefaults != nil {
+			return &database.StrategyGroupSettings{
+				UserID:              userID,
+				Mode:                mode,
+				StrategyGroup:       group,
+				Enabled:             groupDefaults.Enabled,
+				Timeframe:           groupDefaults.BaseSettings.Timeframe,
+				PositionSizePercent: groupDefaults.BaseSettings.PositionSizePercent,
+				MaxLeverage:         groupDefaults.BaseSettings.MaxLeverage,
+				MaxPositions:        groupDefaults.BaseSettings.MaxPositions,
+				MinVolumeUSDT:       groupDefaults.BaseSettings.MinVolumeUSDT,
+			}
+		}
+		log.Printf("[STRATEGY-HIERARCHY] Failed to load defaults from file for %s/%s: %v, using fallback", mode, group, err)
+	}
+
+	// Fallback: Hardcoded default settings based on mode and group
 	defaults := &database.StrategyGroupSettings{
 		UserID:              userID,
 		Mode:                mode,
@@ -846,7 +868,25 @@ func getDefaultStrategyGroup(mode, group, userID string) *database.StrategyGroup
 }
 
 // getDefaultSubStrategy returns default settings for a sub-strategy
+// Loads from default-settings.json if available, otherwise uses hardcoded fallbacks
 func getDefaultSubStrategy(mode, group, strategy, userID string) *database.SubStrategySettings {
+	// Try to load from default-settings.json first
+	if autopilot.HasStrategyHierarchy() {
+		subDefaults, err := autopilot.GetSubStrategyDefaults(mode, group, strategy)
+		if err == nil && subDefaults != nil {
+			return &database.SubStrategySettings{
+				UserID:        userID,
+				Mode:          mode,
+				StrategyGroup: group,
+				SubStrategy:   strategy,
+				Enabled:       subDefaults.Enabled,
+				Settings:      subDefaults.Settings,
+			}
+		}
+		log.Printf("[STRATEGY-HIERARCHY] Failed to load sub-strategy defaults from file for %s/%s/%s: %v, using fallback", mode, group, strategy, err)
+	}
+
+	// Fallback: Hardcoded default settings
 	defaults := &database.SubStrategySettings{
 		UserID:        userID,
 		Mode:          mode,

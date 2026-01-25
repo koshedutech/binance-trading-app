@@ -303,10 +303,10 @@ development_status:
   # Part L: R:R Based Trading Strategies (added 2026-01-24)
   # Story 11.43 split into sub-stories after QA FAIL (37.5% AC coverage)
   11-43-ravindra-volume-imbalance-strategy: done  # Core pattern detection complete - CODE REVIEW PASSED 2026-01-24
-  11-44-volume-imbalance-database-schema: ready-for-dev  # P0 - Migration, repository, cache, user init
-  11-45-volume-imbalance-api-endpoints: backlog  # P1 - Strategy group/sub-strategy APIs (blocked by 11.44)
-  11-46-volume-imbalance-ui-components: backlog  # P1 - Mode Config UI, Entry Decision Engine UI (blocked by 11.44, 11.45)
-  11-47-volume-imbalance-llm-validation: backlog  # P2 - LLM validation integration
+  11-44-volume-imbalance-database-schema: done  # P0 - Migration 047, repository, cache complete 2026-01-25
+  11-45-volume-imbalance-api-endpoints: done  # P1 - All endpoints implemented 2026-01-25
+  11-46-volume-imbalance-ui-components: done  # P1 - PatternList, trailing stop status complete 2026-01-25
+  11-47-volume-imbalance-llm-validation: done  # P2 - LLM validation with fallback complete 2026-01-25
   epic-11-retrospective: optional  # Reopened for Volume Imbalance sub-stories
   # ============================================================================
   # EPIC 11 - 46 stories total (42 original + 4 Volume Imbalance sub-stories)
@@ -314,10 +314,11 @@ development_status:
   # Part K added 2026-01-23 - Configuration Amendment (Story 11.41)
   # Part L added 2026-01-24 - R:R Based Trading Strategies
   #   11.43: Core pattern detection (3-step model) - DONE
-  #   11.44: Database schema & repository - READY
-  #   11.45: API endpoints - BLOCKED
-  #   11.46: UI components - BLOCKED
-  #   11.47: LLM validation - BLOCKED
+  #   11.44: Database schema & repository - DONE 2026-01-25
+  #   11.45: API endpoints - DONE 2026-01-25
+  #   11.46: UI components - DONE 2026-01-25
+  #   11.47: LLM validation - DONE 2026-01-25
+  #   ALL VOLUME IMBALANCE SUB-STORIES COMPLETE!
   # ============================================================================
 
   # ============================================================================

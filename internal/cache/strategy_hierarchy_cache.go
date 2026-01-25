@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"binance-trading-bot/internal/database"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // =====================================================
@@ -13,6 +16,11 @@ import (
 // Story 11.44: Volume Imbalance Database Schema & Repository
 // Provides Redis caching for strategy hierarchy settings
 // =====================================================
+
+// TTL for strategy hierarchy cache entries
+const (
+	StrategyHierarchyTTL = 1 * time.Hour
+)
 
 // StrategyHierarchyCacheService provides cache access to strategy hierarchy settings
 // Uses cache-first read pattern with database fallback
@@ -35,21 +43,27 @@ func NewStrategyHierarchyCacheService(cache *CacheService, repo *database.Reposi
 // REDIS KEY PATTERNS
 // =====================================================
 
-// Key patterns:
-// - user:{userID}:strategy_group:{mode}:{group} - Strategy group settings
-// - user:{userID}:sub_strategy:{mode}:{group}:{subStrategy} - Sub-strategy settings
-// - user:{userID}:enabled_strategies - List of enabled sub-strategies (quick lookup)
+// Key patterns (Story 11.44):
+// - strat:group:{user_id}:{mode}:{group} - Strategy group settings (JSON)
+// - strat:sub:{user_id}:{mode}:{group}:{sub} - Sub-strategy settings (JSON)
+// - strat:enabled:{user_id} - Set of enabled strategy keys (Redis SET)
 
 func strategyGroupKey(userID, mode, group string) string {
-	return fmt.Sprintf("user:%s:strategy_group:%s:%s", userID, mode, group)
+	return fmt.Sprintf("strat:group:%s:%s:%s", userID, mode, group)
 }
 
 func subStrategyKey(userID, mode, group, subStrategy string) string {
-	return fmt.Sprintf("user:%s:sub_strategy:%s:%s:%s", userID, mode, group, subStrategy)
+	return fmt.Sprintf("strat:sub:%s:%s:%s:%s", userID, mode, group, subStrategy)
 }
 
 func enabledStrategiesKey(userID string) string {
-	return fmt.Sprintf("user:%s:enabled_strategies", userID)
+	return fmt.Sprintf("strat:enabled:%s", userID)
+}
+
+// enabledStrategyMember creates a string key for a single enabled strategy
+// Format: {mode}:{group}:{subStrategy}
+func enabledStrategyMember(mode, group, subStrategy string) string {
+	return fmt.Sprintf("%s:%s:%s", mode, group, subStrategy)
 }
 
 // =====================================================
@@ -57,7 +71,7 @@ func enabledStrategiesKey(userID string) string {
 // =====================================================
 
 // GetStrategyGroupFromCache retrieves a strategy group from cache
-// Returns nil if not in cache (caller should fetch from DB)
+// Returns nil, nil if not in cache (caller should fetch from DB)
 func (s *StrategyHierarchyCacheService) GetStrategyGroupFromCache(ctx context.Context, userID, mode, group string) (*database.StrategyGroupSettings, error) {
 	if !s.cache.IsHealthy() {
 		return nil, ErrCacheUnavailable
@@ -65,7 +79,13 @@ func (s *StrategyHierarchyCacheService) GetStrategyGroupFromCache(ctx context.Co
 
 	key := strategyGroupKey(userID, mode, group)
 	cached, err := s.cache.Get(ctx, key)
-	if err != nil || cached == "" {
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil // Cache miss
+		}
+		return nil, nil // Treat errors as cache miss for graceful degradation
+	}
+	if cached == "" {
 		return nil, nil // Cache miss
 	}
 
@@ -78,7 +98,29 @@ func (s *StrategyHierarchyCacheService) GetStrategyGroupFromCache(ctx context.Co
 	return &settings, nil
 }
 
-// SetStrategyGroupCache stores a strategy group in cache
+// SetStrategyGroupInCache stores a strategy group in cache with TTL
+func (s *StrategyHierarchyCacheService) SetStrategyGroupInCache(settings *database.StrategyGroupSettings) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	ctx := context.Background()
+	key := strategyGroupKey(settings.UserID, settings.Mode, settings.StrategyGroup)
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal strategy group: %w", err)
+	}
+
+	if err := s.cache.Set(ctx, key, string(data), StrategyHierarchyTTL); err != nil {
+		s.logger.Debug("Failed to cache strategy group", "key", key, "error", err)
+		return err
+	}
+
+	return nil
+}
+
+// SetStrategyGroupCache stores a strategy group in cache (with context and explicit params)
+// Deprecated: Use SetStrategyGroupInCache instead
 func (s *StrategyHierarchyCacheService) SetStrategyGroupCache(ctx context.Context, userID, mode, group string, settings *database.StrategyGroupSettings) error {
 	if !s.cache.IsHealthy() {
 		return ErrCacheUnavailable
@@ -90,8 +132,7 @@ func (s *StrategyHierarchyCacheService) SetStrategyGroupCache(ctx context.Contex
 		return fmt.Errorf("failed to marshal strategy group: %w", err)
 	}
 
-	// TTL of 0 means no expiration (persistent until invalidated)
-	if err := s.cache.Set(ctx, key, string(data), 0); err != nil {
+	if err := s.cache.Set(ctx, key, string(data), StrategyHierarchyTTL); err != nil {
 		s.logger.Debug("Failed to cache strategy group", "key", key, "error", err)
 		return err
 	}
@@ -137,8 +178,8 @@ func (s *StrategyHierarchyCacheService) UpdateStrategyGroup(ctx context.Context,
 		if err := s.SetStrategyGroupCache(ctx, settings.UserID, settings.Mode, settings.StrategyGroup, settings); err != nil {
 			s.logger.Debug("Failed to update strategy group cache", "error", err)
 		}
-		// Invalidate enabled strategies cache since this may affect it
-		s.InvalidateEnabledStrategiesCache(ctx, settings.UserID)
+		// Refresh enabled strategies cache since this may affect it
+		_ = s.RefreshEnabledStrategiesCache(settings.UserID)
 	}
 
 	return nil
@@ -156,7 +197,13 @@ func (s *StrategyHierarchyCacheService) GetSubStrategyFromCache(ctx context.Cont
 
 	key := subStrategyKey(userID, mode, group, subStrategy)
 	cached, err := s.cache.Get(ctx, key)
-	if err != nil || cached == "" {
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil // Cache miss
+		}
+		return nil, nil // Treat errors as cache miss for graceful degradation
+	}
+	if cached == "" {
 		return nil, nil // Cache miss
 	}
 
@@ -169,7 +216,29 @@ func (s *StrategyHierarchyCacheService) GetSubStrategyFromCache(ctx context.Cont
 	return &settings, nil
 }
 
-// SetSubStrategyCache stores a sub-strategy in cache
+// SetSubStrategyInCache stores a sub-strategy in cache with TTL
+func (s *StrategyHierarchyCacheService) SetSubStrategyInCache(settings *database.SubStrategySettings) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	ctx := context.Background()
+	key := subStrategyKey(settings.UserID, settings.Mode, settings.StrategyGroup, settings.SubStrategy)
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("failed to marshal sub-strategy: %w", err)
+	}
+
+	if err := s.cache.Set(ctx, key, string(data), StrategyHierarchyTTL); err != nil {
+		s.logger.Debug("Failed to cache sub-strategy", "key", key, "error", err)
+		return err
+	}
+
+	return nil
+}
+
+// SetSubStrategyCache stores a sub-strategy in cache (with context and explicit params)
+// Deprecated: Use SetSubStrategyInCache instead
 func (s *StrategyHierarchyCacheService) SetSubStrategyCache(ctx context.Context, userID, mode, group, subStrategy string, settings *database.SubStrategySettings) error {
 	if !s.cache.IsHealthy() {
 		return ErrCacheUnavailable
@@ -181,7 +250,7 @@ func (s *StrategyHierarchyCacheService) SetSubStrategyCache(ctx context.Context,
 		return fmt.Errorf("failed to marshal sub-strategy: %w", err)
 	}
 
-	if err := s.cache.Set(ctx, key, string(data), 0); err != nil {
+	if err := s.cache.Set(ctx, key, string(data), StrategyHierarchyTTL); err != nil {
 		s.logger.Debug("Failed to cache sub-strategy", "key", key, "error", err)
 		return err
 	}
@@ -226,71 +295,164 @@ func (s *StrategyHierarchyCacheService) UpdateSubStrategy(ctx context.Context, s
 		if err := s.SetSubStrategyCache(ctx, settings.UserID, settings.Mode, settings.StrategyGroup, settings.SubStrategy, settings); err != nil {
 			s.logger.Debug("Failed to update sub-strategy cache", "error", err)
 		}
-		// Invalidate enabled strategies cache since this may affect it
-		s.InvalidateEnabledStrategiesCache(ctx, settings.UserID)
+		// Refresh enabled strategies cache since this may affect it
+		_ = s.RefreshEnabledStrategiesCache(settings.UserID)
 	}
 
 	return nil
 }
 
 // =====================================================
-// ENABLED STRATEGIES CACHE
+// ENABLED STRATEGIES CACHE (Redis SET)
 // =====================================================
 
 // GetEnabledStrategiesFromCache retrieves the list of enabled strategies from cache
-// Returns (nil, nil) for cache miss, ([]EnabledSubStrategy, nil) for cache hit (even if empty)
-func (s *StrategyHierarchyCacheService) GetEnabledStrategiesFromCache(ctx context.Context, userID string) ([]database.EnabledSubStrategy, error) {
+// Uses Redis SET for O(1) membership checks
+// Returns (nil, nil) for cache miss, ([]string, nil) for cache hit (even if empty)
+func (s *StrategyHierarchyCacheService) GetEnabledStrategiesFromCache(userID string) ([]string, error) {
 	if !s.cache.IsHealthy() {
 		return nil, ErrCacheUnavailable
 	}
 
+	ctx := context.Background()
 	key := enabledStrategiesKey(userID)
-	cached, err := s.cache.Get(ctx, key)
-	if err != nil || cached == "" {
+	client := s.cache.GetClient()
+	if client == nil {
+		return nil, ErrCacheUnavailable
+	}
+
+	// Check if key exists first (to distinguish empty set from cache miss)
+	exists, err := client.Exists(ctx, key).Result()
+	if err != nil {
+		s.logger.Debug("Failed to check enabled strategies key existence", "key", key, "error", err)
+		return nil, nil // Treat as cache miss
+	}
+	if exists == 0 {
 		return nil, nil // Cache miss
 	}
 
-	var strategies []database.EnabledSubStrategy
-	if err := json.Unmarshal([]byte(cached), &strategies); err != nil {
-		s.logger.Debug("Failed to unmarshal enabled strategies from cache", "key", key, "error", err)
-		return nil, nil
+	// Get all members from the SET
+	members, err := client.SMembers(ctx, key).Result()
+	if err != nil {
+		s.logger.Debug("Failed to get enabled strategies from cache", "key", key, "error", err)
+		return nil, nil // Treat as cache miss
 	}
 
-	// Story 11.44 Fix: Return empty slice (not nil) for cache hit with empty result
-	// This distinguishes cache hit with empty data from cache miss
-	if strategies == nil {
-		strategies = []database.EnabledSubStrategy{}
-	}
-
-	return strategies, nil
+	return members, nil
 }
 
-// SetEnabledStrategiesCache stores the enabled strategies list in cache
-func (s *StrategyHierarchyCacheService) SetEnabledStrategiesCache(ctx context.Context, userID string, strategies []database.EnabledSubStrategy) error {
+// setEnabledStrategiesInCache stores enabled strategies as a Redis SET
+// Internal method - use RefreshEnabledStrategiesCache for external use
+func (s *StrategyHierarchyCacheService) setEnabledStrategiesInCache(ctx context.Context, userID string, strategies []database.EnabledSubStrategy) error {
 	if !s.cache.IsHealthy() {
 		return ErrCacheUnavailable
 	}
 
 	key := enabledStrategiesKey(userID)
-	data, err := json.Marshal(strategies)
-	if err != nil {
-		return fmt.Errorf("failed to marshal enabled strategies: %w", err)
+	client := s.cache.GetClient()
+	if client == nil {
+		return ErrCacheUnavailable
 	}
 
-	if err := s.cache.Set(ctx, key, string(data), 0); err != nil {
-		s.logger.Debug("Failed to cache enabled strategies", "key", key, "error", err)
+	// Use pipeline for atomic operation: delete old set and add new members
+	pipe := client.Pipeline()
+	pipe.Del(ctx, key)
+
+	// Add each enabled strategy as a member
+	if len(strategies) > 0 {
+		members := make([]interface{}, len(strategies))
+		for i, strat := range strategies {
+			members[i] = enabledStrategyMember(strat.Mode, strat.StrategyGroup, strat.SubStrategy)
+		}
+		pipe.SAdd(ctx, key, members...)
+	} else {
+		// For empty set, we still need to mark the cache as valid
+		// Use a special marker that we can detect
+		pipe.SAdd(ctx, key, "__empty__")
+	}
+
+	// Set TTL
+	pipe.Expire(ctx, key, StrategyHierarchyTTL)
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		s.logger.Debug("Failed to set enabled strategies cache", "key", key, "error", err)
 		return err
 	}
 
 	return nil
 }
 
+// RefreshEnabledStrategiesCache fetches enabled strategies from DB and updates cache
+func (s *StrategyHierarchyCacheService) RefreshEnabledStrategiesCache(userID string) error {
+	if !s.cache.IsHealthy() {
+		return ErrCacheUnavailable
+	}
+
+	ctx := context.Background()
+
+	// Fetch from database
+	strategies, err := s.repo.GetEnabledStrategies(ctx, userID)
+	if err != nil {
+		s.logger.Debug("Failed to fetch enabled strategies from DB", "userID", userID, "error", err)
+		return err
+	}
+
+	// Update cache
+	return s.setEnabledStrategiesInCache(ctx, userID, strategies)
+}
+
+// IsStrategyEnabled checks if a specific strategy is enabled (fast O(1) lookup)
+func (s *StrategyHierarchyCacheService) IsStrategyEnabled(ctx context.Context, userID, mode, group, subStrategy string) (bool, error) {
+	if !s.cache.IsHealthy() {
+		return false, ErrCacheUnavailable
+	}
+
+	key := enabledStrategiesKey(userID)
+	member := enabledStrategyMember(mode, group, subStrategy)
+	client := s.cache.GetClient()
+	if client == nil {
+		return false, ErrCacheUnavailable
+	}
+
+	isMember, err := client.SIsMember(ctx, key, member).Result()
+	if err != nil {
+		s.logger.Debug("Failed to check strategy membership", "key", key, "member", member, "error", err)
+		return false, nil // Graceful degradation - assume not cached
+	}
+
+	return isMember, nil
+}
+
 // GetEnabledStrategies retrieves enabled strategies with cache-first pattern
+// Returns database.EnabledSubStrategy slice for compatibility
 func (s *StrategyHierarchyCacheService) GetEnabledStrategies(ctx context.Context, userID string) ([]database.EnabledSubStrategy, error) {
 	// Try cache first
-	cached, err := s.GetEnabledStrategiesFromCache(ctx, userID)
-	if err == nil && cached != nil {
-		return cached, nil
+	cachedMembers, err := s.GetEnabledStrategiesFromCache(userID)
+	if err == nil && cachedMembers != nil {
+		// Parse members back to EnabledSubStrategy
+		strategies := make([]database.EnabledSubStrategy, 0, len(cachedMembers))
+		for _, member := range cachedMembers {
+			// Skip empty marker
+			if member == "__empty__" {
+				continue
+			}
+			// Parse "mode:group:subStrategy" format
+			var mode, group, sub string
+			n, _ := fmt.Sscanf(member, "%s", &mode) // This won't work for colons, use split
+			parts := splitStrategyMember(member)
+			if len(parts) == 3 {
+				mode, group, sub = parts[0], parts[1], parts[2]
+				strategies = append(strategies, database.EnabledSubStrategy{
+					Mode:          mode,
+					StrategyGroup: group,
+					SubStrategy:   sub,
+				})
+			} else {
+				s.logger.Debug("Invalid strategy member format", "member", member, "parsed", n)
+			}
+		}
+		return strategies, nil
 	}
 
 	// Cache miss - fetch from database
@@ -299,21 +461,33 @@ func (s *StrategyHierarchyCacheService) GetEnabledStrategies(ctx context.Context
 		return nil, err
 	}
 
-	// Populate cache (Story 11.44 Fix: Cache empty results too to prevent repeated DB queries)
-	// Empty slice is valid and should be cached to avoid hitting DB every time
+	// Populate cache
 	if s.cache.IsHealthy() {
-		// Use empty slice marker in cache for empty results
-		if strategies == nil {
-			strategies = []database.EnabledSubStrategy{}
-		}
-		_ = s.SetEnabledStrategiesCache(ctx, userID, strategies)
+		_ = s.setEnabledStrategiesInCache(ctx, userID, strategies)
 	}
 
 	return strategies, nil
 }
 
+// splitStrategyMember splits a strategy member string "mode:group:sub" into parts
+func splitStrategyMember(member string) []string {
+	parts := make([]string, 0, 3)
+	start := 0
+	for i, c := range member {
+		if c == ':' {
+			parts = append(parts, member[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(member) {
+		parts = append(parts, member[start:])
+	}
+	return parts
+}
+
 // InvalidateEnabledStrategiesCache removes the enabled strategies cache
 // Called when any strategy's enabled status changes
+// Deprecated: Use RefreshEnabledStrategiesCache instead for write-through pattern
 func (s *StrategyHierarchyCacheService) InvalidateEnabledStrategiesCache(ctx context.Context, userID string) {
 	if !s.cache.IsHealthy() {
 		return
@@ -337,13 +511,13 @@ func (s *StrategyHierarchyCacheService) InvalidateStrategyHierarchyCache(ctx con
 	}
 
 	// Delete strategy group keys
-	strategyGroupPattern := fmt.Sprintf("user:%s:strategy_group:*", userID)
+	strategyGroupPattern := fmt.Sprintf("strat:group:%s:*", userID)
 	if err := s.cache.DeletePattern(ctx, strategyGroupPattern); err != nil {
 		s.logger.Debug("Failed to delete strategy group cache pattern", "pattern", strategyGroupPattern, "error", err)
 	}
 
 	// Delete sub-strategy keys
-	subStrategyPattern := fmt.Sprintf("user:%s:sub_strategy:*", userID)
+	subStrategyPattern := fmt.Sprintf("strat:sub:%s:*", userID)
 	if err := s.cache.DeletePattern(ctx, subStrategyPattern); err != nil {
 		s.logger.Debug("Failed to delete sub-strategy cache pattern", "pattern", subStrategyPattern, "error", err)
 	}
@@ -356,25 +530,37 @@ func (s *StrategyHierarchyCacheService) InvalidateStrategyHierarchyCache(ctx con
 }
 
 // InvalidateStrategyGroup removes a specific strategy group from cache
-func (s *StrategyHierarchyCacheService) InvalidateStrategyGroup(ctx context.Context, userID, mode, group string) {
+func (s *StrategyHierarchyCacheService) InvalidateStrategyGroup(ctx context.Context, userID, mode, group string) error {
 	if !s.cache.IsHealthy() {
-		return
+		return ErrCacheUnavailable
 	}
 
 	key := strategyGroupKey(userID, mode, group)
-	s.cache.Delete(ctx, key)
-	s.InvalidateEnabledStrategiesCache(ctx, userID)
+	if err := s.cache.Delete(ctx, key); err != nil {
+		s.logger.Debug("Failed to invalidate strategy group", "key", key, "error", err)
+		return err
+	}
+
+	// Refresh enabled strategies to ensure consistency
+	_ = s.RefreshEnabledStrategiesCache(userID)
+	return nil
 }
 
 // InvalidateSubStrategy removes a specific sub-strategy from cache
-func (s *StrategyHierarchyCacheService) InvalidateSubStrategy(ctx context.Context, userID, mode, group, subStrategy string) {
+func (s *StrategyHierarchyCacheService) InvalidateSubStrategy(ctx context.Context, userID, mode, group, subStrategy string) error {
 	if !s.cache.IsHealthy() {
-		return
+		return ErrCacheUnavailable
 	}
 
 	key := subStrategyKey(userID, mode, group, subStrategy)
-	s.cache.Delete(ctx, key)
-	s.InvalidateEnabledStrategiesCache(ctx, userID)
+	if err := s.cache.Delete(ctx, key); err != nil {
+		s.logger.Debug("Failed to invalidate sub-strategy", "key", key, "error", err)
+		return err
+	}
+
+	// Refresh enabled strategies to ensure consistency
+	_ = s.RefreshEnabledStrategiesCache(userID)
+	return nil
 }
 
 // =====================================================
@@ -412,12 +598,9 @@ func (s *StrategyHierarchyCacheService) LoadStrategyHierarchyToCache(ctx context
 		}
 	}
 
-	// Load enabled strategies
-	strategies, err := s.repo.GetEnabledStrategies(ctx, userID)
-	if err != nil {
-		s.logger.Debug("Failed to load enabled strategies", "userID", userID, "error", err)
-	} else if len(strategies) > 0 {
-		_ = s.SetEnabledStrategiesCache(ctx, userID, strategies)
+	// Load enabled strategies using refresh (populates Redis SET)
+	if err := s.RefreshEnabledStrategiesCache(userID); err != nil {
+		s.logger.Debug("Failed to refresh enabled strategies cache", "userID", userID, "error", err)
 	}
 
 	s.logger.Debug("Loaded strategy hierarchy to cache", "userID", userID)
@@ -467,4 +650,14 @@ func (s *StrategyHierarchyCacheService) GetAllSubStrategiesForGroup(ctx context.
 	}
 
 	return subStrategies, nil
+}
+
+// =====================================================
+// LEGACY COMPATIBILITY
+// =====================================================
+
+// SetEnabledStrategiesCache stores the enabled strategies list in cache
+// Deprecated: Uses JSON array storage. Use RefreshEnabledStrategiesCache for SET-based storage
+func (s *StrategyHierarchyCacheService) SetEnabledStrategiesCache(ctx context.Context, userID string, strategies []database.EnabledSubStrategy) error {
+	return s.setEnabledStrategiesInCache(ctx, userID, strategies)
 }

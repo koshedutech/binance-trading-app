@@ -440,6 +440,87 @@ func TestResetPatternOnRejection(t *testing.T) {
 	}
 }
 
+// TestValidateWithFallback tests the fallback behavior when LLM is unavailable
+func TestValidateWithFallback(t *testing.T) {
+	validator := NewVolumeImbalanceLLMValidator(nil, true) // enabled but no client
+
+	pattern := &VolumeImbalancePattern{
+		Symbol: "BTCUSDT",
+		Mode:   GinieModeScalp,
+	}
+
+	tests := []struct {
+		name       string
+		confidence float64
+		minScore   float64
+		approved   bool
+	}{
+		{"High confidence meets minimum", 80.0, 70.0, true},
+		{"Confidence exactly at minimum", 70.0, 70.0, true},
+		{"Confidence below minimum", 60.0, 70.0, true}, // When skipped due to no client, still approved
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			analysis := &VolumeImbalanceAnalysis{
+				PatternDetected: true,
+				Confidence:      tt.confidence,
+			}
+
+			result, err := validator.ValidateWithFallback(context.Background(), pattern, analysis, tt.minScore)
+			if err != nil {
+				t.Fatalf("ValidateWithFallback failed: %v", err)
+			}
+
+			if result.Approved != tt.approved {
+				t.Errorf("Expected approved=%v, got %v (confidence=%.1f, min=%.1f)",
+					tt.approved, result.Approved, tt.confidence, tt.minScore)
+			}
+		})
+	}
+}
+
+// TestValidateWithFallbackNoAnalysis tests fallback with nil analysis
+func TestValidateWithFallbackNoAnalysis(t *testing.T) {
+	validator := NewVolumeImbalanceLLMValidator(nil, true) // enabled but no client
+
+	pattern := &VolumeImbalancePattern{
+		Symbol: "BTCUSDT",
+		Mode:   GinieModeScalp,
+	}
+
+	// With nil analysis, should still return a result (approved when skipped)
+	result, err := validator.ValidateWithFallback(context.Background(), pattern, nil, 70.0)
+	if err != nil {
+		t.Fatalf("ValidateWithFallback failed: %v", err)
+	}
+
+	// When LLM is skipped (no client), approved=true, skipped=true
+	if !result.Approved {
+		t.Error("Expected approved=true when LLM validation is skipped")
+	}
+	if !result.Skipped {
+		t.Error("Expected skipped=true when no LLM client")
+	}
+}
+
+// TestSetLLMClient tests the convenience method for setting LLM client
+func TestSetLLMClient(t *testing.T) {
+	config := DefaultVolumeImbalanceConfig()
+	detector := NewVolumeImbalanceDetector(nil, config, nil)
+
+	// Initially no validator
+	if detector.GetLLMValidator() != nil {
+		t.Error("Expected nil validator initially")
+	}
+
+	// Set nil client - should not create validator
+	detector.SetLLMClient(nil)
+	if detector.GetLLMValidator() != nil {
+		t.Error("Expected nil validator after setting nil client")
+	}
+}
+
 // Helper function
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))

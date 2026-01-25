@@ -331,27 +331,32 @@ func (l *Logger) writeText(entry LogEntry) {
 	fmt.Fprintln(l.output, b.String())
 }
 
-// Debug logs a debug message
+// Debug logs a debug message with optional key-value pairs.
+// Note: This is a structured logger - args should be key-value pairs, not printf format args.
 func (l *Logger) Debug(msg string, args ...interface{}) {
 	l.log(DEBUG, msg, args...)
 }
 
-// Info logs an info message
+// Info logs an info message with optional key-value pairs.
+// Note: This is a structured logger - args should be key-value pairs, not printf format args.
 func (l *Logger) Info(msg string, args ...interface{}) {
 	l.log(INFO, msg, args...)
 }
 
-// Warn logs a warning message
+// Warn logs a warning message with optional key-value pairs.
+// Note: This is a structured logger - args should be key-value pairs, not printf format args.
 func (l *Logger) Warn(msg string, args ...interface{}) {
 	l.log(WARN, msg, args...)
 }
 
-// Error logs an error message
+// Error logs an error message with optional key-value pairs.
+// Note: This is a structured logger - args should be key-value pairs, not printf format args.
 func (l *Logger) Error(msg string, args ...interface{}) {
 	l.log(ERROR, msg, args...)
 }
 
-// Fatal logs a fatal message and exits
+// Fatal logs a fatal message with optional key-value pairs and exits.
+// Note: This is a structured logger - args should be key-value pairs, not printf format args.
 func (l *Logger) Fatal(msg string, args ...interface{}) {
 	l.log(FATAL, msg, args...)
 	os.Exit(1)

@@ -27,9 +27,54 @@ import (
 // 5. Rejections are logged for analytics
 //
 // Configuration:
-// - LLMValidation setting in strategy_hierarchy controls enable/disable
+// - LLMValidation setting in VolumeImbalanceConfig controls enable/disable
 // - 30-second timeout for LLM calls
-// - Fallback: If LLM fails, proceed without validation (log warning)
+// - Fallback: If LLM fails or times out, pattern is APPROVED by default
+//
+// ============================================================================
+// INTEGRATION POINT DOCUMENTATION (for ginie_autopilot.go)
+// ============================================================================
+//
+// The LLM validation should be called AFTER the pattern reaches READY state
+// and BEFORE executing entry. The pattern already has Entry/SL/TP calculated
+// at this point.
+//
+// Integration location in ginie_autopilot.go:
+// - When processing volume imbalance signals from AnalyzeForVolumeImbalance()
+// - After analysis.PatternDetected == true && analysis.PatternState == "READY"
+// - Before calling the entry execution logic
+//
+// Example integration code (DO NOT modify ginie_autopilot.go yet):
+//
+//   // In the signal processing function, after getting analysis result:
+//   if analysis.PatternDetected && analysis.PatternState == "READY" {
+//       // Check if LLM validation is enabled
+//       if detector.IsLLMValidationEnabled() {
+//           validator := detector.GetLLMValidator()
+//           result, err := validator.ValidatePatternWithLLM(ctx, analysis.Pattern, analysis)
+//           if err != nil {
+//               // Log error but continue (fail-open behavior)
+//               logger.Warn("LLM validation error, proceeding with entry", "error", err)
+//           } else if !result.Approved && !result.Skipped {
+//               // Pattern rejected by LLM - reset and skip entry
+//               detector.ResetPatternOnRejection(symbol, result.Reason)
+//               logger.Info("Volume imbalance pattern rejected by LLM",
+//                   "symbol", symbol,
+//                   "reason", result.Reason)
+//               return // Skip entry
+//           }
+//       }
+//       // Proceed with entry execution...
+//   }
+//
+// Initialization (in futures_controller.go or user_autopilot_manager.go):
+//
+//   // Create LLM validator with config
+//   llmValidator := NewVolumeImbalanceLLMValidator(llmClient, config.LLMValidation)
+//   llmValidator.SetLogger(logger)
+//   detector.SetLLMValidator(llmValidator)
+//
+// ============================================================================
 
 // LLMValidationResult holds the validation outcome
 type LLMValidationResult struct {
@@ -531,16 +576,103 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// ValidateWithFallback validates a pattern with LLM, with fallback to confidence score.
+// If LLM validation fails (error, timeout) and pattern confidence >= minScore, approves anyway.
+// This provides graceful degradation when LLM is unavailable.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - pattern: The volume imbalance pattern to validate
+//   - analysis: The analysis result containing confidence score
+//   - minScore: Minimum confidence score (0-100) to approve on LLM failure
+//
+// Returns:
+//   - *LLMValidationResult: The validation result
+//   - error: Only returned for critical errors, not LLM failures
+func (v *VolumeImbalanceLLMValidator) ValidateWithFallback(ctx context.Context, pattern *VolumeImbalancePattern, analysis *VolumeImbalanceAnalysis, minScore float64) (*LLMValidationResult, error) {
+	// Try LLM validation first
+	result, err := v.ValidatePatternWithLLM(ctx, pattern, analysis)
+
+	// If validation succeeded (even if skipped), return as-is
+	if err == nil && result != nil {
+		// Special case: If LLM was skipped but confidence meets minimum, mark as approved
+		if result.Skipped && analysis != nil && analysis.Confidence >= minScore {
+			result.Approved = true
+			result.Reason = fmt.Sprintf("LLM skipped (%s), approved by confidence score (%.1f%% >= %.1f%%)",
+				result.SkipReason, analysis.Confidence, minScore)
+			if v.logger != nil {
+				v.logger.Info("[VOLUME_IMBALANCE_LLM] Pattern approved via confidence fallback",
+					"symbol", pattern.Symbol,
+					"confidence", analysis.Confidence,
+					"min_score", minScore,
+					"skip_reason", result.SkipReason)
+			}
+		}
+		return result, nil
+	}
+
+	// LLM failed with error - check confidence fallback
+	if analysis != nil && analysis.Confidence >= minScore {
+		if v.logger != nil {
+			v.logger.Info("[VOLUME_IMBALANCE_LLM] LLM error, approved via confidence fallback",
+				"symbol", pattern.Symbol,
+				"confidence", analysis.Confidence,
+				"min_score", minScore,
+				"error", err.Error())
+		}
+		return &LLMValidationResult{
+			Approved:   true,
+			Reason:     fmt.Sprintf("LLM error, approved by confidence score (%.1f%% >= %.1f%%)", analysis.Confidence, minScore),
+			Skipped:    true,
+			SkipReason: fmt.Sprintf("LLM error: %s", err.Error()),
+			Timestamp:  time.Now(),
+		}, nil
+	}
+
+	// Confidence too low - reject
+	if v.logger != nil {
+		confidence := 0.0
+		if analysis != nil {
+			confidence = analysis.Confidence
+		}
+		v.logger.Info("[VOLUME_IMBALANCE_LLM] LLM error and confidence too low",
+			"symbol", pattern.Symbol,
+			"confidence", confidence,
+			"min_score", minScore,
+			"error", err.Error())
+	}
+
+	return &LLMValidationResult{
+		Approved:   false,
+		Reason:     fmt.Sprintf("LLM validation failed and confidence (%.1f%%) below minimum (%.1f%%)", analysis.Confidence, minScore),
+		Skipped:    false,
+		SkipReason: "",
+		Timestamp:  time.Now(),
+	}, nil
+}
+
 // ============================================================================
 // INTEGRATION HELPERS
 // ============================================================================
 
-// SetLLMClient sets the LLM client for the VolumeImbalanceDetector
+// SetLLMClient creates and sets an LLM validator for the VolumeImbalanceDetector.
+// This is a convenience method that creates a new validator with the given client.
+// For more control over validator configuration, use SetLLMValidator directly.
 func (v *VolumeImbalanceDetector) SetLLMClient(client *llm.Client) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	// Store the client in a way that can be accessed for validation
-	// The validator will be created when needed
+
+	if client == nil {
+		return
+	}
+
+	// Create a new validator with the client
+	// Enable by default if client is provided
+	validator := NewVolumeImbalanceLLMValidator(client, true)
+	if v.logger != nil {
+		validator.SetLogger(v.logger)
+	}
+	v.llmValidator = validator
 }
 
 // ResetPatternOnRejection resets a pattern when rejected by LLM

@@ -486,11 +486,12 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                           {chain.chain_id.split('-').slice(-1)[0]}
                         </span>
 
-                        {/* Trailing Badge */}
+                        {/* Trailing Badge - Story 11.46: Enhanced display */}
                         {trailingOrder && (
-                          <span className="px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400 rounded text-xs flex items-center gap-0.5">
+                          <span className="px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400 rounded text-xs flex items-center gap-1" title={`Trailing SL @ $${formatPrice(trailingOrder.stopPrice)}`}>
                             <Activity className="w-3 h-3" />
                             TRAIL
+                            <span className="text-cyan-300">${formatPrice(trailingOrder.stopPrice)}</span>
                           </span>
                         )}
 
@@ -633,6 +634,87 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                     </div>
                   </div>
 
+                  {/* Trailing Stop Status Section - Story 11.46 */}
+                  {trailingOrder && (
+                    <div className="bg-cyan-900/20 p-3 rounded border border-cyan-800/50">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Activity className="w-4 h-4 text-cyan-400" />
+                        <span className="text-cyan-400 font-medium text-sm">Trailing Stop Active</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-3 text-xs">
+                        <div>
+                          <div className="text-gray-500">Current SL</div>
+                          <div className="text-cyan-300 font-mono font-medium">${formatPrice(trailingOrder.stopPrice)}</div>
+                        </div>
+                        <div>
+                          <div className="text-gray-500">Original SL</div>
+                          <div className="text-gray-400 font-mono">${formatPrice(slPrice)}</div>
+                        </div>
+                        <div>
+                          <div className="text-gray-500">Distance</div>
+                          <div className="text-gray-300 font-mono">
+                            {realTimePrice > 0 && trailingOrder.stopPrice > 0 ? (
+                              `${(Math.abs(realTimePrice - trailingOrder.stopPrice) / realTimePrice * 100).toFixed(2)}%`
+                            ) : '-'}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-gray-500">SL Moved</div>
+                          <div className={`font-mono ${trailingOrder.stopPrice > slPrice ? 'text-green-400' : trailingOrder.stopPrice < slPrice ? 'text-red-400' : 'text-gray-400'}`}>
+                            {slPrice > 0 ? (
+                              isLong
+                                ? `${trailingOrder.stopPrice >= slPrice ? '+' : ''}${((trailingOrder.stopPrice - slPrice) / slPrice * 100).toFixed(2)}%`
+                                : `${slPrice >= trailingOrder.stopPrice ? '+' : ''}${((slPrice - trailingOrder.stopPrice) / slPrice * 100).toFixed(2)}%`
+                            ) : '-'}
+                          </div>
+                        </div>
+                      </div>
+                      {/* Visual progress indicator */}
+                      {entryPrice > 0 && realTimePrice > 0 && (
+                        <div className="mt-3">
+                          <div className="flex justify-between text-xs text-gray-500 mb-1">
+                            <span>Entry ${formatPrice(entryPrice)}</span>
+                            <span>Current ${formatPrice(realTimePrice)}</span>
+                            {nextTPPrice > 0 && <span>Target ${formatPrice(nextTPPrice)}</span>}
+                          </div>
+                          <div className="relative h-2 bg-gray-700 rounded-full overflow-hidden">
+                            {/* Progress bar showing position between entry and target */}
+                            {nextTPPrice > 0 && (
+                              <div
+                                className="absolute h-full bg-gradient-to-r from-cyan-500 to-green-500 rounded-full transition-all duration-300"
+                                style={{
+                                  width: `${Math.min(100, Math.max(0, isLong
+                                    ? ((realTimePrice - entryPrice) / (nextTPPrice - entryPrice)) * 100
+                                    : ((entryPrice - realTimePrice) / (entryPrice - nextTPPrice)) * 100
+                                  ))}%`
+                                }}
+                              />
+                            )}
+                            {/* Trailing SL marker */}
+                            {nextTPPrice > 0 && (
+                              <div
+                                className="absolute w-1 h-full bg-cyan-400"
+                                style={{
+                                  left: `${Math.min(100, Math.max(0, isLong
+                                    ? ((trailingOrder.stopPrice - entryPrice) / (nextTPPrice - entryPrice)) * 100
+                                    : ((entryPrice - trailingOrder.stopPrice) / (entryPrice - nextTPPrice)) * 100
+                                  ))}%`
+                                }}
+                                title={`Trailing SL @ $${formatPrice(trailingOrder.stopPrice)}`}
+                              />
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-500 mt-1 text-center">
+                            {isLong
+                              ? `Profit locked: $${formatPrice(Math.max(0, (trailingOrder.stopPrice - entryPrice) * remainingQty))}`
+                              : `Profit locked: $${formatPrice(Math.max(0, (entryPrice - trailingOrder.stopPrice) * remainingQty))}`
+                            }
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* TP Progression */}
                   {tpOrders.length > 0 && (
                     <div className="space-y-2">
@@ -756,11 +838,21 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
                         </button>
                       )}
 
-                      {/* Trailing Stop Info */}
+                      {/* Enhanced Trailing Stop Status - Story 11.46 */}
                       {trailingOrder && (
-                        <span className="text-xs text-purple-400">
-                          TS: ${formatPrice(trailingOrder.stopPrice)}
-                        </span>
+                        <div className="flex items-center gap-2 text-xs">
+                          <div className="flex items-center gap-1.5 px-2 py-1 bg-cyan-900/30 rounded border border-cyan-800/50">
+                            <Activity className="w-3 h-3 text-cyan-400" />
+                            <span className="text-cyan-400 font-medium">Trailing Active</span>
+                            <span className="text-gray-300">@ ${formatPrice(trailingOrder.stopPrice)}</span>
+                            {/* Calculate distance from current price */}
+                            {realTimePrice > 0 && trailingOrder.stopPrice > 0 && (
+                              <span className="text-gray-500">
+                                ({(((realTimePrice - trailingOrder.stopPrice) / realTimePrice) * 100 * (isLong ? 1 : -1)).toFixed(2)}% distance)
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
 

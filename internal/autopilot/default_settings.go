@@ -34,6 +34,10 @@ type DefaultSettingsFile struct {
 	// Story 11.41: New hierarchical mode-strategy configuration
 	// This replaces the flat mode_configs with per-strategy settings
 	Modes ModesConfigWrapper `json:"modes,omitempty"`
+
+	// Story 11.45: Strategy Hierarchy for Volume Imbalance and future sub-strategies
+	// Structure: Mode -> StrategyGroup -> SubStrategy
+	StrategyHierarchy *StrategyHierarchyDefaults `json:"strategy_hierarchy,omitempty"`
 }
 
 // ModesConfigWrapper wraps the modes configuration from default-settings.json
@@ -541,4 +545,131 @@ func HasModesSection() bool {
 		len(defaults.Modes.Swing.Strategies) > 0 ||
 		len(defaults.Modes.Position.Strategies) > 0 ||
 		len(defaults.Modes.UltraFast.Strategies) > 0
+}
+
+// ============================================================================
+// STRATEGY HIERARCHY DEFAULTS (Story 11.45)
+// Load strategy group and sub-strategy configurations from "strategy_hierarchy"
+// ============================================================================
+
+// StrategyHierarchyDefaults represents the strategy_hierarchy section in default-settings.json
+// Structure: Mode -> StrategyGroups -> SubStrategies
+type StrategyHierarchyDefaults struct {
+	Description string                              `json:"_description,omitempty"`
+	Scalp       StrategyHierarchyMode               `json:"scalp,omitempty"`
+	Swing       StrategyHierarchyMode               `json:"swing,omitempty"`
+	Position    StrategyHierarchyMode               `json:"position,omitempty"`
+	UltraFast   StrategyHierarchyMode               `json:"ultra_fast,omitempty"`
+}
+
+// StrategyHierarchyMode represents strategy groups for a single trading mode
+type StrategyHierarchyMode struct {
+	StrategyGroups map[string]StrategyGroupDefaults `json:"strategy_groups,omitempty"`
+}
+
+// StrategyGroupDefaults represents default settings for a strategy group (breakout, trending, range, volatile)
+type StrategyGroupDefaults struct {
+	Enabled       bool                              `json:"enabled"`
+	BaseSettings  StrategyGroupBaseSettings         `json:"base_settings,omitempty"`
+	SubStrategies map[string]SubStrategyDefaults    `json:"sub_strategies,omitempty"`
+}
+
+// StrategyGroupBaseSettings contains the common settings for a strategy group
+type StrategyGroupBaseSettings struct {
+	Timeframe           string  `json:"timeframe,omitempty"`
+	PositionSizePercent float64 `json:"position_size_percent,omitempty"`
+	MaxLeverage         int     `json:"max_leverage,omitempty"`
+	MaxPositions        int     `json:"max_positions,omitempty"`
+	MinVolumeUSDT       float64 `json:"min_volume_usdt,omitempty"`
+}
+
+// SubStrategyDefaults represents default settings for a sub-strategy (e.g., ravindra_volume_imbalance)
+type SubStrategyDefaults struct {
+	Enabled  bool            `json:"enabled"`
+	Settings json.RawMessage `json:"settings,omitempty"`
+}
+
+// GetStrategyHierarchyDefaults returns the strategy hierarchy defaults from default-settings.json
+func GetStrategyHierarchyDefaults() (*StrategyHierarchyDefaults, error) {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load defaults: %w", err)
+	}
+
+	if defaults.StrategyHierarchy == nil {
+		return nil, fmt.Errorf("strategy_hierarchy section not found in default-settings.json")
+	}
+
+	// Return a deep copy to prevent mutation
+	data, err := json.Marshal(defaults.StrategyHierarchy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal strategy hierarchy: %w", err)
+	}
+
+	var copy StrategyHierarchyDefaults
+	if err := json.Unmarshal(data, &copy); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal strategy hierarchy: %w", err)
+	}
+
+	return &copy, nil
+}
+
+// GetStrategyGroupDefaults returns the default settings for a specific strategy group
+// mode: scalp, swing, position, ultra_fast
+// group: breakout, trending, range, volatile
+func GetStrategyGroupDefaults(mode, group string) (*StrategyGroupDefaults, error) {
+	hierarchy, err := GetStrategyHierarchyDefaults()
+	if err != nil {
+		return nil, err
+	}
+
+	// Get the mode's strategy groups
+	var modeHierarchy *StrategyHierarchyMode
+	switch mode {
+	case "scalp":
+		modeHierarchy = &hierarchy.Scalp
+	case "swing":
+		modeHierarchy = &hierarchy.Swing
+	case "position":
+		modeHierarchy = &hierarchy.Position
+	case "ultra_fast":
+		modeHierarchy = &hierarchy.UltraFast
+	default:
+		return nil, fmt.Errorf("unknown mode: %s", mode)
+	}
+
+	// Get the strategy group
+	groupDefaults, exists := modeHierarchy.StrategyGroups[group]
+	if !exists {
+		return nil, fmt.Errorf("strategy group %s not found for mode %s", group, mode)
+	}
+
+	return &groupDefaults, nil
+}
+
+// GetSubStrategyDefaults returns the default settings for a specific sub-strategy
+// mode: scalp, swing, position, ultra_fast
+// group: breakout, trending, range, volatile
+// subStrategy: ravindra_volume_imbalance, classic_breakout, etc.
+func GetSubStrategyDefaults(mode, group, subStrategy string) (*SubStrategyDefaults, error) {
+	groupDefaults, err := GetStrategyGroupDefaults(mode, group)
+	if err != nil {
+		return nil, err
+	}
+
+	subDefaults, exists := groupDefaults.SubStrategies[subStrategy]
+	if !exists {
+		return nil, fmt.Errorf("sub-strategy %s not found for mode %s, group %s", subStrategy, mode, group)
+	}
+
+	return &subDefaults, nil
+}
+
+// HasStrategyHierarchy checks if the default-settings.json has the strategy_hierarchy section
+func HasStrategyHierarchy() bool {
+	defaults, err := LoadDefaultSettings()
+	if err != nil {
+		return false
+	}
+	return defaults.StrategyHierarchy != nil
 }

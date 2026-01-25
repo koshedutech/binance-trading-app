@@ -6761,8 +6761,13 @@ function PositionCard({ position, expanded, onToggle, realTimePrice }: { positio
           }`}>
             {position.source === 'strategy' ? position.strategy_name || 'Strategy' : 'AI'}
           </span>
+          {/* Story 11.46: Enhanced trailing badge with SL level */}
           {position.trailing_active && (
-            <span className="px-1 py-0.5 bg-blue-900/50 text-blue-400 rounded text-xs">TRAIL</span>
+            <span className="px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400 rounded text-xs flex items-center gap-1" title={`Trailing SL @ $${Number(position.stop_loss || 0).toFixed(2)}`}>
+              <Activity className="w-3 h-3" />
+              TRAIL
+              <span className="text-cyan-300">${Number(position.stop_loss || 0).toFixed(2)}</span>
+            </span>
           )}
           {/* TP Progress Badge - Story 9.9 inline display */}
           {position.current_tp_level > 0 && (
@@ -6978,6 +6983,72 @@ function PositionCard({ position, expanded, onToggle, realTimePrice }: { positio
               ))}
             </div>
           </div>
+
+          {/* Story 11.46: Trailing Stop Status Section */}
+          {position.trailing_active && (
+            <div className="bg-cyan-900/20 p-2 rounded border border-cyan-800/50 mt-2">
+              <div className="flex items-center gap-2 mb-2">
+                <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="text-cyan-400 font-medium text-xs">Trailing Stop Active</span>
+              </div>
+              <div className="grid grid-cols-4 gap-2 text-xs">
+                <div>
+                  <div className="text-gray-500 text-[10px]">Current SL</div>
+                  <div className="text-cyan-300 font-mono">${Number(position.stop_loss || 0).toFixed(2)}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-[10px]">Original SL</div>
+                  <div className="text-gray-400 font-mono">${Number(position.original_sl || 0).toFixed(2)}</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-[10px]">Trail %</div>
+                  <div className="text-gray-300 font-mono">{Number(position.trailing_percent || 0).toFixed(2)}%</div>
+                </div>
+                <div>
+                  <div className="text-gray-500 text-[10px]">Profit Locked</div>
+                  <div className={`font-mono ${position.stop_loss > position.original_sl ? 'text-green-400' : 'text-gray-400'}`}>
+                    {position.side === 'LONG'
+                      ? `$${Math.max(0, (position.stop_loss - entryPrice) * remainingQty).toFixed(2)}`
+                      : `$${Math.max(0, (entryPrice - position.stop_loss) * remainingQty).toFixed(2)}`
+                    }
+                  </div>
+                </div>
+              </div>
+              {/* Visual progress indicator */}
+              {entryPrice > 0 && realTimePrice && realTimePrice > 0 && tpPrice > 0 && (
+                <div className="mt-2">
+                  <div className="flex justify-between text-[10px] text-gray-500 mb-1">
+                    <span>Entry</span>
+                    <span>SL</span>
+                    <span>Current</span>
+                    <span>Target</span>
+                  </div>
+                  <div className="relative h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                    {/* Progress bar */}
+                    <div
+                      className="absolute h-full bg-gradient-to-r from-cyan-500 to-green-500 rounded-full transition-all duration-300"
+                      style={{
+                        width: `${Math.min(100, Math.max(0, isLong
+                          ? ((realTimePrice - entryPrice) / (tpPrice - entryPrice)) * 100
+                          : ((entryPrice - realTimePrice) / (entryPrice - tpPrice)) * 100
+                        ))}%`
+                      }}
+                    />
+                    {/* Trailing SL marker */}
+                    <div
+                      className="absolute w-0.5 h-full bg-cyan-400"
+                      style={{
+                        left: `${Math.min(100, Math.max(0, isLong
+                          ? ((position.stop_loss - entryPrice) / (tpPrice - entryPrice)) * 100
+                          : ((entryPrice - position.stop_loss) / (entryPrice - tpPrice)) * 100
+                        ))}%`
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="text-gray-500">
             Realized: <span className={position.realized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
