@@ -57,6 +57,9 @@ type DefaultStrategyMatcher struct {
 	scoreCalc      *TrendFollowingScoreCalculator
 	coinProvider   CoinDataProvider
 
+	// Historical candle provider (typically CoinProfiler)
+	historyProvider CoinProfilerHistoryProvider
+
 	mu sync.RWMutex
 
 	// Cached enabled strategies (refreshed periodically)
@@ -349,9 +352,54 @@ func (m *DefaultStrategyMatcher) matchScoreStrategy(
 	return sm, nil
 }
 
+// CoinProfilerHistoryProvider is an interface for retrieving historical candles.
+// This abstracts the CoinProfiler to enable testing and loose coupling.
+type CoinProfilerHistoryProvider interface {
+	GetCandleHistory(symbol, timeframe string) []coinprofiler.HistoricalCandle
+}
+
+// SetCoinProfilerHistory sets the historical candle provider.
+// This is typically the CoinProfiler instance.
+func (m *DefaultStrategyMatcher) SetCoinProfilerHistory(provider CoinProfilerHistoryProvider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.historyProvider = provider
+}
+
 // coinDataToCandles converts CoinData timeframe data to Candle slices for pattern matching.
+// It first tries to get historical candles from the CoinProfiler, falling back to the
+// current candle if no history is available.
 func (m *DefaultStrategyMatcher) coinDataToCandles(coinData *coinprofiler.CoinData, timeframe string) []Candle {
-	if coinData == nil || coinData.Timeframes == nil {
+	if coinData == nil {
+		return nil
+	}
+
+	// Try to get historical candles from CoinProfiler
+	m.mu.RLock()
+	provider := m.historyProvider
+	m.mu.RUnlock()
+
+	if provider != nil {
+		historicalCandles := provider.GetCandleHistory(coinData.Symbol, timeframe)
+		if len(historicalCandles) >= 25 { // Minimum needed for pattern detection
+			candles := make([]Candle, len(historicalCandles))
+			for i, hc := range historicalCandles {
+				candles[i] = Candle{
+					Time:           hc.CloseTime,
+					Open:           hc.Open,
+					High:           hc.High,
+					Low:            hc.Low,
+					Close:          hc.Close,
+					Volume:         hc.Volume,
+					TakerBuyVolume: hc.TakerBuyVol,
+				}
+			}
+			return candles
+		}
+	}
+
+	// Fallback: Use current timeframe data from CoinData
+	if coinData.Timeframes == nil {
 		return nil
 	}
 
@@ -360,8 +408,7 @@ func (m *DefaultStrategyMatcher) coinDataToCandles(coinData *coinprofiler.CoinDa
 		return nil
 	}
 
-	// For now, create a single candle from the current timeframe data
-	// In a full implementation, this would retrieve historical candle data
+	// Create a single candle from the current timeframe data
 	candle := Candle{
 		Time:           tfData.UpdatedAt,
 		Open:           tfData.Open,
@@ -372,8 +419,7 @@ func (m *DefaultStrategyMatcher) coinDataToCandles(coinData *coinprofiler.CoinDa
 		TakerBuyVolume: tfData.TakerBuyVol,
 	}
 
-	// Return single candle for now
-	// Pattern matcher requires more candles for full pattern detection
+	// Return single candle - pattern matcher will recognize insufficient data
 	return []Candle{candle}
 }
 

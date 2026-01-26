@@ -374,3 +374,93 @@ export function getReadyCount(strategy: StrategyMatch): number {
 export function getWatchingCount(strategy: StrategyMatch): number {
   return strategy.coins.length - getReadyCount(strategy);
 }
+
+// ==================== Entry Levels Types ====================
+
+/**
+ * Calculated entry, stop-loss, and take-profit levels
+ */
+export interface EntryLevels {
+  /** Entry price (typically reference high for longs) */
+  entry_price: number;
+  /** Stop loss price */
+  stop_loss: number;
+  /** Take profit price */
+  take_profit: number;
+  /** Risk as percentage of entry */
+  risk_percent: number;
+  /** Reward as percentage of entry */
+  reward_percent: number;
+  /** Risk/Reward ratio */
+  risk_reward_ratio: number;
+  /** Reference candle high */
+  reference_high?: number;
+  /** Reference candle low */
+  reference_low?: number;
+  /** Current market price */
+  current_price?: number;
+}
+
+/**
+ * Pattern update from WebSocket (ENTRY_DECISION_PATTERN_UPDATE event)
+ */
+export interface PatternUpdate {
+  /** Coin symbol */
+  symbol: string;
+  /** Timeframe */
+  timeframe: string;
+  /** Trading mode */
+  mode: string;
+  /** Strategy name */
+  strategy: string;
+  /** Sub-strategy name */
+  sub_strategy: string;
+  /** Current step (1-based) */
+  current_step: number;
+  /** Total steps in pattern */
+  total_steps: number;
+  /** Pattern status */
+  status: PatternStatus;
+  /** Step details */
+  step_details: StepDetail[];
+  /** Entry levels (when pattern is ready or near-ready) */
+  entry_levels?: EntryLevels;
+  /** Trade direction */
+  direction?: string;
+  /** Last update */
+  updated_at: string;
+}
+
+/**
+ * Response from GET /api/futures/entry-decision/pattern-updates
+ */
+export interface PatternUpdatesResponse {
+  /** All current pattern updates */
+  updates: PatternUpdate[];
+  /** Count of updates */
+  count: number;
+}
+
+/**
+ * Response from GET /api/futures/entry-decision/entry-levels/:symbol
+ */
+export interface EntryLevelsApiResponse {
+  /** Coin symbol */
+  symbol: string;
+  /** Entry price */
+  entry_price: number;
+  /** Stop loss price */
+  stop_loss: number;
+  /** Take profit price */
+  take_profit: number;
+  /** Risk percentage */
+  risk_percent: number;
+  /** Reward percentage */
+  reward_percent: number;
+  /** Risk/Reward ratio */
+  risk_reward_ratio: number;
+  /** Current price */
+  current_price?: number;
+  /** Message if no levels available */
+  message?: string;
+}

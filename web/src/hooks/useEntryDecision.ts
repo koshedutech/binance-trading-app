@@ -13,6 +13,9 @@ import type {
   StrategyMatch,
   ModeStrategies,
   EntryCandidate,
+  PatternUpdate,
+  PatternUpdatesResponse,
+  EntryLevelsApiResponse,
 } from '../types/entryDecision';
 
 // ==================== Hook Interfaces ====================
@@ -382,6 +385,180 @@ export function useScoreBreakdown(symbol: string): UseScoreBreakdownResult {
   };
 }
 
+// ==================== usePatternUpdates Hook ====================
+
+interface UsePatternUpdatesResult {
+  /** All pattern updates */
+  updates: PatternUpdate[];
+  /** Loading state */
+  isLoading: boolean;
+  /** Error message */
+  error: string | null;
+  /** Refresh function */
+  refresh: () => Promise<void>;
+}
+
+/**
+ * Type guard to validate WebSocket pattern update
+ */
+function isPatternUpdateEvent(data: unknown): data is { event_type: string; data: PatternUpdate } {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'event_type' in data &&
+    (data as { event_type: string }).event_type === 'ENTRY_DECISION_PATTERN_UPDATE' &&
+    'data' in data
+  );
+}
+
+/**
+ * Hook to subscribe to real-time pattern updates via WebSocket.
+ */
+export function usePatternUpdates(): UsePatternUpdatesResult {
+  const [updates, setUpdates] = useState<PatternUpdate[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchInitialUpdates = useCallback(async () => {
+    try {
+      const response = await apiService.get<PatternUpdatesResponse>(
+        '/futures/entry-decision/pattern-updates'
+      );
+      setUpdates(response.data.updates || []);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to fetch pattern updates';
+      setError(message);
+      console.error('Failed to fetch pattern updates:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    await fetchInitialUpdates();
+  }, [fetchInitialUpdates]);
+
+  useEffect(() => {
+    // WebSocket message handler for pattern updates
+    const handlePatternUpdate = (event: WSEvent) => {
+      if (isPatternUpdateEvent(event.data)) {
+        const update = event.data.data;
+
+        setUpdates(prev => {
+          // Find and update existing, or add new
+          const key = `${update.symbol}:${update.mode}:${update.timeframe}`;
+          const existingIndex = prev.findIndex(
+            u => `${u.symbol}:${u.mode}:${u.timeframe}` === key
+          );
+
+          if (existingIndex >= 0) {
+            // Update existing
+            const newUpdates = [...prev];
+            newUpdates[existingIndex] = update;
+            return newUpdates;
+          } else {
+            // Add new
+            return [...prev, update];
+          }
+        });
+      }
+    };
+
+    // Subscribe to WebSocket events
+    wsService.subscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
+
+    // Initial fetch
+    fetchInitialUpdates();
+
+    return () => {
+      wsService.unsubscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
+    };
+  }, [fetchInitialUpdates]);
+
+  return {
+    updates,
+    isLoading,
+    error,
+    refresh,
+  };
+}
+
+// ==================== useEntryLevels Hook ====================
+
+interface UseEntryLevelsResult {
+  /** Entry levels data */
+  levels: EntryLevelsApiResponse | null;
+  /** Loading state */
+  isLoading: boolean;
+  /** Error message */
+  error: string | null;
+  /** Refresh function */
+  refresh: () => Promise<void>;
+}
+
+/**
+ * Hook to fetch entry levels for a specific symbol.
+ *
+ * @param symbol Coin symbol (e.g., "BTCUSDT")
+ * @param mode Optional trading mode
+ * @param timeframe Optional timeframe
+ */
+export function useEntryLevels(
+  symbol: string,
+  mode?: string,
+  timeframe?: string
+): UseEntryLevelsResult {
+  const [levels, setLevels] = useState<EntryLevelsApiResponse | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchLevels = useCallback(async () => {
+    if (!symbol) {
+      setLevels(null);
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      let endpoint = `/futures/entry-decision/entry-levels/${symbol}`;
+      const params: string[] = [];
+      if (mode) params.push(`mode=${mode}`);
+      if (timeframe) params.push(`timeframe=${timeframe}`);
+      if (params.length > 0) {
+        endpoint += `?${params.join('&')}`;
+      }
+
+      const response = await apiService.get<EntryLevelsApiResponse>(endpoint);
+      setLevels(response.data);
+      setError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to fetch entry levels';
+      setError(message);
+      console.error('Failed to fetch entry levels:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [symbol, mode, timeframe]);
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    await fetchLevels();
+  }, [fetchLevels]);
+
+  useEffect(() => {
+    fetchLevels();
+  }, [fetchLevels]);
+
+  return {
+    levels,
+    isLoading,
+    error,
+    refresh,
+  };
+}
+
 // ==================== Combined Hook ====================
 
 /**
@@ -390,16 +567,19 @@ export function useScoreBreakdown(symbol: string): UseScoreBreakdownResult {
 export function useEntryDecision() {
   const strategiesResult = useEntryDecisionStrategies();
   const candidatesResult = useEntryCandidates();
+  const patternUpdatesResult = usePatternUpdates();
 
   return {
     strategies: strategiesResult,
     candidates: candidatesResult,
-    isLoading: strategiesResult.isLoading || candidatesResult.isLoading,
-    hasError: !!strategiesResult.error || !!candidatesResult.error,
+    patternUpdates: patternUpdatesResult,
+    isLoading: strategiesResult.isLoading || candidatesResult.isLoading || patternUpdatesResult.isLoading,
+    hasError: !!strategiesResult.error || !!candidatesResult.error || !!patternUpdatesResult.error,
     refresh: async () => {
       await Promise.all([
         strategiesResult.refresh(),
         candidatesResult.refresh(),
+        patternUpdatesResult.refresh(),
       ]);
     },
   };

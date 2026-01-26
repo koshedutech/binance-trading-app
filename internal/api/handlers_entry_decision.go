@@ -8,6 +8,7 @@ import (
 
 	"binance-trading-bot/internal/coinprofiler"
 	"binance-trading-bot/internal/entrydecision"
+	"binance-trading-bot/internal/events"
 
 	"github.com/gin-gonic/gin"
 )
@@ -512,4 +513,181 @@ func calculatePatternPriority(progress *entrydecision.PatternProgress) int {
 	}
 
 	return priority
+}
+
+// ==================== REAL-TIME PATTERN UPDATE BROADCASTING ====================
+
+// PatternUpdateResponse is the WebSocket message format for pattern updates.
+type PatternUpdateResponse struct {
+	EventType string                       `json:"event_type"`
+	Data      entrydecision.PatternUpdate  `json:"data"`
+	Timestamp time.Time                    `json:"timestamp"`
+}
+
+// EntryLevelsResponse is used for displaying entry levels in the UI.
+type EntryLevelsResponse struct {
+	Symbol          string  `json:"symbol"`
+	EntryPrice      float64 `json:"entry_price"`
+	StopLoss        float64 `json:"stop_loss"`
+	TakeProfit      float64 `json:"take_profit"`
+	RiskPercent     float64 `json:"risk_percent"`
+	RewardPercent   float64 `json:"reward_percent"`
+	RiskRewardRatio float64 `json:"risk_reward_ratio"`
+	CurrentPrice    float64 `json:"current_price,omitempty"`
+}
+
+// PatternUpdateBroadcaster provides WebSocket broadcasting for pattern updates.
+// This implements the entrydecision.PatternUpdateBroadcaster interface.
+type PatternUpdateBroadcaster struct {
+	server *Server
+}
+
+// NewPatternUpdateBroadcaster creates a new pattern update broadcaster.
+func NewPatternUpdateBroadcaster(server *Server) *PatternUpdateBroadcaster {
+	return &PatternUpdateBroadcaster{server: server}
+}
+
+// BroadcastPatternUpdate broadcasts a pattern update to all connected WebSocket clients.
+func (b *PatternUpdateBroadcaster) BroadcastPatternUpdate(update entrydecision.PatternUpdate) error {
+	if userWSHub == nil {
+		return nil
+	}
+
+	// Create event with the pattern update data
+	event := events.Event{
+		Type:      events.EventEntryDecisionPatternUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"symbol":       update.Symbol,
+			"timeframe":    update.Timeframe,
+			"mode":         update.Mode,
+			"strategy":     update.Strategy,
+			"sub_strategy": update.SubStrategy,
+			"current_step": update.CurrentStep,
+			"total_steps":  update.TotalSteps,
+			"status":       string(update.Status),
+			"step_details": update.StepDetails,
+			"entry_levels": update.EntryLevels,
+			"direction":    update.Direction,
+			"updated_at":   update.UpdatedAt,
+		},
+	}
+
+	// Broadcast to all connected clients
+	userWSHub.BroadcastToAll(event)
+
+	return nil
+}
+
+// handleGetPatternUpdates handles GET /api/futures/entry-decision/pattern-updates
+// Returns all current pattern updates (for initial page load).
+func (s *Server) handleGetPatternUpdates(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	// Get realtime matcher
+	realtimeMatcher := s.getOrCreateRealtimeMatcher(userID)
+	if realtimeMatcher == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"updates": []interface{}{},
+			"count":   0,
+		})
+		return
+	}
+
+	// Get all pattern updates
+	updates := realtimeMatcher.GetAllPatternUpdates()
+
+	c.JSON(http.StatusOK, gin.H{
+		"updates": updates,
+		"count":   len(updates),
+	})
+}
+
+// getOrCreateRealtimeMatcher returns or creates a realtime pattern matcher for a user.
+func (s *Server) getOrCreateRealtimeMatcher(userID string) *entrydecision.RealtimePatternMatcher {
+	entryDecisionCacheMu.RLock()
+	// Check if we have a cached realtime matcher
+	// For now, return nil - will be initialized when CoinProfiler integration is complete
+	entryDecisionCacheMu.RUnlock()
+
+	// Get pattern matcher
+	patternMatcher := s.getOrCreatePatternMatcher(userID)
+	if patternMatcher == nil {
+		return nil
+	}
+
+	// Create realtime matcher
+	realtimeMatcher := entrydecision.NewRealtimePatternMatcher(patternMatcher, nil)
+
+	// Wire up broadcaster
+	broadcaster := NewPatternUpdateBroadcaster(s)
+	realtimeMatcher.WirePatternBroadcaster(broadcaster)
+
+	return realtimeMatcher
+}
+
+// ==================== ENTRY LEVELS ENDPOINT ====================
+
+// handleGetEntryLevels handles GET /api/futures/entry-decision/entry-levels/:symbol
+// Returns calculated entry, SL, and TP levels for a symbol.
+func (s *Server) handleGetEntryLevels(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	symbol := strings.ToUpper(strings.TrimSpace(c.Param("symbol")))
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "INVALID_SYMBOL",
+			"message": "Symbol is required",
+		})
+		return
+	}
+
+	mode := strings.ToLower(c.Query("mode"))
+	if mode == "" {
+		mode = "scalp"
+	}
+
+	timeframe := c.Query("timeframe")
+	if timeframe == "" {
+		timeframe = getDefaultTimeframeForMode(mode)
+	}
+
+	// Get realtime matcher
+	realtimeMatcher := s.getOrCreateRealtimeMatcher(userID)
+	if realtimeMatcher == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"symbol":  symbol,
+			"message": "No active pattern for entry level calculation",
+		})
+		return
+	}
+
+	// Get pattern update with entry levels
+	update := realtimeMatcher.GetPatternUpdate(symbol, mode, timeframe)
+	if update == nil || update.EntryLevels == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"symbol":  symbol,
+			"message": "No entry levels available - pattern not at required stage",
+		})
+		return
+	}
+
+	response := EntryLevelsResponse{
+		Symbol:          symbol,
+		EntryPrice:      update.EntryLevels.EntryPrice,
+		StopLoss:        update.EntryLevels.StopLoss,
+		TakeProfit:      update.EntryLevels.TakeProfit,
+		RiskPercent:     update.EntryLevels.RiskPercent,
+		RewardPercent:   update.EntryLevels.RewardPercent,
+		RiskRewardRatio: update.EntryLevels.RiskRewardRatio,
+		CurrentPrice:    update.EntryLevels.CurrentPrice,
+	}
+
+	c.JSON(http.StatusOK, response)
 }

@@ -25,3 +25,13 @@ export {
 
 // Pattern list container (Story 11.46)
 export { default as PatternList } from './PatternList';
+
+// Requirements panel (displays strategy requirements)
+export { default as RequirementsPanel, RequirementsBadge } from './RequirementsPanel';
+
+// Coin stage card (real-time coin monitoring with entry levels)
+export {
+  default as CoinStageCard,
+  CoinStageListItem,
+  CoinStageGrid,
+} from './CoinStageCard';

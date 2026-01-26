@@ -38,6 +38,14 @@ type CoinProfiler struct {
 	coinData         map[string]*CoinData            // symbol -> data
 	combinedReqs     *CombinedRequirements           // Current combined requirements (for API)
 
+	// Historical candle storage for pattern detection
+	// Key: "SYMBOL:TIMEFRAME" (e.g., "BTCUSDT:5m")
+	candleHistory   map[string]*CandleHistory
+	candleHistoryMu sync.RWMutex
+
+	// Callback for candle close events (used by pattern matcher)
+	onCandleClose CandleCloseCallback
+
 	// Metrics
 	updateCount      int64
 	updatesPerSecond float64
@@ -54,6 +62,10 @@ type CoinProfiler struct {
 	mu sync.RWMutex
 	wg sync.WaitGroup
 }
+
+// CandleCloseCallback is called when a candle closes (is_closed_bar: true).
+// This enables real-time pattern evaluation.
+type CandleCloseCallback func(symbol, timeframe string, candles []HistoricalCandle)
 
 // NewCoinProfiler creates a new Coin Profiler instance.
 // If config is nil, default configuration will be used.
@@ -72,6 +84,7 @@ func NewCoinProfiler(config *CoinProfilerConfig, logger *logging.Logger) *CoinPr
 		connectionState: ConnectionStateDisconnected,
 		subscriptions:   make(map[string]*SubscriptionRequest),
 		coinData:        make(map[string]*CoinData),
+		candleHistory:   make(map[string]*CandleHistory),
 		ctx:             ctx,
 		cancelFunc:      cancel,
 		stopChan:        make(chan struct{}),
@@ -747,4 +760,122 @@ func (cp *CoinProfiler) SetSubscriptionsFromCombined(combined *CombinedRequireme
 	}
 
 	return nil
+}
+
+// ============================================================================
+// CANDLE HISTORY MANAGEMENT
+// Epic 14: Entry Decision Strategy Requirements & Real-Time Monitoring
+// ============================================================================
+
+// AddClosedCandle stores a closed candle in the history buffer for pattern detection.
+// This should be called when a candle closes (is_closed_bar: true).
+func (cp *CoinProfiler) AddClosedCandle(symbol, timeframe string, candle HistoricalCandle) {
+	key := CandleHistoryKey(symbol, timeframe)
+
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+
+	// Create history buffer if not exists
+	if cp.candleHistory[key] == nil {
+		cp.candleHistory[key] = NewCandleHistory(DefaultCandleHistorySize)
+	}
+
+	// Add the candle
+	cp.candleHistory[key].Add(candle)
+
+	// Trigger callback if set
+	if cp.onCandleClose != nil {
+		candles := cp.candleHistory[key].GetAll()
+		// Call callback in goroutine to avoid blocking
+		go cp.onCandleClose(symbol, timeframe, candles)
+	}
+}
+
+// GetCandleHistory returns historical candles for a symbol+timeframe combination.
+// Returns nil if no history exists.
+func (cp *CoinProfiler) GetCandleHistory(symbol, timeframe string) []HistoricalCandle {
+	key := CandleHistoryKey(symbol, timeframe)
+
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+
+	history := cp.candleHistory[key]
+	if history == nil {
+		return nil
+	}
+
+	return history.GetAll()
+}
+
+// GetRecentCandles returns the most recent n candles for a symbol+timeframe.
+// Returns nil if no history exists.
+func (cp *CoinProfiler) GetRecentCandles(symbol, timeframe string, count int) []HistoricalCandle {
+	key := CandleHistoryKey(symbol, timeframe)
+
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+
+	history := cp.candleHistory[key]
+	if history == nil {
+		return nil
+	}
+
+	return history.GetRecent(count)
+}
+
+// GetCandleHistoryCount returns the number of historical candles stored for a symbol+timeframe.
+func (cp *CoinProfiler) GetCandleHistoryCount(symbol, timeframe string) int {
+	key := CandleHistoryKey(symbol, timeframe)
+
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+
+	history := cp.candleHistory[key]
+	if history == nil {
+		return 0
+	}
+
+	return history.Count()
+}
+
+// ClearCandleHistory clears the candle history for a symbol+timeframe.
+func (cp *CoinProfiler) ClearCandleHistory(symbol, timeframe string) {
+	key := CandleHistoryKey(symbol, timeframe)
+
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+
+	if history := cp.candleHistory[key]; history != nil {
+		history.Clear()
+	}
+}
+
+// ClearAllCandleHistory clears all candle history.
+func (cp *CoinProfiler) ClearAllCandleHistory() {
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+
+	cp.candleHistory = make(map[string]*CandleHistory)
+}
+
+// SetCandleCloseCallback sets a callback function that is called when a candle closes.
+// This enables real-time pattern evaluation in the Entry Decision system.
+func (cp *CoinProfiler) SetCandleCloseCallback(callback CandleCloseCallback) {
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+	cp.onCandleClose = callback
+}
+
+// GetCandleHistoryStats returns statistics about the candle history storage.
+func (cp *CoinProfiler) GetCandleHistoryStats() map[string]int {
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+
+	stats := make(map[string]int)
+	for key, history := range cp.candleHistory {
+		if history != nil {
+			stats[key] = history.Count()
+		}
+	}
+	return stats
 }

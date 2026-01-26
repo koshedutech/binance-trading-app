@@ -15,9 +15,11 @@ import {
   TrendingDown,
   CheckCircle,
   AlertCircle,
+  Info,
 } from 'lucide-react';
 import PatternProgress, { PatternProgressCompact } from './PatternProgress';
 import ScoreDisplay, { ScoreDisplayCompact } from './ScoreDisplay';
+import RequirementsPanel from './RequirementsPanel';
 import type {
   StrategyMatch,
   CoinMatch,
@@ -199,6 +201,7 @@ export default function StrategyCard({
   compact = false,
 }: StrategyCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [showRequirements, setShowRequirements] = useState(false);
 
   const readyCount = countReady(strategy.coins);
   const watchingCount = countWatching(strategy.coins);
@@ -292,6 +295,34 @@ export default function StrategyCard({
       {/* Expanded content: Coin list */}
       {expanded && strategy.coins.length > 0 && (
         <div className="border-t border-gray-700/50 p-4 space-y-2">
+          {/* Requirements toggle button */}
+          <div className="flex justify-end mb-2">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowRequirements(!showRequirements);
+              }}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-white bg-gray-800/50 hover:bg-gray-700/50 rounded transition-colors"
+            >
+              <Info className="w-3 h-3" />
+              {showRequirements ? 'Hide' : 'Show'} Requirements
+            </button>
+          </div>
+
+          {/* Requirements panel */}
+          {showRequirements && (
+            <div className="mb-3">
+              <RequirementsPanel
+                strategy={strategy.strategy}
+                subStrategy={strategy.sub_strategy}
+                timeframe={strategy.timeframe}
+                defaultExpanded={true}
+              />
+            </div>
+          )}
+
+          {/* Coin list */}
           {sortedCoins.map((coin) => (
             <CoinRow
               key={coin.symbol}
@@ -306,12 +337,41 @@ export default function StrategyCard({
 
       {/* Empty state */}
       {expanded && strategy.coins.length === 0 && (
-        <div className="border-t border-gray-700/50 p-4 text-center">
-          <AlertCircle className="w-8 h-8 mx-auto mb-2 text-gray-600" />
-          <p className="text-sm text-gray-500">No coins being tracked</p>
-          <p className="text-xs text-gray-600 mt-1">
-            Coins will appear here when they match this strategy's criteria
-          </p>
+        <div className="border-t border-gray-700/50 p-4">
+          {/* Requirements toggle for empty state too */}
+          <div className="flex justify-end mb-2">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowRequirements(!showRequirements);
+              }}
+              className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-white bg-gray-800/50 hover:bg-gray-700/50 rounded transition-colors"
+            >
+              <Info className="w-3 h-3" />
+              {showRequirements ? 'Hide' : 'Show'} Requirements
+            </button>
+          </div>
+
+          {/* Requirements panel */}
+          {showRequirements && (
+            <div className="mb-3">
+              <RequirementsPanel
+                strategy={strategy.strategy}
+                subStrategy={strategy.sub_strategy}
+                timeframe={strategy.timeframe}
+                defaultExpanded={true}
+              />
+            </div>
+          )}
+
+          <div className="text-center">
+            <AlertCircle className="w-8 h-8 mx-auto mb-2 text-gray-600" />
+            <p className="text-sm text-gray-500">No coins being tracked</p>
+            <p className="text-xs text-gray-600 mt-1">
+              Coins will appear here when they match this strategy's criteria
+            </p>
+          </div>
         </div>
       )}
     </div>

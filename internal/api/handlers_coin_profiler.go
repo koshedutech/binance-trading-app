@@ -128,7 +128,7 @@ func (s *Server) handleGetCoinProfilerCoin(c *gin.Context) {
 }
 
 // handleGetCoinProfilerRequirements returns the current aggregated data requirements.
-// This shows what timeframes and data fields are needed based on enabled strategies.
+// This shows what timeframes and data fields are needed based on enabled strategies and positions.
 // GET /api/futures/coin-profiler/requirements
 func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 	userID, ok := s.getUserIDRequired(c)
@@ -147,47 +147,110 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 	profiler := s.userAutopilotManager.GetCoinProfiler(userID)
 	if profiler == nil {
 		c.JSON(http.StatusOK, gin.H{
-			"all_timeframes": []string{},
-			"all_data_fields": []string{},
-			"total_strategies": 0,
-			"subscriptions": map[string]interface{}{},
+			"all_timeframes":    []string{},
+			"all_data_fields":   []string{},
+			"all_symbols":       []string{},
+			"strategy_count":    0,
+			"position_count":    0,
+			"from_strategies":   []interface{}{},
+			"from_positions":    []interface{}{},
+			"subscriptions":     map[string]interface{}{},
 		})
 		return
 	}
 
-	// Get current subscriptions as a proxy for requirements
-	subscriptions := profiler.GetSubscriptions()
+	// Get combined requirements which has detailed strategy and position info
+	combined := profiler.GetCombinedRequirements()
 
-	// Build timeframe and data field sets from subscriptions
-	timeframeSet := make(map[string]bool)
-	for _, sub := range subscriptions {
-		for _, tf := range sub.Timeframes {
-			timeframeSet[tf] = true
+	// Build response with detailed breakdown
+	response := gin.H{
+		"all_timeframes":  []string{},
+		"all_data_fields": []string{"ohlc", "volume", "taker_buy_volume"},
+		"all_symbols":     []string{},
+		"strategy_count":  0,
+		"position_count":  0,
+		"from_strategies": []interface{}{},
+		"from_positions":  []interface{}{},
+		"subscriptions":   map[string]interface{}{},
+	}
+
+	if combined != nil {
+		response["all_timeframes"] = combined.AllTimeframes
+		response["all_data_fields"] = combined.AllDataFields
+		response["all_symbols"] = combined.AllSymbols
+		response["strategy_count"] = combined.StrategyCount
+		response["position_count"] = combined.PositionCount
+
+		// Extract strategy sources (symbols tracked for entry decisions)
+		fromStrategies := []interface{}{}
+		fromPositions := []interface{}{}
+
+		for _, symReq := range combined.BySymbol {
+			if symReq.Source == "strategy" || symReq.Source == "both" {
+				// Build strategy info
+				stratInfo := map[string]interface{}{
+					"symbol":     symReq.Symbol,
+					"timeframes": symReq.Timeframes,
+					"strategies": symReq.Strategies,
+				}
+				fromStrategies = append(fromStrategies, stratInfo)
+			}
+
+			if symReq.Source == "position" || symReq.Source == "both" {
+				// Build position info
+				for _, pos := range symReq.Positions {
+					posInfo := map[string]interface{}{
+						"symbol":     pos.Symbol,
+						"mode":       pos.Mode,
+						"side":       pos.Side,
+						"exit_mode":  pos.ExitMode,
+						"timeframes": pos.Timeframes,
+					}
+					fromPositions = append(fromPositions, posInfo)
+				}
+			}
 		}
-	}
 
-	// Convert set to sorted slice
-	timeframes := make([]string, 0, len(timeframeSet))
-	for tf := range timeframeSet {
-		timeframes = append(timeframes, tf)
-	}
+		response["from_strategies"] = fromStrategies
+		response["from_positions"] = fromPositions
 
-	// Convert subscriptions map to JSON-friendly format
-	subsMap := make(map[string]interface{})
-	for symbol, sub := range subscriptions {
-		subsMap[symbol] = map[string]interface{}{
-			"timeframes": sub.Timeframes,
-			"source":     sub.Source,
-			"strategy":   sub.Strategy,
+		// Build subscriptions map
+		subsMap := make(map[string]interface{})
+		for symbol, symReq := range combined.BySymbol {
+			subsMap[symbol] = map[string]interface{}{
+				"timeframes":  symReq.Timeframes,
+				"data_fields": symReq.DataFields,
+				"source":      symReq.Source,
+				"strategies":  symReq.Strategies,
+				"positions":   symReq.Positions,
+			}
 		}
+		response["subscriptions"] = subsMap
+	} else {
+		// Fallback to subscriptions if combined requirements not available
+		subscriptions := profiler.GetSubscriptions()
+		subsMap := make(map[string]interface{})
+		timeframeSet := make(map[string]bool)
+
+		for symbol, sub := range subscriptions {
+			for _, tf := range sub.Timeframes {
+				timeframeSet[tf] = true
+			}
+			subsMap[symbol] = map[string]interface{}{
+				"timeframes": sub.Timeframes,
+				"source":     sub.Source,
+			}
+		}
+
+		timeframes := make([]string, 0, len(timeframeSet))
+		for tf := range timeframeSet {
+			timeframes = append(timeframes, tf)
+		}
+		response["all_timeframes"] = timeframes
+		response["subscriptions"] = subsMap
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"all_timeframes":   timeframes,
-		"all_data_fields":  []string{"ohlc", "volume", "taker_buy_volume"}, // Standard fields
-		"total_strategies": len(subscriptions),
-		"subscriptions":    subsMap,
-	})
+	c.JSON(http.StatusOK, response)
 }
 
 // handleStartCoinProfiler starts the Coin Profiler for the authenticated user.

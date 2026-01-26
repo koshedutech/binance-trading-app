@@ -205,3 +205,123 @@ type TickerMessage struct {
 	LastTradeID     int64  `json:"L"` // Last trade ID
 	TradeCount      int64  `json:"n"` // Total number of trades
 }
+
+// ============================================================================
+// CANDLE HISTORY - Circular buffer for pattern detection
+// Story: Entry Decision Strategy Requirements & Real-Time Monitoring
+// ============================================================================
+
+// HistoricalCandle represents a closed candle for pattern detection.
+// This is a simplified version of TimeframeData focused on pattern matching.
+type HistoricalCandle struct {
+	OpenTime     time.Time `json:"open_time"`
+	CloseTime    time.Time `json:"close_time"`
+	Open         float64   `json:"open"`
+	High         float64   `json:"high"`
+	Low          float64   `json:"low"`
+	Close        float64   `json:"close"`
+	Volume       float64   `json:"volume"`
+	TakerBuyVol  float64   `json:"taker_buy_vol"`
+	TakerSellVol float64   `json:"taker_sell_vol"`
+	QuoteVolume  float64   `json:"quote_volume"`
+	TradeCount   int       `json:"trade_count"`
+}
+
+// CandleHistory stores historical candles in a circular buffer for pattern detection.
+// Thread-safe for concurrent reads and writes.
+type CandleHistory struct {
+	candles  []HistoricalCandle // Circular buffer
+	maxSize  int                // Maximum capacity (default: 50)
+	count    int                // Current number of candles
+	writeIdx int                // Next write position
+}
+
+// DefaultCandleHistorySize is the default number of candles to keep in history.
+const DefaultCandleHistorySize = 50
+
+// NewCandleHistory creates a new candle history buffer with the specified size.
+func NewCandleHistory(maxSize int) *CandleHistory {
+	if maxSize <= 0 {
+		maxSize = DefaultCandleHistorySize
+	}
+	return &CandleHistory{
+		candles: make([]HistoricalCandle, maxSize),
+		maxSize: maxSize,
+	}
+}
+
+// Add adds a closed candle to the history.
+// Older candles are overwritten when buffer is full (circular behavior).
+func (ch *CandleHistory) Add(candle HistoricalCandle) {
+	ch.candles[ch.writeIdx] = candle
+	ch.writeIdx = (ch.writeIdx + 1) % ch.maxSize
+	if ch.count < ch.maxSize {
+		ch.count++
+	}
+}
+
+// GetAll returns all candles in chronological order (oldest first).
+// Returns a copy to prevent external modification.
+func (ch *CandleHistory) GetAll() []HistoricalCandle {
+	if ch.count == 0 {
+		return nil
+	}
+
+	result := make([]HistoricalCandle, ch.count)
+	if ch.count < ch.maxSize {
+		// Buffer not full yet - candles are at indices 0..count-1
+		copy(result, ch.candles[:ch.count])
+	} else {
+		// Buffer full - read from writeIdx (oldest) to end, then from start to writeIdx
+		// First part: from writeIdx to end
+		firstPart := ch.candles[ch.writeIdx:]
+		copy(result, firstPart)
+		// Second part: from start to writeIdx
+		secondPart := ch.candles[:ch.writeIdx]
+		copy(result[len(firstPart):], secondPart)
+	}
+	return result
+}
+
+// GetRecent returns the most recent n candles in chronological order.
+// If n exceeds available candles, returns all available.
+func (ch *CandleHistory) GetRecent(n int) []HistoricalCandle {
+	all := ch.GetAll()
+	if len(all) <= n {
+		return all
+	}
+	return all[len(all)-n:]
+}
+
+// Count returns the current number of candles in history.
+func (ch *CandleHistory) Count() int {
+	return ch.count
+}
+
+// IsFull returns true if the buffer has reached maximum capacity.
+func (ch *CandleHistory) IsFull() bool {
+	return ch.count >= ch.maxSize
+}
+
+// Clear removes all candles from history.
+func (ch *CandleHistory) Clear() {
+	ch.candles = make([]HistoricalCandle, ch.maxSize)
+	ch.count = 0
+	ch.writeIdx = 0
+}
+
+// Last returns the most recent candle, or nil if empty.
+func (ch *CandleHistory) Last() *HistoricalCandle {
+	if ch.count == 0 {
+		return nil
+	}
+	// Last written candle is at (writeIdx - 1 + maxSize) % maxSize
+	lastIdx := (ch.writeIdx - 1 + ch.maxSize) % ch.maxSize
+	candle := ch.candles[lastIdx]
+	return &candle
+}
+
+// CandleHistoryKey generates a unique key for symbol+timeframe combination.
+func CandleHistoryKey(symbol, timeframe string) string {
+	return symbol + ":" + timeframe
+}

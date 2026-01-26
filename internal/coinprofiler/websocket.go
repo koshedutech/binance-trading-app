@@ -676,6 +676,24 @@ func (wsm *WebSocketManager) updateCoinData(symbol string, tfData *TimeframeData
 
 	wsm.profiler.mu.Unlock()
 
+	// Store closed candles in history for pattern detection (outside main lock)
+	if tfData.IsClosedBar {
+		historicalCandle := HistoricalCandle{
+			OpenTime:     tfData.OpenTime,
+			CloseTime:    tfData.CloseTime,
+			Open:         tfData.Open,
+			High:         tfData.High,
+			Low:          tfData.Low,
+			Close:        tfData.Close,
+			Volume:       tfData.Volume,
+			TakerBuyVol:  tfData.TakerBuyVol,
+			TakerSellVol: tfData.TakerSellVol,
+			QuoteVolume:  tfData.QuoteVolume,
+			TradeCount:   tfData.TradeCount,
+		}
+		wsm.profiler.AddClosedCandle(symbol, tfData.Timeframe, historicalCandle)
+	}
+
 	// Broadcast real-time update to WebSocket clients (outside lock)
 	if wsm.onCoinUpdate != nil {
 		wsm.onCoinUpdate(map[string]interface{}{
