@@ -22,7 +22,8 @@ type CoinProfiler struct {
 	config *CoinProfilerConfig
 
 	// Dependencies
-	logger *logging.Logger
+	logger    *logging.Logger
+	wsManager *WebSocketManager // WebSocket manager for real-time data
 
 	// State
 	running         bool
@@ -76,6 +77,9 @@ func NewCoinProfiler(config *CoinProfilerConfig, logger *logging.Logger) *CoinPr
 		updateChan:      make(chan interface{}, 1000), // Buffered channel for updates
 	}
 
+	// Create WebSocket manager (connects to Binance Futures WebSocket)
+	cp.wsManager = NewWebSocketManager(config, cp)
+
 	return cp
 }
 
@@ -103,6 +107,18 @@ func (cp *CoinProfiler) Start() error {
 
 	cp.log("Starting Coin Profiler service")
 
+	// Start the WebSocket manager for real-time data
+	if cp.wsManager != nil {
+		if err := cp.wsManager.Start(); err != nil {
+			cp.mu.Lock()
+			cp.running = false
+			cp.connectionState = ConnectionStateDisconnected
+			cp.mu.Unlock()
+			return fmt.Errorf("%s failed to start WebSocket: %w", LogPrefix, err)
+		}
+		cp.log("WebSocket manager started")
+	}
+
 	// Start the main processing loop
 	cp.wg.Add(1)
 	go cp.runLoop()
@@ -110,6 +126,10 @@ func (cp *CoinProfiler) Start() error {
 	// Start metrics collection
 	cp.wg.Add(1)
 	go cp.metricsLoop()
+
+	// Start connection state sync loop
+	cp.wg.Add(1)
+	go cp.syncConnectionState()
 
 	cp.log("Coin Profiler started successfully")
 	return nil
@@ -134,6 +154,14 @@ func (cp *CoinProfiler) Stop() error {
 	cp.mu.Unlock()
 
 	cp.log("Stopping Coin Profiler service")
+
+	// Stop WebSocket manager first
+	if cp.wsManager != nil {
+		if err := cp.wsManager.Stop(); err != nil {
+			cp.log("Warning: WebSocket manager stop error: %v", err)
+		}
+		cp.log("WebSocket manager stopped")
+	}
 
 	// Signal all goroutines to stop
 	cp.cancelFunc()
@@ -175,15 +203,29 @@ func (cp *CoinProfiler) GetStatus() *CoinProfilerStatus {
 	cp.mu.RLock()
 	defer cp.mu.RUnlock()
 
+	// Get WebSocket connection status
+	connected := cp.connectionState == ConnectionStateConnected
+	reconnectCount := cp.reconnectCount
+	lastError := cp.lastError
+
+	if cp.wsManager != nil {
+		wsStatus := cp.wsManager.GetStatus()
+		connected = wsStatus.Connected
+		reconnectCount = wsStatus.ReconnectCount
+		if wsStatus.LastError != "" {
+			lastError = wsStatus.LastError
+		}
+	}
+
 	status := &CoinProfilerStatus{
 		Running:           cp.running,
-		Connected:         cp.connectionState == ConnectionStateConnected,
+		Connected:         connected,
 		SymbolCount:       len(cp.coinData),
 		SubscriptionCount: len(cp.subscriptions),
 		UpdatesPerSecond:  cp.updatesPerSecond,
 		LastUpdateTime:    cp.lastUpdateTime,
-		LastError:         cp.lastError,
-		ReconnectCount:    cp.reconnectCount,
+		LastError:         lastError,
+		ReconnectCount:    reconnectCount,
 		StartedAt:         cp.startedAt,
 	}
 
@@ -380,6 +422,37 @@ func (cp *CoinProfiler) metricsLoop() {
 			cp.updatesPerSecond = float64(currentCount - prevUpdateCount)
 			prevUpdateCount = currentCount
 			cp.mu.Unlock()
+		}
+	}
+}
+
+// syncConnectionState syncs the connection state from the WebSocket manager.
+func (cp *CoinProfiler) syncConnectionState() {
+	defer cp.wg.Done()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cp.ctx.Done():
+			return
+		case <-cp.stopChan:
+			return
+		case <-ticker.C:
+			if cp.wsManager != nil {
+				wsStatus := cp.wsManager.GetStatus()
+				cp.mu.Lock()
+				if wsStatus.Connected {
+					cp.connectionState = ConnectionStateConnected
+				} else if wsStatus.ConnectionState == "connecting" {
+					cp.connectionState = ConnectionStateConnecting
+				} else {
+					cp.connectionState = ConnectionStateDisconnected
+				}
+				cp.reconnectCount = wsStatus.ReconnectCount
+				cp.mu.Unlock()
+			}
 		}
 	}
 }

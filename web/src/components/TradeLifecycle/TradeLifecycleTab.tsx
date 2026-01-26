@@ -30,6 +30,7 @@ import { VolumeImbalanceCard } from '../EntryDecisionEngine';
 import { StrategyFirstView } from '../EntryDecision';
 import { useVolumeImbalancePatterns } from '../../hooks/useStrategyHierarchy';
 import { TradingToggle } from '../TradingControl';
+import { CoinProfilerCard } from '../CoinProfiler';
 import {
   OrderChain,
   ChainOrder,
@@ -632,6 +633,10 @@ export default function TradeLifecycleTab({
         {/* Trade Cycle Content - Three expandable sections */}
         {tradeCycleExpanded && (
           <div className="border-t border-gray-700 p-4 space-y-4">
+
+            {/* ==================== SECTION 0: COIN PROFILER ==================== */}
+            {/* First expandable - Real-time data hub for Chain Trading System */}
+            <CoinProfilerCard />
 
             {/* ==================== SECTION 1: ENTRY DECISION ENGINE ==================== */}
             <EntryDecisionEngineCard defaultExpanded={true} />

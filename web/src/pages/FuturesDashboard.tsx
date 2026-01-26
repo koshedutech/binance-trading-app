@@ -12,7 +12,6 @@ import InstanceControlPanel from '../components/InstanceControlPanel';
 import CollapsibleCard from '../components/CollapsibleCard';
 import PanicButton from '../components/PanicButton';
 import NewsDashboard from '../components/NewsDashboard';
-import { CoinProfilerCard } from '../components/CoinProfiler';
 import TradeSourceStatsPanel from '../components/TradeSourceStatsPanel';
 import TradingModeToggle from '../components/TradingModeToggle';
 import ModeAllocationPanel from '../components/ModeAllocationPanel';
@@ -327,11 +326,6 @@ export default function FuturesDashboard() {
       {/* News Dashboard */}
       <div className="mb-4">
         <NewsDashboard />
-      </div>
-
-      {/* Coin Profiler - Real-time data hub for Chain Trading System */}
-      <div className="mb-4">
-        <CoinProfilerCard />
       </div>
 
       {/* Ginie AI Trader - Primary Futures Trading AI */}
