@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Database,
   ChevronDown,
@@ -7,14 +7,20 @@ import {
   Square,
   RefreshCw,
   AlertCircle,
+  Zap,
+  Activity,
 } from 'lucide-react';
 import {
   useCoinProfilerStatus,
-  useCoinProfilerCoins,
   useCoinProfilerControl,
+  useCoinProfilerRequirements,
+  useCoinProfilerRealtime,
+  type CoinDataUpdate,
 } from '../../hooks/useCoinProfiler';
+import { wsService } from '../../services/websocket';
 import CoinProfilerStatus, { CoinProfilerStatusDetailed } from './CoinProfilerStatus';
 import CoinList from './CoinList';
+import RequirementsBreakdown from './RequirementsBreakdown';
 
 // ============================================================================
 // Epic 14: Coin Profiler Card Component
@@ -26,18 +32,53 @@ import CoinList from './CoinList';
  *
  * This component serves as the central data hub visualization for the Chain Trading System.
  * It displays real-time WebSocket connection status, tracked symbols, and data collection metrics.
+ *
+ * REAL-TIME UPDATES:
+ * - Subscribes to COIN_DATA_UPDATE WebSocket events
+ * - Updates individual coin data immediately when received (millisecond updates)
+ * - No polling - direct 1:1 push from backend to frontend
  */
 export default function CoinProfilerCard() {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<'status' | 'coins'>('status');
+  const [activeTab, setActiveTab] = useState<'sources' | 'status' | 'coins'>('sources');
+  const [wsConnected, setWsConnected] = useState(wsService.isConnected());
 
   // Hooks for data fetching
   const { data: status, isLoading: statusLoading, refetch: refetchStatus } = useCoinProfilerStatus();
-  const { data: coinsData, isLoading: coinsLoading, refetch: refetchCoins } = useCoinProfilerCoins(
-    isExpanded && activeTab === 'coins', // Only auto-poll when visible
+  const { data: requirements, isLoading: reqsLoading, refetch: refetchReqs } = useCoinProfilerRequirements(
+    isExpanded && activeTab === 'sources', // Only auto-poll when visible
     10000 // Poll every 10 seconds
   );
   const { start, stop, isStarting, isStopping, error: controlError, reset: resetControl } = useCoinProfilerControl();
+
+  // Real-time coin data with WebSocket updates
+  const { coins, total, lastUpdate, updateCount, handleCoinUpdate, refetch: refetchCoins } = useCoinProfilerRealtime(wsConnected);
+
+  // Subscribe to WebSocket events for real-time coin updates
+  useEffect(() => {
+    const handleWsEvent = (event: { type: string; data?: CoinDataUpdate }) => {
+      if (event.type === 'COIN_DATA_UPDATE' && event.data) {
+        handleCoinUpdate(event.data);
+      }
+    };
+
+    const handleConnect = () => setWsConnected(true);
+    const handleDisconnect = () => setWsConnected(false);
+
+    // Subscribe to coin data updates
+    wsService.subscribe('COIN_DATA_UPDATE', handleWsEvent);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Set initial state
+    setWsConnected(wsService.isConnected());
+
+    return () => {
+      wsService.unsubscribe('COIN_DATA_UPDATE', handleWsEvent);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
+    };
+  }, [handleCoinUpdate]);
 
   // Handle start/stop actions
   const handleStart = async () => {
@@ -63,7 +104,7 @@ export default function CoinProfilerCard() {
     if (!status) return null;
     if (!status.running) return 'Stopped';
     if (!status.connected) return 'Reconnecting';
-    return `${status.symbol_count} coins`;
+    return `${total || status.symbol_count} coins`;
   };
 
   const getBadgeColor = (): 'green' | 'yellow' | 'red' | 'gray' => {
@@ -80,6 +121,12 @@ export default function CoinProfilerCard() {
     gray: 'bg-gray-500/20 text-gray-400',
   };
 
+  // Format update rate
+  const formatUpdateRate = () => {
+    if (!status?.updates_per_second) return null;
+    return `${status.updates_per_second}/s`;
+  };
+
   return (
     <div className="bg-gray-700/30 rounded-lg overflow-hidden">
       {/* Header - Clickable to expand */}
@@ -93,6 +140,19 @@ export default function CoinProfilerCard() {
           {getBadgeContent() && (
             <span className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColors[getBadgeColor()]}`}>
               {getBadgeContent()}
+            </span>
+          )}
+          {/* Real-time indicator */}
+          {status?.running && wsConnected && (
+            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/20 text-cyan-400">
+              <Zap className="w-3 h-3" />
+              LIVE
+            </span>
+          )}
+          {/* Update rate */}
+          {formatUpdateRate() && (
+            <span className="text-[10px] text-gray-500">
+              {formatUpdateRate()}
             </span>
           )}
         </div>
@@ -171,6 +231,19 @@ export default function CoinProfilerCard() {
           {/* Tab Navigation */}
           <div className="flex items-center gap-1 mb-3 bg-gray-800 rounded-lg p-1">
             <button
+              onClick={() => {
+                setActiveTab('sources');
+                refetchReqs(); // Refresh requirements when switching to tab
+              }}
+              className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                activeTab === 'sources'
+                  ? 'bg-gray-700 text-white'
+                  : 'text-gray-400 hover:text-gray-300'
+              }`}
+            >
+              Sources
+            </button>
+            <button
               onClick={() => setActiveTab('status')}
               className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
                 activeTab === 'status'
@@ -183,7 +256,7 @@ export default function CoinProfilerCard() {
             <button
               onClick={() => {
                 setActiveTab('coins');
-                refetchCoins(); // Refresh coins when switching to tab
+                if (!coins.length) refetchCoins(); // Only fetch if no coins yet
               }}
               className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
                 activeTab === 'coins'
@@ -191,14 +264,47 @@ export default function CoinProfilerCard() {
                   : 'text-gray-400 hover:text-gray-300'
               }`}
             >
-              Coins ({coinsData?.total || 0})
+              Coins ({total || 0})
             </button>
           </div>
 
           {/* Tab Content */}
-          {activeTab === 'status' ? (
+          {activeTab === 'sources' && (
+            <div>
+              <RequirementsBreakdown requirements={requirements} isLoading={reqsLoading} />
+
+              {/* Refresh Button */}
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={refetchReqs}
+                  className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 flex items-center gap-1"
+                >
+                  <RefreshCw className={`w-3 h-3 ${reqsLoading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'status' && (
             <div>
               <CoinProfilerStatusDetailed status={status} isLoading={statusLoading} />
+
+              {/* Real-time stats */}
+              {status?.running && (
+                <div className="mt-3 p-2 bg-gray-800/50 rounded">
+                  <div className="flex items-center gap-2 text-xs">
+                    <Activity className="w-3 h-3 text-cyan-400" />
+                    <span className="text-gray-400">Real-time Updates:</span>
+                    <span className="text-cyan-400 font-medium">{updateCount.toLocaleString()}</span>
+                    {lastUpdate && (
+                      <span className="text-gray-500 ml-2">
+                        Last: {lastUpdate.toLocaleTimeString()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Refresh Button */}
               <div className="mt-3 flex justify-end">
@@ -211,18 +317,41 @@ export default function CoinProfilerCard() {
                 </button>
               </div>
             </div>
-          ) : (
-            <div>
-              <CoinList data={coinsData} isLoading={coinsLoading} />
+          )}
 
-              {/* Refresh Button */}
-              <div className="mt-3 flex justify-end">
+          {activeTab === 'coins' && (
+            <div>
+              <CoinList
+                data={{ coins, total }}
+                isLoading={false} // Real-time data, never "loading"
+              />
+
+              {/* Real-time indicator */}
+              <div className="mt-3 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-[10px] text-gray-500">
+                  {wsConnected ? (
+                    <>
+                      <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                      <span>Live updates active</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="w-2 h-2 rounded-full bg-yellow-500" />
+                      <span>Connecting...</span>
+                    </>
+                  )}
+                  {lastUpdate && (
+                    <span className="ml-2">
+                      Updated: {lastUpdate.toLocaleTimeString()}
+                    </span>
+                  )}
+                </div>
                 <button
                   onClick={refetchCoins}
                   className="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 flex items-center gap-1"
                 >
-                  <RefreshCw className={`w-3 h-3 ${coinsLoading ? 'animate-spin' : ''}`} />
-                  Refresh Coins
+                  <RefreshCw className="w-3 h-3" />
+                  Reload
                 </button>
               </div>
             </div>

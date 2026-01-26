@@ -134,6 +134,9 @@ type UserAutopilotManager struct {
 	// Epic 11: ChainStateProvider for ChainEntryRunner (interface to avoid circular imports)
 	chainStateProvider ChainStateProvider
 
+	// Epic 14: Callback for real-time coin data updates (set by API layer)
+	coinUpdateCallback coinprofiler.CoinUpdateCallback
+
 	mu sync.RWMutex
 }
 
@@ -246,6 +249,24 @@ func (m *UserAutopilotManager) SetChainStateProvider(sp ChainStateProvider) {
 		instance := value.(*UserAutopilotInstance)
 		if instance.ChainEntryRunner != nil {
 			instance.ChainEntryRunner.SetStateProvider(sp)
+		}
+		return true
+	})
+}
+
+// SetCoinUpdateCallback sets the callback for real-time coin data updates (Epic 14)
+// This is called from the API server to enable WebSocket broadcasting of coin updates.
+func (m *UserAutopilotManager) SetCoinUpdateCallback(callback coinprofiler.CoinUpdateCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.coinUpdateCallback = callback
+	m.logger.Info("CoinUpdateCallback set on UserAutopilotManager for real-time coin streaming")
+
+	// Propagate to existing CoinProfilers
+	m.instances.Range(func(key, value interface{}) bool {
+		instance := value.(*UserAutopilotInstance)
+		if instance.CoinProfiler != nil {
+			instance.CoinProfiler.SetCoinUpdateCallback(callback)
 		}
 		return true
 	})
@@ -450,6 +471,10 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	// Epic 14: Create CoinProfiler for real-time WebSocket data collection
 	coinProfiler := coinprofiler.NewCoinProfiler(nil, m.logger) // Use default config
+	// Set real-time update callback if configured (for WebSocket broadcasting)
+	if m.coinUpdateCallback != nil {
+		coinProfiler.SetCoinUpdateCallback(m.coinUpdateCallback)
+	}
 	m.logger.Info("CoinProfiler created for user", "user_id", userID)
 
 	// Epic 14: Create ExitDecisionService for position exit monitoring
@@ -589,6 +614,9 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 			m.logger.Info("Starting CoinProfiler for chain system", "user_id", userID)
 			if err := instance.CoinProfiler.Start(); err != nil {
 				m.logger.Error("Failed to start CoinProfiler", "user_id", userID, "error", err)
+			} else {
+				// Initialize WebSocket subscriptions based on enabled strategies
+				m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
 			}
 		}
 
@@ -1118,8 +1146,11 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 	if err := instance.CoinProfiler.Start(); err != nil {
 		return fmt.Errorf("failed to start coin profiler: %w", err)
 	}
-	instance.TouchLastActive()
 
+	// Initialize WebSocket subscriptions based on enabled strategies and positions
+	m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
+
+	instance.TouchLastActive()
 	return nil
 }
 
@@ -1173,6 +1204,161 @@ func (m *UserAutopilotManager) GetCoinProfiler(userID string) *coinprofiler.Coin
 		return nil
 	}
 	return instance.CoinProfiler
+}
+
+// initializeCoinProfilerSubscriptions aggregates strategy requirements and initializes WebSocket subscriptions.
+// This is the key integration point that connects Entry Decision strategies to Coin Profiler data collection.
+//
+// Flow:
+// 1. Get enabled strategies from database using Repository
+// 2. Convert database types to coinprofiler types
+// 3. Aggregate requirements using coinprofiler.AggregateRequirements
+// 4. Get open positions from Ginie for exit monitoring
+// 5. Combine strategy and position requirements
+// 6. Subscribe to the required WebSocket streams
+func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.Context, userID string, instance *UserAutopilotInstance) {
+	if instance == nil || instance.CoinProfiler == nil {
+		return
+	}
+
+	m.logger.Info("Initializing CoinProfiler subscriptions", "user_id", userID)
+
+	// Step 1: Get enabled strategies from database
+	dbStrategies, err := m.repo.GetEnabledStrategies(ctx, userID)
+	if err != nil {
+		m.logger.Error("Failed to get enabled strategies", "user_id", userID, "error", err)
+		// Continue anyway - we can still subscribe for positions
+		dbStrategies = []database.EnabledSubStrategy{}
+	}
+	m.logger.Info("Found enabled strategies", "user_id", userID, "count", len(dbStrategies))
+
+	// Step 2: Convert database types to coinprofiler types
+	cpStrategies := make([]coinprofiler.EnabledSubStrategy, 0, len(dbStrategies))
+	for _, s := range dbStrategies {
+		cpStrategies = append(cpStrategies, coinprofiler.EnabledSubStrategy{
+			Mode:          s.Mode,
+			StrategyGroup: s.StrategyGroup,
+			SubStrategy:   s.SubStrategy,
+		})
+	}
+
+	// Step 3: Get requirements for each strategy
+	strategyReqs := coinprofiler.GetRequirementsForStrategies(cpStrategies)
+
+	// Step 4: Aggregate all strategy requirements
+	aggregatedReqs := coinprofiler.AggregateRequirements(strategyReqs)
+	m.logger.Info("Aggregated strategy requirements",
+		"user_id", userID,
+		"strategies", aggregatedReqs.TotalStrategies,
+		"timeframes", aggregatedReqs.AllTimeframes)
+
+	// Step 5: Get open positions for exit monitoring
+	var positions []coinprofiler.Position
+	if instance.Autopilot != nil {
+		giniePositions := instance.Autopilot.GetPositions()
+		for _, gp := range giniePositions {
+			// Create an adapter to convert GiniePosition to coinprofiler.Position interface
+			positions = append(positions, &giniePositionAdapter{pos: gp})
+		}
+	}
+	m.logger.Info("Found open positions", "user_id", userID, "count", len(positions))
+
+	// Step 6: Combine strategy and position requirements
+	positionReqs := coinprofiler.GetPositionRequirements(positions)
+	combinedReqs := coinprofiler.CombineRequirements(aggregatedReqs, positionReqs)
+
+	// Step 6b: If we have timeframes but no symbols, add default watchlist
+	// Strategies provide timeframes but not symbols - we need symbols from somewhere
+	// Use top coins as default entry scanning candidates
+	if len(aggregatedReqs.AllTimeframes) > 0 && len(combinedReqs.AllSymbols) == 0 {
+		defaultSymbols := []string{
+			"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+			"ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT",
+		}
+		m.logger.Info("No symbols from positions, using default watchlist",
+			"user_id", userID,
+			"default_symbols", len(defaultSymbols))
+
+		// Add default symbols with strategy timeframes
+		for _, symbol := range defaultSymbols {
+			stratRefs := make([]coinprofiler.StrategyRef, 0)
+			for _, req := range aggregatedReqs.ByStrategy {
+				stratRefs = append(stratRefs, coinprofiler.StrategyRef{
+					Mode:        req.Mode,
+					Strategy:    req.Strategy,
+					SubStrategy: req.SubStrategy,
+				})
+			}
+			combinedReqs.AddSymbolFromStrategy(symbol, stratRefs, aggregatedReqs.AllTimeframes, aggregatedReqs.AllDataFields)
+		}
+	}
+
+	m.logger.Info("Combined requirements",
+		"user_id", userID,
+		"symbols", len(combinedReqs.AllSymbols),
+		"timeframes", combinedReqs.AllTimeframes)
+
+	// Step 7: Set subscriptions on CoinProfiler
+	if err := instance.CoinProfiler.SetSubscriptionsFromCombined(combinedReqs); err != nil {
+		m.logger.Error("Failed to set CoinProfiler subscriptions", "user_id", userID, "error", err)
+		return
+	}
+
+	m.logger.Info("CoinProfiler subscriptions initialized successfully",
+		"user_id", userID,
+		"symbols", len(combinedReqs.AllSymbols),
+		"strategies", aggregatedReqs.TotalStrategies,
+		"positions", len(positions))
+}
+
+// giniePositionAdapter adapts GiniePosition to the coinprofiler.Position interface.
+type giniePositionAdapter struct {
+	pos *GiniePosition
+}
+
+func (a *giniePositionAdapter) GetSymbol() string {
+	if a.pos == nil {
+		return ""
+	}
+	return a.pos.Symbol
+}
+
+func (a *giniePositionAdapter) GetMode() string {
+	if a.pos == nil {
+		return ""
+	}
+	// Convert GinieTradingMode to string
+	return string(a.pos.Mode)
+}
+
+func (a *giniePositionAdapter) GetSide() string {
+	if a.pos == nil {
+		return ""
+	}
+	return a.pos.Side
+}
+
+func (a *giniePositionAdapter) HasTakeProfit() bool {
+	if a.pos == nil {
+		return false
+	}
+	// GiniePosition has TakeProfits slice - check if any levels exist
+	return len(a.pos.TakeProfits) > 0
+}
+
+func (a *giniePositionAdapter) HasStopLoss() bool {
+	if a.pos == nil {
+		return false
+	}
+	// GiniePosition uses StopLoss field
+	return a.pos.StopLoss > 0
+}
+
+func (a *giniePositionAdapter) IsTrailingActive() bool {
+	if a.pos == nil {
+		return false
+	}
+	return a.pos.TrailingActive
 }
 
 // ==================== Epic 14: ExitDecisionService Management ====================

@@ -984,6 +984,10 @@ func main() {
 		// This enables entry order tracking for per-user autopilot instances
 		userAutopilotManager.SetPositionStateIntegration(positionStateInt)
 
+		// Epic 14: Wire coin update callback for real-time WebSocket broadcasting
+		// This enables the CoinProfiler to push updates directly to frontend clients
+		userAutopilotManager.SetCoinUpdateCallback(api.BroadcastCoinDataUpdate)
+
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
 

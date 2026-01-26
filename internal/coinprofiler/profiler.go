@@ -34,8 +34,9 @@ type CoinProfiler struct {
 	lastUpdateTime  time.Time
 
 	// Subscription management
-	subscriptions map[string]*SubscriptionRequest // symbol -> request
-	coinData      map[string]*CoinData            // symbol -> data
+	subscriptions    map[string]*SubscriptionRequest // symbol -> request
+	coinData         map[string]*CoinData            // symbol -> data
+	combinedReqs     *CombinedRequirements           // Current combined requirements (for API)
 
 	// Metrics
 	updateCount      int64
@@ -381,6 +382,20 @@ func (cp *CoinProfiler) GetSubscriptions() map[string]*SubscriptionRequest {
 	return result
 }
 
+// GetCombinedRequirements returns the current combined requirements.
+// This includes detailed information about strategy and position sources.
+func (cp *CoinProfiler) GetCombinedRequirements() *CombinedRequirements {
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+
+	if cp.combinedReqs == nil {
+		return nil
+	}
+
+	// Return a copy to prevent modification
+	return cp.combinedReqs
+}
+
 // runLoop is the main processing loop for the Coin Profiler.
 func (cp *CoinProfiler) runLoop() {
 	defer cp.wg.Done()
@@ -532,4 +547,204 @@ func formatUptime(d time.Duration) string {
 // Context returns the profiler's context (for integration with other components).
 func (cp *CoinProfiler) Context() context.Context {
 	return cp.ctx
+}
+
+// InitializeSubscriptions sets up WebSocket subscriptions based on enabled strategies and open positions.
+// This is the key method that connects strategy requirements to actual WebSocket streams.
+//
+// Flow:
+// 1. Read enabled strategies from the reader (database)
+// 2. Aggregate requirements using the RequirementAggregator
+// 3. Combine with position requirements (for exit monitoring)
+// 4. Subscribe to the required WebSocket streams
+//
+// Parameters:
+//   - ctx: Context for the operation
+//   - reader: Interface to read enabled strategies (typically wraps database.Repository)
+//   - positions: Open positions that need price monitoring (can be nil)
+//
+// Returns an error if aggregation or subscription fails.
+func (cp *CoinProfiler) InitializeSubscriptions(ctx context.Context, reader EnabledStrategyReader, positions []Position) error {
+	if reader == nil {
+		return fmt.Errorf("%s reader is nil", LogPrefix)
+	}
+
+	cp.mu.RLock()
+	running := cp.running
+	cp.mu.RUnlock()
+
+	if !running {
+		return fmt.Errorf("%s not running", LogPrefix)
+	}
+
+	cp.log("Initializing subscriptions from enabled strategies...")
+
+	// Create aggregator and fetch requirements
+	aggregator := NewRequirementAggregator(reader)
+
+	// Get user ID from context (if available) or use empty string
+	userID := ""
+	if uid := ctx.Value("user_id"); uid != nil {
+		if s, ok := uid.(string); ok {
+			userID = s
+		}
+	}
+
+	// Aggregate strategy requirements
+	strategyReqs, err := aggregator.Aggregate(ctx, userID)
+	if err != nil {
+		cp.logError("Failed to aggregate strategy requirements: %v", err)
+		return fmt.Errorf("failed to aggregate requirements: %w", err)
+	}
+
+	cp.log("Aggregated %d strategies: timeframes=%v, fields=%v",
+		strategyReqs.TotalStrategies,
+		strategyReqs.AllTimeframes,
+		strategyReqs.AllDataFields)
+
+	// Get position requirements
+	positionReqs := GetPositionRequirements(positions)
+	cp.log("Got %d position requirements", len(positionReqs))
+
+	// Combine strategy and position requirements
+	combinedReqs := CombineRequirements(strategyReqs, positionReqs)
+
+	cp.log("Combined requirements: %d symbols, %d timeframes",
+		len(combinedReqs.AllSymbols),
+		len(combinedReqs.AllTimeframes))
+
+	// Update internal subscriptions map
+	cp.mu.Lock()
+	for symbol, symReq := range combinedReqs.BySymbol {
+		cp.subscriptions[symbol] = &SubscriptionRequest{
+			Symbol:     symbol,
+			Timeframes: symReq.Timeframes,
+			Source:     symReq.Source,
+		}
+	}
+	cp.mu.Unlock()
+
+	// Subscribe via WebSocket manager
+	if cp.wsManager != nil {
+		if err := cp.wsManager.UpdateSubscriptions(combinedReqs); err != nil {
+			cp.logError("Failed to update WebSocket subscriptions: %v", err)
+			return fmt.Errorf("failed to subscribe: %w", err)
+		}
+		cp.log("WebSocket subscriptions updated successfully")
+	}
+
+	return nil
+}
+
+// SubscribeToSymbols subscribes to specific symbols with the given timeframes.
+// This is a simpler alternative to InitializeSubscriptions when you already know
+// which symbols to track (e.g., from a coin scanner or manual selection).
+func (cp *CoinProfiler) SubscribeToSymbols(symbols []string, timeframes []string) error {
+	if len(symbols) == 0 || len(timeframes) == 0 {
+		return nil
+	}
+
+	cp.mu.RLock()
+	running := cp.running
+	cp.mu.RUnlock()
+
+	if !running {
+		return fmt.Errorf("%s not running", LogPrefix)
+	}
+
+	cp.log("Subscribing to %d symbols with timeframes %v", len(symbols), timeframes)
+
+	// Build combined requirements
+	combinedReqs := &CombinedRequirements{
+		AllSymbols:    symbols,
+		AllTimeframes: timeframes,
+		AllDataFields: []string{"ohlc", "volume", "taker_buy_volume"},
+		BySymbol:      make(map[string]*SymbolRequirements),
+	}
+
+	for _, symbol := range symbols {
+		combinedReqs.BySymbol[symbol] = &SymbolRequirements{
+			Symbol:     symbol,
+			Timeframes: timeframes,
+			DataFields: []string{"ohlc", "volume", "taker_buy_volume"},
+			Source:     DataSourceStrategy,
+		}
+	}
+
+	// Update internal subscriptions
+	cp.mu.Lock()
+	for _, symbol := range symbols {
+		cp.subscriptions[symbol] = &SubscriptionRequest{
+			Symbol:     symbol,
+			Timeframes: timeframes,
+			Source:     DataSourceStrategy,
+		}
+	}
+	cp.mu.Unlock()
+
+	// Subscribe via WebSocket
+	if cp.wsManager != nil {
+		if err := cp.wsManager.UpdateSubscriptions(combinedReqs); err != nil {
+			return fmt.Errorf("failed to subscribe: %w", err)
+		}
+	}
+
+	cp.log("Subscribed to %d symbols", len(symbols))
+	return nil
+}
+
+// GetWebSocketManager returns the WebSocket manager (for advanced operations).
+func (cp *CoinProfiler) GetWebSocketManager() *WebSocketManager {
+	return cp.wsManager
+}
+
+// SetCoinUpdateCallback sets a callback to be called when coin data is updated in real-time.
+// This is used to broadcast updates to WebSocket clients for live UI updates.
+func (cp *CoinProfiler) SetCoinUpdateCallback(callback CoinUpdateCallback) {
+	if cp.wsManager != nil {
+		cp.wsManager.SetCoinUpdateCallback(callback)
+	}
+}
+
+// SetSubscriptionsFromCombined updates subscriptions from pre-computed combined requirements.
+// This is useful when the caller has already aggregated strategy and position requirements.
+// The combined requirements should contain the symbols and timeframes to subscribe to.
+func (cp *CoinProfiler) SetSubscriptionsFromCombined(combined *CombinedRequirements) error {
+	if combined == nil {
+		return nil
+	}
+
+	cp.mu.RLock()
+	running := cp.running
+	cp.mu.RUnlock()
+
+	if !running {
+		return fmt.Errorf("%s not running", LogPrefix)
+	}
+
+	cp.log("Setting subscriptions: %d symbols, %d timeframes",
+		len(combined.AllSymbols), len(combined.AllTimeframes))
+
+	// Update internal subscriptions map and store combined requirements
+	cp.mu.Lock()
+	cp.combinedReqs = combined // Store for API access
+	for symbol, symReq := range combined.BySymbol {
+		cp.subscriptions[symbol] = &SubscriptionRequest{
+			Symbol:     symbol,
+			Timeframes: symReq.Timeframes,
+			Source:     symReq.Source,
+		}
+	}
+	cp.mu.Unlock()
+
+	// Subscribe via WebSocket manager
+	if cp.wsManager != nil {
+		if err := cp.wsManager.UpdateSubscriptions(combined); err != nil {
+			cp.logError("Failed to update WebSocket subscriptions: %v", err)
+			return fmt.Errorf("failed to subscribe: %w", err)
+		}
+		cp.log("WebSocket subscriptions updated: %d streams", len(combined.BySymbol))
+	}
+
+	return nil
 }

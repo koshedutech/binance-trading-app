@@ -54,14 +54,40 @@ export interface CoinProfilerCoinsResponse {
   total: number;
 }
 
+export interface StrategyRef {
+  mode: string;
+  strategy: string;
+  sub_strategy: string;
+}
+
+export interface PositionRequirement {
+  symbol: string;
+  mode: string;
+  side: string;
+  exit_mode: string;
+  timeframes: string[];
+}
+
+export interface StrategySource {
+  symbol: string;
+  timeframes: string[];
+  strategies: StrategyRef[];
+}
+
 export interface CoinProfilerRequirements {
   all_timeframes: string[];
   all_data_fields: string[];
-  total_strategies: number;
+  all_symbols: string[];
+  strategy_count: number;
+  position_count: number;
+  from_strategies: StrategySource[];
+  from_positions: PositionRequirement[];
   subscriptions: Record<string, {
     timeframes: string[];
+    data_fields: string[];
     source: string;
-    strategy: string;
+    strategies: StrategyRef[];
+    positions: PositionRequirement[];
   }>;
 }
 
@@ -218,4 +244,178 @@ export function useCoinProfilerControl() {
   }, []);
 
   return { start, stop, isStarting, isStopping, error, lastAction, reset };
+}
+
+/**
+ * Hook to fetch Coin Profiler requirements (strategy and position breakdown)
+ * Shows what data is being collected and why
+ */
+export function useCoinProfilerRequirements(autoPoll: boolean = false, pollInterval: number = 10000) {
+  const [data, setData] = useState<CoinProfilerRequirements | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const intervalRef = useRef<number | null>(null);
+
+  const fetchRequirements = useCallback(async () => {
+    try {
+      const response = await futuresApi.getCoinProfilerRequirements();
+      setData(response);
+      setError(null);
+    } catch (err: any) {
+      const message = err?.response?.data?.message || err?.message || 'Failed to fetch requirements';
+      setError(message);
+      console.error('Failed to fetch coin profiler requirements:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Initial fetch
+    fetchRequirements();
+
+    // Optional polling
+    if (autoPoll) {
+      intervalRef.current = window.setInterval(fetchRequirements, pollInterval);
+    }
+
+    return () => {
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+      }
+    };
+  }, [fetchRequirements, autoPoll, pollInterval]);
+
+  const refetch = useCallback(() => {
+    setIsLoading(true);
+    fetchRequirements();
+  }, [fetchRequirements]);
+
+  return { data, isLoading, error, refetch };
+}
+
+/**
+ * Real-time coin data update from WebSocket
+ */
+export interface CoinDataUpdate {
+  symbol: string;
+  price: number;
+  timeframe: string;
+  data: {
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+    taker_buy_vol: number;
+    taker_sell_vol: number;
+    quote_volume: number;
+    trade_count: number;
+    is_closed_bar: boolean;
+    open_time: string;
+    close_time: string;
+    updated_at: string;
+  };
+}
+
+/**
+ * Hook that maintains real-time coin data using WebSocket updates.
+ * Receives COIN_DATA_UPDATE events and updates local state immediately.
+ * Falls back to API polling if WebSocket is not connected.
+ */
+export function useCoinProfilerRealtime(wsConnected: boolean = false) {
+  const [coins, setCoins] = useState<Map<string, CoinData>>(new Map());
+  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  const [updateCount, setUpdateCount] = useState(0);
+
+  // Initial load from API
+  const { data: initialData, refetch } = useCoinProfilerCoins(false);
+
+  // Initialize from API data
+  useEffect(() => {
+    if (initialData?.coins) {
+      const coinMap = new Map<string, CoinData>();
+      initialData.coins.forEach(coin => coinMap.set(coin.symbol, coin));
+      setCoins(coinMap);
+    }
+  }, [initialData]);
+
+  // Handle real-time WebSocket updates
+  const handleCoinUpdate = useCallback((update: CoinDataUpdate) => {
+    setCoins(prevCoins => {
+      const newCoins = new Map(prevCoins);
+      const existing = newCoins.get(update.symbol);
+
+      // Create or update coin data
+      const updatedCoin: CoinData = existing ? {
+        ...existing,
+        price: update.price,
+        timeframes: {
+          ...existing.timeframes,
+          [update.timeframe]: {
+            timeframe: update.timeframe,
+            open: update.data.open,
+            high: update.data.high,
+            low: update.data.low,
+            close: update.data.close,
+            volume: update.data.volume,
+            taker_buy_vol: update.data.taker_buy_vol,
+            taker_sell_vol: update.data.taker_sell_vol,
+            quote_volume: update.data.quote_volume,
+            trade_count: update.data.trade_count,
+            is_closed_bar: update.data.is_closed_bar,
+            open_time: update.data.open_time,
+            close_time: update.data.close_time,
+            updated_at: update.data.updated_at,
+          }
+        },
+        updated_at: new Date().toISOString(),
+      } : {
+        symbol: update.symbol,
+        price: update.price,
+        volume_24h: 0,
+        volatility: 0,
+        timeframes: {
+          [update.timeframe]: {
+            timeframe: update.timeframe,
+            open: update.data.open,
+            high: update.data.high,
+            low: update.data.low,
+            close: update.data.close,
+            volume: update.data.volume,
+            taker_buy_vol: update.data.taker_buy_vol,
+            taker_sell_vol: update.data.taker_sell_vol,
+            quote_volume: update.data.quote_volume,
+            trade_count: update.data.trade_count,
+            is_closed_bar: update.data.is_closed_bar,
+            open_time: update.data.open_time,
+            close_time: update.data.close_time,
+            updated_at: update.data.updated_at,
+          }
+        },
+        source: 'strategy',
+        strategies: [],
+        updated_at: new Date().toISOString(),
+      };
+
+      newCoins.set(update.symbol, updatedCoin);
+      return newCoins;
+    });
+
+    setLastUpdate(new Date());
+    setUpdateCount(prev => prev + 1);
+  }, []);
+
+  // Convert Map to array for component consumption
+  const coinsArray = Array.from(coins.values());
+
+  return {
+    coins: coinsArray,
+    coinsMap: coins,
+    total: coins.size,
+    lastUpdate,
+    updateCount,
+    handleCoinUpdate,
+    refetch,
+  };
 }

@@ -1,15 +1,18 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   TrendingUp,
   TrendingDown,
   Activity,
   ChevronDown,
   ChevronUp,
-  Layers,
   Clock,
   BarChart2,
+  ArrowUp,
+  ArrowDown,
+  Minus,
 } from 'lucide-react';
-import type { CoinData, CoinProfilerCoinsResponse } from '../../hooks/useCoinProfiler';
+import type { CoinData, CoinProfilerCoinsResponse, TimeframeData } from '../../hooks/useCoinProfiler';
+import { TradingViewChart } from './TradingViewChart';
 
 // ============================================================================
 // Epic 14: Coin List Display
@@ -19,6 +22,52 @@ import type { CoinData, CoinProfilerCoinsResponse } from '../../hooks/useCoinPro
 interface CoinListProps {
   data: CoinProfilerCoinsResponse | null;
   isLoading: boolean;
+}
+
+/**
+ * Candle countdown timer - shows remaining time until candle closes
+ */
+function CandleCountdown({ closeTime }: { closeTime: string }) {
+  const [remaining, setRemaining] = useState<string>('');
+
+  useEffect(() => {
+    const updateCountdown = () => {
+      try {
+        const closeDate = new Date(closeTime);
+        const now = new Date();
+        const diffMs = closeDate.getTime() - now.getTime();
+
+        if (diffMs <= 0) {
+          setRemaining('Closing...');
+          return;
+        }
+
+        const totalSeconds = Math.floor(diffMs / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+
+        if (minutes > 0) {
+          setRemaining(`${minutes}m ${seconds.toString().padStart(2, '0')}s`);
+        } else {
+          setRemaining(`${seconds}s`);
+        }
+      } catch {
+        setRemaining('');
+      }
+    };
+
+    updateCountdown();
+    const interval = setInterval(updateCountdown, 1000);
+    return () => clearInterval(interval);
+  }, [closeTime]);
+
+  if (!remaining) return null;
+
+  return (
+    <span className="text-cyan-400 font-mono">
+      ⏱ {remaining}
+    </span>
+  );
 }
 
 /**
@@ -42,32 +91,167 @@ function formatVolume(volume: number): string {
 }
 
 /**
- * Get source badge color
+ * Get the primary timeframe data (first available)
  */
-function getSourceColor(source: string): string {
+function getPrimaryTimeframe(coin: CoinData): { name: string; data: TimeframeData } | null {
+  const timeframes = coin.timeframes || {};
+  const entries = Object.entries(timeframes);
+  if (entries.length === 0) return null;
+  // Prefer common timeframes in order
+  const preferredOrder = ['1m', '3m', '5m', '15m', '30m', '1h', '4h', '1d'];
+  for (const tf of preferredOrder) {
+    if (timeframes[tf]) return { name: tf, data: timeframes[tf] };
+  }
+  return { name: entries[0][0], data: entries[0][1] };
+}
+
+/**
+ * Calculate price change percentage from open to close
+ */
+function calculatePriceChange(tfData: TimeframeData | null): number {
+  if (!tfData || tfData.open === 0) return 0;
+  return ((tfData.close - tfData.open) / tfData.open) * 100;
+}
+
+/**
+ * Calculate volatility from high-low range
+ */
+function calculateVolatility(tfData: TimeframeData | null): number {
+  if (!tfData || tfData.open === 0) return 0;
+  return ((tfData.high - tfData.low) / tfData.open) * 100;
+}
+
+/**
+ * Determine source label based on available data
+ */
+function getSourceLabel(coin: CoinData): string {
+  if (coin.source && coin.source !== '') return coin.source;
+  if (coin.strategies && coin.strategies.length > 0) return 'strategy';
+  return 'scan';
+}
+
+/**
+ * Get source badge styling
+ */
+function getSourceStyle(source: string): { bg: string; text: string; label: string } {
   switch (source) {
     case 'strategy':
-      return 'bg-purple-500/20 text-purple-400 border-purple-500/30';
+      return { bg: 'bg-purple-500/20', text: 'text-purple-400', label: 'Strategy' };
     case 'position':
-      return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
+      return { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'Position' };
     case 'both':
-      return 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30';
+      return { bg: 'bg-cyan-500/20', text: 'text-cyan-400', label: 'Both' };
+    case 'scan':
+      return { bg: 'bg-gray-500/20', text: 'text-gray-400', label: 'Scan' };
     default:
-      return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+      return { bg: 'bg-gray-500/20', text: 'text-gray-400', label: source || 'Unknown' };
   }
 }
 
 /**
- * Individual coin row component
+ * Price indicator with color coding
  */
-function CoinRow({ coin }: { coin: CoinData }) {
-  const [expanded, setExpanded] = useState(false);
-  const timeframeCount = Object.keys(coin.timeframes || {}).length;
+function PriceIndicator({ current, previous, showDiff = false }: {
+  current: number;
+  previous?: number;
+  showDiff?: boolean;
+}) {
+  const diff = previous ? current - previous : 0;
+  const isUp = diff > 0;
+  const isDown = diff < 0;
 
-  // Calculate price change from timeframe data if available
-  const priceChange = coin.timeframes?.['5m']
-    ? ((coin.price - coin.timeframes['5m'].open) / coin.timeframes['5m'].open) * 100
-    : 0;
+  return (
+    <span className={`font-medium transition-colors duration-300 ${
+      isUp ? 'text-green-400' : isDown ? 'text-red-400' : 'text-gray-300'
+    }`}>
+      {formatPrice(current)}
+      {showDiff && diff !== 0 && (
+        <span className="ml-1 text-[10px]">
+          {isUp ? '+' : ''}{diff.toFixed(diff < 1 ? 6 : 2)}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Change indicator with arrow and percentage
+ */
+function ChangeIndicator({ change }: { change: number }) {
+  if (change === 0) {
+    return (
+      <div className="flex items-center justify-end gap-1 text-gray-500">
+        <Minus className="w-3 h-3" />
+        <span className="text-xs">0.00%</span>
+      </div>
+    );
+  }
+
+  const isPositive = change > 0;
+  return (
+    <div className={`flex items-center justify-end gap-1 ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
+      {isPositive ? (
+        <TrendingUp className="w-3 h-3" />
+      ) : (
+        <TrendingDown className="w-3 h-3" />
+      )}
+      <span className="text-xs font-medium">
+        {isPositive ? '+' : ''}{change.toFixed(2)}%
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Volume indicator with direction
+ */
+function VolumeIndicator({ volume, takerBuyRatio }: { volume: number; takerBuyRatio: number }) {
+  // takerBuyRatio > 0.5 means more buying pressure
+  const isBullish = takerBuyRatio > 0.55;
+  const isBearish = takerBuyRatio < 0.45;
+
+  return (
+    <div className="flex items-center justify-end gap-1">
+      {isBullish && <ArrowUp className="w-3 h-3 text-green-500" />}
+      {isBearish && <ArrowDown className="w-3 h-3 text-red-500" />}
+      <span className={`text-xs ${isBullish ? 'text-green-400' : isBearish ? 'text-red-400' : 'text-gray-500'}`}>
+        {formatVolume(volume)}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Individual coin row component with real-time updates
+ */
+function CoinRow({ coin, prevCoin }: { coin: CoinData; prevCoin?: CoinData }) {
+  const [expanded, setExpanded] = useState(false);
+  const [flash, setFlash] = useState<'up' | 'down' | null>(null);
+  const prevPriceRef = useRef(coin.price);
+
+  const primaryTf = getPrimaryTimeframe(coin);
+  const tfData = primaryTf?.data || null;
+  const priceChange = calculatePriceChange(tfData);
+  const volatility = calculateVolatility(tfData);
+  const source = getSourceLabel(coin);
+  const sourceStyle = getSourceStyle(source);
+
+  // Calculate taker buy ratio for volume direction
+  const takerBuyRatio = tfData && tfData.volume > 0
+    ? tfData.taker_buy_vol / tfData.volume
+    : 0.5;
+
+  // Flash effect when price changes
+  useEffect(() => {
+    if (coin.price !== prevPriceRef.current) {
+      const direction = coin.price > prevPriceRef.current ? 'up' : 'down';
+      setFlash(direction);
+      prevPriceRef.current = coin.price;
+
+      const timer = setTimeout(() => setFlash(null), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [coin.price]);
 
   const formatTimeAgo = (timeStr: string) => {
     if (!timeStr || timeStr === '0001-01-01T00:00:00Z') return 'N/A';
@@ -83,8 +267,13 @@ function CoinRow({ coin }: { coin: CoinData }) {
     }
   };
 
+  // Get all timeframe names
+  const timeframeNames = Object.keys(coin.timeframes || {}).join(', ') || '-';
+
   return (
-    <div className="border-b border-gray-700/50 last:border-b-0">
+    <div className={`border-b border-gray-700/50 last:border-b-0 transition-colors duration-300 ${
+      flash === 'up' ? 'bg-green-900/20' : flash === 'down' ? 'bg-red-900/20' : ''
+    }`}>
       {/* Main Row */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -95,43 +284,38 @@ function CoinRow({ coin }: { coin: CoinData }) {
           <span className="font-medium text-white">{coin.symbol}</span>
         </div>
 
-        {/* Price */}
+        {/* Price with color coding */}
         <div className="w-24 text-right">
-          <span className="text-sm text-gray-300">{formatPrice(coin.price)}</span>
-        </div>
-
-        {/* Change */}
-        <div className="w-16 text-right flex items-center justify-end gap-1">
-          {priceChange !== 0 && (
-            <>
-              {priceChange > 0 ? (
-                <TrendingUp className="w-3 h-3 text-green-500" />
-              ) : (
-                <TrendingDown className="w-3 h-3 text-red-500" />
-              )}
-              <span className={`text-xs ${priceChange > 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {priceChange > 0 ? '+' : ''}{priceChange.toFixed(2)}%
-              </span>
-            </>
-          )}
-        </div>
-
-        {/* Volume */}
-        <div className="w-20 text-right">
-          <span className="text-xs text-gray-500">{formatVolume(coin.volume_24h)}</span>
-        </div>
-
-        {/* Source Badge */}
-        <div className="w-20">
-          <span className={`px-1.5 py-0.5 rounded text-[10px] border ${getSourceColor(coin.source)}`}>
-            {coin.source}
+          <span className={`text-sm font-medium transition-colors duration-300 ${
+            priceChange > 0 ? 'text-green-400' : priceChange < 0 ? 'text-red-400' : 'text-gray-300'
+          }`}>
+            {formatPrice(coin.price)}
           </span>
         </div>
 
-        {/* Timeframes */}
-        <div className="w-12 flex items-center justify-center gap-1">
-          <Layers className="w-3 h-3 text-gray-500" />
-          <span className="text-xs text-gray-500">{timeframeCount}</span>
+        {/* Change % */}
+        <div className="w-20">
+          <ChangeIndicator change={priceChange} />
+        </div>
+
+        {/* Volume with direction */}
+        <div className="w-20">
+          <VolumeIndicator
+            volume={tfData?.volume || 0}
+            takerBuyRatio={takerBuyRatio}
+          />
+        </div>
+
+        {/* Source Badge */}
+        <div className="w-16">
+          <span className={`px-1.5 py-0.5 rounded text-[10px] ${sourceStyle.bg} ${sourceStyle.text}`}>
+            {sourceStyle.label}
+          </span>
+        </div>
+
+        {/* Timeframes - show actual names */}
+        <div className="w-14 text-center">
+          <span className="text-xs text-cyan-400 font-medium">{timeframeNames}</span>
         </div>
 
         {/* Expand Toggle */}
@@ -155,7 +339,9 @@ function CoinRow({ coin }: { coin: CoinData }) {
             </div>
             <div className="flex items-center gap-1">
               <Activity className="w-3 h-3" />
-              <span>Volatility: {(coin.volatility * 100).toFixed(2)}%</span>
+              <span className={volatility > 1 ? 'text-yellow-400' : 'text-gray-500'}>
+                Volatility: {volatility.toFixed(2)}%
+              </span>
             </div>
             {coin.strategies && coin.strategies.length > 0 && (
               <div className="flex items-center gap-1">
@@ -165,38 +351,128 @@ function CoinRow({ coin }: { coin: CoinData }) {
             )}
           </div>
 
-          {/* Timeframe Data */}
-          {timeframeCount > 0 && (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-              {Object.entries(coin.timeframes || {}).map(([tf, data]) => (
-                <div key={tf} className="bg-gray-900 rounded p-2">
-                  <div className="text-[10px] text-gray-500 uppercase mb-1">{tf}</div>
-                  <div className="grid grid-cols-2 gap-1 text-[10px]">
-                    <div>
-                      <span className="text-gray-500">O:</span>{' '}
-                      <span className="text-gray-300">{formatPrice(data.open)}</span>
+          {/* Chart + Data Layout */}
+          <div className="flex gap-3">
+            {/* TradingView Chart - Left Side */}
+            <div className="flex-1 min-w-0">
+              <TradingViewChart
+                symbol={coin.symbol}
+                timeframe={primaryTf?.name === '1h' ? '60' : primaryTf?.name === '4h' ? '240' : '15'}
+                height={280}
+              />
+            </div>
+
+            {/* Timeframe Data Cards - Right Side */}
+            <div className="w-72 flex-shrink-0">
+              {Object.keys(coin.timeframes || {}).length > 0 && (
+                <div className="space-y-2 max-h-[280px] overflow-y-auto pr-1">
+              {Object.entries(coin.timeframes || {}).map(([tf, data]) => {
+                const tfChange = data.open > 0 ? ((data.close - data.open) / data.open) * 100 : 0;
+                const tfVolatility = data.open > 0 ? ((data.high - data.low) / data.open) * 100 : 0;
+                const buyRatio = data.volume > 0 ? data.taker_buy_vol / data.volume : 0.5;
+                const isBullish = buyRatio > 0.55;
+                const isBearish = buyRatio < 0.45;
+
+                return (
+                  <div key={tf} className="bg-gray-900 rounded p-2">
+                    {/* Timeframe Header */}
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-cyan-400 font-medium uppercase">{tf}</span>
+                      <span className={`text-xs font-medium ${
+                        tfChange > 0 ? 'text-green-400' : tfChange < 0 ? 'text-red-400' : 'text-gray-400'
+                      }`}>
+                        {tfChange > 0 ? '+' : ''}{tfChange.toFixed(2)}%
+                      </span>
                     </div>
-                    <div>
-                      <span className="text-gray-500">H:</span>{' '}
-                      <span className="text-green-400">{formatPrice(data.high)}</span>
+
+                    {/* OHLC Grid */}
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Open:</span>
+                        <span className="text-gray-300 font-mono">{formatPrice(data.open)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">High:</span>
+                        <span className="text-green-400 font-mono">{formatPrice(data.high)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Close:</span>
+                        <span className={`font-mono ${
+                          data.close > data.open ? 'text-green-400' : data.close < data.open ? 'text-red-400' : 'text-gray-300'
+                        }`}>{formatPrice(data.close)}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Low:</span>
+                        <span className="text-red-400 font-mono">{formatPrice(data.low)}</span>
+                      </div>
                     </div>
-                    <div>
-                      <span className="text-gray-500">L:</span>{' '}
-                      <span className="text-red-400">{formatPrice(data.low)}</span>
+
+                    {/* Volume & Stats */}
+                    <div className="mt-2 pt-2 border-t border-gray-800 grid grid-cols-2 gap-2 text-[10px]">
+                      <div>
+                        <div className="text-gray-500">Volume</div>
+                        <div className="font-medium text-gray-400">
+                          {formatVolume(data.volume)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Pressure</div>
+                        <div className="flex items-center gap-1">
+                          {isBullish ? (
+                            <>
+                              <ArrowUp className="w-3 h-3 text-green-500" />
+                              <span className="text-green-400">Buying</span>
+                            </>
+                          ) : isBearish ? (
+                            <>
+                              <ArrowDown className="w-3 h-3 text-red-500" />
+                              <span className="text-red-400">Selling</span>
+                            </>
+                          ) : (
+                            <span className="text-gray-500">Neutral</span>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Buy/Sell Ratio</div>
+                        <div className="text-gray-400">
+                          <span className="text-green-400">{(buyRatio * 100).toFixed(0)}%</span>
+                          <span className="text-gray-600"> / </span>
+                          <span className="text-red-400">{((1 - buyRatio) * 100).toFixed(0)}%</span>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Volatility</div>
+                        <div className={tfVolatility > 1 ? 'text-yellow-400' : 'text-gray-400'}>
+                          {tfVolatility.toFixed(2)}%
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Trades</div>
+                        <div className="text-gray-400">{data.trade_count.toLocaleString()}</div>
+                      </div>
+                      <div>
+                        <div className="text-gray-500">Quote Vol</div>
+                        <div className="text-gray-400">${formatVolume(data.quote_volume)}</div>
+                      </div>
                     </div>
-                    <div>
-                      <span className="text-gray-500">C:</span>{' '}
-                      <span className="text-gray-300">{formatPrice(data.close)}</span>
-                    </div>
-                    <div className="col-span-2">
-                      <span className="text-gray-500">Vol:</span>{' '}
-                      <span className="text-gray-400">{formatVolume(data.volume)}</span>
+
+                    {/* Bar Status & Countdown */}
+                    <div className="mt-1 flex items-center justify-between text-[9px]">
+                      <span className="text-gray-600">
+                        {data.is_closed_bar ? 'Closed bar' : 'Live bar'}
+                      </span>
+                      {!data.is_closed_bar && data.close_time && (
+                        <CandleCountdown closeTime={data.close_time} />
+                      )}
                     </div>
                   </div>
+                );
+              })}
                 </div>
-              ))}
+              )}
             </div>
-          )}
+          </div>
         </div>
       )}
     </div>
@@ -207,8 +483,18 @@ function CoinRow({ coin }: { coin: CoinData }) {
  * Coin List component showing all tracked coins
  */
 export default function CoinList({ data, isLoading }: CoinListProps) {
-  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'volume' | 'source'>('symbol');
+  const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change' | 'volume'>('symbol');
   const [sortAsc, setSortAsc] = useState(true);
+  const prevDataRef = useRef<Map<string, CoinData>>(new Map());
+
+  // Track previous data for comparison
+  useEffect(() => {
+    if (data?.coins) {
+      const newMap = new Map<string, CoinData>();
+      data.coins.forEach(coin => newMap.set(coin.symbol, coin));
+      prevDataRef.current = newMap;
+    }
+  }, [data]);
 
   if (isLoading && !data) {
     return (
@@ -234,6 +520,9 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
   // Sort coins
   const sortedCoins = [...data.coins].sort((a, b) => {
     let comparison = 0;
+    const tfA = getPrimaryTimeframe(a)?.data;
+    const tfB = getPrimaryTimeframe(b)?.data;
+
     switch (sortBy) {
       case 'symbol':
         comparison = a.symbol.localeCompare(b.symbol);
@@ -241,11 +530,11 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
       case 'price':
         comparison = a.price - b.price;
         break;
-      case 'volume':
-        comparison = a.volume_24h - b.volume_24h;
+      case 'change':
+        comparison = calculatePriceChange(tfA) - calculatePriceChange(tfB);
         break;
-      case 'source':
-        comparison = a.source.localeCompare(b.source);
+      case 'volume':
+        comparison = (tfA?.volume || 0) - (tfB?.volume || 0);
         break;
     }
     return sortAsc ? comparison : -comparison;
@@ -256,14 +545,21 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
       setSortAsc(!sortAsc);
     } else {
       setSortBy(column);
-      setSortAsc(true);
+      setSortAsc(column === 'symbol'); // Default asc for symbol, desc for others
     }
   };
 
-  const SortHeader = ({ column, label, width }: { column: typeof sortBy; label: string; width: string }) => (
+  const SortHeader = ({ column, label, width, align = 'left' }: {
+    column: typeof sortBy;
+    label: string;
+    width: string;
+    align?: 'left' | 'right' | 'center';
+  }) => (
     <button
       onClick={() => handleSort(column)}
-      className={`${width} text-left text-[10px] uppercase flex items-center gap-1 hover:text-gray-300 transition-colors`}
+      className={`${width} text-${align} text-[10px] uppercase flex items-center gap-1 hover:text-gray-300 transition-colors ${
+        align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : ''
+      }`}
     >
       {label}
       {sortBy === column && (
@@ -277,27 +573,31 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
       {/* Header */}
       <div className="flex items-center gap-3 px-2 py-1.5 bg-gray-800/50 border-b border-gray-700 text-gray-500">
         <SortHeader column="symbol" label="Symbol" width="flex-1" />
-        <SortHeader column="price" label="Price" width="w-24 text-right" />
-        <div className="w-16 text-right text-[10px] uppercase">Change</div>
-        <SortHeader column="volume" label="Volume" width="w-20 text-right" />
-        <SortHeader column="source" label="Source" width="w-20" />
-        <div className="w-12 text-center text-[10px] uppercase">TFs</div>
+        <SortHeader column="price" label="Price" width="w-24" align="right" />
+        <SortHeader column="change" label="Change" width="w-20" align="right" />
+        <SortHeader column="volume" label="Volume" width="w-20" align="right" />
+        <div className="w-16 text-center text-[10px] uppercase">Source</div>
+        <div className="w-14 text-center text-[10px] uppercase">TF</div>
         <div className="w-6" />
       </div>
 
       {/* Coin Rows */}
       <div className="max-h-80 overflow-y-auto">
         {sortedCoins.map((coin) => (
-          <CoinRow key={coin.symbol} coin={coin} />
+          <CoinRow
+            key={coin.symbol}
+            coin={coin}
+            prevCoin={prevDataRef.current.get(coin.symbol)}
+          />
         ))}
       </div>
 
-      {/* Footer */}
+      {/* Footer with Legend */}
       <div className="px-2 py-1.5 bg-gray-800/30 border-t border-gray-700 flex items-center justify-between">
         <span className="text-xs text-gray-500">
           Total: {data.total} coin{data.total !== 1 ? 's' : ''}
         </span>
-        <div className="flex items-center gap-3 text-xs">
+        <div className="flex items-center gap-3 text-[10px]">
           <div className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-purple-500" />
             <span className="text-gray-500">Strategy</span>
@@ -307,8 +607,12 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
             <span className="text-gray-500">Position</span>
           </div>
           <div className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-cyan-500" />
-            <span className="text-gray-500">Both</span>
+            <ArrowUp className="w-3 h-3 text-green-500" />
+            <span className="text-gray-500">Buy pressure</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <ArrowDown className="w-3 h-3 text-red-500" />
+            <span className="text-gray-500">Sell pressure</span>
           </div>
         </div>
       </div>

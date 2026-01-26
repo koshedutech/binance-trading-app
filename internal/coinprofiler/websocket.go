@@ -19,6 +19,10 @@ import (
 // LogPrefixWS is the standard prefix for WebSocket-related log messages.
 const LogPrefixWS = "[COIN-PROFILER-WS]"
 
+// CoinUpdateCallback is called when coin data is updated in real-time.
+// The map contains: symbol, price, timeframe, and full timeframe data.
+type CoinUpdateCallback func(coinData map[string]interface{})
+
 // WebSocketManager manages WebSocket connections to Binance Futures for the Coin Profiler.
 // It handles connection lifecycle, subscriptions, message parsing, and reconnection logic.
 type WebSocketManager struct {
@@ -27,6 +31,9 @@ type WebSocketManager struct {
 
 	// Parent profiler for data updates
 	profiler *CoinProfiler
+
+	// Callback for real-time coin updates (to broadcast via WebSocket)
+	onCoinUpdate CoinUpdateCallback
 
 	// Connection state
 	conn            *websocket.Conn
@@ -73,6 +80,12 @@ func NewWebSocketManager(config *CoinProfilerConfig, profiler *CoinProfiler) *We
 		cancelFunc:          cancel,
 		stopChan:            make(chan struct{}),
 	}
+}
+
+// SetCoinUpdateCallback sets the callback function for real-time coin updates.
+// This is used to broadcast updates to WebSocket clients.
+func (wsm *WebSocketManager) SetCoinUpdateCallback(callback CoinUpdateCallback) {
+	wsm.onCoinUpdate = callback
 }
 
 // Start starts the WebSocket manager and establishes the connection.
@@ -147,6 +160,10 @@ func (wsm *WebSocketManager) Stop() error {
 
 	wsm.mu.Lock()
 	wsm.connectionState = ConnectionStateDisconnected
+	// Clear subscription state for clean restart
+	wsm.activeSubscriptions = make(map[string]bool)
+	wsm.pendingSubscribes = wsm.pendingSubscribes[:0]
+	wsm.pendingUnsubscribes = wsm.pendingUnsubscribes[:0]
 	wsm.mu.Unlock()
 
 	return nil
@@ -486,6 +503,11 @@ func (wsm *WebSocketManager) readLoop() {
 
 // processMessage handles an incoming WebSocket message.
 func (wsm *WebSocketManager) processMessage(message []byte) {
+	// Log first few messages for debugging
+	if atomic.LoadInt64(&wsm.messageCount) <= 5 {
+		wsm.log("Received message #%d: %s", atomic.LoadInt64(&wsm.messageCount), string(message[:min(len(message), 200)]))
+	}
+
 	// Check for combined stream format (from combined streams endpoint)
 	var streamWrapper struct {
 		Stream string          `json:"stream"`
@@ -512,21 +534,27 @@ func (wsm *WebSocketManager) processMessage(message []byte) {
 		if response.Error != nil {
 			wsm.logError("Subscription error: code=%d msg=%s", response.Error.Code, response.Error.Msg)
 			atomic.AddInt64(&wsm.errorCount, 1)
-		} else if response.ID != 0 {
-			wsm.logDebug("Subscription response: id=%d", response.ID)
+			return
 		}
-		return
+		if response.ID != 0 {
+			wsm.logDebug("Subscription response received: id=%d", response.ID)
+			return
+		}
+		// Not a subscription response, continue to check other formats
 	}
 
 	// Try parsing as direct event (e.g., kline event without wrapper)
+	// Note: Binance messages have both "e" (event type, string) and "E" (event time, number).
+	// Go's JSON is case-insensitive, so it may try to match "E" to the "e" tag and fail.
+	// We check if EventType was successfully set regardless of other parsing errors.
 	var baseEvent struct {
 		EventType string `json:"e"`
 	}
-	if err := json.Unmarshal(message, &baseEvent); err == nil && baseEvent.EventType != "" {
+	_ = json.Unmarshal(message, &baseEvent) // Ignore error - we just need the event type
+	if baseEvent.EventType != "" {
 		wsm.processDirectEvent(baseEvent.EventType, message)
 		return
 	}
-
 	wsm.logDebug("Unknown message format: %s", string(message[:min(len(message), 100)]))
 }
 
@@ -622,7 +650,6 @@ func (wsm *WebSocketManager) updateCoinData(symbol string, tfData *TimeframeData
 	}
 
 	wsm.profiler.mu.Lock()
-	defer wsm.profiler.mu.Unlock()
 
 	// Get or create CoinData
 	coinData, exists := wsm.profiler.coinData[symbol]
@@ -646,6 +673,32 @@ func (wsm *WebSocketManager) updateCoinData(symbol string, tfData *TimeframeData
 	// Update profiler metrics
 	wsm.profiler.updateCount++
 	wsm.profiler.lastUpdateTime = time.Now()
+
+	wsm.profiler.mu.Unlock()
+
+	// Broadcast real-time update to WebSocket clients (outside lock)
+	if wsm.onCoinUpdate != nil {
+		wsm.onCoinUpdate(map[string]interface{}{
+			"symbol":    symbol,
+			"price":     tfData.Close,
+			"timeframe": tfData.Timeframe,
+			"data": map[string]interface{}{
+				"open":          tfData.Open,
+				"high":          tfData.High,
+				"low":           tfData.Low,
+				"close":         tfData.Close,
+				"volume":        tfData.Volume,
+				"taker_buy_vol": tfData.TakerBuyVol,
+				"taker_sell_vol": tfData.TakerSellVol,
+				"quote_volume":  tfData.QuoteVolume,
+				"trade_count":   tfData.TradeCount,
+				"is_closed_bar": tfData.IsClosedBar,
+				"open_time":     tfData.OpenTime,
+				"close_time":    tfData.CloseTime,
+				"updated_at":    tfData.UpdatedAt,
+			},
+		})
+	}
 }
 
 // pingLoop sends periodic pings to keep the connection alive.

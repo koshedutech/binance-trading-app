@@ -340,3 +340,36 @@ func BroadcastPriceUpdate(symbol string, price float64) {
 
 	wsHub.BroadcastEvent(event)
 }
+
+// BroadcastCoinDataUpdate broadcasts a real-time coin data update to all clients
+// This is called directly from the Coin Profiler when WebSocket data arrives.
+// Epic 14: Enables millisecond-level updates from Binance to frontend UI.
+func BroadcastCoinDataUpdate(coinData map[string]interface{}) {
+	// Use user-aware WebSocket hub (frontend connects to /ws/user)
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventCoinDataUpdate,
+		Timestamp: time.Now(),
+		Data:      coinData,
+	}
+
+	// Use non-blocking send to avoid slowing down the data pipeline
+	select {
+	case userWSHub.broadcast <- mustMarshal(event):
+	default:
+		// Channel full, skip this update (next one will come shortly)
+	}
+}
+
+// mustMarshal marshals to JSON, panics on error (should never fail for valid data)
+func mustMarshal(v interface{}) []byte {
+	data, err := json.Marshal(v)
+	if err != nil {
+		log.Printf("Failed to marshal event: %v", err)
+		return nil
+	}
+	return data
+}

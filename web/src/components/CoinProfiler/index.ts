@@ -6,3 +6,5 @@
 export { default as CoinProfilerCard } from './CoinProfilerCard';
 export { default as CoinProfilerStatus, CoinProfilerStatusDetailed } from './CoinProfilerStatus';
 export { default as CoinList } from './CoinList';
+export { default as RequirementsBreakdown } from './RequirementsBreakdown';
+export { TradingViewChart, MiniChart } from './TradingViewChart';

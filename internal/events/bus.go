@@ -44,6 +44,9 @@ const (
 
 	// Story 10.3: Exit Decision Monitoring UI
 	EventExitDecisionUpdate EventType = "EXIT_DECISION_UPDATE"
+
+	// Epic 14: Coin Profiler Real-Time Updates
+	EventCoinDataUpdate EventType = "COIN_DATA_UPDATE"
 )
 
 // Event represents a system event
