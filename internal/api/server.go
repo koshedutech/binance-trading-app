@@ -19,6 +19,7 @@ import (
 	"binance-trading-bot/internal/decision"
 	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/license"
+	"binance-trading-bot/internal/research"
 	"binance-trading-bot/internal/settlement"
 	"binance-trading-bot/internal/vault"
 
@@ -107,6 +108,16 @@ type Server struct {
 
 	// Story 11.45: Strategy hierarchy cache service for sub-strategy settings
 	strategyHierarchyCacheService *cache.StrategyHierarchyCacheService
+
+	// Epic 15, Story 15.3: Data downloader for historical candle data
+	dataDownloader *research.DataDownloader
+
+	// Epic 15, Story 15.6: Feature calculation background job service
+	featureJobService *research.FeatureJobService
+
+	// Epic 15, Story 15.9: Backtest and walk-forward engines
+	backtestEngine    *research.BacktestEngine
+	walkForwardEngine *research.WalkForwardEngine
 }
 
 // ServerConfig holds server configuration
@@ -281,6 +292,16 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/entry-decision/score/:symbol":                      true,
 		// Position Controller endpoints (internal state only - Story 10.4)
 		"/api/futures/position-controller/status":                        true,
+		// Research Infrastructure endpoints (internal state only - Epic 15)
+		"/api/research/download-data":                                    true,
+		"/api/research/download-status/:job_id":                          true,
+		"/api/research/data-availability":                                true,
+		"/api/research/download-cancel/:job_id":                          true,
+		"/api/research/download-jobs":                                    true,
+		// Backtest endpoints (Story 15.9 - internal computation, no Binance API)
+		"/api/research/backtest":                                         true,
+		"/api/research/walk-forward":                                     true,
+		"/api/research/features":                                         true,
 	}
 
 	return func(c *gin.Context) {
@@ -1068,6 +1089,29 @@ func (s *Server) setupRoutes() {
 			spot.POST("/positions/:symbol/close", s.handleCloseSpotPosition)
 			spot.POST("/positions/close-all", s.handleCloseAllSpotPositions)
 		}
+
+		// ==================== RESEARCH INFRASTRUCTURE ENDPOINTS ====================
+		// Epic 15: Pattern Discovery Agent - Data download and availability
+		research := api.Group("/research")
+		{
+			// Data download endpoints (Story 15.3)
+			research.POST("/download-data", s.handleStartDownload)
+			research.GET("/download-status/:job_id", s.handleGetDownloadStatus)
+			research.GET("/data-availability", s.handleGetDataAvailability)
+			research.POST("/download-cancel/:job_id", s.handleCancelDownload)
+			research.GET("/download-jobs", s.handleListDownloadJobs)
+
+			// Feature calculation endpoints (Story 15.6)
+			research.POST("/calculate-features", s.handleTriggerFeatureCalculation)
+			research.GET("/feature-job/:job_id", s.handleGetFeatureJobStatus)
+			research.GET("/feature-jobs", s.handleListFeatureJobs)
+			research.GET("/feature-job-stats", s.handleGetFeatureJobStats)
+
+			// Backtest endpoints (Story 15.9)
+			research.POST("/backtest", s.handleRunResearchBacktest)
+			research.POST("/walk-forward", s.handleRunResearchWalkForward)
+			research.GET("/features", s.handleGetResearchFeatures)
+		}
 	}
 
 	// Admin endpoints (requires admin role)
@@ -1347,4 +1391,48 @@ func (s *Server) SetStrategyHierarchyCacheService(svc *cache.StrategyHierarchyCa
 // GetStrategyHierarchyCacheService returns the strategy hierarchy cache service.
 func (s *Server) GetStrategyHierarchyCacheService() *cache.StrategyHierarchyCacheService {
 	return s.strategyHierarchyCacheService
+}
+
+// SetDataDownloader sets the data downloader for research infrastructure.
+// Epic 15, Story 15.3: Data Download API Endpoints
+func (s *Server) SetDataDownloader(dl *research.DataDownloader) {
+	s.dataDownloader = dl
+}
+
+// GetDataDownloader returns the data downloader.
+func (s *Server) GetDataDownloader() *research.DataDownloader {
+	return s.dataDownloader
+}
+
+// SetFeatureJobService sets the feature job service for research infrastructure.
+// Epic 15, Story 15.6: Feature Calculation Background Job
+func (s *Server) SetFeatureJobService(svc *research.FeatureJobService) {
+	s.featureJobService = svc
+}
+
+// GetFeatureJobService returns the feature job service.
+func (s *Server) GetFeatureJobService() *research.FeatureJobService {
+	return s.featureJobService
+}
+
+// SetBacktestEngine sets the backtest engine for research infrastructure.
+// Epic 15, Story 15.9: Backtest API Endpoints
+func (s *Server) SetBacktestEngine(engine *research.BacktestEngine) {
+	s.backtestEngine = engine
+}
+
+// GetBacktestEngine returns the backtest engine.
+func (s *Server) GetBacktestEngine() *research.BacktestEngine {
+	return s.backtestEngine
+}
+
+// SetWalkForwardEngine sets the walk-forward engine for research infrastructure.
+// Epic 15, Story 15.9: Backtest API Endpoints
+func (s *Server) SetWalkForwardEngine(engine *research.WalkForwardEngine) {
+	s.walkForwardEngine = engine
+}
+
+// GetWalkForwardEngine returns the walk-forward engine.
+func (s *Server) GetWalkForwardEngine() *research.WalkForwardEngine {
+	return s.walkForwardEngine
 }

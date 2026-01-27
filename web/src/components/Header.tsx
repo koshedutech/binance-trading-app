@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain, RefreshCw, BarChart3, Menu } from 'lucide-react';
+import { Activity, LayoutDashboard, TrendingUp, Sparkles, Zap, Layers, User, CreditCard, Key, LogOut, ChevronDown, LogIn, UserPlus, Search, Shield, Brain, RefreshCw, BarChart3, Menu, Database } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { useAuth, TIER_INFO } from '../contexts/AuthContext';
@@ -114,7 +114,7 @@ export default function Header() {
                 <button
                   onClick={() => setMenuOpen(!menuOpen)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
-                    menuOpen || ['/strategy-builder', '/visual-strategy-advanced', '/pattern-scanner', '/investigate', '/decision-dashboard', '/position-analytics'].includes(location.pathname)
+                    menuOpen || ['/strategy-builder', '/visual-strategy-advanced', '/pattern-scanner', '/investigate', '/decision-dashboard', '/position-analytics', '/research-data'].includes(location.pathname)
                       ? 'bg-dark-600 text-white'
                       : 'text-gray-300 hover:bg-dark-700 hover:text-white'
                   }`}
@@ -198,6 +198,19 @@ export default function Header() {
                     >
                       <BarChart3 className="w-4 h-4" />
                       Position Analytics
+                    </Link>
+                    <div className="border-t border-dark-600 my-1"></div>
+                    <Link
+                      to="/research-data"
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                        isActive('/research-data')
+                          ? 'bg-cyan-600/20 text-cyan-400'
+                          : 'text-gray-300 hover:bg-dark-600 hover:text-white'
+                      }`}
+                    >
+                      <Database className="w-4 h-4" />
+                      Research Data
                     </Link>
                   </div>
                 )}

@@ -85,6 +85,11 @@ type FuturesClient interface {
 	// GetFuturesKlines retrieves candlestick data for futures
 	GetFuturesKlines(symbol, interval string, limit int) ([]Kline, error)
 
+	// GetFuturesKlinesWithTimeRange retrieves candlestick data for futures with time range
+	// startTime/endTime in milliseconds, 0 to ignore
+	// Used by research data downloader for historical candle fetching
+	GetFuturesKlinesWithTimeRange(symbol, interval string, startTime, endTime int64, limit int) ([]Kline, error)
+
 	// Get24hrTicker retrieves 24 hour price change statistics for a symbol
 	Get24hrTicker(symbol string) (*Futures24hrTicker, error)
 

@@ -33,6 +33,7 @@ import (
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/notification"
 	"binance-trading-bot/internal/orders"
+	"binance-trading-bot/internal/research"
 
 	"github.com/rs/zerolog"
 	"binance-trading-bot/internal/risk"
@@ -255,6 +256,13 @@ func main() {
 		}
 		logger.Info("System Control migration completed")
 	}
+
+	// Run Research Candles migration (049) - Epic 15: Research Infrastructure
+	// Creates research_candles table for historical data storage (backtesting & pattern discovery)
+	if err := db.RunResearchCandlesMigration(ctx); err != nil {
+		log.Printf("Warning: Research Candles migration failed: %v", err)
+	}
+	logger.Info("Research Candles migration completed")
 
 	// Create repository early for API key service
 	earlyRepo := database.NewRepository(db)
@@ -1097,6 +1105,69 @@ func main() {
 		logger.Info("SettlementService set on API server for daily P&L analytics")
 	}
 
+	// Epic 15: Initialize Research Infrastructure services for backtesting & pattern discovery
+	// DataDownloader -> FeatureCalculator -> FeatureCache -> FeatureJobService -> BacktestEngine -> WalkForwardEngine
+	var dataDownloader *research.DataDownloader
+	var featureJobService *research.FeatureJobService
+	var backtestEngine *research.BacktestEngine
+	var walkForwardEngine *research.WalkForwardEngine
+
+	// Only initialize if both database and cache are available
+	if db.Pool != nil && cacheService != nil && cacheService.IsHealthy() {
+		// 1. Create DataDownloader (needs db pool, cache service)
+		downloaderConfig := research.DefaultDownloaderConfig()
+		dataDownloader = research.NewDataDownloader(db.Pool, cacheService, downloaderConfig)
+		logger.Info("Research DataDownloader initialized")
+
+		// 2. Create FeatureCache (optimized Redis cache for features)
+		featureCache := research.NewFeatureCache(cacheService, research.DefaultFeatureCacheConfig())
+		logger.Info("Research FeatureCache initialized")
+
+		// 3. Create FeatureCalculator (uses cache service for feature storage)
+		featureCalcConfig := research.DefaultFeatureCalculatorConfig()
+		featureCalculator := research.NewFeatureCalculator(cacheService, featureCalcConfig)
+		logger.Info("Research FeatureCalculator initialized")
+
+		// 4. Create FeatureJobService (background job for feature calculation)
+		featureJobConfig := research.DefaultFeatureJobConfig()
+		featureJobService = research.NewFeatureJobService(db.Pool, featureCalculator, featureJobConfig)
+		logger.Info("Research FeatureJobService initialized")
+
+		// 5. Wire callback: DataDownloader.OnComplete -> FeatureJobService.TriggerFeatureCalculation
+		dataDownloader.SetOnCompleteCallback(func(ctx context.Context, symbol string, timeframe research.Timeframe) {
+			if _, err := featureJobService.TriggerFeatureCalculation(ctx, symbol, timeframe); err != nil {
+				log.Printf("[RESEARCH] Failed to trigger feature calculation for %s/%s: %v", symbol, timeframe, err)
+			} else {
+				log.Printf("[RESEARCH] Triggered feature calculation for %s/%s", symbol, timeframe)
+			}
+		})
+		logger.Info("Research download->feature callback wired")
+
+		// 6. Create BacktestEngine (uses DataDownloader as CandleRepository, FeatureCalculator)
+		backtestEngine = research.NewBacktestEngine(featureCache, featureCalculator, dataDownloader)
+		logger.Info("Research BacktestEngine initialized")
+
+		// 7. Create WalkForwardEngine (uses BacktestEngine)
+		walkForwardEngine = research.NewWalkForwardEngine(backtestEngine)
+		logger.Info("Research WalkForwardEngine initialized")
+
+		// 8. Start FeatureJobService background job
+		if err := featureJobService.Start(ctx); err != nil {
+			logger.Warn("Failed to start FeatureJobService", "error", err)
+		} else {
+			logger.Info("Research FeatureJobService background job started")
+		}
+
+		// 9. Wire services to API server
+		server.SetDataDownloader(dataDownloader)
+		server.SetFeatureJobService(featureJobService)
+		server.SetBacktestEngine(backtestEngine)
+		server.SetWalkForwardEngine(walkForwardEngine)
+		logger.Info("Research services wired to API server")
+	} else {
+		logger.Info("Research infrastructure not initialized - requires database pool and healthy Redis cache")
+	}
+
 	// Story 7.20: Initialize OrderChainCache for fast UI reads
 	var orderChainCache *cache.OrderChainCache
 	if cacheService != nil && cacheService.IsHealthy() {
@@ -1288,6 +1359,17 @@ func main() {
 	if sentimentAnalyzer != nil {
 		sentimentAnalyzer.Stop()
 		logger.Info("Sentiment analyzer stopped")
+	}
+
+	// Stop Research Infrastructure (DataDownloader first, then FeatureJobService)
+	// DataDownloader must stop before FeatureJobService since download callbacks trigger feature jobs
+	if dataDownloader != nil {
+		dataDownloader.Stop()
+		logger.Info("Research DataDownloader stopped")
+	}
+	if featureJobService != nil {
+		featureJobService.Stop()
+		logger.Info("Research FeatureJobService stopped")
 	}
 
 	// Stop User Data Stream

@@ -539,6 +539,74 @@ func (c *FuturesMockClient) GetFuturesKlines(symbol, interval string, limit int)
 	return klines, nil
 }
 
+// GetFuturesKlinesWithTimeRange retrieves candlestick data for futures with time range
+func (c *FuturesMockClient) GetFuturesKlinesWithTimeRange(symbol, interval string, startTime, endTime int64, limit int) ([]Kline, error) {
+	var basePrice float64 = 50000.0
+	if c.priceProvider != nil {
+		if p, err := c.priceProvider(symbol); err == nil {
+			basePrice = p
+		}
+	}
+
+	// Calculate number of candles based on time range
+	intervalDuration := time.Hour // Default to 1h
+	switch interval {
+	case "1m":
+		intervalDuration = time.Minute
+	case "5m":
+		intervalDuration = 5 * time.Minute
+	case "15m":
+		intervalDuration = 15 * time.Minute
+	case "30m":
+		intervalDuration = 30 * time.Minute
+	case "1h":
+		intervalDuration = time.Hour
+	case "4h":
+		intervalDuration = 4 * time.Hour
+	case "1d":
+		intervalDuration = 24 * time.Hour
+	}
+
+	start := time.UnixMilli(startTime)
+	end := time.UnixMilli(endTime)
+	numCandles := int(end.Sub(start) / intervalDuration)
+	if numCandles > limit {
+		numCandles = limit
+	}
+	if numCandles <= 0 {
+		numCandles = 1
+	}
+
+	klines := make([]Kline, numCandles)
+
+	for i := 0; i < numCandles; i++ {
+		candleStart := start.Add(time.Duration(i) * intervalDuration)
+		candleEnd := candleStart.Add(intervalDuration)
+
+		variation := (rand.Float64() - 0.5) * 0.02 * basePrice
+		open := basePrice + variation
+		close := open + (rand.Float64()-0.5)*0.01*basePrice
+		high := max(open, close) + rand.Float64()*0.005*basePrice
+		low := min(open, close) - rand.Float64()*0.005*basePrice
+
+		klines[i] = Kline{
+			OpenTime:                 candleStart.UnixMilli(),
+			Open:                     open,
+			High:                     high,
+			Low:                      low,
+			Close:                    close,
+			Volume:                   100 + rand.Float64()*500,
+			CloseTime:                candleEnd.UnixMilli() - 1,
+			QuoteAssetVolume:         (100 + rand.Float64()*500) * open,
+			NumberOfTrades:           int(100 + rand.Float64()*900),
+			TakerBuyBaseAssetVolume:  50 + rand.Float64()*250,
+			TakerBuyQuoteAssetVolume: (50 + rand.Float64()*250) * open,
+		}
+	}
+
+	return klines, nil
+}
+
 func (c *FuturesMockClient) GetFuturesCurrentPrice(symbol string) (float64, error) {
 	if c.priceProvider != nil {
 		return c.priceProvider(symbol)

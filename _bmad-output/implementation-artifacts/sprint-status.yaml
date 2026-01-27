@@ -406,3 +406,33 @@ development_status:
   14-17-main-integration: done  # Main.go Integration - IMPLEMENTED 2026-01-25
   14-18-db-migrations: done  # Database Migrations - VERIFIED 2026-01-25
   epic-14-retrospective: optional
+
+  # ============================================================================
+  # EPIC 15: Research Infrastructure - Data, Features & Backtesting
+  # Created: 2026-01-27
+  # Total Stories: 12
+  # Description: Build research infrastructure for fast pattern discovery and
+  #   strategy validation. Data cache, feature calculator, backtest engine,
+  #   walk-forward validation, data availability UI.
+  # Dependencies: None (standalone infrastructure)
+  # Goal: Enable 100+ hypothesis tests per hour instead of 5-10
+  # ============================================================================
+  epic-15: done  # ALL 12 STORIES COMPLETE 2026-01-27
+  # Part A: Data Infrastructure
+  15-1-database-schema-historical-candles: done  # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-2-data-download-service: done               # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-3-data-download-api-endpoints: done         # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  # Part B: Feature Calculation
+  15-4-feature-calculator-engine: done           # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-5-feature-cache-management: done            # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-6-feature-calculation-background-job: done  # CODE REVIEW PASSED + QA CONCERNS (wiring in 15.12) 2026-01-27
+  # Part C: Backtest Engine
+  15-7-simple-backtest-engine: done              # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-8-walk-forward-backtest-engine: done        # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-9-backtest-api-endpoints: done              # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  # Part D: UI
+  15-10-research-data-availability-page: done    # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  15-11-navigation-integration: done             # Implemented in 15.10 - Verified 2026-01-27
+  # Part E: Integration
+  15-12-main-go-integration: done                # CODE REVIEW PASSED + QA TRACE PASSED 2026-01-27
+  epic-15-retrospective: optional

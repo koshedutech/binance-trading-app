@@ -26,6 +26,7 @@ import AdminSettings from './pages/AdminSettings';
 import ResetSettings from './pages/ResetSettings';
 import { DecisionEngineDashboard } from './components/DecisionDashboard';
 import { PositionAnalyticsDashboard } from './components/PositionAnalytics';
+import ResearchData from './pages/ResearchData';
 import Header from './components/Header';
 import ConnectionIndicator from './components/ConnectionIndicator';
 
@@ -351,6 +352,11 @@ function AppContent() {
           <Route path="/position-analytics" element={
             <ProtectedRoute requiredTier={['trader', 'pro', 'whale']}>
               <PositionAnalyticsDashboard />
+            </ProtectedRoute>
+          } />
+          <Route path="/research-data" element={
+            <ProtectedRoute requiredTier={['trader', 'pro', 'whale']}>
+              <ResearchData />
             </ProtectedRoute>
           } />
 

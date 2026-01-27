@@ -670,6 +670,55 @@ func (c *FuturesClientImpl) GetFuturesKlines(symbol, interval string, limit int)
 	return klines, nil
 }
 
+// GetFuturesKlinesWithTimeRange retrieves candlestick data for futures with time range
+// startTime/endTime in milliseconds, 0 to ignore
+// Used by research data downloader for historical candle fetching
+func (c *FuturesClientImpl) GetFuturesKlinesWithTimeRange(symbol, interval string, startTime, endTime int64, limit int) ([]Kline, error) {
+	params := map[string]string{
+		"symbol":   symbol,
+		"interval": interval,
+	}
+
+	if startTime > 0 {
+		params["startTime"] = strconv.FormatInt(startTime, 10)
+	}
+	if endTime > 0 {
+		params["endTime"] = strconv.FormatInt(endTime, 10)
+	}
+	if limit > 0 {
+		params["limit"] = strconv.Itoa(limit)
+	}
+
+	resp, err := c.publicGet("/fapi/v1/klines", params)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching klines: %w", err)
+	}
+
+	var rawKlines [][]interface{}
+	if err := json.Unmarshal(resp, &rawKlines); err != nil {
+		return nil, fmt.Errorf("error parsing klines: %w", err)
+	}
+
+	klines := make([]Kline, len(rawKlines))
+	for i, raw := range rawKlines {
+		klines[i] = Kline{
+			OpenTime:                 int64(raw[0].(float64)),
+			Open:                     parseFloat(raw[1]),
+			High:                     parseFloat(raw[2]),
+			Low:                      parseFloat(raw[3]),
+			Close:                    parseFloat(raw[4]),
+			Volume:                   parseFloat(raw[5]),
+			CloseTime:                int64(raw[6].(float64)),
+			QuoteAssetVolume:         parseFloat(raw[7]),
+			NumberOfTrades:           int(raw[8].(float64)),
+			TakerBuyBaseAssetVolume:  parseFloat(raw[9]),
+			TakerBuyQuoteAssetVolume: parseFloat(raw[10]),
+		}
+	}
+
+	return klines, nil
+}
+
 // Get24hrTicker retrieves 24 hour price change statistics for a symbol
 func (c *FuturesClientImpl) Get24hrTicker(symbol string) (*Futures24hrTicker, error) {
 	resp, err := c.publicGet("/fapi/v1/ticker/24hr", map[string]string{

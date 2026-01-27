@@ -499,6 +499,12 @@ func (c *CachedFuturesClient) GetFuturesKlines(symbol, interval string, limit in
 	return result, err
 }
 
+// GetFuturesKlinesWithTimeRange retrieves candlestick data with time range
+// This method doesn't use caching as it's for historical data fetching
+func (c *CachedFuturesClient) GetFuturesKlinesWithTimeRange(symbol, interval string, startTime, endTime int64, limit int) ([]Kline, error) {
+	return c.client.GetFuturesKlinesWithTimeRange(symbol, interval, startTime, endTime, limit)
+}
+
 // GetOrderBookDepth returns cached order book if available, otherwise falls back to REST API
 func (c *CachedFuturesClient) GetOrderBookDepth(symbol string, limit int) (*OrderBookDepth, error) {
 	c.mu.RLock()
