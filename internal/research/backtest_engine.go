@@ -34,6 +34,31 @@ func NewBacktestEngine(featureCache *FeatureCache, featureCalculator *FeatureCal
 	}
 }
 
+// HasFeatures checks if features are cached for a specific symbol/timeframe.
+func (e *BacktestEngine) HasFeatures(ctx context.Context, symbol string, timeframe Timeframe) bool {
+	if e.featureCache == nil {
+		return false
+	}
+	return e.featureCache.HasFeatures(ctx, symbol, timeframe)
+}
+
+// CountFeatures returns the number of cached features for a symbol/timeframe.
+func (e *BacktestEngine) CountFeatures(ctx context.Context, symbol string, timeframe Timeframe) int64 {
+	if e.featureCache == nil {
+		return 0
+	}
+	return e.featureCache.CountFeatures(ctx, symbol, timeframe)
+}
+
+// GetAllFeatureCounts returns feature counts for all symbol/timeframe combinations efficiently.
+// This is much faster than calling CountFeatures for each combination individually.
+func (e *BacktestEngine) GetAllFeatureCounts(ctx context.Context) (map[string]map[string]int64, error) {
+	if e.featureCache == nil {
+		return make(map[string]map[string]int64), nil
+	}
+	return e.featureCache.GetAllFeatureCounts(ctx)
+}
+
 // RunBacktest executes a backtest based on the request parameters.
 func (e *BacktestEngine) RunBacktest(ctx context.Context, req *BacktestRequest) (*BacktestResult, error) {
 	startTime := time.Now()

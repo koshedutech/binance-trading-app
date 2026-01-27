@@ -1119,6 +1119,13 @@ func main() {
 		dataDownloader = research.NewDataDownloader(db.Pool, cacheService, downloaderConfig)
 		logger.Info("Research DataDownloader initialized")
 
+		// Recover any orphaned jobs from previous server instance
+		if recovered, err := dataDownloader.RecoverOrphanedJobs(ctx); err != nil {
+			logger.Warn("Failed to recover orphaned download jobs", "error", err)
+		} else if recovered > 0 {
+			logger.Info("Recovered orphaned download jobs", "count", recovered)
+		}
+
 		// 2. Create FeatureCache (optimized Redis cache for features)
 		featureCache := research.NewFeatureCache(cacheService, research.DefaultFeatureCacheConfig())
 		logger.Info("Research FeatureCache initialized")

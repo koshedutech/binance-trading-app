@@ -297,6 +297,7 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/research/download-status/:job_id":                          true,
 		"/api/research/data-availability":                                true,
 		"/api/research/download-cancel/:job_id":                          true,
+		"/api/research/download-resume/:job_id":                          true,
 		"/api/research/download-jobs":                                    true,
 		// Backtest endpoints (Story 15.9 - internal computation, no Binance API)
 		"/api/research/backtest":                                         true,
@@ -1099,6 +1100,7 @@ func (s *Server) setupRoutes() {
 			research.GET("/download-status/:job_id", s.handleGetDownloadStatus)
 			research.GET("/data-availability", s.handleGetDataAvailability)
 			research.POST("/download-cancel/:job_id", s.handleCancelDownload)
+			research.POST("/download-resume/:job_id", s.handleResumeDownload)
 			research.GET("/download-jobs", s.handleListDownloadJobs)
 
 			// Feature calculation endpoints (Story 15.6)

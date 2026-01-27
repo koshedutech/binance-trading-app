@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
-import { X, Download, Calendar, Clock, AlertTriangle, Check } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { X, Download, Calendar, Clock, AlertTriangle, Check, Search, Loader2, ChevronDown } from 'lucide-react';
+import { apiService } from '../../services/api';
 
 interface DownloadDataModalProps {
   isOpen: boolean;
@@ -15,6 +16,17 @@ export interface DownloadRequest {
   to: string;
 }
 
+// API response wrapper
+interface APIWrapper<T> {
+  success: boolean;
+  data: T;
+}
+
+interface SymbolsResponse {
+  symbols: string[];
+  count: number;
+}
+
 const AVAILABLE_TIMEFRAMES = [
   { value: '5m', label: '5 minutes' },
   { value: '15m', label: '15 minutes' },
@@ -23,7 +35,7 @@ const AVAILABLE_TIMEFRAMES = [
   { value: '1d', label: '1 day' },
 ];
 
-// Popular trading pairs
+// Popular trading pairs (shown as quick select)
 const POPULAR_SYMBOLS = [
   'BTCUSDT',
   'ETHUSDT',
@@ -88,17 +100,138 @@ export default function DownloadDataModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Symbol search state
+  const [availableSymbols, setAvailableSymbols] = useState<string[]>([]);
+  const [isLoadingSymbols, setIsLoadingSymbols] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Fetch available symbols from Binance Futures
+  const fetchSymbols = useCallback(async () => {
+    setIsLoadingSymbols(true);
+    try {
+      // Use futures endpoint - returns array of symbols directly
+      const response = await apiService.get<string[]>('/futures/symbols');
+      if (Array.isArray(response.data)) {
+        setAvailableSymbols(response.data);
+      } else {
+        // Fall back to wrapped response format
+        const wrapped = response.data as unknown as APIWrapper<SymbolsResponse>;
+        if (wrapped?.data?.symbols) {
+          setAvailableSymbols(wrapped.data.symbols);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch symbols:', err);
+      // Fall back to popular symbols if API fails
+      setAvailableSymbols(POPULAR_SYMBOLS);
+    } finally {
+      setIsLoadingSymbols(false);
+    }
+  }, []);
+
+  // Fetch symbols when modal opens
+  useEffect(() => {
+    if (isOpen && availableSymbols.length === 0) {
+      fetchSymbols();
+    }
+  }, [isOpen, availableSymbols.length, fetchSymbols]);
+
   // Reset form when modal opens
   useEffect(() => {
     if (isOpen) {
       const defaultDates = getDefaultDates();
       setSymbol('');
+      setSearchQuery('');
       setTimeframes(['15m', '1h']);
       setFrom(defaultDates.from);
       setTo(defaultDates.to);
       setError(null);
+      setShowDropdown(false);
+      setHighlightedIndex(0);
     }
   }, [isOpen]);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(event.target as Node) &&
+        inputRef.current &&
+        !inputRef.current.contains(event.target as Node)
+      ) {
+        setShowDropdown(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Filter symbols based on search query
+  const filteredSymbols = searchQuery
+    ? availableSymbols.filter((s) =>
+        s.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : availableSymbols;
+
+  // Limit displayed results for performance
+  const displayedSymbols = filteredSymbols.slice(0, 50);
+
+  // Handle keyboard navigation
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (!showDropdown) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter') {
+        setShowDropdown(true);
+        e.preventDefault();
+      }
+      return;
+    }
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightedIndex((prev) =>
+          prev < displayedSymbols.length - 1 ? prev + 1 : prev
+        );
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightedIndex((prev) => (prev > 0 ? prev - 1 : 0));
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (displayedSymbols[highlightedIndex]) {
+          selectSymbol(displayedSymbols[highlightedIndex]);
+        }
+        break;
+      case 'Escape':
+        setShowDropdown(false);
+        break;
+    }
+  };
+
+  // Select a symbol
+  const selectSymbol = (s: string) => {
+    setSymbol(s);
+    setSearchQuery(s);
+    setShowDropdown(false);
+    setHighlightedIndex(0);
+  };
+
+  // Handle input change
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.toUpperCase();
+    setSearchQuery(value);
+    setSymbol(value);
+    setShowDropdown(true);
+    setHighlightedIndex(0);
+  };
 
   const toggleTimeframe = (tf: string) => {
     setTimeframes((prev) =>
@@ -115,6 +248,14 @@ export default function DownloadDataModal({
       setError('Please enter a symbol');
       return;
     }
+
+    // Check if symbol is valid (exists in available symbols or is manually entered)
+    const isValidSymbol = availableSymbols.length === 0 || availableSymbols.includes(symbol.toUpperCase());
+    if (!isValidSymbol) {
+      setError(`Symbol "${symbol}" not found on Binance. Please select a valid symbol.`);
+      return;
+    }
+
     if (timeframes.length === 0) {
       setError('Please select at least one timeframe');
       return;
@@ -187,31 +328,104 @@ export default function DownloadDataModal({
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
-          {/* Symbol input */}
-          <div>
+          {/* Symbol input with autocomplete */}
+          <div className="relative">
             <label className="block text-sm font-medium text-gray-300 mb-2">
               Symbol
+              {isLoadingSymbols && (
+                <Loader2 className="w-3 h-3 inline ml-2 animate-spin text-gray-500" />
+              )}
+              {!isLoadingSymbols && availableSymbols.length > 0 && (
+                <span className="text-xs text-gray-500 ml-2">
+                  ({availableSymbols.length} available)
+                </span>
+              )}
             </label>
-            <input
-              type="text"
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              placeholder="e.g., BTCUSDT"
-              className="w-full px-4 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-            />
-            {symbolExists && (
+
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+              <input
+                ref={inputRef}
+                type="text"
+                value={searchQuery}
+                onChange={handleInputChange}
+                onFocus={() => setShowDropdown(true)}
+                onKeyDown={handleKeyDown}
+                placeholder="Search symbols (e.g., BTC, ETH)"
+                className="w-full pl-10 pr-10 py-2 bg-dark-700 border border-dark-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={() => setShowDropdown(!showDropdown)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-dark-600 rounded"
+              >
+                <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+
+            {/* Dropdown */}
+            {showDropdown && (
+              <div
+                ref={dropdownRef}
+                className="absolute z-10 w-full mt-1 bg-dark-700 border border-dark-600 rounded-lg shadow-xl max-h-60 overflow-y-auto"
+              >
+                {isLoadingSymbols ? (
+                  <div className="flex items-center justify-center py-4 text-gray-400">
+                    <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                    Loading symbols...
+                  </div>
+                ) : displayedSymbols.length > 0 ? (
+                  <>
+                    {displayedSymbols.map((s, index) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => selectSymbol(s)}
+                        className={`w-full px-4 py-2 text-left text-sm flex items-center justify-between transition-colors ${
+                          index === highlightedIndex
+                            ? 'bg-primary-500/20 text-primary-400'
+                            : 'text-gray-300 hover:bg-dark-600'
+                        } ${existingSymbols.includes(s) ? 'border-l-2 border-yellow-500' : ''}`}
+                      >
+                        <span className="font-mono">{s}</span>
+                        {existingSymbols.includes(s) && (
+                          <span className="text-xs text-yellow-400">Has data</span>
+                        )}
+                      </button>
+                    ))}
+                    {filteredSymbols.length > 50 && (
+                      <div className="px-4 py-2 text-xs text-gray-500 border-t border-dark-600">
+                        Showing 50 of {filteredSymbols.length} results. Type more to narrow down.
+                      </div>
+                    )}
+                  </>
+                ) : searchQuery ? (
+                  <div className="px-4 py-3 text-sm text-gray-400">
+                    No symbols found matching "{searchQuery}"
+                  </div>
+                ) : (
+                  <div className="px-4 py-3 text-sm text-gray-400">
+                    Start typing to search symbols
+                  </div>
+                )}
+              </div>
+            )}
+
+            {symbolExists && symbol && (
               <div className="flex items-center gap-1 mt-1 text-xs text-yellow-400">
                 <AlertTriangle className="w-3 h-3" />
                 Data exists for this symbol. New data will be merged.
               </div>
             )}
+
             {/* Quick select buttons */}
             <div className="flex flex-wrap gap-1 mt-2">
               {POPULAR_SYMBOLS.slice(0, 5).map((s) => (
                 <button
                   key={s}
                   type="button"
-                  onClick={() => setSymbol(s)}
+                  onClick={() => selectSymbol(s)}
                   className={`px-2 py-1 text-xs rounded transition-colors ${
                     symbol === s
                       ? 'bg-primary-500/20 text-primary-400 border border-primary-500/30'

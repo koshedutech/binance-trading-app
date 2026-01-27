@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 // DownloadJobStatus represents the status of a download job
@@ -602,8 +603,18 @@ func (d *DataDownloader) saveJob(ctx context.Context, job *DownloadJob) error {
 		return fmt.Errorf("failed to marshal job: %w", err)
 	}
 
-	key := jobKeyPrefix + job.ID
-	return d.cacheService.Set(ctx, key, string(data), jobTTL)
+	client := d.cacheService.GetClient()
+	if client == nil {
+		return fmt.Errorf("redis client unavailable")
+	}
+
+	// Store in HASH for fast listing (HGETALL is O(n) where n = number of jobs)
+	// The hash key is jobListKey, field is job ID, value is JSON
+	if err := client.HSet(ctx, jobListKey, job.ID, string(data)).Err(); err != nil {
+		return fmt.Errorf("failed to save job to hash: %w", err)
+	}
+
+	return nil
 }
 
 // GetJob retrieves a job by ID
@@ -612,10 +623,21 @@ func (d *DataDownloader) GetJob(ctx context.Context, jobID string) (*DownloadJob
 		return nil, fmt.Errorf("cache service not available")
 	}
 
-	key := jobKeyPrefix + jobID
-	data, err := d.cacheService.Get(ctx, key)
+	client := d.cacheService.GetClient()
+	if client == nil {
+		return nil, fmt.Errorf("redis client unavailable")
+	}
+
+	// Get from HASH
+	data, err := client.HGet(ctx, jobListKey, jobID).Result()
 	if err != nil {
-		return nil, err
+		// Try legacy key format for backward compatibility
+		legacyKey := jobKeyPrefix + jobID
+		legacyData, legacyErr := d.cacheService.Get(ctx, legacyKey)
+		if legacyErr != nil {
+			return nil, fmt.Errorf("job not found: %s", jobID)
+		}
+		data = legacyData
 	}
 
 	var job DownloadJob
@@ -701,11 +723,47 @@ func (d *DataDownloader) ListJobs(ctx context.Context) ([]*DownloadJob, error) {
 		return nil, fmt.Errorf("cache service not available")
 	}
 
-	// Scan for all job keys
+	client := d.cacheService.GetClient()
+	if client == nil {
+		return nil, fmt.Errorf("redis client unavailable")
+	}
+
+	// Use HGETALL for O(n) performance where n = number of jobs (not total Redis keys)
+	result, err := client.HGetAll(ctx, jobListKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get jobs from hash: %w", err)
+	}
+
+	// If hash is empty, try to migrate from legacy individual keys
+	if len(result) == 0 {
+		return d.migrateAndListLegacyJobs(ctx, client)
+	}
+
+	jobs := make([]*DownloadJob, 0, len(result))
+	for _, data := range result {
+		var job DownloadJob
+		if err := json.Unmarshal([]byte(data), &job); err != nil {
+			continue
+		}
+		jobs = append(jobs, &job)
+	}
+
+	return jobs, nil
+}
+
+// migrateAndListLegacyJobs migrates jobs from legacy individual keys to the hash
+func (d *DataDownloader) migrateAndListLegacyJobs(ctx context.Context, client *redis.Client) ([]*DownloadJob, error) {
+	// Scan for legacy job keys (this is slow but only happens once during migration)
 	keys, err := d.cacheService.ScanKeys(ctx, jobKeyPrefix+"*", 100)
 	if err != nil {
-		return nil, fmt.Errorf("failed to scan job keys: %w", err)
+		return nil, fmt.Errorf("failed to scan legacy job keys: %w", err)
 	}
+
+	if len(keys) == 0 {
+		return []*DownloadJob{}, nil
+	}
+
+	log.Printf("[RESEARCH] Migrating %d legacy download jobs to hash storage", len(keys))
 
 	jobs := make([]*DownloadJob, 0, len(keys))
 	for _, key := range keys {
@@ -719,9 +777,70 @@ func (d *DataDownloader) ListJobs(ctx context.Context) ([]*DownloadJob, error) {
 			continue
 		}
 		jobs = append(jobs, &job)
+
+		// Migrate to hash
+		if err := client.HSet(ctx, jobListKey, job.ID, data).Err(); err != nil {
+			log.Printf("[RESEARCH] Failed to migrate job %s to hash: %v", job.ID, err)
+		}
 	}
 
+	log.Printf("[RESEARCH] Migration complete: %d jobs migrated to hash storage", len(jobs))
 	return jobs, nil
+}
+
+// RecoverOrphanedJobs finds jobs that were "running" when the server stopped
+// and marks them as "paused" so they can be resumed. This should be called on startup.
+func (d *DataDownloader) RecoverOrphanedJobs(ctx context.Context) (int, error) {
+	jobs, err := d.ListJobs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list jobs: %w", err)
+	}
+
+	recovered := 0
+	for _, job := range jobs {
+		// Check if job was "running" but has no active goroutine
+		if job.Status == JobStatusRunning || job.Status == JobStatusPending {
+			d.mu.RLock()
+			_, isActive := d.activeJobs[job.ID]
+			d.mu.RUnlock()
+
+			if !isActive {
+				// This job was orphaned - mark as paused so it can be resumed
+				job.Status = JobStatusPaused
+				job.Error = "Interrupted by server restart. Click to resume."
+				job.UpdatedAt = time.Now()
+
+				if err := d.saveJob(ctx, job); err != nil {
+					log.Printf("[RESEARCH] Failed to recover orphaned job %s: %v", job.ID, err)
+					continue
+				}
+
+				log.Printf("[RESEARCH] Recovered orphaned job: %s (was at %.1f%%)",
+					job.ID, job.Progress.PercentComplete)
+				recovered++
+			}
+		}
+	}
+
+	if recovered > 0 {
+		log.Printf("[RESEARCH] Recovered %d orphaned download jobs", recovered)
+	}
+
+	return recovered, nil
+}
+
+// ResumeJob manually resumes a paused job
+func (d *DataDownloader) ResumeJob(ctx context.Context, jobID string) (*DownloadJob, error) {
+	job, err := d.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("job not found: %w", err)
+	}
+
+	if job.Status != JobStatusPaused && job.Status != JobStatusFailed {
+		return nil, fmt.Errorf("job cannot be resumed (status: %s)", job.Status)
+	}
+
+	return d.resumeJob(ctx, job)
 }
 
 // GetAvailableData returns information about what data is available in the database

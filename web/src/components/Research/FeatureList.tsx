@@ -111,6 +111,11 @@ interface FeatureListProps {
 export default function FeatureList({ categories, totalCount }: FeatureListProps) {
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set(['price']));
 
+  // Guard against undefined categories
+  if (!categories) {
+    return null;
+  }
+
   const toggleCategory = (category: string) => {
     setExpandedCategories((prev) => {
       const next = new Set(prev);

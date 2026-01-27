@@ -9,6 +9,8 @@ export interface CoinDataInfo {
   to_date: string;
   total_candles: number;
   storage_size_mb: number;
+  feature_status?: Record<string, boolean>;  // Timeframe -> hasFeatures
+  feature_counts?: Record<string, number>;   // Timeframe -> featureCount
 }
 
 interface DataAvailabilityTableProps {
@@ -172,11 +174,15 @@ export default function DataAvailabilityTable({
                       </td>
                       {STANDARD_TIMEFRAMES.map((tf) => {
                         const hasTimeframe = coin.timeframes.includes(tf);
+                        const hasFeatures = coin.feature_status?.[tf] || false;
                         return (
                           <td key={tf} className="px-3 py-3 text-center">
                             {hasTimeframe ? (
-                              <div className="flex items-center justify-center">
+                              <div className="flex items-center justify-center gap-1">
                                 <Check className="w-4 h-4 text-green-400" />
+                                {hasFeatures && (
+                                  <BarChart2 className="w-3 h-3 text-purple-400" title="Features computed" />
+                                )}
                               </div>
                             ) : (
                               <div className="flex items-center justify-center">
@@ -190,18 +196,39 @@ export default function DataAvailabilityTable({
                         <span className="text-gray-300">{formatCandleCount(coin.total_candles)}</span>
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            // Calculate features for the first available timeframe
-                            const tf = coin.timeframes[0] || '15m';
-                            onCalculateFeatures(coin.symbol, tf);
-                          }}
-                          className="p-1.5 hover:bg-dark-600 rounded transition-colors"
-                          title="Calculate features"
-                        >
-                          <BarChart2 className="w-4 h-4 text-primary-400" />
-                        </button>
+                        {(() => {
+                          // Check if all timeframes have features computed
+                          const allFeaturesComputed = coin.timeframes.every(
+                            (tf) => coin.feature_status?.[tf]
+                          );
+                          // Find first timeframe without features
+                          const tfWithoutFeatures = coin.timeframes.find(
+                            (tf) => !coin.feature_status?.[tf]
+                          );
+
+                          if (allFeaturesComputed) {
+                            return (
+                              <span className="text-xs text-green-400" title="All features computed">
+                                <Check className="w-4 h-4 inline" />
+                              </span>
+                            );
+                          }
+
+                          return (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                // Calculate features for the first timeframe without features
+                                const tf = tfWithoutFeatures || coin.timeframes[0] || '15m';
+                                onCalculateFeatures(coin.symbol, tf);
+                              }}
+                              className="p-1.5 hover:bg-dark-600 rounded transition-colors"
+                              title={`Calculate features for ${tfWithoutFeatures || 'all timeframes'}`}
+                            >
+                              <BarChart2 className="w-4 h-4 text-primary-400" />
+                            </button>
+                          );
+                        })()}
                       </td>
                     </tr>
                     {/* Expanded row with details */}
@@ -246,6 +273,44 @@ export default function DataAvailabilityTable({
                               </div>
                             </div>
                           </div>
+
+                          {/* Feature status per timeframe */}
+                          {coin.feature_status && Object.keys(coin.feature_status).length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-dark-600">
+                              <div className="text-xs text-gray-500 mb-2">Feature Status by Timeframe</div>
+                              <div className="flex flex-wrap gap-2">
+                                {coin.timeframes.map((tf) => {
+                                  const hasFeatures = coin.feature_status?.[tf];
+                                  const featureCount = coin.feature_counts?.[tf] || 0;
+                                  return (
+                                    <div
+                                      key={tf}
+                                      className={`px-2 py-1 rounded text-xs flex items-center gap-1 ${
+                                        hasFeatures
+                                          ? 'bg-purple-500/20 text-purple-400'
+                                          : 'bg-dark-600 text-gray-400'
+                                      }`}
+                                    >
+                                      <span className="font-medium">{tf}</span>
+                                      {hasFeatures ? (
+                                        <span>({featureCount.toLocaleString()} cached)</span>
+                                      ) : (
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            onCalculateFeatures(coin.symbol, tf);
+                                          }}
+                                          className="ml-1 text-primary-400 hover:text-primary-300"
+                                        >
+                                          Calculate
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )}

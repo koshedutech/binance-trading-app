@@ -44,12 +44,14 @@ type DownloadStatusResponse struct {
 
 // CoinDataInfo represents data availability for a single coin.
 type CoinDataInfo struct {
-	Symbol        string   `json:"symbol"`
-	Timeframes    []string `json:"timeframes"`
-	FromDate      string   `json:"from_date"`
-	ToDate        string   `json:"to_date"`
-	TotalCandles  int64    `json:"total_candles"`
-	StorageSizeMB float64  `json:"storage_size_mb"`
+	Symbol         string            `json:"symbol"`
+	Timeframes     []string          `json:"timeframes"`
+	FromDate       string            `json:"from_date"`
+	ToDate         string            `json:"to_date"`
+	TotalCandles   int64             `json:"total_candles"`
+	StorageSizeMB  float64           `json:"storage_size_mb"`
+	FeatureStatus  map[string]bool   `json:"feature_status"`   // Timeframe -> hasFeatures
+	FeatureCounts  map[string]int64  `json:"feature_counts"`   // Timeframe -> featureCount
 }
 
 // DataAvailabilityResponse represents the response for data availability query.
@@ -384,11 +386,13 @@ func (s *Server) getDataAvailability(ctx context.Context) (*DataAvailabilityResp
 			}
 		} else {
 			symbolData[symbol] = &CoinDataInfo{
-				Symbol:       symbol,
-				Timeframes:   []string{timeframe},
-				FromDate:     firstCandle.Format("2006-01-02"),
-				ToDate:       lastCandle.Format("2006-01-02"),
-				TotalCandles: candleCount,
+				Symbol:        symbol,
+				Timeframes:    []string{timeframe},
+				FromDate:      firstCandle.Format("2006-01-02"),
+				ToDate:        lastCandle.Format("2006-01-02"),
+				TotalCandles:  candleCount,
+				FeatureStatus: make(map[string]bool),
+				FeatureCounts: make(map[string]int64),
 			}
 		}
 	}
@@ -397,11 +401,35 @@ func (s *Server) getDataAvailability(ctx context.Context) (*DataAvailabilityResp
 		return nil, err
 	}
 
-	// Convert map to slice
+	// Get all feature counts in a single efficient scan (instead of per-coin/per-timeframe queries)
+	var allFeatureCounts map[string]map[string]int64
+	if s.backtestEngine != nil {
+		var err error
+		allFeatureCounts, err = s.backtestEngine.GetAllFeatureCounts(ctx)
+		if err != nil {
+			// Log warning but continue - feature counts are optional
+			fmt.Printf("[DATA-AVAILABILITY] Warning: failed to get feature counts: %v\n", err)
+		}
+	}
+
+	// Convert map to slice and check feature status
 	coins := make([]CoinDataInfo, 0, len(symbolData))
 	for _, coin := range symbolData {
 		// Estimate storage size (approximately 100 bytes per candle)
 		coin.StorageSizeMB = float64(coin.TotalCandles) * 100 / (1024 * 1024)
+
+		// Apply feature counts from the batch query
+		if allFeatureCounts != nil {
+			if symbolCounts, ok := allFeatureCounts[coin.Symbol]; ok {
+				for _, tf := range coin.Timeframes {
+					if count, ok := symbolCounts[tf]; ok {
+						coin.FeatureCounts[tf] = count
+						coin.FeatureStatus[tf] = count > 0
+					}
+				}
+			}
+		}
+
 		coins = append(coins, *coin)
 	}
 
@@ -444,6 +472,40 @@ func (s *Server) handleCancelDownload(c *gin.Context) {
 		"job_id":  jobID,
 		"status":  "cancelled",
 		"message": "Download job cancelled successfully",
+	})
+}
+
+// handleResumeDownload resumes a paused or failed download job.
+// POST /api/research/download-resume/:job_id
+func (s *Server) handleResumeDownload(c *gin.Context) {
+	// Validate user authentication
+	if _, ok := s.getUserIDRequired(c); !ok {
+		return
+	}
+
+	jobID := c.Param("job_id")
+	if jobID == "" {
+		errorResponse(c, http.StatusBadRequest, "Job ID is required")
+		return
+	}
+
+	if s.dataDownloader == nil {
+		errorResponse(c, http.StatusServiceUnavailable, "Data download service not available")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	job, err := s.dataDownloader.ResumeJob(ctx, jobID)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "Failed to resume job: "+err.Error())
+		return
+	}
+
+	successResponse(c, gin.H{
+		"job_id":  job.ID,
+		"status":  string(job.Status),
+		"message": "Download job resumed successfully",
 	})
 }
 

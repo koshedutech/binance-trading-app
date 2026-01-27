@@ -19,7 +19,7 @@ services:
     image: redis:7-alpine
     container_name: binance-bot-redis
     restart: always
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy noeviction
+    command: redis-server --appendonly yes
     environment:
       - TZ=Asia/Phnom_Penh
     volumes:

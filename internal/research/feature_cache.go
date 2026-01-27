@@ -520,6 +520,83 @@ func (fc *FeatureCache) GetStats(ctx context.Context) (*CacheStats, error) {
 	return stats, iter.Err()
 }
 
+// CountFeatures returns the number of cached features for a specific symbol and timeframe.
+// Returns 0 if the cache is unavailable or the scan fails.
+// Note: This method is slow for large datasets. Use GetAllFeatureCounts for batch operations.
+func (fc *FeatureCache) CountFeatures(ctx context.Context, symbol string, timeframe Timeframe) int64 {
+	if !fc.IsHealthy() {
+		return 0
+	}
+
+	client := fc.cacheService.GetClient()
+	if client == nil {
+		return 0
+	}
+
+	// Use the versioned pattern to only count current version features
+	pattern := fmt.Sprintf(FeatureCachePattern, fc.config.Version, symbol, timeframe)
+
+	var count int64
+	iter := client.Scan(ctx, 0, pattern, 1000).Iterator()
+	for iter.Next(ctx) {
+		count++
+	}
+
+	return count
+}
+
+// HasFeatures checks if there are any cached features for a specific symbol and timeframe.
+// Returns true if at least one feature is cached.
+func (fc *FeatureCache) HasFeatures(ctx context.Context, symbol string, timeframe Timeframe) bool {
+	return fc.CountFeatures(ctx, symbol, timeframe) > 0
+}
+
+// FeatureCountResult holds the count for a symbol/timeframe combination
+type FeatureCountResult struct {
+	Symbol    string
+	Timeframe string
+	Count     int64
+}
+
+// GetAllFeatureCounts returns feature counts for all symbol/timeframe combinations in a single scan.
+// This is much more efficient than calling CountFeatures for each combination individually.
+func (fc *FeatureCache) GetAllFeatureCounts(ctx context.Context) (map[string]map[string]int64, error) {
+	result := make(map[string]map[string]int64)
+
+	if !fc.IsHealthy() {
+		return result, nil
+	}
+
+	client := fc.cacheService.GetClient()
+	if client == nil {
+		return result, nil
+	}
+
+	// Scan all features with current version in a single pass
+	pattern := fmt.Sprintf(VersionedFeaturesCachePattern, fc.config.Version)
+
+	iter := client.Scan(ctx, 0, pattern, 10000).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		parts := splitCacheKey(key)
+		if parts == nil {
+			continue
+		}
+
+		// Initialize symbol map if needed
+		if _, ok := result[parts.symbol]; !ok {
+			result[parts.symbol] = make(map[string]int64)
+		}
+		result[parts.symbol][parts.timeframe]++
+	}
+
+	if err := iter.Err(); err != nil {
+		return result, fmt.Errorf("scan error: %w", err)
+	}
+
+	return result, nil
+}
+
 // --- Serialization ---
 
 // featuresToMap converts CandleFeatures to a map suitable for Redis HSET.

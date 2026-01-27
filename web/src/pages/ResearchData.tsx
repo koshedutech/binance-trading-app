@@ -10,11 +10,19 @@ import {
   CheckCircle,
   AlertTriangle,
   Clock,
+  Play,
+  Pause,
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import DataAvailabilityTable, { CoinDataInfo } from '../components/Research/DataAvailabilityTable';
 import FeatureList, { FeatureCategories } from '../components/Research/FeatureList';
 import DownloadDataModal, { DownloadRequest } from '../components/Research/DownloadDataModal';
+
+// Wrapper type for API responses
+interface APIWrapper<T> {
+  success: boolean;
+  data: T;
+}
 
 // Types for API responses
 interface DataAvailabilityResponse {
@@ -104,8 +112,8 @@ export default function ResearchData() {
     setIsLoadingData(true);
     setError(null);
     try {
-      const response = await apiService.get<DataAvailabilityResponse>('/research/data-availability');
-      setDataAvailability(response.data);
+      const response = await apiService.get<APIWrapper<DataAvailabilityResponse>>('/research/data-availability');
+      setDataAvailability(response.data.data);
     } catch (err) {
       console.error('Failed to fetch data availability:', err);
       setError('Failed to load data availability');
@@ -118,8 +126,8 @@ export default function ResearchData() {
   const fetchFeatures = useCallback(async () => {
     setIsLoadingFeatures(true);
     try {
-      const response = await apiService.get<FeaturesResponse>('/research/features');
-      setFeatures(response.data);
+      const response = await apiService.get<APIWrapper<FeaturesResponse>>('/research/features');
+      setFeatures(response.data.data);
     } catch (err) {
       console.error('Failed to fetch features:', err);
     } finally {
@@ -127,12 +135,12 @@ export default function ResearchData() {
     }
   }, []);
 
-  // Fetch active download jobs
+  // Fetch active download jobs (including paused ones that can be resumed)
   const fetchDownloadJobs = useCallback(async () => {
     try {
-      const response = await apiService.get<{ jobs: DownloadJob[]; total: number }>('/research/download-jobs');
-      const activeJobs = response.data.jobs.filter(
-        (job) => job.status === 'pending' || job.status === 'in_progress'
+      const response = await apiService.get<APIWrapper<{ jobs: DownloadJob[]; total: number }>>('/research/download-jobs');
+      const activeJobs = response.data.data.jobs.filter(
+        (job) => job.status === 'pending' || job.status === 'in_progress' || job.status === 'paused'
       );
       setDownloadJobs(activeJobs);
     } catch (err) {
@@ -143,8 +151,8 @@ export default function ResearchData() {
   // Fetch active feature jobs
   const fetchFeatureJobs = useCallback(async () => {
     try {
-      const response = await apiService.get<{ jobs: FeatureJob[]; total: number }>('/research/feature-jobs');
-      const activeJobs = response.data.jobs.filter(
+      const response = await apiService.get<APIWrapper<{ jobs: FeatureJob[]; total: number }>>('/research/feature-jobs');
+      const activeJobs = response.data.data.jobs.filter(
         (job) => job.status === 'pending' || job.status === 'running'
       );
       setFeatureJobs(activeJobs);
@@ -203,6 +211,16 @@ export default function ResearchData() {
     }
   };
 
+  // Handle resume download job
+  const handleResumeDownload = async (jobId: string) => {
+    try {
+      await apiService.post(`/research/download-resume/${jobId}`, {});
+      await fetchDownloadJobs();
+    } catch (err) {
+      console.error('Failed to resume download:', err);
+    }
+  };
+
   // Calculate if all data has features
   const allFeaturesCalculated = dataAvailability
     ? dataAvailability.coins.length > 0 && featureJobs.length === 0
@@ -253,29 +271,56 @@ export default function ResearchData() {
               Active Jobs
             </h3>
             <div className="space-y-2">
-              {downloadJobs.map((job) => (
-                <div
-                  key={job.job_id}
-                  className="flex items-center gap-4 p-3 bg-dark-700/50 rounded-lg"
-                >
-                  <Download className="w-4 h-4 text-primary-400" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm text-white">Downloading: {job.job_id}</span>
-                      <span className="text-xs text-gray-400">
-                        {job.candles_downloaded.toLocaleString()} / {job.candles_total.toLocaleString()} candles
-                      </span>
+              {downloadJobs.map((job) => {
+                const isPaused = job.status === 'paused';
+                return (
+                  <div
+                    key={job.job_id}
+                    className={`flex items-center gap-4 p-3 rounded-lg ${
+                      isPaused ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-dark-700/50'
+                    }`}
+                  >
+                    {isPaused ? (
+                      <Pause className="w-4 h-4 text-yellow-400" />
+                    ) : (
+                      <Download className="w-4 h-4 text-primary-400" />
+                    )}
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm text-white">
+                            {isPaused ? 'Paused' : 'Downloading'}: {job.job_id}
+                          </span>
+                          {isPaused && job.error && (
+                            <span className="text-xs text-yellow-400">{job.error}</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-gray-400">
+                          {job.candles_downloaded.toLocaleString()} / {job.candles_total.toLocaleString()} candles
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1.5 bg-dark-600 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            isPaused ? 'bg-yellow-500' : 'bg-primary-500'
+                          }`}
+                          style={{ width: `${job.progress}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="mt-1 h-1.5 bg-dark-600 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-primary-500 transition-all duration-300"
-                        style={{ width: `${job.progress}%` }}
-                      />
-                    </div>
+                    <span className="text-xs text-gray-400">{job.progress.toFixed(1)}%</span>
+                    {isPaused && (
+                      <button
+                        onClick={() => handleResumeDownload(job.job_id)}
+                        className="p-1.5 bg-green-500/20 hover:bg-green-500/30 rounded text-green-400"
+                        title="Resume download"
+                      >
+                        <Play className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
-                  <span className="text-xs text-gray-400">{job.progress.toFixed(1)}%</span>
-                </div>
-              ))}
+                );
+              })}
               {featureJobs.map((job) => (
                 <div
                   key={job.job_id}
@@ -403,7 +448,7 @@ export default function ResearchData() {
         />
 
         {/* Feature List */}
-        {features && (
+        {features && features.categories && (
           <FeatureList
             categories={features.categories}
             totalCount={features.count}

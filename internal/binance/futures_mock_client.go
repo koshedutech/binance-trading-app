@@ -1,8 +1,13 @@
 package binance
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"math/rand"
+	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -720,6 +725,54 @@ func (c *FuturesMockClient) GetFuturesExchangeInfo() (*FuturesExchangeInfo, erro
 }
 
 func (c *FuturesMockClient) GetFuturesSymbols() ([]string, error) {
+	// Fetch real symbols from Binance public API (no auth required)
+	resp, err := http.Get("https://fapi.binance.com/fapi/v1/exchangeInfo")
+	if err != nil {
+		log.Printf("[MOCK] Failed to fetch symbols from Binance, using fallback: %v", err)
+		return c.getFallbackSymbols(), nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[MOCK] Binance API returned %d, using fallback", resp.StatusCode)
+		return c.getFallbackSymbols(), nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[MOCK] Failed to read response, using fallback: %v", err)
+		return c.getFallbackSymbols(), nil
+	}
+
+	var exchangeInfo struct {
+		Symbols []struct {
+			Symbol       string `json:"symbol"`
+			Status       string `json:"status"`
+			ContractType string `json:"contractType"`
+			QuoteAsset   string `json:"quoteAsset"`
+		} `json:"symbols"`
+	}
+
+	if err := json.Unmarshal(body, &exchangeInfo); err != nil {
+		log.Printf("[MOCK] Failed to parse response, using fallback: %v", err)
+		return c.getFallbackSymbols(), nil
+	}
+
+	// Filter for active USDT perpetual contracts
+	var symbols []string
+	for _, s := range exchangeInfo.Symbols {
+		if s.Status == "TRADING" && s.QuoteAsset == "USDT" && s.ContractType == "PERPETUAL" {
+			symbols = append(symbols, s.Symbol)
+		}
+	}
+
+	sort.Strings(symbols)
+	log.Printf("[MOCK] Fetched %d futures symbols from Binance", len(symbols))
+	return symbols, nil
+}
+
+// getFallbackSymbols returns a fallback list when API is unavailable
+func (c *FuturesMockClient) getFallbackSymbols() []string {
 	return []string{
 		// Major
 		"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -735,7 +788,7 @@ func (c *FuturesMockClient) GetFuturesSymbols() ([]string, error) {
 		"SANDUSDT", "MANAUSDT", "AXSUSDT",
 		// Infrastructure
 		"FILUSDT", "ICPUSDT", "APTUSDT", "SUIUSDT", "SEIUSDT",
-	}, nil
+	}
 }
 
 // ==================== HISTORY ====================
