@@ -308,9 +308,9 @@
       "mode_name": "scalp",
       "enabled": true,
       "timeframe": {
-        "trend_timeframe": "15m",
-        "entry_timeframe": "5m",
-        "analysis_timeframe": "15m"
+        "trend_timeframe": "3m",
+        "entry_timeframe": "3m",
+        "analysis_timeframe": "3m"
       },
       "entry": {
         "limit_order_gap_percent": 0.1,
@@ -1461,15 +1461,15 @@
             "auto_size_min_cover_fee": 0.1
           },
           "timeframe": {
-            "trend_timeframe": "15m",
-            "entry_timeframe": "5m",
-            "analysis_timeframe": "1h"
+            "trend_timeframe": "3m",
+            "entry_timeframe": "3m",
+            "analysis_timeframe": "3m"
           },
           "mtf": {
             "enabled": true,
-            "primary_timeframe": "15m",
+            "primary_timeframe": "3m",
             "primary_weight": 0.5,
-            "secondary_timeframe": "5m",
+            "secondary_timeframe": "3m",
             "secondary_weight": 0.3,
             "tertiary_timeframe": "1m",
             "tertiary_weight": 0.2,
@@ -3892,34 +3892,52 @@
         "breakout": {
           "enabled": true,
           "base_settings": {
-            "timeframe": "15m",
+            "timeframe": "3m",
             "position_size_percent": 2.0,
             "max_leverage": 10,
-            "max_positions": 3,
+            "max_positions": 1,
             "min_volume_usdt": 1000000
           },
           "sub_strategies": {
             "ravindra_volume_imbalance": {
               "enabled": true,
+              "_backtested": "Dec 2025 - Jan 2026: 51 trades, 47.1% WR, +1147% net return (after fees)",
+              "_pattern": "2-step: Volume Spike → Breakout (NO consolidation)",
               "settings": {
-                "min_rr_ratio": "1:4",
-                "llm_validation": true,
+                "risk_reward": {
+                  "risk": 1,
+                  "reward": 4,
+                  "min_ratio": 3
+                },
+                "llm_validation_enabled": false,
                 "trailing_stop": {
                   "enabled": true,
+                  "activation_profit_pct": 2.0,
+                  "initial_trail_pct": 0.0,
                   "milestones": [
-                    { "at_rr": "1:2", "move_sl_to": "entry", "description": "Move SL to breakeven (0 risk)" },
-                    { "at_rr": "1:3", "move_sl_to": "1:1", "description": "Move SL to lock 1:1 profit" }
+                    { "trigger_profit_pct": 2.0, "trail_distance_pct": 0.0, "label": "BE" },
+                    { "trigger_profit_pct": 3.0, "trail_distance_pct": 1.0, "label": "+1R" }
                   ],
-                  "target_rr": "1:4"
+                  "_explanation": "Values are R:R ratios. At 2:1 R:R move SL to breakeven, at 3:1 R:R lock 1:1 profit"
                 },
                 "pattern_detection": {
-                  "reference_lookback_candles": 20,
-                  "min_consolidation_candles": 2,
-                  "max_consolidation_candles": 6,
-                  "volume_spike_threshold": 2.0,
-                  "breakout_volume_surge": 1.5,
-                  "consolidation_range_tolerance": 0.01
-                }
+                  "reference_lookback_candles": 5,
+                  "volume_spike_threshold": 3.0,
+                  "breakout_volume_surge": 1.0,
+                  "breakout_confirmation_candles": 1,
+                  "entry_volume_vs_reference": 1.0,
+                  "max_sl_percent": 1.5,
+                  "max_pattern_age_mins": 60
+                },
+                "budget_allocation": {
+                  "assigned_budget_usd": 100,
+                  "max_concurrent_trades": 1,
+                  "position_sizing": "all_in",
+                  "use_incremental_equity": true,
+                  "_description": "All-in on each trade, using full equity (grows with profits)"
+                },
+                "max_concurrent_patterns": 5,
+                "priority": 1
               }
             },
             "classic_breakout": {
@@ -3969,25 +3987,35 @@
           "sub_strategies": {
             "ravindra_volume_imbalance": {
               "enabled": false,
+              "_pattern": "2-step: Volume Spike → Breakout (NO consolidation)",
               "settings": {
-                "min_rr_ratio": "1:4",
-                "llm_validation": true,
+                "risk_reward": {
+                  "risk": 1,
+                  "reward": 4,
+                  "min_ratio": 3
+                },
+                "llm_validation_enabled": true,
                 "trailing_stop": {
                   "enabled": true,
+                  "activation_profit_pct": 2.0,
+                  "initial_trail_pct": 0.0,
                   "milestones": [
-                    { "at_rr": "1:2", "move_sl_to": "entry", "description": "Move SL to breakeven (0 risk)" },
-                    { "at_rr": "1:3", "move_sl_to": "1:1", "description": "Move SL to lock 1:1 profit" }
+                    { "trigger_profit_pct": 2.0, "trail_distance_pct": 0.0, "label": "BE" },
+                    { "trigger_profit_pct": 3.0, "trail_distance_pct": 1.0, "label": "+1R" }
                   ],
-                  "target_rr": "1:4"
+                  "_explanation": "Values are R:R ratios. At 2:1 R:R move SL to breakeven, at 3:1 R:R lock 1:1 profit"
                 },
                 "pattern_detection": {
                   "reference_lookback_candles": 30,
-                  "min_consolidation_candles": 3,
-                  "max_consolidation_candles": 8,
                   "volume_spike_threshold": 2.0,
                   "breakout_volume_surge": 1.5,
-                  "consolidation_range_tolerance": 0.01
-                }
+                  "breakout_confirmation_candles": 1,
+                  "entry_volume_vs_reference": 1.0,
+                  "max_sl_percent": 2.0,
+                  "max_pattern_age_mins": 120
+                },
+                "max_concurrent_patterns": 3,
+                "priority": 1
               }
             }
           }

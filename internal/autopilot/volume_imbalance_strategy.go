@@ -150,16 +150,20 @@ type VolumeImbalanceConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// Step 1: Accumulation Start detection
-	MinVolumeSpikeMultiplier float64 `json:"min_volume_spike_multiplier"` // Default: 2.0 (2x avg volume for spike)
-	LookbackPeriod           int     `json:"lookback_period"`             // Default: 20 candles to calculate average
+	MinVolumeSpikeMultiplier float64 `json:"min_volume_spike_multiplier"` // Default: 3.0 (3x avg volume for spike) - backtested
+	LookbackPeriod           int     `json:"lookback_period"`             // Default: 5 candles to calculate average - backtested
 
 	// Step 2: Sideways Consolidation thresholds
-	MinConsolidationCandles       int     `json:"min_consolidation_candles"`        // Default: 2
-	MaxConsolidationCandles       int     `json:"max_consolidation_candles"`        // Default: 6
+	MinConsolidationCandles       int     `json:"min_consolidation_candles"`        // Default: 1 - backtested
+	MaxConsolidationCandles       int     `json:"max_consolidation_candles"`        // Default: 999 (unlimited) - backtested
 	ConsolidationRangeTolerance   float64 `json:"consolidation_range_tolerance"`    // Default: 0.01 (1% tolerance)
 
 	// Step 3: Breakout Entry thresholds
-	BreakoutVolumeSurge float64 `json:"breakout_volume_surge"` // Default: 1.5 (50% above consolidation avg)
+	BreakoutVolumeSurge     float64 `json:"breakout_volume_surge"`      // Default: 1.0 (at or above consolidation avg) - backtested
+	EntryVolumeVsReference  float64 `json:"entry_volume_vs_reference"`  // Default: 1.0 - entry candle volume vs reference candle volume
+
+	// Risk Management - backtested
+	MaxSLPercent float64 `json:"max_sl_percent"` // Default: 1.5% - maximum stop loss from entry
 
 	// Legacy fields for backward compatibility
 	MinDeclineCandles         int     `json:"min_decline_candles"`          // Maps to MinConsolidationCandles
@@ -181,59 +185,98 @@ type VolumeImbalanceConfig struct {
 	// Pattern expiration
 	PatternExpirationMinutes int `json:"pattern_expiration_minutes"` // Default: 60 (1 hour)
 
-	// Mode-specific timeframes (VALIDATED BY BACKTESTING)
-	ScalpTimeframe    string `json:"scalp_timeframe"`    // Default: "15m" (validated - institutions need 30-60+ min)
+	// Mode-specific timeframes (VALIDATED BY BACKTESTING Dec 2025 - Jan 2026)
+	ScalpTimeframe    string `json:"scalp_timeframe"`    // Default: "3m" - backtested (was "15m")
 	SwingTimeframe    string `json:"swing_timeframe"`    // Default: "1h"
 	PositionTimeframe string `json:"position_timeframe"` // Default: "4h"
 
 	// Story 11.47: LLM Validation for pattern filtering
-	LLMValidation bool `json:"llm_validation"` // Default: true (enable LLM validation before entry)
+	LLMValidation bool `json:"llm_validation"` // Default: false (disabled for backtested settings)
+
+	// Budget Allocation for position sizing
+	BudgetAllocation *BudgetAllocation `json:"budget_allocation,omitempty"`
+}
+
+// BudgetAllocation tracks budget and position sizing for Volume Imbalance strategy
+type BudgetAllocation struct {
+	// AssignedBudgetUSD is the allocated budget for this strategy in USD
+	AssignedBudgetUSD float64 `json:"assigned_budget_usd"` // Default: 100
+
+	// CurrentEquity tracks the current equity (grows/shrinks with P&L)
+	CurrentEquity float64 `json:"current_equity"`
+
+	// MaxConcurrentTrades is the maximum number of concurrent positions
+	MaxConcurrentTrades int `json:"max_concurrent_trades"` // Default: 1
+
+	// PositionSizing determines how budget is split across trades
+	// "all_in" - use full budget for each trade
+	// "divided" - divide budget by MaxConcurrentTrades
+	PositionSizing string `json:"position_sizing"` // Default: "all_in"
+
+	// UseIncrementalEquity determines if winning trades increase position size
+	// true - next trade uses current equity (including profits)
+	// false - next trade uses original assigned budget
+	UseIncrementalEquity bool `json:"use_incremental_equity"` // Default: true
 }
 
 // DefaultVolumeImbalanceConfig returns the default configuration for 3-step model
+// Values updated with backtested results (Dec 2025 - Jan 2026): 51 trades, 47.1% WR, +1147% net return
 func DefaultVolumeImbalanceConfig() *VolumeImbalanceConfig {
 	return &VolumeImbalanceConfig{
 		Enabled:                     true,
 
-		// Step 1: Accumulation Start
-		MinVolumeSpikeMultiplier:    2.0,
-		LookbackPeriod:              20,
+		// Step 1: Accumulation Start - BACKTESTED VALUES
+		MinVolumeSpikeMultiplier:    3.0,  // Was 2.0 - higher threshold filters noise
+		LookbackPeriod:              5,    // Was 20 - shorter lookback for faster patterns
 
-		// Step 2: Sideways Consolidation
-		MinConsolidationCandles:     2,
-		MaxConsolidationCandles:     6,
-		ConsolidationRangeTolerance: 0.01,
+		// Step 2: Sideways Consolidation - BACKTESTED VALUES
+		MinConsolidationCandles:     1,    // Was 2 - allow immediate breakout
+		MaxConsolidationCandles:     999,  // Was 6 - no upper limit
+		ConsolidationRangeTolerance: 0.01, // 1% tolerance
 
-		// Step 3: Breakout Entry
-		BreakoutVolumeSurge:         1.5,
+		// Step 3: Breakout Entry - BACKTESTED VALUES
+		BreakoutVolumeSurge:         1.0,  // Was 1.5 - equal to consolidation avg is sufficient
+		EntryVolumeVsReference:      1.0,  // Entry candle volume at least equal to reference
 
-		// Legacy mappings
-		MinDeclineCandles:           2,
-		MaxDeclineCandles:           6,
-		MinVolumeDeclination:        0.30,
-		MinPriceDeclination:         0.005,
-		ExhaustionVolumeThreshold:   0.25,
-		PumpVolumeIncrease:          1.5,
-		MinPumpCandles:              1,
+		// Risk Management - BACKTESTED VALUES
+		MaxSLPercent:                1.5,  // Maximum 1.5% stop loss from entry
+
+		// Legacy mappings (maintained for backward compatibility)
+		MinDeclineCandles:           1,    // Maps to MinConsolidationCandles
+		MaxDeclineCandles:           999,  // Maps to MaxConsolidationCandles
+		MinVolumeDeclination:        0.30, // Deprecated
+		MinPriceDeclination:         0.005,// Deprecated
+		ExhaustionVolumeThreshold:   0.25, // Deprecated
+		PumpVolumeIncrease:          1.0,  // Maps to BreakoutVolumeSurge
+		MinPumpCandles:              1,    // Deprecated
 
 		// Risk/Reward
-		DefaultRiskRewardRatio:      4.0,
-		StopLossBuffer:              0.001,
+		DefaultRiskRewardRatio:      4.0,   // 1:4 R:R
+		StopLossBuffer:              0.001, // 0.1% buffer below consolidation low
 
-		// Trailing stop
-		BreakevenRRLevel:            2.0,
-		OneRRLevel:                  3.0,
+		// Trailing stop (Ravindra's approach)
+		BreakevenRRLevel:            2.0,   // Move SL to breakeven at 1:2 R:R
+		OneRRLevel:                  3.0,   // Move SL to 1:1 level at 1:3 R:R
 
 		// Expiration
-		PatternExpirationMinutes:    60,
+		PatternExpirationMinutes:    60,    // 1 hour
 
-		// Timeframes (VALIDATED)
-		ScalpTimeframe:              "15m", // Changed from 5m - validated by backtesting
+		// Timeframes - BACKTESTED VALUES (Dec 2025 - Jan 2026)
+		ScalpTimeframe:              "3m",  // Was "15m" - faster timeframe works better
 		SwingTimeframe:              "1h",
 		PositionTimeframe:           "4h",
 
 		// Story 11.47: LLM Validation
-		LLMValidation:               true, // Enable by default
+		LLMValidation:               false, // Disabled for backtested settings (was true)
+
+		// Budget Allocation - BACKTESTED VALUES
+		BudgetAllocation: &BudgetAllocation{
+			AssignedBudgetUSD:    100,      // $100 starting budget
+			CurrentEquity:        100,      // Starts equal to assigned budget
+			MaxConcurrentTrades:  1,        // One trade at a time
+			PositionSizing:       "all_in", // Use full equity for each trade
+			UseIncrementalEquity: true,     // Compound profits
+		},
 	}
 }
 

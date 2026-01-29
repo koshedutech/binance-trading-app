@@ -871,9 +871,13 @@ func getDefaultStrategyGroup(mode, group, userID string) *database.StrategyGroup
 // Loads from default-settings.json if available, otherwise uses hardcoded fallbacks
 func getDefaultSubStrategy(mode, group, strategy, userID string) *database.SubStrategySettings {
 	// Try to load from default-settings.json first
-	if autopilot.HasStrategyHierarchy() {
+	hasHierarchy := autopilot.HasStrategyHierarchy()
+	log.Printf("[STRATEGY-HIERARCHY-DEBUG] HasStrategyHierarchy=%v for %s/%s/%s", hasHierarchy, mode, group, strategy)
+
+	if hasHierarchy {
 		subDefaults, err := autopilot.GetSubStrategyDefaults(mode, group, strategy)
 		if err == nil && subDefaults != nil {
+			log.Printf("[STRATEGY-HIERARCHY-DEBUG] Loaded from default-settings.json: enabled=%v, settings_len=%d", subDefaults.Enabled, len(subDefaults.Settings))
 			return &database.SubStrategySettings{
 				UserID:        userID,
 				Mode:          mode,
@@ -884,6 +888,8 @@ func getDefaultSubStrategy(mode, group, strategy, userID string) *database.SubSt
 			}
 		}
 		log.Printf("[STRATEGY-HIERARCHY] Failed to load sub-strategy defaults from file for %s/%s/%s: %v, using fallback", mode, group, strategy, err)
+	} else {
+		log.Printf("[STRATEGY-HIERARCHY-DEBUG] No strategy_hierarchy section in default-settings.json, using fallback")
 	}
 
 	// Fallback: Hardcoded default settings
@@ -896,21 +902,42 @@ func getDefaultSubStrategy(mode, group, strategy, userID string) *database.SubSt
 	}
 
 	// Strategy-specific default settings
+	// Based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
 	switch strategy {
 	case "ravindra_volume_imbalance":
 		settings := map[string]interface{}{
-			"enabled":                        true,
-			"min_volume_spike_multiplier":    2.0,
-			"lookback_period":                20,
-			"min_consolidation_candles":      2,
-			"max_consolidation_candles":      6,
-			"consolidation_range_tolerance":  0.01,
-			"breakout_volume_surge":          1.5,
-			"default_risk_reward_ratio":      4.0,
-			"stop_loss_buffer":               0.001,
-			"breakeven_rr_level":             2.0,
-			"one_rr_level":                   3.0,
-			"pattern_expiration_minutes":     60,
+			"risk_reward": map[string]interface{}{
+				"risk":      1,
+				"reward":    4,
+				"min_ratio": 3,
+			},
+			"llm_validation_enabled": false,
+			"trailing_stop": map[string]interface{}{
+				"enabled":               true,
+				"activation_profit_pct": 2.0, // Activate at 2:1 R:R
+				"initial_trail_pct":     0.0, // Move SL to breakeven
+				"milestones": []map[string]interface{}{
+					{"trigger_profit_pct": 2.0, "trail_distance_pct": 0.0, "label": "BE"},   // At 2:1 → breakeven
+					{"trigger_profit_pct": 3.0, "trail_distance_pct": 1.0, "label": "+1R"},  // At 3:1 → lock 1:1
+				},
+			},
+			"pattern_detection": map[string]interface{}{
+				"reference_lookback_candles":    5,
+				"volume_spike_threshold":        3.0,
+				"breakout_volume_surge":         1.0,
+				"breakout_confirmation_candles": 1,
+				"entry_volume_vs_reference":     1.0,
+				"max_sl_percent":                1.5,
+				"max_pattern_age_mins":          60,
+			},
+			"budget_allocation": map[string]interface{}{
+				"assigned_budget_usd":     100,
+				"max_concurrent_trades":   1,
+				"position_sizing":         "all_in",
+				"use_incremental_equity":  true,
+			},
+			"max_concurrent_patterns": 5,
+			"priority":                1,
 		}
 		data, _ := json.Marshal(settings)
 		defaults.Settings = data
@@ -978,7 +1005,7 @@ func compareStrategyGroupSettings(current, defaults *database.StrategyGroupSetti
 	return differences
 }
 
-// compareSubStrategySettings compares two sub-strategy settings
+// compareSubStrategySettings compares two sub-strategy settings with deep comparison
 func compareSubStrategySettings(current, defaults *database.SubStrategySettings) []SubStrategyFieldComparison {
 	var differences []SubStrategyFieldComparison
 
@@ -990,29 +1017,110 @@ func compareSubStrategySettings(current, defaults *database.SubStrategySettings)
 		})
 	}
 
-	// Compare settings JSON
-	if string(current.Settings) != string(defaults.Settings) {
-		var currentMap, defaultMap map[string]interface{}
-		if err := json.Unmarshal(current.Settings, &currentMap); err != nil {
-			// Return empty differences if parsing fails
-			return nil
-		}
-		if err := json.Unmarshal(defaults.Settings, &defaultMap); err != nil {
-			return nil
+	// Compare settings JSON with deep comparison
+	var currentMap, defaultMap map[string]interface{}
+	if err := json.Unmarshal(current.Settings, &currentMap); err != nil {
+		currentMap = make(map[string]interface{})
+	}
+	if err := json.Unmarshal(defaults.Settings, &defaultMap); err != nil {
+		defaultMap = make(map[string]interface{})
+	}
+
+	// Deep compare and flatten all fields
+	flattenAndCompare("settings", currentMap, defaultMap, &differences)
+
+	return differences
+}
+
+// flattenAndCompare recursively compares nested maps and adds differences
+func flattenAndCompare(prefix string, current, defaults map[string]interface{}, differences *[]SubStrategyFieldComparison) {
+	// Track all keys from both maps
+	allKeys := make(map[string]bool)
+	for k := range defaults {
+		allKeys[k] = true
+	}
+	for k := range current {
+		allKeys[k] = true
+	}
+
+	for key := range allKeys {
+		// Skip underscore-prefixed keys (comments/descriptions)
+		if len(key) > 0 && key[0] == '_' {
+			continue
 		}
 
-		// Compare each field in settings
-		for key, defaultVal := range defaultMap {
-			currentVal, exists := currentMap[key]
-			if !exists || currentVal != defaultVal {
-				differences = append(differences, SubStrategyFieldComparison{
-					Field:   "settings." + key,
+		path := prefix + "." + key
+		defaultVal, defaultExists := defaults[key]
+		currentVal, currentExists := current[key]
+
+		// If default exists but current doesn't
+		if defaultExists && !currentExists {
+			*differences = append(*differences, SubStrategyFieldComparison{
+				Field:   path,
+				Current: nil,
+				Default: defaultVal,
+			})
+			continue
+		}
+
+		// If current exists but default doesn't
+		if currentExists && !defaultExists {
+			*differences = append(*differences, SubStrategyFieldComparison{
+				Field:   path,
+				Current: currentVal,
+				Default: nil,
+			})
+			continue
+		}
+
+		// Both exist - compare based on type
+		switch dv := defaultVal.(type) {
+		case map[string]interface{}:
+			// Nested object - recurse
+			cv, ok := currentVal.(map[string]interface{})
+			if !ok {
+				cv = make(map[string]interface{})
+			}
+			flattenAndCompare(path, cv, dv, differences)
+		case []interface{}:
+			// Array - compare as JSON strings for simplicity
+			defaultJSON, _ := json.Marshal(defaultVal)
+			currentJSON, _ := json.Marshal(currentVal)
+			if string(defaultJSON) != string(currentJSON) {
+				*differences = append(*differences, SubStrategyFieldComparison{
+					Field:   path,
+					Current: currentVal,
+					Default: defaultVal,
+				})
+			}
+		default:
+			// Primitive value - direct comparison
+			if !subStrategyValuesEqual(currentVal, defaultVal) {
+				*differences = append(*differences, SubStrategyFieldComparison{
+					Field:   path,
 					Current: currentVal,
 					Default: defaultVal,
 				})
 			}
 		}
 	}
+}
 
-	return differences
+// subStrategyValuesEqual compares two interface{} values accounting for numeric type differences
+func subStrategyValuesEqual(a, b interface{}) bool {
+	// Handle nil cases
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	// Convert to JSON and compare (handles numeric type differences)
+	aJSON, err1 := json.Marshal(a)
+	bJSON, err2 := json.Marshal(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return string(aJSON) == string(bJSON)
 }

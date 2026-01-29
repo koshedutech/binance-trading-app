@@ -63,8 +63,8 @@ export default function CollapsibleCard({
 
       {/* Content - animated collapse/expand */}
       <div
-        className={`transition-all duration-200 ease-in-out overflow-hidden ${
-          isExpanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0'
+        className={`transition-all duration-200 ease-in-out ${
+          isExpanded ? 'opacity-100' : 'max-h-0 overflow-hidden opacity-0'
         }`}
       >
         <div className={`px-3 pb-3 ${contentClassName}`}>
@@ -110,8 +110,8 @@ export function CollapsibleSection({
       </button>
 
       <div
-        className={`transition-all duration-200 ease-in-out overflow-hidden ${
-          isExpanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0'
+        className={`transition-all duration-200 ease-in-out ${
+          isExpanded ? 'opacity-100' : 'max-h-0 overflow-hidden opacity-0'
         }`}
       >
         <div className="pb-2">

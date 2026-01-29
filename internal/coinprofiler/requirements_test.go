@@ -29,12 +29,12 @@ func TestGetStrategyRequirements(t *testing.T) {
 			t.Errorf("expected sub-strategy 'ravindra_volume_imbalance', got %s", req.SubStrategy)
 		}
 
-		// Check timeframes - scalp should use 15m (validated by backtesting)
+		// Check timeframes - scalp should use 3m (backtested Dec 2025 - Jan 2026)
 		if len(req.Timeframes) == 0 {
 			t.Error("expected non-empty timeframes")
 		}
-		if req.Timeframes[0] != "15m" {
-			t.Errorf("expected 15m timeframe for scalp mode, got %v", req.Timeframes)
+		if req.Timeframes[0] != "3m" {
+			t.Errorf("expected 3m timeframe for scalp mode (backtested), got %v", req.Timeframes)
 		}
 
 		// Check data fields
@@ -68,8 +68,9 @@ func TestGetStrategyRequirements(t *testing.T) {
 		swingReq := GetStrategyRequirements("swing", "breakout", "ravindra_volume_imbalance")
 		positionReq := GetStrategyRequirements("position", "breakout", "ravindra_volume_imbalance")
 
-		if scalpReq.Timeframes[0] != "15m" {
-			t.Errorf("scalp should use 15m, got %v", scalpReq.Timeframes)
+		// Scalp uses 3m (backtested Dec 2025 - Jan 2026)
+		if scalpReq.Timeframes[0] != "3m" {
+			t.Errorf("scalp should use 3m (backtested), got %v", scalpReq.Timeframes)
 		}
 		if swingReq.Timeframes[0] != "1h" {
 			t.Errorf("swing should use 1h, got %v", swingReq.Timeframes)

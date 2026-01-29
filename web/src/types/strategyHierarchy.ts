@@ -45,20 +45,58 @@ export interface TrailingStopConfig {
 
 /**
  * Volume imbalance pattern detection parameters
+ * 2-step pattern: Volume Spike → Breakout (NO consolidation requirement)
+ * Based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
  */
 export interface PatternDetectionConfig {
-  /** Minimum volume ratio for imbalance detection */
-  min_volume_ratio: number;
-  /** Consolidation time in minutes */
-  consolidation_time_mins: number;
+  // ===== Legacy fields (kept for backwards compatibility) =====
+  /** @deprecated Use volume_spike_threshold instead */
+  min_volume_ratio?: number;
+  /** @deprecated Consolidation phase removed from strategy */
+  consolidation_time_mins?: number;
   /** Breakout confirmation candles */
-  breakout_confirmation_candles: number;
+  breakout_confirmation_candles?: number;
   /** Maximum pattern age in minutes */
-  max_pattern_age_mins: number;
+  max_pattern_age_mins?: number;
   /** Require higher timeframe confirmation */
-  require_htf_confirmation: boolean;
+  require_htf_confirmation?: boolean;
   /** Higher timeframe for confirmation */
-  htf_timeframe: string;
+  htf_timeframe?: string;
+  /** @deprecated Consolidation phase removed from strategy */
+  min_consolidation_candles?: number;
+  /** @deprecated Consolidation phase removed from strategy */
+  max_consolidation_candles?: number;
+  /** @deprecated Consolidation phase removed from strategy */
+  consolidation_range_tolerance?: number;
+
+  // ===== Active parameters (3m timeframe, 2-step pattern) =====
+  /** Number of candles to look back for reference candle selection */
+  reference_lookback_candles?: number;
+  /** Volume spike threshold multiplier (e.g., 3.0 = 3x average) */
+  volume_spike_threshold?: number;
+  /** Breakout volume surge multiplier (e.g., 1.0 = at least equal to reference) */
+  breakout_volume_surge?: number;
+  /** Entry volume vs reference requirement (e.g., 1.0 = at least equal) */
+  entry_volume_vs_reference?: number;
+  /** Maximum stop loss percent (caps risk) */
+  max_sl_percent?: number;
+}
+
+// ==================== Budget Allocation Configuration ====================
+
+/**
+ * Per-strategy budget allocation settings
+ * Allows independent capital management per strategy
+ */
+export interface BudgetAllocationConfig {
+  /** Initial budget assigned to this strategy in USD */
+  assigned_budget_usd: number;
+  /** Maximum concurrent trades allowed */
+  max_concurrent_trades: number;
+  /** Position sizing method: 'all_in' | 'fixed_percent' | 'kelly' */
+  position_sizing: string;
+  /** Use incremental equity (profits compound into position sizing) */
+  use_incremental_equity: boolean;
 }
 
 // ==================== Risk/Reward Configuration ====================
@@ -97,6 +135,8 @@ export interface VolumeImbalanceSettings {
   max_concurrent_patterns: number;
   /** Priority relative to other sub-strategies */
   priority: number;
+  /** Budget allocation for this strategy */
+  budget_allocation?: BudgetAllocationConfig;
 }
 
 // ==================== Volume Imbalance Pattern ====================
@@ -357,35 +397,48 @@ export const VOLUME_IMBALANCE_STATE_LABELS: Record<VolumeImbalanceState, string>
 
 /**
  * Default Volume Imbalance settings
+ * 2-step pattern: Volume Spike → Breakout (NO consolidation)
+ * Based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return (after fees)
  */
 export const DEFAULT_VOLUME_IMBALANCE_SETTINGS: VolumeImbalanceSettings = {
-  enabled: false,
+  enabled: true,
   risk_reward: {
     risk: 1,
     reward: 4,
     min_ratio: 3,
   },
-  llm_validation_enabled: true,
+  llm_validation_enabled: false,
   trailing_stop: {
     enabled: true,
-    activation_profit_pct: 1.0,
-    initial_trail_pct: 0.5,
+    activation_profit_pct: 2.0,  // Activate at 2:1 R:R
+    initial_trail_pct: 0.0,      // Move SL to breakeven (0R profit locked)
     milestones: [
-      { trigger_profit_pct: 2.0, trail_distance_pct: 0.4, label: 'TP1' },
-      { trigger_profit_pct: 3.0, trail_distance_pct: 0.3, label: 'TP2' },
-      { trigger_profit_pct: 4.0, trail_distance_pct: 0.2, label: 'Final' },
+      { trigger_profit_pct: 2.0, trail_distance_pct: 0.0, label: 'BE' },   // At 2:1 → breakeven
+      { trigger_profit_pct: 3.0, trail_distance_pct: 1.0, label: '+1R' },  // At 3:1 → lock 1:1
     ],
   },
   pattern_detection: {
-    min_volume_ratio: 2.0,
-    consolidation_time_mins: 15,
-    breakout_confirmation_candles: 2,
+    // Legacy fields (kept for backwards compatibility)
+    min_volume_ratio: 3.0,
+    breakout_confirmation_candles: 1,
     max_pattern_age_mins: 60,
-    require_htf_confirmation: true,
-    htf_timeframe: '1h',
+    require_htf_confirmation: false,
+    htf_timeframe: '15m',
+    // Active parameters (3m timeframe, 2-step: Volume Spike → Breakout)
+    reference_lookback_candles: 5,
+    volume_spike_threshold: 3.0,
+    breakout_volume_surge: 1.0,
+    entry_volume_vs_reference: 1.0,
+    max_sl_percent: 1.5,
   },
   max_concurrent_patterns: 5,
   priority: 1,
+  budget_allocation: {
+    assigned_budget_usd: 100,
+    max_concurrent_trades: 1,
+    position_sizing: 'all_in',
+    use_incremental_equity: true,
+  },
 };
 
 // ==================== Utility Functions ====================

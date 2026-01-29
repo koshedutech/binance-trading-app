@@ -951,9 +951,9 @@ func DefaultModeStrategyConfig(modeName, strategyName string) *ModeStrategyConfi
 				MaxPositions:     6,
 				BaseSizeUSD:      200,
 				Timeframe: StrategyTimeframe{
-					TrendTimeframe:    "15m",
-					EntryTimeframe:    "5m",
-					AnalysisTimeframe: "1h",
+					TrendTimeframe:    "3m",
+					EntryTimeframe:    "3m",
+					AnalysisTimeframe: "3m",
 				},
 				SLTP: StrategySLTP{
 					SLPercent:              1.5,

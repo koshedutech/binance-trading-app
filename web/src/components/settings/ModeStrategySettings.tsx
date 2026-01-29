@@ -19,6 +19,7 @@ import {
   Power,
   PowerOff,
   RefreshCw,
+  Wallet,
 } from 'lucide-react';
 import type {
   ModeName,
@@ -37,7 +38,7 @@ import modeStrategyApi from '../../api/modeStrategy';
 import StrategySettingsForm from './StrategySettingsForm';
 // Story 11.43-11.46: Import sub-strategies hook and types for Ravindra Volume Imbalance
 import { useSubStrategies, useUpdateSubStrategy } from '../../hooks/useStrategyHierarchy';
-import type { SubStrategySettings, VolumeImbalanceSettings } from '../../types/strategyHierarchy';
+import type { SubStrategySettings, VolumeImbalanceSettings, BudgetAllocationConfig } from '../../types/strategyHierarchy';
 
 // ==================== Interfaces ====================
 
@@ -764,27 +765,42 @@ function SubStrategyCollapsibleSection({
   const [toggleError, setToggleError] = useState<string | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
-  // Default settings for initialization and reset
+  // Default settings based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
   const defaultSettings: VolumeImbalanceSettings = {
-    enabled: false,
+    enabled: true,
     risk_reward: { risk: 1, reward: 4, min_ratio: 3 },
-    llm_validation_enabled: true,
+    llm_validation_enabled: false,
     trailing_stop: {
       enabled: true,
-      activation_profit_pct: 1.0,
-      initial_trail_pct: 0.5,
-      milestones: [],
+      activation_profit_pct: 2.0,  // Activate at 2:1 R:R
+      initial_trail_pct: 0.0,      // Move SL to breakeven (0R profit locked)
+      milestones: [
+        { trigger_profit_pct: 2.0, trail_distance_pct: 0.0, label: 'BE' },   // At 2:1 → breakeven
+        { trigger_profit_pct: 3.0, trail_distance_pct: 1.0, label: '+1R' },  // At 3:1 → lock 1:1
+      ],
     },
     pattern_detection: {
-      min_volume_ratio: 2.0,
-      consolidation_time_mins: 15,
-      breakout_confirmation_candles: 2,
+      // Legacy fields (kept for backwards compatibility)
+      min_volume_ratio: 3.0,
+      breakout_confirmation_candles: 1,
       max_pattern_age_mins: 60,
-      require_htf_confirmation: true,
-      htf_timeframe: '1h',
+      require_htf_confirmation: false,
+      htf_timeframe: '15m',
+      // Backtested parameters (3m timeframe) - 2 step pattern: Volume Spike → Breakout
+      reference_lookback_candles: 5,
+      volume_spike_threshold: 3.0,
+      breakout_volume_surge: 1.0,
+      entry_volume_vs_reference: 1.0,
+      max_sl_percent: 1.5,
     },
     max_concurrent_patterns: 5,
     priority: 1,
+    budget_allocation: {
+      assigned_budget_usd: 100,
+      max_concurrent_trades: 1,
+      position_sizing: 'all_in',
+      use_incremental_equity: true,
+    },
   };
 
   // Local state for form editing - initialize with defaults merged with settings
@@ -796,6 +812,7 @@ function SubStrategyCollapsibleSection({
         risk_reward: { ...defaultSettings.risk_reward, ...(settings.risk_reward || {}) },
         trailing_stop: { ...defaultSettings.trailing_stop, ...(settings.trailing_stop || {}) },
         pattern_detection: { ...defaultSettings.pattern_detection, ...(settings.pattern_detection || {}) },
+        budget_allocation: { ...defaultSettings.budget_allocation, ...(settings.budget_allocation || {}) },
       };
     }
     return defaultSettings;
@@ -810,6 +827,7 @@ function SubStrategyCollapsibleSection({
         risk_reward: { ...defaultSettings.risk_reward, ...(settings.risk_reward || {}) },
         trailing_stop: { ...defaultSettings.trailing_stop, ...(settings.trailing_stop || {}) },
         pattern_detection: { ...defaultSettings.pattern_detection, ...(settings.pattern_detection || {}) },
+        budget_allocation: { ...defaultSettings.budget_allocation, ...(settings.budget_allocation || {}) },
       });
       setHasChanges(false);
     }
@@ -894,6 +912,7 @@ function SubStrategyCollapsibleSection({
           risk_reward: localSettings.risk_reward,
           trailing_stop: localSettings.trailing_stop,
           pattern_detection: localSettings.pattern_detection,
+          budget_allocation: localSettings.budget_allocation,
         },
       });
       await onRefresh?.();
@@ -1047,7 +1066,7 @@ function SubStrategyCollapsibleSection({
         <div className="bg-gray-800/50 border-t border-gray-700 p-4 space-y-6">
           {isVolumeImbalance && (
             <div className="text-xs text-gray-400 italic border-b border-gray-700 pb-3">
-              3-step pattern: Accumulation - Consolidation - Breakout
+              2-step pattern: Volume Spike → Breakout
             </div>
           )}
 
@@ -1075,6 +1094,109 @@ function SubStrategyCollapsibleSection({
                   </div>
                 </div>
                 <p className="text-xs text-gray-500">Lower = higher priority</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Budget Allocation - Per-strategy capital management */}
+          <div className="space-y-4">
+            <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <Wallet className="w-4 h-4 text-green-400" />
+              Budget Allocation
+            </h4>
+            <p className="text-xs text-gray-500 pl-6 -mt-2">Per-strategy capital management for independent equity tracking</p>
+            <div className="grid grid-cols-2 gap-4 pl-6">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Assigned Budget</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={localSettings.budget_allocation?.assigned_budget_usd || 100}
+                      onChange={(e) => updateLocalSettings({
+                        budget_allocation: {
+                          ...(localSettings.budget_allocation || defaultSettings.budget_allocation!),
+                          assigned_budget_usd: Number(e.target.value)
+                        }
+                      })}
+                      min={10}
+                      max={100000}
+                      step={10}
+                      disabled={isDisabled}
+                      className="w-24 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                    />
+                    <span className="text-xs text-gray-500 w-8">USD</span>
+                  </div>
+                </div>
+                <p className="text-xs text-gray-500">Initial budget for this strategy</p>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Max Concurrent Trades</label>
+                  <input
+                    type="number"
+                    value={localSettings.budget_allocation?.max_concurrent_trades || 1}
+                    onChange={(e) => updateLocalSettings({
+                      budget_allocation: {
+                        ...(localSettings.budget_allocation || defaultSettings.budget_allocation!),
+                        max_concurrent_trades: Number(e.target.value)
+                      }
+                    })}
+                    min={1}
+                    max={10}
+                    step={1}
+                    disabled={isDisabled}
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  />
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium text-gray-300">Position Sizing</label>
+                  <select
+                    value={localSettings.budget_allocation?.position_sizing || 'all_in'}
+                    onChange={(e) => updateLocalSettings({
+                      budget_allocation: {
+                        ...(localSettings.budget_allocation || defaultSettings.budget_allocation!),
+                        position_sizing: e.target.value
+                      }
+                    })}
+                    disabled={isDisabled}
+                    className="w-32 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  >
+                    <option value="all_in">All In (100%)</option>
+                    <option value="fixed_percent">Fixed Percent</option>
+                    <option value="kelly">Kelly Criterion</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex items-start justify-between py-2">
+                <div className="flex-1">
+                  <label className="text-sm font-medium text-gray-300">Incremental Equity</label>
+                  <p className="text-xs text-gray-500 mt-1">Profits compound into position sizing</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => !isDisabled && updateLocalSettings({
+                    budget_allocation: {
+                      ...(localSettings.budget_allocation || defaultSettings.budget_allocation!),
+                      use_incremental_equity: !(localSettings.budget_allocation?.use_incremental_equity ?? true)
+                    }
+                  })}
+                  disabled={isDisabled}
+                  className={`
+                    relative inline-flex h-6 w-11 items-center rounded-full transition-colors
+                    ${(localSettings.budget_allocation?.use_incremental_equity ?? true) ? 'bg-purple-600' : 'bg-gray-600'}
+                    ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                  `}
+                >
+                  <span
+                    className={`
+                      inline-block h-4 w-4 transform rounded-full bg-white transition-transform
+                      ${(localSettings.budget_allocation?.use_incremental_equity ?? true) ? 'translate-x-6' : 'translate-x-1'}
+                    `}
+                  />
+                </button>
               </div>
             </div>
           </div>
@@ -1140,94 +1262,176 @@ function SubStrategyCollapsibleSection({
             </div>
           </div>
 
-          {/* Pattern Detection */}
+          {/* Pattern Detection - Backtested Parameters (3m timeframe) */}
           <div className="space-y-4">
             <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
               <BarChart3 className="w-4 h-4 text-cyan-400" />
               Pattern Detection
             </h4>
-            <div className="grid grid-cols-2 gap-4 pl-6">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-gray-300">Min Volume Ratio</label>
-                  <div className="flex items-center gap-1">
+            <p className="text-xs text-gray-500 pl-6 -mt-2">Backtested Dec 2025 - Jan 2026: 51 trades, 47.1% WR, +1147% return</p>
+
+            {/* Reference Candle Selection */}
+            <div className="pl-6">
+              <span className="text-xs text-purple-400 font-medium">Reference Candle Selection</span>
+              <div className="grid grid-cols-2 gap-4 mt-2">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Lookback Candles</label>
                     <input
                       type="number"
-                      value={localSettings.pattern_detection.min_volume_ratio}
+                      value={localSettings.pattern_detection.reference_lookback_candles || 5}
                       onChange={(e) => updateLocalSettings({
-                        pattern_detection: { ...localSettings.pattern_detection, min_volume_ratio: Number(e.target.value) }
+                        pattern_detection: { ...localSettings.pattern_detection, reference_lookback_candles: Number(e.target.value) }
                       })}
                       min={1}
-                      max={10}
-                      step={0.1}
-                      disabled={isDisabled}
-                      className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
-                    />
-                    <span className="text-xs text-gray-500 w-4">x</span>
-                  </div>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-gray-300">Consolidation Time</label>
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="number"
-                      value={localSettings.pattern_detection.consolidation_time_mins}
-                      onChange={(e) => updateLocalSettings({
-                        pattern_detection: { ...localSettings.pattern_detection, consolidation_time_mins: Number(e.target.value) }
-                      })}
-                      min={1}
-                      max={120}
+                      max={50}
                       step={1}
                       disabled={isDisabled}
                       className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
                     />
-                    <span className="text-xs text-gray-500 w-4">m</span>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Volume Spike Threshold</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        value={localSettings.pattern_detection.volume_spike_threshold || 3.0}
+                        onChange={(e) => updateLocalSettings({
+                          pattern_detection: { ...localSettings.pattern_detection, volume_spike_threshold: Number(e.target.value) }
+                        })}
+                        min={1}
+                        max={10}
+                        step={0.1}
+                        disabled={isDisabled}
+                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                      />
+                      <span className="text-xs text-gray-500 w-4">x</span>
+                    </div>
                   </div>
                 </div>
               </div>
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-gray-300">Breakout Confirm Candles</label>
-                  <input
-                    type="number"
-                    value={localSettings.pattern_detection.breakout_confirmation_candles}
-                    onChange={(e) => updateLocalSettings({
-                      pattern_detection: { ...localSettings.pattern_detection, breakout_confirmation_candles: Number(e.target.value) }
-                    })}
-                    min={1}
-                    max={10}
-                    step={1}
-                    disabled={isDisabled}
-                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
-                  />
+            </div>
+
+            {/* Breakout Parameters */}
+            <div className="pl-6 pt-3 border-t border-gray-700">
+              <span className="text-xs text-purple-400 font-medium">Breakout Confirmation</span>
+              <div className="grid grid-cols-2 gap-4 mt-2">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Volume Surge</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        value={localSettings.pattern_detection.breakout_volume_surge || 1.0}
+                        onChange={(e) => updateLocalSettings({
+                          pattern_detection: { ...localSettings.pattern_detection, breakout_volume_surge: Number(e.target.value) }
+                        })}
+                        min={0.5}
+                        max={5}
+                        step={0.1}
+                        disabled={isDisabled}
+                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                      />
+                      <span className="text-xs text-gray-500 w-4">x</span>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center justify-between">
-                  <label className="text-sm font-medium text-gray-300">Max Pattern Age</label>
-                  <div className="flex items-center gap-1">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Entry Vol vs Ref</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        value={localSettings.pattern_detection.entry_volume_vs_reference || 1.0}
+                        onChange={(e) => updateLocalSettings({
+                          pattern_detection: { ...localSettings.pattern_detection, entry_volume_vs_reference: Number(e.target.value) }
+                        })}
+                        min={0.5}
+                        max={5}
+                        step={0.1}
+                        disabled={isDisabled}
+                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                      />
+                      <span className="text-xs text-gray-500 w-4">x</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Confirm Candles</label>
                     <input
                       type="number"
-                      value={localSettings.pattern_detection.max_pattern_age_mins}
+                      value={localSettings.pattern_detection.breakout_confirmation_candles}
                       onChange={(e) => updateLocalSettings({
-                        pattern_detection: { ...localSettings.pattern_detection, max_pattern_age_mins: Number(e.target.value) }
+                        pattern_detection: { ...localSettings.pattern_detection, breakout_confirmation_candles: Number(e.target.value) }
                       })}
-                      min={5}
-                      max={480}
-                      step={5}
+                      min={1}
+                      max={10}
+                      step={1}
                       disabled={isDisabled}
                       className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
                     />
-                    <span className="text-xs text-gray-500 w-4">m</span>
                   </div>
                 </div>
               </div>
-              <div className="flex items-start justify-between py-2 col-span-2">
+            </div>
+
+            {/* Risk Management */}
+            <div className="pl-6 pt-3 border-t border-gray-700">
+              <span className="text-xs text-purple-400 font-medium">Risk Management</span>
+              <div className="grid grid-cols-2 gap-4 mt-2">
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Max Stop Loss</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        value={localSettings.pattern_detection.max_sl_percent || 1.5}
+                        onChange={(e) => updateLocalSettings({
+                          pattern_detection: { ...localSettings.pattern_detection, max_sl_percent: Number(e.target.value) }
+                        })}
+                        min={0.5}
+                        max={5}
+                        step={0.1}
+                        disabled={isDisabled}
+                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                      />
+                      <span className="text-xs text-gray-500 w-4">%</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500">Caps risk per trade</p>
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Max Pattern Age</label>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        value={localSettings.pattern_detection.max_pattern_age_mins}
+                        onChange={(e) => updateLocalSettings({
+                          pattern_detection: { ...localSettings.pattern_detection, max_pattern_age_mins: Number(e.target.value) }
+                        })}
+                        min={5}
+                        max={480}
+                        step={5}
+                        disabled={isDisabled}
+                        className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                      />
+                      <span className="text-xs text-gray-500 w-4">m</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* HTF Confirmation */}
+            <div className="pl-6 pt-3 border-t border-gray-700">
+              <div className="flex items-start justify-between py-2">
                 <div className="flex-1">
                   <label className="text-sm font-medium text-gray-300">Require HTF Confirmation</label>
-                  <p className="text-xs text-gray-500 mt-1">Require higher timeframe confirmation before entry</p>
+                  <p className="text-xs text-gray-500 mt-1">Validate pattern with higher timeframe</p>
                 </div>
                 <button
                   type="button"
@@ -1250,7 +1454,7 @@ function SubStrategyCollapsibleSection({
                 </button>
               </div>
               {localSettings.pattern_detection.require_htf_confirmation && (
-                <div className="space-y-1">
+                <div className="space-y-1 mt-2">
                   <div className="flex items-center justify-between">
                     <label className="text-sm font-medium text-gray-300">HTF Timeframe</label>
                     <select
@@ -1306,46 +1510,154 @@ function SubStrategyCollapsibleSection({
                 </button>
               </div>
               {localSettings.trailing_stop.enabled && (
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm font-medium text-gray-300">Activation Profit</label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="number"
-                          value={localSettings.trailing_stop.activation_profit_pct}
-                          onChange={(e) => updateLocalSettings({
-                            trailing_stop: { ...localSettings.trailing_stop, activation_profit_pct: Number(e.target.value) }
-                          })}
-                          min={0.1}
-                          max={10}
-                          step={0.1}
-                          disabled={isDisabled}
-                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
-                        />
-                        <span className="text-xs text-gray-500 w-4">%</span>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-gray-300">Activate at R:R</label>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            value={localSettings.trailing_stop.activation_profit_pct}
+                            onChange={(e) => updateLocalSettings({
+                              trailing_stop: { ...localSettings.trailing_stop, activation_profit_pct: Number(e.target.value) }
+                            })}
+                            min={1}
+                            max={10}
+                            step={0.5}
+                            disabled={isDisabled}
+                            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                          />
+                          <span className="text-xs text-gray-500 w-4">:1</span>
+                        </div>
                       </div>
+                      <p className="text-xs text-gray-500">Start trailing when profit = {localSettings.trailing_stop.activation_profit_pct}x risk</p>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-medium text-gray-300">Initial Lock</label>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            value={localSettings.trailing_stop.initial_trail_pct}
+                            onChange={(e) => updateLocalSettings({
+                              trailing_stop: { ...localSettings.trailing_stop, initial_trail_pct: Number(e.target.value) }
+                            })}
+                            min={0}
+                            max={5}
+                            step={0.5}
+                            disabled={isDisabled}
+                            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                          />
+                          <span className="text-xs text-gray-500 w-4">R</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-gray-500">{localSettings.trailing_stop.initial_trail_pct === 0 ? 'Move SL to breakeven' : `Lock in ${localSettings.trailing_stop.initial_trail_pct}:1 profit`}</p>
                     </div>
                   </div>
-                  <div className="space-y-1">
+                  {/* Editable Milestones */}
+                  <div className="bg-gray-700/30 rounded p-3 space-y-3">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm font-medium text-gray-300">Initial Trail</label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="number"
-                          value={localSettings.trailing_stop.initial_trail_pct}
-                          onChange={(e) => updateLocalSettings({
-                            trailing_stop: { ...localSettings.trailing_stop, initial_trail_pct: Number(e.target.value) }
-                          })}
-                          min={0.1}
-                          max={5}
-                          step={0.1}
-                          disabled={isDisabled}
-                          className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-right text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
-                        />
-                        <span className="text-xs text-gray-500 w-4">%</span>
-                      </div>
+                      <span className="text-xs text-purple-400 font-medium">Trailing Milestones</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const milestones = [...(localSettings.trailing_stop.milestones || [])];
+                          const lastTrigger = milestones.length > 0 ? milestones[milestones.length - 1].trigger_profit_pct : 1;
+                          const lastTrail = milestones.length > 0 ? milestones[milestones.length - 1].trail_distance_pct : 0;
+                          milestones.push({
+                            trigger_profit_pct: lastTrigger + 1,
+                            trail_distance_pct: lastTrail + 1,
+                            label: `+${Math.round(lastTrail + 1)}R`,
+                          });
+                          updateLocalSettings({
+                            trailing_stop: { ...localSettings.trailing_stop, milestones }
+                          });
+                        }}
+                        disabled={isDisabled}
+                        className="text-xs text-purple-400 hover:text-purple-300 disabled:opacity-50"
+                      >
+                        + Add Milestone
+                      </button>
                     </div>
+                    <div className="space-y-2">
+                      {localSettings.trailing_stop.milestones?.map((m, i) => (
+                        <div key={i} className="flex items-center gap-2 bg-gray-800/50 rounded p-2">
+                          {/* Label */}
+                          <input
+                            type="text"
+                            value={m.label || ''}
+                            onChange={(e) => {
+                              const milestones = [...(localSettings.trailing_stop.milestones || [])];
+                              milestones[i] = { ...milestones[i], label: e.target.value };
+                              updateLocalSettings({
+                                trailing_stop: { ...localSettings.trailing_stop, milestones }
+                              });
+                            }}
+                            placeholder="Label"
+                            disabled={isDisabled}
+                            className="w-14 px-1.5 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-center focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-50"
+                          />
+                          <span className="text-xs text-gray-500">At</span>
+                          {/* Trigger R:R */}
+                          <input
+                            type="number"
+                            value={m.trigger_profit_pct}
+                            onChange={(e) => {
+                              const milestones = [...(localSettings.trailing_stop.milestones || [])];
+                              milestones[i] = { ...milestones[i], trigger_profit_pct: Number(e.target.value) };
+                              updateLocalSettings({
+                                trailing_stop: { ...localSettings.trailing_stop, milestones }
+                              });
+                            }}
+                            min={0.5}
+                            max={10}
+                            step={0.5}
+                            disabled={isDisabled}
+                            className="w-14 px-1.5 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-right focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-50"
+                          />
+                          <span className="text-xs text-gray-500">:1 →</span>
+                          <span className="text-xs text-gray-500">Lock</span>
+                          {/* Trail Distance */}
+                          <input
+                            type="number"
+                            value={m.trail_distance_pct}
+                            onChange={(e) => {
+                              const milestones = [...(localSettings.trailing_stop.milestones || [])];
+                              milestones[i] = { ...milestones[i], trail_distance_pct: Number(e.target.value) };
+                              updateLocalSettings({
+                                trailing_stop: { ...localSettings.trailing_stop, milestones }
+                              });
+                            }}
+                            min={0}
+                            max={10}
+                            step={0.5}
+                            disabled={isDisabled}
+                            className="w-14 px-1.5 py-1 bg-gray-700 border border-gray-600 rounded text-white text-xs text-right focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-50"
+                          />
+                          <span className="text-xs text-gray-500">R</span>
+                          {/* Remove button */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const milestones = [...(localSettings.trailing_stop.milestones || [])];
+                              milestones.splice(i, 1);
+                              updateLocalSettings({
+                                trailing_stop: { ...localSettings.trailing_stop, milestones }
+                              });
+                            }}
+                            disabled={isDisabled || (localSettings.trailing_stop.milestones?.length || 0) <= 1}
+                            className="text-red-400 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed ml-auto"
+                            title="Remove milestone"
+                          >
+                            <XCircle className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">
+                      Example: "BE" at 2:1 → Lock 0R means move SL to breakeven when profit reaches 2x risk
+                    </p>
                   </div>
                 </div>
               )}

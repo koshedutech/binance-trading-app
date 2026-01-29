@@ -20,6 +20,7 @@ import {
   ChevronUp,
   Plus,
   Trash2,
+  Wallet,
 } from 'lucide-react';
 import type {
   VolumeImbalanceSettings,
@@ -480,8 +481,10 @@ export default function SubStrategySettingsModal({
     { value: 'gemini', label: 'Google Gemini' },
   ];
 
-  // Timeframe options
+  // Timeframe options (including backtested 1m and 3m)
   const timeframeOptions = [
+    { value: '1m', label: '1 minute' },
+    { value: '3m', label: '3 minutes (backtested)' },
     { value: '5m', label: '5 minutes' },
     { value: '15m', label: '15 minutes' },
     { value: '30m', label: '30 minutes' },
@@ -489,14 +492,21 @@ export default function SubStrategySettingsModal({
     { value: '4h', label: '4 hours' },
   ];
 
+  // Position sizing options
+  const positionSizingOptions = [
+    { value: 'all_in', label: 'All In (100% of budget)' },
+    { value: 'fixed_percent', label: 'Fixed Percent' },
+    { value: 'kelly', label: 'Kelly Criterion' },
+  ];
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-      <div className="relative w-full max-w-2xl max-h-[90vh] overflow-hidden bg-gray-800 rounded-xl border border-gray-700 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div className="relative w-full max-w-2xl flex flex-col bg-gray-800 rounded-xl border border-gray-700 shadow-2xl" style={{ maxHeight: 'calc(100vh - 2rem)' }}>
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-700">
+        <div className="flex-shrink-0 flex items-center justify-between p-4 border-b border-gray-700">
           <div>
             <h2 className="text-lg font-semibold text-white">{strategyName} Settings</h2>
-            <p className="text-xs text-gray-500">Configure strategy parameters</p>
+            <p className="text-xs text-gray-500">Configure strategy parameters (scroll down for all options)</p>
           </div>
           <button
             onClick={onClose}
@@ -506,8 +516,8 @@ export default function SubStrategySettingsModal({
           </button>
         </div>
 
-        {/* Content */}
-        <div className="p-4 overflow-y-auto max-h-[calc(90vh-140px)] space-y-4">
+        {/* Content - Scrollable */}
+        <div className="flex-1 p-4 overflow-y-auto space-y-4">
           {/* Status Messages */}
           {error && (
             <div className="flex items-center gap-2 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400">
@@ -618,52 +628,111 @@ export default function SubStrategySettingsModal({
           <SettingsSection
             title="Pattern Detection"
             icon={<BarChart3 className="w-4 h-4" />}
-            description="Parameters for detecting volume imbalance patterns"
-            defaultExpanded={false}
+            description="Backtested parameters (Dec 2025 - Jan 2026: 51 trades, 47.1% WR, +1147% return)"
+            defaultExpanded={true}
           >
+            {/* Reference Candle Selection */}
+            <div className="mb-3">
+              <span className="text-xs text-purple-400 font-medium">Reference Candle Selection</span>
+            </div>
             <NumberInput
-              label="Min Volume Ratio"
-              value={settings.pattern_detection.min_volume_ratio}
-              onChange={(v) => updateNestedSetting('pattern_detection', 'min_volume_ratio', v)}
+              label="Lookback Candles"
+              value={settings.pattern_detection.reference_lookback_candles || 5}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'reference_lookback_candles', v)}
+              min={1}
+              max={50}
+              step={1}
+              disabled={isDisabled}
+            />
+            <NumberInput
+              label="Volume Spike Threshold"
+              value={settings.pattern_detection.volume_spike_threshold || 3.0}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'volume_spike_threshold', v)}
               min={1}
               max={10}
               step={0.1}
               unit="x"
               disabled={isDisabled}
             />
+
+            {/* Consolidation Parameters */}
+            <div className="mt-4 pt-4 border-t border-gray-700 mb-3">
+              <span className="text-xs text-purple-400 font-medium">Consolidation Phase</span>
+            </div>
             <NumberInput
-              label="Consolidation Time"
-              value={settings.pattern_detection.consolidation_time_mins}
-              onChange={(v) => updateNestedSetting('pattern_detection', 'consolidation_time_mins', v)}
-              min={5}
-              max={120}
-              step={5}
-              unit="min"
-              disabled={isDisabled}
-            />
-            <NumberInput
-              label="Confirmation Candles"
-              value={settings.pattern_detection.breakout_confirmation_candles}
-              onChange={(v) => updateNestedSetting('pattern_detection', 'breakout_confirmation_candles', v)}
-              min={1}
-              max={10}
+              label="Min Consolidation Candles"
+              value={settings.pattern_detection.min_consolidation_candles || 1}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'min_consolidation_candles', v)}
+              min={0}
+              max={20}
               step={1}
               disabled={isDisabled}
             />
             <NumberInput
-              label="Max Pattern Age"
-              value={settings.pattern_detection.max_pattern_age_mins}
-              onChange={(v) => updateNestedSetting('pattern_detection', 'max_pattern_age_mins', v)}
-              min={15}
-              max={240}
-              step={15}
-              unit="min"
+              label="Max Consolidation Candles"
+              value={settings.pattern_detection.max_consolidation_candles || 999}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'max_consolidation_candles', v)}
+              min={1}
+              max={999}
+              step={1}
               disabled={isDisabled}
             />
+            <NumberInput
+              label="Range Tolerance"
+              value={(settings.pattern_detection.consolidation_range_tolerance || 0.01) * 100}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'consolidation_range_tolerance', v / 100)}
+              min={0.1}
+              max={5}
+              step={0.1}
+              unit="%"
+              disabled={isDisabled}
+            />
+
+            {/* Breakout Parameters */}
+            <div className="mt-4 pt-4 border-t border-gray-700 mb-3">
+              <span className="text-xs text-purple-400 font-medium">Breakout Confirmation</span>
+            </div>
+            <NumberInput
+              label="Breakout Volume Surge"
+              value={settings.pattern_detection.breakout_volume_surge || 1.0}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'breakout_volume_surge', v)}
+              min={0.5}
+              max={5}
+              step={0.1}
+              unit="x"
+              disabled={isDisabled}
+            />
+            <NumberInput
+              label="Entry Vol vs Reference"
+              value={settings.pattern_detection.entry_volume_vs_reference || 1.0}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'entry_volume_vs_reference', v)}
+              min={0.5}
+              max={5}
+              step={0.1}
+              unit="x"
+              disabled={isDisabled}
+            />
+
+            {/* Risk Management */}
+            <div className="mt-4 pt-4 border-t border-gray-700 mb-3">
+              <span className="text-xs text-purple-400 font-medium">Risk Management</span>
+            </div>
+            <NumberInput
+              label="Max Stop Loss"
+              value={(settings.pattern_detection.max_sl_percent || 1.5)}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'max_sl_percent', v)}
+              min={0.5}
+              max={5}
+              step={0.1}
+              unit="%"
+              disabled={isDisabled}
+            />
+
+            {/* HTF Confirmation */}
             <div className="mt-4 pt-4 border-t border-gray-700">
               <ToggleInput
                 label="Require HTF Confirmation"
-                checked={settings.pattern_detection.require_htf_confirmation}
+                checked={settings.pattern_detection.require_htf_confirmation || false}
                 onChange={(v) => updateNestedSetting('pattern_detection', 'require_htf_confirmation', v)}
                 description="Validate pattern with higher timeframe analysis"
                 disabled={isDisabled}
@@ -671,13 +740,87 @@ export default function SubStrategySettingsModal({
               {settings.pattern_detection.require_htf_confirmation && (
                 <SelectInput
                   label="HTF Timeframe"
-                  value={settings.pattern_detection.htf_timeframe}
+                  value={settings.pattern_detection.htf_timeframe || '15m'}
                   onChange={(v) => updateNestedSetting('pattern_detection', 'htf_timeframe', v)}
                   options={timeframeOptions}
                   disabled={isDisabled}
                 />
               )}
             </div>
+          </SettingsSection>
+
+          {/* Budget Allocation Section */}
+          <SettingsSection
+            title="Budget Allocation"
+            icon={<Wallet className="w-4 h-4" />}
+            description="Per-strategy capital management for independent equity tracking"
+            defaultExpanded={true}
+          >
+            <NumberInput
+              label="Assigned Budget"
+              value={settings.budget_allocation?.assigned_budget_usd || 100}
+              onChange={(v) => {
+                const ba = settings.budget_allocation || {
+                  assigned_budget_usd: 100,
+                  max_concurrent_trades: 1,
+                  position_sizing: 'all_in',
+                  use_incremental_equity: true,
+                };
+                updateSetting('budget_allocation', { ...ba, assigned_budget_usd: v });
+              }}
+              min={10}
+              max={100000}
+              step={10}
+              unit="USD"
+              disabled={isDisabled}
+            />
+            <NumberInput
+              label="Max Concurrent Trades"
+              value={settings.budget_allocation?.max_concurrent_trades || 1}
+              onChange={(v) => {
+                const ba = settings.budget_allocation || {
+                  assigned_budget_usd: 100,
+                  max_concurrent_trades: 1,
+                  position_sizing: 'all_in',
+                  use_incremental_equity: true,
+                };
+                updateSetting('budget_allocation', { ...ba, max_concurrent_trades: v });
+              }}
+              min={1}
+              max={10}
+              step={1}
+              disabled={isDisabled}
+            />
+            <SelectInput
+              label="Position Sizing"
+              value={settings.budget_allocation?.position_sizing || 'all_in'}
+              onChange={(v) => {
+                const ba = settings.budget_allocation || {
+                  assigned_budget_usd: 100,
+                  max_concurrent_trades: 1,
+                  position_sizing: 'all_in',
+                  use_incremental_equity: true,
+                };
+                updateSetting('budget_allocation', { ...ba, position_sizing: v });
+              }}
+              options={positionSizingOptions}
+              disabled={isDisabled}
+            />
+            <ToggleInput
+              label="Use Incremental Equity"
+              checked={settings.budget_allocation?.use_incremental_equity ?? true}
+              onChange={(v) => {
+                const ba = settings.budget_allocation || {
+                  assigned_budget_usd: 100,
+                  max_concurrent_trades: 1,
+                  position_sizing: 'all_in',
+                  use_incremental_equity: true,
+                };
+                updateSetting('budget_allocation', { ...ba, use_incremental_equity: v });
+              }}
+              description="Profits compound into position sizing (grows with wins)"
+              disabled={isDisabled}
+            />
           </SettingsSection>
 
           {/* General Settings Section */}
@@ -707,8 +850,8 @@ export default function SubStrategySettingsModal({
           </SettingsSection>
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-between p-4 border-t border-gray-700 bg-gray-800/50">
+        {/* Footer - Always visible at bottom */}
+        <div className="flex-shrink-0 flex items-center justify-between p-4 border-t border-gray-700 bg-gray-800/50">
           <div className="flex items-center gap-2">
             {hasChanges && (
               <span className="px-2 py-1 text-xs bg-yellow-500/20 text-yellow-400 rounded">

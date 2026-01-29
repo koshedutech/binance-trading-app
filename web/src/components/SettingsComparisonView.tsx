@@ -40,8 +40,8 @@ import modeStrategyApi from '../api/modeStrategy';
 import type { ModeName, StrategyName, ModeStrategyConfig } from '../types/modeStrategy';
 import { STRATEGY_DISPLAY_NAMES } from '../types/modeStrategy';
 // Story 11.43-11.46: Import sub-strategies hook and types for Ravindra Volume Imbalance
-import { useSubStrategies, useUpdateSubStrategy } from '../hooks/useStrategyHierarchy';
-import type { SubStrategySettings, VolumeImbalanceSettings } from '../types/strategyHierarchy';
+import { useSubStrategies, useUpdateSubStrategy, useStrategyGroups } from '../hooks/useStrategyHierarchy';
+import type { SubStrategySettings, VolumeImbalanceSettings, StrategyGroupSettings } from '../types/strategyHierarchy';
 
 // ==================== INTERFACES ====================
 
@@ -2114,8 +2114,23 @@ function SubStrategiesSection({
   onRefresh?: () => void;
 }) {
   const { subStrategies, isLoading, error, refresh } = useSubStrategies(mode, 'breakout');
+  // Fetch strategy groups to get base_settings (including timeframe)
+  const { groups: strategyGroups, isLoading: groupsLoading } = useStrategyGroups(mode);
 
-  if (isLoading) {
+  // Find the breakout group to get base_settings
+  const breakoutGroup = strategyGroups.find(g => g.id === 'breakout');
+  const baseSettings = breakoutGroup?.base_settings;
+
+  // Default base settings for comparison
+  const defaultBaseSettings = {
+    timeframe: '3m',
+    position_size_percent: 2.0,
+    max_leverage: 10,
+    max_positions: 1,
+    min_volume_usdt: 1000000,
+  };
+
+  if (isLoading || groupsLoading) {
     return (
       <div className="space-y-4">
         <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
@@ -2147,6 +2162,59 @@ function SubStrategiesSection({
 
   return (
     <div className="space-y-4">
+      {/* Strategy Hierarchy Base Settings - Shows the 3m timeframe for Volume Imbalance */}
+      {baseSettings && (
+        <div className="border border-cyan-500/30 rounded-lg overflow-hidden bg-cyan-900/10">
+          <div className="flex items-center gap-2 px-4 py-3 bg-cyan-900/20 border-b border-cyan-500/30">
+            <Clock className="w-5 h-5 text-cyan-400" />
+            <span className="text-sm font-semibold text-cyan-300">Volume Imbalance Strategy Settings</span>
+            <span className="px-2 py-0.5 text-xs bg-cyan-500/20 text-cyan-300 rounded">
+              Breakout Group
+            </span>
+          </div>
+          <div className="p-3 space-y-2">
+            {/* Timeframe - Most important for Volume Imbalance */}
+            <div className="flex items-center justify-between py-1.5 border-b border-cyan-500/10">
+              <span className="text-sm text-gray-300">Entry/Analysis Timeframe</span>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 text-xs rounded ${
+                  baseSettings.timeframe === defaultBaseSettings.timeframe
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-yellow-500/20 text-yellow-400'
+                }`}>
+                  {baseSettings.timeframe}
+                </span>
+                {baseSettings.timeframe !== defaultBaseSettings.timeframe && (
+                  <span className="text-xs text-gray-500">
+                    (default: {defaultBaseSettings.timeframe})
+                  </span>
+                )}
+              </div>
+            </div>
+            {/* Position Size */}
+            <div className="flex items-center justify-between py-1.5 border-b border-cyan-500/10">
+              <span className="text-sm text-gray-300">Position Size</span>
+              <span className="text-sm text-gray-400">{baseSettings.position_size_percent}%</span>
+            </div>
+            {/* Max Leverage */}
+            <div className="flex items-center justify-between py-1.5 border-b border-cyan-500/10">
+              <span className="text-sm text-gray-300">Max Leverage</span>
+              <span className="text-sm text-gray-400">{baseSettings.max_leverage}x</span>
+            </div>
+            {/* Max Positions */}
+            <div className="flex items-center justify-between py-1.5 border-b border-cyan-500/10">
+              <span className="text-sm text-gray-300">Max Positions</span>
+              <span className="text-sm text-gray-400">{baseSettings.max_positions}</span>
+            </div>
+            {/* Min Volume */}
+            <div className="flex items-center justify-between py-1.5">
+              <span className="text-sm text-gray-300">Min Volume</span>
+              <span className="text-sm text-gray-400">{(baseSettings.min_volume_usdt / 1000000).toFixed(1)}M USDT</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Sub-Strategies Section with clear header - matches Futures page UI */}
       <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
         <div className="flex items-center gap-2 px-4 py-3 bg-purple-900/20 border-b border-purple-500/30">
@@ -2232,27 +2300,46 @@ function SubStrategyCollapsibleSection({
     ? 'Ravindra Volume Imbalance'
     : subStrategyName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
-  // Default settings for reset - these are the baseline values
+  // Default settings for reset - backtested values (Dec 2025 - Jan 2026: 51 trades, 47.1% WR, +1147% return)
   const defaultSettings: VolumeImbalanceSettings = {
-    enabled: false,
+    enabled: true,
     risk_reward: { risk: 1, reward: 4, min_ratio: 3 },
-    llm_validation_enabled: true,
+    llm_validation_enabled: false,
     trailing_stop: {
       enabled: true,
-      activation_profit_pct: 1.0,
-      initial_trail_pct: 0.5,
-      milestones: [],
+      activation_profit_pct: 2.0,  // At 2:1 R:R
+      initial_trail_pct: 0.0,      // Move to breakeven
+      milestones: [
+        { trigger_profit_pct: 2.0, trail_distance_pct: 0.0, label: 'BE' },   // At 2:1, move SL to entry (breakeven)
+        { trigger_profit_pct: 3.0, trail_distance_pct: 1.0, label: '+1R' },  // At 3:1, lock in 1:1 profit
+      ],
     },
     pattern_detection: {
-      min_volume_ratio: 2.0,
+      // Legacy fields (for backwards compatibility)
+      min_volume_ratio: 3.0,
       consolidation_time_mins: 15,
-      breakout_confirmation_candles: 2,
+      breakout_confirmation_candles: 1,
       max_pattern_age_mins: 60,
-      require_htf_confirmation: true,
-      htf_timeframe: '1h',
+      require_htf_confirmation: false,
+      htf_timeframe: '15m',
+      // New backtested parameters (3m timeframe)
+      reference_lookback_candles: 5,
+      min_consolidation_candles: 1,
+      max_consolidation_candles: 999,
+      volume_spike_threshold: 3.0,
+      breakout_volume_surge: 1.0,
+      consolidation_range_tolerance: 0.01,
+      entry_volume_vs_reference: 1.0,
+      max_sl_percent: 1.5,
     },
     max_concurrent_patterns: 5,
     priority: 1,
+    budget_allocation: {
+      assigned_budget_usd: 100,
+      max_concurrent_trades: 1,
+      position_sizing: 'all_in',
+      use_incremental_equity: true,
+    },
   };
 
   // Handle local field change
@@ -2393,42 +2480,155 @@ function SubStrategyCollapsibleSection({
       });
     }
 
-    // Pattern Detection fields
+    // Pattern Detection fields - Updated with backtested parameters (Dec 2025 - Jan 2026)
     if (settings.pattern_detection) {
+      // New backtested parameters (3m timeframe)
       fieldComparisons.push({
-        path: 'pattern_detection.min_volume_ratio',
-        current: settings.pattern_detection.min_volume_ratio,
-        default: defaultSettings.pattern_detection.min_volume_ratio,
-        match: settings.pattern_detection.min_volume_ratio === defaultSettings.pattern_detection.min_volume_ratio,
-        inputType: 'slider',
-      });
-      fieldComparisons.push({
-        path: 'pattern_detection.consolidation_time_mins',
-        current: settings.pattern_detection.consolidation_time_mins,
-        default: defaultSettings.pattern_detection.consolidation_time_mins,
-        match: settings.pattern_detection.consolidation_time_mins === defaultSettings.pattern_detection.consolidation_time_mins,
+        path: 'pattern_detection.reference_lookback_candles',
+        current: settings.pattern_detection.reference_lookback_candles ?? 5,
+        default: defaultSettings.pattern_detection.reference_lookback_candles,
+        match: (settings.pattern_detection.reference_lookback_candles ?? 5) === defaultSettings.pattern_detection.reference_lookback_candles,
         inputType: 'number',
       });
       fieldComparisons.push({
+        path: 'pattern_detection.volume_spike_threshold',
+        current: settings.pattern_detection.volume_spike_threshold ?? settings.pattern_detection.min_volume_ratio ?? 3.0,
+        default: defaultSettings.pattern_detection.volume_spike_threshold,
+        match: (settings.pattern_detection.volume_spike_threshold ?? settings.pattern_detection.min_volume_ratio ?? 3.0) === defaultSettings.pattern_detection.volume_spike_threshold,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.min_consolidation_candles',
+        current: settings.pattern_detection.min_consolidation_candles ?? 1,
+        default: defaultSettings.pattern_detection.min_consolidation_candles,
+        match: (settings.pattern_detection.min_consolidation_candles ?? 1) === defaultSettings.pattern_detection.min_consolidation_candles,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.max_consolidation_candles',
+        current: settings.pattern_detection.max_consolidation_candles ?? 999,
+        default: defaultSettings.pattern_detection.max_consolidation_candles,
+        match: (settings.pattern_detection.max_consolidation_candles ?? 999) === defaultSettings.pattern_detection.max_consolidation_candles,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.consolidation_range_tolerance',
+        current: settings.pattern_detection.consolidation_range_tolerance ?? 0.01,
+        default: defaultSettings.pattern_detection.consolidation_range_tolerance,
+        match: (settings.pattern_detection.consolidation_range_tolerance ?? 0.01) === defaultSettings.pattern_detection.consolidation_range_tolerance,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.breakout_volume_surge',
+        current: settings.pattern_detection.breakout_volume_surge ?? 1.0,
+        default: defaultSettings.pattern_detection.breakout_volume_surge,
+        match: (settings.pattern_detection.breakout_volume_surge ?? 1.0) === defaultSettings.pattern_detection.breakout_volume_surge,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.entry_volume_vs_reference',
+        current: settings.pattern_detection.entry_volume_vs_reference ?? 1.0,
+        default: defaultSettings.pattern_detection.entry_volume_vs_reference,
+        match: (settings.pattern_detection.entry_volume_vs_reference ?? 1.0) === defaultSettings.pattern_detection.entry_volume_vs_reference,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.max_sl_percent',
+        current: settings.pattern_detection.max_sl_percent ?? 1.5,
+        default: defaultSettings.pattern_detection.max_sl_percent,
+        match: (settings.pattern_detection.max_sl_percent ?? 1.5) === defaultSettings.pattern_detection.max_sl_percent,
+        inputType: 'slider',
+      });
+      fieldComparisons.push({
+        path: 'pattern_detection.require_htf_confirmation',
+        current: settings.pattern_detection.require_htf_confirmation ?? false,
+        default: defaultSettings.pattern_detection.require_htf_confirmation,
+        match: (settings.pattern_detection.require_htf_confirmation ?? false) === defaultSettings.pattern_detection.require_htf_confirmation,
+        inputType: 'toggle',
+      });
+      // Additional pattern detection fields
+      fieldComparisons.push({
         path: 'pattern_detection.breakout_confirmation_candles',
-        current: settings.pattern_detection.breakout_confirmation_candles,
-        default: defaultSettings.pattern_detection.breakout_confirmation_candles,
-        match: settings.pattern_detection.breakout_confirmation_candles === defaultSettings.pattern_detection.breakout_confirmation_candles,
+        current: settings.pattern_detection.breakout_confirmation_candles ?? 1,
+        default: defaultSettings.pattern_detection.breakout_confirmation_candles ?? 1,
+        match: (settings.pattern_detection.breakout_confirmation_candles ?? 1) === (defaultSettings.pattern_detection.breakout_confirmation_candles ?? 1),
         inputType: 'number',
       });
       fieldComparisons.push({
         path: 'pattern_detection.max_pattern_age_mins',
-        current: settings.pattern_detection.max_pattern_age_mins,
-        default: defaultSettings.pattern_detection.max_pattern_age_mins,
-        match: settings.pattern_detection.max_pattern_age_mins === defaultSettings.pattern_detection.max_pattern_age_mins,
+        current: settings.pattern_detection.max_pattern_age_mins ?? 60,
+        default: defaultSettings.pattern_detection.max_pattern_age_mins ?? 60,
+        match: (settings.pattern_detection.max_pattern_age_mins ?? 60) === (defaultSettings.pattern_detection.max_pattern_age_mins ?? 60),
         inputType: 'number',
       });
       fieldComparisons.push({
-        path: 'pattern_detection.require_htf_confirmation',
-        current: settings.pattern_detection.require_htf_confirmation,
-        default: defaultSettings.pattern_detection.require_htf_confirmation,
-        match: settings.pattern_detection.require_htf_confirmation === defaultSettings.pattern_detection.require_htf_confirmation,
+        path: 'pattern_detection.htf_timeframe',
+        current: settings.pattern_detection.htf_timeframe ?? '15m',
+        default: defaultSettings.pattern_detection.htf_timeframe ?? '15m',
+        match: (settings.pattern_detection.htf_timeframe ?? '15m') === (defaultSettings.pattern_detection.htf_timeframe ?? '15m'),
+        inputType: 'number', // Will display as text
+      });
+    }
+
+    // Budget Allocation fields - Per-strategy capital management
+    if (settings.budget_allocation) {
+      fieldComparisons.push({
+        path: 'budget_allocation.assigned_budget_usd',
+        current: settings.budget_allocation.assigned_budget_usd ?? 100,
+        default: defaultSettings.budget_allocation?.assigned_budget_usd ?? 100,
+        match: (settings.budget_allocation.assigned_budget_usd ?? 100) === (defaultSettings.budget_allocation?.assigned_budget_usd ?? 100),
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'budget_allocation.max_concurrent_trades',
+        current: settings.budget_allocation.max_concurrent_trades ?? 1,
+        default: defaultSettings.budget_allocation?.max_concurrent_trades ?? 1,
+        match: (settings.budget_allocation.max_concurrent_trades ?? 1) === (defaultSettings.budget_allocation?.max_concurrent_trades ?? 1),
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'budget_allocation.use_incremental_equity',
+        current: settings.budget_allocation.use_incremental_equity ?? true,
+        default: defaultSettings.budget_allocation?.use_incremental_equity ?? true,
+        match: (settings.budget_allocation.use_incremental_equity ?? true) === (defaultSettings.budget_allocation?.use_incremental_equity ?? true),
         inputType: 'toggle',
+      });
+      fieldComparisons.push({
+        path: 'budget_allocation.position_sizing',
+        current: settings.budget_allocation.position_sizing ?? 'all_in',
+        default: defaultSettings.budget_allocation?.position_sizing ?? 'all_in',
+        match: (settings.budget_allocation.position_sizing ?? 'all_in') === (defaultSettings.budget_allocation?.position_sizing ?? 'all_in'),
+        inputType: 'number', // Will display as text
+      });
+    } else {
+      // Show budget allocation fields even if not set (using defaults)
+      fieldComparisons.push({
+        path: 'budget_allocation.assigned_budget_usd',
+        current: 100,
+        default: defaultSettings.budget_allocation?.assigned_budget_usd ?? 100,
+        match: true,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'budget_allocation.max_concurrent_trades',
+        current: 1,
+        default: defaultSettings.budget_allocation?.max_concurrent_trades ?? 1,
+        match: true,
+        inputType: 'number',
+      });
+      fieldComparisons.push({
+        path: 'budget_allocation.use_incremental_equity',
+        current: true,
+        default: defaultSettings.budget_allocation?.use_incremental_equity ?? true,
+        match: true,
+        inputType: 'toggle',
+      });
+      fieldComparisons.push({
+        path: 'budget_allocation.position_sizing',
+        current: 'all_in',
+        default: defaultSettings.budget_allocation?.position_sizing ?? 'all_in',
+        match: true,
+        inputType: 'number', // Will display as text
       });
     }
 
@@ -2455,6 +2655,37 @@ function SubStrategyCollapsibleSection({
         match: settings.trailing_stop.initial_trail_pct === defaultSettings.trailing_stop.initial_trail_pct,
         inputType: 'slider',
       });
+      // Trailing Stop Milestones - each milestone has trigger_profit_pct, trail_distance_pct, label
+      const currentMilestones = settings.trailing_stop.milestones || [];
+      const defaultMilestones = defaultSettings.trailing_stop.milestones || [];
+      const maxMilestones = Math.max(currentMilestones.length, defaultMilestones.length);
+      for (let i = 0; i < maxMilestones; i++) {
+        const currentMilestone = currentMilestones[i];
+        const defaultMilestone = defaultMilestones[i];
+        const milestoneLabel = currentMilestone?.label || defaultMilestone?.label || `Milestone ${i + 1}`;
+
+        fieldComparisons.push({
+          path: `trailing_stop.milestones[${i}].trigger_profit_pct`,
+          current: currentMilestone?.trigger_profit_pct ?? 'N/A',
+          default: defaultMilestone?.trigger_profit_pct ?? 'N/A',
+          match: currentMilestone?.trigger_profit_pct === defaultMilestone?.trigger_profit_pct,
+          inputType: 'number',
+        });
+        fieldComparisons.push({
+          path: `trailing_stop.milestones[${i}].trail_distance_pct`,
+          current: currentMilestone?.trail_distance_pct ?? 'N/A',
+          default: defaultMilestone?.trail_distance_pct ?? 'N/A',
+          match: currentMilestone?.trail_distance_pct === defaultMilestone?.trail_distance_pct,
+          inputType: 'number',
+        });
+        fieldComparisons.push({
+          path: `trailing_stop.milestones[${i}].label`,
+          current: currentMilestone?.label ?? 'N/A',
+          default: defaultMilestone?.label ?? 'N/A',
+          match: currentMilestone?.label === defaultMilestone?.label,
+          inputType: 'number', // Will display as text
+        });
+      }
     }
   }
 
