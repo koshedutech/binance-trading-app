@@ -91,6 +91,31 @@ function formatVolume(volume: number): string {
 }
 
 /**
+ * Convert Binance timeframe notation to TradingView interval
+ * Binance: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M
+ * TradingView: 1, 3, 5, 15, 30, 60, 120, 240, 360, 480, 720, D, 3D, W, M
+ */
+function timeframeToTradingViewInterval(tf: string): string {
+  // Handle minute timeframes
+  if (tf.endsWith('m')) {
+    return tf.replace('m', '');
+  }
+  // Handle hour timeframes - convert to minutes
+  if (tf.endsWith('h')) {
+    const hours = parseInt(tf.replace('h', ''), 10);
+    return String(hours * 60);
+  }
+  // Handle day timeframes
+  if (tf === '1d' || tf === '1D') return 'D';
+  if (tf === '3d' || tf === '3D') return '3D';
+  // Handle week/month
+  if (tf === '1w' || tf === '1W') return 'W';
+  if (tf === '1M') return 'M';
+  // Default to 15 minutes if unknown
+  return '15';
+}
+
+/**
  * Get the primary timeframe data (first available)
  */
 function getPrimaryTimeframe(coin: CoinData): { name: string; data: TimeframeData } | null {
@@ -223,9 +248,17 @@ function VolumeIndicator({ volume, takerBuyRatio }: { volume: number; takerBuyRa
 
 /**
  * Individual coin row component with real-time updates
+ * Single expandable mode: only one coin can be expanded at a time
  */
-function CoinRow({ coin, prevCoin }: { coin: CoinData; prevCoin?: CoinData }) {
-  const [expanded, setExpanded] = useState(false);
+interface CoinRowProps {
+  coin: CoinData;
+  prevCoin?: CoinData;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
+}
+
+function CoinRow({ coin, prevCoin, isExpanded, onToggleExpand }: CoinRowProps) {
+  const expanded = isExpanded; // Use controlled state from parent
   const [flash, setFlash] = useState<'up' | 'down' | null>(null);
   const prevPriceRef = useRef(coin.price);
 
@@ -276,7 +309,7 @@ function CoinRow({ coin, prevCoin }: { coin: CoinData; prevCoin?: CoinData }) {
     }`}>
       {/* Main Row */}
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={onToggleExpand}
         className="w-full flex items-center gap-3 py-2 px-2 hover:bg-gray-700/30 transition-colors"
       >
         {/* Symbol */}
@@ -357,7 +390,7 @@ function CoinRow({ coin, prevCoin }: { coin: CoinData; prevCoin?: CoinData }) {
             <div className="flex-1 min-w-0">
               <TradingViewChart
                 symbol={coin.symbol}
-                timeframe={primaryTf?.name === '1h' ? '60' : primaryTf?.name === '4h' ? '240' : '15'}
+                timeframe={primaryTf?.name ? timeframeToTradingViewInterval(primaryTf.name) : '15'}
                 height={280}
               />
             </div>
@@ -486,6 +519,13 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
   const [sortBy, setSortBy] = useState<'symbol' | 'price' | 'change' | 'volume'>('symbol');
   const [sortAsc, setSortAsc] = useState(true);
   const prevDataRef = useRef<Map<string, CoinData>>(new Map());
+  // Single expandable mode: only one coin can be expanded at a time
+  const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
+
+  // Toggle expansion - only one coin at a time
+  const handleToggleExpand = (symbol: string) => {
+    setExpandedSymbol(prev => prev === symbol ? null : symbol);
+  };
 
   // Track previous data for comparison
   useEffect(() => {
@@ -588,6 +628,8 @@ export default function CoinList({ data, isLoading }: CoinListProps) {
             key={coin.symbol}
             coin={coin}
             prevCoin={prevDataRef.current.get(coin.symbol)}
+            isExpanded={expandedSymbol === coin.symbol}
+            onToggleExpand={() => handleToggleExpand(coin.symbol)}
           />
         ))}
       </div>

@@ -38,11 +38,11 @@ type StrategyMatcher interface {
 // CoinDataProvider provides coin data for strategy matching.
 // This abstracts the coin profiler or any other data source.
 type CoinDataProvider interface {
-	// GetAllCoinData returns all available coin data.
-	GetAllCoinData(ctx context.Context) (map[string]*coinprofiler.CoinData, error)
+	// GetAllCoinDataCtx returns all available coin data (context-aware).
+	GetAllCoinDataCtx(ctx context.Context) (map[string]*coinprofiler.CoinData, error)
 
-	// GetCoinData returns data for a specific symbol.
-	GetCoinData(ctx context.Context, symbol string) (*coinprofiler.CoinData, error)
+	// GetCoinDataCtx returns data for a specific symbol (context-aware).
+	GetCoinDataCtx(ctx context.Context, symbol string) (*coinprofiler.CoinData, error)
 }
 
 // ============================================================================
@@ -196,7 +196,7 @@ func (m *DefaultStrategyMatcher) GetReadyCandidates(ctx context.Context) (*Entry
 	var err error
 
 	if m.coinProvider != nil {
-		coins, err = m.coinProvider.GetAllCoinData(ctx)
+		coins, err = m.coinProvider.GetAllCoinDataCtx(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get coin data: %w", err)
 		}

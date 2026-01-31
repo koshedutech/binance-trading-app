@@ -325,3 +325,55 @@ func (ch *CandleHistory) Last() *HistoricalCandle {
 func CandleHistoryKey(symbol, timeframe string) string {
 	return symbol + ":" + timeframe
 }
+
+// ============================================================================
+// HISTORICAL DATA PROVIDER - Interface for fetching historical candles
+// Epic 14: Entry Decision Strategy Requirements & Real-Time Monitoring
+// ============================================================================
+
+// HistoricalKline represents a single kline/candlestick from Binance API.
+// This mirrors the binance.Kline struct to avoid direct dependency.
+type HistoricalKline struct {
+	OpenTime                 int64
+	Open                     float64
+	High                     float64
+	Low                      float64
+	Close                    float64
+	Volume                   float64
+	CloseTime                int64
+	QuoteAssetVolume         float64
+	NumberOfTrades           int
+	TakerBuyBaseAssetVolume  float64
+	TakerBuyQuoteAssetVolume float64
+}
+
+// HistoricalDataProvider defines the interface for fetching historical candles.
+// This allows CoinProfiler to pre-populate candle history on startup without
+// requiring users to wait for candles to close in real-time.
+type HistoricalDataProvider interface {
+	// GetFuturesKlines fetches historical klines from Binance API.
+	// Returns the most recent `limit` candles for the given symbol and interval.
+	GetFuturesKlines(symbol, interval string, limit int) ([]HistoricalKline, error)
+}
+
+// KlineToHistoricalCandle converts a HistoricalKline to HistoricalCandle format.
+func KlineToHistoricalCandle(k HistoricalKline) HistoricalCandle {
+	takerSellVol := k.Volume - k.TakerBuyBaseAssetVolume
+	if takerSellVol < 0 {
+		takerSellVol = 0
+	}
+
+	return HistoricalCandle{
+		OpenTime:     time.UnixMilli(k.OpenTime),
+		CloseTime:    time.UnixMilli(k.CloseTime),
+		Open:         k.Open,
+		High:         k.High,
+		Low:          k.Low,
+		Close:        k.Close,
+		Volume:       k.Volume,
+		TakerBuyVol:  k.TakerBuyBaseAssetVolume,
+		TakerSellVol: takerSellVol,
+		QuoteVolume:  k.QuoteAssetVolume,
+		TradeCount:   k.NumberOfTrades,
+	}
+}

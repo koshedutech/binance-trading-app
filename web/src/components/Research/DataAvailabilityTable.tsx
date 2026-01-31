@@ -21,7 +21,7 @@ interface DataAvailabilityTableProps {
 }
 
 // Standard timeframes for the matrix
-const STANDARD_TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d'];
+const STANDARD_TIMEFRAMES = ['1m', '3m', '5m', '15m', '1h', '4h', '1d'];
 
 // Format date range display
 function formatDateRange(fromDate: string, toDate: string): string {

@@ -1,6 +1,6 @@
 // Pattern Progress Component
 // Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
-// Displays pattern step visualization (1 -> 2 -> 3) with progress indicators
+// Displays pattern step visualization (1 -> 2) for 2-step Volume Imbalance pattern
 
 import React from 'react';
 import {
@@ -69,11 +69,12 @@ const sizeConfig = {
 };
 
 // ==================== Step Labels ====================
+// 2-Step Pattern: Volume Spike → Breakout (NO consolidation)
+// Based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
 
 const STEP_LABELS: Record<number, string> = {
   1: 'Spike',
-  2: 'Consolidate',
-  3: 'Ready',
+  2: 'Breakout',
 };
 
 // ==================== Helper Functions ====================
@@ -253,7 +254,7 @@ export function PatternProgressFromCoin({
   return (
     <PatternProgress
       currentStep={coin.step}
-      totalSteps={3} // Default to 3 steps for volume imbalance
+      totalSteps={coin.total_steps || 2} // Use from coin, fallback to 2-step pattern
       status={coin.status}
       details={coin.details}
       size={size}

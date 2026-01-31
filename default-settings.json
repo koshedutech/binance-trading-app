@@ -3921,8 +3921,13 @@
                   "_explanation": "Values are R:R ratios. At 2:1 R:R move SL to breakeven, at 3:1 R:R lock 1:1 profit"
                 },
                 "pattern_detection": {
+                  "direction": "long",
+                  "_direction_options": ["long", "short", "both"],
+                  "_direction_description": "long=GREEN candles only, short=RED candles only, both=any candle",
                   "reference_lookback_candles": 5,
                   "volume_spike_threshold": 3.0,
+                  "require_pre_trend_down": false,
+                  "_require_pre_trend_down_description": "BACKTESTED: false - original strategy did NOT use this filter",
                   "breakout_volume_surge": 1.0,
                   "breakout_confirmation_candles": 1,
                   "entry_volume_vs_reference": 1.0,
@@ -4006,8 +4011,13 @@
                   "_explanation": "Values are R:R ratios. At 2:1 R:R move SL to breakeven, at 3:1 R:R lock 1:1 profit"
                 },
                 "pattern_detection": {
+                  "direction": "long",
+                  "_direction_options": ["long", "short", "both"],
+                  "_direction_description": "long=GREEN candles only, short=RED candles only, both=any candle",
                   "reference_lookback_candles": 30,
                   "volume_spike_threshold": 2.0,
+                  "require_pre_trend_down": false,
+                  "_require_pre_trend_down_description": "BACKTESTED: false - original strategy did NOT use this filter",
                   "breakout_volume_surge": 1.5,
                   "breakout_confirmation_candles": 1,
                   "entry_volume_vs_reference": 1.0,

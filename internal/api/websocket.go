@@ -373,3 +373,25 @@ func mustMarshal(v interface{}) []byte {
 	}
 	return data
 }
+
+// BroadcastEntryDecisionUpdate broadcasts Entry Decision strategies to all clients.
+// This enables real-time updates showing which coins are ready for entry.
+// Epic 14: Entry Decision System WebSocket integration.
+func BroadcastEntryDecisionUpdate(strategiesData map[string]interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventEntryDecisionUpdate,
+		Timestamp: time.Now(),
+		Data:      strategiesData,
+	}
+
+	// Use non-blocking send to avoid slowing down the data pipeline
+	select {
+	case userWSHub.broadcast <- mustMarshal(event):
+	default:
+		// Channel full, skip this update (next one will come shortly)
+	}
+}

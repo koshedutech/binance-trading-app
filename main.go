@@ -996,6 +996,11 @@ func main() {
 		// This enables the CoinProfiler to push updates directly to frontend clients
 		userAutopilotManager.SetCoinUpdateCallback(api.BroadcastCoinDataUpdate)
 
+		// Epic 14: Wire pattern update callback for real-time WebSocket broadcasting
+		// This enables the RealtimePatternMatcher to push pattern state changes to frontend
+		// When patterns transition (volume spike → consolidation → breakout), updates are broadcast
+		userAutopilotManager.SetPatternUpdateCallback(api.BroadcastPatternUpdateFunc)
+
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
 

@@ -77,7 +77,7 @@ const GapDisplay = ({ gap, threshold }: { gap: number; threshold: number }) => {
 const FALLBACK_KEY = 'entryDecisionEngine';
 
 export default function EntryDecisionEngineCard({
-  defaultExpanded = true,
+  defaultExpanded = false,
   className = '',
 }: EntryDecisionEngineCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
@@ -187,11 +187,11 @@ export default function EntryDecisionEngineCard({
       setCoinStates(states);
       setLastUpdated(new Date());
 
-      // Auto-expand top 3 coins on first load only
+      // Auto-expand only the TOP coin on first load (single expandable mode)
       if (!hasInitializedExpansion.current && states.length > 0) {
         hasInitializedExpansion.current = true;
-        const top3 = states.slice(0, 3).map(s => s.symbol);
-        setExpandedCoins(new Set(top3));
+        const topCoin = states[0].symbol;
+        setExpandedCoins(new Set([topCoin]));
       }
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message :
@@ -348,15 +348,15 @@ export default function EntryDecisionEngineCard({
     };
   }, [expanded, fetchCoinStates]);
 
+  // Toggle coin expansion - only ONE coin can be expanded at a time
   const toggleCoinExpansion = (symbol: string) => {
     setExpandedCoins(prev => {
-      const next = new Set(prev);
-      if (next.has(symbol)) {
-        next.delete(symbol);
-      } else {
-        next.add(symbol);
+      // If clicking the already expanded coin, collapse it
+      if (prev.has(symbol)) {
+        return new Set();
       }
-      return next;
+      // Otherwise, expand only this coin (collapse all others)
+      return new Set([symbol]);
     });
   };
 

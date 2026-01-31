@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -67,7 +69,249 @@ var (
 	patternMatcherCache       = make(map[string]*entrydecision.VolumeImbalancePatternMatcher)
 	scoreCalculatorCache      = make(map[string]*entrydecision.TrendFollowingScoreCalculator)
 	entryDecisionCacheMu      sync.RWMutex
+
+	// Background broadcast service state
+	entryDecisionBroadcastStop   chan struct{}
+	entryDecisionBroadcastServer *Server
 )
+
+// ==================== ENTRY DECISION BROADCAST SERVICE ====================
+// Broadcasts Entry Decision strategies to WebSocket clients at regular intervals.
+// This enables real-time "Live" indicator in the UI instead of "Polling".
+
+// StartEntryDecisionBroadcast starts the background broadcast service.
+// Call this when the server starts.
+func (s *Server) StartEntryDecisionBroadcast() {
+	if entryDecisionBroadcastStop != nil {
+		// Already running
+		return
+	}
+
+	entryDecisionBroadcastStop = make(chan struct{})
+	entryDecisionBroadcastServer = s
+
+	go entryDecisionBroadcastLoop()
+}
+
+// StopEntryDecisionBroadcast stops the background broadcast service.
+func StopEntryDecisionBroadcast() {
+	if entryDecisionBroadcastStop != nil {
+		close(entryDecisionBroadcastStop)
+		entryDecisionBroadcastStop = nil
+		entryDecisionBroadcastServer = nil
+	}
+}
+
+// entryDecisionBroadcastLoop runs in the background and periodically broadcasts strategies.
+func entryDecisionBroadcastLoop() {
+	ticker := time.NewTicker(5 * time.Second) // Broadcast every 5 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-entryDecisionBroadcastStop:
+			return
+		case <-ticker.C:
+			broadcastEntryDecisionStrategies()
+		}
+	}
+}
+
+// broadcastEntryDecisionStrategies broadcasts current Entry Decision strategies to all clients.
+// It collects users from both the pattern matcher cache AND users with running CoinProfilers
+// in the UserAutopilotManager to ensure comprehensive coverage.
+func broadcastEntryDecisionStrategies() {
+	if entryDecisionBroadcastServer == nil || entryDecisionBroadcastServer.repo == nil {
+		return
+	}
+
+	// Collect user IDs from multiple sources to ensure all active users get updates
+	userIDSet := make(map[string]bool)
+
+	// Source 1: Pattern matcher cache (users who have made API calls)
+	entryDecisionCacheMu.RLock()
+	for userID := range patternMatcherCache {
+		userIDSet[userID] = true
+	}
+	entryDecisionCacheMu.RUnlock()
+
+	// Source 2: Users with running CoinProfilers in UserAutopilotManager
+	// This is CRITICAL for real-time updates - the CoinProfiler feeds the pattern matcher
+	if entryDecisionBroadcastServer.userAutopilotManager != nil {
+		runningUsers := entryDecisionBroadcastServer.userAutopilotManager.GetAllRunningUsers()
+		for _, userID := range runningUsers {
+			userIDSet[userID] = true
+		}
+	}
+
+	// If no users, nothing to broadcast
+	if len(userIDSet) == 0 {
+		return
+	}
+
+	// Convert set to slice
+	userIDs := make([]string, 0, len(userIDSet))
+	for userID := range userIDSet {
+		userIDs = append(userIDs, userID)
+	}
+
+	// For now, broadcast combined data for all users
+	// In a multi-tenant system, you'd filter by connected users
+	for _, userID := range userIDs {
+		data := buildEntryDecisionBroadcastData(userID)
+		if data != nil {
+			BroadcastEntryDecisionUpdate(data)
+		}
+	}
+}
+
+// buildEntryDecisionBroadcastData builds the broadcast payload for a user.
+func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
+	if entryDecisionBroadcastServer == nil {
+		return nil
+	}
+
+	// Get strategy reader
+	strategyReader := entryDecisionBroadcastServer.getOrCreateStrategyReader(userID)
+	if strategyReader == nil {
+		return nil
+	}
+
+	// Get enabled strategies (using background context since this is async)
+	enabledStrategies, err := strategyReader.GetEnabledStrategies(context.Background(), userID)
+	if err != nil {
+		return nil
+	}
+
+	// Get realtime matcher for countdown timer and direction info
+	var globalNextCandleClose time.Time
+	var globalLookingFor string
+	var lastEvaluatedAt time.Time
+
+	var realtimeMatcher *entrydecision.RealtimePatternMatcher
+	if entryDecisionBroadcastServer.userAutopilotManager != nil {
+		realtimeMatcher = entryDecisionBroadcastServer.userAutopilotManager.GetRealtimePatternMatcher(userID)
+		if realtimeMatcher != nil {
+			// Get any pattern update to extract timing info
+			updates := realtimeMatcher.GetAllPatternUpdates()
+			if len(updates) > 0 {
+				// Use the first update's timing (all should be the same timeframe)
+				globalNextCandleClose = updates[0].NextCandleClose
+				globalLookingFor = updates[0].LookingFor
+				lastEvaluatedAt = updates[0].LastEvaluatedAt
+			}
+		}
+	}
+
+	// Build response
+	response := entrydecision.NewEntryDecisionResponse()
+
+	for _, strategy := range enabledStrategies {
+		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
+
+		sm := entrydecision.NewStrategyMatch(
+			strategy.Mode,
+			strategy.StrategyGroup,
+			strategy.SubStrategy,
+			strategyType,
+			strategy.Timeframe,
+		)
+		sm.Enabled = true
+
+		// Set per-strategy countdown timer (based on its timeframe)
+		sm.NextCandleClose = calculateNextCandleCloseForTimeframe(strategy.Timeframe)
+		sm.LookingFor = globalLookingFor // Use global direction setting
+
+		// Get pattern matcher to check for tracked coins
+		patternMatcher := entryDecisionBroadcastServer.getOrCreatePatternMatcher(userID)
+		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
+			// Use GetAllCoinMatches for FULL tracking data (reference candle, time elapsed, etc.)
+			allCoinMatches := patternMatcher.GetAllCoinMatches()
+			for _, cm := range allCoinMatches {
+				if cm != nil && cm.Status != "" {
+					sm.AddCoin(*cm)
+				}
+			}
+		}
+
+		response.AddStrategy(*sm)
+	}
+
+	response.GroupByMode()
+	response.CalculateSummary()
+
+	// Convert to map for broadcast, including countdown timer and direction info
+	return map[string]interface{}{
+		"strategies":           response.Strategies,
+		"by_mode":              response.ByMode,
+		"total_strategies":     response.TotalStrategies,
+		"enabled_strategies":   response.EnabledStrategies,
+		"total_coins_ready":    response.TotalCoinsReady,
+		"total_coins_watching": response.TotalCoinsWatching,
+		"updated_at":           response.UpdatedAt,
+		"next_candle_close":    globalNextCandleClose,
+		"looking_for":          globalLookingFor,
+		"last_evaluated_at":    lastEvaluatedAt,
+	}
+}
+
+// calculateNextCandleCloseForTimeframe calculates the next candle close time for a given timeframe.
+// This is used to set per-strategy countdown timers.
+func calculateNextCandleCloseForTimeframe(timeframe string) time.Time {
+	now := time.Now().UTC()
+
+	// Parse timeframe in minutes
+	var durationMinutes int
+	switch timeframe {
+	case "1m":
+		durationMinutes = 1
+	case "3m":
+		durationMinutes = 3
+	case "5m":
+		durationMinutes = 5
+	case "15m":
+		durationMinutes = 15
+	case "30m":
+		durationMinutes = 30
+	case "1h":
+		durationMinutes = 60
+	case "4h":
+		durationMinutes = 240
+	case "1d":
+		durationMinutes = 1440
+	default:
+		durationMinutes = 3 // Default to 3m
+	}
+
+	// Calculate based on current minute alignment (Binance candles align to clock)
+	currentMinute := now.Minute()
+	currentSecond := now.Second()
+
+	// Find the next candle close minute
+	currentCandleStart := currentMinute - (currentMinute % durationMinutes)
+	nextCandleClose := currentCandleStart + durationMinutes
+
+	// Handle hour rollover
+	hoursToAdd := 0
+	if nextCandleClose >= 60 {
+		nextCandleClose = nextCandleClose % 60
+		hoursToAdd = 1
+	}
+
+	// Build the next close time
+	nextClose := time.Date(
+		now.Year(), now.Month(), now.Day(),
+		now.Hour()+hoursToAdd, nextCandleClose, 0, 0,
+		time.UTC,
+	)
+
+	// If the calculated time is in the past (edge case at second 0), add duration
+	if nextClose.Before(now) || (nextClose.Equal(now) && currentSecond == 0) {
+		nextClose = nextClose.Add(time.Duration(durationMinutes) * time.Minute)
+	}
+
+	return nextClose
+}
 
 // ==================== HANDLER FUNCTIONS ====================
 
@@ -117,12 +361,13 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 		// Get pattern matcher to check for tracked coins
 		patternMatcher := s.getOrCreatePatternMatcher(userID)
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
-			// Get all patterns for this mode/timeframe
-			allPatterns := patternMatcher.GetAllPatterns()
-			for _, progress := range allPatterns {
-				if progress.Mode == strategy.Mode && progress.Timeframe == strategy.Timeframe {
-					cm := progress.ToCoinMatch()
-					sm.AddCoin(cm)
+			// Get all CoinMatches with FULL tracking data (reference candle, time elapsed, etc.)
+			allCoinMatches := patternMatcher.GetAllCoinMatches()
+			for _, cm := range allCoinMatches {
+				if cm != nil && cm.Status != "" {
+					// Filter by mode/timeframe using the pattern's mode
+					// Note: CoinMatch doesn't store mode, so we add all for now
+					sm.AddCoin(*cm)
 				}
 			}
 		}
@@ -204,11 +449,11 @@ func (s *Server) handleGetEntryDecisionStrategiesForMode(c *gin.Context) {
 
 		// Get pattern matcher to check for tracked coins
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
-			allPatterns := patternMatcher.GetAllPatterns()
-			for _, progress := range allPatterns {
-				if progress.Mode == strategy.Mode && progress.Timeframe == strategy.Timeframe {
-					cm := progress.ToCoinMatch()
-					sm.AddCoin(cm)
+			// Use GetAllCoinMatches for FULL tracking data (reference candle, time elapsed, etc.)
+			allCoinMatches := patternMatcher.GetAllCoinMatches()
+			for _, cm := range allCoinMatches {
+				if cm != nil && cm.Status != "" {
+					sm.AddCoin(*cm)
 				}
 			}
 		}
@@ -312,7 +557,7 @@ func (s *Server) handleGetPatternProgress(c *gin.Context) {
 			"status":       "not_tracking",
 			"message":      "No active pattern being tracked for this symbol",
 			"current_step": 0,
-			"total_steps":  3,
+			"total_steps":  2, // 2-step pattern: Volume Spike → Breakout
 		})
 		return
 	}
@@ -402,7 +647,26 @@ func (s *Server) getOrCreateStrategyReader(userID string) entrydecision.Strategy
 }
 
 // getOrCreatePatternMatcher returns or creates a pattern matcher for a user.
+// Priority: 1) Get from UserAutopilotInstance (connected to CoinProfiler)
+//           2) Fall back to cache
+//           3) Create new with USER SETTINGS from database/cache
+//
+// IMPORTANT: This now loads user-configured values from default-settings.json → database
+// instead of using hard-coded defaults. This ensures the pattern matcher respects
+// user's Volume Imbalance sub-strategy settings.
 func (s *Server) getOrCreatePatternMatcher(userID string) *entrydecision.VolumeImbalancePatternMatcher {
+	// First, try to get from UserAutopilotInstance (this is connected to CoinProfiler)
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.RealtimePatternMatcher != nil {
+			// Get the pattern matcher from the realtime matcher
+			if patternMatcher := instance.RealtimePatternMatcher.GetPatternMatcher(); patternMatcher != nil {
+				return patternMatcher
+			}
+		}
+	}
+
+	// Fall back to cache
 	entryDecisionCacheMu.RLock()
 	matcher, exists := patternMatcherCache[userID]
 	entryDecisionCacheMu.RUnlock()
@@ -411,7 +675,7 @@ func (s *Server) getOrCreatePatternMatcher(userID string) *entrydecision.VolumeI
 		return matcher
 	}
 
-	// Create a new pattern matcher with default config
+	// Create a new pattern matcher with USER SETTINGS (not hard-coded defaults!)
 	entryDecisionCacheMu.Lock()
 	defer entryDecisionCacheMu.Unlock()
 
@@ -420,10 +684,38 @@ func (s *Server) getOrCreatePatternMatcher(userID string) *entrydecision.VolumeI
 		return matcher
 	}
 
-	matcher = entrydecision.NewVolumeImbalancePatternMatcher(nil)
+	// Load user's Volume Imbalance sub-strategy settings from database
+	config := s.loadUserPatternMatcherConfig(userID)
+	matcher = entrydecision.NewVolumeImbalancePatternMatcher(config)
 	patternMatcherCache[userID] = matcher
 
 	return matcher
+}
+
+// loadUserPatternMatcherConfig loads user's Volume Imbalance pattern_detection settings
+// from the database and converts them to PatternMatcherConfig.
+// Falls back to DefaultPatternMatcherConfig if user settings cannot be loaded.
+func (s *Server) loadUserPatternMatcherConfig(userID string) *entrydecision.PatternMatcherConfig {
+	if s.repo == nil {
+		return entrydecision.DefaultPatternMatcherConfig()
+	}
+
+	// Load Volume Imbalance sub-strategy settings for scalp mode (primary mode)
+	// The settings are the same structure across modes
+	ctx := context.Background()
+	subSettings, err := s.repo.GetSubStrategySettings(ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance")
+	if err != nil || subSettings == nil || len(subSettings.Settings) == 0 {
+		// Fall back to defaults if user settings not found
+		return entrydecision.DefaultPatternMatcherConfig()
+	}
+
+	// Parse settings JSON and create config
+	settings := entrydecision.ParseSubStrategySettingsJSON(subSettings.Settings)
+	if settings == nil {
+		return entrydecision.DefaultPatternMatcherConfig()
+	}
+
+	return entrydecision.NewPatternMatcherConfigFromSettings(settings)
 }
 
 // getOrCreateScoreCalculator returns or creates a score calculator for a user.
@@ -460,18 +752,20 @@ func (s *Server) getCoinDataForSymbol(userID string, symbol string) *coinprofile
 }
 
 // getDefaultTimeframeForMode returns the default timeframe for a trading mode.
+// Updated: Volume Imbalance strategy uses 3m timeframe for scalp/swing modes
+// based on Dec 2025 - Jan 2026 backtest results.
 func getDefaultTimeframeForMode(mode string) string {
 	switch mode {
 	case "ultra_fast":
 		return "1m"
 	case "scalp":
-		return "5m"
+		return "3m" // Volume Imbalance uses 3m for scalp
 	case "swing":
-		return "15m"
+		return "3m" // Volume Imbalance uses 3m for swing
 	case "position":
 		return "1h"
 	default:
-		return "5m"
+		return "3m"
 	}
 }
 
@@ -577,6 +871,58 @@ func (b *PatternUpdateBroadcaster) BroadcastPatternUpdate(update entrydecision.P
 	userWSHub.BroadcastToAll(event)
 
 	return nil
+}
+
+// BroadcastPatternUpdateFunc is a standalone function that broadcasts pattern updates.
+// This is used as the callback for UserAutopilotManager.SetPatternUpdateCallback.
+// It wraps the event creation and broadcasting logic for real-time pattern state changes.
+//
+// IMPORTANT: This function broadcasts TWO events for true real-time updates:
+// 1. ENTRY_DECISION_PATTERN_UPDATE - The specific pattern change (incremental)
+// 2. ENTRY_DECISION_UPDATE - The full strategy data (so UI updates immediately)
+func BroadcastPatternUpdateFunc(update entrydecision.PatternUpdate) {
+	log.Printf("[ENTRY-DECISION-BROADCAST] Received pattern update for %s:%s status=%s looking_for=%s",
+		update.Symbol, update.Timeframe, update.Status, update.LookingFor)
+
+	if userWSHub == nil {
+		log.Printf("[ENTRY-DECISION-BROADCAST] WARNING: userWSHub is nil, cannot broadcast")
+		return
+	}
+
+	// 1. Broadcast the specific pattern update event
+	patternEvent := events.Event{
+		Type:      events.EventEntryDecisionPatternUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"symbol":            update.Symbol,
+			"timeframe":         update.Timeframe,
+			"mode":              update.Mode,
+			"strategy":          update.Strategy,
+			"sub_strategy":      update.SubStrategy,
+			"current_step":      update.CurrentStep,
+			"total_steps":       update.TotalSteps,
+			"status":            string(update.Status),
+			"step_details":      update.StepDetails,
+			"entry_levels":      update.EntryLevels,
+			"direction":         update.Direction,
+			"looking_for":       update.LookingFor,
+			"next_candle_close": update.NextCandleClose,
+			"last_evaluated_at": update.LastEvaluatedAt,
+			"updated_at":        update.UpdatedAt,
+		},
+	}
+	userWSHub.BroadcastToAll(patternEvent)
+	log.Printf("[ENTRY-DECISION-BROADCAST] Sent ENTRY_DECISION_PATTERN_UPDATE for %s", update.Symbol)
+
+	// 2. IMMEDIATELY broadcast the full ENTRY_DECISION_UPDATE for this user
+	// This is what the frontend listens to for the "Live" indicator
+	if update.UserID != "" && entryDecisionBroadcastServer != nil {
+		data := buildEntryDecisionBroadcastData(update.UserID)
+		if data != nil {
+			BroadcastEntryDecisionUpdate(data)
+			log.Printf("[ENTRY-DECISION-BROADCAST] Sent ENTRY_DECISION_UPDATE for user %s", update.UserID)
+		}
+	}
 }
 
 // handleGetPatternUpdates handles GET /api/futures/entry-decision/pattern-updates

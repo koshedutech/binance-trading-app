@@ -1040,6 +1040,7 @@ func (s *Server) setupRoutes() {
 			futures.GET("/coin-profiler/requirements", s.handleGetCoinProfilerRequirements)
 			futures.POST("/coin-profiler/start", s.handleStartCoinProfiler)
 			futures.POST("/coin-profiler/stop", s.handleStopCoinProfiler)
+			futures.GET("/coin-profiler/diagnostics", s.handleGetCoinProfilerDiagnostics)
 
 			// Entry Decision API endpoints (Story 14.12: Entry Decision System API)
 			// Strategy-first view of entry opportunities
@@ -1206,6 +1207,10 @@ func (s *Server) Start() error {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Start Entry Decision broadcast service for real-time WebSocket updates
+	s.StartEntryDecisionBroadcast()
+	log.Println("Entry Decision broadcast service started")
+
 	log.Printf("Starting HTTP server on %s", addr)
 
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -1218,6 +1223,9 @@ func (s *Server) Start() error {
 // Shutdown gracefully shuts down the server
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Println("Shutting down HTTP server...")
+
+	// Stop Entry Decision broadcast service
+	StopEntryDecisionBroadcast()
 
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)

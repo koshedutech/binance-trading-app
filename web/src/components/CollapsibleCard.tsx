@@ -3,6 +3,7 @@ import { ChevronDown, ChevronUp } from 'lucide-react';
 
 export interface CollapsibleCardProps {
   title: string;
+  subtitle?: string;
   defaultExpanded?: boolean;
   badge?: string;
   badgeColor?: 'green' | 'red' | 'yellow' | 'blue' | 'purple' | 'cyan' | 'gray';
@@ -25,6 +26,7 @@ const badgeColors = {
 
 export default function CollapsibleCard({
   title,
+  subtitle,
   defaultExpanded = false,
   badge,
   badgeColor = 'gray',
@@ -45,7 +47,10 @@ export default function CollapsibleCard({
       >
         <div className="flex items-center gap-2">
           {icon && <span className="text-gray-400">{icon}</span>}
-          <h3 className="text-sm font-medium text-gray-300">{title}</h3>
+          <div className="text-left">
+            <h3 className="text-sm font-medium text-gray-300">{title}</h3>
+            {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
+          </div>
           {badge && (
             <span className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColors[badgeColor]}`}>
               {badge}

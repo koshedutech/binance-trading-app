@@ -1,6 +1,6 @@
-# Sub-Strategy Development Guide
+# Adding or Modifying Sub-Strategies Guide
 
-This document provides a step-by-step guideline for adding new sub-strategies to the Binance Trading Bot. Follow this process whenever implementing a new trading sub-strategy.
+This document provides a step-by-step guideline for **adding new sub-strategies** or **modifying existing sub-strategy settings** in the Binance Trading Bot.
 
 **One-Time Setup Principle:** Once the initial coding is complete for a sub-strategy, all settings automatically flow from `default-settings.json` through the entire system to the Futures page UI.
 
@@ -9,16 +9,166 @@ This document provides a step-by-step guideline for adding new sub-strategies to
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Complete Data Flow](#complete-data-flow)
-3. [Phase 1: Strategy Definition](#phase-1-strategy-definition)
-4. [Phase 2: Configuration (default-settings.json)](#phase-2-configuration-default-settingsjson)
-5. [Phase 3: Database & Cache Structure](#phase-3-database--cache-structure)
-6. [Phase 4: Backend API Implementation](#phase-4-backend-api-implementation)
-7. [Phase 5: Frontend Implementation](#phase-5-frontend-implementation)
-8. [Phase 6: Build & Verification](#phase-6-build--verification)
-9. [Checklist](#checklist)
-10. [File Reference](#file-reference)
-11. [Troubleshooting](#troubleshooting)
+2. [QUICK REFERENCE: Adding/Modifying a Field](#quick-reference-addingmodifying-a-field)
+3. [CRITICAL: Using Configured Values (NOT Hard-Coded)](#critical-using-configured-values-not-hard-coded)
+4. [Complete Data Flow](#complete-data-flow)
+5. [Phase 1: Strategy Definition](#phase-1-strategy-definition)
+6. [Phase 2: Configuration (default-settings.json)](#phase-2-configuration-default-settingsjson)
+7. [Phase 3: Database & Cache Structure](#phase-3-database--cache-structure)
+8. [Phase 4: Backend API Implementation](#phase-4-backend-api-implementation)
+9. [Phase 5: Frontend Implementation](#phase-5-frontend-implementation)
+10. [Phase 6: Build & Verification](#phase-6-build--verification)
+11. [Checklist](#checklist)
+12. [File Reference](#file-reference)
+13. [Troubleshooting](#troubleshooting)
+
+---
+
+## QUICK REFERENCE: Adding/Modifying a Field
+
+**Use this section when adding or modifying a SINGLE FIELD** in an existing sub-strategy (e.g., adding `require_pre_trend_down` to pattern_detection).
+
+### Files to Update (ALL REQUIRED)
+
+When adding or modifying a field like `pattern_detection.require_pre_trend_down`, you MUST update these files:
+
+| # | File | Purpose | Example Change |
+|---|------|---------|----------------|
+| 1 | `default-settings.json` | Source of truth for defaults | Add `"require_pre_trend_down": false` |
+| 2 | `internal/entrydecision/pattern_matcher.go` | Code defaults struct | Add field with default value |
+| 3 | `internal/api/handlers_strategy_hierarchy.go` | Hardcoded defaults for compare API | Add field to defaults map |
+| 4 | `internal/database/user_initialization.go` | New user initialization | Add field to default JSON |
+| 5 | `web/src/types/strategyHierarchy.ts` | TypeScript interface | Add field type definition |
+| 6 | `web/src/components/SettingsComparisonView.tsx` | Reset Settings comparison + defaults | Add to `defaultSettings` AND `fieldComparisons.push()` |
+| 7 | `web/src/components/ModeConfiguration/SubStrategySettingsModal.tsx` | Futures page settings UI | Add input control |
+
+### Step-by-Step Checklist
+
+```
+□ 1. default-settings.json
+     - Add field to BOTH scalp AND swing (if applicable)
+     - Example: "require_pre_trend_down": false
+
+□ 2. pattern_matcher.go
+     - Add to PatternMatcherConfig struct
+     - Add default value in DefaultPatternMatcherConfig()
+     - Add parsing in NewPatternMatcherConfigFromSettings()
+
+□ 3. handlers_strategy_hierarchy.go
+     - Add to hardcoded defaults map (around line 560)
+     - Example: "require_pre_trend_down": false
+
+□ 4. user_initialization.go
+     - Add to defaultSettings JSON in InitializeUserStrategyHierarchy()
+     - Example: "require_pre_trend_down": false
+
+□ 5. strategyHierarchy.ts
+     - Add to PatternDetectionConfig interface
+     - Add to DEFAULT_VOLUME_IMBALANCE_SETTINGS constant
+
+□ 6. SettingsComparisonView.tsx
+     - Add to defaultSettings constant (pattern_detection section)
+     - Add fieldComparisons.push() call with match logic
+
+□ 7. SubStrategySettingsModal.tsx
+     - Add toggle/input control in Pattern Detection section
+     - Wire to updateNestedSetting()
+
+□ 8. Clear cache and rebuild
+     docker exec binance-trading-bot-dev rm -rf /app/web/node_modules/.cache /app/web/dist
+     ./scripts/docker-dev.sh
+
+□ 9. Update existing user settings (Redis)
+     - If users already have settings, manually update Redis keys
+     - Or provide migration script
+
+□ 10. Browser hard refresh
+      Ctrl+Shift+R (Windows) or Cmd+Shift+R (Mac)
+```
+
+### Real Example: Adding `require_pre_trend_down`
+
+**1. default-settings.json:**
+```json
+"pattern_detection": {
+  "direction": "long",
+  "volume_spike_threshold": 3.0,
+  "require_pre_trend_down": false,  // <-- ADD THIS
+  ...
+}
+```
+
+**2. pattern_matcher.go:**
+```go
+type PatternMatcherConfig struct {
+    RequirePreTrendDown bool `json:"require_pre_trend_down"` // <-- ADD
+}
+
+func DefaultPatternMatcherConfig() *PatternMatcherConfig {
+    return &PatternMatcherConfig{
+        RequirePreTrendDown: false, // <-- ADD DEFAULT
+    }
+}
+```
+
+**3. handlers_strategy_hierarchy.go:**
+```go
+"pattern_detection": map[string]interface{}{
+    "direction": "long",
+    "require_pre_trend_down": false, // <-- ADD THIS
+}
+```
+
+**4. user_initialization.go:**
+```go
+defaultSettings := json.RawMessage(`{
+    "pattern_detection": {
+        "require_pre_trend_down": false,  // <-- ADD THIS
+    }
+}`)
+```
+
+**5. strategyHierarchy.ts:**
+```typescript
+export interface PatternDetectionConfig {
+  require_pre_trend_down?: boolean; // <-- ADD THIS
+}
+
+export const DEFAULT_VOLUME_IMBALANCE_SETTINGS = {
+  pattern_detection: {
+    require_pre_trend_down: false, // <-- ADD THIS
+  }
+}
+```
+
+**6. SettingsComparisonView.tsx:**
+```typescript
+// In defaultSettings constant:
+pattern_detection: {
+  require_pre_trend_down: false, // <-- ADD THIS
+}
+
+// Add comparison in fieldComparisons:
+fieldComparisons.push({
+  path: 'pattern_detection.require_pre_trend_down',
+  current: settings.pattern_detection.require_pre_trend_down ?? false,
+  default: defaultSettings.pattern_detection.require_pre_trend_down ?? false,
+  match: (settings.pattern_detection.require_pre_trend_down ?? false) ===
+         (defaultSettings.pattern_detection.require_pre_trend_down ?? false),
+  inputType: 'toggle',
+});
+```
+
+**7. SubStrategySettingsModal.tsx:**
+```tsx
+<ToggleInput
+  label="Require Pre-Trend Down"
+  description="Only detect spikes after price pullback"
+  value={settings.pattern_detection.require_pre_trend_down ?? false}
+  onChange={(v) => updateNestedSetting('pattern_detection', 'require_pre_trend_down', v)}
+  disabled={isDisabled}
+/>
+```
 
 ---
 
@@ -41,6 +191,108 @@ Once you complete the implementation for a new sub-strategy:
 - Reset Settings page compares user values with defaults
 - Futures page displays editable UI for all fields
 - All changes persist through the complete pipeline
+
+---
+
+## CRITICAL: Using Configured Values (NOT Hard-Coded)
+
+> **MANDATORY RULE:** Pattern matchers and trading logic MUST read user-configured settings from the database/cache. Hard-coded values are ONLY permitted as fallbacks when settings cannot be loaded.
+
+### Why This Matters
+
+The entire settings pipeline exists so users can customize their strategies:
+
+```
+default-settings.json → Database → Redis Cache → Pattern Matcher / Trading Engine
+                                                        ↑
+                                                 MUST READ FROM HERE
+```
+
+**If you hard-code values in the pattern matcher, user configuration becomes meaningless.**
+
+### Bad Example (DO NOT DO THIS)
+
+```go
+// BAD: Hard-coded values ignore user settings!
+func DefaultPatternMatcherConfig() *PatternMatcherConfig {
+    return &PatternMatcherConfig{
+        MinVolumeSpikeMultiplier: 2.0,  // WRONG: User configured 3.0!
+        LookbackPeriod:           20,   // WRONG: User configured 5!
+    }
+}
+
+// BAD: Creating matcher without user settings
+matcher := NewVolumeImbalancePatternMatcher(nil)  // Uses hard-coded defaults!
+```
+
+### Good Example (CORRECT APPROACH)
+
+```go
+// GOOD: Load user settings from database
+func (s *Server) loadUserPatternMatcherConfig(userID string) *PatternMatcherConfig {
+    // Get user's configured settings from database/cache
+    subSettings, err := s.repo.GetSubStrategySettings(
+        ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance",
+    )
+    if err != nil || subSettings == nil {
+        // ONLY use defaults as fallback
+        return DefaultPatternMatcherConfig()
+    }
+
+    // Parse and apply user's configured values
+    return NewPatternMatcherConfigFromSettings(subSettings.Settings)
+}
+
+// GOOD: Create function that maps settings to config
+func NewPatternMatcherConfigFromSettings(settings map[string]interface{}) *PatternMatcherConfig {
+    config := DefaultPatternMatcherConfig()  // Start with defaults
+
+    if settings == nil {
+        return config
+    }
+
+    // Override with user-configured values
+    if patternDetection, ok := settings["pattern_detection"].(map[string]interface{}); ok {
+        if val, ok := patternDetection["volume_spike_threshold"].(float64); ok && val > 0 {
+            config.MinVolumeSpikeMultiplier = val  // User's configured value!
+        }
+        if val, ok := patternDetection["reference_lookback_candles"].(float64); ok && val > 0 {
+            config.LookbackPeriod = int(val)  // User's configured value!
+        }
+    }
+
+    return config
+}
+
+// GOOD: Create matcher with user settings
+config := s.loadUserPatternMatcherConfig(userID)
+matcher := NewVolumeImbalancePatternMatcher(config)  // Uses user's values!
+```
+
+### Settings Field Mapping
+
+When implementing a pattern matcher, map `default-settings.json` fields to config:
+
+| default-settings.json Path | PatternMatcherConfig Field |
+|----------------------------|---------------------------|
+| `pattern_detection.volume_spike_threshold` | `MinVolumeSpikeMultiplier` |
+| `pattern_detection.reference_lookback_candles` | `LookbackPeriod` |
+| `pattern_detection.min_consolidation_candles` | `MinConsolidationCandles` |
+| `pattern_detection.max_consolidation_candles` | `MaxConsolidationCandles` |
+| `pattern_detection.breakout_volume_surge` | `BreakoutVolumeSurge` |
+| `risk_reward.risk` | Used for position sizing |
+| `risk_reward.reward` | Used for take profit calculation |
+
+### Verification Checklist
+
+When implementing pattern matcher integration:
+
+- [ ] Pattern matcher config struct has fields for ALL configurable parameters
+- [ ] `NewPatternMatcherConfigFromSettings()` function exists to parse user settings
+- [ ] API handler loads user settings before creating pattern matcher
+- [ ] Hard-coded `DefaultPatternMatcherConfig()` is ONLY used as fallback
+- [ ] Diagnostic endpoints show actual configured values (not hard-coded)
+- [ ] Settings changes in UI are reflected in pattern detection behavior
 
 ---
 
@@ -79,8 +331,17 @@ Once you complete the implementation for a new sub-strategy:
 │                    ▼                     ▼                     ▼               │
 │         ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐       │
 │         │  Reset Settings   │  │   Futures Page    │  │  Trading Engine   │      │
-│         │  (Comparison UI)  │  │  (Edit Settings)  │  │  (Execute Trades) │      │
-│         └──────────────────┘  └──────────────────┘  └──────────────────┘       │
+│         │  (Comparison UI)  │  │  (Edit Settings)  │  │  (Pattern Matcher)│      │
+│         └──────────────────┘  └──────────────────┘  └────────┬─────────┘       │
+│                                                               │                │
+│         ⚠️  CRITICAL: Trading Engine MUST read from cache,   │                │
+│             not use hard-coded values! See section above.     │                │
+│                                                               ▼                │
+│                                                    ┌──────────────────┐        │
+│                                                    │  Trade Execution  │        │
+│                                                    │  (Uses Configured │        │
+│                                                    │   User Settings)  │        │
+│                                                    └──────────────────┘        │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -96,7 +357,7 @@ Once you complete the implementation for a new sub-strategy:
 | 5 | REST API | Expose endpoints for reading/writing settings |
 | 6 | Reset Settings Page | Compare user DB values with defaults, allow reset |
 | 7 | Futures Page | Display editable UI, save changes |
-| 8 | Trading Engine | Read settings for trade decisions |
+| 8 | **Trading Engine / Pattern Matcher** | **MUST read user settings from cache** (see critical section above) |
 
 ---
 
@@ -732,6 +993,14 @@ Use this checklist when adding a new sub-strategy:
 - [ ] Fallback defaults added to `handlers_strategy_hierarchy.go`
 - [ ] Comparison API returns all fields
 
+### Trading Engine / Pattern Matcher (CRITICAL)
+- [ ] Pattern matcher config struct has fields for ALL configurable parameters
+- [ ] `NewPatternMatcherConfigFromSettings()` function created to parse user settings
+- [ ] API handler loads user settings BEFORE creating pattern matcher
+- [ ] Hard-coded defaults are ONLY used as fallback when settings unavailable
+- [ ] Diagnostic endpoint shows actual user-configured values (not defaults)
+- [ ] Verified: changing settings in UI affects pattern detection behavior
+
 ### Frontend - Reset Settings
 - [ ] All field comparisons added to `SettingsComparisonView.tsx`
 - [ ] Nested objects handled (risk_reward, pattern_detection, etc.)
@@ -768,6 +1037,8 @@ Use this checklist when adding a new sub-strategy:
 | `/web/src/components/SettingsComparisonView.tsx` | Reset Settings comparison UI |
 | `/web/src/components/settings/ModeStrategySettings.tsx` | Futures page strategy editor UI |
 | `/internal/api/handlers_strategy_hierarchy.go` | API handlers and fallback defaults |
+| `/internal/api/handlers_entry_decision.go` | Entry decision API (loads user settings for pattern matcher) |
+| `/internal/entrydecision/pattern_matcher.go` | Pattern matcher with `NewPatternMatcherConfigFromSettings()` |
 | `/internal/database/models_user_settings.go` | Go structs for database |
 | `/internal/database/migrations/` | Database migration files |
 | `/internal/cache/settings_cache_service.go` | Redis cache integration |
@@ -825,6 +1096,30 @@ docker exec binance-trading-bot-dev rm -rf /app/web/node_modules/.cache /app/web
 2. Verify default settings match `default-settings.json`
 3. Check API endpoint returns success
 4. Verify cache is invalidated after reset
+
+### Pattern Detection Ignores User Settings
+
+**Problem:** User changed settings in UI (e.g., volume_spike_threshold to 3.0), but pattern detection still uses old values (e.g., 2.0).
+
+**Root Cause:** Pattern matcher is using hard-coded defaults instead of loading user settings from database/cache.
+
+**Solution:**
+1. **Check API Handler:** Verify `getOrCreatePatternMatcher()` in `handlers_entry_decision.go` calls `loadUserPatternMatcherConfig(userID)` instead of passing `nil`
+2. **Check Settings Loader:** Verify `loadUserPatternMatcherConfig()` correctly queries `GetSubStrategySettings()` from the database
+3. **Check Config Parser:** Verify `NewPatternMatcherConfigFromSettings()` correctly maps JSON fields to config struct fields
+4. **Verify Mapping:** Ensure `pattern_detection.volume_spike_threshold` maps to `MinVolumeSpikeMultiplier`
+5. **Check Diagnostic Endpoint:** Hit `/api/futures/coin-profiler/diagnostics` to see actual values being used
+6. **Force Cache Clear:** Pattern matcher may be cached - restart container or clear `patternMatcherCache`
+
+**Example Fix:**
+```go
+// BAD: Ignores user settings
+matcher := NewVolumeImbalancePatternMatcher(nil)
+
+// GOOD: Loads user settings
+config := s.loadUserPatternMatcherConfig(userID)
+matcher := NewVolumeImbalancePatternMatcher(config)
+```
 
 ---
 

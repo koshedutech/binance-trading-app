@@ -5,6 +5,7 @@ package entrydecision
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -31,6 +32,9 @@ import (
 // PatternUpdate represents a change in pattern state for a coin.
 // This is broadcast via WebSocket when patterns progress or complete.
 type PatternUpdate struct {
+	// User identification (for targeted broadcasts)
+	UserID string `json:"user_id,omitempty"`
+
 	// Coin identification
 	Symbol    string `json:"symbol"`
 	Timeframe string `json:"timeframe"`
@@ -49,8 +53,17 @@ type PatternUpdate struct {
 	// Entry levels (when pattern is ready or near-ready)
 	EntryLevels *EntryLevels `json:"entry_levels,omitempty"`
 
-	// Direction
+	// Direction - the actual direction being tracked (long/short)
 	Direction string `json:"direction,omitempty"`
+
+	// LookingFor - what the strategy is configured to find (long/short/both)
+	LookingFor string `json:"looking_for,omitempty"`
+
+	// Countdown timer for next candle close
+	NextCandleClose time.Time `json:"next_candle_close,omitempty"`
+
+	// Last evaluation timestamp (so frontend knows data is fresh)
+	LastEvaluatedAt time.Time `json:"last_evaluated_at,omitempty"`
 
 	// Timestamp
 	UpdatedAt time.Time `json:"updated_at"`
@@ -90,6 +103,9 @@ type RealtimePatternMatcher struct {
 
 	// Callback for pattern state changes
 	onPatternUpdate PatternUpdateCallback
+
+	// User identification for targeted broadcasts
+	userID string
 
 	// Configuration
 	defaultMode string
@@ -141,13 +157,56 @@ func (r *RealtimePatternMatcher) SetPatternUpdateCallback(callback PatternUpdate
 	r.onPatternUpdate = callback
 }
 
+// SetUserID sets the user ID for this matcher (used in pattern update broadcasts).
+func (r *RealtimePatternMatcher) SetUserID(userID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.userID = userID
+}
+
+// GetPatternMatcher returns the underlying VolumeImbalancePatternMatcher.
+// This allows the Entry Decision API to access the same pattern matcher
+// that is connected to the CoinProfiler for real-time updates.
+func (r *RealtimePatternMatcher) GetPatternMatcher() *VolumeImbalancePatternMatcher {
+	return r.patternMatcher
+}
+
 // OnCandleClose is called when a candle closes. This is the main entry point
 // for real-time pattern evaluation.
-// It evaluates patterns for the given symbol/timeframe and triggers callbacks
-// if the pattern state has changed.
+// It evaluates patterns for the given symbol/timeframe and ALWAYS broadcasts
+// the current state (so frontend knows the system is alive and when next update will occur).
 func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles []coinprofiler.HistoricalCandle) {
-	if r.patternMatcher == nil || len(candles) < 25 {
-		return // Not enough data for pattern detection
+	if r.patternMatcher == nil {
+		return
+	}
+
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	// Calculate next candle close time for countdown display
+	nextCandleClose := calculateNextCandleClose(timeframe)
+
+	if len(candles) < 25 {
+		log.Printf("[REALTIME-PATTERN] %s:%s - Not enough candles (%d < 25), skipping", symbol, timeframe, len(candles))
+		// Still broadcast a status update so frontend knows we're alive
+		if callback != nil {
+			callback(PatternUpdate{
+				UserID:          userID,
+				Symbol:          symbol,
+				Timeframe:       timeframe,
+				Mode:            r.defaultMode,
+				Strategy:        "volume_imbalance",
+				SubStrategy:     "ravindra_volume_imbalance",
+				Status:          PatternStatusWatching,
+				LookingFor:      r.getLookingForDirection(),
+				NextCandleClose: nextCandleClose,
+				LastEvaluatedAt: time.Now(),
+				UpdatedAt:       time.Now(),
+			})
+		}
+		return
 	}
 
 	// Convert historical candles to pattern matcher format
@@ -167,35 +226,127 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	// Evaluate pattern for default mode
 	mode := r.defaultMode
 	coinMatch := r.patternMatcher.MatchPattern(symbol, mode, timeframe, matcherCandles)
-	if coinMatch == nil {
-		return
-	}
 
-	// Get full pattern progress
+	// Get full pattern progress (even if coinMatch is nil, we want current state)
 	progress := r.patternMatcher.GetPattern(symbol, mode, timeframe)
-	if progress == nil {
-		return
+
+	if coinMatch != nil {
+		log.Printf("[REALTIME-PATTERN] %s:%s - Pattern match found! Step %d, Status: %s",
+			symbol, timeframe, coinMatch.Step, coinMatch.Status)
 	}
 
-	// Check if state has changed
+	// Check if state has changed (for logging purposes)
 	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
-	if !r.hasStateChanged(stateKey, progress) {
-		return // No change, skip update
+	stateChanged := r.hasStateChanged(stateKey, progress)
+
+	if stateChanged && progress != nil {
+		// Store new state
+		r.mu.Lock()
+		r.lastStates[stateKey] = progress
+		r.mu.Unlock()
 	}
 
-	// Store new state
-	r.mu.Lock()
-	r.lastStates[stateKey] = progress
-	callback := r.onPatternUpdate
-	r.mu.Unlock()
-
-	// Build update
-	update := r.buildPatternUpdate(symbol, timeframe, progress, matcherCandles)
-
-	// Trigger callback if set
+	// ALWAYS broadcast update (so frontend knows system is alive)
 	if callback != nil {
+		var update PatternUpdate
+
+		if progress != nil {
+			update = r.buildPatternUpdate(symbol, timeframe, progress, matcherCandles)
+		} else {
+			// No pattern yet, create a basic watching state
+			update = PatternUpdate{
+				UserID:      userID,
+				Symbol:      symbol,
+				Timeframe:   timeframe,
+				Mode:        mode,
+				Strategy:    "volume_imbalance",
+				SubStrategy: "ravindra_volume_imbalance",
+				CurrentStep: 1,
+				TotalSteps:  2,
+				Status:      PatternStatusWatching,
+				UpdatedAt:   time.Now(),
+			}
+		}
+
+		// Add countdown timer and evaluation timestamp
+		update.NextCandleClose = nextCandleClose
+		update.LastEvaluatedAt = time.Now()
+		update.LookingFor = r.getLookingForDirection()
+
+		log.Printf("[REALTIME-PATTERN] Broadcasting update for %s:%s status=%s looking_for=%s next_close=%v",
+			symbol, timeframe, update.Status, update.LookingFor, update.NextCandleClose)
 		callback(update)
+	} else {
+		log.Printf("[REALTIME-PATTERN] WARNING: No callback set for %s:%s, cannot broadcast", symbol, timeframe)
 	}
+}
+
+// calculateNextCandleClose calculates when the next candle will close based on timeframe.
+// Aligns to Binance candle boundaries which start at 00:00:00 UTC.
+// For 3m candles: closes at :00, :03, :06, :09... :51, :54, :57
+func calculateNextCandleClose(timeframe string) time.Time {
+	now := time.Now().UTC()
+
+	// Parse timeframe in minutes
+	var durationMinutes int
+	switch timeframe {
+	case "1m":
+		durationMinutes = 1
+	case "3m":
+		durationMinutes = 3
+	case "5m":
+		durationMinutes = 5
+	case "15m":
+		durationMinutes = 15
+	case "30m":
+		durationMinutes = 30
+	case "1h":
+		durationMinutes = 60
+	case "4h":
+		durationMinutes = 240
+	case "1d":
+		durationMinutes = 1440
+	default:
+		durationMinutes = 3 // Default to 3m
+	}
+
+	// Calculate based on current minute alignment (Binance candles align to clock)
+	currentMinute := now.Minute()
+	currentSecond := now.Second()
+
+	// Find the next candle close minute
+	// For 3m candles starting at minute 0: close at 3, 6, 9, 12... 51, 54, 57, 0
+	currentCandleStart := currentMinute - (currentMinute % durationMinutes)
+	nextCandleClose := currentCandleStart + durationMinutes
+
+	// Handle hour rollover
+	hoursToAdd := 0
+	if nextCandleClose >= 60 {
+		nextCandleClose = nextCandleClose % 60
+		hoursToAdd = 1
+	}
+
+	// Build the next close time
+	nextClose := time.Date(
+		now.Year(), now.Month(), now.Day(),
+		now.Hour()+hoursToAdd, nextCandleClose, 0, 0,
+		time.UTC,
+	)
+
+	// If the calculated time is in the past (edge case at second 0), add duration
+	if nextClose.Before(now) || (nextClose.Equal(now) && currentSecond == 0) {
+		nextClose = nextClose.Add(time.Duration(durationMinutes) * time.Minute)
+	}
+
+	return nextClose
+}
+
+// getLookingForDirection returns the configured direction setting for display.
+func (r *RealtimePatternMatcher) getLookingForDirection() string {
+	if r.patternMatcher == nil || r.patternMatcher.config == nil {
+		return "long"
+	}
+	return r.patternMatcher.config.Direction
 }
 
 // hasStateChanged checks if the pattern state has changed from the last known state.
@@ -226,6 +377,7 @@ func (r *RealtimePatternMatcher) buildPatternUpdate(
 	candles []Candle,
 ) PatternUpdate {
 	update := PatternUpdate{
+		UserID:      r.userID, // Include userID for targeted broadcasts
 		Symbol:      symbol,
 		Timeframe:   timeframe,
 		Mode:        progress.Mode,
@@ -235,6 +387,7 @@ func (r *RealtimePatternMatcher) buildPatternUpdate(
 		TotalSteps:  progress.TotalSteps,
 		Status:      progress.Status,
 		StepDetails: progress.StepDetails,
+		LookingFor:  r.getLookingForDirection(), // What direction we're configured to find
 		UpdatedAt:   time.Now(),
 	}
 
@@ -396,6 +549,121 @@ func (r *RealtimePatternMatcher) RegisterWithCoinProfiler(cp *coinprofiler.CoinP
 	}
 
 	cp.SetCandleCloseCallback(r.OnCandleClose)
+	// Also register for price updates (tick-level breakout detection)
+	cp.SetPriceUpdateCallback(r.OnPriceUpdate)
+}
+
+// ============================================================================
+// TICK-LEVEL BREAKOUT DETECTION
+// ============================================================================
+
+// OnPriceUpdate is called on every price tick. This enables immediate breakout
+// detection without waiting for candle close.
+// It only evaluates coins that have completed Step 1 (have a reference candle).
+func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, currentHigh, currentLow float64) {
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Get pattern state for this symbol
+	mode := r.defaultMode
+	state := r.getPatternState(symbol, mode, timeframe)
+	if state == nil || state.ReferenceCandle == nil {
+		return // No reference candle yet, nothing to check
+	}
+
+	// Check if pattern is in a state where breakout is relevant
+	progress := r.patternMatcher.GetPattern(symbol, mode, timeframe)
+	if progress == nil {
+		return
+	}
+
+	// Only check for breakout if we're in accumulation/consolidation phase
+	if progress.Status != PatternStatusAccumulation && progress.Status != PatternStatusConsolidating {
+		return
+	}
+
+	// Check for breakout based on direction
+	var isBreakout bool
+	switch state.Direction {
+	case "long":
+		// For LONG: Check if current high breaks reference high
+		if currentHigh >= state.ReferenceCandle.High {
+			isBreakout = true
+		}
+	case "short":
+		// For SHORT: Check if current low breaks consolidation low
+		if state.ConsolidationLow > 0 && currentLow <= state.ConsolidationLow {
+			isBreakout = true
+		}
+	}
+
+	if !isBreakout {
+		return
+	}
+
+	// Breakout detected! Log and trigger update
+	log.Printf("[REALTIME-BREAKOUT] %s:%s - TICK-LEVEL BREAKOUT! Direction: %s, Price: %.6f",
+		symbol, timeframe, state.Direction, price)
+
+	// Mark pattern as ready (breakout detected)
+	// Update step details to indicate tick-level detection
+	r.patternMatcher.mu.Lock()
+	patternKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	internalProgress := r.patternMatcher.patterns[patternKey]
+	if internalProgress != nil && internalProgress.Status != PatternStatusReady {
+		// Mark Step 2 as complete (we're already at step 2, just mark it done)
+		internalProgress.StepDetails[1] = StepDetail{
+			StepNumber:  2,
+			Name:        "Breakout",
+			Completed:   true,
+			CompletedAt: time.Now(),
+			Progress:    "LIVE",
+			Details:     fmt.Sprintf("Tick-level breakout! %s @ %.6f", state.Direction, price),
+		}
+		// Do NOT call AdvanceStep - we're already at step 2
+		// Just mark as READY
+		internalProgress.SetStatus(PatternStatusReady)
+		internalProgress.UpdatedAt = time.Now()
+	}
+	r.patternMatcher.mu.Unlock()
+
+	// Get updated progress and build update
+	progress = r.patternMatcher.GetPattern(symbol, mode, timeframe)
+	if progress == nil {
+		return
+	}
+
+	// Store new state
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	r.mu.Lock()
+	r.lastStates[stateKey] = progress
+	callback := r.onPatternUpdate
+	r.mu.Unlock()
+
+	// Build and broadcast update
+	update := PatternUpdate{
+		UserID:      r.userID,
+		Symbol:      symbol,
+		Timeframe:   timeframe,
+		Mode:        progress.Mode,
+		Strategy:    progress.Strategy,
+		SubStrategy: progress.SubStrategy,
+		CurrentStep: progress.CurrentStep,
+		TotalSteps:  progress.TotalSteps,
+		Status:      progress.Status,
+		StepDetails: progress.StepDetails,
+		Direction:   state.Direction,
+		UpdatedAt:   time.Now(),
+	}
+
+	// Calculate entry levels
+	update.EntryLevels = r.calculateEntryLevels(state, price)
+
+	// Trigger callback if set
+	if callback != nil {
+		callback(update)
+	}
 }
 
 // ============================================================================
@@ -435,7 +703,7 @@ func (r *RealtimePatternMatcher) EvaluateAllPatterns(
 	}
 
 	// Get all coin data
-	coins, err := coinProvider.GetAllCoinData(ctx)
+	coins, err := coinProvider.GetAllCoinDataCtx(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get coin data: %w", err)
 	}
@@ -443,7 +711,8 @@ func (r *RealtimePatternMatcher) EvaluateAllPatterns(
 	// Evaluate each coin
 	for symbol := range coins {
 		// Get historical candles for each timeframe we track
-		for _, timeframe := range []string{"5m", "15m", "1h"} {
+		// IMPORTANT: Include ALL timeframes used by strategies (1m for ultra_fast, 3m for scalp/swing)
+		for _, timeframe := range []string{"1m", "3m", "5m", "15m", "1h"} {
 			candles := historyProvider.GetCandleHistory(symbol, timeframe)
 			if len(candles) >= 25 {
 				r.OnCandleClose(symbol, timeframe, candles)

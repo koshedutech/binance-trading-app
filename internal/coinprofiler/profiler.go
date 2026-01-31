@@ -22,8 +22,9 @@ type CoinProfiler struct {
 	config *CoinProfilerConfig
 
 	// Dependencies
-	logger    *logging.Logger
-	wsManager *WebSocketManager // WebSocket manager for real-time data
+	logger             *logging.Logger
+	wsManager          *WebSocketManager        // WebSocket manager for real-time data
+	historicalProvider HistoricalDataProvider   // For fetching historical candles on startup
 
 	// State
 	running         bool
@@ -46,6 +47,9 @@ type CoinProfiler struct {
 	// Callback for candle close events (used by pattern matcher)
 	onCandleClose CandleCloseCallback
 
+	// Callback for real-time price updates (used for tick-level breakout detection)
+	onPriceUpdate PriceUpdateCallback
+
 	// Metrics
 	updateCount      int64
 	updatesPerSecond float64
@@ -66,6 +70,11 @@ type CoinProfiler struct {
 // CandleCloseCallback is called when a candle closes (is_closed_bar: true).
 // This enables real-time pattern evaluation.
 type CandleCloseCallback func(symbol, timeframe string, candles []HistoricalCandle)
+
+// PriceUpdateCallback is called on every price update (tick-level).
+// This enables real-time breakout detection without waiting for candle close.
+// Parameters: symbol, timeframe, current price, current high of forming candle
+type PriceUpdateCallback func(symbol, timeframe string, price, currentHigh, currentLow float64)
 
 // NewCoinProfiler creates a new Coin Profiler instance.
 // If config is nil, default configuration will be used.
@@ -328,6 +337,48 @@ func (cp *CoinProfiler) GetAllCoinData() map[string]*CoinData {
 		result[symbol] = &dataCopy
 	}
 	return result
+}
+
+// GetAllCoinDataCtx returns all currently tracked coin data (interface-compliant version).
+// This method implements the CoinDataProvider interface.
+func (cp *CoinProfiler) GetAllCoinDataCtx(ctx context.Context) (map[string]*CoinData, error) {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return cp.GetAllCoinData(), nil
+}
+
+// GetCoinDataCtx returns data for a specific symbol (context-aware).
+// This method implements the CoinDataProvider interface.
+func (cp *CoinProfiler) GetCoinDataCtx(ctx context.Context, symbol string) (*CoinData, error) {
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	cp.mu.RLock()
+	defer cp.mu.RUnlock()
+
+	data, exists := cp.coinData[symbol]
+	if !exists {
+		return nil, fmt.Errorf("symbol %s not found", symbol)
+	}
+
+	// Return deep copy
+	dataCopy := *data
+	if data.Timeframes != nil {
+		dataCopy.Timeframes = make(map[string]*TimeframeData, len(data.Timeframes))
+		for k, v := range data.Timeframes {
+			tfCopy := *v
+			dataCopy.Timeframes[k] = &tfCopy
+		}
+	}
+	return &dataCopy, nil
 }
 
 // AddSubscription adds a new subscription request.
@@ -703,6 +754,15 @@ func (cp *CoinProfiler) SubscribeToSymbols(symbols []string, timeframes []string
 	}
 
 	cp.log("Subscribed to %d symbols", len(symbols))
+
+	// Prefetch historical candles for immediate pattern detection
+	// This runs in background to avoid blocking the subscription
+	go func() {
+		if err := cp.PrefetchHistoricalCandles(symbols, timeframes); err != nil {
+			cp.logError("Failed to prefetch historical candles: %v", err)
+		}
+	}()
+
 	return nil
 }
 
@@ -757,6 +817,16 @@ func (cp *CoinProfiler) SetSubscriptionsFromCombined(combined *CombinedRequireme
 			return fmt.Errorf("failed to subscribe: %w", err)
 		}
 		cp.log("WebSocket subscriptions updated: %d streams", len(combined.BySymbol))
+	}
+
+	// Prefetch historical candles for immediate pattern detection
+	// This runs in background to avoid blocking the subscription
+	if len(combined.AllSymbols) > 0 && len(combined.AllTimeframes) > 0 {
+		go func() {
+			if err := cp.PrefetchHistoricalCandles(combined.AllSymbols, combined.AllTimeframes); err != nil {
+				cp.logError("Failed to prefetch historical candles: %v", err)
+			}
+		}()
 	}
 
 	return nil
@@ -864,6 +934,180 @@ func (cp *CoinProfiler) SetCandleCloseCallback(callback CandleCloseCallback) {
 	cp.candleHistoryMu.Lock()
 	defer cp.candleHistoryMu.Unlock()
 	cp.onCandleClose = callback
+}
+
+// SetPriceUpdateCallback sets a callback function that is called on every price update.
+// This enables tick-level breakout detection for immediate entry signals.
+func (cp *CoinProfiler) SetPriceUpdateCallback(callback PriceUpdateCallback) {
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+	cp.onPriceUpdate = callback
+}
+
+// GetPriceUpdateCallback returns the current price update callback (for WebSocket manager).
+func (cp *CoinProfiler) GetPriceUpdateCallback() PriceUpdateCallback {
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+	return cp.onPriceUpdate
+}
+
+// SetHistoricalDataProvider sets the provider for fetching historical candles.
+// This should be called before starting the CoinProfiler to enable historical prefetch.
+func (cp *CoinProfiler) SetHistoricalDataProvider(provider HistoricalDataProvider) {
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	cp.historicalProvider = provider
+	cp.log("Historical data provider set")
+}
+
+// PrefetchHistoricalCandles fetches historical candles from Binance REST API
+// and pre-populates the candle history buffer. This enables pattern detection
+// to work immediately without waiting for candles to close in real-time.
+//
+// Call this after subscribing to symbols to bootstrap the candle history.
+// Uses sequential processing with delays to avoid rate limits.
+func (cp *CoinProfiler) PrefetchHistoricalCandles(symbols []string, timeframes []string) error {
+	cp.mu.RLock()
+	provider := cp.historicalProvider
+	cp.mu.RUnlock()
+
+	if provider == nil {
+		cp.log("No historical data provider set, skipping prefetch")
+		return nil
+	}
+
+	if len(symbols) == 0 || len(timeframes) == 0 {
+		return nil
+	}
+
+	totalRequests := len(symbols) * len(timeframes)
+	cp.log("Prefetching historical candles for %d symbols × %d timeframes (%d total requests, sequential)",
+		len(symbols), len(timeframes), totalRequests)
+
+	// Process SEQUENTIALLY with delay to avoid rate limits
+	// Binance rate limit: 2400 requests/minute = 40/second
+	// We use 150ms delay = ~6.6 requests/second (safe margin)
+	const requestDelay = 150 * time.Millisecond
+	const maxRetries = 3
+	const retryDelay = 2 * time.Second
+
+	errorCount := 0
+	successCount := 0
+
+	for i, symbol := range symbols {
+		for j, timeframe := range timeframes {
+			requestNum := i*len(timeframes) + j + 1
+
+			// Fetch with retry logic
+			var klines []HistoricalKline
+			var err error
+
+			for retry := 0; retry < maxRetries; retry++ {
+				klines, err = provider.GetFuturesKlines(symbol, timeframe, DefaultCandleHistorySize)
+				if err == nil {
+					break
+				}
+
+				// Check if it's a rate limit error
+				if retry < maxRetries-1 {
+					cp.log("Retry %d/%d for %s:%s after error: %v", retry+1, maxRetries, symbol, timeframe, err)
+					time.Sleep(retryDelay * time.Duration(retry+1)) // Exponential backoff
+				}
+			}
+
+			if err != nil {
+				cp.logError("Failed to fetch historical candles for %s:%s after %d retries: %v",
+					symbol, timeframe, maxRetries, err)
+				errorCount++
+				// Continue to next symbol instead of failing completely
+				time.Sleep(requestDelay)
+				continue
+			}
+
+			if len(klines) == 0 {
+				cp.logDebug("No historical candles returned for %s:%s", symbol, timeframe)
+				time.Sleep(requestDelay)
+				continue
+			}
+
+			// Pre-populate candle history
+			cp.candleHistoryMu.Lock()
+			key := CandleHistoryKey(symbol, timeframe)
+			if cp.candleHistory[key] == nil {
+				cp.candleHistory[key] = NewCandleHistory(DefaultCandleHistorySize)
+			}
+
+			// Add candles in chronological order (oldest first)
+			for _, kline := range klines {
+				candle := KlineToHistoricalCandle(kline)
+				cp.candleHistory[key].Add(candle)
+			}
+
+			// Get all candles for callback
+			candlesForCallback := cp.candleHistory[key].GetAll()
+			cp.candleHistoryMu.Unlock()
+
+			successCount++
+			cp.logDebug("Prefetched %d candles for %s:%s (%d/%d)", len(klines), symbol, timeframe, requestNum, totalRequests)
+
+			// CRITICAL: Trigger candle close callback IMMEDIATELY after prefetch
+			// This enables pattern evaluation without waiting for the next candle close
+			if cp.onCandleClose != nil && len(candlesForCallback) >= 25 {
+				cp.log("Triggering immediate pattern evaluation for %s:%s (prefetch complete)", symbol, timeframe)
+				go cp.onCandleClose(symbol, timeframe, candlesForCallback)
+			}
+
+			// Delay before next request (except for the last one)
+			if requestNum < totalRequests {
+				time.Sleep(requestDelay)
+			}
+		}
+	}
+
+	if errorCount > 0 {
+		cp.log("Prefetch completed: %d success, %d errors", successCount, errorCount)
+	} else {
+		cp.log("Prefetch completed successfully: %d symbols", successCount)
+	}
+
+	// Note: Pattern evaluation is already triggered during the prefetch loop above
+	// (see line "go cp.onCandleClose(symbol, timeframe, candlesForCallback)")
+	// No need for additional triggerInitialPatternEvaluation call
+
+	return nil
+}
+
+// triggerInitialPatternEvaluation triggers the candle close callback for all
+// prefetched symbols to enable immediate pattern detection.
+func (cp *CoinProfiler) triggerInitialPatternEvaluation(symbols []string, timeframes []string) {
+	cp.candleHistoryMu.RLock()
+	callback := cp.onCandleClose
+	cp.candleHistoryMu.RUnlock()
+
+	if callback == nil {
+		return
+	}
+
+	cp.log("Triggering initial pattern evaluation for prefetched candles")
+
+	for _, symbol := range symbols {
+		for _, timeframe := range timeframes {
+			key := CandleHistoryKey(symbol, timeframe)
+
+			cp.candleHistoryMu.RLock()
+			history := cp.candleHistory[key]
+			var candles []HistoricalCandle
+			if history != nil {
+				candles = history.GetAll()
+			}
+			cp.candleHistoryMu.RUnlock()
+
+			if len(candles) >= 25 { // Minimum for pattern detection
+				// Call in goroutine to avoid blocking
+				go callback(symbol, timeframe, candles)
+			}
+		}
+	}
 }
 
 // GetCandleHistoryStats returns statistics about the candle history storage.

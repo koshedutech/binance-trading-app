@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
 // Main strategy-first view with mode grouping and collapsible sections
 
-import React, { useState, useCallback } from 'react';
+import React, { useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -12,7 +12,6 @@ import {
   Zap,
   Activity,
   TrendingUp,
-  Clock,
   CheckCircle,
   AlertCircle,
   Wifi,
@@ -217,8 +216,8 @@ export default function StrategyFirstView({
     isLoading,
     isRealTime,
     error,
-    lastUpdated,
     refresh,
+    // Note: nextCandleClose and lookingFor are now passed per-strategy to StrategyCard
   } = useEntryDecisionStrategies();
 
   // Group strategies by mode if not already grouped
@@ -243,11 +242,6 @@ export default function StrategyFirstView({
     const order = ['scalp', 'swing', 'position', 'ultra_fast'];
     return order.indexOf(a.mode) - order.indexOf(b.mode);
   });
-
-  const formatTime = useCallback((date: Date | null) => {
-    if (!date) return 'Never';
-    return date.toLocaleTimeString();
-  }, []);
 
   return (
     <div className={`bg-gray-800 rounded-lg border border-gray-700 ${className}`}>
@@ -280,6 +274,7 @@ export default function StrategyFirstView({
               Polling
             </span>
           )}
+          {/* NOTE: Countdown timer moved to StrategyCard for per-strategy display */}
         </div>
 
         <div className="flex items-center gap-3">
@@ -417,16 +412,6 @@ export default function StrategyFirstView({
             </>
           )}
 
-          {/* Footer */}
-          <div className="px-4 py-2 border-t border-gray-700 bg-gray-900/30 flex items-center justify-between">
-            <div className="text-xs text-gray-500">
-              {lastUpdated && `Last updated: ${formatTime(lastUpdated)}`}
-            </div>
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <Clock className="w-3 h-3" />
-              <span>Auto-refreshes every 30s</span>
-            </div>
-          </div>
         </div>
       )}
     </div>

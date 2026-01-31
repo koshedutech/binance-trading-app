@@ -27,6 +27,56 @@ export type TradingMode = 'scalp' | 'swing' | 'position' | 'ultra_fast';
 // ==================== Coin Match Types ====================
 
 /**
+ * Reference candle information for pattern tracking
+ */
+export interface ReferenceCandle {
+  /** Reference candle open time */
+  open_time: string;
+  /** Reference candle close time */
+  close_time: string;
+  /** Open price */
+  open: number;
+  /** High price - breakout level for longs */
+  high: number;
+  /** Low price */
+  low: number;
+  /** Close price */
+  close: number;
+  /** Volume */
+  volume: number;
+  /** Volume multiplier vs average (e.g., 3.2x) */
+  volume_multiplier: number;
+}
+
+/**
+ * Entry candle information when pattern is ready
+ */
+export interface EntryCandle {
+  /** Entry candle open time (UTC) */
+  open_time: string;
+  /** Entry candle close time (UTC) */
+  close_time: string;
+  /** Open price */
+  open: number;
+  /** High price */
+  high: number;
+  /** Low price */
+  low: number;
+  /** Close price at breakout detection */
+  close: number;
+  /** Volume at breakout */
+  volume: number;
+  /** Volume multiplier vs consolidation avg */
+  volume_multiplier: number;
+  /** Actual entry price sent for order */
+  entry_price: number;
+  /** When breakout was detected (UTC) */
+  detected_at: string;
+  /** "long" or "short" */
+  direction: string;
+}
+
+/**
  * Represents a single coin's match status against a strategy
  */
 export interface CoinMatch {
@@ -38,10 +88,36 @@ export interface CoinMatch {
   // Pattern-based fields
   /** Current step (1, 2, 3, etc.) for pattern strategies */
   step?: number;
+  /** Total steps in pattern (e.g., 2 for Volume Imbalance) */
+  total_steps?: number;
   /** Current pattern status */
   status?: PatternStatus;
-  /** Human-readable details (e.g., "3/6 candles") */
+  /** Human-readable details (e.g., "3.2x avg") */
   details?: string;
+  /** Detailed info for each step - used for tracking stage display */
+  step_details?: StepDetail[];
+
+  // Pattern tracking metrics
+  /** Reference candle data (for step 1+) */
+  reference_candle?: ReferenceCandle;
+  /** Time when reference candle was detected */
+  reference_detected_at?: string;
+  /** Number of candles since reference */
+  candles_since_reference?: number;
+  /** Seconds elapsed since reference detection */
+  seconds_since_reference?: number;
+  /** Current price proximity to breakout (%) - negative = below, positive = above */
+  proximity_to_breakout?: number;
+  /** Whether current candle looks like potential breakout */
+  potential_breakout?: boolean;
+
+  // Entry/Breakout candle (when pattern is ready)
+  /** Entry candle data when breakout detected */
+  entry_candle?: EntryCandle;
+  /** When pattern became ready (UTC) */
+  ready_at?: string;
+  /** Seconds until ready pattern expires */
+  seconds_until_expiry?: number;
 
   // Score-based fields
   /** Score value (0-100) for score strategies */
@@ -56,6 +132,18 @@ export interface CoinMatch {
   current_price?: number;
   /** 24h volume for reference */
   volume_24h?: number;
+  /** Current candle volume */
+  current_volume?: number;
+  /** Volume threshold to trigger (e.g., 3.0 for 3x avg) */
+  volume_threshold?: number;
+  /** Average volume used for comparison */
+  avg_volume?: number;
+  /** Current volume multiplier vs average */
+  volume_multiplier?: number;
+  /** Distance to volume threshold as percentage (negative = below threshold) */
+  volume_distance_percent?: number;
+  /** Distance to breakout price as percentage (negative = below entry) */
+  price_distance_percent?: number;
 }
 
 // ==================== Strategy Match Types ====================
@@ -102,6 +190,11 @@ export interface StrategyMatch {
   /** Strategy requirements for UI display */
   requirements?: StrategyRequirements;
 
+  /** Next candle close timestamp - for countdown timer */
+  next_candle_close?: string;
+  /** What direction this strategy is looking for ("long", "short", or "both") */
+  looking_for?: string;
+
   /** Last update timestamp */
   updated_at: string;
 }
@@ -140,6 +233,14 @@ export interface EntryDecisionStrategiesResponse {
   total_coins_watching: number;
   /** Response timestamp */
   updated_at: string;
+
+  // Real-time countdown fields (from WebSocket broadcasts)
+  /** Next candle close timestamp - used for countdown timer display */
+  next_candle_close?: string;
+  /** What direction we're looking for ("long", "short", or "both") */
+  looking_for?: string;
+  /** When patterns were last evaluated */
+  last_evaluated_at?: string;
 }
 
 /**

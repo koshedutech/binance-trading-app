@@ -3,7 +3,9 @@
 package entrydecision
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -43,10 +45,17 @@ type Candle struct {
 }
 
 // PatternMatcherConfig holds configurable thresholds for pattern detection.
+// IMPORTANT: Default values are from BACKTESTED walk-forward testing (Dec 2025 - Jan 2026).
 type PatternMatcherConfig struct {
+	// Trade Direction: "long", "short", or "both"
+	// - "long": Only GREEN (bullish) candles qualify as reference, look for upward breakout
+	// - "short": Only RED (bearish) candles qualify as reference, look for downward breakout
+	// - "both": Accept any candle, direction determined by candle color
+	Direction string `json:"direction"` // Default: "long"
+
 	// Step 1: Volume Spike Detection
-	MinVolumeSpikeMultiplier float64 `json:"min_volume_spike_multiplier"` // Default: 2.0 (2x avg volume)
-	LookbackPeriod           int     `json:"lookback_period"`             // Default: 20 candles
+	MinVolumeSpikeMultiplier float64 `json:"min_volume_spike_multiplier"` // Default: 3.0 (3x avg volume - BACKTESTED)
+	LookbackPeriod           int     `json:"lookback_period"`             // Default: 5 candles (BACKTESTED)
 
 	// Step 2: Consolidation Thresholds
 	MinConsolidationCandles     int     `json:"min_consolidation_candles"`      // Default: 2
@@ -58,6 +67,7 @@ type PatternMatcherConfig struct {
 
 	// Pattern Expiration
 	PatternExpirationMinutes int `json:"pattern_expiration_minutes"` // Default: 60 (1 hour)
+	ReadyExpirationSeconds   int `json:"ready_expiration_seconds"`   // Default: 60 (ready patterns expire after 60s if not executed)
 
 	// ============================================================================
 	// OPTIMIZED FILTERS (from backtesting)
@@ -81,33 +91,143 @@ type PatternMatcherConfig struct {
 }
 
 // DefaultPatternMatcherConfig returns the default configuration.
-// NOTE: These defaults are optimized based on extensive backtesting (600+ trades).
+// NOTE: These defaults are from BACKTESTED walk-forward testing (Dec 2025 - Jan 2026).
+// Results: 51 trades, 47.1% WR, +1147% net return.
 // The pre-trend and entry breakout filters improve win rate from ~18% to ~40%.
+//
+// IMPORTANT: Use NewPatternMatcherConfigFromSettings() to load user-configured values
+// from the database/cache. Hard-coded defaults should only be used as fallback.
 func DefaultPatternMatcherConfig() *PatternMatcherConfig {
 	return &PatternMatcherConfig{
-		// Core pattern detection
-		MinVolumeSpikeMultiplier:    2.0,
-		LookbackPeriod:              20,
-		MinConsolidationCandles:     2,
-		MaxConsolidationCandles:     6,
+		// Trade direction - determines which candle colors qualify as reference
+		Direction: "long", // Default: only GREEN candles, look for upward breakout
+
+		// Core pattern detection - BACKTESTED VALUES
+		MinVolumeSpikeMultiplier:    3.0,  // Was 2.0 - higher threshold filters noise (BACKTESTED)
+		LookbackPeriod:              5,    // Was 20 - shorter lookback for faster patterns (BACKTESTED)
+		MinConsolidationCandles:     1,    // Was 2 - allow immediate breakout (BACKTESTED)
+		MaxConsolidationCandles:     999,  // Was 6 - no upper limit (BACKTESTED)
 		ConsolidationRangeTolerance: 0.01,
-		BreakoutVolumeSurge:         1.5,
+		BreakoutVolumeSurge:         1.0,  // Was 1.5 - equal to consolidation avg is sufficient (BACKTESTED)
 		PatternExpirationMinutes:    60,
+		ReadyExpirationSeconds:      60,   // Ready patterns expire after 60 seconds if not executed
 
 		// Optimized filters (recommended: all enabled)
-		RequirePreTrendDown:   true, // Pattern works after pullback
+		RequirePreTrendDown:   false, // BACKTESTED: Original strategy did NOT use this filter
 		MinReferenceBodyRatio: 0.0,  // Disabled by default (0.5 for strict mode)
 		RequireEntryBreakout:  true, // Entry must break consolidation high
 		PreferredHourUTC:      -1,   // Disabled (-1), set to 14 for US market hours
 	}
 }
 
+// NewPatternMatcherConfigFromSettings creates a PatternMatcherConfig from user's
+// sub-strategy settings loaded from database/cache.
+//
+// This is the PREFERRED way to create a pattern matcher config - it respects
+// user-configured values from default-settings.json → database → cache.
+//
+// Expected settings map structure (from SubStrategySettings.Settings):
+//
+//	{
+//	  "pattern_detection": {
+//	    "direction": "long",          // "long", "short", or "both"
+//	    "reference_lookback_candles": 5,
+//	    "volume_spike_threshold": 3.0,
+//	    "breakout_volume_surge": 1.0,
+//	    "max_sl_percent": 1.5,
+//	    "max_pattern_age_mins": 60
+//	  }
+//	}
+func NewPatternMatcherConfigFromSettings(settings map[string]interface{}) *PatternMatcherConfig {
+	// Start with defaults (backtested values)
+	config := DefaultPatternMatcherConfig()
+
+	if settings == nil {
+		return config
+	}
+
+	// Extract pattern_detection settings
+	patternDetection, ok := settings["pattern_detection"].(map[string]interface{})
+	if !ok {
+		return config
+	}
+
+	// Override with user-configured values
+
+	// Direction: "long", "short", or "both"
+	if val, ok := patternDetection["direction"].(string); ok && val != "" {
+		// Validate direction value
+		if val == "long" || val == "short" || val == "both" {
+			config.Direction = val
+		}
+	}
+
+	if val, ok := patternDetection["reference_lookback_candles"].(float64); ok && val > 0 {
+		config.LookbackPeriod = int(val)
+	}
+
+	if val, ok := patternDetection["volume_spike_threshold"].(float64); ok && val > 0 {
+		config.MinVolumeSpikeMultiplier = val
+	}
+
+	if val, ok := patternDetection["breakout_volume_surge"].(float64); ok && val > 0 {
+		config.BreakoutVolumeSurge = val
+	}
+
+	if val, ok := patternDetection["min_consolidation_candles"].(float64); ok && val >= 0 {
+		config.MinConsolidationCandles = int(val)
+	}
+
+	if val, ok := patternDetection["max_consolidation_candles"].(float64); ok && val > 0 {
+		config.MaxConsolidationCandles = int(val)
+	}
+
+	if val, ok := patternDetection["max_pattern_age_mins"].(float64); ok && val > 0 {
+		config.PatternExpirationMinutes = int(val)
+	}
+
+	// Optional filters
+	if val, ok := patternDetection["require_pre_trend_down"].(bool); ok {
+		config.RequirePreTrendDown = val
+	}
+
+	if val, ok := patternDetection["min_reference_body_ratio"].(float64); ok {
+		config.MinReferenceBodyRatio = val
+	}
+
+	if val, ok := patternDetection["require_entry_breakout"].(bool); ok {
+		config.RequireEntryBreakout = val
+	}
+
+	if val, ok := patternDetection["preferred_hour_utc"].(float64); ok {
+		config.PreferredHourUTC = int(val)
+	}
+
+	return config
+}
+
+// ParseSubStrategySettingsJSON parses JSON bytes from database into a settings map.
+// This is used to convert SubStrategySettings.Settings (json.RawMessage) to the
+// map[string]interface{} format expected by NewPatternMatcherConfigFromSettings.
+func ParseSubStrategySettingsJSON(data []byte) map[string]interface{} {
+	if len(data) == 0 || string(data) == "{}" || string(data) == "null" {
+		return nil
+	}
+
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil
+	}
+	return settings
+}
+
 // PatternState holds the internal state for pattern tracking.
 type PatternState struct {
 	// Reference candle from Step 1
-	ReferenceCandle     *Candle   `json:"reference_candle,omitempty"`
-	ReferenceCandleIdx  int       `json:"reference_candle_idx"`
-	AverageVolumeAtSpike float64  `json:"average_volume_at_spike"` // Avg volume when spike detected
+	ReferenceCandle      *Candle   `json:"reference_candle,omitempty"`
+	ReferenceCandleIdx   int       `json:"reference_candle_idx"`
+	ReferenceDetectedAt  time.Time `json:"reference_detected_at"`    // When reference candle was detected
+	AverageVolumeAtSpike float64   `json:"average_volume_at_spike"`  // Avg volume when spike detected
 
 	// Consolidation tracking from Step 2
 	ConsolidationStartIdx int       `json:"consolidation_start_idx"`
@@ -122,6 +242,11 @@ type PatternState struct {
 
 	// Direction detection
 	Direction string `json:"direction"` // "long" or "short"
+
+	// Ready state tracking
+	ReadyAt            time.Time `json:"ready_at"`              // When pattern became ready (UTC)
+	EntryPrice         float64   `json:"entry_price"`           // Calculated entry price for order
+	BreakoutVolumeMultiplier float64 `json:"breakout_volume_multiplier"` // Volume multiplier at breakout
 }
 
 // VolumeImbalancePatternMatcher tracks and matches Volume Imbalance patterns.
@@ -173,7 +298,10 @@ func (m *VolumeImbalancePatternMatcher) MatchPattern(
 	state := m.states[patternKey]
 
 	if progress == nil {
-		progress = NewPatternProgress(symbol, "volume_imbalance", "ravindra_volume_imbalance", mode, timeframe, 3)
+		// 2-step pattern: Step 1 = Reference Candle (Volume Spike), Step 2 = Breakout Entry
+		// After Step 1, we WATCH for breakout (consolidation happens but isn't a separate "step")
+		// CurrentStep starts at 1 (watching for Step 1)
+		progress = NewPatternProgress(symbol, "volume_imbalance", "ravindra_volume_imbalance", mode, timeframe, 2)
 		progress.ExpiresAt = time.Now().Add(time.Duration(m.config.PatternExpirationMinutes) * time.Minute)
 		m.patterns[patternKey] = progress
 
@@ -185,25 +313,40 @@ func (m *VolumeImbalancePatternMatcher) MatchPattern(
 	if progress.IsExpired() {
 		m.resetPatternUnlocked(patternKey, "Pattern expired")
 		progress.SetStatus(PatternStatusExpired)
-		return m.createCoinMatch(progress, state)
+		return m.createCoinMatchWithCandles(progress, state, candles)
 	}
 
 	// Process based on current status
+	// 2-STEP PATTERN:
+	// Step 1: Volume Spike (Reference Candle) - status goes WATCHING → ACCUMULATION
+	// Step 2: Breakout Entry - status goes ACCUMULATION/CONSOLIDATING → READY
 	switch progress.Status {
 	case PatternStatusWatching:
+		// Looking for Step 1: Volume Spike (Reference Candle)
 		m.processStep1(patternKey, progress, state, candles)
 
-	case PatternStatusAccumulation:
+	case PatternStatusAccumulation, PatternStatusConsolidating:
+		// Step 1 complete, now watching for Step 2: Breakout
+		// processStep2 handles consolidation monitoring AND breakout detection
 		m.processStep2(patternKey, progress, state, candles)
 
-	case PatternStatusConsolidating:
-		m.processStep3(patternKey, progress, state, candles)
+	case PatternStatusReady:
+		// Check if ready pattern has expired (not executed within timeout)
+		if !state.ReadyAt.IsZero() && m.config.ReadyExpirationSeconds > 0 {
+			elapsed := time.Since(state.ReadyAt).Seconds()
+			if elapsed > float64(m.config.ReadyExpirationSeconds) {
+				log.Printf("[PATTERN] %s - Ready pattern expired after %.0f seconds (limit: %d)",
+					symbol, elapsed, m.config.ReadyExpirationSeconds)
+				m.resetPatternUnlocked(patternKey, "Ready pattern expired - not executed in time")
+				progress.SetStatus(PatternStatusExpired)
+			}
+		}
 
-	case PatternStatusReady, PatternStatusFailed, PatternStatusExpired:
-		// Terminal states - return current match
+	case PatternStatusFailed, PatternStatusExpired:
+		// Terminal failed/expired states - return current match
 	}
 
-	return m.createCoinMatch(progress, state)
+	return m.createCoinMatchWithCandles(progress, state, candles)
 }
 
 // ============================================================================
@@ -225,22 +368,49 @@ func (m *VolumeImbalancePatternMatcher) processStep1(
 	// Update state with reference candle
 	state.ReferenceCandle = spike
 	state.ReferenceCandleIdx = spikeIdx
+	state.ReferenceDetectedAt = time.Now()
 	state.AverageVolumeAtSpike = avgVol
 	state.ConsolidationLow = spike.Low
 	state.ConsolidationHigh = spike.High
 
-	// Update step details
+	// Determine direction from reference candle color
+	// When direction is "both", the actual direction is determined by candle color
+	// GREEN (close > open) = looking for LONG breakout
+	// RED (close < open) = looking for SHORT breakdown
+	isBullish := spike.Close > spike.Open
+	switch m.config.Direction {
+	case "long":
+		state.Direction = "long"
+	case "short":
+		state.Direction = "short"
+	case "both":
+		if isBullish {
+			state.Direction = "long"
+		} else {
+			state.Direction = "short"
+		}
+	default:
+		state.Direction = "long"
+	}
+
+	// Format direction for display
+	directionLabel := "Long Setup"
+	if state.Direction == "short" {
+		directionLabel = "Short Setup"
+	}
+
+	// Update step details with direction
 	progress.StepDetails[0] = StepDetail{
 		StepNumber:  1,
 		Name:        "Volume Spike",
 		Completed:   true,
 		CompletedAt: time.Now(),
-		Progress:    fmt.Sprintf("%.1fx avg", spike.Volume/avgVol),
-		Details:     fmt.Sprintf("Reference high: %.6f", spike.High),
+		Progress:    fmt.Sprintf("%.1fx avg (%s)", spike.Volume/avgVol, directionLabel),
+		Details:     fmt.Sprintf("Reference: H=%.6f L=%.6f", spike.High, spike.Low),
 	}
 
 	// Advance to Step 2
-	progress.AdvanceStep(fmt.Sprintf("Volume spike at %.2fx average", spike.Volume/avgVol))
+	progress.AdvanceStep(fmt.Sprintf("Volume spike %.2fx - %s", spike.Volume/avgVol, directionLabel))
 	progress.SetStatus(PatternStatusAccumulation)
 	progress.ExpiresAt = time.Now().Add(time.Duration(m.config.PatternExpirationMinutes) * time.Minute)
 }
@@ -272,8 +442,12 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 	var bestScore float64
 	bestIndex := -1
 
+	// Debug counters
+	var skippedPreTrend, skippedVolume, skippedDirection, skippedBodyRatio, candidatesChecked int
+
 	for i := lookbackStart; i < len(candles)-1; i++ {
 		c := &candles[i]
+		candidatesChecked++
 
 		// ============================================================
 		// OPTIMIZED FILTER 1: Pre-trend Direction
@@ -283,6 +457,7 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 			preTrendStart := candles[i-5].Open
 			preTrendEnd := candles[i-1].Close
 			if preTrendEnd >= preTrendStart {
+				skippedPreTrend++
 				continue // Skip - pre-trend is UP, not DOWN
 			}
 		}
@@ -305,7 +480,38 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 
 		// Check volume threshold
 		if c.Volume < avgVolume*m.config.MinVolumeSpikeMultiplier {
+			skippedVolume++
 			continue
+		}
+
+		// ============================================================
+		// DIRECTION FILTER: Candle color must match configured direction
+		// - "long": Only GREEN (bullish) candles (close > open)
+		// - "short": Only RED (bearish) candles (close < open)
+		// - "both": Accept any candle
+		// ============================================================
+		isBullish := c.Close > c.Open
+		isBearish := c.Close < c.Open
+
+		switch m.config.Direction {
+		case "long":
+			if !isBullish {
+				skippedDirection++
+				continue // Skip - need GREEN candle for long direction
+			}
+		case "short":
+			if !isBearish {
+				skippedDirection++
+				continue // Skip - need RED candle for short direction
+			}
+		case "both":
+			// Accept any candle (doji included)
+		default:
+			// Default to long behavior if direction not set
+			if !isBullish {
+				skippedDirection++
+				continue
+			}
 		}
 
 		// ============================================================
@@ -320,26 +526,28 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 			}
 			bodyRatio := bodySize / candleRange
 			if bodyRatio < m.config.MinReferenceBodyRatio {
+				skippedBodyRatio++
 				continue // Skip - body too small (likely indecision)
 			}
 		}
 
-		// Score based on volume magnitude
+		// Score based on volume magnitude (no bullish bonus - direction is explicit)
 		volumeScore := c.Volume / avgVolume
 
-		// Bonus for bullish candles (close > open)
-		bullishBonus := 1.0
-		if c.Close > c.Open {
-			bullishBonus = 1.2
-		}
-
-		// Bonus for taker buy volume if available
+		// Bonus for taker buy volume if available (direction-aware)
 		takerBonus := 1.0
 		if c.Volume > 0 && c.TakerBuyVolume > 0 {
-			takerBonus = 1 + (c.TakerBuyVolume/c.Volume)*0.5
+			takerBuyRatio := c.TakerBuyVolume / c.Volume
+			// For long: higher taker buy = better
+			// For short: lower taker buy (more selling) = better
+			if m.config.Direction == "short" {
+				takerBonus = 1 + (1-takerBuyRatio)*0.5
+			} else {
+				takerBonus = 1 + takerBuyRatio*0.5
+			}
 		}
 
-		totalScore := volumeScore * bullishBonus * takerBonus
+		totalScore := volumeScore * takerBonus
 
 		if totalScore > bestScore {
 			bestScore = totalScore
@@ -349,6 +557,12 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 		}
 	}
 
+	// Log debug info if no spike found
+	if bestCandle == nil && candidatesChecked > 0 {
+		log.Printf("[SPIKE-DEBUG] No spike found: checked=%d, skippedPreTrend=%d, skippedVolume=%d, skippedDirection=%d, skippedBodyRatio=%d, avgVol=%.0f, threshold=%.1fx",
+			candidatesChecked, skippedPreTrend, skippedVolume, skippedDirection, skippedBodyRatio, avgVolume, m.config.MinVolumeSpikeMultiplier)
+	}
+
 	return bestCandle, bestIndex, avgVolume
 }
 
@@ -356,7 +570,10 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 // STEP 2: CONSOLIDATION DETECTION
 // ============================================================================
 
-// processStep2 tracks consolidation after volume spike.
+// processStep2 tracks consolidation after volume spike and checks for breakout.
+// NOTE: This is NOT a separate "step" - consolidation is the monitoring phase
+// between Step 1 (reference candle) and Step 2 (breakout).
+// We stay at CurrentStep=1 until breakout is detected, then advance to Step 2.
 func (m *VolumeImbalancePatternMatcher) processStep2(
 	patternKey string,
 	progress *PatternProgress,
@@ -368,39 +585,71 @@ func (m *VolumeImbalancePatternMatcher) processStep2(
 		return
 	}
 
-	isConsolidating, candleCount, consolidationData := m.isInConsolidation(state, candles)
-
-	if !isConsolidating {
-		// Check if pattern should be invalidated
-		if m.isPatternInvalid(state, candles) {
-			m.resetPatternUnlocked(patternKey, "Pattern invalidated during consolidation")
-			progress.SetStatus(PatternStatusFailed)
-			return
-		}
-		// Not enough candles yet - keep waiting
+	// Check if pattern should be invalidated
+	if m.isPatternInvalid(state, candles) {
+		m.resetPatternUnlocked(patternKey, "Pattern invalidated during consolidation")
+		progress.SetStatus(PatternStatusFailed)
 		return
 	}
 
-	// Update consolidation state
-	state.ConsolidationCandles = candleCount
-	state.ConsolidationLow = consolidationData.low
-	state.ConsolidationHigh = consolidationData.high
-	state.ConsolidationAvgVol = consolidationData.avgVolume
-	state.VolumeTrend = consolidationData.volumeTrend
+	// Track consolidation metrics (for display purposes)
+	isConsolidating, candleCount, consolidationData := m.isInConsolidation(state, candles)
 
-	// Update step details
-	progress.StepDetails[1] = StepDetail{
-		StepNumber:  2,
-		Name:        "Consolidation",
-		Completed:   true,
-		CompletedAt: time.Now(),
-		Progress:    fmt.Sprintf("%d candles", candleCount),
-		Details:     fmt.Sprintf("Volume trend: %.4f", consolidationData.volumeTrend),
+	if isConsolidating && consolidationData != nil {
+		// Update consolidation state (for entry level calculations)
+		state.ConsolidationCandles = candleCount
+		state.ConsolidationLow = consolidationData.low
+		state.ConsolidationHigh = consolidationData.high
+		state.ConsolidationAvgVol = consolidationData.avgVolume
+		state.VolumeTrend = consolidationData.volumeTrend
+
+		// Update Step 1 details to show consolidation progress
+		// (We're still on Step 1, just showing what's happening)
+		progress.StepDetails[0].Details = fmt.Sprintf("Watching for breakout (%d candles, vol trend: %.2f)", candleCount, consolidationData.volumeTrend)
 	}
 
-	// Advance to Step 3
-	progress.AdvanceStep(fmt.Sprintf("Consolidation: %d candles, volume declining", candleCount))
-	progress.SetStatus(PatternStatusConsolidating)
+	// Check for BREAKOUT (this completes Step 2 - the final step)
+	isBreakout, direction, breakoutCandle := m.isBreakoutReady(state, candles)
+	if isBreakout {
+		// Breakout detected! Pattern is now complete (Step 2/2)
+		state.BreakoutCandle = breakoutCandle
+		state.Direction = direction
+		state.ReadyAt = time.Now().UTC() // Track when pattern became ready (UTC)
+
+		// Calculate volume surge for display
+		volSurge := 1.0
+		if state.ConsolidationAvgVol > 0 {
+			volSurge = breakoutCandle.Volume / state.ConsolidationAvgVol
+		}
+		state.BreakoutVolumeMultiplier = volSurge
+
+		// Calculate entry price (reference high for long, reference low for short)
+		if direction == "long" && state.ReferenceCandle != nil {
+			state.EntryPrice = state.ReferenceCandle.High
+		} else if direction == "short" && state.ReferenceCandle != nil {
+			state.EntryPrice = state.ReferenceCandle.Low
+		} else {
+			state.EntryPrice = breakoutCandle.Close
+		}
+
+		// Mark Step 2 as complete (we're already on Step 2, just mark it done)
+		progress.StepDetails[1] = StepDetail{
+			StepNumber:  2,
+			Name:        "Breakout",
+			Completed:   true,
+			CompletedAt: time.Now().UTC(),
+			Progress:    fmt.Sprintf("%.1fx vol surge", volSurge),
+			Details:     fmt.Sprintf("Direction: %s, entry: %.6f", direction, state.EntryPrice),
+		}
+
+		// Pattern is READY - do NOT call AdvanceStep (we're already at step 2)
+		// Just mark the status as ready
+		progress.SetStatus(PatternStatusReady)
+		progress.UpdatedAt = time.Now().UTC()
+	} else {
+		// Still waiting for breakout - update status to show we're consolidating
+		progress.SetStatus(PatternStatusConsolidating)
+	}
 }
 
 // consolidationData holds intermediate consolidation metrics.
@@ -417,11 +666,16 @@ func (m *VolumeImbalancePatternMatcher) isInConsolidation(
 	state *PatternState,
 	candles []Candle,
 ) (bool, int, *consolidationData) {
-	if state.ReferenceCandle == nil || state.ReferenceCandleIdx >= len(candles) {
+	if state.ReferenceCandle == nil {
 		return false, 0, nil
 	}
 
-	refIdx := state.ReferenceCandleIdx
+	// Use helper to find current index (handles circular buffer shifts)
+	refIdx := getReferenceCandleIdx(state, candles)
+	if refIdx < 0 || refIdx >= len(candles) {
+		return false, 0, nil
+	}
+
 	currentIdx := len(candles) - 1
 	candlesSinceRef := currentIdx - refIdx
 
@@ -482,59 +736,11 @@ func (m *VolumeImbalancePatternMatcher) isInConsolidation(
 }
 
 // ============================================================================
-// STEP 3: BREAKOUT DETECTION
+// BREAKOUT DETECTION
 // ============================================================================
-
-// processStep3 detects breakout with volume surge.
-func (m *VolumeImbalancePatternMatcher) processStep3(
-	patternKey string,
-	progress *PatternProgress,
-	state *PatternState,
-	candles []Candle,
-) {
-	if state.ReferenceCandle == nil || state.ConsolidationAvgVol == 0 {
-		return
-	}
-
-	// Check if pattern should be invalidated
-	if m.isPatternInvalid(state, candles) {
-		m.resetPatternUnlocked(patternKey, "Pattern invalidated waiting for breakout")
-		progress.SetStatus(PatternStatusFailed)
-		return
-	}
-
-	// Check for breakout
-	isBreakout, direction, breakoutCandle := m.isBreakoutReady(state, candles)
-	if !isBreakout {
-		// Update step progress while waiting
-		progress.StepDetails[2] = StepDetail{
-			StepNumber: 3,
-			Name:       "Breakout",
-			Completed:  false,
-			Progress:   "Waiting for breakout",
-			Details:    fmt.Sprintf("Target: %.6f", state.ReferenceCandle.High),
-		}
-		return
-	}
-
-	// Breakout detected!
-	state.BreakoutCandle = breakoutCandle
-	state.Direction = direction
-
-	// Update step details
-	progress.StepDetails[2] = StepDetail{
-		StepNumber:  3,
-		Name:        "Breakout",
-		Completed:   true,
-		CompletedAt: time.Now(),
-		Progress:    fmt.Sprintf("%.1fx vol surge", breakoutCandle.Volume/state.ConsolidationAvgVol),
-		Details:     fmt.Sprintf("Direction: %s, price: %.6f", direction, breakoutCandle.Close),
-	}
-
-	// Pattern complete!
-	progress.AdvanceStep(fmt.Sprintf("Breakout confirmed, direction: %s", direction))
-	progress.SetStatus(PatternStatusReady)
-}
+// NOTE: processStep3 has been removed. Breakout detection is now integrated
+// into processStep2 for the simplified 2-step pattern model.
+// Step 1: Reference Candle (Volume Spike) → Step 2: Breakout Entry
 
 // isBreakoutReady checks if current candle shows breakout with volume surge.
 // Returns (true, direction, candle) if breakout is detected.
@@ -573,25 +779,74 @@ func (m *VolumeImbalancePatternMatcher) isBreakoutReady(
 		}
 	}
 
+	// ============================================================
+	// DIRECTION-BASED BREAKOUT DETECTION
+	// Only check for breakout in the configured direction
+	// ============================================================
+
 	// Check for LONG breakout (price breaks above reference high)
-	if currentCandle.High >= state.ReferenceCandle.High {
-		// Confirm close is also above (not just a wick)
-		if currentCandle.Close >= state.ReferenceCandle.High*0.998 {
-			candleCopy := *currentCandle
-			return true, "long", &candleCopy
+	// Only if direction is "long" or "both"
+	if m.config.Direction == "long" || m.config.Direction == "both" || m.config.Direction == "" {
+		if currentCandle.High >= state.ReferenceCandle.High {
+			// Confirm close is also above (not just a wick)
+			if currentCandle.Close >= state.ReferenceCandle.High*0.998 {
+				candleCopy := *currentCandle
+				return true, "long", &candleCopy
+			}
 		}
 	}
 
 	// Check for SHORT breakout (price breaks below consolidation low)
-	if currentCandle.Low <= state.ConsolidationLow {
-		// Confirm close is also below (not just a wick)
-		if currentCandle.Close <= state.ConsolidationLow*1.002 {
-			candleCopy := *currentCandle
-			return true, "short", &candleCopy
+	// Only if direction is "short" or "both"
+	if m.config.Direction == "short" || m.config.Direction == "both" {
+		if currentCandle.Low <= state.ConsolidationLow {
+			// Confirm close is also below (not just a wick)
+			if currentCandle.Close <= state.ConsolidationLow*1.002 {
+				candleCopy := *currentCandle
+				return true, "short", &candleCopy
+			}
 		}
 	}
 
 	return false, "", nil
+}
+
+// ============================================================================
+// CANDLE INDEX HELPER
+// ============================================================================
+
+// findCandleIdxByTime finds the index of a candle by its close time.
+// Returns -1 if not found. This is needed because the circular buffer
+// shifts indices when new candles are added, so stored indices become invalid.
+func findCandleIdxByTime(candles []Candle, targetTime time.Time) int {
+	for i, c := range candles {
+		// Match within 1 second to handle any timestamp precision issues
+		if c.Time.Sub(targetTime).Abs() < time.Second {
+			return i
+		}
+	}
+	return -1
+}
+
+// getReferenceCandleIdx finds the current index of the reference candle.
+// If the stored ReferenceCandleIdx is valid (candle at that index matches),
+// use it. Otherwise, look up by timestamp.
+func getReferenceCandleIdx(state *PatternState, candles []Candle) int {
+	if state.ReferenceCandle == nil {
+		return -1
+	}
+
+	// First, check if stored index is still valid
+	if state.ReferenceCandleIdx >= 0 && state.ReferenceCandleIdx < len(candles) {
+		storedCandle := &candles[state.ReferenceCandleIdx]
+		// Check if it's the same candle (by timestamp)
+		if storedCandle.Time.Sub(state.ReferenceCandle.Time).Abs() < time.Second {
+			return state.ReferenceCandleIdx
+		}
+	}
+
+	// Index invalid (circular buffer shifted), find by timestamp
+	return findCandleIdxByTime(candles, state.ReferenceCandle.Time)
 }
 
 // ============================================================================
@@ -611,9 +866,10 @@ func (m *VolumeImbalancePatternMatcher) isPatternInvalid(state *PatternState, ca
 		return true
 	}
 
-	// Consolidation taking too long
-	if state.ReferenceCandleIdx > 0 {
-		candlesSinceRef := len(candles) - 1 - state.ReferenceCandleIdx
+	// Consolidation taking too long - use helper to find current reference index
+	refIdx := getReferenceCandleIdx(state, candles)
+	if refIdx >= 0 {
+		candlesSinceRef := len(candles) - 1 - refIdx
 		if candlesSinceRef > m.config.MaxConsolidationCandles+2 {
 			return true
 		}
@@ -674,6 +930,41 @@ func (m *VolumeImbalancePatternMatcher) GetAllPatterns() []*PatternProgress {
 	return result
 }
 
+// GetCoinMatch returns a full CoinMatch with tracking data for a symbol (thread-safe).
+// This includes ReferenceCandle, candles_since_reference, seconds_since_reference,
+// proximity_to_breakout, and other tracking fields.
+func (m *VolumeImbalancePatternMatcher) GetCoinMatch(symbol, mode, timeframe string) *CoinMatch {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	patternKey := m.patternKey(symbol, mode, timeframe)
+	progress := m.patterns[patternKey]
+	state := m.states[patternKey]
+
+	if progress == nil {
+		return nil
+	}
+
+	return m.createCoinMatchWithCandles(progress, state, nil)
+}
+
+// GetAllCoinMatches returns all tracked patterns as CoinMatches with full tracking data.
+// Use this for API responses and WebSocket broadcasts to include reference candle info.
+func (m *VolumeImbalancePatternMatcher) GetAllCoinMatches() []*CoinMatch {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*CoinMatch, 0, len(m.patterns))
+	for key, progress := range m.patterns {
+		state := m.states[key]
+		cm := m.createCoinMatchWithCandles(progress, state, nil)
+		if cm != nil {
+			result = append(result, cm)
+		}
+	}
+	return result
+}
+
 // CleanupExpiredPatterns removes expired patterns and returns the count.
 func (m *VolumeImbalancePatternMatcher) CleanupExpiredPatterns() int {
 	m.mu.Lock()
@@ -718,6 +1009,15 @@ func (m *VolumeImbalancePatternMatcher) patternKey(symbol, mode, timeframe strin
 
 // createCoinMatch converts pattern progress to a CoinMatch for API responses.
 func (m *VolumeImbalancePatternMatcher) createCoinMatch(progress *PatternProgress, state *PatternState) *CoinMatch {
+	return m.createCoinMatchWithCandles(progress, state, nil)
+}
+
+// createCoinMatchWithCandles converts pattern progress to a CoinMatch with full tracking details.
+func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
+	progress *PatternProgress,
+	state *PatternState,
+	candles []Candle,
+) *CoinMatch {
 	if progress == nil {
 		return nil
 	}
@@ -731,6 +1031,100 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatch(progress *PatternProgres
 			cm.CurrentPrice = state.BreakoutCandle.Close
 		} else if state.ReferenceCandle != nil {
 			cm.CurrentPrice = state.ReferenceCandle.Close
+		}
+
+		// Add reference candle tracking data
+		if state.ReferenceCandle != nil {
+			refDetectedAt := state.ReferenceDetectedAt
+			cm.ReferenceDetectedAt = &refDetectedAt
+
+			// Convert internal Candle to ReferenceCandle struct
+			cm.ReferenceCandle = &ReferenceCandle{
+				OpenTime:         state.ReferenceCandle.Time,
+				CloseTime:        state.ReferenceCandle.Time, // Use same time as close time approximation
+				Open:             state.ReferenceCandle.Open,
+				High:             state.ReferenceCandle.High,
+				Low:              state.ReferenceCandle.Low,
+				Close:            state.ReferenceCandle.Close,
+				Volume:           state.ReferenceCandle.Volume,
+				VolumeMultiplier: 0, // Will be calculated below
+			}
+
+			// Calculate volume multiplier
+			if state.AverageVolumeAtSpike > 0 {
+				cm.ReferenceCandle.VolumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+			}
+
+			// Calculate seconds since reference detection
+			if !state.ReferenceDetectedAt.IsZero() {
+				cm.SecondsSinceReference = int(time.Since(state.ReferenceDetectedAt).Seconds())
+			}
+
+			// Calculate candles since reference (use helper to handle circular buffer shifts)
+			if candles != nil {
+				refIdx := getReferenceCandleIdx(state, candles)
+				if refIdx >= 0 {
+					cm.CandlesSinceReference = len(candles) - 1 - refIdx
+				}
+			}
+
+			// Calculate proximity to breakout
+			if cm.CurrentPrice > 0 && state.ReferenceCandle.High > 0 {
+				cm.ProximityToBreakout = (cm.CurrentPrice - state.ReferenceCandle.High) / state.ReferenceCandle.High * 100
+			}
+
+			// Check for potential breakout
+			if candles != nil && len(candles) > 0 {
+				currentCandle := &candles[len(candles)-1]
+				cm.CurrentPrice = currentCandle.Close
+
+				// Recalculate proximity with latest price
+				if state.ReferenceCandle.High > 0 {
+					cm.ProximityToBreakout = (currentCandle.Close - state.ReferenceCandle.High) / state.ReferenceCandle.High * 100
+				}
+
+				// Potential breakout: price approaching or exceeding reference high with volume
+				if currentCandle.High >= state.ReferenceCandle.High*0.99 {
+					// Check for volume surge (at least 1.3x consolidation avg or 1.5x reference volume)
+					isVolumeSurge := false
+					if state.ConsolidationAvgVol > 0 {
+						isVolumeSurge = currentCandle.Volume >= state.ConsolidationAvgVol*1.3
+					} else if state.AverageVolumeAtSpike > 0 {
+						isVolumeSurge = currentCandle.Volume >= state.AverageVolumeAtSpike*1.0
+					}
+					cm.PotentialBreakout = isVolumeSurge
+				}
+			}
+		}
+
+		// Add entry candle data when pattern is ready
+		if state.BreakoutCandle != nil && progress.Status == PatternStatusReady {
+			readyAt := state.ReadyAt
+			cm.ReadyAt = &readyAt
+
+			// Create EntryCandle from breakout data
+			cm.EntryCandle = &EntryCandle{
+				OpenTime:         state.BreakoutCandle.Time,
+				CloseTime:        state.BreakoutCandle.Time, // Approximation
+				Open:             state.BreakoutCandle.Open,
+				High:             state.BreakoutCandle.High,
+				Low:              state.BreakoutCandle.Low,
+				Close:            state.BreakoutCandle.Close,
+				Volume:           state.BreakoutCandle.Volume,
+				VolumeMultiplier: state.BreakoutVolumeMultiplier,
+				EntryPrice:       state.EntryPrice,
+				DetectedAt:       state.ReadyAt,
+				Direction:        state.Direction,
+			}
+
+			// Calculate seconds until expiry for ready patterns
+			if !state.ReadyAt.IsZero() && m.config.ReadyExpirationSeconds > 0 {
+				elapsed := time.Since(state.ReadyAt).Seconds()
+				remaining := float64(m.config.ReadyExpirationSeconds) - elapsed
+				if remaining > 0 {
+					cm.SecondsUntilExpiry = int(remaining)
+				}
+			}
 		}
 	}
 

@@ -16,6 +16,7 @@ type Timeframe string
 
 const (
 	Timeframe1m  Timeframe = "1m"
+	Timeframe3m  Timeframe = "3m"
 	Timeframe5m  Timeframe = "5m"
 	Timeframe15m Timeframe = "15m"
 	Timeframe30m Timeframe = "30m"
@@ -32,7 +33,7 @@ func (t Timeframe) String() string {
 // IsValid checks if the timeframe is a valid supported value.
 func (t Timeframe) IsValid() bool {
 	switch t {
-	case Timeframe1m, Timeframe5m, Timeframe15m, Timeframe30m, Timeframe1h, Timeframe4h, Timeframe1d:
+	case Timeframe1m, Timeframe3m, Timeframe5m, Timeframe15m, Timeframe30m, Timeframe1h, Timeframe4h, Timeframe1d:
 		return true
 	default:
 		return false
@@ -44,6 +45,8 @@ func (t Timeframe) Minutes() int {
 	switch t {
 	case Timeframe1m:
 		return 1
+	case Timeframe3m:
+		return 3
 	case Timeframe5m:
 		return 5
 	case Timeframe15m:

@@ -28,6 +28,8 @@ interface SymbolsResponse {
 }
 
 const AVAILABLE_TIMEFRAMES = [
+  { value: '1m', label: '1 minute' },
+  { value: '3m', label: '3 minutes' },
   { value: '5m', label: '5 minutes' },
   { value: '15m', label: '15 minutes' },
   { value: '1h', label: '1 hour' },
@@ -72,6 +74,7 @@ function estimateCandles(from: string, to: string, timeframes: string[]): number
     let candlesPerDay = 0;
     switch (tf) {
       case '1m': candlesPerDay = 1440; break;
+      case '3m': candlesPerDay = 480; break;
       case '5m': candlesPerDay = 288; break;
       case '15m': candlesPerDay = 96; break;
       case '30m': candlesPerDay = 48; break;

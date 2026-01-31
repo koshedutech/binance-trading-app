@@ -8,7 +8,7 @@
 #
 # Dev can restart freely without affecting shared Redis!
 
-name: binance-dev
+name: binance-dev-v2
 
 services:
   # PostgreSQL Database - Dev's own (separate schema from prod)

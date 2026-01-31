@@ -177,7 +177,7 @@ func (s *Server) handleStartDownload(c *gin.Context) {
 		if firstError != nil {
 			errorResponse(c, http.StatusBadRequest, "Failed to start download: "+firstError.Error())
 		} else if len(invalidTimeframes) > 0 {
-			errorResponse(c, http.StatusBadRequest, fmt.Sprintf("No valid timeframes provided. Invalid timeframes: %v. Valid options: 1m, 5m, 15m, 30m, 1h, 4h, 1d", invalidTimeframes))
+			errorResponse(c, http.StatusBadRequest, fmt.Sprintf("No valid timeframes provided. Invalid timeframes: %v. Valid options: 1m, 3m, 5m, 15m, 30m, 1h, 4h, 1d", invalidTimeframes))
 		} else {
 			errorResponse(c, http.StatusBadRequest, "No valid timeframes provided")
 		}

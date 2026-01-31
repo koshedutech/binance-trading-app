@@ -73,14 +73,14 @@ func NewMockCoinDataProvider() *MockCoinDataProvider {
 	}
 }
 
-func (m *MockCoinDataProvider) GetAllCoinData(ctx context.Context) (map[string]*coinprofiler.CoinData, error) {
+func (m *MockCoinDataProvider) GetAllCoinDataCtx(ctx context.Context) (map[string]*coinprofiler.CoinData, error) {
 	if m.Err != nil {
 		return nil, m.Err
 	}
 	return m.CoinData, nil
 }
 
-func (m *MockCoinDataProvider) GetCoinData(ctx context.Context, symbol string) (*coinprofiler.CoinData, error) {
+func (m *MockCoinDataProvider) GetCoinDataCtx(ctx context.Context, symbol string) (*coinprofiler.CoinData, error) {
 	if m.Err != nil {
 		return nil, m.Err
 	}

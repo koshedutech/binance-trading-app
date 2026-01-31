@@ -717,6 +717,14 @@ func (wsm *WebSocketManager) updateCoinData(symbol string, tfData *TimeframeData
 			},
 		})
 	}
+
+	// Call price update callback for tick-level breakout detection (outside lock)
+	// This enables immediate entry signal detection without waiting for candle close
+	if wsm.profiler != nil && !tfData.IsClosedBar {
+		if priceCallback := wsm.profiler.GetPriceUpdateCallback(); priceCallback != nil {
+			priceCallback(symbol, tfData.Timeframe, tfData.Close, tfData.High, tfData.Low)
+		}
+	}
 }
 
 // pingLoop sends periodic pings to keep the connection alive.

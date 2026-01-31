@@ -654,6 +654,13 @@ export default function SubStrategySettingsModal({
               unit="x"
               disabled={isDisabled}
             />
+            <ToggleInput
+              label="Require Pre-Trend Down"
+              description="Only detect spikes after price pullback (BACKTESTED: OFF)"
+              value={settings.pattern_detection.require_pre_trend_down ?? false}
+              onChange={(v) => updateNestedSetting('pattern_detection', 'require_pre_trend_down', v)}
+              disabled={isDisabled}
+            />
 
             {/* Consolidation Parameters */}
             <div className="mt-4 pt-4 border-t border-gray-700 mb-3">

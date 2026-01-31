@@ -48,7 +48,8 @@ const (
 	// Epic 14: Coin Profiler Real-Time Updates
 	EventCoinDataUpdate EventType = "COIN_DATA_UPDATE"
 
-	// Epic 14: Entry Decision Pattern Updates
+	// Epic 14: Entry Decision Updates
+	EventEntryDecisionUpdate        EventType = "ENTRY_DECISION_UPDATE"
 	EventEntryDecisionPatternUpdate EventType = "ENTRY_DECISION_PATTERN_UPDATE"
 )
 

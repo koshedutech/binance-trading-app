@@ -51,14 +51,16 @@ interface RequirementsPanelProps {
 }
 
 // ==================== Default Configurations ====================
+// Updated: 2-step pattern (Volume Spike → Breakout) - NO consolidation
+// Based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
 
 const DEFAULT_VOLUME_IMBALANCE_CONFIG: VolumeImbalanceRequirements = {
-  volumeSpikeMultiplier: 2.0,
-  lookbackPeriod: 20,
-  minConsolidationCandles: 2,
-  maxConsolidationCandles: 6,
-  consolidationRangeTolerance: 0.01, // 1%
-  breakoutVolumeSurge: 1.5, // 50% above avg
+  volumeSpikeMultiplier: 3.0,       // 3x average volume threshold
+  lookbackPeriod: 5,                // Reference lookback candles
+  minConsolidationCandles: 1,       // Not used in 2-step pattern
+  maxConsolidationCandles: 999,     // Not used in 2-step pattern
+  consolidationRangeTolerance: 0.01, // Not used in 2-step pattern
+  breakoutVolumeSurge: 1.0,         // Entry volume >= reference volume
   patternExpirationMinutes: 60,
 };
 
@@ -171,10 +173,15 @@ interface VolumeImbalanceRequirementsPanelProps {
 function VolumeImbalanceRequirementsPanel({ config, timeframe }: VolumeImbalanceRequirementsPanelProps) {
   return (
     <div className="space-y-3">
-      {/* Step 1: Volume Spike */}
+      {/* Pattern Description */}
+      <div className="p-2 bg-purple-500/10 border border-purple-500/20 rounded text-xs text-purple-300">
+        <strong>2-Step Pattern:</strong> Volume Spike → Breakout (NO consolidation)
+      </div>
+
+      {/* Step 1: Volume Spike (Reference Candle) */}
       <StepRequirement
         stepNumber={1}
-        title="VOLUME SPIKE"
+        title="VOLUME SPIKE (Reference)"
         icon={<Activity className="w-4 h-4" />}
         color="bg-blue-500/20"
         requirements={[
@@ -184,58 +191,43 @@ function VolumeImbalanceRequirementsPanel({ config, timeframe }: VolumeImbalance
             highlight: true,
           },
           {
-            label: 'Lookback period',
+            label: 'Reference lookback',
             value: `${config.lookbackPeriod} candles`,
           },
           {
-            label: 'Preference',
+            label: 'Candle type',
             value: 'Bullish candle (close > open)',
           },
+          {
+            label: 'Sets reference',
+            value: 'High/Low used for breakout trigger',
+          },
         ]}
       />
 
-      {/* Step 2: Consolidation */}
+      {/* Step 2: Breakout Entry */}
       <StepRequirement
         stepNumber={2}
-        title="CONSOLIDATION"
-        icon={<BarChart2 className="w-4 h-4" />}
-        color="bg-yellow-500/20"
-        requirements={[
-          {
-            label: 'Duration',
-            value: `${config.minConsolidationCandles}-${config.maxConsolidationCandles} candles`,
-          },
-          {
-            label: 'Price range',
-            value: `Stay within +/- ${(config.consolidationRangeTolerance * 100).toFixed(0)}% of reference`,
-          },
-          {
-            label: 'Volume trend',
-            value: 'Must be declining (negative slope)',
-            highlight: true,
-          },
-        ]}
-      />
-
-      {/* Step 3: Breakout */}
-      <StepRequirement
-        stepNumber={3}
-        title="BREAKOUT"
+        title="BREAKOUT ENTRY"
         icon={<TrendingUp className="w-4 h-4" />}
         color="bg-green-500/20"
         requirements={[
           {
-            label: 'Volume surge',
-            value: `>= ${((config.breakoutVolumeSurge - 1) * 100).toFixed(0)}% above consolidation avg`,
+            label: 'Entry volume',
+            value: `>= ${config.breakoutVolumeSurge}x reference volume`,
             highlight: true,
           },
           {
             label: 'Price action',
-            value: 'Breaks above reference high',
+            value: 'Breaks above reference candle high',
           },
           {
             label: 'Confirmation',
-            value: 'Close confirms above reference',
+            value: 'Close confirms above reference high',
+          },
+          {
+            label: 'Max SL',
+            value: '1.5% (caps risk per trade)',
           },
         ]}
       />
@@ -243,11 +235,11 @@ function VolumeImbalanceRequirementsPanel({ config, timeframe }: VolumeImbalance
       {/* Risk Management */}
       <RiskManagementSection levels={DEFAULT_RISK_MANAGEMENT} />
 
-      {/* Pattern Expiration Notice */}
+      {/* Pattern Info */}
       <div className="flex items-center gap-2 text-xs text-gray-500 p-2 bg-gray-800/20 rounded">
         <Clock className="w-3 h-3" />
         <span>
-          Pattern expires after {config.patternExpirationMinutes} minutes if not completed
+          Timeframe: {timeframe} | Pattern expires after {config.patternExpirationMinutes} min
         </span>
       </div>
     </div>

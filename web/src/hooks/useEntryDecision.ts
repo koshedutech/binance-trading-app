@@ -40,6 +40,10 @@ interface UseEntryDecisionStrategiesResult {
   error: string | null;
   /** Last update timestamp */
   lastUpdated: Date | null;
+  /** Next candle close timestamp - for countdown timer display */
+  nextCandleClose: Date | null;
+  /** What direction we're looking for ("long", "short", or "both") */
+  lookingFor: string | null;
   /** Refresh function */
   refresh: () => Promise<void>;
 }
@@ -114,6 +118,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
   const [isRealTime, setIsRealTime] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [nextCandleClose, setNextCandleClose] = useState<Date | null>(null);
+  const [lookingFor, setLookingFor] = useState<string | null>(null);
 
   const lastWsUpdateRef = useRef<number>(0);
   const fallbackTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -127,9 +133,9 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
       const response = await apiService.get<EntryDecisionStrategiesResponse>(endpoint);
       const data = response.data;
 
-      // Only update if we haven't received WebSocket data recently
-      const timeSinceWsUpdate = Date.now() - lastWsUpdateRef.current;
-      if (timeSinceWsUpdate > 5000) {
+      // Always update from REST if WebSocket isn't active
+      // (No artificial delay - update immediately)
+      if (!isRealTime) {
         setStrategies(data.strategies || []);
         setByMode(data.by_mode || []);
         setStats({
@@ -138,8 +144,14 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
           totalCoinsReady: data.total_coins_ready || 0,
           totalCoinsWatching: data.total_coins_watching || 0,
         });
-        setIsRealTime(false);
         setLastUpdated(new Date());
+        // Extract countdown from REST response as fallback
+        if (data.next_candle_close) {
+          setNextCandleClose(new Date(data.next_candle_close));
+        }
+        if (data.looking_for) {
+          setLookingFor(data.looking_for);
+        }
       }
       setError(null);
     } catch (err) {
@@ -149,7 +161,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     } finally {
       setIsLoading(false);
     }
-  }, [mode]);
+  }, [mode, isRealTime]);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -158,9 +170,10 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
   }, [fetchStrategies]);
 
   useEffect(() => {
-    // WebSocket message handler
+    // WebSocket message handler - IMMEDIATE updates, no throttling
     const handleStrategyUpdate = (event: WSEvent) => {
       if (isEntryDecisionResponse(event.data)) {
+        // Immediate update - no delays!
         setStrategies(event.data.strategies);
         if (event.data.by_mode) {
           setByMode(event.data.by_mode);
@@ -171,28 +184,57 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
           totalCoinsReady: event.data.total_coins_ready || 0,
           totalCoinsWatching: event.data.total_coins_watching || 0,
         });
+
+        // Extract countdown timer data
+        if (event.data.next_candle_close) {
+          setNextCandleClose(new Date(event.data.next_candle_close));
+        }
+        if (event.data.looking_for) {
+          setLookingFor(event.data.looking_for);
+        }
+
         setIsRealTime(true);
+        setError(null); // Clear any errors on successful WebSocket update
         setLastUpdated(new Date());
         lastWsUpdateRef.current = Date.now();
       }
     };
 
+    // Track WebSocket connection status
+    const handleConnect = () => {
+      setIsRealTime(true);
+      console.log('[useEntryDecisionStrategies] WebSocket connected');
+    };
+
+    const handleDisconnect = () => {
+      setIsRealTime(false);
+      console.log('[useEntryDecisionStrategies] WebSocket disconnected, will use REST fallback');
+    };
+
     // Subscribe to WebSocket events
     wsService.subscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
+    wsService.onConnect(handleConnect);
+    wsService.onDisconnect(handleDisconnect);
+
+    // Set initial connection state
+    setIsRealTime(wsService.isConnected());
 
     // Initial fetch
     fetchStrategies();
 
-    // Set up REST polling as fallback (every 30 seconds)
+    // REST polling fallback - only when WebSocket is not active
+    // Poll every 5 seconds when disconnected (fast fallback)
     fallbackTimerRef.current = setInterval(() => {
-      const timeSinceWsUpdate = Date.now() - lastWsUpdateRef.current;
-      if (timeSinceWsUpdate > 5000) {
+      if (!wsService.isConnected()) {
+        setIsRealTime(false);
         fetchStrategies();
       }
-    }, 30000);
+    }, 5000);
 
     return () => {
       wsService.unsubscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
+      wsService.offConnect(handleConnect);
+      wsService.offDisconnect(handleDisconnect);
       if (fallbackTimerRef.current) {
         clearInterval(fallbackTimerRef.current);
         fallbackTimerRef.current = null;
@@ -208,6 +250,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     isRealTime,
     error,
     lastUpdated,
+    nextCandleClose,
+    lookingFor,
     refresh,
   };
 }

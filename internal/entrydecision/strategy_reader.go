@@ -246,31 +246,34 @@ func (r *DefaultStrategyReader) GetStrategyConfig(ctx context.Context, userID st
 	return config, nil
 }
 
-// getTimeframeForStrategy gets the timeframe for a strategy from cache or database.
+// getTimeframeForStrategy gets the timeframe for a strategy from user's settings (cache/database).
+// User-configured settings take priority over defaults.
 func (r *DefaultStrategyReader) getTimeframeForStrategy(ctx context.Context, userID, mode, strategyGroup string) string {
-	// Try to get from strategy group settings
+	// Get user's configured timeframe from strategy group settings (Redis cache -> database)
 	groupSettings, err := r.repo.GetStrategyGroupSettings(ctx, userID, mode, strategyGroup)
 	if err == nil && groupSettings != nil && groupSettings.Timeframe != "" {
 		return groupSettings.Timeframe
 	}
 
-	// Fall back to mode-based defaults
+	// Fall back to mode-based defaults only if user has no configured setting
 	return getDefaultTimeframe(mode)
 }
 
 // getDefaultTimeframe returns the default timeframe for a mode.
+// Updated: Volume Imbalance strategy uses 3m timeframe for scalp/swing modes
+// based on Dec 2025 - Jan 2026 backtest results.
 func getDefaultTimeframe(mode string) string {
 	switch mode {
 	case "ultra_fast":
 		return "1m"
 	case "scalp":
-		return "5m"
+		return "3m" // Volume Imbalance uses 3m for scalp
 	case "swing":
-		return "15m"
+		return "3m" // Volume Imbalance uses 3m for swing
 	case "position":
 		return "1h"
 	default:
-		return "5m"
+		return "3m"
 	}
 }
 
@@ -377,10 +380,10 @@ func (r *CachedStrategyReader) GetEnabledStrategiesForMode(ctx context.Context, 
 		return nil, fmt.Errorf("failed to get enabled strategies for mode %s: %w", mode, err)
 	}
 
-	// Convert and enrich with timeframe information
+	// Convert and enrich with timeframe information from user's settings
 	result := make([]EnabledSubStrategy, 0, len(dbStrategies))
 	for _, dbStrat := range dbStrategies {
-		// Get timeframe from strategy group settings
+		// Get user's configured timeframe from strategy group settings (Redis cache -> database)
 		groupSettings, _ := r.repo.GetStrategyGroupSettings(ctx, userID, dbStrat.Mode, dbStrat.StrategyGroup)
 		timeframe := getDefaultTimeframe(dbStrat.Mode)
 		if groupSettings != nil && groupSettings.Timeframe != "" {

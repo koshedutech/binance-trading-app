@@ -2315,6 +2315,8 @@ function SubStrategyCollapsibleSection({
       ],
     },
     pattern_detection: {
+      // Direction setting: "long" (GREEN candles), "short" (RED candles), or "both"
+      direction: 'long' as const,
       // Legacy fields (for backwards compatibility)
       min_volume_ratio: 3.0,
       consolidation_time_mins: 15,
@@ -2327,6 +2329,7 @@ function SubStrategyCollapsibleSection({
       min_consolidation_candles: 1,
       max_consolidation_candles: 999,
       volume_spike_threshold: 3.0,
+      require_pre_trend_down: false, // BACKTESTED: false - original strategy did NOT use this filter
       breakout_volume_surge: 1.0,
       consolidation_range_tolerance: 0.01,
       entry_volume_vs_reference: 1.0,
@@ -2482,6 +2485,14 @@ function SubStrategyCollapsibleSection({
 
     // Pattern Detection fields - Updated with backtested parameters (Dec 2025 - Jan 2026)
     if (settings.pattern_detection) {
+      // Direction setting (long, short, or both)
+      fieldComparisons.push({
+        path: 'pattern_detection.direction',
+        current: settings.pattern_detection.direction ?? 'long',
+        default: defaultSettings.pattern_detection.direction ?? 'long',
+        match: (settings.pattern_detection.direction ?? 'long') === (defaultSettings.pattern_detection.direction ?? 'long'),
+        inputType: 'text',
+      });
       // New backtested parameters (3m timeframe)
       fieldComparisons.push({
         path: 'pattern_detection.reference_lookback_candles',
@@ -2496,6 +2507,14 @@ function SubStrategyCollapsibleSection({
         default: defaultSettings.pattern_detection.volume_spike_threshold,
         match: (settings.pattern_detection.volume_spike_threshold ?? settings.pattern_detection.min_volume_ratio ?? 3.0) === defaultSettings.pattern_detection.volume_spike_threshold,
         inputType: 'slider',
+      });
+      // Require Pre-Trend Down - BACKTESTED: false (original strategy did NOT use this filter)
+      fieldComparisons.push({
+        path: 'pattern_detection.require_pre_trend_down',
+        current: settings.pattern_detection.require_pre_trend_down ?? false,
+        default: defaultSettings.pattern_detection.require_pre_trend_down ?? false,
+        match: (settings.pattern_detection.require_pre_trend_down ?? false) === (defaultSettings.pattern_detection.require_pre_trend_down ?? false),
+        inputType: 'toggle',
       });
       fieldComparisons.push({
         path: 'pattern_detection.min_consolidation_candles',

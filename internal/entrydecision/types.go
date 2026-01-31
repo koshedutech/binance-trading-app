@@ -84,18 +84,68 @@ type CoinMatch struct {
 	UpdatedAt time.Time `json:"updated_at"` // When this match was last updated
 
 	// Pattern-based fields (used when strategy type is "pattern")
-	Step    int           `json:"step,omitempty"`    // Current step (1, 2, 3, etc.)
-	Status  PatternStatus `json:"status,omitempty"`  // Current pattern status
-	Details string        `json:"details,omitempty"` // Human-readable details (e.g., "3/6 candles")
+	Step        int           `json:"step,omitempty"`         // Current step (1, 2, 3, etc.)
+	TotalSteps  int           `json:"total_steps,omitempty"`  // Total steps in pattern (e.g., 2 for Volume Imbalance)
+	Status      PatternStatus `json:"status,omitempty"`       // Current pattern status
+	Details     string        `json:"details,omitempty"`      // Human-readable details (e.g., "3.2x avg")
+	StepDetails []StepDetail  `json:"step_details,omitempty"` // Detailed info for each step
 
 	// Score-based fields (used when strategy type is "score")
 	Score int  `json:"score,omitempty"` // Score value (0-100)
 	Ready bool `json:"ready,omitempty"` // Whether score meets threshold
 
+	// Pattern tracking metrics (for pattern strategies with active tracking)
+	ReferenceCandle        *ReferenceCandle `json:"reference_candle,omitempty"`          // Reference candle data (for step 1+)
+	ReferenceDetectedAt    *time.Time       `json:"reference_detected_at,omitempty"`     // When reference candle was detected
+	CandlesSinceReference  int              `json:"candles_since_reference,omitempty"`   // Number of candles since reference
+	SecondsSinceReference  int              `json:"seconds_since_reference,omitempty"`   // Seconds elapsed since reference detection
+	ProximityToBreakout    float64          `json:"proximity_to_breakout,omitempty"`     // Current price proximity to breakout (%) - negative = below
+	PotentialBreakout      bool             `json:"potential_breakout,omitempty"`        // Whether current candle looks like potential breakout
+
+	// Entry/Breakout candle (when pattern is ready)
+	EntryCandle     *EntryCandle `json:"entry_candle,omitempty"`      // Entry candle data when breakout detected
+	ReadyAt         *time.Time   `json:"ready_at,omitempty"`          // When pattern became ready (UTC)
+	SecondsUntilExpiry int       `json:"seconds_until_expiry,omitempty"` // Seconds until ready pattern expires
+
 	// Additional context (shared)
 	Direction    string  `json:"direction,omitempty"`     // "long", "short", or "neutral"
 	CurrentPrice float64 `json:"current_price,omitempty"` // Current price for reference
 	Volume24h    float64 `json:"volume_24h,omitempty"`    // 24h volume for reference
+
+	// Volume tracking (for real-time display)
+	CurrentVolume         float64 `json:"current_volume,omitempty"`          // Current candle volume
+	VolumeThreshold       float64 `json:"volume_threshold,omitempty"`        // Volume threshold to trigger (e.g., 3.0 for 3x avg)
+	AvgVolume             float64 `json:"avg_volume,omitempty"`              // Average volume used for comparison
+	VolumeMultiplier      float64 `json:"volume_multiplier,omitempty"`       // Current volume multiplier vs average
+	VolumeDistancePercent float64 `json:"volume_distance_percent,omitempty"` // Distance to volume threshold (negative = below threshold)
+	PriceDistancePercent  float64 `json:"price_distance_percent,omitempty"`  // Distance to breakout price (negative = below entry)
+}
+
+// ReferenceCandle holds information about the reference candle for pattern tracking.
+type ReferenceCandle struct {
+	OpenTime         time.Time `json:"open_time"`         // Reference candle open time
+	CloseTime        time.Time `json:"close_time"`        // Reference candle close time
+	Open             float64   `json:"open"`              // Open price
+	High             float64   `json:"high"`              // High price - breakout level for longs
+	Low              float64   `json:"low"`               // Low price
+	Close            float64   `json:"close"`             // Close price
+	Volume           float64   `json:"volume"`            // Volume
+	VolumeMultiplier float64   `json:"volume_multiplier"` // Volume multiplier vs average (e.g., 3.2x)
+}
+
+// EntryCandle holds information about the entry/breakout candle when pattern completes.
+type EntryCandle struct {
+	OpenTime         time.Time `json:"open_time"`         // Entry candle open time (UTC)
+	CloseTime        time.Time `json:"close_time"`        // Entry candle close time (UTC)
+	Open             float64   `json:"open"`              // Open price
+	High             float64   `json:"high"`              // High price
+	Low              float64   `json:"low"`               // Low price
+	Close            float64   `json:"close"`             // Close price at breakout detection
+	Volume           float64   `json:"volume"`            // Volume at breakout
+	VolumeMultiplier float64   `json:"volume_multiplier"` // Volume multiplier vs consolidation avg
+	EntryPrice       float64   `json:"entry_price"`       // Actual entry price sent for order
+	DetectedAt       time.Time `json:"detected_at"`       // When breakout was detected (UTC)
+	Direction        string    `json:"direction"`         // "long" or "short"
 }
 
 // NewPatternCoinMatch creates a new CoinMatch for pattern-based strategies.
@@ -189,6 +239,10 @@ type StrategyMatch struct {
 
 	// Strategy requirements (for UI display)
 	Requirements *StrategyRequirements `json:"requirements,omitempty"`
+
+	// Real-time countdown timer (per-strategy, based on timeframe)
+	NextCandleClose time.Time `json:"next_candle_close,omitempty"` // When next candle closes
+	LookingFor      string    `json:"looking_for,omitempty"`       // Direction looking for ("long", "short", "both")
 
 	// Metadata
 	UpdatedAt time.Time `json:"updated_at"` // When this match data was last updated
@@ -563,6 +617,7 @@ func (pp *PatternProgress) IsExpired() bool {
 
 // ToCoinMatch converts the pattern progress to a CoinMatch for API responses.
 // Safe to call on nil receiver - returns empty CoinMatch.
+// Includes step_details for detailed UI display of tracking stages.
 func (pp *PatternProgress) ToCoinMatch() CoinMatch {
 	if pp == nil {
 		return CoinMatch{}
@@ -577,10 +632,12 @@ func (pp *PatternProgress) ToCoinMatch() CoinMatch {
 	}
 
 	return CoinMatch{
-		Symbol:    pp.Symbol,
-		Step:      pp.CurrentStep,
-		Status:    pp.Status,
-		Details:   details,
-		UpdatedAt: pp.UpdatedAt,
+		Symbol:      pp.Symbol,
+		Step:        pp.CurrentStep,
+		TotalSteps:  pp.TotalSteps,
+		Status:      pp.Status,
+		Details:     details,
+		StepDetails: pp.StepDetails, // Include full step details for UI display
+		UpdatedAt:   pp.UpdatedAt,
 	}
 }
