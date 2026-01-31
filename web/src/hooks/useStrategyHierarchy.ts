@@ -28,6 +28,8 @@ interface UseStrategyGroupsResult {
 
 interface UseSubStrategiesResult {
   subStrategies: SubStrategySettings[];
+  /** Whether the parent strategy group is enabled */
+  strategyGroupEnabled: boolean;
   isLoading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -103,6 +105,7 @@ export function useStrategyGroups(mode: string): UseStrategyGroupsResult {
  */
 export function useSubStrategies(mode: string, group: string): UseSubStrategiesResult {
   const [subStrategies, setSubStrategies] = useState<SubStrategySettings[]>([]);
+  const [strategyGroupEnabled, setStrategyGroupEnabled] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -117,6 +120,8 @@ export function useSubStrategies(mode: string, group: string): UseSubStrategiesR
         `/futures/sub-strategies/${mode}/${group}`
       );
       setSubStrategies(response.data.sub_strategies || []);
+      // Track whether the parent strategy group is enabled
+      setStrategyGroupEnabled(response.data.strategy_group_enabled ?? true);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch sub-strategies';
       setError(message);
@@ -132,6 +137,7 @@ export function useSubStrategies(mode: string, group: string): UseSubStrategiesR
 
   return {
     subStrategies,
+    strategyGroupEnabled,
     isLoading,
     error,
     refresh: fetchSubStrategies,

@@ -48,7 +48,19 @@ export interface TrailingStopConfig {
  * 2-step pattern: Volume Spike → Breakout (NO consolidation requirement)
  * Based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
  */
+/** Trade direction type for pattern detection */
+export type TradeDirection = 'long' | 'short' | 'both';
+
 export interface PatternDetectionConfig {
+  // ===== Direction Setting =====
+  /**
+   * Trade direction filter:
+   * - "long": Only GREEN (bullish) candles qualify as reference, look for upward breakout
+   * - "short": Only RED (bearish) candles qualify as reference, look for downward breakout
+   * - "both": Accept any candle, direction determined by candle color
+   */
+  direction?: TradeDirection;
+
   // ===== Legacy fields (kept for backwards compatibility) =====
   /** @deprecated Use volume_spike_threshold instead */
   min_volume_ratio?: number;
@@ -74,6 +86,8 @@ export interface PatternDetectionConfig {
   reference_lookback_candles?: number;
   /** Volume spike threshold multiplier (e.g., 3.0 = 3x average) */
   volume_spike_threshold?: number;
+  /** Require pre-trend down before volume spike (BACKTESTED: false) */
+  require_pre_trend_down?: boolean;
   /** Breakout volume surge multiplier (e.g., 1.0 = at least equal to reference) */
   breakout_volume_surge?: number;
   /** Entry volume vs reference requirement (e.g., 1.0 = at least equal) */
@@ -310,8 +324,11 @@ export interface GetStrategyGroupsResponse {
 export interface GetSubStrategiesResponse {
   success: boolean;
   mode: string;
-  group: string;
+  strategy_group: string;
+  /** Whether the parent strategy group is enabled */
+  strategy_group_enabled: boolean;
   sub_strategies: SubStrategySettings[];
+  count: number;
 }
 
 /**
@@ -418,6 +435,8 @@ export const DEFAULT_VOLUME_IMBALANCE_SETTINGS: VolumeImbalanceSettings = {
     ],
   },
   pattern_detection: {
+    // Direction setting: "long" (GREEN candles), "short" (RED candles), or "both"
+    direction: 'long',
     // Legacy fields (kept for backwards compatibility)
     min_volume_ratio: 3.0,
     breakout_confirmation_candles: 1,
@@ -425,8 +444,10 @@ export const DEFAULT_VOLUME_IMBALANCE_SETTINGS: VolumeImbalanceSettings = {
     require_htf_confirmation: false,
     htf_timeframe: '15m',
     // Active parameters (3m timeframe, 2-step: Volume Spike → Breakout)
+    // BACKTESTED (Dec 2025 - Jan 2026): 51 trades, 47.1% WR, +1147% net return
     reference_lookback_candles: 5,
     volume_spike_threshold: 3.0,
+    require_pre_trend_down: false, // BACKTESTED: false - original strategy did NOT use this filter
     breakout_volume_surge: 1.0,
     entry_volume_vs_reference: 1.0,
     max_sl_percent: 1.5,

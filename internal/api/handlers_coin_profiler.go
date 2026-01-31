@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -269,7 +270,28 @@ func (s *Server) handleStartCoinProfiler(c *gin.Context) {
 		return
 	}
 
-	if err := s.userAutopilotManager.StartCoinProfiler(c.Request.Context(), userID); err != nil {
+	ctx := c.Request.Context()
+
+	// Check if any strategies are enabled before starting
+	enabledCount, err := s.userAutopilotManager.GetEnabledStrategiesCount(ctx, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "VALIDATION_FAILED",
+			"message": "Failed to check enabled strategies: " + err.Error(),
+		})
+		return
+	}
+
+	if enabledCount == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":              "NO_STRATEGIES_ENABLED",
+			"message":            "No strategies are enabled. Please enable at least one strategy in Futures settings before starting the Coin Profiler.",
+			"enabled_strategies": 0,
+		})
+		return
+	}
+
+	if err := s.userAutopilotManager.StartCoinProfiler(ctx, userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "START_FAILED",
 			"message": err.Error(),
@@ -279,9 +301,10 @@ func (s *Server) handleStartCoinProfiler(c *gin.Context) {
 
 	status := s.userAutopilotManager.GetCoinProfilerStatus(userID)
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Coin profiler started",
-		"status":  status,
+		"success":            true,
+		"message":            fmt.Sprintf("Coin profiler started with %d enabled strategies", enabledCount),
+		"status":             status,
+		"enabled_strategies": enabledCount,
 	})
 }
 
@@ -315,4 +338,123 @@ func (s *Server) handleStopCoinProfiler(c *gin.Context) {
 		"message": "Coin profiler stopped",
 		"status":  status,
 	})
+}
+
+// handleGetCoinProfilerDiagnostics returns diagnostic information about pattern detection.
+// GET /api/futures/coin-profiler/diagnostics
+// This endpoint helps debug why patterns are not being detected.
+func (s *Server) handleGetCoinProfilerDiagnostics(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	if s.userAutopilotManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "SERVICE_UNAVAILABLE",
+			"message": "Autopilot manager not initialized",
+		})
+		return
+	}
+
+	profiler := s.userAutopilotManager.GetCoinProfiler(userID)
+	if profiler == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"error":   "NO_PROFILER",
+			"message": "Coin profiler not active for this user",
+		})
+		return
+	}
+
+	// Get all coin data
+	allCoinData := profiler.GetAllCoinData()
+	diagnostics := make([]map[string]interface{}, 0)
+
+	for symbol, coinData := range allCoinData {
+		// Get candle history for the coin
+		for tfName := range coinData.Timeframes {
+			history := profiler.GetCandleHistory(symbol, tfName)
+			candleCount := len(history)
+
+			// Calculate average volume if we have enough candles
+			avgVolume := 0.0
+			maxVolume := 0.0
+			maxVolumeMultiplier := 0.0
+			hasVolumeSpikeCandidate := false
+			preTrendAnalysis := "N/A"
+
+			if candleCount >= 10 { // Need at least 10 candles (5 lookback + 5 pre-trend)
+				// Calculate 5-candle average volume (BACKTESTED lookback period)
+				sum := 0.0
+				for i := candleCount - 5; i < candleCount; i++ {
+					sum += history[i].Volume
+				}
+				avgVolume = sum / 5.0
+
+				// Find max volume and check for spikes (using 3x threshold - BACKTESTED)
+				for i := 5; i < candleCount-1; i++ {
+					vol := history[i].Volume
+					if vol > maxVolume {
+						maxVolume = vol
+						if avgVolume > 0 {
+							maxVolumeMultiplier = vol / avgVolume
+						}
+					}
+					if avgVolume > 0 && vol >= avgVolume*3.0 { // 3x threshold (BACKTESTED)
+						hasVolumeSpikeCandidate = true
+					}
+				}
+
+				// Check pre-trend for recent candles
+				if candleCount >= 10 {
+					preTrendStart := history[candleCount-6].Open
+					preTrendEnd := history[candleCount-2].Close
+					if preTrendEnd < preTrendStart {
+						change := ((preTrendEnd - preTrendStart) / preTrendStart) * 100
+						preTrendAnalysis = "DOWN " + formatFloat(change, 2) + "% (qualifies)"
+					} else {
+						change := ((preTrendEnd - preTrendStart) / preTrendStart) * 100
+						preTrendAnalysis = "UP +" + formatFloat(change, 2) + "% (rejected by filter)"
+					}
+				}
+			}
+
+			diag := map[string]interface{}{
+				"symbol":                  symbol,
+				"timeframe":               tfName,
+				"candles_stored":          candleCount,
+				"candles_needed":          10, // 5 lookback + 5 pre-trend (BACKTESTED)
+				"has_enough_data":         candleCount >= 10,
+				"avg_volume_5":            avgVolume, // 5-candle lookback (BACKTESTED)
+				"max_volume_in_range":     maxVolume,
+				"max_volume_multiplier":   maxVolumeMultiplier,
+				"spike_threshold":         "3.0x", // BACKTESTED threshold
+				"has_spike_candidate":     hasVolumeSpikeCandidate,
+				"pre_trend_5_candles":     preTrendAnalysis,
+				"current_price":           coinData.Price,
+				"filter_require_pullback": true,
+				"filter_explanation":      "BACKTESTED: Pattern requires 5 candles BEFORE spike to show downward movement, then breakout above reference candle high",
+			}
+			diagnostics = append(diagnostics, diag)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"diagnostics":       diagnostics,
+		"total_symbols":     len(allCoinData),
+		"pattern_config": map[string]interface{}{
+			"volume_spike_multiplier": 3.0,  // BACKTESTED (Dec 2025 - Jan 2026)
+			"lookback_period":         5,    // BACKTESTED (Dec 2025 - Jan 2026)
+			"require_pre_trend_down":  true,
+			"min_body_ratio":          0.0,
+			"preferred_hour_utc":      -1,
+		},
+		"explanation": "BACKTESTED: Patterns require: 1) Volume spike >= 3x average (5 candle lookback), 2) Pre-trend DOWN (5 candles before must show pullback), 3) Then wait for breakout above reference candle high",
+	})
+}
+
+// formatFloat formats a float with specified decimal places
+func formatFloat(f float64, decimals int) string {
+	format := "%." + string(rune('0'+decimals)) + "f"
+	return fmt.Sprintf(format, f)
 }

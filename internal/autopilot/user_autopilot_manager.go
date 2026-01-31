@@ -6,6 +6,7 @@ import (
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/coinprofiler"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/entrydecision"
 	"binance-trading-bot/internal/exitdecision"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
@@ -23,19 +24,21 @@ import (
 // - LLMAnalyzer (user's AI API key)
 // - ChainEntryRunner (automatic chain-based entries when entry_decision_system="chain")
 // - CoinProfiler (real-time WebSocket data collection for Chain Trading System)
+// - RealtimePatternMatcher (evaluates patterns on candle close, triggers Entry Decision updates)
 // - ExitDecisionService (monitors positions for TP/SL/trailing stop exits)
 // - PositionController (Story 10.4: executes exit signals on Binance)
 type UserAutopilotInstance struct {
-	UserID              string
-	FuturesClient       binance.FuturesClient
-	LLMAnalyzer         *llm.Analyzer
-	Autopilot           *GinieAutopilot
-	ChainEntryRunner    *ChainEntryRunner              // Automatic chain entries (independent of Ginie)
-	CoinProfiler        *coinprofiler.CoinProfiler     // Epic 14: Real-time data collection
-	ExitDecisionService *exitdecision.Service          // Epic 14: Exit signal monitoring
-	PositionController  *PositionController            // Story 10.4: Exit signal executor
-	CreatedAt           time.Time
-	LastActive          time.Time
+	UserID                 string
+	FuturesClient          binance.FuturesClient
+	LLMAnalyzer            *llm.Analyzer
+	Autopilot              *GinieAutopilot
+	ChainEntryRunner       *ChainEntryRunner                       // Automatic chain entries (independent of Ginie)
+	CoinProfiler           *coinprofiler.CoinProfiler              // Epic 14: Real-time data collection
+	RealtimePatternMatcher *entrydecision.RealtimePatternMatcher   // Epic 14: Pattern evaluation on candle close
+	ExitDecisionService    *exitdecision.Service                   // Epic 14: Exit signal monitoring
+	PositionController     *PositionController                     // Story 10.4: Exit signal executor
+	CreatedAt              time.Time
+	LastActive             time.Time
 
 	mu sync.RWMutex
 }
@@ -136,6 +139,9 @@ type UserAutopilotManager struct {
 
 	// Epic 14: Callback for real-time coin data updates (set by API layer)
 	coinUpdateCallback coinprofiler.CoinUpdateCallback
+
+	// Epic 14: Callback for pattern updates (set by API layer for WebSocket broadcasting)
+	patternUpdateCallback entrydecision.PatternUpdateCallback
 
 	mu sync.RWMutex
 }
@@ -267,6 +273,28 @@ func (m *UserAutopilotManager) SetCoinUpdateCallback(callback coinprofiler.CoinU
 		instance := value.(*UserAutopilotInstance)
 		if instance.CoinProfiler != nil {
 			instance.CoinProfiler.SetCoinUpdateCallback(callback)
+		}
+		return true
+	})
+}
+
+// SetPatternUpdateCallback sets the callback for pattern updates (Epic 14)
+// This is called from the API server to enable WebSocket broadcasting of pattern updates.
+// When patterns change state (e.g., volume spike detected → consolidation → breakout),
+// the callback is triggered to broadcast the update to connected clients.
+func (m *UserAutopilotManager) SetPatternUpdateCallback(callback entrydecision.PatternUpdateCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.patternUpdateCallback = callback
+	m.logger.Info("PatternUpdateCallback set on UserAutopilotManager for real-time pattern updates")
+
+	// Propagate to existing RealtimePatternMatchers
+	m.instances.Range(func(key, value interface{}) bool {
+		userID := key.(string)
+		instance := value.(*UserAutopilotInstance)
+		if instance.RealtimePatternMatcher != nil {
+			instance.RealtimePatternMatcher.SetPatternUpdateCallback(callback)
+			m.logger.Debug("Propagated PatternUpdateCallback to user", "user_id", userID)
 		}
 		return true
 	})
@@ -475,7 +503,57 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	if m.coinUpdateCallback != nil {
 		coinProfiler.SetCoinUpdateCallback(m.coinUpdateCallback)
 	}
+
+	// Epic 14: Set historical data provider for prefetching candles on startup
+	// This enables pattern detection to work immediately without waiting for candles to close
+	if futuresClient != nil {
+		adapter := coinprofiler.NewFuturesClientAdapter(func(symbol, interval string, limit int) ([]coinprofiler.HistoricalKline, error) {
+			klines, err := futuresClient.GetFuturesKlines(symbol, interval, limit)
+			if err != nil {
+				return nil, err
+			}
+			result := make([]coinprofiler.HistoricalKline, len(klines))
+			for i, k := range klines {
+				result[i] = coinprofiler.HistoricalKline{
+					OpenTime:                 k.OpenTime,
+					Open:                     k.Open,
+					High:                     k.High,
+					Low:                      k.Low,
+					Close:                    k.Close,
+					Volume:                   k.Volume,
+					CloseTime:                k.CloseTime,
+					QuoteAssetVolume:         k.QuoteAssetVolume,
+					NumberOfTrades:           k.NumberOfTrades,
+					TakerBuyBaseAssetVolume:  k.TakerBuyBaseAssetVolume,
+					TakerBuyQuoteAssetVolume: k.TakerBuyQuoteAssetVolume,
+				}
+			}
+			return result, nil
+		})
+		coinProfiler.SetHistoricalDataProvider(adapter)
+		m.logger.Info("Historical data provider set on CoinProfiler", "user_id", userID)
+	}
+
 	m.logger.Info("CoinProfiler created for user", "user_id", userID)
+
+	// Epic 14: Create RealtimePatternMatcher for Entry Decision pattern evaluation
+	// This evaluates patterns on candle close events and triggers Entry Decision updates
+	//
+	// IMPORTANT: We load user's pattern matcher config from database settings to ensure
+	// configured values (direction, volume thresholds, etc.) are respected instead of defaults.
+	patternMatcherConfig := m.loadUserPatternMatcherConfig(ctx, userID)
+	patternMatcher := entrydecision.NewVolumeImbalancePatternMatcher(patternMatcherConfig)
+	realtimeMatcher := entrydecision.NewRealtimePatternMatcher(patternMatcher, nil)
+	// Set userID for targeted broadcasts
+	realtimeMatcher.SetUserID(userID)
+	// Register with CoinProfiler to receive candle close events
+	realtimeMatcher.RegisterWithCoinProfiler(coinProfiler)
+	// Wire pattern update callback for real-time WebSocket broadcasting
+	if m.patternUpdateCallback != nil {
+		realtimeMatcher.SetPatternUpdateCallback(m.patternUpdateCallback)
+		m.logger.Info("PatternUpdateCallback wired to RealtimePatternMatcher", "user_id", userID)
+	}
+	m.logger.Info("RealtimePatternMatcher created and registered with CoinProfiler", "user_id", userID)
 
 	// Epic 14: Create ExitDecisionService for position exit monitoring
 	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)
@@ -494,16 +572,17 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	m.logger.Info("PositionController created for user", "user_id", userID)
 
 	instance := &UserAutopilotInstance{
-		UserID:              userID,
-		FuturesClient:       futuresClient,
-		LLMAnalyzer:         llmAnalyzer,
-		Autopilot:           autopilot,
-		ChainEntryRunner:    chainEntryRunner,
-		CoinProfiler:        coinProfiler,        // Epic 14: Real-time data collection
-		ExitDecisionService: exitDecisionSvc,     // Epic 14: Exit signal monitoring
-		PositionController:  positionController,  // Story 10.4: Exit signal executor
-		CreatedAt:           time.Now(),
-		LastActive:          time.Now(),
+		UserID:                 userID,
+		FuturesClient:          futuresClient,
+		LLMAnalyzer:            llmAnalyzer,
+		Autopilot:              autopilot,
+		ChainEntryRunner:       chainEntryRunner,
+		CoinProfiler:           coinProfiler,        // Epic 14: Real-time data collection
+		RealtimePatternMatcher: realtimeMatcher,     // Epic 14: Pattern evaluation on candle close
+		ExitDecisionService:    exitDecisionSvc,     // Epic 14: Exit signal monitoring
+		PositionController:     positionController,  // Story 10.4: Exit signal executor
+		CreatedAt:              time.Now(),
+		LastActive:             time.Now(),
 	}
 
 	// Wire ExitDecisionService providers (after all components are created)
@@ -1127,6 +1206,16 @@ func (m *UserAutopilotManager) AutoStartFromSettings(ctx context.Context) error 
 
 // ==================== Epic 14: CoinProfiler Management ====================
 
+// GetEnabledStrategiesCount returns the count of enabled strategies for a user.
+// This can be used to validate before starting the Coin Profiler.
+func (m *UserAutopilotManager) GetEnabledStrategiesCount(ctx context.Context, userID string) (int, error) {
+	strategies, err := m.repo.GetEnabledStrategies(ctx, userID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get enabled strategies: %w", err)
+	}
+	return len(strategies), nil
+}
+
 // StartCoinProfiler starts the coin profiler for a specific user
 func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID string) error {
 	instance, err := m.GetOrCreateInstance(ctx, userID)
@@ -1204,6 +1293,40 @@ func (m *UserAutopilotManager) GetCoinProfiler(userID string) *coinprofiler.Coin
 		return nil
 	}
 	return instance.CoinProfiler
+}
+
+// RefreshCoinProfilerSubscriptions refreshes the Coin Profiler subscriptions for a user.
+// This should be called when strategies are enabled/disabled to update data collection.
+// Returns the count of enabled strategies after refresh.
+func (m *UserAutopilotManager) RefreshCoinProfilerSubscriptions(ctx context.Context, userID string) (int, error) {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return 0, fmt.Errorf("no autopilot instance for user %s", userID)
+	}
+
+	if instance.CoinProfiler == nil {
+		return 0, fmt.Errorf("coin profiler not initialized for user %s", userID)
+	}
+
+	// Check if profiler is running
+	if !instance.CoinProfiler.IsRunning() {
+		m.logger.Info("Coin profiler not running, skipping refresh", "user_id", userID)
+		return 0, nil
+	}
+
+	m.logger.Info("Refreshing CoinProfiler subscriptions due to strategy change", "user_id", userID)
+
+	// Re-initialize subscriptions based on current enabled strategies
+	m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
+
+	// Get the count of enabled strategies
+	dbStrategies, err := m.repo.GetEnabledStrategies(ctx, userID)
+	if err != nil {
+		m.logger.Error("Failed to get enabled strategies count", "user_id", userID, "error", err)
+		return 0, nil // Don't fail the refresh
+	}
+
+	return len(dbStrategies), nil
 }
 
 // initializeCoinProfilerSubscriptions aggregates strategy requirements and initializes WebSocket subscriptions.
@@ -1309,6 +1432,11 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 		"symbols", len(combinedReqs.AllSymbols),
 		"strategies", aggregatedReqs.TotalStrategies,
 		"positions", len(positions))
+
+	// Step 8: Pattern evaluation is now triggered automatically by CoinProfiler
+	// during PrefetchHistoricalCandles - as each symbol's data loads, the candle close
+	// callback fires immediately, enabling pattern evaluation without waiting.
+	m.logger.Info("CoinProfiler subscriptions complete - pattern evaluation will trigger as historical data loads", "user_id", userID)
 }
 
 // giniePositionAdapter adapts GiniePosition to the coinprofiler.Position interface.
@@ -1534,6 +1662,16 @@ func (m *UserAutopilotManager) GetPositionController(userID string) *PositionCon
 	return instance.PositionController
 }
 
+// GetRealtimePatternMatcher returns the realtime pattern matcher instance for a user.
+// Used for accessing pattern updates, countdown timer, and direction info for Entry Decision UI.
+func (m *UserAutopilotManager) GetRealtimePatternMatcher(userID string) *entrydecision.RealtimePatternMatcher {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return nil
+	}
+	return instance.RealtimePatternMatcher
+}
+
 // TriggerPositionControllerHeal triggers an immediate protection heal check for a user.
 func (m *UserAutopilotManager) TriggerPositionControllerHeal(userID string) error {
 	instance := m.GetInstance(userID)
@@ -1546,4 +1684,39 @@ func (m *UserAutopilotManager) TriggerPositionControllerHeal(userID string) erro
 	}
 
 	return instance.PositionController.HealNow()
+}
+
+// loadUserPatternMatcherConfig loads the user's Volume Imbalance pattern_detection settings
+// from the database and converts them to PatternMatcherConfig.
+// Falls back to DefaultPatternMatcherConfig if user settings cannot be loaded.
+// This ensures the pattern matcher respects user-configured values (direction, thresholds, etc.)
+// instead of using hard-coded defaults.
+func (m *UserAutopilotManager) loadUserPatternMatcherConfig(ctx context.Context, userID string) *entrydecision.PatternMatcherConfig {
+	if m.repo == nil {
+		m.logger.Warn("Repository not available, using default pattern matcher config", "user_id", userID)
+		return entrydecision.DefaultPatternMatcherConfig()
+	}
+
+	// Load Volume Imbalance sub-strategy settings for scalp mode (primary mode)
+	// The settings are the same structure across modes
+	subSettings, err := m.repo.GetSubStrategySettings(ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance")
+	if err != nil || subSettings == nil || len(subSettings.Settings) == 0 {
+		m.logger.Debug("User settings not found, using default pattern matcher config", "user_id", userID, "error", err)
+		return entrydecision.DefaultPatternMatcherConfig()
+	}
+
+	// Parse settings JSON and create config
+	settings := entrydecision.ParseSubStrategySettingsJSON(subSettings.Settings)
+	if settings == nil {
+		m.logger.Warn("Failed to parse sub-strategy settings, using default", "user_id", userID)
+		return entrydecision.DefaultPatternMatcherConfig()
+	}
+
+	config := entrydecision.NewPatternMatcherConfigFromSettings(settings)
+	m.logger.Info("Loaded user pattern matcher config",
+		"user_id", userID,
+		"direction", config.Direction,
+		"min_volume_spike_multiplier", config.MinVolumeSpikeMultiplier)
+
+	return config
 }

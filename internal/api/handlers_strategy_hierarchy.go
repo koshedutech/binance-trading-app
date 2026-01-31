@@ -265,10 +265,17 @@ func (s *Server) handleUpdateStrategyGroup(c *gin.Context) {
 		return
 	}
 
+	// Refresh Coin Profiler subscriptions if the enabled state changed
+	var enabledStrategies int
+	if s.userAutopilotManager != nil {
+		enabledStrategies, _ = s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": fmt.Sprintf("Strategy group %s/%s updated successfully", mode, group),
-		"data":    convertStrategyGroupToResponse(existing),
+		"success":            true,
+		"message":            fmt.Sprintf("Strategy group %s/%s updated successfully", mode, group),
+		"data":               convertStrategyGroupToResponse(existing),
+		"enabled_strategies": enabledStrategies,
 	})
 }
 
@@ -358,6 +365,13 @@ func (s *Server) handleGetSubStrategiesForGroup(c *gin.Context) {
 		return
 	}
 
+	// Get the parent strategy group to check if it's enabled
+	strategyGroup, err := s.strategyHierarchyCacheService.GetStrategyGroup(ctx, userID, mode, group)
+	if err != nil && err != cache.ErrCacheUnavailable {
+		// Log but don't fail - we can still return sub-strategies
+	}
+	parentEnabled := strategyGroup != nil && strategyGroup.Enabled
+
 	subStrategies, err := s.strategyHierarchyCacheService.GetAllSubStrategiesForGroup(ctx, userID, mode, group)
 	if err != nil {
 		if err == cache.ErrCacheUnavailable {
@@ -375,11 +389,12 @@ func (s *Server) handleGetSubStrategiesForGroup(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":        true,
-		"mode":           mode,
-		"strategy_group": group,
-		"sub_strategies": responses,
-		"count":          len(responses),
+		"success":              true,
+		"mode":                 mode,
+		"strategy_group":       group,
+		"strategy_group_enabled": parentEnabled,
+		"sub_strategies":       responses,
+		"count":                len(responses),
 	})
 }
 
@@ -450,10 +465,17 @@ func (s *Server) handleUpdateSubStrategy(c *gin.Context) {
 		return
 	}
 
+	// Refresh Coin Profiler subscriptions if the enabled state changed
+	var enabledStrategies int
+	if s.userAutopilotManager != nil {
+		enabledStrategies, _ = s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": fmt.Sprintf("Sub-strategy %s/%s/%s updated successfully", mode, group, strategy),
-		"data":    convertSubStrategyToResponse(existing),
+		"success":            true,
+		"message":            fmt.Sprintf("Sub-strategy %s/%s/%s updated successfully", mode, group, strategy),
+		"data":               convertSubStrategyToResponse(existing),
+		"enabled_strategies": enabledStrategies,
 	})
 }
 
@@ -922,8 +944,10 @@ func getDefaultSubStrategy(mode, group, strategy, userID string) *database.SubSt
 				},
 			},
 			"pattern_detection": map[string]interface{}{
+				"direction":                     "long",
 				"reference_lookback_candles":    5,
 				"volume_spike_threshold":        3.0,
+				"require_pre_trend_down":        false, // BACKTESTED: false - original strategy did NOT use this filter
 				"breakout_volume_surge":         1.0,
 				"breakout_confirmation_candles": 1,
 				"entry_volume_vs_reference":     1.0,

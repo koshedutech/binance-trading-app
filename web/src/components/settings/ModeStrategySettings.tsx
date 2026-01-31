@@ -660,7 +660,7 @@ function SubStrategiesSection({
   mode: string;
   onToggle?: (subStrategyId: string, enabled: boolean) => void;
 }) {
-  const { subStrategies, isLoading, error, refresh } = useSubStrategies(mode, 'breakout');
+  const { subStrategies, strategyGroupEnabled, isLoading, error, refresh } = useSubStrategies(mode, 'breakout');
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
 
   const toggleSection = (key: string) => {
@@ -704,14 +704,46 @@ function SubStrategiesSection({
   return (
     <div className="space-y-4">
       {/* Sub-Strategies Section with clear header */}
-      <div className="border border-purple-500/30 rounded-lg overflow-hidden bg-purple-900/10">
-        <div className="flex items-center gap-2 px-4 py-3 bg-purple-900/20 border-b border-purple-500/30">
-          <Zap className="w-5 h-5 text-purple-400" />
-          <span className="text-sm font-semibold text-purple-300">Sub-Strategies</span>
-          <span className="px-2 py-0.5 text-xs bg-purple-500/20 text-purple-300 rounded">
+      <div className={`border rounded-lg overflow-hidden ${
+        strategyGroupEnabled
+          ? 'border-purple-500/30 bg-purple-900/10'
+          : 'border-gray-600/50 bg-gray-800/30 opacity-60'
+      }`}>
+        <div className={`flex items-center gap-2 px-4 py-3 border-b ${
+          strategyGroupEnabled
+            ? 'bg-purple-900/20 border-purple-500/30'
+            : 'bg-gray-700/30 border-gray-600/50'
+        }`}>
+          <Zap className={`w-5 h-5 ${strategyGroupEnabled ? 'text-purple-400' : 'text-gray-500'}`} />
+          <span className={`text-sm font-semibold ${strategyGroupEnabled ? 'text-purple-300' : 'text-gray-400'}`}>
+            Sub-Strategies
+          </span>
+          <span className={`px-2 py-0.5 text-xs rounded ${
+            strategyGroupEnabled
+              ? 'bg-purple-500/20 text-purple-300'
+              : 'bg-gray-600/30 text-gray-500'
+          }`}>
             {subStrategies.length}
           </span>
+          {/* Disabled indicator when parent strategy group is OFF */}
+          {!strategyGroupEnabled && (
+            <span className="ml-auto flex items-center gap-1.5 px-2 py-0.5 bg-amber-500/20 text-amber-400 text-xs rounded">
+              <AlertTriangle className="w-3 h-3" />
+              Breakout strategy is OFF
+            </span>
+          )}
         </div>
+
+        {/* Warning banner when parent is disabled */}
+        {!strategyGroupEnabled && (
+          <div className="px-4 py-2 bg-amber-900/20 border-b border-amber-500/20">
+            <p className="text-xs text-amber-400/90">
+              Enable the Breakout strategy above to use these sub-strategies.
+              Your settings will be preserved.
+            </p>
+          </div>
+        )}
+
         <div className="p-3 space-y-2">
           {subStrategies.map((subStrategy) => (
             <SubStrategyCollapsibleSection
@@ -722,6 +754,7 @@ function SubStrategiesSection({
               onToggle={() => toggleSection(`sub_strategy_${subStrategy.sub_strategy}`)}
               onEnabledChange={onToggle}
               onRefresh={refresh}
+              parentDisabled={!strategyGroupEnabled}
             />
           ))}
         </div>
@@ -746,6 +779,7 @@ function SubStrategyCollapsibleSection({
   onToggle,
   onEnabledChange,
   onRefresh,
+  parentDisabled = false,
 }: {
   subStrategy: SubStrategySettings;
   mode: string;
@@ -753,6 +787,8 @@ function SubStrategyCollapsibleSection({
   onToggle: () => void;
   onEnabledChange?: (subStrategyId: string, enabled: boolean) => void;
   onRefresh?: () => Promise<void>;
+  /** Whether the parent strategy group is disabled */
+  parentDisabled?: boolean;
 }) {
   // Type guard for Volume Imbalance settings
   // Use sub_strategy field for identification (not id which is the DB UUID)
@@ -786,6 +822,8 @@ function SubStrategyCollapsibleSection({
       max_pattern_age_mins: 60,
       require_htf_confirmation: false,
       htf_timeframe: '15m',
+      // Direction setting: "long" (GREEN candles), "short" (RED candles), or "both"
+      direction: 'long' as const,
       // Backtested parameters (3m timeframe) - 2 step pattern: Volume Spike → Breakout
       reference_lookback_candles: 5,
       volume_spike_threshold: 3.0,
@@ -978,7 +1016,7 @@ function SubStrategyCollapsibleSection({
   const differentFields = totalFields - matchingFields;
   const allMatch = differentFields === 0;
 
-  const isDisabled = isToggling || isUpdating || isResetting || isSaving;
+  const isDisabled = isToggling || isUpdating || isResetting || isSaving || parentDisabled;
 
   // HTF Timeframe options
   const htfTimeframeOptions = [
@@ -988,32 +1026,37 @@ function SubStrategyCollapsibleSection({
   ];
 
   return (
-    <div className="border border-gray-700 rounded-lg overflow-hidden">
+    <div className={`border rounded-lg overflow-hidden ${parentDisabled ? 'border-gray-600/50' : 'border-gray-700'}`}>
       {/* Section Header - follows CollapsibleStrategySection pattern */}
       <button
         type="button"
         onClick={onToggle}
         className={`w-full flex items-center justify-between px-3 py-2 transition-colors ${
-          allMatch
-            ? 'bg-green-900/20 hover:bg-green-900/30'
-            : 'bg-orange-900/20 hover:bg-orange-900/30'
+          parentDisabled
+            ? 'bg-gray-700/20 hover:bg-gray-700/30'
+            : allMatch
+              ? 'bg-green-900/20 hover:bg-green-900/30'
+              : 'bg-orange-900/20 hover:bg-orange-900/30'
         }`}
       >
         <div className="flex items-center gap-2">
-          <span className="text-purple-400">
+          <span className={parentDisabled ? 'text-gray-500' : 'text-purple-400'}>
             <Zap className="w-4 h-4" />
           </span>
-          <span className="font-medium text-gray-200 text-sm">{displayName}</span>
-          {/* Enable/Disable Toggle - Functional */}
+          <span className={`font-medium text-sm ${parentDisabled ? 'text-gray-400' : 'text-gray-200'}`}>{displayName}</span>
+          {/* Enable/Disable Toggle - Shows actual state but disabled when parent is OFF */}
           <div
-            onClick={handleToggleEnabled}
+            onClick={parentDisabled ? undefined : handleToggleEnabled}
             className={`
-              flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors cursor-pointer
-              ${subStrategy.enabled
-                ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
-                : 'bg-gray-600/20 text-gray-500 hover:bg-gray-600/30'}
+              flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium transition-colors
+              ${parentDisabled
+                ? 'bg-gray-600/30 text-gray-500 cursor-not-allowed'
+                : subStrategy.enabled
+                  ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30 cursor-pointer'
+                  : 'bg-gray-600/20 text-gray-500 hover:bg-gray-600/30 cursor-pointer'}
               ${(isToggling || isUpdating) ? 'opacity-50 cursor-wait' : ''}
             `}
+            title={parentDisabled ? 'Enable Breakout strategy first' : undefined}
           >
             {(isToggling || isUpdating) ? (
               <Loader2 className="w-3 h-3 animate-spin" />
@@ -1024,6 +1067,10 @@ function SubStrategyCollapsibleSection({
             )}
             {subStrategy.enabled ? 'ON' : 'OFF'}
           </div>
+          {/* Show "Inactive" badge when parent is disabled but sub-strategy is ON */}
+          {parentDisabled && subStrategy.enabled && (
+            <span className="text-xs text-amber-500/80 italic">(inactive)</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* Reset Button - only show when there are differences */}
@@ -1270,8 +1317,38 @@ function SubStrategyCollapsibleSection({
             </h4>
             <p className="text-xs text-gray-500 pl-6 -mt-2">Backtested Dec 2025 - Jan 2026: 51 trades, 47.1% WR, +1147% return</p>
 
-            {/* Reference Candle Selection */}
+            {/* Trade Direction Selection */}
             <div className="pl-6">
+              <span className="text-xs text-purple-400 font-medium">Trade Direction</span>
+              <div className="mt-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <label className="text-sm font-medium text-gray-300">Direction</label>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {localSettings.pattern_detection.direction === 'long' && 'Only GREEN (bullish) candles → Look for upward breakout'}
+                      {localSettings.pattern_detection.direction === 'short' && 'Only RED (bearish) candles → Look for downward breakout'}
+                      {localSettings.pattern_detection.direction === 'both' && 'Any candle color → Direction determined by candle'}
+                      {!localSettings.pattern_detection.direction && 'Only GREEN (bullish) candles → Look for upward breakout'}
+                    </p>
+                  </div>
+                  <select
+                    value={localSettings.pattern_detection.direction || 'long'}
+                    onChange={(e) => updateLocalSettings({
+                      pattern_detection: { ...localSettings.pattern_detection, direction: e.target.value as 'long' | 'short' | 'both' }
+                    })}
+                    disabled={isDisabled}
+                    className="w-32 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+                  >
+                    <option value="long">Long Only</option>
+                    <option value="short">Short Only</option>
+                    <option value="both">Both</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Reference Candle Selection */}
+            <div className="pl-6 pt-3 border-t border-gray-700">
               <span className="text-xs text-purple-400 font-medium">Reference Candle Selection</span>
               <div className="grid grid-cols-2 gap-4 mt-2">
                 <div className="space-y-1">
