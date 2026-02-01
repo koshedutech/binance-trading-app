@@ -761,7 +761,8 @@ function CoinRow({
       )}
 
       {/* Watching state info - Show live volume progress */}
-      {strategyType === 'pattern' && (!coin.step || coin.step === 0) && coin.status === 'watching' && (
+      {/* Step 1 = Looking for volume spike (watching state in 2-step pattern) */}
+      {strategyType === 'pattern' && (!coin.step || coin.step === 0 || coin.step === 1) && coin.status === 'watching' && (
         <div className="mt-2 pt-2 border-t border-gray-700/30 space-y-1.5">
           {/* Volume Progress Bar */}
           {coin.volume_multiplier !== undefined && coin.volume_threshold !== undefined ? (
@@ -774,29 +775,22 @@ function CoinRow({
               const currentVol = coin.current_volume || (avgVol * coin.volume_multiplier);
               const thresholdVol = avgVol * coin.volume_threshold;
 
-              return (
-                <div className="space-y-1.5">
-                  {/* Row 1: Average volume (base reference) */}
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-gray-500">Avg Volume:</span>
-                    <span className="font-mono text-gray-400">{formatVolume(avgVol)}</span>
-                    <span className="text-gray-600">×</span>
-                    <span className="text-cyan-400 font-mono">{coin.volume_threshold.toFixed(1)}X</span>
-                    <span className="text-gray-600">=</span>
-                    <span className="text-yellow-400 font-mono">{formatVolume(thresholdVol)}</span>
-                    <span className="text-gray-500">(spike threshold)</span>
-                  </div>
+              // Calculate average position on the bar (average = 1x, threshold = Nx, so avg is at 1/N)
+              const avgPositionPercent = (1 / coin.volume_threshold) * 100;
+              const isAboveAverage = coin.volume_multiplier >= 1;
 
-                  {/* Row 2: Current volume with multiplier */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-xs">
+              return (
+                <div className="space-y-1">
+                  {/* Row 1: Current volume info - compact */}
+                  <div className="flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-2">
                       <Volume2 className={`w-3.5 h-3.5 ${
                         isAboveThreshold ? 'text-green-400 animate-pulse' :
                         coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'text-yellow-400 animate-pulse' :
-                        coin.volume_multiplier >= coin.volume_threshold * 0.5 ? 'text-blue-400' :
+                        isAboveAverage ? 'text-blue-400' :
                         'text-gray-500'
                       }`} />
-                      <span className="text-gray-500">Current:</span>
+                      <span className="text-gray-500">Vol:</span>
                       <span className={`font-mono font-medium ${
                         isAboveThreshold ? 'text-green-400' :
                         coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'text-yellow-400' :
@@ -804,22 +798,14 @@ function CoinRow({
                       }`}>
                         {formatVolume(currentVol)}
                       </span>
-                      <span className="text-gray-600">=</span>
-                      <span className={`font-mono ${
-                        isAboveThreshold ? 'text-green-400' :
-                        coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'text-yellow-400' :
-                        'text-gray-400'
-                      }`}>
-                        {coin.volume_multiplier.toFixed(2)}X
-                      </span>
-                      <span className="text-gray-600">of avg</span>
-                      {/* Distance to threshold */}
-                      <span className={`font-mono font-medium px-1.5 py-0.5 rounded ${
+                      <span className="text-gray-600">/</span>
+                      <span className="text-yellow-400 font-mono">{formatVolume(thresholdVol)}</span>
+                      <span className={`font-mono text-[10px] px-1 py-0.5 rounded ${
                         isAboveThreshold
                           ? 'bg-green-500/20 text-green-400'
-                          : 'bg-gray-700 text-gray-400'
+                          : 'bg-gray-700/50 text-gray-400'
                       }`}>
-                        {isAboveThreshold ? '+' : ''}{distanceToThreshold.toFixed(2)}X {isAboveThreshold ? '✓' : 'to go'}
+                        {coin.volume_multiplier.toFixed(1)}x/{coin.volume_threshold.toFixed(1)}x
                       </span>
                     </div>
                     {/* Direction indicator */}
@@ -836,24 +822,60 @@ function CoinRow({
                     )}
                   </div>
 
-                  {/* Progress bar */}
-                  <div className="relative h-2 bg-gray-700/50 rounded-full overflow-hidden">
-                    <div
-                      className={`absolute inset-y-0 left-0 rounded-full transition-all duration-300 ${
-                        isAboveThreshold ? 'bg-green-500' :
-                        coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'bg-yellow-500' :
-                        'bg-blue-500'
-                      }`}
-                      style={{ width: `${Math.min(progressPercent, 100)}%` }}
-                    />
+                  {/* Three-layer Progress Bar with Average Marker */}
+                  <div className="relative">
+                    {/* Progress bar container */}
+                    <div className="relative h-3 bg-gray-700/50 rounded-full overflow-hidden">
+                      {/* Layer 1: Average zone (darker fill from 0 to average position) */}
+                      <div
+                        className="absolute inset-y-0 left-0 bg-gray-600/60 rounded-l-full"
+                        style={{ width: `${avgPositionPercent}%` }}
+                      />
+
+                      {/* Layer 2: Current volume progress */}
+                      <div
+                        className={`absolute inset-y-0 left-0 rounded-full transition-all duration-500 ease-out ${
+                          isAboveThreshold ? 'bg-green-500' :
+                          coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'bg-yellow-500' :
+                          isAboveAverage ? 'bg-blue-500' :
+                          'bg-blue-400/70'
+                        }`}
+                        style={{ width: `${Math.min(progressPercent, 100)}%` }}
+                      />
+
+                      {/* Average marker line */}
+                      <div
+                        className="absolute inset-y-0 w-0.5 bg-white/60"
+                        style={{ left: `${avgPositionPercent}%` }}
+                      />
+                    </div>
+
+                    {/* Labels below progress bar */}
+                    <div className="relative h-4 mt-0.5">
+                      {/* Start label (0) */}
+                      <span className="absolute left-0 text-[9px] text-gray-600 font-mono">0</span>
+
+                      {/* Average marker label */}
+                      <div
+                        className="absolute transform -translate-x-1/2 text-[9px] text-gray-400 font-mono whitespace-nowrap"
+                        style={{ left: `${avgPositionPercent}%` }}
+                      >
+                        <span className="text-gray-500">avg:</span>{formatVolume(avgVol)}
+                      </div>
+
+                      {/* Threshold label (end) */}
+                      <span className="absolute right-0 text-[9px] text-yellow-500 font-mono">
+                        {formatVolume(thresholdVol)}
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Progress percentage */}
+                  {/* Status text */}
                   <div className="text-[10px] text-center">
                     <span className={isAboveThreshold ? 'text-green-400 font-medium' : 'text-gray-500'}>
                       {isAboveThreshold
-                        ? `✓ Volume spike detected! (${progressPercent.toFixed(0)}% of threshold)`
-                        : `${progressPercent.toFixed(0)}% to volume spike`}
+                        ? `✓ Volume spike detected!`
+                        : `${progressPercent.toFixed(0)}% to spike threshold`}
                     </span>
                   </div>
                 </div>

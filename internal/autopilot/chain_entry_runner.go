@@ -89,6 +89,9 @@ type ChainEntryRunner struct {
 	// Configuration
 	config *ChainEntryRunnerConfig
 
+	// Ravindra Position Monitor for trailing stop management
+	ravindraMonitor *RavindraPositionMonitor
+
 	// Runtime state
 	running        bool
 	stopChan       chan struct{}
@@ -693,6 +696,29 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 					log.Printf("[CHAIN-ENTRY] Warning: Failed to record TP placed event: %v", err)
 				}
 			}
+
+			// Step 11b: Register position with Ravindra Position Monitor for trailing stop management
+			// This enables automatic SL updates at 1:2 (breakeven) and 1:3 (1:1 profit lock) milestones
+			if r.ravindraMonitor != nil && slResp != nil {
+				ravindraPos := CreateRavindraPositionFromChainEntry(
+					chainID,
+					symbol,
+					r.userID,
+					direction,
+					entryPrice,
+					filledQuantity,
+					slPrice,
+					tpPrice,
+					slResp.AlgoId,
+					tpResp.AlgoId,
+					nil, // Use default config
+				)
+				if err := r.ravindraMonitor.AddPosition(ravindraPos); err != nil {
+					log.Printf("[CHAIN-ENTRY] Warning: Failed to register position with Ravindra monitor: %v", err)
+				} else {
+					log.Printf("[CHAIN-ENTRY] Position registered with Ravindra monitor: chainID=%s, SL milestones: BE@1:2, 1R@1:3", chainID)
+				}
+			}
 		}
 	}
 
@@ -761,6 +787,21 @@ func (r *ChainEntryRunner) SetFuturesClient(client binance.FuturesClient) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.futuresClient = client
+}
+
+// SetRavindraMonitor sets the Ravindra position monitor for trailing stop management
+func (r *ChainEntryRunner) SetRavindraMonitor(monitor *RavindraPositionMonitor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ravindraMonitor = monitor
+	log.Printf("[CHAIN-ENTRY] Ravindra position monitor configured")
+}
+
+// GetRavindraMonitor returns the Ravindra position monitor
+func (r *ChainEntryRunner) GetRavindraMonitor() *RavindraPositionMonitor {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ravindraMonitor
 }
 
 // SetChainEventWriter updates the chain event writer
