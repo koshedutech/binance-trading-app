@@ -1056,6 +1056,32 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 
 	cm := progress.ToCoinMatch()
 
+	// Always populate volume metrics for progress bar display (especially for watching state)
+	if candles != nil && len(candles) >= m.config.LookbackPeriod {
+		avgVolume := m.calculateAverageVolume(candles, m.config.LookbackPeriod)
+		if avgVolume > 0 {
+			currentCandle := &candles[len(candles)-1]
+			currentVolume := currentCandle.Volume
+			volumeMultiplier := currentVolume / avgVolume
+			volumeThreshold := m.config.MinVolumeSpikeMultiplier
+
+			// Set volume metrics on CoinMatch
+			cm.AvgVolume = avgVolume
+			cm.CurrentVolume = currentVolume
+			cm.VolumeThreshold = volumeThreshold
+			cm.VolumeMultiplier = volumeMultiplier
+
+			// Calculate distance to threshold as percentage
+			// Negative = below threshold, Positive = above threshold
+			if volumeThreshold > 0 {
+				cm.VolumeDistancePercent = ((volumeMultiplier / volumeThreshold) - 1) * 100
+			}
+
+			// Set current price from latest candle
+			cm.CurrentPrice = currentCandle.Close
+		}
+	}
+
 	// Add direction and price from state if available
 	if state != nil {
 		cm.Direction = state.Direction
