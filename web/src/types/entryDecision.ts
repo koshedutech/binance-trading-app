@@ -145,6 +145,14 @@ export interface CoinMatch {
   /** Distance to breakout price as percentage (negative = below entry) */
   price_distance_percent?: number;
 
+  // Price context fields
+  /** Day high price */
+  day_high?: number;
+  /** Day low price */
+  day_low?: number;
+  /** 5-candle average price */
+  avg_price_5?: number;
+
   // Position tracking (when position is actually open on Binance)
   /** Whether there's an active position for this coin */
   has_active_position?: boolean;

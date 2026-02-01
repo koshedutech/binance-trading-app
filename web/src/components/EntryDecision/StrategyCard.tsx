@@ -878,6 +878,97 @@ function CoinRow({
                         : `${progressPercent.toFixed(0)}% to spike threshold`}
                     </span>
                   </div>
+
+                  {/* Price Context Progress Bar */}
+                  {coin.day_high && coin.day_low && coin.day_high > coin.day_low && (
+                    (() => {
+                      const dayRange = coin.day_high - coin.day_low;
+                      const currentPrice = coin.current_price || 0;
+                      const avgPrice = coin.avg_price_5 || currentPrice;
+
+                      // Position calculations (as percentage of day range)
+                      const pricePositionPercent = dayRange > 0
+                        ? ((currentPrice - coin.day_low) / dayRange) * 100
+                        : 50;
+                      const avgPositionPercent = dayRange > 0
+                        ? ((avgPrice - coin.day_low) / dayRange) * 100
+                        : 50;
+
+                      const isAboveAvg = currentPrice >= avgPrice;
+                      const distanceFromAvg = avgPrice > 0
+                        ? ((currentPrice - avgPrice) / avgPrice) * 100
+                        : 0;
+
+                      return (
+                        <div className="mt-2 pt-2 border-t border-gray-700/20 space-y-1">
+                          {/* Header */}
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-gray-500">Price Context:</span>
+                            <span className={`font-mono ${isAboveAvg ? 'text-green-400' : 'text-red-400'}`}>
+                              ${currentPrice.toFixed(4)}
+                            </span>
+                          </div>
+
+                          {/* Three-layer Progress Bar */}
+                          <div className="relative">
+                            <div className="relative h-3 bg-gray-700/50 rounded-full overflow-hidden">
+                              {/* Layer 1: Average zone (darker fill from 0 to avg position) */}
+                              <div
+                                className="absolute inset-y-0 left-0 bg-gray-600/60 rounded-l-full"
+                                style={{ width: `${avgPositionPercent}%` }}
+                              />
+
+                              {/* Layer 2: Current price progress */}
+                              <div
+                                className={`absolute inset-y-0 left-0 rounded-full transition-all duration-500 ease-out ${
+                                  isAboveAvg ? 'bg-green-500' : 'bg-red-500'
+                                }`}
+                                style={{ width: `${Math.min(Math.max(pricePositionPercent, 0), 100)}%` }}
+                              />
+
+                              {/* Average marker line */}
+                              <div
+                                className="absolute inset-y-0 w-0.5 bg-white/60"
+                                style={{ left: `${avgPositionPercent}%` }}
+                              />
+                            </div>
+
+                            {/* Labels below progress bar */}
+                            <div className="relative h-4 mt-0.5">
+                              {/* Day Low label */}
+                              <span className="absolute left-0 text-[9px] text-gray-500 font-mono">
+                                ${coin.day_low.toFixed(4)}
+                              </span>
+
+                              {/* Average marker label */}
+                              <div
+                                className="absolute transform -translate-x-1/2 text-[9px] text-gray-400 font-mono whitespace-nowrap"
+                                style={{ left: `${avgPositionPercent}%` }}
+                              >
+                                avg
+                              </div>
+
+                              {/* Day High label */}
+                              <span className="absolute right-0 text-[9px] text-gray-500 font-mono">
+                                ${coin.day_high.toFixed(4)}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Status text */}
+                          <div className="text-[10px] text-center">
+                            <span className="text-gray-500">
+                              {pricePositionPercent.toFixed(0)}% into day range
+                            </span>
+                            <span className="text-gray-600 mx-1">•</span>
+                            <span className={isAboveAvg ? 'text-green-400' : 'text-red-400'}>
+                              {isAboveAvg ? '+' : ''}{distanceFromAvg.toFixed(2)}% from avg
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })()
+                  )}
                 </div>
               );
             })()

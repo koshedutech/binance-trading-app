@@ -248,6 +248,11 @@ type PatternState struct {
 	ReadyAt            time.Time `json:"ready_at"`              // When pattern became ready (UTC)
 	EntryPrice         float64   `json:"entry_price"`           // Calculated entry price for order
 	BreakoutVolumeMultiplier float64 `json:"breakout_volume_multiplier"` // Volume multiplier at breakout
+
+	// Day High/Low tracking (efficient approach - fetched once, updated in real-time)
+	DayHigh           float64   `json:"day_high"`             // Day's highest price
+	DayLow            float64   `json:"day_low"`              // Day's lowest price
+	DayHighLowFetched bool      `json:"day_high_low_fetched"` // Flag: was initial 24h data fetched?
 }
 
 // VolumeImbalancePatternMatcher tracks and matches Volume Imbalance patterns.
@@ -308,6 +313,22 @@ func (m *VolumeImbalancePatternMatcher) MatchPattern(
 
 		state = &PatternState{}
 		m.states[patternKey] = state
+
+		// Initialize day high/low from available candles
+		// This gives us a starting point; real-time updates will refine it
+		if len(candles) > 0 {
+			state.DayHigh = candles[0].High
+			state.DayLow = candles[0].Low
+			for _, c := range candles {
+				if c.High > state.DayHigh {
+					state.DayHigh = c.High
+				}
+				if c.Low < state.DayLow {
+					state.DayLow = c.Low
+				}
+			}
+			state.DayHighLowFetched = true // Mark as initialized from candles
+		}
 	}
 
 	// Check expiration
@@ -1082,6 +1103,30 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 		}
 	}
 
+	// Price context metrics for price progress bar
+	if candles != nil && len(candles) > 0 {
+		currentCandle := &candles[len(candles)-1]
+
+		// Update day high/low from current candle (real-time tracking)
+		if state != nil {
+			if currentCandle.High > state.DayHigh && state.DayHigh > 0 {
+				state.DayHigh = currentCandle.High
+			}
+			if (currentCandle.Low < state.DayLow || state.DayLow == 0) && currentCandle.Low > 0 {
+				state.DayLow = currentCandle.Low
+			}
+
+			// Set price context on CoinMatch
+			cm.DayHigh = state.DayHigh
+			cm.DayLow = state.DayLow
+		}
+
+		// Calculate 5-candle average price (same lookback as volume)
+		if len(candles) >= m.config.LookbackPeriod {
+			cm.AvgPrice5 = m.calculateAveragePrice(candles, m.config.LookbackPeriod)
+		}
+	}
+
 	// Add direction and price from state if available
 	if state != nil {
 		cm.Direction = state.Direction
@@ -1208,6 +1253,28 @@ func (m *VolumeImbalancePatternMatcher) calculateAverageVolume(candles []Candle,
 
 	for i := start; i < len(candles); i++ {
 		sum += candles[i].Volume
+	}
+	return sum / float64(period)
+}
+
+// calculateAveragePrice calculates the average close price over the given period.
+// Uses the same lookback period as volume for consistency.
+func (m *VolumeImbalancePatternMatcher) calculateAveragePrice(candles []Candle, period int) float64 {
+	if len(candles) < period {
+		period = len(candles)
+	}
+	if period == 0 {
+		return 0
+	}
+
+	var sum float64
+	start := len(candles) - period
+	if start < 0 {
+		start = 0
+	}
+
+	for i := start; i < len(candles); i++ {
+		sum += candles[i].Close
 	}
 	return sum / float64(period)
 }

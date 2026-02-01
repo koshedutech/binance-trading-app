@@ -120,6 +120,11 @@ type CoinMatch struct {
 	VolumeDistancePercent float64 `json:"volume_distance_percent,omitempty"` // Distance to volume threshold (negative = below threshold)
 	PriceDistancePercent  float64 `json:"price_distance_percent,omitempty"`  // Distance to breakout price (negative = below entry)
 
+	// Price context tracking (for UI price progress bar)
+	DayHigh   float64 `json:"day_high,omitempty"`    // Day's highest price
+	DayLow    float64 `json:"day_low,omitempty"`     // Day's lowest price
+	AvgPrice5 float64 `json:"avg_price_5,omitempty"` // 5-candle average price (same lookback as volume)
+
 	// Position tracking (when position is actually open on Binance)
 	HasActivePosition    bool       `json:"has_active_position,omitempty"`    // Whether there's an active position for this coin
 	PositionOpenedAt     *time.Time `json:"position_opened_at,omitempty"`     // When position was opened (entry filled)
