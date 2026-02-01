@@ -230,18 +230,24 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
 			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
-					// Enrich with real-time volume progress for watching coins
-					// This enables the Step 1 volume progress bar in the UI
-					if realtimeMatcher != nil && cm.Status == entrydecision.PatternStatusWatching {
+					// Enrich with real-time data from volume progress
+					// This enables the volume progress bar and price context bar in the UI
+					if realtimeMatcher != nil {
 						volProgress := realtimeMatcher.GetVolumeProgress(cm.Symbol, strategy.Timeframe)
 						if volProgress != nil {
-							cm.CurrentVolume = volProgress.CurrentVolume
-							cm.AvgVolume = volProgress.AverageVolume
-							cm.VolumeMultiplier = volProgress.CurrentRatio
-							cm.VolumeThreshold = volProgress.RequiredRatio
-							// Calculate distance to threshold as percentage
-							if volProgress.RequiredRatio > 0 {
-								cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+							// Always update current price from real-time data
+							cm.CurrentPrice = volProgress.CurrentPrice
+
+							// Volume data for watching state coins
+							if cm.Status == entrydecision.PatternStatusWatching {
+								cm.CurrentVolume = volProgress.CurrentVolume
+								cm.AvgVolume = volProgress.AverageVolume
+								cm.VolumeMultiplier = volProgress.CurrentRatio
+								cm.VolumeThreshold = volProgress.RequiredRatio
+								// Calculate distance to threshold as percentage
+								if volProgress.RequiredRatio > 0 {
+									cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+								}
 							}
 						}
 					}
@@ -329,6 +335,93 @@ func calculateNextCandleCloseForTimeframe(timeframe string) time.Time {
 	return nextClose
 }
 
+// ==================== POSITION ENRICHMENT ====================
+
+// ActivePositionInfo holds relevant position data for enriching coin matches
+type ActivePositionInfo struct {
+	Symbol       string
+	EntryPrice   float64
+	Quantity     float64
+	Side         string
+	OpenedAt     time.Time
+	UnrealizedPL float64
+}
+
+// getActivePositionsMap returns a map of symbol -> ActivePositionInfo for all active positions
+func (s *Server) getActivePositionsMap(userID string) map[string]*ActivePositionInfo {
+	positions := make(map[string]*ActivePositionInfo)
+
+	// Get positions from Ginie Autopilot
+	if controller := s.getFuturesAutopilot(); controller != nil {
+		if autopilot := controller.GetGinieAutopilot(); autopilot != nil {
+			giniePositions := autopilot.GetPositions()
+			for _, gPos := range giniePositions {
+				if gPos.RemainingQty > 0 {
+					positions[gPos.Symbol] = &ActivePositionInfo{
+						Symbol:       gPos.Symbol,
+						EntryPrice:   gPos.EntryPrice,
+						Quantity:     gPos.RemainingQty,
+						Side:         gPos.Side,
+						OpenedAt:     gPos.EntryTime,
+						UnrealizedPL: 0, // Ginie doesn't track unrealized PL directly
+					}
+				}
+			}
+		}
+	}
+
+	return positions
+}
+
+// enrichCoinMatchWithPosition enriches a CoinMatch with active position data
+// If a position exists, sets status to position_running and populates position fields
+func enrichCoinMatchWithPosition(cm *entrydecision.CoinMatch, posInfo *ActivePositionInfo) {
+	if cm == nil || posInfo == nil {
+		return
+	}
+
+	cm.HasActivePosition = true
+	cm.PositionEntryPrice = posInfo.EntryPrice
+	cm.PositionQuantity = posInfo.Quantity
+	openedAt := posInfo.OpenedAt
+	cm.PositionOpenedAt = &openedAt
+
+	// Set status to position_running so UI knows a position is active
+	// This prevents the UI from showing "watching" when a position exists
+	cm.Status = entrydecision.PatternStatusPositionRunning
+
+	// Preserve the entry candle info if present (reference candle becomes entry candle context)
+	// The entry price from position takes precedence for display
+	if cm.EntryCandle != nil {
+		cm.EntryCandle.EntryPrice = posInfo.EntryPrice
+	}
+}
+
+// resetStalePatterns resets patterns for symbols that had position_running status
+// but no longer have active positions (position was closed)
+func (s *Server) resetStalePatterns(userID string, patternMatcher *entrydecision.VolumeImbalancePatternMatcher, activePositions map[string]*ActivePositionInfo) {
+	if patternMatcher == nil {
+		return
+	}
+
+	// Get all patterns and check for stale position_running status
+	allPatterns := patternMatcher.GetAllPatterns()
+	for _, pattern := range allPatterns {
+		if pattern == nil {
+			continue
+		}
+
+		// If pattern is position_running but no active position, reset it
+		if pattern.Status == entrydecision.PatternStatusPositionRunning {
+			if _, hasPosition := activePositions[pattern.Symbol]; !hasPosition {
+				// Position was closed, reset pattern to watching state
+				log.Printf("[ENTRY-DECISION] Resetting stale pattern for %s (position closed)", pattern.Symbol)
+				patternMatcher.ResetPattern(pattern.Symbol, pattern.Mode, pattern.Timeframe)
+			}
+		}
+	}
+}
+
 // ==================== HANDLER FUNCTIONS ====================
 
 // handleGetEntryDecisionStrategies handles GET /api/futures/entry-decision/strategies
@@ -368,6 +461,15 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 		realtimeMatcher = s.userAutopilotManager.GetRealtimePatternMatcher(userID)
 	}
 
+	// Get active positions map for enrichment
+	// This prevents coins with active positions from showing "watching" status
+	activePositions := s.getActivePositionsMap(userID)
+
+	// Reset stale patterns (position_running status but no active position)
+	// This ensures patterns reset to watching when positions are closed
+	patternMatcher := s.getOrCreatePatternMatcher(userID)
+	s.resetStalePatterns(userID, patternMatcher, activePositions)
+
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
 
@@ -388,21 +490,34 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
 			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
-					// Enrich with real-time volume progress for watching coins
-					// This enables the Step 1 volume progress bar in the UI
-					if realtimeMatcher != nil && cm.Status == entrydecision.PatternStatusWatching {
+					// Enrich with real-time data from volume progress
+					// This enables the volume progress bar and price context bar in the UI
+					if realtimeMatcher != nil {
 						volProgress := realtimeMatcher.GetVolumeProgress(cm.Symbol, strategy.Timeframe)
 						if volProgress != nil {
-							cm.CurrentVolume = volProgress.CurrentVolume
-							cm.AvgVolume = volProgress.AverageVolume
-							cm.VolumeMultiplier = volProgress.CurrentRatio
-							cm.VolumeThreshold = volProgress.RequiredRatio
-							// Calculate distance to threshold as percentage
-							if volProgress.RequiredRatio > 0 {
-								cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+							// Always update current price from real-time data
+							cm.CurrentPrice = volProgress.CurrentPrice
+
+							// Volume data for watching state coins
+							if cm.Status == entrydecision.PatternStatusWatching {
+								cm.CurrentVolume = volProgress.CurrentVolume
+								cm.AvgVolume = volProgress.AverageVolume
+								cm.VolumeMultiplier = volProgress.CurrentRatio
+								cm.VolumeThreshold = volProgress.RequiredRatio
+								// Calculate distance to threshold as percentage
+								if volProgress.RequiredRatio > 0 {
+									cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+								}
 							}
 						}
 					}
+
+					// Enrich with active position data if position exists
+					// This sets status to "position_running" and populates position fields
+					if posInfo, exists := activePositions[cm.Symbol]; exists {
+						enrichCoinMatchWithPosition(cm, posInfo)
+					}
+
 					sm.AddCoin(*cm)
 				}
 			}
@@ -477,6 +592,9 @@ func (s *Server) handleGetEntryDecisionStrategiesForMode(c *gin.Context) {
 		realtimeMatcher = s.userAutopilotManager.GetRealtimePatternMatcher(userID)
 	}
 
+	// Get active positions map for enrichment
+	activePositions := s.getActivePositionsMap(userID)
+
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
 
@@ -496,19 +614,31 @@ func (s *Server) handleGetEntryDecisionStrategiesForMode(c *gin.Context) {
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
 			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
-					// Enrich with real-time volume progress for watching coins
-					if realtimeMatcher != nil && cm.Status == entrydecision.PatternStatusWatching {
+					// Enrich with real-time data from volume progress
+					if realtimeMatcher != nil {
 						volProgress := realtimeMatcher.GetVolumeProgress(cm.Symbol, strategy.Timeframe)
 						if volProgress != nil {
-							cm.CurrentVolume = volProgress.CurrentVolume
-							cm.AvgVolume = volProgress.AverageVolume
-							cm.VolumeMultiplier = volProgress.CurrentRatio
-							cm.VolumeThreshold = volProgress.RequiredRatio
-							if volProgress.RequiredRatio > 0 {
-								cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+							// Always update current price from real-time data
+							cm.CurrentPrice = volProgress.CurrentPrice
+
+							// Volume data for watching state coins
+							if cm.Status == entrydecision.PatternStatusWatching {
+								cm.CurrentVolume = volProgress.CurrentVolume
+								cm.AvgVolume = volProgress.AverageVolume
+								cm.VolumeMultiplier = volProgress.CurrentRatio
+								cm.VolumeThreshold = volProgress.RequiredRatio
+								if volProgress.RequiredRatio > 0 {
+									cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+								}
 							}
 						}
 					}
+
+					// Enrich with active position data if position exists
+					if posInfo, exists := activePositions[cm.Symbol]; exists {
+						enrichCoinMatchWithPosition(cm, posInfo)
+					}
+
 					sm.AddCoin(*cm)
 				}
 			}

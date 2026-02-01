@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
 // Displays individual strategy with matching coins, expandable view
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -706,10 +706,10 @@ function CoinRow({
                 </div>
 
                 {/* RIGHT: Ready/Running status indicator */}
-                {coin.status === 'ready' && (
+                {(coin.status === 'ready' || coin.status === 'position_running') && (
                   <div className="flex items-center gap-2">
-                    {/* Expiry countdown for ready patterns */}
-                    {coin.seconds_until_expiry !== undefined && coin.seconds_until_expiry > 0 && (
+                    {/* Expiry countdown for ready patterns (not for position_running) */}
+                    {coin.status === 'ready' && coin.seconds_until_expiry !== undefined && coin.seconds_until_expiry > 0 && (
                       <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded font-mono ${
                         coin.seconds_until_expiry <= 10
                           ? 'bg-red-500/30 text-red-400 animate-pulse'
@@ -719,11 +719,18 @@ function CoinRow({
                         {coin.seconds_until_expiry}s
                       </span>
                     )}
-                    {/* Ready badge */}
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded">
-                      <CheckCircle className="w-3 h-3" />
-                      READY
-                    </span>
+                    {/* Ready badge or Position Running badge */}
+                    {coin.status === 'position_running' ? (
+                      <span className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">
+                        <TrendingUp className="w-3 h-3" />
+                        POSITION
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded">
+                        <CheckCircle className="w-3 h-3" />
+                        READY
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -882,31 +889,48 @@ function CoinRow({
                   {/* Price Context Progress Bar */}
                   {coin.day_high && coin.day_low && coin.day_high > coin.day_low && (
                     (() => {
-                      const dayRange = coin.day_high - coin.day_low;
+                      const dayLow = coin.day_low;
+                      const dayHigh = coin.day_high;
+                      const dayRange = dayHigh - dayLow;
                       const currentPrice = coin.current_price || 0;
                       const avgPrice = coin.avg_price_5 || currentPrice;
 
-                      // Position calculations (as percentage of day range)
+                      // Growth percentages from the lowest price
+                      const totalRangePercent = dayLow > 0 ? ((dayHigh - dayLow) / dayLow) * 100 : 0;
+                      const avgGrowthFromLow = dayLow > 0 ? ((avgPrice - dayLow) / dayLow) * 100 : 0;
+                      const currentGrowthFromLow = dayLow > 0 ? ((currentPrice - dayLow) / dayLow) * 100 : 0;
+
+                      // Position calculations (as percentage of day range, clamped 0-100)
                       const pricePositionPercent = dayRange > 0
-                        ? ((currentPrice - coin.day_low) / dayRange) * 100
+                        ? Math.min(Math.max(((currentPrice - dayLow) / dayRange) * 100, 0), 100)
                         : 50;
                       const avgPositionPercent = dayRange > 0
-                        ? ((avgPrice - coin.day_low) / dayRange) * 100
+                        ? Math.min(Math.max(((avgPrice - dayLow) / dayRange) * 100, 0), 100)
                         : 50;
 
                       const isAboveAvg = currentPrice >= avgPrice;
-                      const distanceFromAvg = avgPrice > 0
-                        ? ((currentPrice - avgPrice) / avgPrice) * 100
-                        : 0;
+
+                      // Format price based on magnitude
+                      const formatPrice = (price: number) => {
+                        if (price >= 1000) return `$${price.toFixed(0)}`;
+                        if (price >= 1) return `$${price.toFixed(2)}`;
+                        return `$${price.toFixed(4)}`;
+                      };
 
                       return (
                         <div className="mt-2 pt-2 border-t border-gray-700/20 space-y-1">
-                          {/* Header */}
+                          {/* Header with current price and total range */}
                           <div className="flex items-center justify-between text-xs">
-                            <span className="text-gray-500">Price Context:</span>
-                            <span className={`font-mono ${isAboveAvg ? 'text-green-400' : 'text-red-400'}`}>
-                              ${currentPrice.toFixed(4)}
-                            </span>
+                            <span className="text-gray-500">Price Range:</span>
+                            <div className="flex items-center gap-2">
+                              <span className={`font-mono font-medium ${isAboveAvg ? 'text-green-400' : 'text-red-400'}`}>
+                                {formatPrice(currentPrice)}
+                              </span>
+                              <span className="text-gray-600">|</span>
+                              <span className="text-yellow-400 font-mono text-[10px]">
+                                Range: +{totalRangePercent.toFixed(2)}%
+                              </span>
+                            </div>
                           </div>
 
                           {/* Three-layer Progress Bar */}
@@ -923,46 +947,70 @@ function CoinRow({
                                 className={`absolute inset-y-0 left-0 rounded-full transition-all duration-500 ease-out ${
                                   isAboveAvg ? 'bg-green-500' : 'bg-red-500'
                                 }`}
-                                style={{ width: `${Math.min(Math.max(pricePositionPercent, 0), 100)}%` }}
+                                style={{ width: `${pricePositionPercent}%` }}
                               />
 
                               {/* Average marker line */}
                               <div
-                                className="absolute inset-y-0 w-0.5 bg-white/60"
+                                className="absolute inset-y-0 w-0.5 bg-white/70"
                                 style={{ left: `${avgPositionPercent}%` }}
                               />
                             </div>
 
-                            {/* Labels below progress bar */}
-                            <div className="relative h-4 mt-0.5">
-                              {/* Day Low label */}
-                              <span className="absolute left-0 text-[9px] text-gray-500 font-mono">
-                                ${coin.day_low.toFixed(4)}
-                              </span>
+                            {/* Labels below progress bar - two rows */}
+                            <div className="relative mt-0.5">
+                              {/* Row 1: Price values */}
+                              <div className="relative h-3 flex justify-between items-center">
+                                {/* Day Low */}
+                                <span className="text-[9px] text-gray-500 font-mono">
+                                  {formatPrice(dayLow)}
+                                </span>
 
-                              {/* Average marker label */}
-                              <div
-                                className="absolute transform -translate-x-1/2 text-[9px] text-gray-400 font-mono whitespace-nowrap"
-                                style={{ left: `${avgPositionPercent}%` }}
-                              >
-                                avg
+                                {/* Average price (positioned at marker) */}
+                                <div
+                                  className="absolute transform -translate-x-1/2 text-[9px] text-gray-400 font-mono"
+                                  style={{ left: `${avgPositionPercent}%` }}
+                                >
+                                  {formatPrice(avgPrice)}
+                                </div>
+
+                                {/* Day High */}
+                                <span className="text-[9px] text-gray-500 font-mono">
+                                  {formatPrice(dayHigh)}
+                                </span>
                               </div>
 
-                              {/* Day High label */}
-                              <span className="absolute right-0 text-[9px] text-gray-500 font-mono">
-                                ${coin.day_high.toFixed(4)}
-                              </span>
+                              {/* Row 2: Growth percentages from low */}
+                              <div className="relative h-3 flex justify-between items-center">
+                                {/* Low baseline */}
+                                <span className="text-[8px] text-gray-600 font-mono">
+                                  0%
+                                </span>
+
+                                {/* Average growth from low */}
+                                <div
+                                  className="absolute transform -translate-x-1/2 text-[8px] text-blue-400 font-mono"
+                                  style={{ left: `${avgPositionPercent}%` }}
+                                >
+                                  +{avgGrowthFromLow.toFixed(1)}%
+                                </div>
+
+                                {/* High growth (total range) */}
+                                <span className="text-[8px] text-yellow-400 font-mono">
+                                  +{totalRangePercent.toFixed(1)}%
+                                </span>
+                              </div>
                             </div>
                           </div>
 
-                          {/* Status text */}
+                          {/* Status text - current position info */}
                           <div className="text-[10px] text-center">
                             <span className="text-gray-500">
-                              {pricePositionPercent.toFixed(0)}% into day range
+                              Current: {pricePositionPercent.toFixed(0)}% into range
                             </span>
                             <span className="text-gray-600 mx-1">•</span>
-                            <span className={isAboveAvg ? 'text-green-400' : 'text-red-400'}>
-                              {isAboveAvg ? '+' : ''}{distanceFromAvg.toFixed(2)}% from avg
+                            <span className={currentGrowthFromLow >= 0 ? 'text-green-400' : 'text-red-400'}>
+                              {currentGrowthFromLow >= 0 ? '+' : ''}{currentGrowthFromLow.toFixed(2)}% from low
                             </span>
                           </div>
                         </div>
@@ -986,6 +1034,9 @@ function CoinRow({
 
 // ==================== Main Component ====================
 
+// Sort interval in milliseconds - only re-sort every 10 seconds to prevent rapid reordering
+const SORT_THROTTLE_MS = 10000;
+
 export default function StrategyCard({
   strategy,
   defaultExpanded = false,
@@ -995,6 +1046,10 @@ export default function StrategyCard({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showRequirements, setShowRequirements] = useState(false);
   const autoExpandedRef = useRef(false);
+
+  // Throttled sort order - only updates every SORT_THROTTLE_MS
+  const [sortedSymbolOrder, setSortedSymbolOrder] = useState<string[]>([]);
+  const lastSortTimeRef = useRef<number>(0);
 
   const readyCount = countReady(strategy.coins);
   const watchingCount = countWatching(strategy.coins);
@@ -1023,26 +1078,89 @@ export default function StrategyCard({
     }
   }, [strategy.coins]);
 
-  // Sort coins: ready first, then by step, then by volume multiplier (highest first)
-  const sortedCoins = [...strategy.coins].sort((a, b) => {
-    const aReady = checkCoinReady(a);
-    const bReady = checkCoinReady(b);
-    if (aReady && !bReady) return -1;
-    if (!aReady && bReady) return 1;
+  // Compute sorted order function (used by both initial and interval updates)
+  const computeSortOrder = (coins: CoinMatch[]): string[] => {
+    return [...coins].sort((a, b) => {
+      const aReady = checkCoinReady(a);
+      const bReady = checkCoinReady(b);
+      if (aReady && !bReady) return -1;
+      if (!aReady && bReady) return 1;
 
-    // For pattern-based, sort by step first (higher = closer to ready)
-    if (strategy.type === 'pattern') {
-      const stepDiff = (b.step || 0) - (a.step || 0);
-      if (stepDiff !== 0) return stepDiff;
+      // For pattern-based, sort by step first (higher = closer to ready)
+      if (strategy.type === 'pattern') {
+        const stepDiff = (b.step || 0) - (a.step || 0);
+        if (stepDiff !== 0) return stepDiff;
 
-      // Within same step, sort by volume multiplier (higher = more likely to spike)
-      const aVol = a.volume_multiplier || 0;
-      const bVol = b.volume_multiplier || 0;
-      return bVol - aVol;
+        // Within same step, sort by volume multiplier (higher = more likely to spike)
+        const aVol = a.volume_multiplier || 0;
+        const bVol = b.volume_multiplier || 0;
+        return bVol - aVol;
+      }
+      // For score-based, sort by score (higher = closer to ready)
+      return (b.score || 0) - (a.score || 0);
+    }).map(c => c.symbol);
+  };
+
+  // Initialize sort order on first render and when coins list changes (new coins added/removed)
+  useEffect(() => {
+    const currentSymbols = new Set(strategy.coins.map(c => c.symbol));
+    const storedSymbols = new Set(sortedSymbolOrder);
+
+    // Check if coins were added or removed
+    const symbolsChanged = currentSymbols.size !== storedSymbols.size ||
+      [...currentSymbols].some(s => !storedSymbols.has(s));
+
+    if (sortedSymbolOrder.length === 0 || symbolsChanged) {
+      setSortedSymbolOrder(computeSortOrder(strategy.coins));
+      lastSortTimeRef.current = Date.now();
     }
-    // For score-based, sort by score (higher = closer to ready)
-    return (b.score || 0) - (a.score || 0);
-  });
+  }, [strategy.coins.map(c => c.symbol).join(',')]); // Only when symbol list changes
+
+  // Throttled sort update - runs every SORT_THROTTLE_MS
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastSortTimeRef.current >= SORT_THROTTLE_MS) {
+        setSortedSymbolOrder(computeSortOrder(strategy.coins));
+        lastSortTimeRef.current = now;
+      }
+    }, SORT_THROTTLE_MS);
+
+    return () => clearInterval(interval);
+  }, [strategy.coins, strategy.type]);
+
+  // Get coins in the throttled sort order, but with fresh data
+  // This ensures visual order stays stable while data updates in real-time
+  const sortedCoins = useMemo(() => {
+    if (sortedSymbolOrder.length === 0) {
+      // Fallback: if no stored order yet, compute directly
+      return computeSortOrder(strategy.coins).map(symbol =>
+        strategy.coins.find(c => c.symbol === symbol)
+      ).filter((c): c is CoinMatch => c !== undefined);
+    }
+
+    // Use stored order but get fresh coin data
+    const orderedCoins: CoinMatch[] = [];
+    const usedSymbols = new Set<string>();
+
+    // First, add coins in the stored order
+    for (const symbol of sortedSymbolOrder) {
+      const coin = strategy.coins.find(c => c.symbol === symbol);
+      if (coin) {
+        orderedCoins.push(coin);
+        usedSymbols.add(symbol);
+      }
+    }
+
+    // Then, add any new coins that weren't in the stored order (at the end)
+    for (const coin of strategy.coins) {
+      if (!usedSymbols.has(coin.symbol)) {
+        orderedCoins.push(coin);
+      }
+    }
+
+    return orderedCoins;
+  }, [strategy.coins, sortedSymbolOrder]);
 
   return (
     <div className={`

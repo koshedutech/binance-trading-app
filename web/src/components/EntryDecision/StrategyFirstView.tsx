@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
 // Main strategy-first view with mode grouping and collapsible sections
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -115,6 +115,9 @@ function countModeTotalCoins(modeData: ModeStrategies): number {
   }, 0);
 }
 
+// Sort throttle interval - only re-sort every 10 seconds to prevent rapid reordering
+const STRATEGY_SORT_THROTTLE_MS = 10000;
+
 // ==================== Mode Section Component ====================
 
 function ModeSection({
@@ -124,6 +127,10 @@ function ModeSection({
 }: ModeSectionProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const autoExpandedRef = useRef(false);
+
+  // Throttled strategy sort order - only updates every STRATEGY_SORT_THROTTLE_MS
+  const [sortedStrategyKeys, setSortedStrategyKeys] = useState<string[]>([]);
+  const lastSortTimeRef = useRef<number>(0);
 
   // Auto-expand when strategies have coins with data (step > 0 or status != 'watching')
   useEffect(() => {
@@ -153,12 +160,77 @@ function ModeSection({
   const totalCoins = countModeTotalCoins(modeData);
   const hasReady = readyCoins > 0;
 
-  // Sort strategies: those with ready coins first
-  const sortedStrategies = [...modeData.strategies].sort((a, b) => {
-    const aReady = a.coins.filter(c => c.status === 'ready' || c.ready === true).length;
-    const bReady = b.coins.filter(c => c.status === 'ready' || c.ready === true).length;
-    return bReady - aReady;
-  });
+  // Generate unique key for a strategy
+  const getStrategyKey = (s: StrategyMatch): string =>
+    `${s.mode}-${s.strategy}-${s.sub_strategy || ''}`;
+
+  // Compute sorted order function
+  const computeStrategyOrder = (strategies: StrategyMatch[]): string[] => {
+    return [...strategies].sort((a, b) => {
+      const aReady = a.coins.filter(c => c.status === 'ready' || c.ready === true).length;
+      const bReady = b.coins.filter(c => c.status === 'ready' || c.ready === true).length;
+      return bReady - aReady;
+    }).map(getStrategyKey);
+  };
+
+  // Initialize sort order on first render and when strategy list changes
+  useEffect(() => {
+    const currentKeys = new Set(modeData.strategies.map(getStrategyKey));
+    const storedKeys = new Set(sortedStrategyKeys);
+
+    // Check if strategies were added or removed
+    const keysChanged = currentKeys.size !== storedKeys.size ||
+      [...currentKeys].some(k => !storedKeys.has(k));
+
+    if (sortedStrategyKeys.length === 0 || keysChanged) {
+      setSortedStrategyKeys(computeStrategyOrder(modeData.strategies));
+      lastSortTimeRef.current = Date.now();
+    }
+  }, [modeData.strategies.map(getStrategyKey).join(',')]); // Only when strategy keys change
+
+  // Throttled sort update - runs every STRATEGY_SORT_THROTTLE_MS
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastSortTimeRef.current >= STRATEGY_SORT_THROTTLE_MS) {
+        setSortedStrategyKeys(computeStrategyOrder(modeData.strategies));
+        lastSortTimeRef.current = now;
+      }
+    }, STRATEGY_SORT_THROTTLE_MS);
+
+    return () => clearInterval(interval);
+  }, [modeData.strategies]);
+
+  // Get strategies in throttled sort order with fresh data
+  const sortedStrategies = useMemo(() => {
+    if (sortedStrategyKeys.length === 0) {
+      // Fallback: compute directly
+      return computeStrategyOrder(modeData.strategies).map(key =>
+        modeData.strategies.find(s => getStrategyKey(s) === key)
+      ).filter((s): s is StrategyMatch => s !== undefined);
+    }
+
+    const orderedStrategies: StrategyMatch[] = [];
+    const usedKeys = new Set<string>();
+
+    // First, add strategies in stored order
+    for (const key of sortedStrategyKeys) {
+      const strategy = modeData.strategies.find(s => getStrategyKey(s) === key);
+      if (strategy) {
+        orderedStrategies.push(strategy);
+        usedKeys.add(key);
+      }
+    }
+
+    // Then, add any new strategies not in stored order
+    for (const strategy of modeData.strategies) {
+      if (!usedKeys.has(getStrategyKey(strategy))) {
+        orderedStrategies.push(strategy);
+      }
+    }
+
+    return orderedStrategies;
+  }, [modeData.strategies, sortedStrategyKeys]);
 
   return (
     <div className={`rounded-lg border ${colors.border} overflow-hidden`}>

@@ -253,6 +253,7 @@ type PatternState struct {
 	DayHigh           float64   `json:"day_high"`             // Day's highest price
 	DayLow            float64   `json:"day_low"`              // Day's lowest price
 	DayHighLowFetched bool      `json:"day_high_low_fetched"` // Flag: was initial 24h data fetched?
+	AvgPrice5         float64   `json:"avg_price_5"`          // 5-candle average price (for progress bar)
 }
 
 // VolumeImbalancePatternMatcher tracks and matches Volume Imbalance patterns.
@@ -1037,6 +1038,25 @@ func (m *VolumeImbalancePatternMatcher) CleanupExpiredPatterns() int {
 	return removed
 }
 
+// ClearAllPatterns removes all tracked patterns and resets internal state.
+// This should be called when the CoinProfiler restarts to ensure fresh pattern
+// detection without stale expiration timestamps from previous sessions.
+// Returns the count of patterns that were cleared.
+func (m *VolumeImbalancePatternMatcher) ClearAllPatterns() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	count := len(m.patterns)
+	m.patterns = make(map[string]*PatternProgress)
+	m.states = make(map[string]*PatternState)
+
+	if count > 0 {
+		log.Printf("[PATTERN] Cleared %d patterns for fresh start", count)
+	}
+
+	return count
+}
+
 // GetReadyPatterns returns all patterns that are ready for entry.
 func (m *VolumeImbalancePatternMatcher) GetReadyPatterns() []*PatternProgress {
 	m.mu.RLock()
@@ -1104,26 +1124,36 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 	}
 
 	// Price context metrics for price progress bar
+	// Always copy day high/low from state (even when candles are nil for API responses)
+	if state != nil {
+		cm.DayHigh = state.DayHigh
+		cm.DayLow = state.DayLow
+		cm.AvgPrice5 = state.AvgPrice5
+	}
+
+	// Update day high/low and avg price from current candle (real-time tracking)
 	if candles != nil && len(candles) > 0 {
 		currentCandle := &candles[len(candles)-1]
 
-		// Update day high/low from current candle (real-time tracking)
 		if state != nil {
+			// Update state's day high/low from current candle
 			if currentCandle.High > state.DayHigh && state.DayHigh > 0 {
 				state.DayHigh = currentCandle.High
+				cm.DayHigh = state.DayHigh
 			}
 			if (currentCandle.Low < state.DayLow || state.DayLow == 0) && currentCandle.Low > 0 {
 				state.DayLow = currentCandle.Low
+				cm.DayLow = state.DayLow
 			}
-
-			// Set price context on CoinMatch
-			cm.DayHigh = state.DayHigh
-			cm.DayLow = state.DayLow
 		}
 
 		// Calculate 5-candle average price (same lookback as volume)
 		if len(candles) >= m.config.LookbackPeriod {
-			cm.AvgPrice5 = m.calculateAveragePrice(candles, m.config.LookbackPeriod)
+			avgPrice := m.calculateAveragePrice(candles, m.config.LookbackPeriod)
+			cm.AvgPrice5 = avgPrice
+			if state != nil {
+				state.AvgPrice5 = avgPrice // Store in state for API responses
+			}
 		}
 	}
 

@@ -98,6 +98,7 @@ type VolumeProgressData struct {
 	IsApproachingSpike  bool    `json:"is_approaching_spike"`  // True if > 50% of threshold
 	TimeRemainingMs     int64   `json:"time_remaining_ms"`     // Milliseconds until candle close
 	LookbackCandles     int     `json:"lookback_candles"`      // How many candles used for average
+	CurrentPrice        float64 `json:"current_price"`         // Real-time current price (from close)
 }
 
 // VolumeProgressCallback is called on every kline update with current volume progress.
@@ -1084,6 +1085,7 @@ func (cp *CoinProfiler) CalculateVolumeProgress(symbol, timeframe string, curren
 		IsApproachingSpike: currentRatio >= requiredRatio*0.5, // > 50% of threshold
 		TimeRemainingMs:    timeRemaining.Milliseconds(),
 		LookbackCandles:    lookback,
+		CurrentPrice:       close, // Real-time price from candle close
 	}
 }
 

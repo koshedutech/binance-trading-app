@@ -17,7 +17,8 @@ export type PatternStatus =
   | 'consolidating'
   | 'ready'
   | 'failed'
-  | 'expired';
+  | 'expired'
+  | 'position_running';
 
 /**
  * Trading mode

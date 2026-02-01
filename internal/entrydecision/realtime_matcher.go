@@ -83,6 +83,7 @@ type VolumeProgress struct {
 	IsApproachingSpike bool    `json:"is_approaching_spike"` // True if > 50% of threshold
 	TimeRemainingMs    int64   `json:"time_remaining_ms"`    // Milliseconds until candle close
 	LookbackCandles    int     `json:"lookback_candles"`     // How many candles used for average
+	CurrentPrice       float64 `json:"current_price"`        // Real-time current price
 }
 
 // EntryLevels contains calculated entry, stop-loss, and take-profit levels.
@@ -228,6 +229,7 @@ func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgre
 		IsApproachingSpike: data.IsApproachingSpike,
 		TimeRemainingMs:    data.TimeRemainingMs,
 		LookbackCandles:    data.LookbackCandles,
+		CurrentPrice:       data.CurrentPrice,
 	}
 
 	// Store latest volume progress
@@ -281,6 +283,29 @@ func (r *RealtimePatternMatcher) GetVolumeProgress(symbol, timeframe string) *Vo
 // that is connected to the CoinProfiler for real-time updates.
 func (r *RealtimePatternMatcher) GetPatternMatcher() *VolumeImbalancePatternMatcher {
 	return r.patternMatcher
+}
+
+// ClearAllPatterns clears all pattern state from both the underlying pattern matcher
+// and the realtime matcher's cached states. This should be called when:
+// - The CoinProfiler restarts (e.g., browser refresh triggers stop/start)
+// - Subscriptions are refreshed
+// - A fresh pattern detection session is needed
+//
+// This prevents "pattern timeout/expired" issues after profiler restart because
+// old patterns with stale ExpiresAt timestamps are cleared before new candle data arrives.
+func (r *RealtimePatternMatcher) ClearAllPatterns() {
+	// Clear underlying pattern matcher's patterns
+	if r.patternMatcher != nil {
+		r.patternMatcher.ClearAllPatterns()
+	}
+
+	// Clear our cached states
+	r.mu.Lock()
+	r.lastStates = make(map[string]*PatternProgress)
+	r.volumeProgress = make(map[string]*VolumeProgress)
+	r.mu.Unlock()
+
+	log.Printf("[REALTIME-PATTERN] Cleared all pattern states for fresh start")
 }
 
 // OnCandleClose is called when a candle closes. This is the main entry point

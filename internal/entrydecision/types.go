@@ -56,6 +56,12 @@ const (
 
 	// PatternStatusExpired indicates the pattern window has expired.
 	PatternStatusExpired PatternStatus = "expired"
+
+	// PatternStatusPositionRunning indicates a position is currently open from this pattern.
+	// The coin should preserve its entry candle info and show position stage instead of
+	// resetting to "watching" state. This status is set when there's an active position
+	// on Binance for this symbol.
+	PatternStatusPositionRunning PatternStatus = "position_running"
 )
 
 // String returns the string representation of the pattern status.
@@ -73,7 +79,8 @@ func (ps PatternStatus) IsActive() bool {
 	return ps == PatternStatusWatching ||
 		ps == PatternStatusAccumulation ||
 		ps == PatternStatusConsolidating ||
-		ps == PatternStatusReady
+		ps == PatternStatusReady ||
+		ps == PatternStatusPositionRunning
 }
 
 // CoinMatch represents a single coin's match status against a strategy.

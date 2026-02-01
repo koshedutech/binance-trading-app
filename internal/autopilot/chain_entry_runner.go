@@ -39,6 +39,15 @@ type ChainCoinState struct {
 	ScoreHistory    int
 	ScoreFinal      int
 	BlockingReasons []string
+
+	// Strategy configuration fields (from sub-strategy settings)
+	StrategyGroup    string  // e.g., "breakout"
+	SubStrategy      string  // e.g., "ravindra_volume_imbalance"
+	Timeframe        string  // e.g., "3m", "15m"
+	BudgetUSD        float64 // Position size budget in USD from strategy settings
+	MaxLeverage      int     // Maximum leverage from strategy settings
+	SLPercent        float64 // Stop loss percentage from strategy settings
+	TPPercent        float64 // Take profit percentage from strategy settings
 }
 
 // ChainStateProvider is an interface for getting coin states from Redis.
@@ -463,8 +472,26 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		return fmt.Errorf("symbol %s not found in exchange info", symbol)
 	}
 
-	// Step 3: Get mode defaults for position size
+	// Step 3: Get position size from strategy settings (if available) or fall back to mode defaults
 	positionSizeUSD, slPercent, tpPercent := r.getModeDefaults(modeStr)
+
+	// Override with strategy-specific settings if provided
+	if state.BudgetUSD > 0 {
+		positionSizeUSD = state.BudgetUSD
+		log.Printf("[CHAIN-ENTRY] Using strategy budget: %.2f USD (from sub-strategy settings)", positionSizeUSD)
+	}
+	if state.SLPercent > 0 {
+		slPercent = state.SLPercent
+	}
+	if state.TPPercent > 0 {
+		tpPercent = state.TPPercent
+	}
+
+	// Apply leverage to position size (budget × leverage = effective position)
+	if state.MaxLeverage > 0 {
+		positionSizeUSD = positionSizeUSD * float64(state.MaxLeverage)
+		log.Printf("[CHAIN-ENTRY] Applied leverage %dx: effective position %.2f USD", state.MaxLeverage, positionSizeUSD)
+	}
 
 	// Step 4: Calculate quantity
 	quantity := positionSizeUSD / currentPrice

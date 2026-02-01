@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"binance-trading-bot/internal/coinprofiler"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -70,10 +72,44 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 
 	allCoinData := profiler.GetAllCoinData()
 
-	// Convert map to slice for JSON response
-	coins := make([]interface{}, 0, len(allCoinData))
+	// Get active positions to dynamically update source
+	activePositionSymbols := make(map[string]bool)
+	if controller := s.getFuturesAutopilot(); controller != nil {
+		if autopilot := controller.GetGinieAutopilot(); autopilot != nil {
+			for _, pos := range autopilot.GetPositions() {
+				if pos.RemainingQty > 0 {
+					activePositionSymbols[pos.Symbol] = true
+				}
+			}
+		}
+	}
+
+	// Convert map to slice and enrich source based on active positions
+	coins := make([]map[string]interface{}, 0, len(allCoinData))
 	for _, coin := range allCoinData {
-		coins = append(coins, coin)
+		// Create a copy of the coin data as a map
+		coinMap := map[string]interface{}{
+			"symbol":     coin.Symbol,
+			"price":      coin.Price,
+			"volume_24h": coin.Volume24h,
+			"volatility": coin.Volatility,
+			"timeframes": coin.Timeframes,
+			"strategies": coin.Strategies,
+			"updated_at": coin.UpdatedAt,
+		}
+
+		// Dynamically determine source based on active positions
+		if activePositionSymbols[coin.Symbol] {
+			if coin.Source == coinprofiler.DataSourceStrategy {
+				coinMap["source"] = "both" // Has both strategy and position
+			} else {
+				coinMap["source"] = "position"
+			}
+		} else {
+			coinMap["source"] = string(coin.Source) // Keep original source (strategy)
+		}
+
+		coins = append(coins, coinMap)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

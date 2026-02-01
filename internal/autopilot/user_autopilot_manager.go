@@ -557,6 +557,10 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// This is the critical bridge between pattern detection and order execution.
 	// When a pattern becomes "ready", ChainEntryRunner will automatically place orders.
 	patternStateProvider := NewPatternStateProvider(realtimeMatcher, userID)
+	// Wire repository for strategy settings access (budget, leverage, SL/TP)
+	if m.repo != nil {
+		patternStateProvider.SetRepository(m.repo)
+	}
 	chainEntryRunner.SetStateProvider(patternStateProvider)
 	m.logger.Info("PatternStateProvider wired to ChainEntryRunner for automatic order execution", "user_id", userID)
 
@@ -704,6 +708,14 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 	if isChainMode {
 		// 1. Start CoinProfiler (real-time WebSocket data collection)
 		if instance.CoinProfiler != nil && !instance.CoinProfiler.IsRunning() {
+			// CRITICAL: Clear all pattern state before starting to prevent "pattern timeout" issues.
+			// When the profiler restarts (e.g., after browser refresh), old patterns with stale
+			// ExpiresAt timestamps would appear as "expired" when new candle data arrives.
+			if instance.RealtimePatternMatcher != nil {
+				instance.RealtimePatternMatcher.ClearAllPatterns()
+				m.logger.Info("Cleared stale pattern state before CoinProfiler start (chain mode)", "user_id", userID)
+			}
+
 			m.logger.Info("Starting CoinProfiler for chain system", "user_id", userID)
 			if err := instance.CoinProfiler.Start(); err != nil {
 				m.logger.Error("Failed to start CoinProfiler", "user_id", userID, "error", err)
@@ -1246,6 +1258,16 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 	}
 
 	m.logger.Info("Starting coin profiler for user", "user_id", userID)
+
+	// CRITICAL: Clear all pattern state before starting to prevent "pattern timeout" issues.
+	// When the profiler restarts (e.g., after browser refresh), old patterns with stale
+	// ExpiresAt timestamps would appear as "expired" when new candle data arrives.
+	// Clearing patterns ensures fresh detection with new timestamps.
+	if instance.RealtimePatternMatcher != nil {
+		instance.RealtimePatternMatcher.ClearAllPatterns()
+		m.logger.Info("Cleared stale pattern state before CoinProfiler start", "user_id", userID)
+	}
+
 	if err := instance.CoinProfiler.Start(); err != nil {
 		return fmt.Errorf("failed to start coin profiler: %w", err)
 	}
