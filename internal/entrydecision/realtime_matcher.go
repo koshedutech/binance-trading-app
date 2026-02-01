@@ -53,6 +53,9 @@ type PatternUpdate struct {
 	// Entry levels (when pattern is ready or near-ready)
 	EntryLevels *EntryLevels `json:"entry_levels,omitempty"`
 
+	// Volume progress (real-time volume ratio for UI display)
+	VolumeProgress *VolumeProgress `json:"volume_progress,omitempty"`
+
 	// Direction - the actual direction being tracked (long/short)
 	Direction string `json:"direction,omitempty"`
 
@@ -67,6 +70,19 @@ type PatternUpdate struct {
 
 	// Timestamp
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// VolumeProgress contains real-time volume progress for UI display.
+type VolumeProgress struct {
+	CurrentVolume      float64 `json:"current_volume"`       // Current forming candle's volume
+	AverageVolume      float64 `json:"average_volume"`       // Average of last N closed candles
+	CurrentRatio       float64 `json:"current_ratio"`        // CurrentVolume / AverageVolume
+	RequiredRatio      float64 `json:"required_ratio"`       // Threshold to trigger (e.g., 3.0)
+	ProgressPercent    float64 `json:"progress_percent"`     // (CurrentRatio / RequiredRatio) * 100
+	CandleDirection    string  `json:"candle_direction"`     // "bullish" or "bearish"
+	IsApproachingSpike bool    `json:"is_approaching_spike"` // True if > 50% of threshold
+	TimeRemainingMs    int64   `json:"time_remaining_ms"`    // Milliseconds until candle close
+	LookbackCandles    int     `json:"lookback_candles"`     // How many candles used for average
 }
 
 // EntryLevels contains calculated entry, stop-loss, and take-profit levels.
@@ -96,6 +112,14 @@ type EntryLevels struct {
 // PatternUpdateCallback is called when a pattern state changes.
 type PatternUpdateCallback func(update PatternUpdate)
 
+// VolumeProgressCallback is called on every tick with volume progress data.
+type VolumeProgressCallback func(progress VolumeProgress)
+
+// BreakoutCallback is called immediately when tick-level breakout is detected.
+// This enables instant order execution without waiting for scan cycle.
+// Parameters: symbol, direction ("long"/"short"), mode, price at breakout
+type BreakoutCallback func(symbol, direction, mode string, price float64)
+
 // RealtimePatternMatcher handles real-time pattern evaluation on candle close events.
 type RealtimePatternMatcher struct {
 	// Pattern matcher for Volume Imbalance strategy
@@ -103,6 +127,12 @@ type RealtimePatternMatcher struct {
 
 	// Callback for pattern state changes
 	onPatternUpdate PatternUpdateCallback
+
+	// Callback for real-time volume progress updates
+	onVolumeProgress VolumeProgressCallback
+
+	// Callback for immediate breakout order execution
+	onBreakout BreakoutCallback
 
 	// User identification for targeted broadcasts
 	userID string
@@ -113,7 +143,11 @@ type RealtimePatternMatcher struct {
 
 	// State tracking - last known states for change detection
 	lastStates map[string]*PatternProgress // key: symbol:mode:timeframe
-	mu         sync.RWMutex
+
+	// Volume progress storage - latest volume progress per symbol
+	volumeProgress map[string]*VolumeProgress // key: symbol:timeframe
+
+	mu sync.RWMutex
 }
 
 // RealtimePatternMatcherConfig holds configuration for the realtime matcher.
@@ -147,6 +181,7 @@ func NewRealtimePatternMatcher(
 		defaultMode:    config.DefaultMode,
 		riskReward:     config.RiskRewardRatio,
 		lastStates:     make(map[string]*PatternProgress),
+		volumeProgress: make(map[string]*VolumeProgress),
 	}
 }
 
@@ -162,6 +197,83 @@ func (r *RealtimePatternMatcher) SetUserID(userID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.userID = userID
+}
+
+// SetVolumeProgressCallback sets the callback for real-time volume progress updates.
+func (r *RealtimePatternMatcher) SetVolumeProgressCallback(callback VolumeProgressCallback) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onVolumeProgress = callback
+}
+
+// SetBreakoutCallback sets the callback for immediate breakout order execution.
+// This callback is triggered the moment price breaks out, enabling instant order placement.
+func (r *RealtimePatternMatcher) SetBreakoutCallback(callback BreakoutCallback) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onBreakout = callback
+}
+
+// OnVolumeProgress is called on every tick with volume progress data from CoinProfiler.
+// It stores the latest volume progress and broadcasts it via WebSocket in real-time.
+func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgressData) {
+	// Convert CoinProfiler data to our VolumeProgress type
+	progress := &VolumeProgress{
+		CurrentVolume:      data.CurrentVolume,
+		AverageVolume:      data.AverageVolume,
+		CurrentRatio:       data.CurrentRatio,
+		RequiredRatio:      data.RequiredRatio,
+		ProgressPercent:    data.ProgressPercent,
+		CandleDirection:    data.CandleDirection,
+		IsApproachingSpike: data.IsApproachingSpike,
+		TimeRemainingMs:    data.TimeRemainingMs,
+		LookbackCandles:    data.LookbackCandles,
+	}
+
+	// Store latest volume progress
+	key := fmt.Sprintf("%s:%s", data.Symbol, data.Timeframe)
+	r.mu.Lock()
+	r.volumeProgress[key] = progress
+	callback := r.onVolumeProgress
+	userID := r.userID
+	r.mu.Unlock()
+
+	// Broadcast volume progress update
+	if callback != nil {
+		callback(*progress)
+	}
+
+	// Also broadcast as a pattern update with volume progress attached
+	// This keeps the frontend in sync with real-time volume data
+	r.mu.RLock()
+	patternCallback := r.onPatternUpdate
+	r.mu.RUnlock()
+
+	if patternCallback != nil {
+		update := PatternUpdate{
+			UserID:         userID,
+			Symbol:         data.Symbol,
+			Timeframe:      data.Timeframe,
+			Mode:           r.defaultMode,
+			Strategy:       "volume_imbalance",
+			SubStrategy:    "ravindra_volume_imbalance",
+			CurrentStep:    1,
+			TotalSteps:     2,
+			Status:         PatternStatusWatching,
+			VolumeProgress: progress,
+			LookingFor:     r.getLookingForDirection(),
+			UpdatedAt:      time.Now(),
+		}
+		patternCallback(update)
+	}
+}
+
+// GetVolumeProgress returns the latest volume progress for a symbol/timeframe.
+func (r *RealtimePatternMatcher) GetVolumeProgress(symbol, timeframe string) *VolumeProgress {
+	key := fmt.Sprintf("%s:%s", symbol, timeframe)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.volumeProgress[key]
 }
 
 // GetPatternMatcher returns the underlying VolumeImbalancePatternMatcher.
@@ -213,7 +325,8 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	matcherCandles := make([]Candle, len(candles))
 	for i, hc := range candles {
 		matcherCandles[i] = Candle{
-			Time:           hc.CloseTime,
+			OpenTime:       hc.OpenTime,  // Candle open time (use to identify the candle)
+			Time:           hc.CloseTime, // Candle close time (backward compat)
 			Open:           hc.Open,
 			High:           hc.High,
 			Low:            hc.Low,
@@ -403,6 +516,9 @@ func (r *RealtimePatternMatcher) buildPatternUpdate(
 		}
 	}
 
+	// Attach latest volume progress if available
+	update.VolumeProgress = r.GetVolumeProgress(symbol, timeframe)
+
 	return update
 }
 
@@ -551,14 +667,26 @@ func (r *RealtimePatternMatcher) RegisterWithCoinProfiler(cp *coinprofiler.CoinP
 	cp.SetCandleCloseCallback(r.OnCandleClose)
 	// Also register for price updates (tick-level breakout detection)
 	cp.SetPriceUpdateCallback(r.OnPriceUpdate)
+
+	// Register for volume progress updates (real-time volume ratio display)
+	cp.SetVolumeProgressCallback(r.OnVolumeProgress)
+
+	// Configure volume progress calculation parameters from pattern matcher config
+	if r.patternMatcher != nil && r.patternMatcher.config != nil {
+		cp.SetVolumeProgressConfig(
+			r.patternMatcher.config.MinVolumeSpikeMultiplier,
+			r.patternMatcher.config.LookbackPeriod,
+		)
+	}
 }
 
 // ============================================================================
-// TICK-LEVEL BREAKOUT DETECTION
+// TICK-LEVEL BREAKOUT DETECTION AND REAL-TIME PROXIMITY UPDATES
 // ============================================================================
 
-// OnPriceUpdate is called on every price tick. This enables immediate breakout
-// detection without waiting for candle close.
+// OnPriceUpdate is called on every price tick. This enables:
+// 1. Real-time proximity updates for consolidating coins (UI shows live distance to entry)
+// 2. Immediate breakout detection without waiting for candle close
 // It only evaluates coins that have completed Step 1 (have a reference candle).
 func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, currentHigh, currentLow float64) {
 	if r.patternMatcher == nil {
@@ -572,96 +700,132 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		return // No reference candle yet, nothing to check
 	}
 
-	// Check if pattern is in a state where breakout is relevant
+	// Check if pattern is in a state where updates are relevant
 	progress := r.patternMatcher.GetPattern(symbol, mode, timeframe)
 	if progress == nil {
 		return
 	}
 
-	// Only check for breakout if we're in accumulation/consolidation phase
+	// Only process if we're in accumulation/consolidation phase
 	if progress.Status != PatternStatusAccumulation && progress.Status != PatternStatusConsolidating {
 		return
 	}
 
-	// Check for breakout based on direction
+	// Calculate proximity to breakout for real-time display
+	var proximityPercent float64
 	var isBreakout bool
+
 	switch state.Direction {
 	case "long":
-		// For LONG: Check if current high breaks reference high
+		// For LONG: Check distance to reference high
+		if state.ReferenceCandle.High > 0 {
+			proximityPercent = ((price - state.ReferenceCandle.High) / state.ReferenceCandle.High) * 100
+		}
+		// Check if current high breaks reference high
 		if currentHigh >= state.ReferenceCandle.High {
 			isBreakout = true
 		}
 	case "short":
-		// For SHORT: Check if current low breaks consolidation low
+		// For SHORT: Check distance to consolidation low
+		if state.ConsolidationLow > 0 {
+			proximityPercent = ((state.ConsolidationLow - price) / state.ConsolidationLow) * 100
+		}
 		if state.ConsolidationLow > 0 && currentLow <= state.ConsolidationLow {
 			isBreakout = true
 		}
 	}
 
-	if !isBreakout {
-		return
-	}
-
-	// Breakout detected! Log and trigger update
-	log.Printf("[REALTIME-BREAKOUT] %s:%s - TICK-LEVEL BREAKOUT! Direction: %s, Price: %.6f",
-		symbol, timeframe, state.Direction, price)
-
-	// Mark pattern as ready (breakout detected)
-	// Update step details to indicate tick-level detection
-	r.patternMatcher.mu.Lock()
-	patternKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
-	internalProgress := r.patternMatcher.patterns[patternKey]
-	if internalProgress != nil && internalProgress.Status != PatternStatusReady {
-		// Mark Step 2 as complete (we're already at step 2, just mark it done)
-		internalProgress.StepDetails[1] = StepDetail{
-			StepNumber:  2,
-			Name:        "Breakout",
-			Completed:   true,
-			CompletedAt: time.Now(),
-			Progress:    "LIVE",
-			Details:     fmt.Sprintf("Tick-level breakout! %s @ %.6f", state.Direction, price),
-		}
-		// Do NOT call AdvanceStep - we're already at step 2
-		// Just mark as READY
-		internalProgress.SetStatus(PatternStatusReady)
-		internalProgress.UpdatedAt = time.Now()
-	}
-	r.patternMatcher.mu.Unlock()
-
-	// Get updated progress and build update
-	progress = r.patternMatcher.GetPattern(symbol, mode, timeframe)
-	if progress == nil {
-		return
-	}
-
-	// Store new state
-	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
-	r.mu.Lock()
-	r.lastStates[stateKey] = progress
+	r.mu.RLock()
 	callback := r.onPatternUpdate
-	r.mu.Unlock()
+	breakoutCallback := r.onBreakout
+	userID := r.userID
+	r.mu.RUnlock()
 
-	// Build and broadcast update
-	update := PatternUpdate{
-		UserID:      r.userID,
-		Symbol:      symbol,
-		Timeframe:   timeframe,
-		Mode:        progress.Mode,
-		Strategy:    progress.Strategy,
-		SubStrategy: progress.SubStrategy,
-		CurrentStep: progress.CurrentStep,
-		TotalSteps:  progress.TotalSteps,
-		Status:      progress.Status,
-		StepDetails: progress.StepDetails,
-		Direction:   state.Direction,
-		UpdatedAt:   time.Now(),
+	if isBreakout {
+		// Breakout detected! Log and trigger update
+		log.Printf("[REALTIME-BREAKOUT] %s:%s - TICK-LEVEL BREAKOUT! Direction: %s, Price: %.6f",
+			symbol, timeframe, state.Direction, price)
+
+		// Mark pattern as ready (breakout detected)
+		r.patternMatcher.mu.Lock()
+		patternKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+		internalProgress := r.patternMatcher.patterns[patternKey]
+		if internalProgress != nil && internalProgress.Status != PatternStatusReady {
+			// Mark Step 2 as complete
+			internalProgress.StepDetails[1] = StepDetail{
+				StepNumber:  2,
+				Name:        "Breakout",
+				Completed:   true,
+				CompletedAt: time.Now(),
+				Progress:    "LIVE",
+				Details:     fmt.Sprintf("Tick-level breakout! %s @ %.6f", state.Direction, price),
+			}
+			internalProgress.SetStatus(PatternStatusReady)
+			internalProgress.UpdatedAt = time.Now()
+		}
+		r.patternMatcher.mu.Unlock()
+
+		// CRITICAL: Trigger immediate order execution callback
+		// This enables instant order placement the moment breakout occurs
+		if breakoutCallback != nil {
+			log.Printf("[REALTIME-BREAKOUT] Triggering immediate entry callback for %s: %s @ %.6f",
+				symbol, state.Direction, price)
+			go breakoutCallback(symbol, state.Direction, mode, price)
+		}
+
+		// Get updated progress for broadcast
+		progress = r.patternMatcher.GetPattern(symbol, mode, timeframe)
+		if progress == nil {
+			return
+		}
+
+		// Store new state
+		stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+		r.mu.Lock()
+		r.lastStates[stateKey] = progress
+		r.mu.Unlock()
 	}
 
-	// Calculate entry levels
-	update.EntryLevels = r.calculateEntryLevels(state, price)
-
-	// Trigger callback if set
+	// ALWAYS broadcast update for consolidating coins - even without breakout
+	// This enables real-time proximity display in the UI
 	if callback != nil {
+		// Create a copy of step details to update with real-time proximity
+		stepDetails := make([]StepDetail, len(progress.StepDetails))
+		copy(stepDetails, progress.StepDetails)
+
+		// Update Step 2 details with real-time proximity
+		if len(stepDetails) >= 2 && !isBreakout {
+			stepDetails[1] = StepDetail{
+				StepNumber: 2,
+				Name:       "Breakout",
+				Completed:  false,
+				Progress:   fmt.Sprintf("%.2f%%", proximityPercent),
+				Details:    fmt.Sprintf("Price: %.4f → Entry: %.4f", price, state.ReferenceCandle.High),
+			}
+		}
+
+		update := PatternUpdate{
+			UserID:      userID,
+			Symbol:      symbol,
+			Timeframe:   timeframe,
+			Mode:        progress.Mode,
+			Strategy:    progress.Strategy,
+			SubStrategy: progress.SubStrategy,
+			CurrentStep: progress.CurrentStep,
+			TotalSteps:  progress.TotalSteps,
+			Status:      progress.Status,
+			StepDetails: stepDetails,
+			Direction:   state.Direction,
+			LookingFor:  r.getLookingForDirection(),
+			UpdatedAt:   time.Now(),
+		}
+
+		// Calculate and include entry levels with current price
+		update.EntryLevels = r.calculateEntryLevels(state, price)
+		if update.EntryLevels != nil {
+			update.EntryLevels.CurrentPrice = price
+		}
+
 		callback(update)
 	}
 }

@@ -97,6 +97,19 @@ function isEntryDecisionResponse(data: unknown): data is EntryDecisionStrategies
   );
 }
 
+/**
+ * Type guard to validate individual pattern update
+ */
+function isPatternUpdate(data: unknown): data is PatternUpdate {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'symbol' in data &&
+    'status' in data &&
+    typeof (data as PatternUpdate).symbol === 'string'
+  );
+}
+
 // ==================== useEntryDecisionStrategies Hook ====================
 
 /**
@@ -200,6 +213,93 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
       }
     };
 
+    // Real-time pattern update handler - merges individual coin updates for live proximity display
+    const handlePatternUpdate = (event: WSEvent) => {
+      const update = event.data as PatternUpdate;
+      if (!isPatternUpdate(update)) return;
+
+      // Merge update into strategies for real-time display
+      setStrategies(prevStrategies => {
+        return prevStrategies.map(strategy => {
+          // Find the coin in this strategy
+          const coinIndex = strategy.coins.findIndex(c => c.symbol === update.symbol);
+          if (coinIndex === -1) return strategy;
+
+          // Create updated coin with real-time data
+          const updatedCoins = [...strategy.coins];
+          const coin = { ...updatedCoins[coinIndex] };
+
+          // Update status and step from pattern update
+          coin.status = update.status;
+          coin.step = update.current_step;
+          coin.total_steps = update.total_steps;
+          coin.step_details = update.step_details;
+          coin.direction = update.direction as 'long' | 'short' | 'neutral' | undefined;
+          coin.updated_at = update.updated_at;
+
+          // Update entry levels with real-time price data
+          if (update.entry_levels) {
+            coin.current_price = update.entry_levels.current_price;
+            // Calculate proximity to breakout from entry levels
+            if (update.entry_levels.entry_price && update.entry_levels.current_price) {
+              coin.proximity_to_breakout =
+                ((update.entry_levels.current_price - update.entry_levels.entry_price) /
+                  update.entry_levels.entry_price) * 100;
+            }
+          }
+
+          // Update volume progress if available
+          if (update.volume_progress) {
+            coin.volume_multiplier = update.volume_progress.current_ratio;
+            coin.volume_threshold = update.volume_progress.required_ratio;
+            coin.current_volume = update.volume_progress.current_volume;
+            coin.avg_volume = update.volume_progress.average_volume;
+          }
+
+          updatedCoins[coinIndex] = coin;
+          return { ...strategy, coins: updatedCoins };
+        });
+      });
+
+      // Also update byMode for grouped view
+      setByMode(prevByMode => {
+        return prevByMode.map(modeGroup => ({
+          ...modeGroup,
+          strategies: modeGroup.strategies.map(strategy => {
+            const coinIndex = strategy.coins.findIndex(c => c.symbol === update.symbol);
+            if (coinIndex === -1) return strategy;
+
+            const updatedCoins = [...strategy.coins];
+            const coin = { ...updatedCoins[coinIndex] };
+
+            coin.status = update.status;
+            coin.step = update.current_step;
+            coin.direction = update.direction as 'long' | 'short' | 'neutral' | undefined;
+
+            if (update.entry_levels) {
+              coin.current_price = update.entry_levels.current_price;
+              if (update.entry_levels.entry_price && update.entry_levels.current_price) {
+                coin.proximity_to_breakout =
+                  ((update.entry_levels.current_price - update.entry_levels.entry_price) /
+                    update.entry_levels.entry_price) * 100;
+              }
+            }
+
+            if (update.volume_progress) {
+              coin.volume_multiplier = update.volume_progress.current_ratio;
+              coin.volume_threshold = update.volume_progress.required_ratio;
+              coin.current_volume = update.volume_progress.current_volume;
+            }
+
+            updatedCoins[coinIndex] = coin;
+            return { ...strategy, coins: updatedCoins };
+          }),
+        }));
+      });
+
+      setLastUpdated(new Date());
+    };
+
     // Track WebSocket connection status
     const handleConnect = () => {
       setIsRealTime(true);
@@ -213,6 +313,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
     // Subscribe to WebSocket events
     wsService.subscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
+    wsService.subscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
     wsService.onConnect(handleConnect);
     wsService.onDisconnect(handleDisconnect);
 
@@ -233,6 +334,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
     return () => {
       wsService.unsubscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
+      wsService.unsubscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);
       if (fallbackTimerRef.current) {

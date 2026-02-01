@@ -87,6 +87,8 @@ export default function EntryDecisionEngineCard({
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [expandedCoins, setExpandedCoins] = useState<Set<string>>(new Set());
   const hasInitializedExpansion = useRef(false);
+  // Track if auto-expansion has occurred (to respect user's manual collapse)
+  const autoExpandedOnDataRef = useRef(false);
 
   // Use user's timezone for datetime display
   const { formatTime } = useUserTimezone();
@@ -211,6 +213,14 @@ export default function EntryDecisionEngineCard({
       fetchCoinStates();
     }
   }, [expanded, fetchCoinStates]);
+
+  // Auto-expand when coin states data is received for the first time
+  useEffect(() => {
+    if (coinStates.length > 0 && !autoExpandedOnDataRef.current) {
+      setExpanded(true);
+      autoExpandedOnDataRef.current = true;
+    }
+  }, [coinStates.length]);
 
   // WebSocket subscription for real-time COIN_STATE_UPDATE events
   // Updates state directly from WebSocket data - NO API calls

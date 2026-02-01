@@ -50,6 +50,15 @@ type CoinProfiler struct {
 	// Callback for real-time price updates (used for tick-level breakout detection)
 	onPriceUpdate PriceUpdateCallback
 
+	// Callback for volume progress updates (used for real-time volume ratio display)
+	onVolumeProgress VolumeProgressCallback
+
+	// Volume progress configuration (set by pattern matcher)
+	volumeProgressConfig struct {
+		RequiredRatio   float64 // e.g., 3.0 for 3x volume spike
+		LookbackCandles int     // e.g., 5 for 5-candle average
+	}
+
 	// Metrics
 	updateCount      int64
 	updatesPerSecond float64
@@ -75,6 +84,25 @@ type CandleCloseCallback func(symbol, timeframe string, candles []HistoricalCand
 // This enables real-time breakout detection without waiting for candle close.
 // Parameters: symbol, timeframe, current price, current high of forming candle
 type PriceUpdateCallback func(symbol, timeframe string, price, currentHigh, currentLow float64)
+
+// VolumeProgressData contains real-time volume ratio information for UI display.
+type VolumeProgressData struct {
+	Symbol              string  `json:"symbol"`
+	Timeframe           string  `json:"timeframe"`
+	CurrentVolume       float64 `json:"current_volume"`        // Current forming candle's volume
+	AverageVolume       float64 `json:"average_volume"`        // Average of last N closed candles
+	CurrentRatio        float64 `json:"current_ratio"`         // CurrentVolume / AverageVolume
+	RequiredRatio       float64 `json:"required_ratio"`        // Threshold to trigger (e.g., 3.0)
+	ProgressPercent     float64 `json:"progress_percent"`      // (CurrentRatio / RequiredRatio) * 100
+	CandleDirection     string  `json:"candle_direction"`      // "bullish" or "bearish"
+	IsApproachingSpike  bool    `json:"is_approaching_spike"`  // True if > 50% of threshold
+	TimeRemainingMs     int64   `json:"time_remaining_ms"`     // Milliseconds until candle close
+	LookbackCandles     int     `json:"lookback_candles"`      // How many candles used for average
+}
+
+// VolumeProgressCallback is called on every kline update with current volume progress.
+// This enables real-time volume ratio display in the UI.
+type VolumeProgressCallback func(data VolumeProgressData)
 
 // NewCoinProfiler creates a new Coin Profiler instance.
 // If config is nil, default configuration will be used.
@@ -410,6 +438,11 @@ func (cp *CoinProfiler) AddSubscription(req *SubscriptionRequest) error {
 		// Update source to "both" if needed
 		if existing.Source != req.Source {
 			existing.Source = DataSourceBoth
+		}
+
+		// Update existing coinData source if it exists
+		if coinData, ok := cp.coinData[req.Symbol]; ok {
+			coinData.Source = existing.Source
 		}
 
 		cp.logDebug("Updated subscription for %s: timeframes=%v, source=%s", req.Symbol, merged, existing.Source)
@@ -807,6 +840,10 @@ func (cp *CoinProfiler) SetSubscriptionsFromCombined(combined *CombinedRequireme
 			Timeframes: symReq.Timeframes,
 			Source:     symReq.Source,
 		}
+		// Also update existing coinData source if it exists
+		if coinData, exists := cp.coinData[symbol]; exists {
+			coinData.Source = symReq.Source
+		}
 	}
 	cp.mu.Unlock()
 
@@ -951,6 +988,105 @@ func (cp *CoinProfiler) GetPriceUpdateCallback() PriceUpdateCallback {
 	return cp.onPriceUpdate
 }
 
+// SetVolumeProgressCallback sets a callback for real-time volume progress updates.
+// This is called on every kline update with calculated volume ratio.
+func (cp *CoinProfiler) SetVolumeProgressCallback(callback VolumeProgressCallback) {
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+	cp.onVolumeProgress = callback
+}
+
+// GetVolumeProgressCallback returns the current volume progress callback.
+func (cp *CoinProfiler) GetVolumeProgressCallback() VolumeProgressCallback {
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+	return cp.onVolumeProgress
+}
+
+// SetVolumeProgressConfig configures volume progress calculation parameters.
+func (cp *CoinProfiler) SetVolumeProgressConfig(requiredRatio float64, lookbackCandles int) {
+	cp.candleHistoryMu.Lock()
+	defer cp.candleHistoryMu.Unlock()
+	cp.volumeProgressConfig.RequiredRatio = requiredRatio
+	cp.volumeProgressConfig.LookbackCandles = lookbackCandles
+}
+
+// GetVolumeProgressConfig returns volume progress configuration.
+func (cp *CoinProfiler) GetVolumeProgressConfig() (requiredRatio float64, lookbackCandles int) {
+	cp.candleHistoryMu.RLock()
+	defer cp.candleHistoryMu.RUnlock()
+	return cp.volumeProgressConfig.RequiredRatio, cp.volumeProgressConfig.LookbackCandles
+}
+
+// CalculateVolumeProgress calculates current volume progress for a symbol/timeframe.
+// Returns VolumeProgressData with current ratio vs threshold.
+func (cp *CoinProfiler) CalculateVolumeProgress(symbol, timeframe string, currentVolume, open, close float64, closeTime time.Time) *VolumeProgressData {
+	cp.candleHistoryMu.RLock()
+	requiredRatio := cp.volumeProgressConfig.RequiredRatio
+	lookback := cp.volumeProgressConfig.LookbackCandles
+	cp.candleHistoryMu.RUnlock()
+
+	// Default values if not configured
+	if requiredRatio <= 0 {
+		requiredRatio = 3.0
+	}
+	if lookback <= 0 {
+		lookback = 5
+	}
+
+	// Get historical candles for average calculation
+	history := cp.GetCandleHistory(symbol, timeframe)
+	if len(history) < lookback {
+		return nil // Not enough data
+	}
+
+	// Calculate average volume of last N closed candles
+	var totalVolume float64
+	for i := len(history) - lookback; i < len(history); i++ {
+		totalVolume += history[i].Volume
+	}
+	avgVolume := totalVolume / float64(lookback)
+
+	if avgVolume <= 0 {
+		return nil
+	}
+
+	// Calculate current ratio
+	currentRatio := currentVolume / avgVolume
+	progressPercent := (currentRatio / requiredRatio) * 100
+	if progressPercent > 100 {
+		progressPercent = 100
+	}
+
+	// Determine candle direction
+	direction := "bearish"
+	if close > open {
+		direction = "bullish"
+	} else if close == open {
+		direction = "neutral"
+	}
+
+	// Calculate time remaining until candle close
+	timeRemaining := closeTime.Sub(time.Now())
+	if timeRemaining < 0 {
+		timeRemaining = 0
+	}
+
+	return &VolumeProgressData{
+		Symbol:             symbol,
+		Timeframe:          timeframe,
+		CurrentVolume:      currentVolume,
+		AverageVolume:      avgVolume,
+		CurrentRatio:       currentRatio,
+		RequiredRatio:      requiredRatio,
+		ProgressPercent:    progressPercent,
+		CandleDirection:    direction,
+		IsApproachingSpike: currentRatio >= requiredRatio*0.5, // > 50% of threshold
+		TimeRemainingMs:    timeRemaining.Milliseconds(),
+		LookbackCandles:    lookback,
+	}
+}
+
 // SetHistoricalDataProvider sets the provider for fetching historical candles.
 // This should be called before starting the CoinProfiler to enable historical prefetch.
 func (cp *CoinProfiler) SetHistoricalDataProvider(provider HistoricalDataProvider) {
@@ -986,8 +1122,8 @@ func (cp *CoinProfiler) PrefetchHistoricalCandles(symbols []string, timeframes [
 
 	// Process SEQUENTIALLY with delay to avoid rate limits
 	// Binance rate limit: 2400 requests/minute = 40/second
-	// We use 150ms delay = ~6.6 requests/second (safe margin)
-	const requestDelay = 150 * time.Millisecond
+	// We use 50ms delay = ~20 requests/second (still safe, faster startup)
+	const requestDelay = 50 * time.Millisecond
 	const maxRetries = 3
 	const retryDelay = 2 * time.Second
 

@@ -35,7 +35,8 @@ import (
 
 // Candle represents OHLCV data for pattern analysis.
 type Candle struct {
-	Time           time.Time `json:"time"`
+	OpenTime       time.Time `json:"open_time"`                  // Candle open time (use this to identify the candle)
+	Time           time.Time `json:"time"`                       // Candle close time (for backward compatibility)
 	Open           float64   `json:"open"`
 	High           float64   `json:"high"`
 	Low            float64   `json:"low"`
@@ -444,10 +445,19 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 
 	// Debug counters
 	var skippedPreTrend, skippedVolume, skippedDirection, skippedBodyRatio, candidatesChecked int
+	var maxVolumeRatio float64
 
 	for i := lookbackStart; i < len(candles)-1; i++ {
 		c := &candles[i]
 		candidatesChecked++
+
+		// Track max volume ratio for debugging
+		if avgVolume > 0 {
+			volRatio := c.Volume / avgVolume
+			if volRatio > maxVolumeRatio {
+				maxVolumeRatio = volRatio
+			}
+		}
 
 		// ============================================================
 		// OPTIMIZED FILTER 1: Pre-trend Direction
@@ -559,8 +569,8 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 
 	// Log debug info if no spike found
 	if bestCandle == nil && candidatesChecked > 0 {
-		log.Printf("[SPIKE-DEBUG] No spike found: checked=%d, skippedPreTrend=%d, skippedVolume=%d, skippedDirection=%d, skippedBodyRatio=%d, avgVol=%.0f, threshold=%.1fx",
-			candidatesChecked, skippedPreTrend, skippedVolume, skippedDirection, skippedBodyRatio, avgVolume, m.config.MinVolumeSpikeMultiplier)
+		log.Printf("[SPIKE-DEBUG] No spike found: checked=%d, skippedVol=%d, maxRatio=%.2fx (need %.1fx), avgVol=%.0f",
+			candidatesChecked, skippedVolume, maxVolumeRatio, m.config.MinVolumeSpikeMultiplier, avgVolume)
 	}
 
 	return bestCandle, bestIndex, avgVolume
@@ -965,6 +975,28 @@ func (m *VolumeImbalancePatternMatcher) GetAllCoinMatches() []*CoinMatch {
 	return result
 }
 
+// GetCoinMatchesForStrategy returns coin matches filtered by mode and timeframe.
+// This prevents duplicate coins from appearing when the same coin is tracked
+// across multiple strategies (e.g., scalp/3m and swing/1h).
+func (m *VolumeImbalancePatternMatcher) GetCoinMatchesForStrategy(mode, timeframe string) []*CoinMatch {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]*CoinMatch, 0)
+	for key, progress := range m.patterns {
+		// Filter by mode and timeframe
+		if progress.Mode != mode || progress.Timeframe != timeframe {
+			continue
+		}
+		state := m.states[key]
+		cm := m.createCoinMatchWithCandles(progress, state, nil)
+		if cm != nil {
+			result = append(result, cm)
+		}
+	}
+	return result
+}
+
 // CleanupExpiredPatterns removes expired patterns and returns the count.
 func (m *VolumeImbalancePatternMatcher) CleanupExpiredPatterns() int {
 	m.mu.Lock()
@@ -1039,9 +1071,10 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 			cm.ReferenceDetectedAt = &refDetectedAt
 
 			// Convert internal Candle to ReferenceCandle struct
+			// Use OpenTime to identify the candle (aligned to candle boundaries like :00, :03, :06)
 			cm.ReferenceCandle = &ReferenceCandle{
-				OpenTime:         state.ReferenceCandle.Time,
-				CloseTime:        state.ReferenceCandle.Time, // Use same time as close time approximation
+				OpenTime:         state.ReferenceCandle.OpenTime, // Candle open time (proper candle identifier)
+				CloseTime:        state.ReferenceCandle.Time,     // Candle close time
 				Open:             state.ReferenceCandle.Open,
 				High:             state.ReferenceCandle.High,
 				Low:              state.ReferenceCandle.Low,
@@ -1103,9 +1136,10 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 			cm.ReadyAt = &readyAt
 
 			// Create EntryCandle from breakout data
+			// Use OpenTime to identify the candle (aligned to candle boundaries)
 			cm.EntryCandle = &EntryCandle{
-				OpenTime:         state.BreakoutCandle.Time,
-				CloseTime:        state.BreakoutCandle.Time, // Approximation
+				OpenTime:         state.BreakoutCandle.OpenTime, // Candle open time (proper identifier)
+				CloseTime:        state.BreakoutCandle.Time,     // Candle close time
 				Open:             state.BreakoutCandle.Open,
 				High:             state.BreakoutCandle.High,
 				Low:              state.BreakoutCandle.Low,

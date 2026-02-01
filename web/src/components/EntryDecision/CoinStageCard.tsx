@@ -18,6 +18,7 @@ import type {
   PatternUpdate,
   PatternStatus,
   EntryLevels,
+  VolumeProgress,
   PATTERN_STATUS_COLORS,
   PATTERN_STATUS_LABELS,
 } from '../../types/entryDecision';
@@ -149,6 +150,107 @@ function EntryLevelsPanel({ levels, currentPrice, direction }: EntryLevelsPanelP
   );
 }
 
+// ==================== Volume Progress Bar ====================
+
+interface VolumeProgressBarProps {
+  /** Volume progress data */
+  progress: VolumeProgress;
+  /** Show detailed mode */
+  detailed?: boolean;
+}
+
+function VolumeProgressBar({ progress, detailed = false }: VolumeProgressBarProps) {
+  const {
+    current_ratio,
+    required_ratio,
+    progress_percent,
+    candle_direction,
+    is_approaching_spike,
+    time_remaining_ms,
+  } = progress;
+
+  // Color based on progress and candle direction
+  const isBullish = candle_direction === 'bullish';
+  const getBarColor = () => {
+    if (progress_percent >= 100) return 'bg-green-500'; // Spike triggered!
+    if (is_approaching_spike) return isBullish ? 'bg-yellow-500' : 'bg-orange-500';
+    return isBullish ? 'bg-blue-500' : 'bg-red-500';
+  };
+
+  const getGlowColor = () => {
+    if (progress_percent >= 100) return 'shadow-green-500/50';
+    if (is_approaching_spike) return isBullish ? 'shadow-yellow-500/30' : 'shadow-orange-500/30';
+    return '';
+  };
+
+  // Format time remaining
+  const formatTime = (ms: number) => {
+    const seconds = Math.floor(ms / 1000);
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+  };
+
+  return (
+    <div className="mb-2">
+      {/* Label Row */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-2 text-xs">
+          <Activity className={`w-3 h-3 ${is_approaching_spike ? 'text-yellow-400 animate-pulse' : 'text-gray-500'}`} />
+          <span className="text-gray-400">Volume</span>
+          <span className={`font-mono font-medium ${
+            progress_percent >= 100 ? 'text-green-400' :
+            is_approaching_spike ? 'text-yellow-400' :
+            isBullish ? 'text-blue-400' : 'text-red-400'
+          }`}>
+            {current_ratio.toFixed(2)}x
+          </span>
+          <span className="text-gray-500">/</span>
+          <span className="text-gray-400 font-mono">{required_ratio.toFixed(1)}x</span>
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-gray-500">
+          <Clock className="w-3 h-3" />
+          <span>{formatTime(time_remaining_ms)}</span>
+        </div>
+      </div>
+
+      {/* Progress Bar */}
+      <div className="relative h-2 bg-gray-700/50 rounded-full overflow-hidden">
+        <div
+          className={`absolute inset-y-0 left-0 rounded-full transition-all duration-300 ${getBarColor()} ${getGlowColor()}`}
+          style={{ width: `${Math.min(progress_percent, 100)}%` }}
+        />
+        {/* Threshold marker */}
+        <div
+          className="absolute inset-y-0 w-0.5 bg-white/30"
+          style={{ left: '100%' }}
+          title={`Threshold: ${required_ratio}x`}
+        />
+      </div>
+
+      {/* Detailed Mode - Shows percentages */}
+      {detailed && (
+        <div className="flex items-center justify-between mt-1 text-[10px]">
+          <span className="text-gray-500">
+            {progress_percent.toFixed(0)}% to spike
+          </span>
+          <span className={`${isBullish ? 'text-green-400' : 'text-red-400'}`}>
+            {isBullish ? '▲' : '▼'} {candle_direction}
+          </span>
+        </div>
+      )}
+
+      {/* Spike Alert */}
+      {progress_percent >= 100 && (
+        <div className="flex items-center gap-1 mt-1 text-xs text-green-400 animate-pulse">
+          <CheckCircle className="w-3 h-3" />
+          <span>Volume spike detected!</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ==================== Step Progress Display ====================
 
 interface StepProgressProps {
@@ -274,6 +376,11 @@ export default function CoinStageCard({
               ${price.toFixed(price > 100 ? 2 : 4)}
             </span>
           </div>
+        )}
+
+        {/* Real-time Volume Progress */}
+        {update.volume_progress && (
+          <VolumeProgressBar progress={update.volume_progress} detailed={!compact} />
         )}
 
         {/* Step Progress */}

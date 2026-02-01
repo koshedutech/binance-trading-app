@@ -480,22 +480,20 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.logger.Info("PositionStateIntegration set on user autopilot for trade lifecycle", "user_id", userID)
 	}
 
-	// Epic 11: Create ChainEntryRunner for automatic chain-based entries
+	// Epic 11/14: Create ChainEntryRunner for automatic chain-based entries
 	// This runs independently of GinieAutopilot when entry_decision_system = "chain"
-	var chainEntryRunner *ChainEntryRunner
-	if m.chainStateProvider != nil {
-		chainEntryRunner = NewChainEntryRunner(
-			userID,
-			m.chainStateProvider,
-			futuresClient,
-			m.chainEventWriter,
-			m.settingsCache,
-			m.repo,
-			m.logger,
-			nil, // Use default config
-		)
-		m.logger.Info("ChainEntryRunner created for user", "user_id", userID)
-	}
+	// NOTE: StateProvider is wired after RealtimePatternMatcher is created (see below)
+	chainEntryRunner := NewChainEntryRunner(
+		userID,
+		nil, // StateProvider wired later via PatternStateProvider
+		futuresClient,
+		m.chainEventWriter,
+		m.settingsCache,
+		m.repo,
+		m.logger,
+		nil, // Use default config
+	)
+	m.logger.Info("ChainEntryRunner created for user", "user_id", userID)
 
 	// Epic 14: Create CoinProfiler for real-time WebSocket data collection
 	coinProfiler := coinprofiler.NewCoinProfiler(nil, m.logger) // Use default config
@@ -554,6 +552,22 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.logger.Info("PatternUpdateCallback wired to RealtimePatternMatcher", "user_id", userID)
 	}
 	m.logger.Info("RealtimePatternMatcher created and registered with CoinProfiler", "user_id", userID)
+
+	// Epic 14: Wire PatternStateProvider to ChainEntryRunner
+	// This is the critical bridge between pattern detection and order execution.
+	// When a pattern becomes "ready", ChainEntryRunner will automatically place orders.
+	patternStateProvider := NewPatternStateProvider(realtimeMatcher, userID)
+	chainEntryRunner.SetStateProvider(patternStateProvider)
+	m.logger.Info("PatternStateProvider wired to ChainEntryRunner for automatic order execution", "user_id", userID)
+
+	// Epic 14: Wire immediate breakout callback for instant order execution
+	// This enables orders to be placed the MOMENT price breaks out, not waiting for scan cycle.
+	realtimeMatcher.SetBreakoutCallback(func(symbol, direction, mode string, price float64) {
+		if err := chainEntryRunner.ExecuteImmediateEntry(symbol, direction, mode, price); err != nil {
+			m.logger.Error("Immediate breakout entry failed", "symbol", symbol, "direction", direction, "error", err)
+		}
+	})
+	m.logger.Info("Breakout callback wired for immediate order execution", "user_id", userID)
 
 	// Epic 14: Create ExitDecisionService for position exit monitoring
 	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)

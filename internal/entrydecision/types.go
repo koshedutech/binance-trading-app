@@ -119,6 +119,13 @@ type CoinMatch struct {
 	VolumeMultiplier      float64 `json:"volume_multiplier,omitempty"`       // Current volume multiplier vs average
 	VolumeDistancePercent float64 `json:"volume_distance_percent,omitempty"` // Distance to volume threshold (negative = below threshold)
 	PriceDistancePercent  float64 `json:"price_distance_percent,omitempty"`  // Distance to breakout price (negative = below entry)
+
+	// Position tracking (when position is actually open on Binance)
+	HasActivePosition    bool       `json:"has_active_position,omitempty"`    // Whether there's an active position for this coin
+	PositionOpenedAt     *time.Time `json:"position_opened_at,omitempty"`     // When position was opened (entry filled)
+	PositionEntryPrice   float64    `json:"position_entry_price,omitempty"`   // Position entry price (actual fill price from Binance)
+	PositionQuantity     float64    `json:"position_quantity,omitempty"`      // Position quantity
+	ChainID              string     `json:"chain_id,omitempty"`               // Chain ID for the position
 }
 
 // ReferenceCandle holds information about the reference candle for pattern tracking.

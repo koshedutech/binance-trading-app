@@ -225,10 +225,26 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 		// Get pattern matcher to check for tracked coins
 		patternMatcher := entryDecisionBroadcastServer.getOrCreatePatternMatcher(userID)
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
-			// Use GetAllCoinMatches for FULL tracking data (reference candle, time elapsed, etc.)
-			allCoinMatches := patternMatcher.GetAllCoinMatches()
-			for _, cm := range allCoinMatches {
+			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
+			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
+			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
+			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
+					// Enrich with real-time volume progress for watching coins
+					// This enables the Step 1 volume progress bar in the UI
+					if realtimeMatcher != nil && cm.Status == entrydecision.PatternStatusWatching {
+						volProgress := realtimeMatcher.GetVolumeProgress(cm.Symbol, strategy.Timeframe)
+						if volProgress != nil {
+							cm.CurrentVolume = volProgress.CurrentVolume
+							cm.AvgVolume = volProgress.AverageVolume
+							cm.VolumeMultiplier = volProgress.CurrentRatio
+							cm.VolumeThreshold = volProgress.RequiredRatio
+							// Calculate distance to threshold as percentage
+							if volProgress.RequiredRatio > 0 {
+								cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+							}
+						}
+					}
 					sm.AddCoin(*cm)
 				}
 			}
@@ -346,6 +362,12 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 	// Build response manually (simpler than full matcher since we don't have coin data yet)
 	response := entrydecision.NewEntryDecisionResponse()
 
+	// Get realtime matcher for volume progress data
+	var realtimeMatcher *entrydecision.RealtimePatternMatcher
+	if s.userAutopilotManager != nil {
+		realtimeMatcher = s.userAutopilotManager.GetRealtimePatternMatcher(userID)
+	}
+
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
 
@@ -361,12 +383,26 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 		// Get pattern matcher to check for tracked coins
 		patternMatcher := s.getOrCreatePatternMatcher(userID)
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
-			// Get all CoinMatches with FULL tracking data (reference candle, time elapsed, etc.)
-			allCoinMatches := patternMatcher.GetAllCoinMatches()
-			for _, cm := range allCoinMatches {
+			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
+			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
+			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
+			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
-					// Filter by mode/timeframe using the pattern's mode
-					// Note: CoinMatch doesn't store mode, so we add all for now
+					// Enrich with real-time volume progress for watching coins
+					// This enables the Step 1 volume progress bar in the UI
+					if realtimeMatcher != nil && cm.Status == entrydecision.PatternStatusWatching {
+						volProgress := realtimeMatcher.GetVolumeProgress(cm.Symbol, strategy.Timeframe)
+						if volProgress != nil {
+							cm.CurrentVolume = volProgress.CurrentVolume
+							cm.AvgVolume = volProgress.AverageVolume
+							cm.VolumeMultiplier = volProgress.CurrentRatio
+							cm.VolumeThreshold = volProgress.RequiredRatio
+							// Calculate distance to threshold as percentage
+							if volProgress.RequiredRatio > 0 {
+								cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+							}
+						}
+					}
 					sm.AddCoin(*cm)
 				}
 			}
@@ -435,6 +471,12 @@ func (s *Server) handleGetEntryDecisionStrategiesForMode(c *gin.Context) {
 
 	patternMatcher := s.getOrCreatePatternMatcher(userID)
 
+	// Get realtime matcher for volume progress data
+	var realtimeMatcher *entrydecision.RealtimePatternMatcher
+	if s.userAutopilotManager != nil {
+		realtimeMatcher = s.userAutopilotManager.GetRealtimePatternMatcher(userID)
+	}
+
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
 
@@ -449,10 +491,24 @@ func (s *Server) handleGetEntryDecisionStrategiesForMode(c *gin.Context) {
 
 		// Get pattern matcher to check for tracked coins
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
-			// Use GetAllCoinMatches for FULL tracking data (reference candle, time elapsed, etc.)
-			allCoinMatches := patternMatcher.GetAllCoinMatches()
-			for _, cm := range allCoinMatches {
+			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
+			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
+			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
+			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
+					// Enrich with real-time volume progress for watching coins
+					if realtimeMatcher != nil && cm.Status == entrydecision.PatternStatusWatching {
+						volProgress := realtimeMatcher.GetVolumeProgress(cm.Symbol, strategy.Timeframe)
+						if volProgress != nil {
+							cm.CurrentVolume = volProgress.CurrentVolume
+							cm.AvgVolume = volProgress.AverageVolume
+							cm.VolumeMultiplier = volProgress.CurrentRatio
+							cm.VolumeThreshold = volProgress.RequiredRatio
+							if volProgress.RequiredRatio > 0 {
+								cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
+							}
+						}
+					}
 					sm.AddCoin(*cm)
 				}
 			}

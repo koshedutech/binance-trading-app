@@ -563,12 +563,38 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry placed event: %v", err)
 		}
+
+		// Step 9b: For MARKET orders, if status is FILLED, record entry filled event immediately
+		// This ensures the chain shows ACTIVE status with correct quantity/price
+		if orderResp.Status == "FILLED" && orderResp.ExecutedQty > 0 {
+			filledPrice := orderResp.AvgPrice
+			if filledPrice <= 0 {
+				filledPrice = currentPrice
+			}
+			err := r.chainEventWriter.RecordEntryFilled(ctx, chainID, orders.ChainEntryFilledEvent{
+				FilledPrice:      filledPrice,
+				FilledQuantity:   orderResp.ExecutedQty,
+				Fees:             0, // Fees will be tracked separately via WebSocket
+				BinanceTimestamp: orderResp.UpdateTime,
+			})
+			if err != nil {
+				log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry filled event: %v", err)
+			} else {
+				log.Printf("[CHAIN-ENTRY] Recorded entry filled: chainID=%s, price=%.6f, qty=%.6f",
+					chainID, filledPrice, orderResp.ExecutedQty)
+			}
+		}
 	}
 
-	// Step 10: Calculate SL/TP prices for logging
+	// Step 10: Calculate SL/TP prices
 	entryPrice := orderResp.AvgPrice
 	if entryPrice <= 0 {
 		entryPrice = currentPrice
+	}
+
+	filledQuantity := orderResp.ExecutedQty
+	if filledQuantity <= 0 {
+		filledQuantity = quantity
 	}
 
 	var slPrice, tpPrice float64
@@ -580,15 +606,130 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		tpPrice = entryPrice * (1 - tpPercent/100)
 	}
 
-	// Step 11: Update cooldown
+	// Round SL/TP prices to appropriate precision
+	slPrice = roundToTickSizeFromSymbol(slPrice, symbolInfo)
+	tpPrice = roundToTickSizeFromSymbol(tpPrice, symbolInfo)
+
+	// Step 11: Place SL/TP orders immediately to protect the position
+	// CRITICAL: Position must have SL/TP orders placed within seconds of entry
+	if orderResp.Status == "FILLED" && filledQuantity > 0 {
+		// Determine close side (opposite of entry side)
+		var closeSide string
+		if direction == "LONG" {
+			closeSide = "SELL"
+		} else {
+			closeSide = "BUY"
+		}
+
+		// Generate client order IDs for SL/TP
+		slClientOrderID := fmt.Sprintf("%s-SL", chainID)
+		tpClientOrderID := fmt.Sprintf("%s-TP", chainID)
+
+		// Place Stop Loss order (STOP_MARKET)
+		slParams := binance.AlgoOrderParams{
+			Symbol:        symbol,
+			Side:          closeSide,
+			PositionSide:  positionSide,
+			Type:          binance.FuturesOrderTypeStopMarket,
+			Quantity:      filledQuantity,
+			TriggerPrice:  slPrice,
+			ClosePosition: false,
+			WorkingType:   binance.WorkingTypeMarkPrice,
+			ClientAlgoId:  slClientOrderID,
+		}
+
+		log.Printf("[CHAIN-ENTRY] Placing STOP_MARKET SL order for %s: price=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
+
+		slResp, err := r.futuresClient.PlaceAlgoOrder(slParams)
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] WARNING: Failed to place SL order for %s: %v", symbol, err)
+		} else {
+			log.Printf("[CHAIN-ENTRY] SL order placed: symbol=%s, algoID=%d, price=%.6f", symbol, slResp.AlgoId, slPrice)
+
+			// Record SL placed event
+			if r.chainEventWriter != nil {
+				err := r.chainEventWriter.RecordSLPlaced(ctx, chainID, orders.ChainSLPlacedEvent{
+					BinanceOrderID:       slResp.AlgoId,
+					BinanceClientOrderID: slClientOrderID,
+					Price:                slPrice,
+					BinanceTimestamp:     slResp.UpdateTime,
+				})
+				if err != nil {
+					log.Printf("[CHAIN-ENTRY] Warning: Failed to record SL placed event: %v", err)
+				}
+			}
+		}
+
+		// Place Take Profit order (TAKE_PROFIT_MARKET)
+		tpParams := binance.AlgoOrderParams{
+			Symbol:        symbol,
+			Side:          closeSide,
+			PositionSide:  positionSide,
+			Type:          binance.FuturesOrderTypeTakeProfitMarket,
+			Quantity:      filledQuantity,
+			TriggerPrice:  tpPrice,
+			ClosePosition: false,
+			WorkingType:   binance.WorkingTypeMarkPrice,
+			ClientAlgoId:  tpClientOrderID,
+		}
+
+		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT_MARKET TP order for %s: price=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
+
+		tpResp, err := r.futuresClient.PlaceAlgoOrder(tpParams)
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] WARNING: Failed to place TP order for %s: %v", symbol, err)
+		} else {
+			log.Printf("[CHAIN-ENTRY] TP order placed: symbol=%s, algoID=%d, price=%.6f", symbol, tpResp.AlgoId, tpPrice)
+
+			// Record TP placed event
+			if r.chainEventWriter != nil {
+				err := r.chainEventWriter.RecordTPPlaced(ctx, chainID, orders.ChainTPPlacedEvent{
+					BinanceOrderID:       tpResp.AlgoId,
+					BinanceClientOrderID: tpClientOrderID,
+					Price:                tpPrice,
+					BinanceTimestamp:     tpResp.UpdateTime,
+				})
+				if err != nil {
+					log.Printf("[CHAIN-ENTRY] Warning: Failed to record TP placed event: %v", err)
+				}
+			}
+		}
+	}
+
+	// Step 12: Update cooldown
 	r.mu.Lock()
 	r.entryCooldowns[symbol] = time.Now()
 	r.mu.Unlock()
 
 	log.Printf("[CHAIN-ENTRY] SUCCESS: %s %s entry at %.6f, qty=%.6f, orderID=%d, chainID=%s, SL=%.6f, TP=%.6f",
-		direction, symbol, entryPrice, quantity, orderResp.OrderId, chainID, slPrice, tpPrice)
+		direction, symbol, entryPrice, filledQuantity, orderResp.OrderId, chainID, slPrice, tpPrice)
 
 	return nil
+}
+
+// roundToTickSizeFromSymbol rounds a price to the symbol's tick size precision.
+// This extracts the tick size from the FuturesSymbolInfo filters.
+func roundToTickSizeFromSymbol(price float64, symbolInfo *binance.FuturesSymbolInfo) float64 {
+	if symbolInfo == nil {
+		return price
+	}
+
+	// Find tick size from filters
+	var tickSize float64 = 0.01 // Default
+	for _, filter := range symbolInfo.Filters {
+		if filter.FilterType == "PRICE_FILTER" && filter.TickSize != "" {
+			if parsed, err := parseFloatStr(filter.TickSize); err == nil && parsed > 0 {
+				tickSize = parsed
+			}
+			break
+		}
+	}
+
+	// Round to tick size
+	if tickSize > 0 {
+		return math.Round(price/tickSize) * tickSize
+	}
+	return price
 }
 
 // getModeDefaults returns position size, SL%, and TP% defaults for a trading mode
@@ -648,4 +789,81 @@ func (r *ChainEntryRunner) ClearAllCooldowns() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.entryCooldowns = make(map[string]time.Time)
+}
+
+// ExecuteImmediateEntry executes an entry immediately without waiting for the scan cycle.
+// This is called when tick-level breakout is detected for instant order placement.
+// It bypasses the scan timer to ensure orders are placed at the moment of breakout.
+//
+// Parameters:
+// - symbol: The trading pair (e.g., "BTCUSDT")
+// - direction: "long" or "short"
+// - mode: Trading mode (e.g., "scalp", "swing")
+// - price: Current market price at breakout detection
+//
+// Returns error if entry cannot be executed.
+func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode string, price float64) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Check if chain entry is enabled
+	if !r.isChainEntryEnabled(ctx) {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Chain entry not enabled, skipping %s", symbol)
+		return fmt.Errorf("chain entry system not enabled")
+	}
+
+	// Check circuit breaker
+	if r.isCircuitBreakerTripped(ctx) {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Circuit breaker tripped, skipping %s", symbol)
+		return fmt.Errorf("circuit breaker tripped")
+	}
+
+	// Check cooldown
+	if r.isOnCooldown(symbol) {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] %s on cooldown, skipping", symbol)
+		return fmt.Errorf("symbol on cooldown")
+	}
+
+	// Check if symbol has open position already
+	if r.hasOpenPosition(ctx, symbol) {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] %s has open position, skipping", symbol)
+		return fmt.Errorf("symbol has open position")
+	}
+
+	// Create ChainCoinState for immediate entry
+	trend := "BULLISH"
+	if direction == "short" {
+		trend = "BEARISH"
+	}
+
+	state := &ChainCoinState{
+		Symbol:         symbol,
+		Price:          price,
+		ActiveStrategy: mode,
+		Decision:       "READY",
+		Trend1H:        trend,
+		Trend15M:       trend,
+		ScoreFinal:     90, // High score for breakout entries
+	}
+
+	log.Printf("[CHAIN-ENTRY-IMMEDIATE] Executing breakout entry for %s: direction=%s, mode=%s, price=%.6f",
+		symbol, direction, mode, price)
+
+	// Execute the entry
+	if err := r.executeChainEntry(ctx, state); err != nil {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Failed to execute entry for %s: %v", symbol, err)
+		r.mu.Lock()
+		r.stats.FailedEntries++
+		r.mu.Unlock()
+		return err
+	}
+
+	r.mu.Lock()
+	r.stats.SuccessfulEntries++
+	r.stats.TotalEntries++
+	r.stats.LastEntryTime = time.Now()
+	r.mu.Unlock()
+
+	log.Printf("[CHAIN-ENTRY-IMMEDIATE] SUCCESS: Breakout entry placed for %s", symbol)
+	return nil
 }

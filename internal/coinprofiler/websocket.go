@@ -387,12 +387,21 @@ func (wsm *WebSocketManager) connectionLoop() {
 		// Connected successfully - reset backoff
 		backoff = wsm.config.ReconnectDelay
 
+		// Check if this is a reconnection (not initial connect)
+		isReconnection := atomic.LoadInt32(&wsm.reconnectCount) > 0
+
 		// Process pending subscriptions
 		wsm.mu.Lock()
 		if err := wsm.processPendingUnlocked(); err != nil {
 			wsm.logError("Failed to process pending subscriptions: %v", err)
 		}
 		wsm.mu.Unlock()
+
+		// On reconnection, trigger historical data prefetch to restore candle history
+		// This ensures pattern matcher has the required 50 candles for evaluation
+		if isReconnection {
+			wsm.triggerReconnectionPrefetch()
+		}
 
 		// Start reading messages (blocks until disconnected)
 		wsm.readLoop()
@@ -654,12 +663,23 @@ func (wsm *WebSocketManager) updateCoinData(symbol string, tfData *TimeframeData
 	// Get or create CoinData
 	coinData, exists := wsm.profiler.coinData[symbol]
 	if !exists {
+		// Get source from subscription if available
+		source := DataSourceStrategy // Default to strategy
+		if sub, ok := wsm.profiler.subscriptions[symbol]; ok && sub != nil {
+			source = sub.Source
+		}
 		coinData = &CoinData{
 			Symbol:     symbol,
 			Timeframes: make(map[string]*TimeframeData),
+			Source:     source,
 			UpdatedAt:  time.Now(),
 		}
 		wsm.profiler.coinData[symbol] = coinData
+	} else if coinData.Source == "" {
+		// Fix source if it was not set previously
+		if sub, ok := wsm.profiler.subscriptions[symbol]; ok && sub != nil {
+			coinData.Source = sub.Source
+		}
 	}
 
 	// Update timeframe data (deep copy to prevent race conditions)
@@ -723,6 +743,22 @@ func (wsm *WebSocketManager) updateCoinData(symbol string, tfData *TimeframeData
 	if wsm.profiler != nil && !tfData.IsClosedBar {
 		if priceCallback := wsm.profiler.GetPriceUpdateCallback(); priceCallback != nil {
 			priceCallback(symbol, tfData.Timeframe, tfData.Close, tfData.High, tfData.Low)
+		}
+
+		// Call volume progress callback for real-time volume ratio display
+		if volumeCallback := wsm.profiler.GetVolumeProgressCallback(); volumeCallback != nil {
+			// Calculate volume progress using current forming candle's data
+			progress := wsm.profiler.CalculateVolumeProgress(
+				symbol,
+				tfData.Timeframe,
+				tfData.Volume,
+				tfData.Open,
+				tfData.Close,
+				tfData.CloseTime,
+			)
+			if progress != nil {
+				volumeCallback(*progress)
+			}
 		}
 	}
 }
@@ -878,6 +914,65 @@ func (wsm *WebSocketManager) setLastError(errMsg string) {
 	wsm.mu.Lock()
 	wsm.lastError = errMsg
 	wsm.mu.Unlock()
+}
+
+// triggerReconnectionPrefetch fetches historical candles after WebSocket reconnection.
+// This ensures pattern detection has the required historical data (50+ candles)
+// without waiting for real-time candles to accumulate.
+func (wsm *WebSocketManager) triggerReconnectionPrefetch() {
+	if wsm.profiler == nil {
+		return
+	}
+
+	// Get current subscriptions
+	wsm.mu.RLock()
+	subscriptions := make([]string, 0, len(wsm.activeSubscriptions))
+	for stream := range wsm.activeSubscriptions {
+		subscriptions = append(subscriptions, stream)
+	}
+	wsm.mu.RUnlock()
+
+	if len(subscriptions) == 0 {
+		return
+	}
+
+	// Parse subscriptions to extract unique symbols and timeframes
+	symbolSet := make(map[string]bool)
+	timeframeSet := make(map[string]bool)
+
+	for _, stream := range subscriptions {
+		symbol, timeframe, ok := parseKlineStream(stream)
+		if ok {
+			symbolSet[symbol] = true
+			timeframeSet[timeframe] = true
+		}
+	}
+
+	// Convert to slices
+	symbols := make([]string, 0, len(symbolSet))
+	for symbol := range symbolSet {
+		symbols = append(symbols, symbol)
+	}
+	timeframes := make([]string, 0, len(timeframeSet))
+	for tf := range timeframeSet {
+		timeframes = append(timeframes, tf)
+	}
+
+	if len(symbols) == 0 || len(timeframes) == 0 {
+		return
+	}
+
+	wsm.log("Reconnection detected - triggering historical candle prefetch for %d symbols × %d timeframes",
+		len(symbols), len(timeframes))
+
+	// Run prefetch in goroutine to avoid blocking the connection loop
+	go func() {
+		if err := wsm.profiler.PrefetchHistoricalCandles(symbols, timeframes); err != nil {
+			wsm.logError("Failed to prefetch historical candles on reconnection: %v", err)
+		} else {
+			wsm.log("Reconnection prefetch completed successfully")
+		}
+	}()
 }
 
 // ============================================================================

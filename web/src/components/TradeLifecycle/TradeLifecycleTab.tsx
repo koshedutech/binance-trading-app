@@ -64,9 +64,14 @@ export default function TradeLifecycleTab({
   });
 
   // Section expansion states (must be declared before any early returns)
+  // All collapsed by default - will auto-expand when data is received
   const [tradeCycleExpanded, setTradeCycleExpanded] = useState(true);
-  const [ordersExpanded, setOrdersExpanded] = useState(true);
-  const [positionsExpanded, setPositionsExpanded] = useState(true);
+  const [ordersExpanded, setOrdersExpanded] = useState(false);
+  const [positionsExpanded, setPositionsExpanded] = useState(false);
+
+  // Track if auto-expansion has already occurred (to respect user's manual collapse)
+  const ordersAutoExpandedRef = useRef(false);
+  const positionsAutoExpandedRef = useRef(false);
 
   // Volume Imbalance patterns for Entry Decision Engine
   const { patterns: volumeImbalancePatterns, isLoading: patternsLoading } = useVolumeImbalancePatterns();
@@ -565,6 +570,25 @@ export default function TradeLifecycleTab({
     };
   }, [chains]);
 
+  // Auto-expand Orders section when active orders are received
+  useEffect(() => {
+    // Only auto-expand once, and only if there are active orders
+    const hasActiveOrders = chains.some(c => c.status === 'active' || c.status === 'partial');
+    if (hasActiveOrders && !ordersAutoExpandedRef.current) {
+      setOrdersExpanded(true);
+      ordersAutoExpandedRef.current = true;
+    }
+  }, [chains]);
+
+  // Auto-expand Positions section when active positions are received
+  useEffect(() => {
+    // Only auto-expand once, and only if there are active positions
+    if (positionStats.total > 0 && !positionsAutoExpandedRef.current) {
+      setPositionsExpanded(true);
+      positionsAutoExpandedRef.current = true;
+    }
+  }, [positionStats.total]);
+
   // Loading state
   if (loading && chains.length === 0) {
     return (
@@ -639,7 +663,7 @@ export default function TradeLifecycleTab({
             <CoinProfilerCard />
 
             {/* ==================== SECTION 1: ENTRY DECISION ENGINE ==================== */}
-            <EntryDecisionEngineCard defaultExpanded={true} />
+            <EntryDecisionEngineCard defaultExpanded={false} />
 
             {/* ==================== SECTION 1.25: STRATEGY-FIRST VIEW (Story 14.13) ==================== */}
             <StrategyFirstView

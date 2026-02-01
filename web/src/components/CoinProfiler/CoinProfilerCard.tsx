@@ -40,7 +40,7 @@ import RequirementsBreakdown from './RequirementsBreakdown';
  */
 export default function CoinProfilerCard() {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<'sources' | 'status' | 'coins'>('sources');
+  const [activeTab, setActiveTab] = useState<'sources' | 'status' | 'coins'>('coins');
   const [wsConnected, setWsConnected] = useState(wsService.isConnected());
 
   // Hooks for data fetching

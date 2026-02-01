@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
 // Displays individual strategy with matching coins, expandable view
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -246,6 +246,91 @@ function formatVolume(volume: number): string {
   return volume.toFixed(2);
 }
 
+// ==================== Position Running Timer Component ====================
+
+interface PositionRunningTimerProps {
+  /** When position was opened (ISO timestamp) */
+  positionOpenedAt: string;
+  /** Position entry price */
+  entryPrice?: number;
+  /** Current price */
+  currentPrice?: number;
+  /** Chain ID for reference */
+  chainId?: string;
+}
+
+function PositionRunningTimer({ positionOpenedAt, entryPrice, currentPrice, chainId }: PositionRunningTimerProps) {
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+
+  useEffect(() => {
+    const openedAt = new Date(positionOpenedAt);
+
+    const updateElapsed = () => {
+      const now = new Date();
+      const diff = Math.floor((now.getTime() - openedAt.getTime()) / 1000);
+      setElapsedSeconds(Math.max(0, diff));
+    };
+
+    // Update immediately
+    updateElapsed();
+
+    // Update every second
+    const timer = setInterval(updateElapsed, 1000);
+
+    return () => clearInterval(timer);
+  }, [positionOpenedAt]);
+
+  // Calculate P&L if prices available
+  const pnlPercent = entryPrice && currentPrice
+    ? ((currentPrice - entryPrice) / entryPrice) * 100
+    : null;
+
+  return (
+    <div className="flex items-center gap-3 px-2 py-1.5 bg-cyan-500/10 border border-cyan-500/30 rounded">
+      {/* Position Running indicator */}
+      <div className="flex items-center gap-1.5">
+        <span className="relative flex h-2 w-2">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+        </span>
+        <span className="text-cyan-400 text-xs font-medium">Position Running</span>
+      </div>
+
+      {/* Timer */}
+      <div className="flex items-center gap-1 text-xs">
+        <Clock className="w-3 h-3 text-cyan-400" />
+        <span className="font-mono text-cyan-300">{formatTimeElapsed(elapsedSeconds)}</span>
+      </div>
+
+      {/* Entry Price */}
+      {entryPrice && (
+        <div className="flex items-center gap-1 text-xs">
+          <span className="text-gray-500">Entry:</span>
+          <span className="font-mono text-white">
+            ${entryPrice.toFixed(entryPrice > 100 ? 2 : 4)}
+          </span>
+        </div>
+      )}
+
+      {/* Unrealized P&L */}
+      {pnlPercent !== null && (
+        <span className={`text-xs font-mono font-medium px-1 rounded ${
+          pnlPercent >= 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+        }`}>
+          {pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%
+        </span>
+      )}
+
+      {/* Chain ID */}
+      {chainId && (
+        <span className="text-[10px] text-gray-500 font-mono">
+          {chainId}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ==================== Stage Labels ====================
 
 const STAGE_LABELS: Record<number, { name: string; description: string; color: string }> = {
@@ -466,7 +551,7 @@ function CoinRow({
                   </div>
                 )}
 
-                {/* RIGHT: Entry Candle (when breakout detected) */}
+                {/* RIGHT: Entry Candle (when breakout detected OR status is ready) */}
                 {coin.entry_candle ? (
                   <div className="flex flex-col gap-1 border-l border-gray-700/50 pl-3">
                     <div className="flex items-center gap-1.5 text-xs">
@@ -516,21 +601,74 @@ function CoinRow({
                       </span>
                     </div>
                   </div>
+                ) : coin.status === 'ready' ? (
+                  /* Status is READY but entry_candle not populated - show ready state */
+                  <div className="flex flex-col gap-1 border-l border-gray-700/50 pl-3">
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <span className="text-green-400 font-medium animate-pulse">✅ Pattern Ready</span>
+                      {coin.direction && (
+                        <span className={`uppercase text-[10px] px-1 rounded ${
+                          coin.direction === 'long'
+                            ? 'bg-green-500/20 text-green-400'
+                            : 'bg-red-500/20 text-red-400'
+                        }`}>
+                          {coin.direction}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-green-400">
+                      <span>Breakout confirmed - Entry signal active</span>
+                    </div>
+                    {/* Ready since time */}
+                    {coin.ready_at && (
+                      <div className="flex items-center gap-1 text-xs text-gray-400">
+                        <Clock className="w-3 h-3" />
+                        <span>Ready since {new Date(coin.ready_at).toISOString().slice(11, 19)} UTC</span>
+                      </div>
+                    )}
+                    {/* Entry price from reference high if available */}
+                    {coin.reference_candle && (
+                      <div className="flex items-center gap-1 text-xs mt-0.5 bg-green-500/10 px-1.5 py-0.5 rounded">
+                        <span className="text-green-300 font-medium">Entry Level:</span>
+                        <span className="text-green-400 font-mono font-bold">
+                          ${coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 ) : coin.reference_candle && (
-                  /* Placeholder when no entry yet - show proximity info */
+                  /* Placeholder when no entry yet - show proximity info with actual prices */
                   <div className="flex flex-col gap-1 border-l border-gray-700/50 pl-3">
                     <div className="flex items-center gap-1.5 text-xs">
                       <span className="text-gray-500 font-medium">⏳ Awaiting Breakout</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      {coin.proximity_to_breakout !== undefined && (
-                        <span className={`font-mono ${
-                          coin.proximity_to_breakout >= 0 ? 'text-green-400' :
-                          coin.proximity_to_breakout > -0.5 ? 'text-yellow-400' : 'text-gray-400'
-                        }`}>
-                          {coin.proximity_to_breakout >= 0 ? '+' : ''}{coin.proximity_to_breakout.toFixed(2)}%
-                          {coin.proximity_to_breakout >= 0 ? ' ABOVE' : ' to entry'}
+                      {/* Candles since reference */}
+                      {coin.candles_since_reference !== undefined && coin.candles_since_reference > 0 && (
+                        <span className="text-gray-600 font-mono text-[10px]">
+                          ({coin.candles_since_reference} candle{coin.candles_since_reference !== 1 ? 's' : ''})
                         </span>
+                      )}
+                    </div>
+                    {/* Price proximity with actual values */}
+                    <div className="flex flex-col gap-0.5 text-xs">
+                      {coin.proximity_to_breakout !== undefined && coin.current_price && (
+                        <>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-gray-500">Price:</span>
+                            <span className="text-white font-mono">
+                              ${coin.current_price.toFixed(coin.current_price > 100 ? 2 : 4)}
+                            </span>
+                            <span className="text-gray-600">→</span>
+                            <span className="text-green-400 font-mono">
+                              ${coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}
+                            </span>
+                            <span className={`font-mono font-medium px-1 rounded ${
+                              coin.proximity_to_breakout >= 0 ? 'bg-green-500/20 text-green-400' :
+                              coin.proximity_to_breakout > -0.5 ? 'bg-yellow-500/20 text-yellow-400' : 'bg-gray-700 text-gray-400'
+                            }`}>
+                              {coin.proximity_to_breakout >= 0 ? '+' : ''}{coin.proximity_to_breakout.toFixed(2)}%
+                            </span>
+                          </div>
+                        </>
                       )}
                     </div>
                     {/* Potential breakout indicator - blinking */}
@@ -545,7 +683,7 @@ function CoinRow({
 
               {/* Tracking metrics row */}
               <div className="flex items-center justify-between text-xs">
-                {/* Reference candle timing info */}
+                {/* LEFT: Reference candle timing info */}
                 <div className="flex items-center gap-3">
                   {/* Candles passed */}
                   {coin.candles_since_reference !== undefined && (
@@ -554,19 +692,39 @@ function CoinRow({
                     </span>
                   )}
 
-                  {/* Time elapsed */}
+                  {/* Time to reach ready (stops when ready) */}
                   {coin.seconds_since_reference !== undefined && coin.seconds_since_reference > 0 && (
-                    <span className="text-gray-500">
-                      ⏱ {formatTimeElapsed(coin.seconds_since_reference)} ago
+                    <span className={`flex items-center gap-1 ${coin.status === 'ready' ? 'text-green-400' : 'text-gray-500'}`}>
+                      <Clock className="w-3 h-3" />
+                      {coin.status === 'ready' ? (
+                        <span>Took {formatTimeElapsed(coin.seconds_since_reference)} to ready</span>
+                      ) : (
+                        <span>{formatTimeElapsed(coin.seconds_since_reference)} elapsed</span>
+                      )}
                     </span>
                   )}
                 </div>
 
-                {/* Ready status indicator */}
-                {coin.status === 'ready' && coin.ready_at && (
-                  <span className="text-green-400 text-xs">
-                    Ready since {new Date(coin.ready_at).toISOString().slice(11, 19)} UTC
-                  </span>
+                {/* RIGHT: Ready/Running status indicator */}
+                {coin.status === 'ready' && (
+                  <div className="flex items-center gap-2">
+                    {/* Expiry countdown for ready patterns */}
+                    {coin.seconds_until_expiry !== undefined && coin.seconds_until_expiry > 0 && (
+                      <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded font-mono ${
+                        coin.seconds_until_expiry <= 10
+                          ? 'bg-red-500/30 text-red-400 animate-pulse'
+                          : 'bg-yellow-500/20 text-yellow-400'
+                      }`}>
+                        <Clock className="w-3 h-3" />
+                        {coin.seconds_until_expiry}s
+                      </span>
+                    )}
+                    {/* Ready badge */}
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 bg-green-500/20 text-green-400 rounded">
+                      <CheckCircle className="w-3 h-3" />
+                      READY
+                    </span>
+                  </div>
                 )}
               </div>
             </div>
@@ -587,15 +745,126 @@ function CoinRow({
               </span>
             </div>
           )}
+
+          {/* Position Running Timer - shows when there's an active position */}
+          {coin.has_active_position && coin.position_opened_at && (
+            <div className="mt-2">
+              <PositionRunningTimer
+                positionOpenedAt={coin.position_opened_at}
+                entryPrice={coin.position_entry_price}
+                currentPrice={coin.current_price}
+                chainId={coin.chain_id}
+              />
+            </div>
+          )}
         </div>
       )}
 
-      {/* Watching state info */}
+      {/* Watching state info - Show live volume progress */}
       {strategyType === 'pattern' && (!coin.step || coin.step === 0) && coin.status === 'watching' && (
-        <div className="mt-2 pt-2 border-t border-gray-700/30">
-          <span className="text-xs text-gray-500">
-            🔍 Scanning for volume spike (3x average)...
-          </span>
+        <div className="mt-2 pt-2 border-t border-gray-700/30 space-y-1.5">
+          {/* Volume Progress Bar */}
+          {coin.volume_multiplier !== undefined && coin.volume_threshold !== undefined ? (
+            (() => {
+              const distanceToThreshold = coin.volume_multiplier - coin.volume_threshold;
+              const isAboveThreshold = distanceToThreshold >= 0;
+              const progressPercent = (coin.volume_multiplier / coin.volume_threshold) * 100;
+              // Calculate actual volume values
+              const avgVol = coin.avg_volume || 0;
+              const currentVol = coin.current_volume || (avgVol * coin.volume_multiplier);
+              const thresholdVol = avgVol * coin.volume_threshold;
+
+              return (
+                <div className="space-y-1.5">
+                  {/* Row 1: Average volume (base reference) */}
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-gray-500">Avg Volume:</span>
+                    <span className="font-mono text-gray-400">{formatVolume(avgVol)}</span>
+                    <span className="text-gray-600">×</span>
+                    <span className="text-cyan-400 font-mono">{coin.volume_threshold.toFixed(1)}X</span>
+                    <span className="text-gray-600">=</span>
+                    <span className="text-yellow-400 font-mono">{formatVolume(thresholdVol)}</span>
+                    <span className="text-gray-500">(spike threshold)</span>
+                  </div>
+
+                  {/* Row 2: Current volume with multiplier */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-xs">
+                      <Volume2 className={`w-3.5 h-3.5 ${
+                        isAboveThreshold ? 'text-green-400 animate-pulse' :
+                        coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'text-yellow-400 animate-pulse' :
+                        coin.volume_multiplier >= coin.volume_threshold * 0.5 ? 'text-blue-400' :
+                        'text-gray-500'
+                      }`} />
+                      <span className="text-gray-500">Current:</span>
+                      <span className={`font-mono font-medium ${
+                        isAboveThreshold ? 'text-green-400' :
+                        coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'text-yellow-400' :
+                        'text-white'
+                      }`}>
+                        {formatVolume(currentVol)}
+                      </span>
+                      <span className="text-gray-600">=</span>
+                      <span className={`font-mono ${
+                        isAboveThreshold ? 'text-green-400' :
+                        coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'text-yellow-400' :
+                        'text-gray-400'
+                      }`}>
+                        {coin.volume_multiplier.toFixed(2)}X
+                      </span>
+                      <span className="text-gray-600">of avg</span>
+                      {/* Distance to threshold */}
+                      <span className={`font-mono font-medium px-1.5 py-0.5 rounded ${
+                        isAboveThreshold
+                          ? 'bg-green-500/20 text-green-400'
+                          : 'bg-gray-700 text-gray-400'
+                      }`}>
+                        {isAboveThreshold ? '+' : ''}{distanceToThreshold.toFixed(2)}X {isAboveThreshold ? '✓' : 'to go'}
+                      </span>
+                    </div>
+                    {/* Direction indicator */}
+                    {coin.direction && (
+                      <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] uppercase ${
+                        coin.direction === 'long' ? 'bg-green-500/20 text-green-400' :
+                        coin.direction === 'short' ? 'bg-red-500/20 text-red-400' :
+                        'bg-purple-500/20 text-purple-400'
+                      }`}>
+                        {coin.direction === 'long' && <TrendingUp className="w-3 h-3" />}
+                        {coin.direction === 'short' && <TrendingDown className="w-3 h-3" />}
+                        {coin.direction}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Progress bar */}
+                  <div className="relative h-2 bg-gray-700/50 rounded-full overflow-hidden">
+                    <div
+                      className={`absolute inset-y-0 left-0 rounded-full transition-all duration-300 ${
+                        isAboveThreshold ? 'bg-green-500' :
+                        coin.volume_multiplier >= coin.volume_threshold * 0.7 ? 'bg-yellow-500' :
+                        'bg-blue-500'
+                      }`}
+                      style={{ width: `${Math.min(progressPercent, 100)}%` }}
+                    />
+                  </div>
+
+                  {/* Progress percentage */}
+                  <div className="text-[10px] text-center">
+                    <span className={isAboveThreshold ? 'text-green-400 font-medium' : 'text-gray-500'}>
+                      {isAboveThreshold
+                        ? `✓ Volume spike detected! (${progressPercent.toFixed(0)}% of threshold)`
+                        : `${progressPercent.toFixed(0)}% to volume spike`}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()
+          ) : (
+            /* Fallback when no volume data */
+            <span className="text-xs text-gray-500">
+              🔍 Scanning for volume spike (3x average)...
+            </span>
+          )}
         </div>
       )}
     </button>
@@ -612,6 +881,7 @@ export default function StrategyCard({
 }: StrategyCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showRequirements, setShowRequirements] = useState(false);
+  const autoExpandedRef = useRef(false);
 
   const readyCount = countReady(strategy.coins);
   const watchingCount = countWatching(strategy.coins);
@@ -622,16 +892,40 @@ export default function StrategyCard({
     : null;
   const hasReadyCoins = readyCount > 0;
 
-  // Sort coins: ready first, then by step/score
+  // Auto-expand when coins have active data
+  useEffect(() => {
+    if (autoExpandedRef.current) return;
+
+    const hasActiveCoins = strategy.coins.some(c =>
+      (c.step && c.step > 0) ||
+      c.status === 'accumulation' ||
+      c.status === 'consolidating' ||
+      c.status === 'ready' ||
+      (c.volume_multiplier && c.volume_multiplier >= 1.5) // Approaching spike
+    );
+
+    if (hasActiveCoins) {
+      setExpanded(true);
+      autoExpandedRef.current = true;
+    }
+  }, [strategy.coins]);
+
+  // Sort coins: ready first, then by step, then by volume multiplier (highest first)
   const sortedCoins = [...strategy.coins].sort((a, b) => {
     const aReady = checkCoinReady(a);
     const bReady = checkCoinReady(b);
     if (aReady && !bReady) return -1;
     if (!aReady && bReady) return 1;
 
-    // For pattern-based, sort by step (higher = closer to ready)
+    // For pattern-based, sort by step first (higher = closer to ready)
     if (strategy.type === 'pattern') {
-      return (b.step || 0) - (a.step || 0);
+      const stepDiff = (b.step || 0) - (a.step || 0);
+      if (stepDiff !== 0) return stepDiff;
+
+      // Within same step, sort by volume multiplier (higher = more likely to spike)
+      const aVol = a.volume_multiplier || 0;
+      const bVol = b.volume_multiplier || 0;
+      return bVol - aVol;
     }
     // For score-based, sort by score (higher = closer to ready)
     return (b.score || 0) - (a.score || 0);

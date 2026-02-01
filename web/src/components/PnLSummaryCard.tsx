@@ -306,7 +306,7 @@ export default function PnLSummaryCard() {
     <CollapsibleCard
       title="P&L Summary"
       icon={<TrendingUp className="w-4 h-4" />}
-      defaultExpanded={true}
+      defaultExpanded={false}
       badge="Daily & Weekly"
       badgeColor="green"
     >

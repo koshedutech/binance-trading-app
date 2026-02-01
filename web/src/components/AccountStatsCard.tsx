@@ -157,7 +157,7 @@ export default function AccountStatsCard() {
     <CollapsibleCard
       title="Account Overview"
       icon={<LayoutDashboard className="w-4 h-4" />}
-      defaultExpanded={false}
+      defaultExpanded={true}
       badge="Stats"
       badgeColor="cyan"
     >

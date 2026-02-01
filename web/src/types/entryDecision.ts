@@ -144,6 +144,18 @@ export interface CoinMatch {
   volume_distance_percent?: number;
   /** Distance to breakout price as percentage (negative = below entry) */
   price_distance_percent?: number;
+
+  // Position tracking (when position is actually open on Binance)
+  /** Whether there's an active position for this coin */
+  has_active_position?: boolean;
+  /** When position was opened (entry filled) - ISO timestamp */
+  position_opened_at?: string;
+  /** Position entry price (actual fill price from Binance) */
+  position_entry_price?: number;
+  /** Position quantity */
+  position_quantity?: number;
+  /** Chain ID for the position */
+  chain_id?: string;
 }
 
 // ==================== Strategy Match Types ====================
@@ -503,6 +515,30 @@ export interface EntryLevels {
 }
 
 /**
+ * Real-time volume progress for UI display
+ */
+export interface VolumeProgress {
+  /** Current forming candle's volume */
+  current_volume: number;
+  /** Average volume of last N closed candles */
+  average_volume: number;
+  /** Current volume ratio (current_volume / average_volume) */
+  current_ratio: number;
+  /** Required ratio to trigger spike (e.g., 3.0) */
+  required_ratio: number;
+  /** Progress as percentage (current_ratio / required_ratio * 100) */
+  progress_percent: number;
+  /** Current candle direction: "bullish", "bearish", or "neutral" */
+  candle_direction: string;
+  /** True if current ratio > 50% of required */
+  is_approaching_spike: boolean;
+  /** Milliseconds until candle close */
+  time_remaining_ms: number;
+  /** Number of candles used for average calculation */
+  lookback_candles: number;
+}
+
+/**
  * Pattern update from WebSocket (ENTRY_DECISION_PATTERN_UPDATE event)
  */
 export interface PatternUpdate {
@@ -526,8 +562,16 @@ export interface PatternUpdate {
   step_details: StepDetail[];
   /** Entry levels (when pattern is ready or near-ready) */
   entry_levels?: EntryLevels;
+  /** Real-time volume progress (updated on every tick) */
+  volume_progress?: VolumeProgress;
   /** Trade direction */
   direction?: string;
+  /** What direction we're looking for ("long", "short", or "both") */
+  looking_for?: string;
+  /** Next candle close timestamp */
+  next_candle_close?: string;
+  /** When patterns were last evaluated */
+  last_evaluated_at?: string;
   /** Last update */
   updated_at: string;
 }

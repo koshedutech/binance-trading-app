@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Story 14.13: Frontend UI Enhancement
 // Main strategy-first view with mode grouping and collapsible sections
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -123,6 +123,27 @@ function ModeSection({
   onCoinSelect,
 }: ModeSectionProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const autoExpandedRef = useRef(false);
+
+  // Auto-expand when strategies have coins with data (step > 0 or status != 'watching')
+  useEffect(() => {
+    if (autoExpandedRef.current) return;
+
+    const hasActiveCoins = modeData.strategies.some(strategy =>
+      strategy.coins.some(c =>
+        (c.step && c.step > 0) ||
+        c.status === 'accumulation' ||
+        c.status === 'consolidating' ||
+        c.status === 'ready' ||
+        (c.volume_multiplier && c.volume_multiplier >= 1.5) // Coins with significant volume
+      )
+    );
+
+    if (hasActiveCoins) {
+      setExpanded(true);
+      autoExpandedRef.current = true;
+    }
+  }, [modeData.strategies]);
 
   const colors = MODE_COLORS_MAP[modeData.mode] || MODE_COLORS_MAP.scalp;
   const displayName = MODE_DISPLAY_NAMES_MAP[modeData.mode] || modeData.mode;
@@ -208,6 +229,8 @@ export default function StrategyFirstView({
 }: StrategyFirstViewProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped');
+  // Track if auto-expansion has occurred (to respect user's manual collapse)
+  const autoExpandedOnDataRef = useRef(false);
 
   const {
     strategies,
@@ -242,6 +265,15 @@ export default function StrategyFirstView({
     const order = ['scalp', 'swing', 'position', 'ultra_fast'];
     return order.indexOf(a.mode) - order.indexOf(b.mode);
   });
+
+  // Auto-expand when strategies with coins are received for the first time
+  useEffect(() => {
+    const totalCoins = strategies.reduce((sum, s) => sum + s.coins.length, 0);
+    if (totalCoins > 0 && !autoExpandedOnDataRef.current) {
+      setExpanded(true);
+      autoExpandedOnDataRef.current = true;
+    }
+  }, [strategies]);
 
   return (
     <div className={`bg-gray-800 rounded-lg border border-gray-700 ${className}`}>
