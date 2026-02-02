@@ -143,8 +143,15 @@ type UserAutopilotManager struct {
 	// Epic 14: Callback for pattern updates (set by API layer for WebSocket broadcasting)
 	patternUpdateCallback entrydecision.PatternUpdateCallback
 
+	// Epic 14: Callback for settings changes (set by API layer for WebSocket broadcasting)
+	settingsChangeCallback SettingsChangeCallback
+
 	mu sync.RWMutex
 }
+
+// SettingsChangeCallback is the callback function type for settings change notifications.
+// Used for WebSocket broadcasting when settings are modified.
+type SettingsChangeCallback func(userID, changeType, mode, strategyGroup, subStrategy string)
 
 // NewUserAutopilotManager creates a new multi-user autopilot manager
 // positionStateRepo can be nil (position state will fall back to JSON file only)
@@ -298,6 +305,120 @@ func (m *UserAutopilotManager) SetPatternUpdateCallback(callback entrydecision.P
 		}
 		return true
 	})
+}
+
+// SetSettingsChangeCallback sets the callback for settings change notifications (Epic 14)
+// This is called from the API server to enable WebSocket broadcasting of settings changes.
+// When settings are modified (sub-strategy, strategy group, or mode), the callback is
+// triggered to broadcast the update to connected clients for real-time UI refresh.
+func (m *UserAutopilotManager) SetSettingsChangeCallback(callback SettingsChangeCallback) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.settingsChangeCallback = callback
+	m.logger.Info("SettingsChangeCallback set on UserAutopilotManager for real-time settings notifications")
+}
+
+// NotifySettingsChanged notifies the autopilot system that settings have changed.
+// This triggers a reload of relevant components based on what changed.
+//
+// Parameters:
+//   - ctx: Context for database operations
+//   - userID: The user whose settings changed
+//   - changeType: Type of change - "sub_strategy", "strategy_group", or "mode"
+//   - mode: Trading mode (scalp, swing, position) - may be empty for mode-level changes
+//   - strategyGroup: Strategy group name - may be empty for mode/strategy_group level changes
+//   - subStrategy: Sub-strategy name - may be empty for higher-level changes
+//
+// Actions:
+//   - Reloads pattern matcher config when sub-strategy settings change
+//   - Refreshes CoinProfiler subscriptions when strategies are enabled/disabled
+func (m *UserAutopilotManager) NotifySettingsChanged(ctx context.Context, userID string, changeType string, mode string, strategyGroup string, subStrategy string) {
+	m.logger.Info("Settings change notification received",
+		"user_id", userID,
+		"change_type", changeType,
+		"mode", mode,
+		"strategy_group", strategyGroup,
+		"sub_strategy", subStrategy)
+
+	// Get the user instance
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		m.logger.Debug("No autopilot instance for user, skipping settings notification", "user_id", userID)
+		return
+	}
+
+	// Reload pattern matcher config if RealtimePatternMatcher exists
+	// This ensures pattern detection uses the latest user settings
+	if instance.RealtimePatternMatcher != nil {
+		if err := m.ReloadPatternMatcherConfig(ctx, userID); err != nil {
+			m.logger.Error("Failed to reload pattern matcher config",
+				"user_id", userID,
+				"error", err)
+		} else {
+			m.logger.Info("Pattern matcher config reloaded successfully",
+				"user_id", userID,
+				"change_type", changeType)
+		}
+	}
+
+	// Refresh CoinProfiler subscriptions if running
+	// This handles strategy enable/disable affecting which symbols to monitor
+	if instance.CoinProfiler != nil && instance.CoinProfiler.IsRunning() {
+		count, err := m.RefreshCoinProfilerSubscriptions(ctx, userID)
+		if err != nil {
+			m.logger.Error("Failed to refresh CoinProfiler subscriptions",
+				"user_id", userID,
+				"error", err)
+		} else {
+			m.logger.Info("CoinProfiler subscriptions refreshed",
+				"user_id", userID,
+				"enabled_strategies", count)
+		}
+	}
+
+	// Broadcast settings change via WebSocket for real-time UI updates
+	// This is called AFTER all internal processing is complete
+	m.mu.RLock()
+	callback := m.settingsChangeCallback
+	m.mu.RUnlock()
+
+	if callback != nil {
+		callback(userID, changeType, mode, strategyGroup, subStrategy)
+		m.logger.Debug("Settings change callback triggered",
+			"user_id", userID,
+			"change_type", changeType)
+	}
+
+	m.logger.Info("Settings change notification processed",
+		"user_id", userID,
+		"change_type", changeType)
+}
+
+// ReloadPatternMatcherConfig reloads the pattern matcher configuration from database settings.
+// This should be called when sub-strategy settings change to ensure the pattern matcher
+// uses the latest user-configured values (direction, thresholds, etc.)
+func (m *UserAutopilotManager) ReloadPatternMatcherConfig(ctx context.Context, userID string) error {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return fmt.Errorf("no autopilot instance for user %s", userID)
+	}
+
+	if instance.RealtimePatternMatcher == nil {
+		return fmt.Errorf("realtime pattern matcher not initialized for user %s", userID)
+	}
+
+	// Load fresh config from database using existing method
+	config := m.loadUserPatternMatcherConfig(ctx, userID)
+
+	// Update the pattern matcher with new config
+	instance.RealtimePatternMatcher.ReloadPatternMatcherConfig(config)
+
+	m.logger.Info("Reloaded pattern matcher config",
+		"user_id", userID,
+		"direction", config.Direction,
+		"min_volume_spike_multiplier", config.MinVolumeSpikeMultiplier)
+
+	return nil
 }
 
 // cleanupLoop periodically removes idle user sessions

@@ -265,9 +265,10 @@ func (s *Server) handleUpdateStrategyGroup(c *gin.Context) {
 		return
 	}
 
-	// Refresh Coin Profiler subscriptions if the enabled state changed
+	// Notify autopilot system that settings have changed and refresh CoinProfiler subscriptions
 	var enabledStrategies int
 	if s.userAutopilotManager != nil {
+		s.userAutopilotManager.NotifySettingsChanged(ctx, userID, "strategy_group", mode, group, "")
 		enabledStrategies, _ = s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID)
 	}
 
@@ -465,9 +466,11 @@ func (s *Server) handleUpdateSubStrategy(c *gin.Context) {
 		return
 	}
 
-	// Refresh Coin Profiler subscriptions if the enabled state changed
+	// Notify autopilot system that settings have changed
+	// This triggers a reload of pattern matcher config and refreshes CoinProfiler subscriptions
 	var enabledStrategies int
 	if s.userAutopilotManager != nil {
+		s.userAutopilotManager.NotifySettingsChanged(ctx, userID, "sub_strategy", mode, group, strategy)
 		enabledStrategies, _ = s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID)
 	}
 

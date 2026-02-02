@@ -30,6 +30,7 @@ import { VolumeImbalanceCard } from '../EntryDecisionEngine';
 import { StrategyFirstView } from '../EntryDecision';
 import { useVolumeImbalancePatterns } from '../../hooks/useStrategyHierarchy';
 import { TradingToggle } from '../TradingControl';
+import { useTradingState } from '../../hooks/useTradingState';
 import { CoinProfilerCard } from '../CoinProfiler';
 import {
   OrderChain,
@@ -75,6 +76,10 @@ export default function TradeLifecycleTab({
 
   // Volume Imbalance patterns for Entry Decision Engine
   const { patterns: volumeImbalancePatterns, isLoading: patternsLoading } = useVolumeImbalancePatterns();
+
+  // Trading state - controls whether new entries are allowed
+  const { data: tradingState } = useTradingState();
+  const tradingEnabled = tradingState?.enabled ?? true;
 
   // Helper: Convert API PositionStateInfo to frontend PositionState
   const mapPositionState = (state: PositionStateInfo): PositionState => ({
@@ -660,14 +665,20 @@ export default function TradeLifecycleTab({
 
             {/* ==================== SECTION 0: COIN PROFILER ==================== */}
             {/* First expandable - Real-time data hub for Chain Trading System */}
+            {/* CoinProfiler always runs to monitor positions, but strategies only when trading is ON */}
             <CoinProfilerCard />
 
             {/* ==================== SECTION 1: ENTRY DECISION ENGINE ==================== */}
-            <EntryDecisionEngineCard defaultExpanded={false} />
+            {/* Only show when trading is ON - this is for new entry analysis */}
+            {tradingEnabled && (
+              <EntryDecisionEngineCard defaultExpanded={false} />
+            )}
 
             {/* ==================== SECTION 1.25: STRATEGY-FIRST VIEW (Story 14.13) ==================== */}
+            {/* Shows strategies - when trading OFF, only shows coins with active positions */}
             <StrategyFirstView
               defaultExpanded={false}
+              tradingEnabled={tradingEnabled}
               onCoinSelect={(symbol, strategy) => {
                 console.log('Selected coin:', symbol, 'from strategy:', strategy.strategy);
                 // TODO: Navigate to coin details or trigger entry flow
@@ -675,7 +686,8 @@ export default function TradeLifecycleTab({
             />
 
             {/* ==================== SECTION 1.5: VOLUME IMBALANCE PATTERNS ==================== */}
-            {volumeImbalancePatterns.length > 0 && (
+            {/* Only show when trading is ON - these are new entry signals */}
+            {tradingEnabled && volumeImbalancePatterns.length > 0 && (
               <div className="bg-gray-900/50 rounded-lg border border-purple-500/30 p-4">
                 <h3 className="text-sm font-semibold text-purple-400 mb-3 flex items-center gap-2">
                   <Activity className="w-4 h-4" />

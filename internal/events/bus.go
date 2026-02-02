@@ -51,6 +51,9 @@ const (
 	// Epic 14: Entry Decision Updates
 	EventEntryDecisionUpdate        EventType = "ENTRY_DECISION_UPDATE"
 	EventEntryDecisionPatternUpdate EventType = "ENTRY_DECISION_PATTERN_UPDATE"
+
+	// Epic 14: Settings Changed Notification
+	EventSettingsChanged EventType = "SETTINGS_CHANGED"
 )
 
 // Event represents a system event
@@ -248,6 +251,7 @@ var (
 	broadcastCoinStateUpdate    BroadcastFunc // Epic 11: Position Decision Engine
 	broadcastExitDecisionUpdate BroadcastFunc // Story 10.3: Exit Decision Monitoring
 	broadcastOrderUpdate        BroadcastFunc // Order status updates (placed/cancelled/filled)
+	broadcastSettingsChanged    BroadcastFunc // Epic 14: Settings change notifications
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -396,5 +400,19 @@ func SetBroadcastOrderUpdate(fn BroadcastFunc) {
 func BroadcastOrderUpdate(userID string, data interface{}) {
 	if broadcastOrderUpdate != nil && userID != "" {
 		go broadcastOrderUpdate(userID, data)
+	}
+}
+
+// SetBroadcastSettingsChanged sets the callback for settings change broadcasts
+// Epic 14: Settings change notifications for live settings propagation
+func SetBroadcastSettingsChanged(fn BroadcastFunc) {
+	broadcastSettingsChanged = fn
+}
+
+// BroadcastSettingsChanged broadcasts settings change notification to a user
+// Epic 14: Settings change notifications - Real-time settings updates for UI
+func BroadcastSettingsChanged(userID string, data interface{}) {
+	if broadcastSettingsChanged != nil && userID != "" {
+		go broadcastSettingsChanged(userID, data)
 	}
 }

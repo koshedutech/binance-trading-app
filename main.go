@@ -1001,6 +1001,11 @@ func main() {
 		// When patterns transition (volume spike → consolidation → breakout), updates are broadcast
 		userAutopilotManager.SetPatternUpdateCallback(api.BroadcastPatternUpdateFunc)
 
+		// Epic 14: Wire settings change callback for real-time WebSocket broadcasting
+		// This enables live settings propagation - when settings change, the frontend is notified
+		// immediately via WebSocket, allowing UI components to refresh without polling
+		userAutopilotManager.SetSettingsChangeCallback(api.BroadcastSettingsChanged)
+
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
 

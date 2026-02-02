@@ -279,6 +279,32 @@ func NewVolumeImbalancePatternMatcher(config *PatternMatcherConfig) *VolumeImbal
 	}
 }
 
+// ReloadConfig updates the pattern matcher configuration without resetting pattern progress.
+// This allows dynamic configuration updates (e.g., when user changes strategy settings)
+// while preserving existing pattern detection state.
+func (m *VolumeImbalancePatternMatcher) ReloadConfig(newConfig *PatternMatcherConfig) {
+	if newConfig == nil {
+		log.Printf("[PATTERN] ReloadConfig called with nil config, ignoring")
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	oldDirection := ""
+	if m.config != nil {
+		oldDirection = m.config.Direction
+	}
+
+	m.config = newConfig
+
+	log.Printf("[PATTERN] Config reloaded: direction=%s (was %s), volume_spike=%.1fx, lookback=%d, breakout_surge=%.1fx",
+		newConfig.Direction, oldDirection,
+		newConfig.MinVolumeSpikeMultiplier,
+		newConfig.LookbackPeriod,
+		newConfig.BreakoutVolumeSurge)
+}
+
 // ============================================================================
 // MAIN PATTERN MATCHING INTERFACE
 // ============================================================================

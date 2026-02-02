@@ -708,6 +708,12 @@ func (s *Server) handleUpdateModeStrategy(c *gin.Context) {
 		return
 	}
 
+	// Notify autopilot system that settings have changed
+	// This triggers a reload of pattern matcher config and refreshes CoinProfiler subscriptions
+	if s.userAutopilotManager != nil {
+		s.userAutopilotManager.NotifySettingsChanged(ctx, userID, "strategy_group", mode, strategy, "")
+	}
+
 	response := configToResponse(mode, strategy, existingConfig)
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

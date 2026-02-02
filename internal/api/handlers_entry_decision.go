@@ -1163,6 +1163,53 @@ func (s *Server) getOrCreateRealtimeMatcher(userID string) *entrydecision.Realti
 
 // ==================== ENTRY LEVELS ENDPOINT ====================
 
+// ==================== SETTINGS CHANGE BROADCASTING ====================
+
+// SettingsChangeData represents the data sent in a SETTINGS_CHANGED WebSocket event.
+type SettingsChangeData struct {
+	UserID        string `json:"user_id"`
+	ChangeType    string `json:"change_type"`     // "sub_strategy", "strategy_group", or "mode"
+	Mode          string `json:"mode,omitempty"`  // Trading mode (scalp, swing, position)
+	StrategyGroup string `json:"strategy_group,omitempty"`
+	SubStrategy   string `json:"sub_strategy,omitempty"`
+}
+
+// BroadcastSettingsChanged broadcasts a settings change event to WebSocket clients.
+// This enables the frontend to receive real-time notifications when settings are modified,
+// allowing UI components to refresh their data without polling.
+//
+// Parameters:
+//   - userID: The user whose settings changed
+//   - changeType: Type of change - "sub_strategy", "strategy_group", or "mode"
+//   - mode: Trading mode (scalp, swing, position) - may be empty
+//   - strategyGroup: Strategy group name - may be empty
+//   - subStrategy: Sub-strategy name - may be empty
+func BroadcastSettingsChanged(userID, changeType, mode, strategyGroup, subStrategy string) {
+	if userWSHub == nil {
+		log.Printf("[SETTINGS-BROADCAST] WARNING: userWSHub is nil, cannot broadcast settings change")
+		return
+	}
+
+	log.Printf("[SETTINGS-BROADCAST] Broadcasting settings change: user=%s type=%s mode=%s strategy=%s sub=%s",
+		userID, changeType, mode, strategyGroup, subStrategy)
+
+	event := events.Event{
+		Type:      events.EventSettingsChanged,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"user_id":        userID,
+			"change_type":    changeType,
+			"mode":           mode,
+			"strategy_group": strategyGroup,
+			"sub_strategy":   subStrategy,
+		},
+	}
+
+	// Broadcast to the specific user who made the change
+	userWSHub.BroadcastToUser(userID, event)
+	log.Printf("[SETTINGS-BROADCAST] Sent SETTINGS_CHANGED event to user %s", userID)
+}
+
 // handleGetEntryLevels handles GET /api/futures/entry-decision/entry-levels/:symbol
 // Returns calculated entry, SL, and TP levels for a symbol.
 func (s *Server) handleGetEntryLevels(c *gin.Context) {

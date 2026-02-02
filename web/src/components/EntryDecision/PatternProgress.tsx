@@ -289,6 +289,7 @@ export function PatternProgressCompact({
     ready: 'text-green-400',
     failed: 'text-red-400',
     expired: 'text-gray-500',
+    position_running: 'text-blue-400',
   };
 
   const statusLabels: Record<PatternStatus, string> = {
@@ -298,6 +299,7 @@ export function PatternProgressCompact({
     ready: 'Ready',
     failed: 'Failed',
     expired: 'Expired',
+    position_running: 'Position Running',
   };
 
   return (

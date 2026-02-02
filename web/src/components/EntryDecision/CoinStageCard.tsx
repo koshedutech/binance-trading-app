@@ -54,6 +54,7 @@ const STATUS_COLORS: Record<PatternStatus, { bg: string; text: string; border: s
   ready: { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30' },
   failed: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30' },
   expired: { bg: 'bg-gray-500/20', text: 'text-gray-500', border: 'border-gray-500/30' },
+  position_running: { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500/30' },
 };
 
 const STATUS_LABELS: Record<PatternStatus, string> = {
@@ -63,6 +64,7 @@ const STATUS_LABELS: Record<PatternStatus, string> = {
   ready: 'Ready',
   failed: 'Failed',
   expired: 'Expired',
+  position_running: 'Position Running',
 };
 
 // ==================== Entry Levels Panel ====================

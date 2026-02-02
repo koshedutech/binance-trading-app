@@ -285,6 +285,16 @@ func (r *RealtimePatternMatcher) GetPatternMatcher() *VolumeImbalancePatternMatc
 	return r.patternMatcher
 }
 
+// ReloadPatternMatcherConfig updates the underlying pattern matcher's configuration.
+// This allows dynamic configuration updates without resetting pattern progress.
+func (r *RealtimePatternMatcher) ReloadPatternMatcherConfig(newConfig *PatternMatcherConfig) {
+	if r.patternMatcher == nil {
+		log.Printf("[REALTIME-PATTERN] ReloadPatternMatcherConfig: no pattern matcher, ignoring")
+		return
+	}
+	r.patternMatcher.ReloadConfig(newConfig)
+}
+
 // ClearAllPatterns clears all pattern state from both the underlying pattern matcher
 // and the realtime matcher's cached states. This should be called when:
 // - The CoinProfiler restarts (e.g., browser refresh triggers stop/start)

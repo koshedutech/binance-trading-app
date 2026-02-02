@@ -18,6 +18,8 @@ import {
   WifiOff,
   LayoutGrid,
   List,
+  Pause,
+  Briefcase,
 } from 'lucide-react';
 import StrategyCard, { StrategyBadge } from './StrategyCard';
 import { useEntryDecisionStrategies } from '../../hooks/useEntryDecision';
@@ -39,6 +41,8 @@ interface StrategyFirstViewProps {
   onCoinSelect?: (symbol: string, strategy: StrategyMatch) => void;
   /** Callback when a strategy is selected */
   onStrategySelect?: (strategy: StrategyMatch) => void;
+  /** Whether trading is enabled - when false, only shows position coins */
+  tradingEnabled?: boolean;
 }
 
 interface ModeSectionProps {
@@ -298,6 +302,7 @@ export default function StrategyFirstView({
   className = '',
   onCoinSelect,
   onStrategySelect,
+  tradingEnabled = true,
 }: StrategyFirstViewProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped');
@@ -305,15 +310,56 @@ export default function StrategyFirstView({
   const autoExpandedOnDataRef = useRef(false);
 
   const {
-    strategies,
-    byMode,
-    stats,
+    strategies: rawStrategies,
+    byMode: rawByMode,
+    stats: rawStats,
     isLoading,
     isRealTime,
     error,
     refresh,
     // Note: nextCandleClose and lookingFor are now passed per-strategy to StrategyCard
   } = useEntryDecisionStrategies();
+
+  // When trading is OFF, filter to show only coins with active positions
+  const strategies = useMemo(() => {
+    if (tradingEnabled) return rawStrategies;
+
+    // Filter strategies to only include coins with active positions
+    return rawStrategies.map(strategy => ({
+      ...strategy,
+      coins: strategy.coins.filter(coin => coin.has_active_position === true),
+    })).filter(strategy => strategy.coins.length > 0);
+  }, [rawStrategies, tradingEnabled]);
+
+  const byMode = useMemo(() => {
+    if (tradingEnabled) return rawByMode;
+
+    // Filter by_mode to only include coins with active positions
+    return rawByMode.map(modeGroup => ({
+      ...modeGroup,
+      strategies: modeGroup.strategies.map(strategy => ({
+        ...strategy,
+        coins: strategy.coins.filter(coin => coin.has_active_position === true),
+      })).filter(strategy => strategy.coins.length > 0),
+    })).filter(modeGroup => modeGroup.strategies.length > 0);
+  }, [rawByMode, tradingEnabled]);
+
+  // Recalculate stats based on filtered data
+  const stats = useMemo(() => {
+    if (tradingEnabled) return rawStats;
+
+    const totalCoinsReady = strategies.reduce((sum, s) =>
+      sum + s.coins.filter(c => c.status === 'ready' || c.ready === true).length, 0);
+    const totalCoinsWatching = strategies.reduce((sum, s) =>
+      sum + s.coins.filter(c => c.status !== 'ready' && c.ready !== true).length, 0);
+
+    return {
+      ...rawStats,
+      enabledStrategies: strategies.length,
+      totalCoinsReady,
+      totalCoinsWatching,
+    };
+  }, [rawStats, strategies, tradingEnabled]);
 
   // Group strategies by mode if not already grouped
   const groupedByMode = byMode.length > 0
@@ -425,8 +471,24 @@ export default function StrategyFirstView({
             </div>
           )}
 
-          {/* Empty State */}
-          {!isLoading && strategies.length === 0 && !error && (
+          {/* Empty State - Trading Paused */}
+          {!isLoading && strategies.length === 0 && !error && !tradingEnabled && (
+            <div className="text-center py-8">
+              <div className="w-16 h-16 mx-auto mb-3 rounded-full bg-yellow-500/20 flex items-center justify-center">
+                <Pause className="w-8 h-8 text-yellow-400" />
+              </div>
+              <p className="text-yellow-400 font-medium">Trading Paused</p>
+              <p className="text-sm text-gray-500 mt-1">
+                New entry signals are paused. Only active positions are being monitored.
+              </p>
+              <p className="text-xs text-gray-600 mt-2">
+                Click the ON button above to resume strategy scanning.
+              </p>
+            </div>
+          )}
+
+          {/* Empty State - No Strategies */}
+          {!isLoading && strategies.length === 0 && !error && tradingEnabled && (
             <div className="text-center py-8">
               <Layers className="w-12 h-12 mx-auto mb-3 text-gray-600" />
               <p className="text-gray-400">No strategies configured</p>

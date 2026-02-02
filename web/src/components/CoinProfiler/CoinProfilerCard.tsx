@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Database,
   ChevronDown,
@@ -9,6 +9,8 @@ import {
   AlertCircle,
   Zap,
   Activity,
+  AlertTriangle,
+  Lock,
 } from 'lucide-react';
 import {
   useCoinProfilerStatus,
@@ -17,6 +19,7 @@ import {
   useCoinProfilerRealtime,
   type CoinDataUpdate,
 } from '../../hooks/useCoinProfiler';
+import { useTradingState } from '../../hooks/useTradingState';
 import { wsService } from '../../services/websocket';
 import CoinProfilerStatus, { CoinProfilerStatusDetailed } from './CoinProfilerStatus';
 import CoinList from './CoinList';
@@ -54,6 +57,20 @@ export default function CoinProfilerCard() {
   // Real-time coin data with WebSocket updates
   const { coins, total, lastUpdate, updateCount, handleCoinUpdate, refetch: refetchCoins } = useCoinProfilerRealtime(wsConnected);
 
+  // Trading state - controls what can be started/stopped
+  const { data: tradingState } = useTradingState();
+  const tradingEnabled = tradingState?.enabled ?? true;
+
+  // Count active positions (coins with source "position" or "both")
+  const positionCoinsCount = useMemo(() => {
+    if (!coins) return 0;
+    return coins.filter(c => c.source === 'position' || c.source === 'both').length;
+  }, [coins]);
+
+  // Control restrictions
+  const canStopProfiler = positionCoinsCount === 0; // Can only stop if no positions
+  const canStartProfiler = tradingEnabled; // Can only start if trading is ON
+
   // Subscribe to WebSocket events for real-time coin updates
   useEffect(() => {
     const handleWsEvent = (event: { type: string; data?: CoinDataUpdate }) => {
@@ -80,8 +97,17 @@ export default function CoinProfilerCard() {
     };
   }, [handleCoinUpdate]);
 
-  // Handle start/stop actions
+  // Warning states for control restrictions
+  const [showStopWarning, setShowStopWarning] = useState(false);
+  const [showStartWarning, setShowStartWarning] = useState(false);
+
+  // Handle start/stop actions with restrictions
   const handleStart = async () => {
+    if (!canStartProfiler) {
+      setShowStartWarning(true);
+      setTimeout(() => setShowStartWarning(false), 5000);
+      return;
+    }
     try {
       await start();
       refetchStatus();
@@ -91,6 +117,11 @@ export default function CoinProfilerCard() {
   };
 
   const handleStop = async () => {
+    if (!canStopProfiler) {
+      setShowStopWarning(true);
+      setTimeout(() => setShowStopWarning(false), 5000);
+      return;
+    }
     try {
       await stop();
       refetchStatus();
@@ -168,30 +199,42 @@ export default function CoinProfilerCard() {
             {status?.running ? (
               <button
                 onClick={handleStop}
-                disabled={isStopping}
-                className="px-2 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded text-xs font-medium flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Stop Profiler"
+                disabled={isStopping || !canStopProfiler}
+                className={`px-2 py-1 rounded text-xs font-medium flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  !canStopProfiler
+                    ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+                    : 'bg-red-500/20 hover:bg-red-500/30 text-red-400'
+                }`}
+                title={!canStopProfiler ? `Cannot stop: ${positionCoinsCount} position(s) active. Pause Trade Cycle instead.` : 'Stop Profiler'}
               >
                 {isStopping ? (
                   <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : !canStopProfiler ? (
+                  <Lock className="w-3 h-3" />
                 ) : (
                   <Square className="w-3 h-3" />
                 )}
-                Stop
+                {!canStopProfiler ? 'Locked' : 'Stop'}
               </button>
             ) : (
               <button
                 onClick={handleStart}
-                disabled={isStarting}
-                className="px-2 py-1 bg-green-500/20 hover:bg-green-500/30 text-green-400 rounded text-xs font-medium flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-                title="Start Profiler"
+                disabled={isStarting || !canStartProfiler}
+                className={`px-2 py-1 rounded text-xs font-medium flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  !canStartProfiler
+                    ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
+                    : 'bg-green-500/20 hover:bg-green-500/30 text-green-400'
+                }`}
+                title={!canStartProfiler ? 'Enable Trade Cycle first to start Coin Profiler' : 'Start Profiler'}
               >
                 {isStarting ? (
                   <RefreshCw className="w-3 h-3 animate-spin" />
+                ) : !canStartProfiler ? (
+                  <Lock className="w-3 h-3" />
                 ) : (
                   <Play className="w-3 h-3" />
                 )}
-                Start
+                {!canStartProfiler ? 'Locked' : 'Start'}
               </button>
             )}
           </div>
@@ -204,6 +247,44 @@ export default function CoinProfilerCard() {
           )}
         </div>
       </button>
+
+      {/* Warning: Cannot stop due to active positions */}
+      {showStopWarning && (
+        <div className="px-3 py-2 bg-yellow-900/20 border-t border-yellow-800">
+          <div className="flex items-center gap-2 text-yellow-400 text-xs">
+            <AlertTriangle className="w-4 h-4" />
+            <span>
+              Cannot stop Coin Profiler: <strong>{positionCoinsCount} position(s)</strong> are active.
+              Use <strong>Trade Cycle OFF</strong> to pause new entries while monitoring positions.
+            </span>
+            <button
+              onClick={() => setShowStopWarning(false)}
+              className="ml-auto text-yellow-400 hover:text-yellow-300"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Warning: Cannot start due to Trade Cycle OFF */}
+      {showStartWarning && (
+        <div className="px-3 py-2 bg-yellow-900/20 border-t border-yellow-800">
+          <div className="flex items-center gap-2 text-yellow-400 text-xs">
+            <AlertTriangle className="w-4 h-4" />
+            <span>
+              Cannot start Coin Profiler: <strong>Trade Cycle is OFF</strong>.
+              Enable Trade Cycle first to start data collection.
+            </span>
+            <button
+              onClick={() => setShowStartWarning(false)}
+              className="ml-auto text-yellow-400 hover:text-yellow-300"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Control Error */}
       {controlError && (
