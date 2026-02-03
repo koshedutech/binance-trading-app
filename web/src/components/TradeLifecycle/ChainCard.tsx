@@ -21,11 +21,13 @@ import { OrderChain, ChainOrder, ORDER_TYPE_CONFIG, MODE_DISPLAY_NAMES, OrderTyp
 import {
   StageBadge,
   StageTimeline,
+  PriceLevelsDisplay,
   EfficiencyMetricsDisplay,
   ClassicIndicatorDisplay,
   NewEngineIndicatorDisplay,
   DecisionModeBadge,
 } from '../PositionCardExpanded';
+import type { ExpandedPositionData } from '../../types/positionManagement';
 import { useUserTimezone } from './hooks/useUserTimezone';
 import OrderTreeNode, { buildEntryFromPositionState, TreeNodeType } from './OrderTreeNode';
 import { ModificationTree, ModificationRowList, calculateSummaryStats, formatDollarImpact } from './ModificationHistory';
@@ -39,6 +41,8 @@ interface ChainCardProps {
   // User fee rates for economics calculations
   makerFeeRate?: number; // Default 0.02% = 0.0002
   takerFeeRate?: number; // Default 0.04% = 0.0004
+  // Real-time price from coin profiler subscription
+  livePrice?: number;
 }
 
 // Fee calculation helpers (similar to OrderEconomics.tsx)
@@ -147,13 +151,77 @@ function formatPnLPercent(value: number | null | undefined): string {
   return `${safeValue >= 0 ? '+' : ''}${safeValue.toFixed(2)}%`;
 }
 
+// Convert chain data to ExpandedPositionData for position detail display
+function convertToExpandedPositionData(
+  chain: OrderChain,
+  positionState: PositionState,
+  analytics?: PositionAnalyticsData,
+  livePrice?: number  // Real-time price from coin profiler
+): ExpandedPositionData {
+  // Get SL price from order or analytics
+  const slPrice = chain.slOrder?.stopPrice || chain.slOrder?.price || analytics?.stop_loss;
+
+  // Calculate unrealized PnL using live price if available, otherwise analytics or entry price
+  const currentPrice = livePrice ?? analytics?.current_price ?? positionState.entryPrice;
+  const priceChange = chain.positionSide === 'LONG'
+    ? currentPrice - positionState.entryPrice
+    : positionState.entryPrice - currentPrice;
+  const unrealizedPnl = priceChange * positionState.remainingQuantity;
+  const entryValue = positionState.entryValue || positionState.entryPrice * positionState.entryQuantity;
+  const unrealizedPnlPercent = entryValue > 0 ? (unrealizedPnl / entryValue) * 100 : 0;
+
+  return {
+    symbol: chain.symbol || positionState.symbol,
+    side: chain.positionSide === 'LONG' ? 'LONG' : 'SHORT',
+    entry_price: positionState.entryPrice,
+    current_price: currentPrice,
+    quantity: positionState.entryQuantity,
+    leverage: 1, // Default leverage (not tracked in position state)
+    // Use calculated unrealized P&L based on live price (if available)
+    unrealized_pnl: livePrice ? unrealizedPnl : (analytics?.unrealized_pnl ?? unrealizedPnl),
+    unrealized_pnl_percent: unrealizedPnlPercent,
+    roe: analytics?.roe ?? unrealizedPnlPercent,
+    stage: analytics?.stage ?? 'RISK_ZONE',
+    stage_entry_time: analytics?.stage_entry_time ?? new Date(positionState.entryFilledAt).getTime(),
+    stage_progress_percent: 0,
+    stop_loss: slPrice,
+    take_profit: chain.tpOrders[0]?.price,
+    breakeven_price: analytics?.breakeven_price,
+    tp1_price: analytics?.tp1_price ?? chain.tpOrders[0]?.price,
+    tp2_price: analytics?.tp2_price ?? chain.tpOrders[1]?.price,
+    tp3_price: analytics?.tp3_price ?? chain.tpOrders[2]?.price,
+    decision_mode: analytics?.decision_mode ?? 'classic',
+    efficiency: analytics?.efficiency,
+    classic_scores: analytics?.classic_scores,
+    new_engine_scores: analytics?.new_engine_scores,
+    entry_time: new Date(positionState.entryFilledAt).getTime(),
+    last_updated: new Date(positionState.updatedAt).getTime(),
+  };
+}
+
 export default function ChainCard({
   chain,
   compact = false,
   useTreeView = true,
   makerFeeRate = 0.0002,  // 0.02% VIP0 maker
   takerFeeRate = 0.0004,  // 0.04% VIP0 taker
+  livePrice,             // Real-time price from coin profiler
 }: ChainCardProps) {
+  // Use live price if available, otherwise fall back to analytics/position state
+  const currentPrice = livePrice ?? chain.positionAnalytics?.current_price ?? chain.positionState?.entryPrice ?? 0;
+
+  // Calculate live unrealized P&L based on current price
+  const liveUnrealizedPnl = useMemo(() => {
+    if (!chain.positionState || currentPrice <= 0) {
+      return chain.positionAnalytics?.unrealized_pnl ?? 0;
+    }
+    const entryPrice = chain.positionState.entryPrice;
+    const qty = chain.positionState.remainingQuantity || chain.positionState.entryQuantity;
+    const isLong = chain.positionSide === 'LONG';
+    const priceChange = isLong ? currentPrice - entryPrice : entryPrice - currentPrice;
+    return priceChange * qty;
+  }, [chain.positionState, chain.positionSide, chain.positionAnalytics?.unrealized_pnl, currentPrice]);
+
   const [expanded, setExpanded] = useState(false);
   const [showLegacyView, setShowLegacyView] = useState(false); // Toggle to show old horizontal view
   const [tpSectionExpanded, setTpSectionExpanded] = useState(false);
@@ -366,6 +434,11 @@ export default function ChainCard({
               (chain.status === 'completed' && positionStatus === 'CLOSED');
             // Don't show duplicate badge
             if (statusEquivalent) return null;
+            // Don't show CLOSED position status when chain is still active/partial
+            // This prevents confusing display of "CLOSED" on open orders
+            if (positionStatus === 'CLOSED' && (chain.status === 'active' || chain.status === 'partial')) {
+              return null;
+            }
             return (
               <span className={`px-1.5 py-0.5 rounded text-xs ${
                 positionStatus === 'ACTIVE' ? 'bg-green-500/20 text-green-400' :
@@ -431,12 +504,13 @@ export default function ChainCard({
               />
             )}
 
-            {/* Position State - Child of entry (depth 1) */}
+            {/* Position State - Child of entry (depth 1) - Minimal card with stage badge */}
             {chain.positionState && (
               <div className="mt-1">
                 <OrderTreeNode
                   type="POSITION"
                   positionState={chain.positionState}
+                  positionAnalytics={chain.positionAnalytics}
                   chainId={chain.chainId}
                   positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
                   depth={1}
@@ -586,6 +660,127 @@ export default function ChainCard({
             )}
           </div>
 
+          {/* Detailed Position Section - Shown below Order Tree for active/partial chains with position state */}
+          {chain.positionState && (chain.status === 'active' || chain.status === 'partial') && (
+            <div className="border border-gray-700 rounded-lg overflow-hidden bg-gray-900/30">
+              <div className="px-4 py-3 border-b border-gray-700 bg-gray-800/50">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Target className="w-4 h-4 text-cyan-400" />
+                    <span className="text-sm font-medium text-gray-300">Position Details</span>
+                    {chain.positionAnalytics && (
+                      <StageBadge stage={chain.positionAnalytics.stage} compact />
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {/* Realized P&L if any */}
+                    {chain.positionState.realizedPnl !== 0 && (
+                      <span className={`text-xs ${chain.positionState.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        Realized: {chain.positionState.realizedPnl >= 0 ? '+' : ''}{chain.positionState.realizedPnl.toFixed(4)} USDT
+                      </span>
+                    )}
+                    {/* Unrealized P&L - calculated live */}
+                    <span className={`text-sm font-semibold ${liveUnrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {liveUnrealizedPnl >= 0 ? '+' : ''}{liveUnrealizedPnl.toFixed(2)} USDT
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 space-y-4">
+                {/* Position Stage Progress Bar */}
+                {chain.positionAnalytics && (
+                  <div>
+                    <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-purple-400" />
+                      Stage Progress
+                    </h4>
+                    <StageTimeline
+                      currentStage={chain.positionAnalytics.stage}
+                      stageEntryTime={chain.positionAnalytics.stage_entry_time}
+                    />
+                  </div>
+                )}
+
+                {/* Price Levels Visualization */}
+                <div>
+                  <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
+                    <Layers className="w-4 h-4 text-yellow-400" />
+                    Price Levels
+                  </h4>
+                  <PriceLevelsDisplay
+                    position={convertToExpandedPositionData(chain, chain.positionState, chain.positionAnalytics, currentPrice)}
+                  />
+                </div>
+
+                {/* Risk Metrics Grid */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="bg-gray-800/50 rounded-lg p-3">
+                    <span className="text-xs text-gray-500 block mb-1">Entry Price</span>
+                    <span className="text-sm font-mono text-blue-400">${chain.positionState.entryPrice.toFixed(4)}</span>
+                  </div>
+                  <div className="bg-gray-800/50 rounded-lg p-3">
+                    <span className="text-xs text-gray-500 block mb-1">Entry Value</span>
+                    <span className="text-sm font-mono text-gray-300">${chain.positionState.entryValue.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-gray-800/50 rounded-lg p-3">
+                    <span className="text-xs text-gray-500 block mb-1">Quantity</span>
+                    <span className="text-sm font-mono text-gray-300">
+                      {chain.positionState.remainingQuantity.toFixed(4)}
+                      {chain.positionState.remainingQuantity !== chain.positionState.entryQuantity && (
+                        <span className="text-gray-500 text-xs ml-1">
+                          / {chain.positionState.entryQuantity.toFixed(4)}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="bg-gray-800/50 rounded-lg p-3">
+                    <span className="text-xs text-gray-500 block mb-1">Entry Fees</span>
+                    <span className="text-sm font-mono text-orange-400">${chain.positionState.entryFees.toFixed(4)}</span>
+                  </div>
+                </div>
+
+                {/* Current Price & SL/TP Levels */}
+                {(chain.positionAnalytics || currentPrice > 0) && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="bg-gray-800/50 rounded-lg p-3">
+                      <span className="text-xs text-gray-500 block mb-1">Current Price</span>
+                      <span className="text-sm font-mono text-white">${currentPrice.toFixed(4)}</span>
+                    </div>
+                    {chain.positionAnalytics.breakeven_price && (
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <span className="text-xs text-gray-500 block mb-1">Breakeven</span>
+                        <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(4)}</span>
+                      </div>
+                    )}
+                    {chain.slOrder && (
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <span className="text-xs text-gray-500 block mb-1">Stop Loss</span>
+                        <span className="text-sm font-mono text-red-400">${(chain.slOrder.stopPrice || chain.slOrder.price || 0).toFixed(4)}</span>
+                      </div>
+                    )}
+                    {chain.tpOrders.length > 0 && (
+                      <div className="bg-gray-800/50 rounded-lg p-3">
+                        <span className="text-xs text-gray-500 block mb-1">TP1</span>
+                        <span className="text-sm font-mono text-green-400">${(chain.tpOrders[0].price || 0).toFixed(4)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ROE Display */}
+                {chain.positionAnalytics && (
+                  <div className="flex items-center justify-between pt-3 border-t border-gray-700">
+                    <span className="text-sm text-gray-400">Return on Equity (ROE)</span>
+                    <span className={`text-sm font-semibold ${(chain.positionAnalytics.roe ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {(chain.positionAnalytics.roe ?? 0) >= 0 ? '+' : ''}{(chain.positionAnalytics.roe ?? 0).toFixed(2)}%
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Story 11.40: Position Analytics Section */}
           {chain.positionAnalytics && (
             <div className="border border-gray-700 rounded-lg overflow-hidden">
@@ -601,9 +796,9 @@ export default function ChainCard({
                   <DecisionModeBadge mode={chain.positionAnalytics.decision_mode} />
                 </div>
                 <div className="flex items-center gap-3">
-                  {/* P&L */}
-                  <span className={`text-sm font-semibold ${(chain.positionAnalytics.unrealized_pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {(chain.positionAnalytics.unrealized_pnl ?? 0) >= 0 ? '+' : ''}{(chain.positionAnalytics.unrealized_pnl ?? 0).toFixed(2)} USDT
+                  {/* P&L - calculated live */}
+                  <span className={`text-sm font-semibold ${liveUnrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {liveUnrealizedPnl >= 0 ? '+' : ''}{liveUnrealizedPnl.toFixed(2)} USDT
                   </span>
                   {analyticsExpanded ? <ChevronDown className="w-4 h-4 text-gray-400" /> : <ChevronRight className="w-4 h-4 text-gray-400" />}
                 </div>
@@ -624,7 +819,7 @@ export default function ChainCard({
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-gray-800/50 rounded-lg p-3">
                       <span className="text-xs text-gray-500 block mb-1">Current Price</span>
-                      <span className="text-sm font-mono text-white">${(chain.positionAnalytics.current_price ?? 0).toFixed(2)}</span>
+                      <span className="text-sm font-mono text-white">${currentPrice.toFixed(2)}</span>
                     </div>
                     {chain.positionAnalytics.breakeven_price && (
                       <div className="bg-gray-800/50 rounded-lg p-3">

@@ -18,6 +18,7 @@ import {
   ChevronRight,
   GitBranch,
   Briefcase,
+  CloudCog,
 } from 'lucide-react';
 import { futuresApi, OrderChainWithState, PositionStateInfo, HistoricalOrderChain } from '../../services/futuresApi';
 import { wsService } from '../../services/websocket';
@@ -32,6 +33,7 @@ import { useVolumeImbalancePatterns } from '../../hooks/useStrategyHierarchy';
 import { TradingToggle } from '../TradingControl';
 import { useTradingState } from '../../hooks/useTradingState';
 import { CoinProfilerCard } from '../CoinProfiler';
+import type { CoinDataUpdate } from '../../hooks/useCoinProfiler';
 import {
   OrderChain,
   ChainOrder,
@@ -40,6 +42,8 @@ import {
   parseClientOrderId,
   TradingModeCode,
   PositionState,
+  OrderTypeSuffix,
+  ORDER_TYPE_CONFIG,
 } from './types';
 import type { WSEvent } from '../../types';
 
@@ -74,12 +78,39 @@ export default function TradeLifecycleTab({
   const ordersAutoExpandedRef = useRef(false);
   const positionsAutoExpandedRef = useRef(false);
 
+  // State for sync operation
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState<{ success: boolean; message: string } | null>(null);
+
   // Volume Imbalance patterns for Entry Decision Engine
   const { patterns: volumeImbalancePatterns, isLoading: patternsLoading } = useVolumeImbalancePatterns();
 
   // Trading state - controls whether new entries are allowed
   const { data: tradingState } = useTradingState();
   const tradingEnabled = tradingState?.enabled ?? true;
+
+  // Real-time price map from coin profiler subscription (symbol -> price)
+  const [livePrices, setLivePrices] = useState<Map<string, number>>(new Map());
+
+  // Subscribe to real-time price updates from coin profiler
+  useEffect(() => {
+    const handleCoinUpdate = (event: WSEvent) => {
+      const update = event.data as CoinDataUpdate;
+      if (update && update.symbol && update.price > 0) {
+        setLivePrices(prev => {
+          const newMap = new Map(prev);
+          newMap.set(update.symbol, update.price);
+          return newMap;
+        });
+      }
+    };
+
+    wsService.subscribe('COIN_DATA_UPDATE', handleCoinUpdate);
+
+    return () => {
+      wsService.unsubscribe('COIN_DATA_UPDATE', handleCoinUpdate);
+    };
+  }, []);
 
   // Helper: Convert API PositionStateInfo to frontend PositionState
   const mapPositionState = (state: PositionStateInfo): PositionState => ({
@@ -107,6 +138,25 @@ export default function TradeLifecycleTab({
     // Transform orders from API format to ChainOrder format
     const chainOrders: ChainOrder[] = apiChain.orders.map(order => {
       const parsed = parseClientOrderId(order.client_order_id);
+
+      // Determine orderType: prefer backend's order_type, fallback to parsed, then detect from Binance type
+      let orderType: OrderTypeSuffix | null = null;
+      if (order.order_type && ORDER_TYPE_CONFIG[order.order_type as OrderTypeSuffix]) {
+        orderType = order.order_type as OrderTypeSuffix;
+      } else if (parsed.orderType) {
+        orderType = parsed.orderType;
+      } else {
+        // Fallback: detect from Binance order type for orders without proper client order ID
+        const binanceType = order.type?.toUpperCase() || '';
+        if (binanceType === 'STOP_MARKET' || binanceType === 'STOP') {
+          orderType = 'SL';
+        } else if (binanceType === 'TAKE_PROFIT_MARKET' || binanceType === 'TAKE_PROFIT') {
+          orderType = 'TP1'; // Default to TP1 if we can't determine exact level
+        } else if (binanceType === 'MARKET' || binanceType === 'LIMIT') {
+          orderType = 'E'; // Entry order
+        }
+      }
+
       return {
         orderId: order.order_id,
         clientOrderId: order.client_order_id,
@@ -122,7 +172,7 @@ export default function TradeLifecycleTab({
         stopPrice: order.stop_price || 0,
         time: order.time,
         updateTime: order.update_time,
-        orderType: parsed.orderType,
+        orderType,
         parsed,
       };
     });
@@ -166,6 +216,22 @@ export default function TradeLifecycleTab({
       // Story 7.15: Position state and modification counts from new API
       positionState: apiChain.position_state ? mapPositionState(apiChain.position_state) : undefined,
       modificationCounts: apiChain.modification_counts || undefined,
+      // Story 11.40: Position analytics for detailed position section
+      positionAnalytics: apiChain.position_analytics ? {
+        stage: apiChain.position_analytics.stage,
+        stage_entry_time: apiChain.position_analytics.stage_entry_time,
+        current_price: apiChain.position_analytics.current_price,
+        breakeven_price: apiChain.position_analytics.breakeven_price,
+        tp1_price: apiChain.position_analytics.tp1_price,
+        tp2_price: apiChain.position_analytics.tp2_price,
+        tp3_price: apiChain.position_analytics.tp3_price,
+        stop_loss: apiChain.position_analytics.stop_loss,
+        efficiency: apiChain.position_analytics.efficiency,
+        decision_mode: apiChain.position_analytics.decision_mode,
+        classic_scores: apiChain.position_analytics.classic_scores,
+        new_engine_scores: apiChain.position_analytics.new_engine_scores,
+        unrealized_pnl: apiChain.position_analytics.unrealized_pnl,
+      } : undefined,
     };
   };
 
@@ -442,31 +508,205 @@ export default function TradeLifecycleTab({
     fetchOrders();
   }, [fetchOrders]);
 
+  // Sync order state with Binance (reconciles stale orders)
+  const handleSyncOrderState = useCallback(async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    try {
+      const result = await futuresApi.syncOrderState();
+      setSyncResult({ success: result.success, message: result.message });
+      console.log('[TradeLifecycle] Sync complete:', result);
+      // Refresh orders after sync
+      await fetchOrders();
+    } catch (err) {
+      console.error('Failed to sync order state:', err);
+      setSyncResult({ success: false, message: err instanceof Error ? err.message : 'Sync failed' });
+    } finally {
+      setSyncing(false);
+      // Clear sync result after 5 seconds
+      setTimeout(() => setSyncResult(null), 5000);
+    }
+  }, [fetchOrders]);
+
   // WebSocket subscription for real-time chain/order updates
-  // Uses centralized fallbackManager for disconnect recovery (Story 12.9 pattern)
+  // Story 14.x: Direct state updates from WebSocket instead of API polling
   useEffect(() => {
     if (!autoRefresh) return;
 
     const handleChainUpdate = (event: WSEvent) => {
-      // On chain update, refresh the full chains list
-      // This ensures we have consistent state with all related orders
-      fetchOrders();
+      // Direct chain update from WebSocket - update state immediately
+      const chainData = event.data?.chain;
+      if (!chainData) {
+        // Fallback to API if data is missing
+        fetchOrders();
+        return;
+      }
+
+      setChains(prevChains => {
+        // Find and update the specific chain
+        const chainId = chainData.chain_id || chainData.chainId;
+        const existingIdx = prevChains.findIndex(c => c.chainId === chainId);
+
+        if (existingIdx >= 0) {
+          // Update existing chain
+          const updated = [...prevChains];
+          const existingChain = updated[existingIdx];
+          updated[existingIdx] = {
+            ...existingChain,
+            status: chainData.status || existingChain.status,
+            updatedAt: chainData.updated_at || Date.now(),
+            // Update position state if provided
+            positionState: chainData.position_state
+              ? mapPositionState(chainData.position_state)
+              : existingChain.positionState,
+          };
+          return updated;
+        } else {
+          // New chain - do a full refresh to get all details
+          fetchOrders();
+          return prevChains;
+        }
+      });
     };
 
     const handleOrderUpdate = (event: WSEvent) => {
-      // On order update, refresh chains as order state affects chain status
-      fetchOrders();
+      // Direct order update from WebSocket
+      const orderData = event.data;
+      if (!orderData || !orderData.client_order_id) {
+        // Fallback to API if data is missing
+        fetchOrders();
+        return;
+      }
+
+      // Parse chain ID from client order ID (format: MODE-YYMMDD-SEQ-TYPE)
+      const parts = orderData.client_order_id?.split('-') || [];
+      const chainId = parts.length >= 3 ? `${parts[0]}-${parts[1]}-${parts[2]}` : null;
+
+      if (!chainId) {
+        fetchOrders();
+        return;
+      }
+
+      setChains(prevChains => {
+        const chainIdx = prevChains.findIndex(c => c.chainId === chainId);
+        if (chainIdx < 0) return prevChains;
+
+        const updated = [...prevChains];
+        const chain = { ...updated[chainIdx] };
+
+        // Update order status in the chain
+        const orderType = parts.length >= 4 ? parts[3] : null;
+        const newStatus = orderData.status || orderData.order_status;
+
+        if (orderType === 'E' && chain.entryOrder) {
+          chain.entryOrder = { ...chain.entryOrder, status: newStatus };
+        } else if (orderType === 'SL' && chain.slOrder) {
+          chain.slOrder = { ...chain.slOrder, status: newStatus };
+        } else if (orderType && orderType.startsWith('TP')) {
+          const tpIdx = chain.tpOrders.findIndex(tp => tp.orderType === orderType);
+          if (tpIdx >= 0) {
+            chain.tpOrders = [...chain.tpOrders];
+            chain.tpOrders[tpIdx] = { ...chain.tpOrders[tpIdx], status: newStatus };
+          }
+        }
+
+        // Update chain status based on order fill
+        if (newStatus === 'FILLED' && (orderType === 'SL' || orderType?.startsWith('TP'))) {
+          // Exit order filled - position may be closed
+          chain.status = 'completed';
+        }
+
+        chain.updatedAt = Date.now();
+        updated[chainIdx] = chain;
+        return updated;
+      });
     };
 
     const handlePositionUpdate = (event: WSEvent) => {
-      // On position update, refresh chains to update position state
-      // This ensures positions section shows current data
-      fetchOrders();
+      // Direct position update from WebSocket
+      const positions = event.data?.positions || [];
+
+      if (!Array.isArray(positions) || positions.length === 0) {
+        return; // No data to update
+      }
+
+      setChains(prevChains => {
+        let updated = [...prevChains];
+        let hasChanges = false;
+
+        for (const pos of positions) {
+          const symbol = pos.symbol;
+          const posAmt = parseFloat(pos.position_amount || pos.positionAmt || '0');
+
+          // Find chains for this symbol
+          for (let i = 0; i < updated.length; i++) {
+            if (updated[i].symbol === symbol && updated[i].positionState) {
+              hasChanges = true;
+
+              // If position amount is 0, mark as closed
+              if (posAmt === 0) {
+                updated[i] = {
+                  ...updated[i],
+                  status: 'completed',
+                  positionState: {
+                    ...updated[i].positionState!,
+                    status: 'CLOSED',
+                    remainingQuantity: 0,
+                    closedAt: new Date().toISOString(),
+                  },
+                  updatedAt: Date.now(),
+                };
+              } else {
+                // Update unrealized PnL and remaining quantity
+                updated[i] = {
+                  ...updated[i],
+                  positionState: {
+                    ...updated[i].positionState!,
+                    remainingQuantity: Math.abs(posAmt),
+                    realizedPnl: parseFloat(pos.unrealized_pnl || pos.unRealizedProfit || '0'),
+                  },
+                  updatedAt: Date.now(),
+                };
+              }
+            }
+          }
+        }
+
+        return hasChanges ? updated : prevChains;
+      });
     };
 
     const handlePnlUpdate = (event: WSEvent) => {
-      // On PnL update (position close), refresh chains to show closed positions
-      fetchOrders();
+      // PnL update typically indicates position close
+      const pnlData = event.data?.pnl || event.data;
+      if (!pnlData) return;
+
+      const chainId = pnlData.chain_id || pnlData.chainId;
+      if (!chainId) {
+        // If no chain ID, do a full refresh
+        fetchOrders();
+        return;
+      }
+
+      setChains(prevChains => {
+        const chainIdx = prevChains.findIndex(c => c.chainId === chainId);
+        if (chainIdx < 0) return prevChains;
+
+        const updated = [...prevChains];
+        updated[chainIdx] = {
+          ...updated[chainIdx],
+          status: 'completed',
+          pnl: pnlData.realized_pnl || pnlData.realizedPnl || 0,
+          positionState: updated[chainIdx].positionState ? {
+            ...updated[chainIdx].positionState!,
+            status: 'CLOSED',
+            realizedPnl: pnlData.realized_pnl || pnlData.realizedPnl || 0,
+            closedAt: new Date().toISOString(),
+          } : undefined,
+          updatedAt: Date.now(),
+        };
+        return updated;
+      });
     };
 
     const handleConnect = () => {
@@ -474,11 +714,62 @@ export default function TradeLifecycleTab({
       fetchOrders();
     };
 
+    const handleOrderSync = (event: WSEvent) => {
+      // ORDER_SYNC event from backend indicates state reconciliation
+      // This happens when the backend reconnects to Binance and syncs state
+      const data = event.data;
+      if (!data || data.type !== 'ORDER_SYNC') return;
+
+      console.log('[TradeLifecycle] Received ORDER_SYNC - refreshing state', {
+        totalOrders: data.total_orders,
+        syncReason: data.sync_reason,
+      });
+
+      // Full refresh to get reconciled state from backend
+      fetchOrders();
+    };
+
+    const handleChainClosed = (event: WSEvent) => {
+      // CHAIN_CLOSED event from backend indicates a stale chain was closed during reconciliation
+      const data = event.data;
+      if (!data) return;
+
+      console.log('[TradeLifecycle] Received CHAIN_CLOSED - updating chain state', {
+        chainId: data.chain_id,
+        symbol: data.symbol,
+        closeReason: data.close_reason,
+        realizedPnl: data.realized_pnl,
+      });
+
+      // Update the specific chain to completed status
+      setChains(prevChains => {
+        const chainIdx = prevChains.findIndex(c => c.chainId === data.chain_id);
+        if (chainIdx < 0) return prevChains;
+
+        const updated = [...prevChains];
+        updated[chainIdx] = {
+          ...updated[chainIdx],
+          status: 'completed',
+          pnl: data.realized_pnl || updated[chainIdx].pnl,
+          positionState: updated[chainIdx].positionState ? {
+            ...updated[chainIdx].positionState!,
+            status: 'CLOSED',
+            realizedPnl: data.realized_pnl || updated[chainIdx].positionState!.realizedPnl,
+            closedAt: new Date().toISOString(),
+          } : undefined,
+          updatedAt: Date.now(),
+        };
+        return updated;
+      });
+    };
+
     // Subscribe to WebSocket events
     wsService.subscribe('CHAIN_UPDATE', handleChainUpdate);
     wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
     wsService.subscribe('PNL_UPDATE', handlePnlUpdate);
+    wsService.subscribe('ORDER_SYNC', handleOrderSync);
+    wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
     wsService.onConnect(handleConnect);
 
     // Register with fallbackManager for centralized fallback polling
@@ -489,6 +780,8 @@ export default function TradeLifecycleTab({
       wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
       wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('PNL_UPDATE', handlePnlUpdate);
+      wsService.unsubscribe('ORDER_SYNC', handleOrderSync);
+      wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction(FALLBACK_KEY);
     };
@@ -557,11 +850,31 @@ export default function TradeLifecycleTab({
 
   // Calculate position stats from chains that have active positions
   // Must be before any early returns to follow React hooks rules
+  // Note: API may return lowercase (active/partial) or uppercase (ACTIVE/PARTIAL) status
+  // A chain has an active position if:
+  // 1. It has a positionState with status ACTIVE/PARTIAL, OR
+  // 2. The chain status is active/partial AND the entry order is FILLED (position exists but no positionState record)
   const positionStats = useMemo(() => {
-    const activePositions = chains.filter(c =>
-      c.positionState &&
-      (c.positionState.status === 'ACTIVE' || c.positionState.status === 'PARTIAL')
-    );
+    const activePositions = chains.filter(c => {
+      // Case 1: Has positionState with ACTIVE/PARTIAL status
+      if (c.positionState) {
+        const status = c.positionState.status?.toUpperCase();
+        return status === 'ACTIVE' || status === 'PARTIAL';
+      }
+
+      // Case 2: Chain is active/partial with a filled entry order
+      // This handles cases where positionState record is missing but position exists
+      const chainStatus = c.status?.toLowerCase();
+      if (chainStatus === 'active' || chainStatus === 'partial') {
+        // Check if entry order exists and is filled
+        const entryFilled = c.entryOrder?.status === 'FILLED';
+        // Also check if entry order has executed quantity > 0 (order partially/fully filled)
+        const hasFilledQty = (c.entryOrder?.executedQty || 0) > 0;
+        return entryFilled || hasFilledQty;
+      }
+
+      return false;
+    });
     const longPositions = activePositions.filter(c => c.positionSide === 'LONG');
     const shortPositions = activePositions.filter(c => c.positionSide === 'SHORT');
     const totalPnl = activePositions.reduce((sum, c) => sum + (c.positionState?.realizedPnl || 0), 0);
@@ -750,6 +1063,14 @@ export default function TradeLifecycleTab({
                     </div>
                   )}
                   <button
+                    onClick={(e) => { e.stopPropagation(); handleSyncOrderState(); }}
+                    className="p-1.5 hover:bg-gray-700 rounded transition-colors"
+                    title="Sync with Binance (reconcile stale orders)"
+                    disabled={syncing}
+                  >
+                    <CloudCog className={`w-4 h-4 text-cyan-400 ${syncing ? 'animate-pulse' : ''}`} />
+                  </button>
+                  <button
                     onClick={(e) => { e.stopPropagation(); setLoading(true); fetchOrders(); }}
                     className="p-1.5 hover:bg-gray-700 rounded transition-colors"
                     title="Refresh"
@@ -758,6 +1079,17 @@ export default function TradeLifecycleTab({
                   </button>
                 </div>
               </button>
+
+              {/* Sync result banner */}
+              {syncResult && (
+                <div className={`mx-4 mt-2 p-2 rounded-lg text-sm flex items-center gap-2 ${
+                  syncResult.success
+                    ? 'bg-green-500/10 border border-green-500/30 text-green-400'
+                    : 'bg-red-500/10 border border-red-500/30 text-red-400'
+                }`}>
+                  {syncResult.success ? '✓' : '✕'} {syncResult.message}
+                </div>
+              )}
 
               {/* Orders Content */}
               {ordersExpanded && (
@@ -846,7 +1178,11 @@ export default function TradeLifecycleTab({
                       </div>
                     ) : (
                       filteredChains.map((chain) => (
-                        <ChainCard key={chain.chainId} chain={chain} />
+                        <ChainCard
+                          key={chain.chainId}
+                          chain={chain}
+                          livePrice={livePrices.get(chain.symbol)}
+                        />
                       ))
                     )}
                   </div>
@@ -950,69 +1286,184 @@ export default function TradeLifecycleTab({
                       </p>
                     </div>
                   ) : (
-                    <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                      {positionStats.positions.map((chain) => (
-                        <div
-                          key={chain.chainId}
-                          className="bg-gray-800/50 rounded-lg p-4 border border-gray-700/50"
-                        >
-                          {/* Position Header */}
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="flex items-center gap-3">
-                              <span className="font-bold text-white text-lg">{chain.symbol}</span>
-                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
-                                chain.positionSide === 'LONG'
-                                  ? 'bg-green-500/20 text-green-400'
-                                  : 'bg-red-500/20 text-red-400'
-                              }`}>
-                                {chain.positionSide === 'LONG' ? (
-                                  <TrendingUp className="w-3 h-3" />
-                                ) : (
-                                  <TrendingDown className="w-3 h-3" />
-                                )}
-                                {chain.positionSide}
-                              </span>
-                              {chain.modeCode && (
-                                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
-                                  {chain.modeCode}
-                                </span>
-                              )}
-                            </div>
-                            <span className={`text-sm font-medium ${
-                              (chain.positionState?.realizedPnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-                            }`}>
-                              {(chain.positionState?.realizedPnl || 0) >= 0 ? '+' : ''}
-                              {(chain.positionState?.realizedPnl || 0).toFixed(4)} USDT
-                            </span>
-                          </div>
+                    <div className="space-y-3 max-h-[500px] overflow-y-auto">
+                      {positionStats.positions.map((chain) => {
+                        // Get price levels - support both positionState and fallback to entry order data
+                        // When positionState is missing (no DB record), derive from entry order
+                        const entryOrder = chain.entryOrder;
+                        const hasPositionState = !!chain.positionState;
 
-                          {/* Position Details */}
-                          <div className="grid grid-cols-4 gap-4 text-sm">
-                            <div>
-                              <div className="text-xs text-gray-500">Entry Price</div>
-                              <div className="text-gray-200">${(chain.positionState?.entryPrice || 0).toFixed(4)}</div>
-                            </div>
-                            <div>
-                              <div className="text-xs text-gray-500">Quantity</div>
-                              <div className="text-gray-200">{chain.positionState?.entryQuantity}</div>
-                            </div>
-                            <div>
-                              <div className="text-xs text-gray-500">Remaining</div>
-                              <div className="text-gray-200">{chain.positionState?.remainingQuantity}</div>
-                            </div>
-                            <div>
-                              <div className="text-xs text-gray-500">Status</div>
-                              <div className={`${
-                                chain.positionState?.status === 'ACTIVE' ? 'text-green-400' :
-                                chain.positionState?.status === 'PARTIAL' ? 'text-yellow-400' :
-                                'text-gray-400'
-                              }`}>
-                                {chain.positionState?.status}
+                        // Entry price: from positionState, or entry order's avgPrice (filled), or entry order's price
+                        const entryPrice = chain.positionState?.entryPrice ||
+                          (entryOrder?.avgPrice && entryOrder.avgPrice > 0 ? entryOrder.avgPrice : entryOrder?.price) || 0;
+
+                        // Current price: use live price from coin profiler, fallback to analytics, then entry price
+                        const currentPrice = livePrices.get(chain.symbol) || chain.positionAnalytics?.current_price || entryPrice;
+
+                        // SL price: from order or analytics
+                        const slPrice = chain.slOrder?.stopPrice || chain.slOrder?.price || chain.positionAnalytics?.stop_loss || 0;
+
+                        // TP price: from order or analytics
+                        const tp1Price = chain.tpOrders?.[0]?.stopPrice || chain.tpOrders?.[0]?.price || chain.positionAnalytics?.tp1_price || 0;
+
+                        const isLong = chain.positionSide === 'LONG';
+
+                        // Remaining quantity: from positionState, or entry order's executedQty (full position if no partial closes)
+                        const remainingQty = chain.positionState?.remainingQuantity ||
+                          (entryOrder?.executedQty || 0);
+
+                        // Entry quantity: from positionState, or entry order's executedQty
+                        const entryQty = chain.positionState?.entryQuantity ||
+                          (entryOrder?.executedQty || 0);
+
+                        // Calculate unrealized PnL
+                        const unrealizedPnl = isLong
+                          ? (currentPrice - entryPrice) * remainingQty
+                          : (entryPrice - currentPrice) * remainingQty;
+                        const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 * (isLong ? 1 : -1) : 0;
+
+                        // Calculate progress to SL and TP
+                        const riskDistance = isLong ? entryPrice - slPrice : slPrice - entryPrice;
+                        const rewardDistance = isLong ? tp1Price - entryPrice : entryPrice - tp1Price;
+                        const currentFromEntry = isLong ? currentPrice - entryPrice : entryPrice - currentPrice;
+
+                        // Derive status when positionState is missing
+                        const positionStatus = chain.positionState?.status?.toUpperCase() ||
+                          (chain.status === 'partial' ? 'PARTIAL' : 'ACTIVE');
+
+                        // Progress: negative = towards SL, positive = towards TP
+                        const progressToTP = rewardDistance > 0 ? (currentFromEntry / rewardDistance) * 100 : 0;
+                        const progressToSL = riskDistance > 0 ? (-currentFromEntry / riskDistance) * 100 : 0;
+
+                        // Determine stage
+                        const stage = chain.positionAnalytics?.stage ||
+                          (currentFromEntry < 0 ? 'RISK_ZONE' :
+                           currentFromEntry >= rewardDistance ? 'TP1' :
+                           currentFromEntry >= 0 ? 'BREAKEVEN' : 'RISK_ZONE');
+
+                        // Stage display config
+                        const stageConfig: Record<string, { label: string; color: string; bgColor: string; icon: string }> = {
+                          'RISK_ZONE': { label: 'Risk Zone', color: 'text-red-400', bgColor: 'bg-red-500/20', icon: '⚠️' },
+                          'BREAKEVEN': { label: 'Breakeven', color: 'text-blue-400', bgColor: 'bg-blue-500/20', icon: '🛡️' },
+                          'TP1': { label: 'TP1 Zone', color: 'text-green-400', bgColor: 'bg-green-500/20', icon: '🎯' },
+                          'EFFICIENCY': { label: 'Efficiency', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', icon: '📈' },
+                        };
+                        const currentStage = stageConfig[stage] || stageConfig['RISK_ZONE'];
+
+                        return (
+                          <div
+                            key={chain.chainId}
+                            className="bg-gray-800/50 rounded-lg p-4 border border-gray-700/50"
+                          >
+                            {/* Position Header */}
+                            <div className="flex items-center justify-between mb-3">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-white text-lg">{chain.symbol}</span>
+                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
+                                  isLong ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                }`}>
+                                  {isLong ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                                  {chain.positionSide}
+                                </span>
+                                {chain.modeCode && (
+                                  <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                                    {chain.modeCode}
+                                  </span>
+                                )}
+                                {/* Stage Badge */}
+                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${currentStage.bgColor} ${currentStage.color}`}>
+                                  {currentStage.icon} {currentStage.label}
+                                </span>
+                              </div>
+                              <div className="text-right">
+                                <div className={`text-sm font-bold ${unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                  {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(4)} USDT
+                                </div>
+                                <div className={`text-xs ${pnlPercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                  ({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)
+                                </div>
                               </div>
                             </div>
+
+                            {/* Price Levels Grid */}
+                            <div className="grid grid-cols-4 gap-3 text-sm mb-3">
+                              <div className="text-center p-2 bg-gray-700/30 rounded">
+                                <div className="text-xs text-gray-500">Entry</div>
+                                <div className="text-gray-200 font-mono">${entryPrice.toFixed(4)}</div>
+                              </div>
+                              <div className="text-center p-2 bg-gray-700/30 rounded">
+                                <div className="text-xs text-gray-500">Current</div>
+                                <div className={`font-mono font-bold ${currentPrice >= entryPrice ? 'text-green-400' : 'text-red-400'}`}>
+                                  ${currentPrice.toFixed(4)}
+                                </div>
+                              </div>
+                              <div className="text-center p-2 bg-red-900/20 rounded border border-red-800/30">
+                                <div className="text-xs text-red-400">SL</div>
+                                <div className="text-red-300 font-mono">{slPrice > 0 ? `$${slPrice.toFixed(4)}` : '-'}</div>
+                              </div>
+                              <div className="text-center p-2 bg-green-900/20 rounded border border-green-800/30">
+                                <div className="text-xs text-green-400">TP</div>
+                                <div className="text-green-300 font-mono">{tp1Price > 0 ? `$${tp1Price.toFixed(4)}` : '-'}</div>
+                              </div>
+                            </div>
+
+                            {/* Price Progress Visualization */}
+                            {slPrice > 0 && tp1Price > 0 && (
+                              <div className="mb-3">
+                                <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                                  <span className="text-red-400">SL ${slPrice.toFixed(2)}</span>
+                                  <span>Entry ${entryPrice.toFixed(2)}</span>
+                                  <span className="text-green-400">TP ${tp1Price.toFixed(2)}</span>
+                                </div>
+                                <div className="relative h-3 bg-gray-700 rounded-full overflow-hidden">
+                                  {/* Risk zone (red) */}
+                                  <div className="absolute left-0 h-full bg-red-500/30" style={{ width: '50%' }} />
+                                  {/* Profit zone (green) */}
+                                  <div className="absolute right-0 h-full bg-green-500/30" style={{ width: '50%' }} />
+                                  {/* Entry marker (center) */}
+                                  <div className="absolute top-0 bottom-0 w-0.5 bg-gray-400" style={{ left: '50%' }} />
+                                  {/* Current price marker */}
+                                  {(() => {
+                                    // Calculate position as percentage (0% = SL, 50% = Entry, 100% = TP)
+                                    const range = (tp1Price - slPrice) || 1;
+                                    const positionPct = ((currentPrice - slPrice) / range) * 100;
+                                    const clampedPct = Math.max(0, Math.min(100, positionPct));
+                                    return (
+                                      <div
+                                        className="absolute top-0 bottom-0 w-1 bg-yellow-400 rounded shadow-lg shadow-yellow-400/50 transition-all duration-300"
+                                        style={{ left: `${clampedPct}%`, transform: 'translateX(-50%)' }}
+                                        title={`Current: $${currentPrice.toFixed(4)}`}
+                                      />
+                                    );
+                                  })()}
+                                </div>
+                                {/* Progress text */}
+                                <div className="flex justify-between mt-1 text-xs">
+                                  <span className={progressToSL > 0 ? 'text-red-400' : 'text-gray-500'}>
+                                    {progressToSL > 0 ? `${progressToSL.toFixed(0)}% to SL` : ''}
+                                  </span>
+                                  <span className={progressToTP > 0 ? 'text-green-400' : 'text-gray-500'}>
+                                    {progressToTP > 0 ? `${progressToTP.toFixed(0)}% to TP` : ''}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Bottom Stats Row */}
+                            <div className="flex items-center justify-between text-xs text-gray-500 pt-2 border-t border-gray-700/50">
+                              <span>Qty: {remainingQty.toFixed(4)} / {entryQty.toFixed(4)}</span>
+                              <span>Chain: {chain.chainId}</span>
+                              <span className={`${
+                                positionStatus === 'ACTIVE' ? 'text-green-400' :
+                                positionStatus === 'PARTIAL' ? 'text-yellow-400' : 'text-gray-400'
+                              }`}>
+                                {positionStatus}
+                                {!hasPositionState && <span className="text-orange-400 ml-1">(derived)</span>}
+                              </span>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>

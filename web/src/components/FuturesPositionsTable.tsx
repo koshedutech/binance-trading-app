@@ -103,6 +103,9 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   const [tradingMode, setTradingMode] = useState<'live' | 'paper' | null>(null);
   const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
+  // Real-time prices from coin profiler (updates more frequently than markPrice)
+  const [livePrices, setLivePrices] = useState<Map<string, number>>(new Map());
+
   // Ref for refresh interval
   const refreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -112,6 +115,9 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
   };
 
   // Fetch order chains from NEW system
+  // Note: Chain Runner positions (those with mode codes like SCA, SWI, ULT, POS) are
+  // displayed in the Trade Lifecycle tab's Positions section for detailed management.
+  // This table shows only non-Chain Runner positions (manual trades, etc.)
   const fetchOrderChains = useCallback(async () => {
     try {
       setLoadingChains(true);
@@ -124,7 +130,19 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
         ...(partialResponse.chains || []),
       ];
 
-      setOrderChains(allChains);
+      // Filter OUT Chain Runner positions (those managed by the Chain Entry Runner)
+      // Chain Runner positions have mode codes (SCA, SWI, ULT, POS) and are displayed
+      // in the Trade Lifecycle tab's Positions section with detailed analytics
+      const CHAIN_RUNNER_MODE_CODES = ['SCA', 'SWI', 'ULT', 'POS'];
+      const nonChainRunnerChains = allChains.filter(chain => {
+        // Filter out chains with Chain Runner mode codes
+        if (chain.mode_code && CHAIN_RUNNER_MODE_CODES.includes(chain.mode_code)) {
+          return false;
+        }
+        return true;
+      });
+
+      setOrderChains(nonChainRunnerChains);
       setLastRefreshTime(new Date());
     } catch (err) {
       console.error('Error fetching order chains:', err);
@@ -191,11 +209,23 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       setWsConnected(false);
     };
 
+    // Handle real-time price updates from coin profiler
+    const handleCoinUpdate = (event: { type: string; data?: { symbol: string; price: number } }) => {
+      if (event.data && event.data.symbol && event.data.price > 0) {
+        setLivePrices(prev => {
+          const newMap = new Map(prev);
+          newMap.set(event.data!.symbol, event.data!.price);
+          return newMap;
+        });
+      }
+    };
+
     // Subscribe to WebSocket events
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
     wsService.subscribe('PNL_UPDATE', handlePositionUpdate);
     wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
     wsService.subscribe('CHAIN_UPDATE', handlePositionUpdate);
+    wsService.subscribe('COIN_DATA_UPDATE', handleCoinUpdate);
     wsService.onConnect(handleConnect);
     wsService.onDisconnect(handleDisconnect);
 
@@ -204,7 +234,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     fetchOrderChains();
     fetchPositions();
 
-    // Set up 1-second refresh interval for real-time mark prices
+    // Set up 1-second refresh interval for real-time mark prices (fallback)
     refreshIntervalRef.current = setInterval(() => {
       fetchPositions(); // Get latest mark prices from Binance
     }, 1000);
@@ -214,6 +244,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       wsService.unsubscribe('PNL_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
       wsService.unsubscribe('CHAIN_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('COIN_DATA_UPDATE', handleCoinUpdate);
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);
 
@@ -298,8 +329,14 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     }
   };
 
-  // Get real-time price from Binance position
+  // Get real-time price - use live price from coin profiler first, fallback to Binance markPrice
   const getRealTimePrice = (symbol: string): number => {
+    // First try live price from coin profiler (updates more frequently)
+    const livePrice = livePrices.get(symbol);
+    if (livePrice && livePrice > 0) {
+      return livePrice;
+    }
+    // Fallback to Binance position markPrice
     const binancePos = binancePositions.find(bp => bp.symbol === symbol);
     return binancePos?.markPrice || 0;
   };
