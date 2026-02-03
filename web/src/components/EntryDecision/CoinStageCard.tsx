@@ -14,11 +14,14 @@ import {
   DollarSign,
 } from 'lucide-react';
 import PatternProgress from './PatternProgress';
+import ReferenceCandleContext from './ReferenceCandleContext';
+import Step2ProgressBars from './Step2ProgressBars';
 import type {
   PatternUpdate,
   PatternStatus,
   EntryLevels,
   VolumeProgress,
+  ReferenceCandle,
   PATTERN_STATUS_COLORS,
   PATTERN_STATUS_LABELS,
 } from '../../types/entryDecision';
@@ -320,12 +323,17 @@ export default function CoinStageCard({
   const colors = STATUS_COLORS[update.status] || STATUS_COLORS.watching;
   const isReady = update.status === 'ready';
   const isActive = update.status === 'accumulation' || update.status === 'consolidating';
+  // Position running means Chain Runner has an active position - detailed info shown in Trade Lifecycle
+  const isPositionRunning = update.status === 'position_running';
+  // Stage 2+ means we're past the initial volume spike detection
+  const isStageTwo = update.current_step >= 2;
   const price = currentPrice || update.entry_levels?.current_price;
 
   return (
     <div
       className={`
-        rounded-lg border transition-all cursor-pointer
+        rounded-lg border cursor-pointer
+        transition-colors duration-200 ease-in-out
         ${isReady
           ? 'bg-green-500/5 border-green-500/30 shadow-md shadow-green-500/5'
           : isActive
@@ -336,7 +344,10 @@ export default function CoinStageCard({
       `}
       onClick={onClick}
     >
-      <div className="p-3">
+      {/* Content wrapper with min-height to prevent flickering on state transitions.
+          Stage 2 cards are taller due to reference candle and entry levels.
+          Position running cards are shorter since details are in Trade Lifecycle. */}
+      <div className={`p-3 ${isPositionRunning ? 'min-h-[140px]' : isStageTwo ? 'min-h-[280px]' : 'min-h-[140px]'}`}>
         {/* Header Row */}
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
@@ -411,13 +422,54 @@ export default function CoinStageCard({
           </div>
         )}
 
-        {/* Entry Levels (when available and not compact) */}
-        {!compact && update.entry_levels && (update.status === 'consolidating' || update.status === 'ready') && (
+        {/* Reference Candle Context (Stage 2+) - Shows Stage 1 spike info
+            IMPORTANT: Always show this in Stage 2+ to prevent UI flickering when
+            status transitions between watching/consolidating/ready. The Stage 2
+            context provides important reference information for monitoring.
+            NOT shown when position is running - that info is in Trade Lifecycle. */}
+        {!compact && isStageTwo && !isPositionRunning && update.reference_candle && price && (
+          <ReferenceCandleContext
+            referenceCandle={update.reference_candle}
+            currentPrice={price}
+            dayHigh={update.day_high}
+            dayLow={update.day_low}
+            volumeThreshold={update.volume_threshold || 3.0}
+            direction={update.direction || 'long'}
+          />
+        )}
+
+        {/* Entry Levels - Show in Stage 2+ (not just consolidating/ready) to prevent
+            UI flickering. When transitioning between states, the card maintains
+            consistent height and shows the calculated entry levels for reference.
+            NOT shown when position is running - that info is in Trade Lifecycle. */}
+        {!compact && update.entry_levels && isStageTwo && !isPositionRunning && (
           <EntryLevelsPanel
             levels={update.entry_levels}
             currentPrice={price}
             direction={update.direction}
           />
+        )}
+
+        {/* Step 2 Progress Bars - Shows volume and price progress toward reference values
+            Displays real-time progress for entry conditions in Stage 2 */}
+        {!compact && isStageTwo && !isPositionRunning && update.reference_candle && price && (
+          <Step2ProgressBars
+            update={update}
+            currentPrice={price}
+          />
+        )}
+
+        {/* Position Running indicator - simplified view for Entry Decision.
+            Detailed position info (P&L, entry price, stages) is shown in Trade Lifecycle. */}
+        {isPositionRunning && (
+          <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+            </span>
+            <span className="text-cyan-400 text-sm font-medium">Position Active</span>
+            <span className="text-gray-500 text-xs ml-auto">See Trade Lifecycle for details</span>
+          </div>
         )}
 
         {/* Ready Action Hint */}

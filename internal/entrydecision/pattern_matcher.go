@@ -238,6 +238,11 @@ type PatternState struct {
 	ConsolidationAvgVol   float64   `json:"consolidation_avg_vol"`
 	VolumeTrend           float64   `json:"volume_trend"` // Slope of volume (negative = declining)
 
+	// Step 2 Progress Bar fields (for UI display)
+	ConsolidationAvgVolumeMultiplier float64 `json:"consolidation_avg_volume_multiplier"` // Avg vol multiplier from ref to last candle
+	ConsolidationAvgPrice            float64 `json:"consolidation_avg_price"`             // Avg price from ref to last candle
+	CurrentCandleVolumeMultiplier    float64 `json:"current_candle_volume_multiplier"`    // Current candle's vol multiplier
+
 	// Breakout candle from Step 3
 	BreakoutCandle *Candle `json:"breakout_candle,omitempty"`
 
@@ -481,7 +486,9 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 		return nil, -1, 0
 	}
 
-	// Look for spike in recent candles (not the most current one)
+	// Look for spike in recent candles INCLUDING the most recently closed one
+	// IMPORTANT: When OnCandleClose is called, the last candle IS closed and should be checked
+	// Previously we excluded it (< len(candles)-1) which caused volume spikes to be missed
 	lookbackStart := len(candles) - m.config.LookbackPeriod
 	if lookbackStart < 5 { // Ensure room for pre-trend check
 		lookbackStart = 5
@@ -495,7 +502,8 @@ func (m *VolumeImbalancePatternMatcher) detectVolumeSpike(candles []Candle) (*Ca
 	var skippedPreTrend, skippedVolume, skippedDirection, skippedBodyRatio, candidatesChecked int
 	var maxVolumeRatio float64
 
-	for i := lookbackStart; i < len(candles)-1; i++ {
+	// Include the last candle (len(candles)) - this is the just-closed candle that may have the volume spike
+	for i := lookbackStart; i < len(candles); i++ {
 		c := &candles[i]
 		candidatesChecked++
 
@@ -661,6 +669,21 @@ func (m *VolumeImbalancePatternMatcher) processStep2(
 		state.ConsolidationAvgVol = consolidationData.avgVolume
 		state.VolumeTrend = consolidationData.volumeTrend
 
+		// Calculate Step 2 Progress Bar fields
+		// Average volume multiplier from reference candle to last candle (before current)
+		if state.AverageVolumeAtSpike > 0 {
+			state.ConsolidationAvgVolumeMultiplier = consolidationData.avgVolume / state.AverageVolumeAtSpike
+		}
+
+		// Average price from reference candle to last candle
+		state.ConsolidationAvgPrice = consolidationData.avgPrice
+
+		// Current candle's volume multiplier (last candle in the series)
+		if len(candles) > 0 && state.AverageVolumeAtSpike > 0 {
+			currentCandle := candles[len(candles)-1]
+			state.CurrentCandleVolumeMultiplier = currentCandle.Volume / state.AverageVolumeAtSpike
+		}
+
 		// Update Step 1 details to show consolidation progress
 		// (We're still on Step 1, just showing what's happening)
 		progress.StepDetails[0].Details = fmt.Sprintf("Watching for breakout (%d candles, vol trend: %.2f)", candleCount, consolidationData.volumeTrend)
@@ -715,6 +738,7 @@ type consolidationData struct {
 	low         float64
 	high        float64
 	avgVolume   float64
+	avgPrice    float64 // Average price from reference to last candle (for Step 2 progress bar)
 	volumeTrend float64
 }
 
@@ -751,6 +775,7 @@ func (m *VolumeImbalancePatternMatcher) isInConsolidation(
 	tolerance := m.config.ConsolidationRangeTolerance
 
 	var volumeSum float64
+	var priceSum float64 // For average price calculation
 	consolidationLow := candles[refIdx+1].Low
 	consolidationHigh := candles[refIdx+1].High
 	volumes := make([]float64, 0, candlesSinceRef)
@@ -759,6 +784,9 @@ func (m *VolumeImbalancePatternMatcher) isInConsolidation(
 		c := &candles[i]
 		volumeSum += c.Volume
 		volumes = append(volumes, c.Volume)
+
+		// Calculate average price (using OHLC midpoint)
+		priceSum += (c.Open + c.High + c.Low + c.Close) / 4.0
 
 		// Track consolidation range
 		if c.Low < consolidationLow {
@@ -787,6 +815,7 @@ func (m *VolumeImbalancePatternMatcher) isInConsolidation(
 		low:         consolidationLow,
 		high:        consolidationHigh,
 		avgVolume:   volumeSum / float64(candlesSinceRef),
+		avgPrice:    priceSum / float64(candlesSinceRef), // Average price for Step 2 progress bar
 		volumeTrend: volumeTrend,
 	}
 
@@ -1284,6 +1313,43 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 				remaining := float64(m.config.ReadyExpirationSeconds) - elapsed
 				if remaining > 0 {
 					cm.SecondsUntilExpiry = int(remaining)
+				}
+			}
+		}
+
+		// Populate entry levels from pattern state for actual SL/TP prices
+		// These are calculated from Support Price (Consolidation Low) at pattern detection time
+		if state.ConsolidationLow > 0 {
+			cm.SupportPrice = state.ConsolidationLow
+		}
+		if state.ConsolidationHigh > 0 {
+			cm.ResistancePrice = state.ConsolidationHigh
+		}
+		if state.EntryPrice > 0 {
+			cm.EntryLevelPrice = state.EntryPrice
+
+			// Default R:R ratio of 4.0 (1:4) - matches backtested defaults
+			// This will be overridden by sub-strategy settings if available
+			const defaultRRRatio = 4.0
+
+			// Calculate SL, TP, and Risk based on direction
+			if state.Direction == "long" && state.ConsolidationLow > 0 {
+				// For LONG: SL = Support Price (with small buffer), TP = Entry + Risk × R:R
+				cm.StopLossPrice = state.ConsolidationLow * 0.999 // 0.1% buffer below support
+				cm.RiskAmount = state.EntryPrice - cm.StopLossPrice
+				if cm.RiskAmount > 0 {
+					cm.RiskPercent = (cm.RiskAmount / state.EntryPrice) * 100
+					// TP at R:R ratio
+					cm.TakeProfitPrice = state.EntryPrice + (cm.RiskAmount * defaultRRRatio)
+				}
+			} else if state.Direction == "short" && state.ConsolidationHigh > 0 {
+				// For SHORT: SL = Resistance Price (with small buffer), TP = Entry - Risk × R:R
+				cm.StopLossPrice = state.ConsolidationHigh * 1.001 // 0.1% buffer above resistance
+				cm.RiskAmount = cm.StopLossPrice - state.EntryPrice
+				if cm.RiskAmount > 0 {
+					cm.RiskPercent = (cm.RiskAmount / state.EntryPrice) * 100
+					// TP at R:R ratio
+					cm.TakeProfitPrice = state.EntryPrice - (cm.RiskAmount * defaultRRRatio)
 				}
 			}
 		}

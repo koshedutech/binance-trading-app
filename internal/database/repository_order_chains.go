@@ -242,6 +242,72 @@ func (db *DB) GetOrderChainByID(ctx context.Context, userID, chainID string) (*o
 	return chain, nil
 }
 
+// GetOrderChainByChainIDOnly retrieves an order chain by chain ID only (without userID).
+// This is used by ChainEventWriter when the userID is not known at the time of update.
+// NOTE: chain_id is unique, so this is safe to use.
+func (db *DB) GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*orders.OrderChain, error) {
+	if db.Pool == nil {
+		return nil, nil
+	}
+
+	query := `
+		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
+			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
+			current_sl_price, current_tp_price,
+			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
+			remaining_quantity,
+			hedge_chain_id, is_hedge, parent_chain_id,
+			sl_modification_count, tp_modification_count, event_count, last_event_seq,
+			created_at, updated_at, closed_at, close_reason,
+			realized_pnl, total_fees
+		FROM order_chains
+		WHERE chain_id = $1`
+
+	chain := &orders.OrderChain{}
+	err := db.Pool.QueryRow(ctx, query, chainID).Scan(
+		&chain.ID,
+		&chain.UserID,
+		&chain.ChainID,
+		&chain.Symbol,
+		&chain.Side,
+		&chain.ModeCode,
+		&chain.Status,
+		&chain.EntryPrice,
+		&chain.EntryQuantity,
+		&chain.EntryFilledAt,
+		&chain.EntryBinanceOrderID,
+		&chain.CurrentSLPrice,
+		&chain.CurrentTPPrice,
+		&chain.PositionOptEnabled,
+		&chain.CurrentTP1Price,
+		&chain.CurrentTP2Price,
+		&chain.CurrentTP3Price,
+		&chain.RemainingQuantity,
+		&chain.HedgeChainID,
+		&chain.IsHedge,
+		&chain.ParentChainID,
+		&chain.SLModificationCount,
+		&chain.TPModificationCount,
+		&chain.EventCount,
+		&chain.LastEventSeq,
+		&chain.CreatedAt,
+		&chain.UpdatedAt,
+		&chain.ClosedAt,
+		&chain.CloseReason,
+		&chain.RealizedPnL,
+		&chain.TotalFees,
+	)
+
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get order chain by chain_id: %w", err)
+	}
+
+	return chain, nil
+}
+
 // GetOrderChainsByUserID retrieves all order chains for a user, optionally filtered by status
 func (db *DB) GetOrderChainsByUserID(ctx context.Context, userID string, status orders.OrderChainStatus) ([]*orders.OrderChain, error) {
 	if db.Pool == nil {
@@ -319,6 +385,47 @@ func (db *DB) GetActiveOrderChains(ctx context.Context, userID string) ([]*order
 	defer rows.Close()
 
 	return scanOrderChains(rows)
+}
+
+// GetOrderChainsByChainIDs retrieves order chains by their chain IDs (regardless of status)
+// This is used to enrich chains created from Binance orders with entry data from DB
+func (db *DB) GetOrderChainsByChainIDs(ctx context.Context, userID string, chainIDs []string) (map[string]*orders.OrderChain, error) {
+	result := make(map[string]*orders.OrderChain)
+	if db.Pool == nil || len(chainIDs) == 0 {
+		return result, nil
+	}
+
+	query := `
+		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
+			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
+			current_sl_price, current_tp_price,
+			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
+			remaining_quantity,
+			hedge_chain_id, is_hedge, parent_chain_id,
+			sl_modification_count, tp_modification_count, event_count, last_event_seq,
+			created_at, updated_at, closed_at, close_reason,
+			realized_pnl, total_fees
+		FROM order_chains
+		WHERE user_id = $1 AND chain_id = ANY($2)`
+
+	rows, err := db.Pool.Query(ctx, query, userID, chainIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get order chains by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	chains, err := scanOrderChains(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, chain := range chains {
+		if chain != nil {
+			result[chain.ChainID] = chain
+		}
+	}
+
+	return result, nil
 }
 
 // GetUsersWithActiveChains retrieves all user IDs that have active chains

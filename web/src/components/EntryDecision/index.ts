@@ -35,3 +35,9 @@ export {
   CoinStageListItem,
   CoinStageGrid,
 } from './CoinStageCard';
+
+// Reference candle context (Stage 1 info displayed in Stage 2)
+export { default as ReferenceCandleContext } from './ReferenceCandleContext';
+
+// Step 2 Progress Bars (volume and price progress toward entry)
+export { default as Step2ProgressBars } from './Step2ProgressBars';

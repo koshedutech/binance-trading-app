@@ -835,6 +835,7 @@ type PositionStateInfo struct {
 // handleGetOrderChainsWithState returns order chains with position states and modification counts
 // Story 7.14: Order Chain Backend Integration
 // GET /api/futures/order-chains
+// NOTE: This endpoint now also performs automatic stale order reconciliation
 func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 	ctx := c.Request.Context()
 	userID, ok := s.getUserIDRequired(c)
@@ -863,6 +864,39 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 	algoOrders, err := futuresClient.GetOpenAlgoOrders(symbolFilter)
 	if err != nil {
 		algoOrders = []binance.AlgoOrder{}
+	}
+
+	// AUTOMATIC STALE ORDER RECONCILIATION
+	// Run in background goroutine to update database for future requests
+	go s.reconcileStaleOrderChains(userID, regularOrders, futuresClient)
+
+	// Get Binance positions synchronously for inline status verification AND synthetic positionState
+	// This ensures the current response reflects accurate position state from Binance live data
+	binancePositions, posErr := futuresClient.GetPositions()
+	positionsBySymbol := make(map[string]float64)             // symbol -> position amount (for status verification)
+	binancePositionsBySymbol := make(map[string]binance.FuturesPosition) // symbol -> full position data (for synthetic positionState)
+	if posErr == nil {
+		for _, pos := range binancePositions {
+			if pos.PositionAmt != 0 {
+				positionsBySymbol[pos.Symbol] = pos.PositionAmt
+				binancePositionsBySymbol[pos.Symbol] = pos
+			}
+		}
+	}
+
+	// Build map of chain IDs with open orders (for status verification)
+	chainsWithOpenOrders := make(map[string]bool)
+	for _, order := range regularOrders {
+		chainID := parseChainIDFromClientOrderID(order.ClientOrderId)
+		if chainID != "" {
+			chainsWithOpenOrders[chainID] = true
+		}
+	}
+	for _, order := range algoOrders {
+		chainID := parseChainIDFromClientOrderID(order.ClientAlgoId)
+		if chainID != "" {
+			chainsWithOpenOrders[chainID] = true
+		}
 	}
 
 	// 3. Group orders by chain ID
@@ -984,7 +1018,129 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		}
 	}
 
-	// 4. Fetch position states for all chain IDs (using UUID string directly)
+	// 4a. Fetch order chain data by chain IDs (regardless of status)
+	// This fetches entry data for chains that were created from Binance TP/SL orders
+	// The chain may be marked CLOSED in DB but still have open orders on Binance
+	dbOrderChainsMap, err := s.repo.GetDB().GetOrderChainsByChainIDs(ctx, userID, chainIDs)
+	if err != nil {
+		log.Printf("[ORDER-CHAINS] Error fetching order chains by IDs: %v", err)
+		dbOrderChainsMap = make(map[string]*orders.OrderChain)
+	}
+
+	// 4a-1. Also fetch active order chains to include chains that have no Binance orders
+	// (e.g., positions with filled entries but no pending TP/SL orders yet)
+	activeOrderChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+	if err != nil {
+		log.Printf("[ORDER-CHAINS] Error fetching active order chains: %v", err)
+		activeOrderChains = []*orders.OrderChain{}
+	}
+
+	// Merge active chains into dbOrderChainsMap
+	for _, dbChain := range activeOrderChains {
+		if dbChain != nil {
+			if _, exists := dbOrderChainsMap[dbChain.ChainID]; !exists {
+				dbOrderChainsMap[dbChain.ChainID] = dbChain
+			}
+		}
+	}
+
+	// Add chains for active positions that don't have open orders on Binance
+	for _, dbChain := range activeOrderChains {
+		if dbChain == nil {
+			continue
+		}
+		chainID := dbChain.ChainID
+		if chains[chainID] == nil {
+			// Apply mode filter
+			if modeFilter != "" {
+				modeCode := extractModeCodeFromChainID(chainID)
+				if modeCode != strings.ToUpper(modeFilter) {
+					continue
+				}
+			}
+			// Apply symbol filter
+			if symbolFilter != "" && dbChain.Symbol != symbolFilter {
+				continue
+			}
+
+			// Determine position side from entry side
+			positionSide := "LONG"
+			if strings.ToUpper(dbChain.Side) == "SELL" {
+				positionSide = "SHORT"
+			}
+
+			// Create chain entry from database order_chains table
+			chains[chainID] = &OrderChainWithState{
+				ChainID:            chainID,
+				ModeCode:           dbChain.ModeCode,
+				Symbol:             dbChain.Symbol,
+				PositionSide:       positionSide,
+				Orders:             []ChainOrderInfo{},
+				ModificationCounts: make(map[string]int),
+				Status:             strings.ToLower(string(dbChain.Status)),
+				CreatedAt:          dbChain.CreatedAt.UnixMilli(),
+				UpdatedAt:          dbChain.UpdatedAt.UnixMilli(),
+			}
+			chainIDs = append(chainIDs, chainID)
+		}
+	}
+
+	// 4a-2. Enrich ALL chains with entry data from DB (including chains created from Binance TP/SL orders)
+	// This fixes the issue where TP/SL orders exist on Binance but entry order is not shown
+	for chainID, chain := range chains {
+		// Check if chain already has an entry order
+		hasEntry := false
+		for _, order := range chain.Orders {
+			if order.OrderType == "E" {
+				hasEntry = true
+				break
+			}
+		}
+
+		// If no entry order, try to get it from DB order_chains
+		if !hasEntry {
+			if dbChain, exists := dbOrderChainsMap[chainID]; exists && dbChain != nil {
+				if dbChain.EntryFilledAt != nil && dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
+					entryTime := dbChain.EntryFilledAt.UnixMilli()
+					var entryOrderID int64
+					if dbChain.EntryBinanceOrderID != nil {
+						entryOrderID = *dbChain.EntryBinanceOrderID
+					}
+					var entryPrice, entryQty float64
+					if dbChain.EntryPrice != nil {
+						entryPrice = *dbChain.EntryPrice
+					}
+					if dbChain.EntryQuantity != nil {
+						entryQty = *dbChain.EntryQuantity
+					}
+
+					// Prepend entry order (should appear first in tree)
+					entryOrder := ChainOrderInfo{
+						OrderID:       entryOrderID,
+						ClientOrderID: chainID + "-E",
+						OrderType:     "E",
+						Symbol:        dbChain.Symbol,
+						Side:          dbChain.Side,
+						Type:          "MARKET",
+						Status:        "FILLED",
+						Price:         entryPrice,
+						AvgPrice:      entryPrice,
+						Quantity:      entryQty,
+						ExecutedQty:   entryQty,
+						Time:          entryTime,
+						UpdateTime:    entryTime,
+						IsAlgo:        false,
+					}
+					chain.Orders = append([]ChainOrderInfo{entryOrder}, chain.Orders...)
+
+					log.Printf("[ORDER-CHAINS] Added entry order from DB for chain %s: price=%.4f, qty=%.4f",
+						chainID, entryPrice, entryQty)
+				}
+			}
+		}
+	}
+
+	// 4b. Fetch position states for all chain IDs (using UUID string directly)
 	positionStates, err := s.repo.GetDB().GetPositionStatesByChainIDs(ctx, userID, chainIDs)
 	if err != nil {
 		log.Printf("[ORDER-CHAINS] Error fetching position states: %v", err)
@@ -1070,11 +1226,131 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 			chain.ModificationCounts = counts
 		}
 
-		// Story 11.40: Add position analytics for active positions
+		// 6a. BUILD SYNTHETIC POSITION STATE
+		// When DB has no position_state record, try to build from:
+		// 1. First: Binance live position data (most accurate)
+		// 2. Fallback: order_chains entry data from DB (when position closed but orders still pending)
+		if chain.PositionState == nil {
+			if binancePos, hasBinancePos := binancePositionsBySymbol[chain.Symbol]; hasBinancePos {
+				// Option 1: Build from Binance live position
+				entrySide := "BUY"
+				if binancePos.PositionSide == "SHORT" || (binancePos.PositionSide == "BOTH" && binancePos.PositionAmt < 0) {
+					entrySide = "SELL"
+				}
+
+				posQty := math.Abs(binancePos.PositionAmt)
+				posValue := math.Abs(binancePos.Notional)
+
+				chain.PositionState = &PositionStateInfo{
+					ID:                 0,
+					ChainID:            chainID,
+					Symbol:             chain.Symbol,
+					EntryOrderID:       0,
+					EntryClientOrderID: chainID + "-E",
+					EntrySide:          entrySide,
+					EntryPrice:         binancePos.EntryPrice,
+					EntryQuantity:      posQty,
+					EntryValue:         posValue,
+					EntryFees:          0,
+					EntryFilledAt:      time.UnixMilli(binancePos.UpdateTime).Format(time.RFC3339),
+					Status:             "ACTIVE",
+					RemainingQuantity:  posQty,
+					RealizedPnL:        0,
+					CreatedAt:          time.UnixMilli(binancePos.UpdateTime).Format(time.RFC3339),
+					UpdatedAt:          time.UnixMilli(binancePos.UpdateTime).Format(time.RFC3339),
+				}
+
+				chain.Status = "active"
+				chain.FilledValue = posValue
+				if chain.TotalValue < posValue {
+					chain.TotalValue = posValue
+				}
+
+				log.Printf("[ORDER-CHAINS] Built synthetic positionState for chain %s from Binance: qty=%.4f, entry=%.4f",
+					chainID, posQty, binancePos.EntryPrice)
+
+			} else if dbChain, hasDBChain := dbOrderChainsMap[chainID]; hasDBChain && dbChain != nil {
+				// Option 2: Build from order_chains entry data (fallback when no Binance position)
+				// This happens when entry filled but position closed (SL/TP hit) but orders still pending
+				if dbChain.EntryFilledAt != nil && dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
+					var entryPrice, entryQty float64
+					if dbChain.EntryPrice != nil {
+						entryPrice = *dbChain.EntryPrice
+					}
+					if dbChain.EntryQuantity != nil {
+						entryQty = *dbChain.EntryQuantity
+					}
+					entryValue := entryPrice * entryQty
+
+					// Determine entry side
+					entrySide := "BUY"
+					if strings.ToUpper(dbChain.Side) == "SELL" || strings.ToUpper(dbChain.Side) == "SHORT" {
+						entrySide = "SELL"
+					}
+
+					// Determine status based on whether there are open orders
+					posStatus := "ACTIVE"
+					if chainsWithOpenOrders[chainID] && positionsBySymbol[chain.Symbol] == 0 {
+						// Has open orders but no position = position was closed, waiting for order cleanup
+						posStatus = "CLOSED"
+					}
+
+					chain.PositionState = &PositionStateInfo{
+						ID:                 0,
+						ChainID:            chainID,
+						Symbol:             chain.Symbol,
+						EntryOrderID:       0,
+						EntryClientOrderID: chainID + "-E",
+						EntrySide:          entrySide,
+						EntryPrice:         entryPrice,
+						EntryQuantity:      entryQty,
+						EntryValue:         entryValue,
+						EntryFees:          0,
+						EntryFilledAt:      dbChain.EntryFilledAt.Format(time.RFC3339),
+						Status:             posStatus,
+						RemainingQuantity:  entryQty,
+						RealizedPnL:        0,
+						CreatedAt:          dbChain.CreatedAt.Format(time.RFC3339),
+						UpdatedAt:          dbChain.UpdatedAt.Format(time.RFC3339),
+					}
+
+					chain.FilledValue = entryValue
+					if chain.TotalValue < entryValue {
+						chain.TotalValue = entryValue
+					}
+
+					log.Printf("[ORDER-CHAINS] Built synthetic positionState for chain %s from DB order_chains: qty=%.4f, entry=%.4f, status=%s",
+						chainID, entryQty, entryPrice, posStatus)
+				}
+			}
+		}
+
+		// Story 11.40: Add position analytics for active positions (now works with synthetic positionState too)
 		if chain.PositionState != nil && chain.Status == "active" {
 			analytics := s.getPositionAnalyticsForChain(c, chain.Symbol)
 			if analytics != nil {
 				chain.PositionAnalytics = analytics
+			}
+		}
+	}
+
+	// 6b. INLINE STATUS VERIFICATION against actual Binance state
+	// This fixes the issue where DB has stale "active" status but position is actually closed
+	// Without this, closed positions would still appear as "active" until background reconciliation runs
+	for chainID, chain := range chains {
+		// Only verify chains that appear active/partial
+		if chain.Status == "active" || chain.Status == "partial" {
+			hasOpenPosition := positionsBySymbol[chain.Symbol] != 0
+			hasOpenOrders := chainsWithOpenOrders[chainID]
+
+			// If no position AND no open orders for this chain, it's actually closed
+			if !hasOpenPosition && !hasOpenOrders {
+				log.Printf("[ORDER-CHAINS] Inline status fix: chain %s marked closed (no position/orders on Binance)", chainID)
+				chain.Status = "closed"
+				// Also update position state status if present
+				if chain.PositionState != nil && chain.PositionState.Status != "CLOSED" {
+					chain.PositionState.Status = "CLOSED"
+				}
 			}
 		}
 	}
@@ -1101,6 +1377,14 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		"total":       len(result),
 		"chain_count": len(result),
 	})
+}
+
+// determinePositionSide converts entry side (BUY/SELL) to position side (LONG/SHORT)
+func determinePositionSide(entrySide string) string {
+	if strings.ToUpper(entrySide) == "BUY" {
+		return "LONG"
+	}
+	return "SHORT"
 }
 
 // parseChainIDFromClientOrderID extracts the chain ID from a client order ID
@@ -3854,4 +4138,192 @@ func (s *Server) handleGetHistoricalOrderChains(c *gin.Context) {
 			"offset":   offset,
 		},
 	})
+}
+
+// handleSyncOrderState reconciles local order chain state with Binance's actual state
+// This is used to fix stale orders that were closed externally (e.g., manually on Binance)
+// POST /api/futures/order-chains/sync
+func (s *Server) handleSyncOrderState(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
+		return
+	}
+
+	log.Printf("[ORDER-SYNC] Starting order state sync for user %s", userID)
+
+	// 1. Get all open orders from Binance (ground truth)
+	openOrders, err := futuresClient.GetOpenOrders("")
+	if err != nil {
+		log.Printf("[ORDER-SYNC] Failed to fetch open orders from Binance: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch orders from Binance"})
+		return
+	}
+
+	// Track which CLIENT ORDER IDs are actually open on Binance
+	// This is the key - we match by our client order ID (e.g., "ULT-260202-00008-E"), not Binance's numeric ID
+	openClientOrderIDs := make(map[string]bool)
+	openOrdersByClientID := make(map[string]binance.FuturesOrder)
+	for _, order := range openOrders {
+		if order.ClientOrderId != "" {
+			openClientOrderIDs[order.ClientOrderId] = true
+			openOrdersByClientID[order.ClientOrderId] = order
+			log.Printf("[ORDER-SYNC] Open order on Binance: %s (symbol=%s, status=%s)",
+				order.ClientOrderId, order.Symbol, order.Status)
+		}
+	}
+	log.Printf("[ORDER-SYNC] Found %d open orders on Binance", len(openOrders))
+
+	// 2. Get active order chains from our database
+	activeChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+	if err != nil {
+		log.Printf("[ORDER-SYNC] Failed to get active chains from database: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch chains from database"})
+		return
+	}
+	log.Printf("[ORDER-SYNC] Found %d active chains in database", len(activeChains))
+
+	// 3. Get current positions from Binance (to check if position still exists)
+	positions, err := futuresClient.GetPositions()
+	positionsBySymbol := make(map[string]bool)
+	if err == nil {
+		for _, pos := range positions {
+			if pos.PositionAmt != 0 {
+				positionsBySymbol[pos.Symbol] = true
+				log.Printf("[ORDER-SYNC] Active position on Binance: %s (amt=%.4f)", pos.Symbol, pos.PositionAmt)
+			}
+		}
+	}
+	log.Printf("[ORDER-SYNC] Found %d active positions on Binance", len(positionsBySymbol))
+
+	// 4. Find and close stale chains by comparing CLIENT ORDER IDs
+	closedChains := 0
+	for _, chain := range activeChains {
+		// Build the entry client order ID: ChainID + "-E"
+		// e.g., "ULT-260202-00008" -> "ULT-260202-00008-E"
+		entryClientOrderID := chain.ChainID + "-E"
+
+		log.Printf("[ORDER-SYNC] Checking chain %s (symbol=%s, entryClientID=%s)",
+			chain.ChainID, chain.Symbol, entryClientOrderID)
+
+		// Check if entry order is still open on Binance (by client order ID)
+		if openClientOrderIDs[entryClientOrderID] {
+			log.Printf("[ORDER-SYNC] Chain %s entry order still open on Binance - skipping", chain.ChainID)
+			continue
+		}
+
+		// Entry order is NOT in open orders
+		// Check if position still exists for this symbol
+		if positionsBySymbol[chain.Symbol] {
+			log.Printf("[ORDER-SYNC] Chain %s: entry not open but position exists for %s - skipping",
+				chain.ChainID, chain.Symbol)
+			continue
+		}
+
+		// Neither entry order open nor position exists - this is a stale chain
+		log.Printf("[ORDER-SYNC] Chain %s is STALE - entry not open and no position for %s",
+			chain.ChainID, chain.Symbol)
+
+		// Close the chain in database
+		closeReason := "CLOSED_EXTERNALLY"
+		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0)
+		if err != nil {
+			log.Printf("[ORDER-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
+		} else {
+			log.Printf("[ORDER-SYNC] Closed stale chain %s (reason: %s)", chain.ChainID, closeReason)
+			closedChains++
+		}
+
+		// Also close position state if exists
+		posState, err := s.repo.GetDB().GetPositionByChainID(ctx, userID, chain.ChainID)
+		if err == nil && posState != nil && posState.Status != "CLOSED" {
+			posState.Status = "CLOSED"
+			now := time.Now()
+			posState.ClosedAt = &now
+			err = s.repo.GetDB().UpdatePositionState(ctx, posState)
+			if err != nil {
+				log.Printf("[ORDER-SYNC] Failed to close position state for chain %s: %v", chain.ChainID, err)
+			}
+		}
+	}
+
+	log.Printf("[ORDER-SYNC] Sync complete: closed %d stale chains", closedChains)
+	c.JSON(http.StatusOK, gin.H{
+		"success":        true,
+		"message":        fmt.Sprintf("Synced order state: closed %d stale chains", closedChains),
+		"open_orders":    len(openOrders),
+		"active_chains":  len(activeChains),
+		"closed_chains":  closedChains,
+	})
+}
+
+// reconcileStaleOrderChains runs in the background to automatically close stale order chains
+// Called when user views order chains - compares database state with Binance open orders
+func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.FuturesOrder, futuresClient binance.FuturesClient) {
+	ctx := context.Background()
+
+	// Build map of client order IDs that are open on Binance
+	openClientOrderIDs := make(map[string]bool)
+	for _, order := range openOrders {
+		if order.ClientOrderId != "" {
+			openClientOrderIDs[order.ClientOrderId] = true
+		}
+	}
+
+	// Get current positions from Binance
+	positions, err := futuresClient.GetPositions()
+	positionsBySymbol := make(map[string]bool)
+	if err == nil {
+		for _, pos := range positions {
+			if pos.PositionAmt != 0 {
+				positionsBySymbol[pos.Symbol] = true
+			}
+		}
+	}
+
+	// Get active order chains from database
+	activeChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+	if err != nil {
+		log.Printf("[AUTO-SYNC] Failed to get active chains: %v", err)
+		return
+	}
+
+	// Find and close stale chains
+	closedCount := 0
+	for _, chain := range activeChains {
+		entryClientOrderID := chain.ChainID + "-E"
+
+		// Check if entry order is open OR position exists
+		if openClientOrderIDs[entryClientOrderID] || positionsBySymbol[chain.Symbol] {
+			continue // Not stale
+		}
+
+		// This chain is stale - close it
+		log.Printf("[AUTO-SYNC] Closing stale chain %s (symbol=%s)", chain.ChainID, chain.Symbol)
+		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0)
+		if err != nil {
+			log.Printf("[AUTO-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
+			continue
+		}
+		closedCount++
+
+		// Also close position state
+		posState, err := s.repo.GetDB().GetPositionByChainID(ctx, userID, chain.ChainID)
+		if err == nil && posState != nil && posState.Status != "CLOSED" {
+			posState.Status = "CLOSED"
+			now := time.Now()
+			posState.ClosedAt = &now
+			s.repo.GetDB().UpdatePositionState(ctx, posState)
+		}
+	}
+
+	if closedCount > 0 {
+		log.Printf("[AUTO-SYNC] Closed %d stale chains for user %s", closedCount, userID)
+	}
 }

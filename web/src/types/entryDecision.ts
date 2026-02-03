@@ -573,6 +573,16 @@ export interface PatternUpdate {
   entry_levels?: EntryLevels;
   /** Real-time volume progress (updated on every tick) */
   volume_progress?: VolumeProgress;
+  /** Reference candle from Stage 1 (persisted into Stage 2+) */
+  reference_candle?: ReferenceCandle;
+  /** Current price */
+  current_price?: number;
+  /** Day high price */
+  day_high?: number;
+  /** Day low price */
+  day_low?: number;
+  /** Volume threshold required (e.g., 3.0 for 3x) */
+  volume_threshold?: number;
   /** Trade direction */
   direction?: string;
   /** What direction we're looking for ("long", "short", or "both") */
@@ -583,6 +593,14 @@ export interface PatternUpdate {
   last_evaluated_at?: string;
   /** Last update */
   updated_at: string;
+
+  // Step 2 Progress Bar fields (average from reference candle to last candle)
+  /** Average volume multiplier from reference candle to last candle (before current) */
+  consolidation_avg_volume_multiplier?: number;
+  /** Average price from reference candle to last candle (before current) */
+  consolidation_avg_price?: number;
+  /** Current candle's volume multiplier */
+  current_candle_volume_multiplier?: number;
 }
 
 /**
