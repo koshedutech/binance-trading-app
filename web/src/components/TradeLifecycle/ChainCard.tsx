@@ -747,7 +747,7 @@ export default function ChainCard({
                       <span className="text-xs text-gray-500 block mb-1">Current Price</span>
                       <span className="text-sm font-mono text-white">${currentPrice.toFixed(4)}</span>
                     </div>
-                    {chain.positionAnalytics.breakeven_price && (
+                    {chain.positionAnalytics?.breakeven_price && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">Breakeven</span>
                         <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(4)}</span>
