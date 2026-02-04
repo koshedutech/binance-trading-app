@@ -1,5 +1,5 @@
-import { RefreshCw, TrendingUp, Briefcase, Clock, Target, ArrowUpRight, ArrowDownRight } from 'lucide-react';
-import type { CoinProfilerRequirements } from '../../hooks/useCoinProfiler';
+import { RefreshCw, TrendingUp, Briefcase, Clock, Target, ArrowUpRight, ArrowDownRight, Lock, CheckCircle, AlertTriangle } from 'lucide-react';
+import type { CoinProfilerRequirements, StrategyRef, StrategyCapacityInfo } from '../../hooks/useCoinProfiler';
 
 // ============================================================================
 // Epic 14: Coin Profiler Requirements Breakdown
@@ -39,6 +39,129 @@ function formatMode(mode: string): string {
 }
 
 /**
+ * Position limit badge component
+ * Shows current/max positions with status indicator
+ */
+function PositionLimitBadge({ strat }: { strat: StrategyRef }) {
+  // If capacity info is not available, don't show badge
+  if (strat.current_positions === undefined || strat.max_positions === undefined) {
+    return null;
+  }
+
+  const current = strat.current_positions;
+  const max = strat.max_positions;
+  const status = strat.capacity_status || 'available';
+
+  // Determine colors and icon based on status
+  const getStatusStyles = () => {
+    switch (status) {
+      case 'at_limit':
+        return {
+          bgColor: 'bg-red-500/20',
+          textColor: 'text-red-400',
+          borderColor: 'border-red-500/30',
+          Icon: Lock,
+          label: 'AT LIMIT',
+        };
+      case 'limited':
+        return {
+          bgColor: 'bg-yellow-500/20',
+          textColor: 'text-yellow-400',
+          borderColor: 'border-yellow-500/30',
+          Icon: AlertTriangle,
+          label: 'LIMITED',
+        };
+      default:
+        return {
+          bgColor: 'bg-green-500/20',
+          textColor: 'text-green-400',
+          borderColor: 'border-green-500/30',
+          Icon: CheckCircle,
+          label: 'Available',
+        };
+    }
+  };
+
+  const styles = getStatusStyles();
+  const Icon = styles.Icon;
+
+  return (
+    <div className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded ${styles.bgColor} ${styles.textColor} text-[10px] border ${styles.borderColor}`}>
+      <Icon className="w-3 h-3" />
+      <span>{current}/{max}</span>
+      {status === 'at_limit' && <span className="font-medium">[PAUSED]</span>}
+    </div>
+  );
+}
+
+/**
+ * Capacity summary section showing all strategies' position limits
+ */
+function CapacitySummary({ capacitySummary }: { capacitySummary?: StrategyCapacityInfo[] }) {
+  if (!capacitySummary || capacitySummary.length === 0) {
+    return null;
+  }
+
+  // Check if any strategy is at limit
+  const atLimitCount = capacitySummary.filter(c => c.capacity_status === 'at_limit').length;
+  const limitedCount = capacitySummary.filter(c => c.capacity_status === 'limited').length;
+
+  return (
+    <div className="p-3 bg-gray-800/30 rounded-lg">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <Target className="w-4 h-4 text-cyan-400" />
+          <span className="text-sm font-medium text-gray-300">POSITION CAPACITY</span>
+        </div>
+        {atLimitCount > 0 && (
+          <span className="px-1.5 py-0.5 rounded text-xs bg-red-500/20 text-red-400">
+            {atLimitCount} at limit
+          </span>
+        )}
+        {limitedCount > 0 && atLimitCount === 0 && (
+          <span className="px-1.5 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-400">
+            {limitedCount} limited
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-1.5">
+        {capacitySummary.map((cap, idx) => {
+          const statusStyles = cap.capacity_status === 'at_limit'
+            ? { bg: 'bg-red-500/10', border: 'border-red-500/30', text: 'text-red-400', icon: Lock }
+            : cap.capacity_status === 'limited'
+            ? { bg: 'bg-yellow-500/10', border: 'border-yellow-500/30', text: 'text-yellow-400', icon: AlertTriangle }
+            : { bg: 'bg-green-500/10', border: 'border-green-500/30', text: 'text-green-400', icon: CheckCircle };
+
+          const StatusIcon = statusStyles.icon;
+
+          return (
+            <div
+              key={idx}
+              className={`flex items-center justify-between text-xs rounded px-2 py-1.5 border ${statusStyles.bg} ${statusStyles.border}`}
+            >
+              <div className="flex items-center gap-2">
+                <StatusIcon className={`w-3 h-3 ${statusStyles.text}`} />
+                <span className="text-gray-300">{formatStrategyName(cap.sub_strategy)}</span>
+                <span className="text-gray-500">({formatMode(cap.mode)})</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`font-medium ${statusStyles.text}`}>
+                  {cap.current_positions}/{cap.max_positions}
+                </span>
+                {cap.capacity_status === 'at_limit' && (
+                  <span className="text-red-400 font-medium">PAUSED</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Section header component
  */
 function SectionHeader({ icon: Icon, title, count, color }: {
@@ -59,21 +182,53 @@ function SectionHeader({ icon: Icon, title, count, color }: {
 }
 
 /**
- * Shows the aggregated timeframes and data fields
+ * Get color for trading mode
+ */
+function getModeColor(mode: string): { bg: string; text: string } {
+  const colors: Record<string, { bg: string; text: string }> = {
+    'scalp': { bg: 'bg-orange-500/20', text: 'text-orange-400' },
+    'swing': { bg: 'bg-blue-500/20', text: 'text-blue-400' },
+    'position': { bg: 'bg-purple-500/20', text: 'text-purple-400' },
+    'ultra_fast': { bg: 'bg-pink-500/20', text: 'text-pink-400' },
+  };
+  return colors[mode] || { bg: 'bg-gray-500/20', text: 'text-gray-400' };
+}
+
+/**
+ * Shows the aggregated timeframes (with mode info) and symbols
  */
 function AggregatedInfo({ requirements }: { requirements: CoinProfilerRequirements }) {
   if (!requirements.all_timeframes?.length && !requirements.all_symbols?.length) {
     return null;
   }
 
+  // Use timeframes_by_mode if available for clearer display
+  const timeframesByMode = requirements.timeframes_by_mode;
+  const hasTimeframesByMode = timeframesByMode && Object.keys(timeframesByMode).length > 0;
+
   return (
     <div className="mb-4 p-3 bg-gray-800/50 rounded-lg">
       <div className="text-xs text-gray-500 uppercase mb-2">Aggregated Requirements</div>
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <div className="text-[10px] text-gray-500 mb-1">Timeframes</div>
+          <div className="text-[10px] text-gray-500 mb-1">Timeframes by Mode</div>
           <div className="flex flex-wrap gap-1">
-            {requirements.all_timeframes?.length ? (
+            {hasTimeframesByMode ? (
+              // Display timeframes grouped by mode with color coding
+              Object.entries(timeframesByMode).flatMap(([mode, timeframes]) => {
+                const colors = getModeColor(mode);
+                return timeframes.map(tf => (
+                  <span
+                    key={`${mode}-${tf}`}
+                    className={`px-1.5 py-0.5 ${colors.bg} ${colors.text} rounded text-xs`}
+                    title={`${formatMode(mode)} mode requires ${tf} timeframe`}
+                  >
+                    {formatMode(mode)}: {tf}
+                  </span>
+                ));
+              })
+            ) : requirements.all_timeframes?.length ? (
+              // Fallback to simple list if timeframes_by_mode not available
               requirements.all_timeframes.map(tf => (
                 <span key={tf} className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-xs">
                   {tf}
@@ -111,6 +266,7 @@ function AggregatedInfo({ requirements }: { requirements: CoinProfilerRequiremen
  */
 function StrategySources({ requirements }: { requirements: CoinProfilerRequirements }) {
   const strategies = requirements.from_strategies || [];
+  const timeframesByMode = requirements.timeframes_by_mode || {};
 
   if (strategies.length === 0 && requirements.strategy_count === 0) {
     return (
@@ -123,18 +279,16 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
     );
   }
 
-  // Group strategies by mode
-  const byMode: Record<string, typeof strategies> = {};
+  // Group strategies by mode, collecting unique strategies with their capacity info
+  const byMode: Record<string, StrategyRef[]> = {};
   strategies.forEach(s => {
     s.strategies?.forEach(strat => {
       const mode = strat.mode || 'unknown';
       if (!byMode[mode]) byMode[mode] = [];
       // Check if this strategy is already added for this mode
-      const exists = byMode[mode].some(existing =>
-        existing.strategies?.some(es => es.sub_strategy === strat.sub_strategy)
-      );
+      const exists = byMode[mode].some(es => es.sub_strategy === strat.sub_strategy);
       if (!exists) {
-        byMode[mode].push(s);
+        byMode[mode].push(strat);
       }
     });
   });
@@ -145,25 +299,33 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
 
       {Object.keys(byMode).length > 0 ? (
         <div className="space-y-2">
-          {Object.entries(byMode).map(([mode, sources]) => (
-            <div key={mode} className="pl-2 border-l-2 border-purple-500/30">
-              <div className="text-xs text-purple-300 font-medium mb-1">{formatMode(mode)} Mode</div>
-              {sources.map((source, idx) => (
-                <div key={idx} className="flex items-start gap-2 text-xs mb-1">
-                  {source.strategies?.map((strat, sidx) => (
-                    <div key={sidx} className="flex items-center gap-1">
-                      <span className="text-gray-400">{formatStrategyName(strat.sub_strategy)}</span>
-                      {source.timeframes?.length > 0 && (
-                        <span className="text-gray-600">
-                          ({source.timeframes.join(', ')})
-                        </span>
-                      )}
-                    </div>
-                  ))}
+          {Object.entries(byMode).map(([mode, modeStrategies]) => {
+            const modeColors = getModeColor(mode);
+            const modeTimeframes = timeframesByMode[mode] || [];
+
+            return (
+              <div key={mode} className={`pl-2 border-l-2 ${modeColors.text.replace('text-', 'border-')}/30`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={`text-xs font-medium ${modeColors.text}`}>
+                    {formatMode(mode)} Mode
+                  </span>
+                  {modeTimeframes.length > 0 && (
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${modeColors.bg} ${modeColors.text}`}>
+                      {modeTimeframes.join(', ')}
+                    </span>
+                  )}
                 </div>
-              ))}
-            </div>
-          ))}
+                {modeStrategies.map((strat, sidx) => (
+                  <div key={sidx} className="flex items-center justify-between text-xs mb-1.5 bg-gray-800/30 rounded px-2 py-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-gray-300">{formatStrategyName(strat.sub_strategy)}</span>
+                    </div>
+                    <PositionLimitBadge strat={strat} />
+                  </div>
+                ))}
+              </div>
+            );
+          })}
         </div>
       ) : requirements.strategy_count > 0 ? (
         <div className="text-xs text-gray-400">
@@ -171,10 +333,26 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
         </div>
       ) : null}
 
-      {requirements.all_timeframes?.length > 0 && (
-        <div className="mt-2 flex items-center gap-1 text-[10px] text-gray-500">
-          <Clock className="w-3 h-3" />
-          <span>Timeframe needs: {requirements.all_timeframes.join(', ')}</span>
+      {/* Show timeframes by mode summary */}
+      {Object.keys(timeframesByMode).length > 0 && (
+        <div className="mt-2 pt-2 border-t border-gray-700/50">
+          <div className="flex items-center gap-1 text-[10px] text-gray-500 mb-1">
+            <Clock className="w-3 h-3" />
+            <span>Timeframe demand by mode:</span>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {Object.entries(timeframesByMode).map(([mode, tfs]) => {
+              const colors = getModeColor(mode);
+              return tfs.map(tf => (
+                <span
+                  key={`${mode}-${tf}`}
+                  className={`px-1.5 py-0.5 rounded text-[10px] ${colors.bg} ${colors.text}`}
+                >
+                  {formatMode(mode)}: {tf}
+                </span>
+              ));
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -264,6 +442,9 @@ export default function RequirementsBreakdown({ requirements, isLoading }: Requi
     <div className="space-y-3">
       {/* Aggregated Info */}
       <AggregatedInfo requirements={requirements} />
+
+      {/* Capacity Summary - Show position limits for all strategies */}
+      <CapacitySummary capacitySummary={requirements.capacity_summary} />
 
       {/* Strategy Sources */}
       <StrategySources requirements={requirements} />

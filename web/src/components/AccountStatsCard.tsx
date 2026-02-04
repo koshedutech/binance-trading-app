@@ -21,6 +21,12 @@ interface AutopilotStats {
   unrealized_pnl: number;
 }
 
+interface ChainEntryStats {
+  current_positions: number;
+  max_positions: number;
+  running: boolean;
+}
+
 
 export default function AccountStatsCard() {
   const accountInfo = useFuturesStore((state) => state.accountInfo);
@@ -33,6 +39,7 @@ export default function AccountStatsCard() {
   const fetchPositions = useFuturesStore((state) => state.fetchPositions);
 
   const [autopilotStats, setAutopilotStats] = useState<AutopilotStats | null>(null);
+  const [chainEntryStats, setChainEntryStats] = useState<ChainEntryStats | null>(null);
   const [wsConnected, setWsConnected] = useState(() => wsService.isConnected());
 
   // Safely parse values
@@ -58,6 +65,23 @@ export default function AccountStatsCard() {
       }
     } catch (err) {
       console.error('Failed to fetch autopilot status:', err);
+    }
+  }, []);
+
+  // Fetch Chain Entry Runner status for accurate sub-strategy position limits
+  const fetchChainEntryStatus = useCallback(async () => {
+    try {
+      const data = await futuresApi.getChainEntryStatus();
+      if (data) {
+        setChainEntryStats({
+          current_positions: data.current_positions ?? 0,
+          max_positions: data.max_positions ?? 0,
+          running: data.running ?? false,
+        });
+      }
+    } catch (err) {
+      // Chain entry might not be running - not an error
+      console.debug('Chain entry status not available:', err);
     }
   }, []);
 
@@ -101,6 +125,7 @@ export default function AccountStatsCard() {
       if (!fallbackRef.current) {
         fallbackRef.current = setInterval(() => {
           fetchAutopilotStatus();
+          fetchChainEntryStatus();
           fetchPositions();
           fetchAccountInfo();
         }, 60000);
@@ -113,6 +138,7 @@ export default function AccountStatsCard() {
         fallbackRef.current = null;
       }
       fetchAutopilotStatus();
+      fetchChainEntryStatus();
       fetchPositions();
       fetchAccountInfo();
     };
@@ -126,6 +152,7 @@ export default function AccountStatsCard() {
 
     // Initial fetch
     fetchAutopilotStatus();
+    fetchChainEntryStatus();
 
     return () => {
       wsService.unsubscribe('GINIE_STATUS_UPDATE', handleGinieUpdate);
@@ -138,7 +165,7 @@ export default function AccountStatsCard() {
         fallbackRef.current = null;
       }
     };
-  }, [fetchAutopilotStatus, fetchPositions, fetchAccountInfo]);
+  }, [fetchAutopilotStatus, fetchChainEntryStatus, fetchPositions, fetchAccountInfo]);
 
   // Track WebSocket connection status
   useEffect(() => {
@@ -149,9 +176,12 @@ export default function AccountStatsCard() {
     setWsConnected(wsService.isConnected());
   }, []);
 
-  // Position counts
-  const currentPositions = autopilotStats?.active_positions ?? activePositions.length;
-  const maxPositions = autopilotStats?.max_positions ?? 10;
+  // Position counts - prefer Chain Entry Runner values (sub-strategy based) over Ginie (mode based)
+  const currentPositions = chainEntryStats?.current_positions ?? autopilotStats?.active_positions ?? activePositions.length;
+  // Use chain entry max_positions if available and > 0, otherwise fall back to Ginie
+  const maxPositions = (chainEntryStats?.max_positions && chainEntryStats.max_positions > 0)
+    ? chainEntryStats.max_positions
+    : (autopilotStats?.max_positions ?? 10);
 
   return (
     <CollapsibleCard

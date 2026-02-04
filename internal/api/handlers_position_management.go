@@ -595,6 +595,9 @@ type ExpandedPositionDataResponse struct {
 	// New engine indicator scores
 	NewEngineScores *NewEngineIndicatorScoresResponse `json:"new_engine_scores,omitempty"`
 
+	// R:R tracking and trailing stop status
+	TrailingStopStatus *TrailingStopStatusResponse `json:"trailing_stop_status,omitempty"`
+
 	// Timestamps
 	EntryTime   int64 `json:"entry_time"`
 	LastUpdated int64 `json:"last_updated"`
@@ -628,6 +631,24 @@ type NewEngineIndicatorScoresResponse struct {
 	Final     float64 `json:"final"`
 	Regime    string  `json:"regime"`
 	Strategy  string  `json:"strategy"`
+}
+
+// TrailingStopStatusResponse represents trailing stop R:R tracking status
+type TrailingStopStatusResponse struct {
+	// Current state
+	CurrentRR     float64 `json:"current_rr"`      // Current risk-reward ratio
+	CurrentSL     float64 `json:"current_sl"`      // Current stop-loss price
+	InitialSL     float64 `json:"initial_sl"`      // Initial stop-loss price
+	RiskAmount    float64 `json:"risk_amount"`     // Entry - Initial SL ($ at risk)
+	HighestPrice  float64 `json:"highest_price"`   // Highest price since entry
+
+	// Milestone flags
+	MovedToBreakeven bool `json:"moved_to_breakeven"` // At 1:2 R:R, SL moved to entry
+	MovedTo1R        bool `json:"moved_to_1r"`        // At 1:3 R:R, SL moved to 1:1
+
+	// Binance order status
+	SLOrderID     int64 `json:"sl_order_id"`     // Binance stop-loss order ID
+	SLOrderSynced bool  `json:"sl_order_synced"` // Whether SL is synced on Binance
 }
 
 // handleGetExpandedPositionData returns full position data for the expanded card
@@ -789,6 +810,9 @@ func (s *Server) handleGetExpandedPositionData(c *gin.Context) {
 		}
 	}
 
+	// Add trailing stop R:R status
+	response.TrailingStopStatus = buildTrailingStopStatus(position, currentPrice)
+
 	c.JSON(http.StatusOK, gin.H{
 		"success":  true,
 		"position": response,
@@ -846,4 +870,74 @@ func getDecisionMode(position *autopilot.GiniePosition) string {
 	}
 	// Default to new_engine for new positions
 	return "new_engine"
+}
+
+// buildTrailingStopStatus creates the trailing stop R:R status from position data
+func buildTrailingStopStatus(position *autopilot.GiniePosition, currentPrice float64) *TrailingStopStatusResponse {
+	if position.StopLoss == 0 {
+		return nil
+	}
+
+	// Calculate risk amount and current R:R
+	// Use OriginalSL if available, otherwise use current StopLoss
+	initialSL := position.OriginalSL
+	if initialSL == 0 {
+		initialSL = position.StopLoss // Use current SL as initial if not stored
+	}
+
+	var riskAmount float64
+	var currentRR float64
+
+	if position.Side == "LONG" {
+		riskAmount = position.EntryPrice - initialSL
+		if riskAmount > 0 {
+			profit := currentPrice - position.EntryPrice
+			currentRR = profit / riskAmount
+		}
+	} else {
+		riskAmount = initialSL - position.EntryPrice
+		if riskAmount > 0 {
+			profit := position.EntryPrice - currentPrice
+			currentRR = profit / riskAmount
+		}
+	}
+
+	// Determine if milestones have been reached based on current SL position
+	movedToBreakeven := position.MovedToBreakeven
+	// Check if SL has been moved to breakeven based on position
+	if !movedToBreakeven {
+		if position.Side == "LONG" && position.StopLoss >= position.EntryPrice {
+			movedToBreakeven = true
+		} else if position.Side == "SHORT" && position.StopLoss <= position.EntryPrice {
+			movedToBreakeven = true
+		}
+	}
+
+	// Check if moved to 1R level (at 1:3 R:R, SL moves to 1:1)
+	// This happens when SL is at entry + 1R (for LONG) or entry - 1R (for SHORT)
+	movedTo1R := false
+	if riskAmount > 0 {
+		if position.Side == "LONG" {
+			oneRLevel := position.EntryPrice + riskAmount
+			movedTo1R = position.StopLoss >= oneRLevel
+		} else {
+			oneRLevel := position.EntryPrice - riskAmount
+			movedTo1R = position.StopLoss <= oneRLevel
+		}
+	}
+
+	// Get SL order ID if available (StopLossAlgoID is the Binance order ID)
+	slOrderID := position.StopLossAlgoID
+
+	return &TrailingStopStatusResponse{
+		CurrentRR:        currentRR,
+		CurrentSL:        position.StopLoss,
+		InitialSL:        initialSL,
+		RiskAmount:       riskAmount * position.RemainingQty, // Total $ at risk
+		HighestPrice:     position.HighestPrice,
+		MovedToBreakeven: movedToBreakeven,
+		MovedTo1R:        movedTo1R,
+		SLOrderID:        slOrderID,
+		SLOrderSynced:    slOrderID > 0,
+	}
 }

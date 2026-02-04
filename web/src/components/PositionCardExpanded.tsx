@@ -21,6 +21,7 @@ import {
   Eye,
 } from 'lucide-react';
 import { ExitDecisionMonitor } from './ExitDecisionMonitor';
+import RiskRewardTracker from './RiskRewardTracker';
 import type {
   ExpandedPositionData,
   PositionStage,
@@ -585,6 +586,11 @@ export default function PositionCardExpanded({
               stageEntryTime={position.stage_entry_time}
             />
           </div>
+
+          {/* Risk-Reward Tracker */}
+          {position.stop_loss && (
+            <RiskRewardTracker position={position} />
+          )}
 
           {/* Price Levels Visualization */}
           <div>

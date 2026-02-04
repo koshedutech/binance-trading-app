@@ -325,6 +325,22 @@ class FuturesAPIService {
     return data;
   }
 
+  /**
+   * Sync order state with Binance
+   * Reconciles local database state with Binance's actual state
+   * Closes stale orders that no longer exist on Binance
+   */
+  async syncOrderState(): Promise<{
+    success: boolean;
+    message: string;
+    open_orders: number;
+    active_chains: number;
+    closed_chains: number;
+  }> {
+    const { data } = await this.client.post('/order-chains/sync');
+    return data;
+  }
+
   // ==================== COIN STATE (Epic 11: Position Decision Engine) ====================
 
   /**
@@ -1324,6 +1340,21 @@ class FuturesAPIService {
       params,
       timeout: 120000
     });
+    return data;
+  }
+
+  // ==================== CHAIN ENTRY RUNNER ====================
+
+  async getChainEntryStatus(): Promise<{
+    running: boolean;
+    scan_interval_seconds: number;
+    last_scan_at: string | null;
+    scan_count: number;
+    entry_count: number;
+    current_positions: number;
+    max_positions: number;
+  }> {
+    const { data } = await this.client.get('/chain-entry/status');
     return data;
   }
 
@@ -4736,6 +4767,44 @@ export interface PositionStateInfo {
   closed_at?: string; // ISO 8601
 }
 
+// Story 11.40: Position Analytics from API
+export interface PositionAnalyticsInfo {
+  stage: 'RISK_ZONE' | 'BREAKEVEN' | 'TP1' | 'EFFICIENCY';
+  stage_entry_time?: number; // Unix ms
+  current_price: number;
+  breakeven_price?: number;
+  tp1_price?: number;
+  tp2_price?: number;
+  tp3_price?: number;
+  stop_loss?: number;
+  efficiency?: {
+    peak_profit: number;
+    current_profit: number;
+    efficiency_percent: number;
+    threshold_percent: number;
+  };
+  decision_mode: 'classic' | 'new_engine';
+  classic_scores?: {
+    adx: number;
+    adx_threshold: number;
+    rsi: number;
+    rsi_state: 'oversold' | 'normal' | 'overbought';
+    reversal_signals: number;
+    reversal_required: number;
+  };
+  new_engine_scores?: {
+    technical: number;
+    context: number;
+    llm: number;
+    history: number;
+    final: number;
+    regime: string;
+    strategy: string;
+  };
+  unrealized_pnl: number;
+  roe: number;
+}
+
 export interface OrderChainWithState {
   chain_id: string;
   mode_code: string;
@@ -4743,6 +4812,7 @@ export interface OrderChainWithState {
   position_side: string;
   orders: ChainOrderInfo[];
   position_state?: PositionStateInfo;
+  position_analytics?: PositionAnalyticsInfo; // Story 11.40
   modification_counts: Record<string, number>; // e.g., {"SL": 3, "TP1": 2}
   status: 'active' | 'partial' | 'closed';
   total_value: number;

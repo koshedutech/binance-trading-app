@@ -575,6 +575,9 @@ func (s *Server) setupRoutes() {
 			// Order chain history endpoint (supports date range filtering)
 			futures.GET("/order-chains/history", s.handleGetHistoricalOrderChains)
 
+			// Order chain sync endpoint (reconciles with Binance state)
+			futures.POST("/order-chains/sync", s.handleSyncOrderState)
+
 			// Algo Order endpoints (TP/SL orders since 2025-12-09)
 			futures.DELETE("/algo-orders/:symbol/:id", s.handleCancelAlgoOrder)
 			futures.DELETE("/algo-orders/:symbol/all", s.handleCancelAllAlgoOrders)

@@ -9,6 +9,7 @@ import (
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/logging"
+	"binance-trading-bot/internal/orders"
 	"context"
 	"fmt"
 	"log"
@@ -587,6 +588,9 @@ type FuturesController struct {
 	onPositionUpdate func(userID string, positions []map[string]interface{})
 	onOrderUpdate    func(userID string, order map[string]interface{})
 	onTradeUpdate    func(userID string, trade map[string]interface{})
+
+	// Callback when futures client is updated (for re-initializing UserDataStream)
+	onClientUpdate func(client binance.FuturesClient)
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -1091,8 +1095,6 @@ func (fc *FuturesController) SetDryRun(enabled bool) {
 // SetFuturesClient updates the futures client (used when switching between paper/live modes)
 func (fc *FuturesController) SetFuturesClient(client binance.FuturesClient) {
 	fc.mu.Lock()
-	defer fc.mu.Unlock()
-
 	fc.futuresClient = client
 	fc.logger.Info("Futures controller client updated")
 
@@ -1101,6 +1103,24 @@ func (fc *FuturesController) SetFuturesClient(client binance.FuturesClient) {
 		fc.ginieAutopilot.SetFuturesClient(client)
 		fc.logger.Info("Ginie autopilot client updated")
 	}
+
+	// Call the onClientUpdate callback to allow re-initialization of UserDataStream
+	onClientUpdate := fc.onClientUpdate
+	fc.mu.Unlock()
+
+	if onClientUpdate != nil {
+		fc.logger.Info("Calling onClientUpdate callback for UserDataStream re-initialization")
+		onClientUpdate(client)
+	}
+}
+
+// SetOnClientUpdateCallback sets the callback to be called when the futures client is updated
+// This is used by main.go to restart the UserDataStream with the new client
+func (fc *FuturesController) SetOnClientUpdateCallback(callback func(client binance.FuturesClient)) {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	fc.onClientUpdate = callback
+	fc.logger.Info("Client update callback registered")
 }
 
 // IsDryRun returns current dry run status
@@ -5211,7 +5231,27 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			"pnl", order.RealizedProfit,
 			"commission", order.Commission,
 			"commission_asset", order.CommissionAsset,
-			"is_maker", order.IsMakerSide)
+			"is_maker", order.IsMakerSide,
+			"order_status", order.OrderStatus)
+
+		// CRITICAL: Handle SL/TP order fills - cancel counterpart orders
+		// When SL fills, cancel all TP orders. When TP fills, cancel SL order.
+		// This prevents orphaned conditional orders after position closes.
+		// NOTE: We trigger on TRADE execution type (not just FILLED status) because
+		// STOP_MARKET orders close the position when triggered, even if status shows as FILLED later.
+		if fc.ginieAutopilot != nil {
+			orderType := order.OrderType
+			if orderType == "STOP_MARKET" || orderType == "STOP" ||
+				orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+				fc.logger.Info("SL/TP order TRADE event - triggering counterpart cancellation",
+					"symbol", order.Symbol,
+					"order_type", orderType,
+					"order_id", order.OrderId,
+					"order_status", order.OrderStatus,
+					"last_filled_qty", order.LastFilledQty)
+				fc.ginieAutopilot.HandleSLTPOrderFilled(order.Symbol, orderType, order.OrderId)
+			}
+		}
 
 		// Capture actual fee data from Binance WebSocket
 		// This provides real fee paid per trade instead of estimates
@@ -5305,5 +5345,351 @@ func (fc *FuturesController) HandleStreamAccountUpdate(update *binance.AccountUp
 				})
 			}
 		}
+	}
+}
+
+// SyncStateFromBinance fetches current orders and positions from Binance REST API
+// and updates the internal state. This should be called:
+// 1. On application startup
+// 2. After WebSocket reconnection
+// 3. When user requests a manual refresh
+//
+// CRITICAL: This prevents stale data issues where orders/positions closed while
+// disconnected would show as "active" indefinitely.
+func (fc *FuturesController) SyncStateFromBinance() {
+	fc.logger.Info("Syncing state from Binance REST API...")
+
+	client := fc.GetFuturesClient()
+	if client == nil {
+		fc.logger.Warn("Cannot sync state: no Binance client available")
+		return
+	}
+
+	// Sync positions
+	fc.syncPositionsFromBinance(client)
+
+	// Sync open orders
+	fc.syncOpenOrdersFromBinance(client)
+
+	fc.logger.Info("State sync from Binance completed")
+}
+
+// syncPositionsFromBinance fetches current positions and updates internal state
+func (fc *FuturesController) syncPositionsFromBinance(client binance.FuturesClient) {
+	positions, err := client.GetPositions()
+	if err != nil {
+		fc.logger.Error("Failed to fetch positions from Binance", "error", err)
+		return
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	// Track which positions we found from Binance
+	foundPositions := make(map[string]bool)
+
+	// Update positions from Binance data
+	for _, pos := range positions {
+		// Only track positions with non-zero amount
+		if pos.PositionAmt == 0 {
+			continue
+		}
+
+		positionKey := pos.Symbol + "_" + pos.PositionSide
+		foundPositions[positionKey] = true
+
+		fc.logger.Debug("Synced position from Binance",
+			"symbol", pos.Symbol,
+			"side", pos.PositionSide,
+			"amount", pos.PositionAmt,
+			"entry_price", pos.EntryPrice)
+	}
+
+	// Find and remove stale positions (positions in our cache that no longer exist on Binance)
+	for key, existingPos := range fc.activePositions {
+		if !foundPositions[key] {
+			fc.logger.Info("Removing stale position (closed on Binance)",
+				"symbol", existingPos.Symbol,
+				"side", existingPos.Side,
+				"was_quantity", existingPos.Quantity)
+
+			// Broadcast position closure to frontend
+			if fc.ownerUserID != "" && fc.onPositionUpdate != nil {
+				fc.onPositionUpdate(fc.ownerUserID, []map[string]interface{}{{
+					"symbol":          existingPos.Symbol,
+					"position_side":   existingPos.Side,
+					"position_amt":    0,
+					"entry_price":     0,
+					"unrealized_pnl":  0,
+					"status":          "CLOSED",
+					"sync_reason":     "state_reconciliation",
+				}})
+			}
+
+			delete(fc.activePositions, key)
+		}
+	}
+
+	fc.logger.Info("Position sync complete",
+		"active_positions", len(fc.activePositions),
+		"found_on_binance", len(foundPositions))
+}
+
+// syncOpenOrdersFromBinance fetches current open orders and updates internal state
+// Also reconciles database state by closing stale orders that no longer exist on Binance
+func (fc *FuturesController) syncOpenOrdersFromBinance(client binance.FuturesClient) {
+	ctx := context.Background()
+
+	// Fetch all open orders (empty symbol means all symbols)
+	openOrders, err := client.GetOpenOrders("")
+	if err != nil {
+		fc.logger.Error("Failed to fetch open orders from Binance", "error", err)
+		return
+	}
+
+	// Track which orders are actually open on Binance
+	openOrderIDs := make(map[int64]bool)
+	for _, order := range openOrders {
+		openOrderIDs[order.OrderId] = true
+		fc.logger.Debug("Found open order on Binance",
+			"order_id", order.OrderId,
+			"symbol", order.Symbol,
+			"type", order.Type,
+			"status", order.Status)
+	}
+
+	// Get active order chains from our database to find stale ones
+	if fc.repo == nil {
+		fc.logger.Debug("Skipping stale chain check - no database repository")
+	} else if fc.ownerUserID == "" {
+		fc.logger.Debug("Skipping stale chain check - no owner user ID set yet")
+	}
+
+	if fc.repo != nil && fc.ownerUserID != "" {
+		activeChains, err := fc.repo.GetDB().GetActiveOrderChains(ctx, fc.ownerUserID)
+		if err != nil {
+			fc.logger.Error("Failed to get active order chains from database", "error", err)
+		} else {
+			fc.logger.Info("Checking for stale order chains",
+				"active_chains_in_db", len(activeChains),
+				"open_orders_on_binance", len(openOrders))
+
+			// Check each active chain - if its entry order is not open on Binance, it's stale
+			for _, chain := range activeChains {
+				// Get entry order ID (it's a pointer, may be nil)
+				if chain.EntryBinanceOrderID == nil || *chain.EntryBinanceOrderID == 0 {
+					continue // Skip chains without entry orders
+				}
+				entryOrderID := *chain.EntryBinanceOrderID
+
+				// Check if entry order is still open on Binance
+				if !openOrderIDs[entryOrderID] {
+					// Entry order is not open - could be FILLED, CANCELLED, or EXPIRED
+					// Query Binance to get the actual status
+					fc.reconcileStaleOrderChain(ctx, client, chain, entryOrderID)
+				}
+			}
+		}
+	}
+
+	// Broadcast the current open orders to frontend
+	if fc.ownerUserID != "" && fc.onOrderUpdate != nil {
+		fc.logger.Info("Broadcasting order sync to frontend",
+			"open_orders", len(openOrders))
+
+		fc.onOrderUpdate(fc.ownerUserID, map[string]interface{}{
+			"type":         "ORDER_SYNC",
+			"open_orders":  openOrders,
+			"sync_reason":  "state_reconciliation",
+			"total_orders": len(openOrders),
+		})
+	}
+
+	fc.logger.Info("Order sync complete", "open_orders", len(openOrders))
+}
+
+// reconcileStaleOrderChain queries Binance for the actual status of orders in a stale chain
+// and updates the database accordingly
+func (fc *FuturesController) reconcileStaleOrderChain(ctx context.Context, client binance.FuturesClient, chain *orders.OrderChain, entryOrderID int64) {
+	fc.logger.Info("Reconciling stale order chain",
+		"chain_id", chain.ChainID,
+		"symbol", chain.Symbol,
+		"entry_order_id", entryOrderID)
+
+	// Query Binance for the entry order's actual status
+	order, err := client.GetOrder(chain.Symbol, entryOrderID)
+	if err != nil {
+		fc.logger.Warn("Failed to query order from Binance, will try historical API",
+			"chain_id", chain.ChainID,
+			"order_id", entryOrderID,
+			"error", err)
+
+		// Try getting from historical orders (last 24 hours)
+		fc.reconcileFromHistoricalOrders(ctx, client, chain, entryOrderID)
+		return
+	}
+
+	// Determine how to handle based on order status
+	switch order.Status {
+	case "FILLED":
+		fc.logger.Info("Stale order was FILLED - position should be tracked",
+			"chain_id", chain.ChainID,
+			"order_id", order.OrderId,
+			"filled_qty", order.ExecutedQty)
+		// Entry filled means position was opened - check if position still exists
+		// If position doesn't exist, the trade was closed externally
+		fc.checkAndClosePositionIfNeeded(ctx, chain)
+
+	case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
+		fc.logger.Info("Stale order was cancelled/expired - closing chain",
+			"chain_id", chain.ChainID,
+			"order_id", order.OrderId,
+			"status", order.Status)
+		// Order was cancelled - close the chain
+		fc.closeStaleChain(ctx, chain, order.Status, 0.0)
+
+	default:
+		fc.logger.Warn("Unexpected order status from Binance",
+			"chain_id", chain.ChainID,
+			"order_id", order.OrderId,
+			"status", order.Status)
+	}
+}
+
+// reconcileFromHistoricalOrders uses the historical orders API when direct query fails
+func (fc *FuturesController) reconcileFromHistoricalOrders(ctx context.Context, client binance.FuturesClient, chain *orders.OrderChain, entryOrderID int64) {
+	// Get orders from last 24 hours for this symbol
+	now := time.Now()
+	startTime := now.Add(-24 * time.Hour).UnixMilli()
+	endTime := now.UnixMilli()
+
+	historicalOrders, err := client.GetAllOrdersByDateRange(chain.Symbol, startTime, endTime, 100)
+	if err != nil {
+		fc.logger.Error("Failed to get historical orders from Binance",
+			"chain_id", chain.ChainID,
+			"symbol", chain.Symbol,
+			"error", err)
+		// As fallback, assume the order was cancelled/closed externally
+		fc.closeStaleChain(ctx, chain, "UNKNOWN_CLOSED", 0.0)
+		return
+	}
+
+	// Find our entry order in the historical orders
+	for _, order := range historicalOrders {
+		if order.OrderId == entryOrderID {
+			fc.logger.Info("Found entry order in historical data",
+				"chain_id", chain.ChainID,
+				"order_id", order.OrderId,
+				"status", order.Status)
+
+			switch order.Status {
+			case "FILLED":
+				fc.checkAndClosePositionIfNeeded(ctx, chain)
+			case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
+				fc.closeStaleChain(ctx, chain, order.Status, 0.0)
+			default:
+				fc.logger.Warn("Unexpected historical order status",
+					"chain_id", chain.ChainID,
+					"status", order.Status)
+				fc.closeStaleChain(ctx, chain, order.Status, 0.0)
+			}
+			return
+		}
+	}
+
+	// Order not found in historical data - likely older than 24 hours
+	// Close as unknown
+	fc.logger.Warn("Entry order not found in historical data - closing as unknown",
+		"chain_id", chain.ChainID,
+		"entry_order_id", entryOrderID)
+	fc.closeStaleChain(ctx, chain, "NOT_FOUND", 0.0)
+}
+
+// checkAndClosePositionIfNeeded checks if the position for a chain still exists on Binance
+// If not, closes the chain and position state in database
+func (fc *FuturesController) checkAndClosePositionIfNeeded(ctx context.Context, chain *orders.OrderChain) {
+	// Check if this position still exists in our activePositions cache
+	// chain.Side is "LONG" or "SHORT"
+	fc.mu.RLock()
+	posKey := chain.Symbol + "_" + chain.Side
+	_, posExists := fc.activePositions[posKey]
+	fc.mu.RUnlock()
+
+	if posExists {
+		// Position still tracked - don't close the chain
+		fc.logger.Debug("Position still active for filled entry",
+			"chain_id", chain.ChainID,
+			"symbol", chain.Symbol)
+		return
+	}
+
+	// Position no longer exists - close the chain
+	fc.logger.Info("Position no longer exists for filled entry - closing chain",
+		"chain_id", chain.ChainID,
+		"symbol", chain.Symbol)
+
+	// Get realized PnL if available from position state
+	var realizedPnL float64
+	if fc.repo != nil {
+		posState, err := fc.repo.GetDB().GetPositionByChainID(ctx, fc.ownerUserID, chain.ChainID)
+		if err == nil && posState != nil {
+			realizedPnL = posState.RealizedPnL
+		}
+	}
+
+	fc.closeStaleChain(ctx, chain, "CLOSED", realizedPnL)
+}
+
+// closeStaleChain closes a stale order chain in the database and broadcasts the closure
+func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.OrderChain, closeReason string, realizedPnL float64) {
+	if fc.repo == nil {
+		fc.logger.Warn("Cannot close stale chain - no database repository")
+		return
+	}
+
+	// Close the order chain in database
+	err := fc.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, 0.0)
+	if err != nil {
+		fc.logger.Error("Failed to close stale order chain",
+			"chain_id", chain.ChainID,
+			"error", err)
+	} else {
+		fc.logger.Info("Closed stale order chain in database",
+			"chain_id", chain.ChainID,
+			"close_reason", closeReason,
+			"realized_pnl", realizedPnL)
+	}
+
+	// Also close the position state if it exists
+	posState, err := fc.repo.GetDB().GetPositionByChainID(ctx, fc.ownerUserID, chain.ChainID)
+	if err == nil && posState != nil && posState.Status != "CLOSED" {
+		posState.Status = "CLOSED"
+		now := time.Now()
+		posState.ClosedAt = &now
+		if realizedPnL != 0 {
+			posState.RealizedPnL = realizedPnL
+		}
+		err = fc.repo.GetDB().UpdatePositionState(ctx, posState)
+		if err != nil {
+			fc.logger.Error("Failed to close position state",
+				"chain_id", chain.ChainID,
+				"error", err)
+		} else {
+			fc.logger.Info("Closed position state in database",
+				"chain_id", chain.ChainID,
+				"position_id", posState.ID)
+		}
+	}
+
+	// Broadcast chain closure to frontend
+	if fc.ownerUserID != "" && fc.onOrderUpdate != nil {
+		fc.onOrderUpdate(fc.ownerUserID, map[string]interface{}{
+			"type":         "CHAIN_CLOSED",
+			"chain_id":     chain.ChainID,
+			"symbol":       chain.Symbol,
+			"close_reason": closeReason,
+			"realized_pnl": realizedPnL,
+			"sync_reason":  "state_reconciliation",
+		})
 	}
 }

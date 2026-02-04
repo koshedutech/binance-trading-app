@@ -396,8 +396,13 @@ func (c *FuturesClientImpl) PlaceAlgoOrder(params AlgoOrderParams) (*AlgoOrderRe
 	}
 
 	// Add trigger price (required for conditional orders)
+	// Use specified precision to avoid Binance -1111 "Precision is over the maximum" errors
 	if params.TriggerPrice > 0 {
-		reqParams["triggerPrice"] = strconv.FormatFloat(params.TriggerPrice, 'f', -1, 64)
+		pricePrecision := params.PricePrecision
+		if pricePrecision <= 0 {
+			pricePrecision = 8 // Safe default that covers most symbols
+		}
+		reqParams["triggerPrice"] = strconv.FormatFloat(params.TriggerPrice, 'f', pricePrecision, 64)
 	}
 
 	// Add position side if specified
@@ -406,13 +411,23 @@ func (c *FuturesClientImpl) PlaceAlgoOrder(params AlgoOrderParams) (*AlgoOrderRe
 	}
 
 	// Add quantity (not used with closePosition=true)
+	// Use specified precision to avoid Binance -1111 "Precision is over the maximum" errors
 	if params.Quantity > 0 && !params.ClosePosition {
-		reqParams["quantity"] = strconv.FormatFloat(params.Quantity, 'f', -1, 64)
+		qtyPrecision := params.QuantityPrecision
+		if qtyPrecision <= 0 {
+			qtyPrecision = 8 // Safe default that covers most symbols
+		}
+		reqParams["quantity"] = strconv.FormatFloat(params.Quantity, 'f', qtyPrecision, 64)
 	}
 
 	// Add price for limit conditional orders (STOP, TAKE_PROFIT)
+	// Use specified precision to avoid Binance -1111 "Precision is over the maximum" errors
 	if params.Price > 0 {
-		reqParams["price"] = strconv.FormatFloat(params.Price, 'f', -1, 64)
+		pricePrecision := params.PricePrecision
+		if pricePrecision <= 0 {
+			pricePrecision = 8 // Safe default that covers most symbols
+		}
+		reqParams["price"] = strconv.FormatFloat(params.Price, 'f', pricePrecision, 64)
 	}
 
 	// Add time in force

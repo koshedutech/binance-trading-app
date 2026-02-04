@@ -33,7 +33,7 @@ import { useVolumeImbalancePatterns } from '../../hooks/useStrategyHierarchy';
 import { TradingToggle } from '../TradingControl';
 import { useTradingState } from '../../hooks/useTradingState';
 import { CoinProfilerCard } from '../CoinProfiler';
-import type { CoinDataUpdate } from '../../hooks/useCoinProfiler';
+import type { CoinDataUpdate, PositionCreatedEvent } from '../../hooks/useCoinProfiler';
 import {
   OrderChain,
   ChainOrder,
@@ -709,6 +709,22 @@ export default function TradeLifecycleTab({
       });
     };
 
+    const handleTradeUpdate = (event: WSEvent) => {
+      // TRADE_UPDATE event from backend indicates an order was filled
+      // This is critical for real-time updates when SL/TP orders are triggered
+      const tradeData = event.data;
+      if (!tradeData) return;
+
+      console.log('[TradeLifecycle] Received TRADE_UPDATE - refreshing state', {
+        symbol: tradeData.symbol,
+        orderId: tradeData.order_id || tradeData.orderId,
+        executionType: tradeData.execution_type || tradeData.executionType,
+      });
+
+      // Refresh to get updated order states
+      fetchOrders();
+    };
+
     const handleConnect = () => {
       // Refresh data on reconnect to sync any missed events
       fetchOrders();
@@ -763,13 +779,44 @@ export default function TradeLifecycleTab({
       });
     };
 
+    const handlePositionCreated = (event: WSEvent) => {
+      // POSITION_CREATED event from backend indicates a new position was opened
+      // This happens when an entry order is filled
+      const positionData = event.data?.position as PositionCreatedEvent | undefined;
+      if (!positionData) {
+        console.log('[TradeLifecycle] POSITION_CREATED missing position data, refreshing');
+        fetchOrders();
+        return;
+      }
+
+      console.log('[TradeLifecycle] Received POSITION_CREATED - adding new position', {
+        chainId: positionData.chain_id,
+        symbol: positionData.symbol,
+        side: positionData.side,
+        entryPrice: positionData.entry_price,
+        quantity: positionData.quantity,
+      });
+
+      // Full refresh to get the complete chain data from API
+      // The position was just created, so we need all the order details
+      fetchOrders();
+
+      // Auto-expand positions section when a new position is created
+      if (!positionsAutoExpandedRef.current) {
+        setPositionsExpanded(true);
+        positionsAutoExpandedRef.current = true;
+      }
+    };
+
     // Subscribe to WebSocket events
     wsService.subscribe('CHAIN_UPDATE', handleChainUpdate);
     wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
+    wsService.subscribe('TRADE_UPDATE', handleTradeUpdate); // For filled orders (SL/TP triggered)
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
     wsService.subscribe('PNL_UPDATE', handlePnlUpdate);
     wsService.subscribe('ORDER_SYNC', handleOrderSync);
     wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+    wsService.subscribe('POSITION_CREATED', handlePositionCreated); // For instant new position updates
     wsService.onConnect(handleConnect);
 
     // Register with fallbackManager for centralized fallback polling
@@ -778,10 +825,12 @@ export default function TradeLifecycleTab({
     return () => {
       wsService.unsubscribe('CHAIN_UPDATE', handleChainUpdate);
       wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
+      wsService.unsubscribe('TRADE_UPDATE', handleTradeUpdate);
       wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('PNL_UPDATE', handlePnlUpdate);
       wsService.unsubscribe('ORDER_SYNC', handleOrderSync);
       wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+      wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction(FALLBACK_KEY);
     };
@@ -1389,63 +1438,166 @@ export default function TradeLifecycleTab({
                             <div className="grid grid-cols-4 gap-3 text-sm mb-3">
                               <div className="text-center p-2 bg-gray-700/30 rounded">
                                 <div className="text-xs text-gray-500">Entry</div>
-                                <div className="text-gray-200 font-mono">${entryPrice.toFixed(4)}</div>
+                                <div className="text-gray-200 font-mono">${entryPrice.toFixed(8)}</div>
                               </div>
                               <div className="text-center p-2 bg-gray-700/30 rounded">
                                 <div className="text-xs text-gray-500">Current</div>
-                                <div className={`font-mono font-bold ${currentPrice >= entryPrice ? 'text-green-400' : 'text-red-400'}`}>
-                                  ${currentPrice.toFixed(4)}
+                                <div className={`font-mono font-bold ${
+                                  // For LONG: higher price = profit (green), lower = loss (red)
+                                  // For SHORT: lower price = profit (green), higher = loss (red)
+                                  (isLong ? currentPrice >= entryPrice : currentPrice <= entryPrice)
+                                    ? 'text-green-400' : 'text-red-400'
+                                }`}>
+                                  ${currentPrice.toFixed(8)}
                                 </div>
                               </div>
                               <div className="text-center p-2 bg-red-900/20 rounded border border-red-800/30">
                                 <div className="text-xs text-red-400">SL</div>
-                                <div className="text-red-300 font-mono">{slPrice > 0 ? `$${slPrice.toFixed(4)}` : '-'}</div>
+                                <div className="text-red-300 font-mono">{slPrice > 0 ? `$${slPrice.toFixed(8)}` : '-'}</div>
                               </div>
                               <div className="text-center p-2 bg-green-900/20 rounded border border-green-800/30">
                                 <div className="text-xs text-green-400">TP</div>
-                                <div className="text-green-300 font-mono">{tp1Price > 0 ? `$${tp1Price.toFixed(4)}` : '-'}</div>
+                                <div className="text-green-300 font-mono">{tp1Price > 0 ? `$${tp1Price.toFixed(8)}` : '-'}</div>
                               </div>
                             </div>
 
-                            {/* Price Progress Visualization */}
+                            {/* Price Progress Visualization - R:R based positioning */}
                             {slPrice > 0 && tp1Price > 0 && (
                               <div className="mb-3">
-                                <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-                                  <span className="text-red-400">SL ${slPrice.toFixed(2)}</span>
-                                  <span>Entry ${entryPrice.toFixed(2)}</span>
-                                  <span className="text-green-400">TP ${tp1Price.toFixed(2)}</span>
-                                </div>
-                                <div className="relative h-3 bg-gray-700 rounded-full overflow-hidden">
-                                  {/* Risk zone (red) */}
-                                  <div className="absolute left-0 h-full bg-red-500/30" style={{ width: '50%' }} />
-                                  {/* Profit zone (green) */}
-                                  <div className="absolute right-0 h-full bg-green-500/30" style={{ width: '50%' }} />
-                                  {/* Entry marker (center) */}
-                                  <div className="absolute top-0 bottom-0 w-0.5 bg-gray-400" style={{ left: '50%' }} />
-                                  {/* Current price marker */}
-                                  {(() => {
-                                    // Calculate position as percentage (0% = SL, 50% = Entry, 100% = TP)
-                                    const range = (tp1Price - slPrice) || 1;
-                                    const positionPct = ((currentPrice - slPrice) / range) * 100;
-                                    const clampedPct = Math.max(0, Math.min(100, positionPct));
-                                    return (
-                                      <div
-                                        className="absolute top-0 bottom-0 w-1 bg-yellow-400 rounded shadow-lg shadow-yellow-400/50 transition-all duration-300"
-                                        style={{ left: `${clampedPct}%`, transform: 'translateX(-50%)' }}
-                                        title={`Current: $${currentPrice.toFixed(4)}`}
-                                      />
-                                    );
-                                  })()}
-                                </div>
-                                {/* Progress text */}
-                                <div className="flex justify-between mt-1 text-xs">
-                                  <span className={progressToSL > 0 ? 'text-red-400' : 'text-gray-500'}>
-                                    {progressToSL > 0 ? `${progressToSL.toFixed(0)}% to SL` : ''}
-                                  </span>
-                                  <span className={progressToTP > 0 ? 'text-green-400' : 'text-gray-500'}>
-                                    {progressToTP > 0 ? `${progressToTP.toFixed(0)}% to TP` : ''}
-                                  </span>
-                                </div>
+                                {(() => {
+                                  // Calculate R:R ratio and entry position
+                                  // riskDistance and rewardDistance already calculated above
+                                  const totalRange = riskDistance + rewardDistance;
+                                  const rrRatio = rewardDistance > 0 && riskDistance > 0 ? rewardDistance / riskDistance : 4;
+
+                                  // Entry position on bar based on R:R
+                                  // For 1:4 R:R: entry = 1/(1+4) * 100 = 20% for LONG
+                                  // For SHORT: same calculation works because riskDistance/rewardDistance are already adjusted
+                                  const entryPositionPercent = totalRange > 0
+                                    ? (riskDistance / totalRange) * 100
+                                    : 20; // Default to 1:4 (20%)
+
+                                  // Current price position (0% = SL end, 100% = TP end)
+                                  // For LONG: 0% = SL (lower), 100% = TP (higher)
+                                  // For SHORT: 0% = SL end (higher price), 100% = TP end (lower price)
+                                  let currentPositionPercent: number;
+                                  if (isLong) {
+                                    // LONG: SL is lower, TP is higher
+                                    const priceRange = tp1Price - slPrice;
+                                    currentPositionPercent = priceRange > 0
+                                      ? ((currentPrice - slPrice) / priceRange) * 100
+                                      : 50;
+                                  } else {
+                                    // SHORT: TP is lower, SL is higher
+                                    // Normalize so bar always shows SL on left, TP on right
+                                    const priceRange = slPrice - tp1Price;
+                                    currentPositionPercent = priceRange > 0
+                                      ? ((slPrice - currentPrice) / priceRange) * 100
+                                      : 50;
+                                  }
+                                  currentPositionPercent = Math.max(-10, Math.min(110, currentPositionPercent));
+
+                                  // Check if SL has moved to breakeven (SL = Entry)
+                                  const breakevenPrice = chain.positionAnalytics?.breakeven_price || entryPrice;
+                                  const isAtBreakeven = Math.abs(slPrice - entryPrice) < (entryPrice * 0.001); // Within 0.1%
+
+                                  // Breakeven position on bar (if different from entry)
+                                  let breakevenPositionPercent: number | null = null;
+                                  if (chain.positionAnalytics?.breakeven_price && Math.abs(breakevenPrice - entryPrice) > (entryPrice * 0.001)) {
+                                    if (isLong) {
+                                      const priceRange = tp1Price - slPrice;
+                                      breakevenPositionPercent = priceRange > 0
+                                        ? ((breakevenPrice - slPrice) / priceRange) * 100
+                                        : null;
+                                    } else {
+                                      const priceRange = slPrice - tp1Price;
+                                      breakevenPositionPercent = priceRange > 0
+                                        ? ((slPrice - breakevenPrice) / priceRange) * 100
+                                        : null;
+                                    }
+                                  }
+
+                                  // Format price with 8 decimal precision (Binance standard)
+                                  const formatPrice = (price: number) => {
+                                    return price.toFixed(8);
+                                  };
+
+                                  return (
+                                    <>
+                                      {/* Labels row - positioned based on R:R */}
+                                      <div className="relative flex items-center text-xs text-gray-500 mb-1 h-4">
+                                        {/* SL label at left (0%) */}
+                                        <span className="absolute left-0 text-red-400" style={{ transform: 'translateX(0)' }}>
+                                          SL ${formatPrice(slPrice)}
+                                        </span>
+                                        {/* Entry label at calculated position */}
+                                        <span
+                                          className="absolute text-blue-400"
+                                          style={{
+                                            left: `${entryPositionPercent}%`,
+                                            transform: 'translateX(-50%)'
+                                          }}
+                                        >
+                                          Entry ${formatPrice(entryPrice)}
+                                        </span>
+                                        {/* TP label at right (100%) */}
+                                        <span className="absolute right-0 text-green-400" style={{ transform: 'translateX(0)' }}>
+                                          TP ${formatPrice(tp1Price)}
+                                        </span>
+                                      </div>
+
+                                      {/* Progress bar */}
+                                      <div className="relative h-3 bg-gray-700 rounded-full overflow-hidden">
+                                        {/* Risk zone (red) - from 0% to entry position */}
+                                        <div
+                                          className="absolute left-0 h-full bg-red-500/30"
+                                          style={{ width: `${entryPositionPercent}%` }}
+                                        />
+                                        {/* Profit zone (green) - from entry position to 100% */}
+                                        <div
+                                          className="absolute h-full bg-green-500/30"
+                                          style={{
+                                            left: `${entryPositionPercent}%`,
+                                            width: `${100 - entryPositionPercent}%`
+                                          }}
+                                        />
+                                        {/* Entry marker */}
+                                        <div
+                                          className="absolute top-0 bottom-0 w-0.5 bg-blue-400 z-10"
+                                          style={{ left: `${entryPositionPercent}%`, transform: 'translateX(-50%)' }}
+                                        />
+                                        {/* Breakeven marker (if different from entry) */}
+                                        {breakevenPositionPercent !== null && (
+                                          <div
+                                            className="absolute top-0 bottom-0 w-0.5 bg-yellow-400 z-10 opacity-70"
+                                            style={{ left: `${breakevenPositionPercent}%`, transform: 'translateX(-50%)' }}
+                                            title={`Breakeven: $${formatPrice(breakevenPrice)}`}
+                                          />
+                                        )}
+                                        {/* Current price marker */}
+                                        <div
+                                          className="absolute top-0 bottom-0 w-1.5 bg-white rounded shadow-lg shadow-white/50 transition-all duration-300 z-20"
+                                          style={{ left: `${currentPositionPercent}%`, transform: 'translateX(-50%)' }}
+                                          title={`Current: $${formatPrice(currentPrice)}`}
+                                        />
+                                      </div>
+
+                                      {/* Progress text with R:R info */}
+                                      <div className="flex justify-between mt-1 text-xs">
+                                        <span className={progressToSL > 0 ? 'text-red-400' : 'text-gray-500'}>
+                                          {progressToSL > 0 ? `${progressToSL.toFixed(0)}% to SL` : ''}
+                                          {isAtBreakeven && <span className="text-yellow-400 ml-1">(Break Even)</span>}
+                                        </span>
+                                        <span className="text-gray-500">
+                                          R:R 1:{rrRatio.toFixed(1)}
+                                        </span>
+                                        <span className={progressToTP > 0 ? 'text-green-400' : 'text-gray-500'}>
+                                          {progressToTP > 0 ? `${progressToTP.toFixed(0)}% to TP` : ''}
+                                        </span>
+                                      </div>
+                                    </>
+                                  );
+                                })()}
                               </div>
                             )}
 

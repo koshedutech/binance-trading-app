@@ -135,6 +135,46 @@ export interface PositionManagementConfig {
   dynamic_sltp: DynamicSLTPSettings;
 }
 
+// ==================== Risk-Reward Tracking Types ====================
+
+/**
+ * Risk-Reward milestone level.
+ */
+export interface RRMilestone {
+  level: number;        // 1, 2, 3, or 4
+  label: string;        // "1:1", "1:2", "1:3", "1:4"
+  price: number;        // Calculated price at this R:R level
+  achieved: boolean;    // Whether this level has been reached
+  achievedAt?: number;  // Timestamp when achieved
+}
+
+/**
+ * Trailing stop status for position.
+ */
+export interface TrailingStopStatus {
+  // Current state
+  current_rr: number;           // Current risk-reward ratio (e.g., 2.5)
+  current_sl: number;           // Current stop-loss price
+  initial_sl: number;           // Initial stop-loss price
+  risk_amount: number;          // Entry - Initial SL ($ amount at risk)
+  highest_price: number;        // Highest price since entry (for LONG)
+
+  // Milestone flags
+  moved_to_breakeven: boolean;  // At 1:2 R:R, SL moved to entry
+  moved_to_1r: boolean;         // At 1:3 R:R, SL moved to 1:1 level
+
+  // R:R milestone levels
+  milestones: RRMilestone[];
+
+  // Binance order status
+  sl_order_id?: number;         // Binance stop-loss order ID (0 if not placed)
+  sl_order_synced: boolean;     // Whether SL is synced on Binance
+
+  // Next action
+  next_move_at?: number;        // Price where next SL move happens
+  next_move_label?: string;     // Description of next move
+}
+
 // ==================== Expanded Position Card Types ====================
 
 /**
@@ -224,6 +264,9 @@ export interface ExpandedPositionData {
 
   // New engine indicators
   new_engine_scores?: NewEngineIndicatorScores;
+
+  // R:R tracking and trailing stop status
+  trailing_stop_status?: TrailingStopStatus;
 
   // Timestamps
   entry_time: number;
@@ -430,11 +473,9 @@ export function calculatePriceLevels(position: ExpandedPositionData): PriceLevel
 }
 
 /**
- * Format price with appropriate precision.
+ * Format price with 8 decimal precision (Binance standard).
  */
 export function formatPositionPrice(price: number): string {
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
   return price.toFixed(8);
 }
 
@@ -444,4 +485,71 @@ export function formatPositionPrice(price: number): string {
 export function formatPositionPercent(value: number): string {
   const sign = value >= 0 ? '+' : '';
   return `${sign}${value.toFixed(2)}%`;
+}
+
+/**
+ * Calculate R:R milestone prices for a position.
+ *
+ * For LONG: Higher prices = profit
+ * For SHORT: Lower prices = profit
+ */
+export function calculateRRMilestones(
+  entryPrice: number,
+  stopLoss: number,
+  side: 'LONG' | 'SHORT',
+  currentPrice: number,
+  movedToBreakeven?: boolean,
+  movedTo1R?: boolean
+): RRMilestone[] {
+  // Calculate risk amount (always positive)
+  const riskAmount = side === 'LONG'
+    ? entryPrice - stopLoss
+    : stopLoss - entryPrice;
+
+  // Calculate price at each R:R level
+  const milestones: RRMilestone[] = [];
+  const rrLevels = [1, 2, 3, 4];
+
+  for (const level of rrLevels) {
+    // Price at this R:R level
+    const price = side === 'LONG'
+      ? entryPrice + (riskAmount * level)
+      : entryPrice - (riskAmount * level);
+
+    // Check if achieved (based on current price)
+    const achieved = side === 'LONG'
+      ? currentPrice >= price
+      : currentPrice <= price;
+
+    milestones.push({
+      level,
+      label: `1:${level}`,
+      price,
+      achieved: achieved || (level === 2 && movedToBreakeven) || (level === 3 && movedTo1R),
+    });
+  }
+
+  return milestones;
+}
+
+/**
+ * Get the current R:R ratio for a position.
+ */
+export function calculateCurrentRR(
+  entryPrice: number,
+  stopLoss: number,
+  currentPrice: number,
+  side: 'LONG' | 'SHORT'
+): number {
+  const riskAmount = side === 'LONG'
+    ? entryPrice - stopLoss
+    : stopLoss - entryPrice;
+
+  if (riskAmount <= 0) return 0;
+
+  const profit = side === 'LONG'
+    ? currentPrice - entryPrice
+    : entryPrice - currentPrice;
+
+  return profit / riskAmount;
 }

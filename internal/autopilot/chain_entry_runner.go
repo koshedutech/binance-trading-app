@@ -5,9 +5,11 @@ package autopilot
 import (
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -46,8 +48,15 @@ type ChainCoinState struct {
 	Timeframe        string  // e.g., "3m", "15m"
 	BudgetUSD        float64 // Position size budget in USD from strategy settings
 	MaxLeverage      int     // Maximum leverage from strategy settings
-	SLPercent        float64 // Stop loss percentage from strategy settings
-	TPPercent        float64 // Take profit percentage from strategy settings
+	SLPercent        float64 // Stop loss percentage (max_sl_percent) - used as GATE during pattern detection
+	TPPercent        float64 // R:R ratio for TP calculation (e.g., 4.0 for 1:4)
+
+	// Absolute price levels from pattern detection (preferred over percentages)
+	// These are calculated from Support Price (Consolidation Low) at runtime
+	EntryPrice float64 // Entry price from pattern (reference high for long)
+	SLPrice    float64 // Actual stop loss price (Support Price from pattern)
+	TPPrice    float64 // Actual take profit price (Entry + Risk × R:R)
+	RiskAmount float64 // Risk in price terms (Entry - SL for long)
 }
 
 // ChainStateProvider is an interface for getting coin states from Redis.
@@ -55,6 +64,10 @@ type ChainCoinState struct {
 type ChainStateProvider interface {
 	// GetAllCoinStates returns all coin states for a user
 	GetAllChainCoinStates(ctx context.Context, userID string) ([]*ChainCoinState, error)
+
+	// GetCoinStateForEntry returns a coin state for a specific symbol with actual SL/TP prices
+	// from pattern detection. This is used by ExecuteImmediateEntry for tick-level breakout orders.
+	GetCoinStateForEntry(ctx context.Context, userID, symbol, mode, timeframe string) (*ChainCoinState, error)
 }
 
 // ========== Configuration ==========
@@ -98,6 +111,9 @@ type ChainEntryRunner struct {
 	// Configuration
 	config *ChainEntryRunnerConfig
 
+	// Order ID Generator for sequential numbering (Epic 7)
+	orderIdGenerator *orders.ClientOrderIdGenerator
+
 	// Ravindra Position Monitor for trailing stop management
 	ravindraMonitor *RavindraPositionMonitor
 
@@ -106,6 +122,19 @@ type ChainEntryRunner struct {
 	stopChan       chan struct{}
 	entryCooldowns map[string]time.Time // symbol -> last entry time
 	mu             sync.RWMutex
+
+	// Position limit enforcement mutex - prevents race condition where
+	// multiple goroutines read activeChains=0 simultaneously and all
+	// place orders, exceeding the max_concurrent_trades limit.
+	// This mutex must be held during the entire check-and-order sequence.
+	limitMu sync.Mutex
+
+	// Pending entries tracking - symbols that are in the process of entry
+	// but haven't yet created their order chain in the database.
+	// This prevents duplicate entries during the brief window between
+	// passing the limit check and creating the chain record.
+	pendingEntries map[string]bool
+	pendingMu      sync.Mutex
 
 	// Statistics
 	stats ChainEntryRunnerStats
@@ -136,6 +165,17 @@ func NewChainEntryRunner(
 		config = DefaultChainEntryRunnerConfig()
 	}
 
+	// Create order ID generator for sequential numbering (Epic 7)
+	// settingsCache implements SequenceProvider interface (IncrementDailySequence + IsHealthy)
+	var orderIdGen *orders.ClientOrderIdGenerator
+	if settingsCache != nil {
+		var err error
+		orderIdGen, err = orders.NewClientOrderIdGenerator(settingsCache, userID, nil)
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] Warning: Failed to create order ID generator: %v (will use fallback)", err)
+		}
+	}
+
 	return &ChainEntryRunner{
 		userID:           userID,
 		stateProvider:    stateProvider,
@@ -145,7 +185,9 @@ func NewChainEntryRunner(
 		repo:             repo,
 		logger:           logger,
 		config:           config,
+		orderIdGenerator: orderIdGen,
 		entryCooldowns:   make(map[string]time.Time),
+		pendingEntries:   make(map[string]bool),
 		stopChan:         make(chan struct{}),
 	}
 }
@@ -260,20 +302,34 @@ func (r *ChainEntryRunner) executeScanCycle() {
 			break
 		}
 
-		if r.canEnterPosition(ctx, candidate) {
-			if err := r.executeChainEntry(ctx, candidate); err != nil {
-				log.Printf("[CHAIN-ENTRY] Failed to execute entry for %s: %v", candidate.Symbol, err)
-				r.mu.Lock()
-				r.stats.FailedEntries++
-				r.mu.Unlock()
-			} else {
-				entriesExecuted++
-				r.mu.Lock()
-				r.stats.SuccessfulEntries++
-				r.stats.TotalEntries++
-				r.stats.LastEntryTime = time.Now()
-				r.mu.Unlock()
-			}
+		// Preliminary checks (mode enabled, dependencies available)
+		if !r.canEnterPosition(ctx, candidate) {
+			continue
+		}
+
+		// CRITICAL: Atomically reserve an entry slot to prevent race conditions
+		// This ensures that multiple candidates cannot all pass the limit check
+		// and place orders simultaneously, exceeding max_concurrent_trades.
+		allowed, releaseSlot := r.tryReserveEntrySlot(ctx, candidate)
+		if !allowed {
+			continue
+		}
+
+		// Execute entry with the slot reserved
+		if err := r.executeChainEntry(ctx, candidate); err != nil {
+			log.Printf("[CHAIN-ENTRY] Failed to execute entry for %s: %v", candidate.Symbol, err)
+			r.mu.Lock()
+			r.stats.FailedEntries++
+			r.mu.Unlock()
+			releaseSlot() // Release the reserved slot on failure
+		} else {
+			entriesExecuted++
+			r.mu.Lock()
+			r.stats.SuccessfulEntries++
+			r.stats.TotalEntries++
+			r.stats.LastEntryTime = time.Now()
+			r.mu.Unlock()
+			releaseSlot() // Release the reserved slot on success (chain is now in DB)
 		}
 	}
 }
@@ -404,7 +460,8 @@ func (r *ChainEntryRunner) hasOpenPosition(ctx context.Context, symbol string) b
 	return false
 }
 
-// canEnterPosition performs final checks before entry
+// canEnterPosition performs final checks before entry (non-locking version for internal checks).
+// NOTE: This method does NOT acquire limitMu. For race-safe entry, use tryReserveEntrySlot instead.
 func (r *ChainEntryRunner) canEnterPosition(ctx context.Context, state *ChainCoinState) bool {
 	// Check if we have all required dependencies
 	if r.futuresClient == nil {
@@ -429,7 +486,123 @@ func (r *ChainEntryRunner) canEnterPosition(ctx context.Context, state *ChainCoi
 		}
 	}
 
-	return true
+	// Check position limit (without locking - for preliminary checks)
+	allowed, _, _ := r.checkPositionLimit(ctx, state, false)
+	return allowed
+}
+
+// checkPositionLimit checks if we can open a new position given the current limits.
+// If includePending is true, pending entries are counted toward the current active count.
+// Returns: (allowed bool, currentCount int, maxCount int)
+func (r *ChainEntryRunner) checkPositionLimit(ctx context.Context, state *ChainCoinState, includePending bool) (bool, int, int) {
+	if r.chainEventWriter == nil {
+		return true, 0, 1 // Allow if we can't check
+	}
+
+	activeChains, err := r.chainEventWriter.GetActiveChains(ctx, r.userID)
+	if err != nil {
+		log.Printf("[CHAIN-ENTRY] Warning: Failed to get active chains for %s: %v", state.Symbol, err)
+		return true, 0, 1 // Allow if we can't check (fail-open for trading)
+	}
+
+	currentActiveCount := len(activeChains)
+
+	// Add pending entries to the count if requested
+	if includePending {
+		r.pendingMu.Lock()
+		currentActiveCount += len(r.pendingEntries)
+		r.pendingMu.Unlock()
+	}
+
+	// Get max_concurrent_trades from sub-strategy settings
+	mode := state.ActiveStrategy
+	if mode == "" {
+		mode = "scalp"
+	}
+	maxConcurrentTrades := 1 // Default fallback - conservative
+	if r.repo != nil {
+		strategyGroup := state.StrategyGroup
+		if strategyGroup == "" {
+			strategyGroup = "volume_imbalance" // Default
+		}
+		subStrategy := state.SubStrategy
+		if subStrategy == "" {
+			subStrategy = "ravindra" // Default
+		}
+
+		subSettings, err := r.repo.GetSubStrategySettings(ctx, r.userID, mode, strategyGroup, subStrategy)
+		if err == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+			var settingsMap map[string]interface{}
+			if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+						maxConcurrentTrades = int(maxTrades)
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("[CHAIN-ENTRY] Position limit check for %s: active=%d (pending included=%v), max=%d",
+		state.Symbol, currentActiveCount, includePending, maxConcurrentTrades)
+
+	if currentActiveCount >= maxConcurrentTrades {
+		log.Printf("[CHAIN-ENTRY] BLOCKED: max_concurrent_trades limit reached (%d/%d), skipping %s",
+			currentActiveCount, maxConcurrentTrades, state.Symbol)
+		return false, currentActiveCount, maxConcurrentTrades
+	}
+
+	return true, currentActiveCount, maxConcurrentTrades
+}
+
+// tryReserveEntrySlot atomically checks position limits and reserves a slot for entry.
+// This prevents the race condition where multiple goroutines read activeChains=0,
+// all pass the check, and all place orders exceeding the limit.
+//
+// Returns: (allowed bool, releaseFunc func())
+// If allowed is true, the caller MUST call releaseFunc() after the entry completes
+// (success or failure) to release the reserved slot.
+func (r *ChainEntryRunner) tryReserveEntrySlot(ctx context.Context, state *ChainCoinState) (bool, func()) {
+	symbol := state.Symbol
+
+	// Acquire the limit mutex to ensure atomic check-and-reserve
+	r.limitMu.Lock()
+
+	// Check if this symbol already has a pending entry
+	r.pendingMu.Lock()
+	if r.pendingEntries[symbol] {
+		r.pendingMu.Unlock()
+		r.limitMu.Unlock()
+		log.Printf("[CHAIN-ENTRY] BLOCKED: %s already has pending entry", symbol)
+		return false, nil
+	}
+	r.pendingMu.Unlock()
+
+	// Check position limit (including pending entries)
+	allowed, currentCount, maxCount := r.checkPositionLimit(ctx, state, true)
+	if !allowed {
+		r.limitMu.Unlock()
+		return false, nil
+	}
+
+	// Reserve the slot by marking this symbol as pending
+	r.pendingMu.Lock()
+	r.pendingEntries[symbol] = true
+	r.pendingMu.Unlock()
+
+	log.Printf("[CHAIN-ENTRY] Reserved entry slot for %s: active=%d (now +1 pending), max=%d",
+		symbol, currentCount, maxCount)
+
+	// Release function to be called after entry completes
+	releaseFunc := func() {
+		r.pendingMu.Lock()
+		delete(r.pendingEntries, symbol)
+		r.pendingMu.Unlock()
+		r.limitMu.Unlock()
+		log.Printf("[CHAIN-ENTRY] Released entry slot for %s", symbol)
+	}
+
+	return true, releaseFunc
 }
 
 // executeChainEntry places the entry order and records chain events
@@ -473,7 +646,9 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	}
 
 	// Step 3: Get position size from strategy settings (if available) or fall back to mode defaults
-	positionSizeUSD, slPercent, tpPercent := r.getModeDefaults(modeStr)
+	// NOTE: We ignore tpPercent from getModeDefaults because we use R:R ratio calculation instead
+	// (tpPercent from defaults is a small percentage like 0.4%, not a R:R ratio)
+	positionSizeUSD, slPercent, _ := r.getModeDefaults(modeStr)
 
 	// Override with strategy-specific settings if provided
 	if state.BudgetUSD > 0 {
@@ -483,9 +658,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	if state.SLPercent > 0 {
 		slPercent = state.SLPercent
 	}
-	if state.TPPercent > 0 {
-		tpPercent = state.TPPercent
-	}
+	// NOTE: state.TPPercent is used as R:R ratio (e.g., 4.0 for 1:4) in the SL/TP calculation below
 
 	// Apply leverage to position size (budget × leverage = effective position)
 	if state.MaxLeverage > 0 {
@@ -518,18 +691,33 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		quantity = minQty
 	}
 
-	// Step 5: Generate chain ID
+	// Step 5: Generate chain ID using sequential generator (Epic 7)
 	tradingMode := orders.ModeFromString(modeStr)
 	modeCode := orders.ModeCode[tradingMode]
 	if modeCode == "" {
 		modeCode = "SCA"
 	}
+	var chainID, entryClientOrderID string
 
-	now := time.Now().UTC()
-	dateStr := now.Format("02Jan")
-	seqNum := now.UnixNano() % 100000
-	chainID := fmt.Sprintf("%s-%s-%05d", modeCode, dateStr, seqNum)
-	entryClientOrderID := fmt.Sprintf("%s-E", chainID)
+	if r.orderIdGenerator != nil {
+		// Use proper sequential generator
+		fullID, baseID, err := r.orderIdGenerator.Generate(ctx, tradingMode, orders.OrderTypeEntry)
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] Warning: Generator error, using fallback: %v", err)
+			// Fallback to generator's built-in fallback
+			fullID, baseID = r.orderIdGenerator.GenerateFallback(tradingMode, orders.OrderTypeEntry)
+		}
+		chainID = baseID
+		entryClientOrderID = fullID
+	} else {
+		// Fallback when generator not available
+		now := time.Now().UTC()
+		dateStr := now.Format("02Jan")
+		seqNum := now.UnixNano() % 100000
+		chainID = fmt.Sprintf("%s-%s-%05d", modeCode, dateStr, seqNum)
+		entryClientOrderID = fmt.Sprintf("%s-E", chainID)
+		log.Printf("[CHAIN-ENTRY] Warning: Using fallback order ID generation (no generator available)")
+	}
 
 	// Step 6: Determine order side
 	var orderSide string
@@ -546,12 +734,16 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	// If database write fails, abort entry to prevent orphaned positions that Ginie picks up
 	if r.chainEventWriter != nil {
 		_, err := r.chainEventWriter.CreateChain(ctx, orders.CreateChainRequest{
-			UserID:   r.userID,
-			ChainID:  chainID,
-			Symbol:   symbol,
-			Side:     direction,
-			ModeCode: modeCode,
-			IsHedge:  false,
+			UserID:        r.userID,
+			ChainID:       chainID,
+			Symbol:        symbol,
+			Side:          direction,
+			ModeCode:      modeCode,
+			IsHedge:       false,
+			Mode:          state.ActiveStrategy,  // scalp, swing, position, ultra_fast
+			StrategyGroup: state.StrategyGroup,   // e.g., breakout
+			SubStrategy:   state.SubStrategy,     // e.g., ravindra_volume_imbalance
+			Timeframe:     state.Timeframe,       // e.g., 3m, 5m, 15m from pattern detection
 		})
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] ABORTED: Failed to create order chain in database - cannot place order without chain record: %v", err)
@@ -581,6 +773,10 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		return fmt.Errorf("failed to place entry order: %w", err)
 	}
 
+	// DEBUG: Log the full order response to diagnose SL/TP placement issues
+	log.Printf("[CHAIN-ENTRY] DEBUG Order Response: orderID=%d, status=%q, executedQty=%.6f, avgPrice=%.6f, origQty=%.6f",
+		orderResp.OrderId, orderResp.Status, orderResp.ExecutedQty, orderResp.AvgPrice, orderResp.OrigQty)
+
 	// Step 9: Record entry placed event
 	if r.chainEventWriter != nil {
 		err := r.chainEventWriter.RecordEntryPlaced(ctx, chainID, orders.ChainEntryPlacedEvent{
@@ -594,25 +790,50 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry placed event: %v", err)
 		}
 
-		// Step 9b: For MARKET orders, if status is FILLED, record entry filled event immediately
+		// Step 9b: For MARKET orders, record entry filled event immediately
+		// MARKET orders execute immediately, so we record fill even if ExecutedQty is reported later
 		// This ensures the chain shows ACTIVE status with correct quantity/price
-		if orderResp.Status == "FILLED" && orderResp.ExecutedQty > 0 {
-			filledPrice := orderResp.AvgPrice
-			if filledPrice <= 0 {
-				filledPrice = currentPrice
-			}
-			err := r.chainEventWriter.RecordEntryFilled(ctx, chainID, orders.ChainEntryFilledEvent{
-				FilledPrice:      filledPrice,
-				FilledQuantity:   orderResp.ExecutedQty,
-				Fees:             0, // Fees will be tracked separately via WebSocket
-				BinanceTimestamp: orderResp.UpdateTime,
+		filledQty := orderResp.ExecutedQty
+		if filledQty <= 0 {
+			// For MARKET orders, if ExecutedQty is not yet populated, use requested quantity
+			filledQty = quantity
+			log.Printf("[CHAIN-ENTRY] ExecutedQty=0, using requested quantity %.6f for MARKET order", filledQty)
+		}
+		filledPrice := orderResp.AvgPrice
+		if filledPrice <= 0 {
+			filledPrice = currentPrice
+		}
+		// Record entry filled for MARKET orders (they should always fill)
+		err = r.chainEventWriter.RecordEntryFilled(ctx, chainID, orders.ChainEntryFilledEvent{
+			FilledPrice:      filledPrice,
+			FilledQuantity:   filledQty,
+			Fees:             0, // Fees will be tracked separately via WebSocket
+			BinanceTimestamp: orderResp.UpdateTime,
+		})
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry filled event: %v", err)
+		} else {
+			log.Printf("[CHAIN-ENTRY] Recorded entry filled: chainID=%s, status=%q, price=%.6f, qty=%.6f",
+				chainID, orderResp.Status, filledPrice, filledQty)
+
+			// Broadcast POSITION_CREATED event to UI for instant update
+			// This allows the frontend to show the new position without requiring manual refresh
+			events.BroadcastPositionCreated(r.userID, map[string]interface{}{
+				"chain_id":       chainID,
+				"symbol":         symbol,
+				"side":           direction,
+				"entry_price":    filledPrice,
+				"quantity":       filledQty,
+				"mode":           state.ActiveStrategy,
+				"mode_code":      modeCode,
+				"strategy_group": state.StrategyGroup,
+				"sub_strategy":   state.SubStrategy,
+				"timeframe":      state.Timeframe,
+				"order_id":       orderResp.OrderId,
+				"created_at":     time.Now().UTC().Format(time.RFC3339),
 			})
-			if err != nil {
-				log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry filled event: %v", err)
-			} else {
-				log.Printf("[CHAIN-ENTRY] Recorded entry filled: chainID=%s, price=%.6f, qty=%.6f",
-					chainID, filledPrice, orderResp.ExecutedQty)
-			}
+			log.Printf("[CHAIN-ENTRY] Broadcast POSITION_CREATED: chainID=%s, symbol=%s, side=%s",
+				chainID, symbol, direction)
 		}
 	}
 
@@ -627,13 +848,56 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		filledQuantity = quantity
 	}
 
+	// Calculate SL/TP prices
+	// PREFERRED: Use actual prices from pattern detection (Support/Resistance based)
+	// FALLBACK: Use percentage-based calculation
 	var slPrice, tpPrice float64
-	if direction == "LONG" {
-		slPrice = entryPrice * (1 - slPercent/100)
-		tpPrice = entryPrice * (1 + tpPercent/100)
+	if state.SLPrice > 0 && state.TPPrice > 0 {
+		// Use actual prices from pattern detection
+		// These are calculated from Support Price (Consolidation Low) at pattern detection time
+		slPrice = state.SLPrice
+		tpPrice = state.TPPrice
+		log.Printf("[CHAIN-ENTRY] Using actual SL/TP from pattern: SL=%.6f, TP=%.6f, Risk=%.6f",
+			slPrice, tpPrice, state.RiskAmount)
+
+		// If the actual entry differs from pattern's expected entry, adjust SL/TP proportionally
+		// This maintains the same R:R ratio even if market moved
+		if state.EntryPrice > 0 && state.RiskAmount > 0 && entryPrice != state.EntryPrice {
+			priceDiff := entryPrice - state.EntryPrice
+			if direction == "LONG" {
+				// For LONG: if entry is higher, SL and TP both move up
+				slPrice = state.SLPrice + priceDiff
+				tpPrice = state.TPPrice + priceDiff
+			} else {
+				// For SHORT: if entry is lower, SL and TP both move down
+				slPrice = state.SLPrice + priceDiff
+				tpPrice = state.TPPrice + priceDiff
+			}
+			log.Printf("[CHAIN-ENTRY] Adjusted SL/TP for price drift (%.6f → %.6f): SL=%.6f, TP=%.6f",
+				state.EntryPrice, entryPrice, slPrice, tpPrice)
+		}
 	} else {
-		slPrice = entryPrice * (1 + slPercent/100)
-		tpPrice = entryPrice * (1 - tpPercent/100)
+		// Fallback to percentage-based calculation
+		// CRITICAL FIX: Use R:R ratio to calculate TP percentage from SL percentage
+		// state.TPPercent stores the R:R ratio (e.g., 4.0 for 1:4), NOT a percentage
+		// For 1:4 R:R ratio: if SL=1.5%, then TP should be 1.5% × 4 = 6%
+		rrRatio := 4.0 // Default R:R ratio for Ravindra Volume Imbalance strategy
+		if state.TPPercent > 1 {
+			// TPPercent > 1 means it's an R:R ratio (e.g., 4.0), not a percentage
+			rrRatio = state.TPPercent
+		}
+		// Calculate actual TP percentage using the R:R ratio
+		actualTPPercent := slPercent * rrRatio
+
+		if direction == "LONG" {
+			slPrice = entryPrice * (1 - slPercent/100)
+			tpPrice = entryPrice * (1 + actualTPPercent/100)
+		} else {
+			slPrice = entryPrice * (1 + slPercent/100)
+			tpPrice = entryPrice * (1 - actualTPPercent/100)
+		}
+		log.Printf("[CHAIN-ENTRY] Using percentage-based SL/TP with R:R ratio %.1f: SL=%.2f%%, TP=%.2f%% (Risk:Reward = 1:%.1f)",
+			rrRatio, slPercent, actualTPPercent, rrRatio)
 	}
 
 	// Round SL/TP prices to appropriate precision
@@ -642,7 +906,15 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 
 	// Step 11: Place SL/TP orders immediately to protect the position
 	// CRITICAL: Position must have SL/TP orders placed within seconds of entry
-	if orderResp.Status == "FILLED" && filledQuantity > 0 {
+	// For MARKET orders, we place SL/TP immediately after entry - don't wait for status
+	// The order was placed successfully (no error), so we protect the position
+	shouldPlaceSLTP := filledQuantity > 0
+	if !shouldPlaceSLTP {
+		log.Printf("[CHAIN-ENTRY] WARNING: filledQuantity is 0, cannot place SL/TP orders")
+	} else {
+		log.Printf("[CHAIN-ENTRY] Proceeding to place SL/TP: status=%q, filledQty=%.6f", orderResp.Status, filledQuantity)
+	}
+	if shouldPlaceSLTP {
 		// Determine close side (opposite of entry side)
 		var closeSide string
 		if direction == "LONG" {
@@ -655,17 +927,23 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		slClientOrderID := fmt.Sprintf("%s-SL", chainID)
 		tpClientOrderID := fmt.Sprintf("%s-TP", chainID)
 
+		// Get precision from symbol info to avoid Binance -1111 errors
+		pricePrecision, qtyPrecision := getPrecisionFromSymbol(symbolInfo)
+		log.Printf("[CHAIN-ENTRY] Using precision: price=%d, qty=%d for %s", pricePrecision, qtyPrecision, symbol)
+
 		// Place Stop Loss order (STOP_MARKET)
 		slParams := binance.AlgoOrderParams{
-			Symbol:        symbol,
-			Side:          closeSide,
-			PositionSide:  positionSide,
-			Type:          binance.FuturesOrderTypeStopMarket,
-			Quantity:      filledQuantity,
-			TriggerPrice:  slPrice,
-			ClosePosition: false,
-			WorkingType:   binance.WorkingTypeMarkPrice,
-			ClientAlgoId:  slClientOrderID,
+			Symbol:            symbol,
+			Side:              closeSide,
+			PositionSide:      positionSide,
+			Type:              binance.FuturesOrderTypeStopMarket,
+			Quantity:          filledQuantity,
+			TriggerPrice:      slPrice,
+			ClosePosition:     false,
+			WorkingType:       binance.WorkingTypeMarkPrice,
+			ClientAlgoId:      slClientOrderID,
+			PricePrecision:    pricePrecision,
+			QuantityPrecision: qtyPrecision,
 		}
 
 		log.Printf("[CHAIN-ENTRY] Placing STOP_MARKET SL order for %s: price=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
@@ -692,15 +970,17 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 
 		// Place Take Profit order (TAKE_PROFIT_MARKET)
 		tpParams := binance.AlgoOrderParams{
-			Symbol:        symbol,
-			Side:          closeSide,
-			PositionSide:  positionSide,
-			Type:          binance.FuturesOrderTypeTakeProfitMarket,
-			Quantity:      filledQuantity,
-			TriggerPrice:  tpPrice,
-			ClosePosition: false,
-			WorkingType:   binance.WorkingTypeMarkPrice,
-			ClientAlgoId:  tpClientOrderID,
+			Symbol:            symbol,
+			Side:              closeSide,
+			PositionSide:      positionSide,
+			Type:              binance.FuturesOrderTypeTakeProfitMarket,
+			Quantity:          filledQuantity,
+			TriggerPrice:      tpPrice,
+			ClosePosition:     false,
+			WorkingType:       binance.WorkingTypeMarkPrice,
+			ClientAlgoId:      tpClientOrderID,
+			PricePrecision:    pricePrecision,
+			QuantityPrecision: qtyPrecision,
 		}
 
 		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT_MARKET TP order for %s: price=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
@@ -809,6 +1089,59 @@ func parseFloatStr(s string) (float64, error) {
 	return f, err
 }
 
+// getPrecisionFromSymbol extracts price and quantity precision from symbol info
+// Returns (pricePrecision, quantityPrecision)
+func getPrecisionFromSymbol(symbolInfo *binance.FuturesSymbolInfo) (int, int) {
+	pricePrecision := 8  // Default safe precision
+	qtyPrecision := 8    // Default safe precision
+
+	if symbolInfo == nil {
+		return pricePrecision, qtyPrecision
+	}
+
+	// Get price precision from tick size
+	for _, filter := range symbolInfo.Filters {
+		if filter.FilterType == "PRICE_FILTER" && filter.TickSize != "" {
+			if tickSize, err := parseFloatStr(filter.TickSize); err == nil && tickSize > 0 {
+				// Calculate decimal places from tick size (e.g., 0.00001 = 5 decimal places)
+				precision := 0
+				for tickSize < 1 {
+					tickSize *= 10
+					precision++
+				}
+				pricePrecision = precision
+			}
+			break
+		}
+	}
+
+	// Get quantity precision from step size
+	for _, filter := range symbolInfo.Filters {
+		if filter.FilterType == "LOT_SIZE" && filter.StepSize != "" {
+			if stepSize, err := parseFloatStr(filter.StepSize); err == nil && stepSize > 0 {
+				// Calculate decimal places from step size
+				precision := 0
+				for stepSize < 1 {
+					stepSize *= 10
+					precision++
+				}
+				qtyPrecision = precision
+			}
+			break
+		}
+	}
+
+	// Also check the symbol's declared precision if available
+	if symbolInfo.PricePrecision > 0 && symbolInfo.PricePrecision < pricePrecision {
+		pricePrecision = symbolInfo.PricePrecision
+	}
+	if symbolInfo.QuantityPrecision > 0 && symbolInfo.QuantityPrecision < qtyPrecision {
+		qtyPrecision = symbolInfo.QuantityPrecision
+	}
+
+	return pricePrecision, qtyPrecision
+}
+
 // SetFuturesClient updates the futures client (used when client is refreshed)
 func (r *ChainEntryRunner) SetFuturesClient(client binance.FuturesClient) {
 	r.mu.Lock()
@@ -867,10 +1200,12 @@ func (r *ChainEntryRunner) ClearAllCooldowns() {
 // - symbol: The trading pair (e.g., "BTCUSDT")
 // - direction: "long" or "short"
 // - mode: Trading mode (e.g., "scalp", "swing")
+// - strategyGroup: Strategy group (e.g., "breakout")
+// - subStrategy: Sub-strategy name (e.g., "ravindra_volume_imbalance")
 // - price: Current market price at breakout detection
 //
 // Returns error if entry cannot be executed.
-func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode string, price float64) error {
+func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strategyGroup, subStrategy string, price float64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -898,31 +1233,119 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode string,
 		return fmt.Errorf("symbol has open position")
 	}
 
-	// Create ChainCoinState for immediate entry
-	trend := "BULLISH"
-	if direction == "short" {
-		trend = "BEARISH"
-	}
-
-	state := &ChainCoinState{
+	// Build a preliminary state for the limit check
+	// (We need this to check max_concurrent_trades from sub-strategy settings)
+	preliminaryState := &ChainCoinState{
 		Symbol:         symbol,
-		Price:          price,
 		ActiveStrategy: mode,
-		Decision:       "READY",
-		Trend1H:        trend,
-		Trend15M:       trend,
-		ScoreFinal:     90, // High score for breakout entries
+		StrategyGroup:  strategyGroup,
+		SubStrategy:    subStrategy,
 	}
 
-	log.Printf("[CHAIN-ENTRY-IMMEDIATE] Executing breakout entry for %s: direction=%s, mode=%s, price=%.6f",
-		symbol, direction, mode, price)
+	// CRITICAL: Atomically reserve an entry slot to prevent race conditions
+	// This replaces the old non-atomic limit check that allowed 4 positions when only 1 was allowed.
+	// The limitMu mutex ensures that multiple goroutines cannot simultaneously pass the limit check.
+	allowed, releaseSlot := r.tryReserveEntrySlot(ctx, preliminaryState)
+	if !allowed {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] BLOCKED: Could not reserve entry slot for %s (limit reached or pending)", symbol)
+		return fmt.Errorf("could not reserve entry slot (max_concurrent_trades limit reached)")
+	}
 
-	// Execute the entry
+	// IMPORTANT: We now have the slot reserved. We MUST call releaseSlot() when done.
+	// Use a deferred call with a flag to track if we've already released.
+	slotReleased := false
+	defer func() {
+		if !slotReleased {
+			releaseSlot()
+		}
+	}()
+
+	// CRITICAL: Try to get actual SL/TP prices from pattern detection
+	// This ensures correct R:R ratio for both LONG and SHORT positions
+	var state *ChainCoinState
+
+	// Try to get the state from pattern provider (includes actual SL/TP prices)
+	if r.stateProvider != nil {
+		// Try common timeframes for the pattern
+		for _, timeframe := range []string{"3m", "5m", "15m", "1m"} {
+			patternState, err := r.stateProvider.GetCoinStateForEntry(ctx, r.userID, symbol, mode, timeframe)
+			if err == nil && patternState != nil && patternState.SLPrice > 0 && patternState.TPPrice > 0 {
+				state = patternState
+				log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded pattern state with actual SL/TP: symbol=%s, SL=%.6f, TP=%.6f, Risk=%.6f",
+					symbol, state.SLPrice, state.TPPrice, state.RiskAmount)
+				break
+			}
+		}
+	}
+
+	// Fallback: Create basic state if pattern not found (uses percentage-based SL/TP)
+	if state == nil {
+		trend := "BULLISH"
+		if direction == "short" {
+			trend = "BEARISH"
+		}
+		state = &ChainCoinState{
+			Symbol:         symbol,
+			Price:          price,
+			ActiveStrategy: mode,
+			StrategyGroup:  strategyGroup,
+			SubStrategy:    subStrategy,
+			Decision:       "READY",
+			Trend1H:        trend,
+			Trend15M:       trend,
+			ScoreFinal:     90, // High score for breakout entries
+		}
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] WARNING: No pattern state found, using percentage-based SL/TP (may have inverted R:R for SHORT)")
+	} else {
+		// Override strategy info in case pattern had different values
+		state.StrategyGroup = strategyGroup
+		state.SubStrategy = subStrategy
+		state.ActiveStrategy = mode
+		state.Price = price // Use current breakout price
+	}
+
+	// Load budget and leverage from user settings
+	if r.repo != nil && r.userID != "" {
+		// Get strategy group settings for leverage
+		groupSettings, err := r.repo.GetStrategyGroupSettings(ctx, r.userID, mode, strategyGroup)
+		if err == nil && groupSettings != nil {
+			state.MaxLeverage = groupSettings.MaxLeverage
+			log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded leverage from strategy group: %dx", state.MaxLeverage)
+		}
+
+		// Get sub-strategy settings for budget
+		subSettings, err := r.repo.GetSubStrategySettings(ctx, r.userID, mode, strategyGroup, subStrategy)
+		if err == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+			var settingsMap map[string]interface{}
+			if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
+				// Check for budget_allocation.assigned_budget_usd
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					if budgetUSD, ok := budgetAlloc["assigned_budget_usd"].(float64); ok && budgetUSD > 0 {
+						state.BudgetUSD = budgetUSD
+						log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded budget from sub-strategy: $%.2f", budgetUSD)
+					}
+				}
+				// Check for pattern_detection.max_sl_percent
+				if patternDet, ok := settingsMap["pattern_detection"].(map[string]interface{}); ok {
+					if maxSL, ok := patternDet["max_sl_percent"].(float64); ok && maxSL > 0 {
+						state.SLPercent = maxSL
+						log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded max SL from sub-strategy: %.2f%%", maxSL)
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("[CHAIN-ENTRY-IMMEDIATE] Executing breakout entry for %s: direction=%s, mode=%s, budget=$%.2f, leverage=%dx, price=%.6f",
+		symbol, direction, mode, state.BudgetUSD, state.MaxLeverage, price)
+
+	// Execute the entry (slot is reserved, will be released by defer or explicitly)
 	if err := r.executeChainEntry(ctx, state); err != nil {
 		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Failed to execute entry for %s: %v", symbol, err)
 		r.mu.Lock()
 		r.stats.FailedEntries++
 		r.mu.Unlock()
+		// releaseSlot() will be called by defer
 		return err
 	}
 
@@ -932,6 +1355,104 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode string,
 	r.stats.LastEntryTime = time.Now()
 	r.mu.Unlock()
 
+	// Explicitly release the slot now that the chain is in the database
+	releaseSlot()
+	slotReleased = true
+
 	log.Printf("[CHAIN-ENTRY-IMMEDIATE] SUCCESS: Breakout entry placed for %s", symbol)
 	return nil
+}
+
+// CalculateMaxPositionsFromSubStrategies calculates the total max positions by summing
+// max_concurrent_trades from all enabled sub-strategies. This implements the correct
+// position limit calculation per Krishna's requirement.
+//
+// The calculation follows this hierarchy:
+// - For each ENABLED mode
+// - For each ENABLED strategy group in that mode
+// - For each ENABLED sub-strategy in that group
+// - SUM the max_concurrent_trades values
+// - If sub-strategy doesn't define it, use strategy group's max_positions
+//
+// Returns: (currentPositions, maxPositions)
+func (r *ChainEntryRunner) CalculateMaxPositionsFromSubStrategies(ctx context.Context) (current int, max int) {
+	if r.repo == nil {
+		log.Printf("[CHAIN-ENTRY] Warning: Repository not available for position limit calculation")
+		return 0, 1 // Default to 1 max position
+	}
+
+	modes := []string{"ultra_fast", "scalp", "swing", "position"}
+	strategyGroups := []string{"breakout", "trending", "range", "volatile"}
+	totalMaxPositions := 0
+
+	for _, mode := range modes {
+		// Check if mode is enabled (via settings cache or similar)
+		// For now, iterate through all and check at strategy group level
+
+		for _, group := range strategyGroups {
+			// Get strategy group settings
+			groupSettings, err := r.repo.GetStrategyGroupSettings(ctx, r.userID, mode, group)
+			if err != nil || groupSettings == nil || !groupSettings.Enabled {
+				continue // Skip disabled or non-existent groups
+			}
+
+			// Get all sub-strategies for this group
+			subStrategies, err := r.repo.GetAllSubStrategies(ctx, r.userID, mode, group)
+			if err != nil {
+				// If no sub-strategies, use group's max_positions
+				if groupSettings.MaxPositions > 0 {
+					totalMaxPositions += groupSettings.MaxPositions
+				}
+				continue
+			}
+
+			groupHasEnabledSubStrategy := false
+			for _, subStrat := range subStrategies {
+				if !subStrat.Enabled {
+					continue
+				}
+				groupHasEnabledSubStrategy = true
+
+				// Parse settings JSON to get max_concurrent_trades
+				var settingsMap map[string]interface{}
+				if err := json.Unmarshal(subStrat.Settings, &settingsMap); err != nil {
+					continue
+				}
+
+				// Check for budget_allocation.max_concurrent_trades
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+						totalMaxPositions += int(maxTrades)
+						log.Printf("[CHAIN-ENTRY] Sub-strategy %s/%s/%s max_concurrent_trades: %d",
+							mode, group, subStrat.SubStrategy, int(maxTrades))
+					}
+				}
+			}
+
+			// If no sub-strategies define max_concurrent_trades, use group's max_positions
+			if !groupHasEnabledSubStrategy && groupSettings.MaxPositions > 0 {
+				totalMaxPositions += groupSettings.MaxPositions
+			}
+		}
+	}
+
+	// Fallback to 1 if no positions configured
+	if totalMaxPositions == 0 {
+		totalMaxPositions = 1
+	}
+
+	// TODO: Get current active positions from order chains
+	currentPositions := 0
+
+	return currentPositions, totalMaxPositions
+}
+
+// GetPositionLimitInfo returns current and max positions for API/UI display
+func (r *ChainEntryRunner) GetPositionLimitInfo(ctx context.Context) map[string]interface{} {
+	current, max := r.CalculateMaxPositionsFromSubStrategies(ctx)
+	return map[string]interface{}{
+		"current_positions": current,
+		"max_positions":     max,
+		"source":            "sub_strategy_max_concurrent_trades",
+	}
 }

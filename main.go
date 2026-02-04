@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -793,36 +794,76 @@ func main() {
 	// Initialize User Data Stream for real-time account/position/order updates
 	// This eliminates REST API polling for position changes
 	var userDataStream *binance.UserDataStream
+	var userDataStreamMu sync.Mutex // Protect userDataStream during restart
 	if cfg.FuturesConfig.Enabled && futuresAutopilotController != nil {
-		// Get the active futures client from the controller
-		activeClient := futuresAutopilotController.GetFuturesClient()
-		if activeClient != nil {
-			userDataStream = binance.NewUserDataStream(activeClient, cfg.FuturesConfig.TestNet)
+		// Helper function to create and start UserDataStream with a given client
+		startUserDataStream := func(client binance.FuturesClient) *binance.UserDataStream {
+			if client == nil {
+				return nil
+			}
+			stream := binance.NewUserDataStream(client, cfg.FuturesConfig.TestNet)
 
 			// Wire up callbacks to Ginie autopilot controller
-			userDataStream.SetPositionUpdateCallback(func(update *binance.PositionUpdateEvent) {
+			stream.SetPositionUpdateCallback(func(update *binance.PositionUpdateEvent) {
 				futuresAutopilotController.HandleStreamPositionUpdate(update)
 			})
 
-			userDataStream.SetOrderUpdateCallback(func(update *binance.OrderUpdateEvent) {
+			stream.SetOrderUpdateCallback(func(update *binance.OrderUpdateEvent) {
 				futuresAutopilotController.HandleStreamOrderUpdate(update)
 			})
 
-			userDataStream.SetAccountUpdateCallback(func(update *binance.AccountUpdateEvent) {
+			stream.SetAccountUpdateCallback(func(update *binance.AccountUpdateEvent) {
 				futuresAutopilotController.HandleStreamAccountUpdate(update)
 			})
 
+			// CRITICAL: Set onConnect callback to sync state from Binance REST API.
+			// This fixes stale data issues where orders/positions closed while
+			// WebSocket was disconnected would show as "active" indefinitely.
+			stream.SetOnConnectCallback(func() {
+				logger.Info("User Data Stream connected - syncing state from Binance...")
+				futuresAutopilotController.SyncStateFromBinance()
+			})
+
 			// Start the stream (non-blocking)
-			if err := userDataStream.Start(); err != nil {
+			if err := stream.Start(); err != nil {
 				logger.Warn("Failed to start User Data Stream",
 					"error", err,
 					"dry_run", cfg.TradingConfig.DryRun)
-			} else {
-				logger.Info("User Data Stream started for real-time updates",
-					"testnet", cfg.FuturesConfig.TestNet,
-					"dry_run", cfg.TradingConfig.DryRun)
+				return nil
 			}
+			logger.Info("User Data Stream started for real-time updates",
+				"testnet", cfg.FuturesConfig.TestNet,
+				"dry_run", cfg.TradingConfig.DryRun)
+			return stream
 		}
+
+		// Start initial UserDataStream
+		activeClient := futuresAutopilotController.GetFuturesClient()
+		userDataStream = startUserDataStream(activeClient)
+
+		// Register callback to restart UserDataStream when client is updated
+		// This is CRITICAL for live trading - when switching from mock to real client,
+		// the UserDataStream must be restarted with the real client to receive order fills
+		futuresAutopilotController.SetOnClientUpdateCallback(func(newClient binance.FuturesClient) {
+			userDataStreamMu.Lock()
+			defer userDataStreamMu.Unlock()
+
+			logger.Info("Client updated - restarting User Data Stream with new client")
+
+			// Stop existing stream if running
+			if userDataStream != nil {
+				userDataStream.Stop()
+				logger.Info("Stopped old User Data Stream")
+			}
+
+			// Start new stream with updated client
+			userDataStream = startUserDataStream(newClient)
+			if userDataStream != nil {
+				logger.Info("User Data Stream restarted successfully with new client")
+			} else {
+				logger.Warn("Failed to restart User Data Stream with new client")
+			}
+		})
 	}
 
 	// Initialize web server
@@ -1231,6 +1272,20 @@ func main() {
 			if chainEventWriter != nil && userAutopilotManager != nil {
 				userAutopilotManager.SetChainEventWriter(chainEventWriter)
 				logger.Info("ChainEventWriter set on UserAutopilotManager for chain entry tracking")
+
+				// Set up equity compounding callback for chain close events
+				// When a chain closes with P&L, update the sub-strategy's current_equity
+				chainEventWriter.SetOnChainClosed(func(ctx context.Context, userID, mode, strategyGroup, subStrategy string, realizedPnL float64) {
+					if subStrategy != "" && realizedPnL != 0 {
+						err := repo.UpdateSubStrategyEquity(ctx, userID, mode, strategyGroup, subStrategy, realizedPnL)
+						if err != nil {
+							log.Printf("[EQUITY-UPDATE] Failed to update equity for %s/%s/%s: %v", mode, strategyGroup, subStrategy, err)
+						} else {
+							log.Printf("[EQUITY-UPDATE] Updated equity for %s/%s/%s: PnL=%.2f", mode, strategyGroup, subStrategy, realizedPnL)
+						}
+					}
+				})
+				logger.Info("Equity compounding callback set on ChainEventWriter")
 			}
 		}
 	}
@@ -2288,4 +2343,15 @@ func (a *chainStateProviderAdapter) GetAllChainCoinStates(ctx context.Context, u
 	}
 
 	return result, nil
+}
+
+// GetCoinStateForEntry implements autopilot.ChainStateProvider.
+// This adapter is for the scoring-based system and doesn't have access to pattern matcher.
+// For tick-level breakout entries, the PatternStateProvider is used instead.
+// Returns nil since this adapter cannot provide pattern-detected SL/TP prices.
+func (a *chainStateProviderAdapter) GetCoinStateForEntry(ctx context.Context, userID, symbol, mode, timeframe string) (*autopilot.ChainCoinState, error) {
+	// This adapter doesn't have access to pattern detection data.
+	// The ChainEntryRunner's ExecuteImmediateEntry will use PatternStateProvider
+	// which is set separately on the ChainEntryRunner.
+	return nil, nil
 }

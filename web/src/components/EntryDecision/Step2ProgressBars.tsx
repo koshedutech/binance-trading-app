@@ -13,6 +13,8 @@ interface Step2ProgressBarsProps {
   update: PatternUpdate;
   /** Current market price */
   currentPrice: number;
+  /** Number of candles since reference (optional, for display) */
+  candlesSinceReference?: number;
 }
 
 // ==================== Volume Progress Bar ====================
@@ -86,18 +88,18 @@ function VolumeProgressBar({
           style={{ width: `${Math.max(currentPosition, 0)}%` }}
         />
 
-        {/* Average Volume Marker */}
+        {/* Average Volume Marker (Ref→Last candle average) */}
         <div
           className="absolute top-0 bottom-0 flex flex-col items-center"
           style={{ left: `${Math.min(Math.max(avgPosition, 5), 95)}%`, transform: 'translateX(-50%)' }}
         >
           <div className="w-0.5 h-full bg-gray-400/70" />
           <div className="absolute -bottom-4 text-[9px] text-gray-400 whitespace-nowrap">
-            Avg {avgVolumeMultiplier.toFixed(1)}x
+            Ref→Last {avgVolumeMultiplier.toFixed(1)}x
           </div>
         </div>
 
-        {/* Entry Threshold Marker (if different from reference) */}
+        {/* Volume Threshold Marker (required for entry trigger) */}
         {Math.abs(entryThreshold - referenceVolumeMultiplier) > 0.1 && (
           <div
             className="absolute top-0 bottom-0 flex flex-col items-center"
@@ -105,7 +107,7 @@ function VolumeProgressBar({
           >
             <div className="w-1 h-full bg-yellow-500/70" />
             <div className="absolute -top-4 text-[9px] text-yellow-400 whitespace-nowrap">
-              Entry {entryThreshold.toFixed(1)}x
+              Threshold {entryThreshold.toFixed(1)}x
             </div>
           </div>
         )}
@@ -235,25 +237,25 @@ function PriceProgressBar({
           <div className="w-0.5 h-full bg-green-500/50" />
         </div>
 
-        {/* Average Price Marker */}
+        {/* Average Price Marker (Ref→Last candle average) */}
         <div
           className="absolute top-0 bottom-0 flex flex-col items-center"
           style={{ left: `${Math.min(Math.max(avgPosition, 5), 95)}%`, transform: 'translateX(-50%)' }}
         >
           <div className="w-0.5 h-full bg-gray-400/70" />
           <div className="absolute -bottom-4 text-[9px] text-gray-400 whitespace-nowrap">
-            Avg
+            Ref→Last
           </div>
         </div>
 
-        {/* Entry Price Marker (Reference High) */}
+        {/* Reference Candle High Price Marker (Breakout Entry Level) */}
         <div
           className="absolute top-0 bottom-0 flex flex-col items-center z-10"
           style={{ left: `${Math.min(Math.max(entryPosition, 5), 95)}%`, transform: 'translateX(-50%)' }}
         >
           <div className="w-1.5 h-full bg-purple-500" />
           <div className="absolute -top-4 text-[9px] text-purple-400 font-medium whitespace-nowrap">
-            Entry
+            Ref High
           </div>
         </div>
 
@@ -263,12 +265,12 @@ function PriceProgressBar({
           style={{ left: `${Math.min(Math.max(currentPosition, 2), 98)}%`, transform: 'translateX(-50%) translateY(-50%)' }}
         />
 
-        {/* Scale Labels */}
-        <div className="absolute -bottom-4 left-0 text-[9px] text-red-400">
-          {formatPrice(dayLow)}
+        {/* Scale Labels - Day Low and Day High */}
+        <div className="absolute -bottom-4 left-0 text-[9px] text-red-400 whitespace-nowrap">
+          Day Low {formatPrice(dayLow)}
         </div>
-        <div className="absolute -bottom-4 right-0 text-[9px] text-green-400">
-          {formatPrice(dayHigh)}
+        <div className="absolute -bottom-4 right-0 text-[9px] text-green-400 whitespace-nowrap">
+          Day High {formatPrice(dayHigh)}
         </div>
       </div>
 
@@ -280,14 +282,31 @@ function PriceProgressBar({
 
 // ==================== Main Component ====================
 
-export default function Step2ProgressBars({ update, currentPrice }: Step2ProgressBarsProps) {
-  // Extract required data
+export default function Step2ProgressBars({ update, currentPrice, candlesSinceReference }: Step2ProgressBarsProps) {
+  // Extract required data - CRITICAL: Don't return null, render placeholder instead to prevent flicker
   const referenceCandle = update.reference_candle;
-  if (!referenceCandle) return null;
+
+  // If no reference candle data yet, render a loading placeholder instead of nothing
+  // This prevents the component from unmounting and causing layout shift/flicker
+  if (!referenceCandle) {
+    return (
+      <div className="mt-4 pt-4 border-t border-gray-700/50 animate-pulse">
+        <div className="h-4 bg-gray-700/30 rounded w-1/3 mb-3" />
+        <div className="h-8 bg-gray-700/30 rounded mb-3" />
+        <div className="h-8 bg-gray-700/30 rounded" />
+      </div>
+    );
+  }
+
+  // Use reference candle mid price as fallback if currentPrice is missing/0
+  const effectiveCurrentPrice = currentPrice > 0
+    ? currentPrice
+    : (referenceCandle.high + referenceCandle.low) / 2;
 
   // Volume data
   const referenceVolumeMultiplier = referenceCandle.volume_multiplier;
-  const entryThreshold = update.volume_threshold || 3.0;
+  // Use actual threshold from settings, fallback to 2.0 (common default)
+  const entryThreshold = update.volume_threshold || 2.0;
 
   // Current candle volume - use from update or calculate from volume_progress
   const currentVolumeMultiplier = update.current_candle_volume_multiplier
@@ -312,8 +331,8 @@ export default function Step2ProgressBars({ update, currentPrice }: Step2Progres
   // Check if both conditions are met
   const volumeConditionMet = currentVolumeMultiplier >= entryThreshold;
   const priceConditionMet = direction === 'long'
-    ? currentPrice >= entryPrice
-    : currentPrice <= entryPrice;
+    ? effectiveCurrentPrice >= entryPrice
+    : effectiveCurrentPrice <= entryPrice;
   const bothConditionsMet = volumeConditionMet && priceConditionMet;
 
   return (
@@ -323,6 +342,12 @@ export default function Step2ProgressBars({ update, currentPrice }: Step2Progres
         <div className="flex items-center gap-2 text-xs text-gray-400">
           <TrendingUp className="w-3.5 h-3.5" />
           <span>Step 2 Entry Progress</span>
+          {/* Candle count since reference */}
+          {candlesSinceReference !== undefined && candlesSinceReference > 0 && (
+            <span className="px-1.5 py-0.5 bg-gray-700/50 text-gray-300 rounded text-[10px] font-mono">
+              🕯 {candlesSinceReference} candle{candlesSinceReference !== 1 ? 's' : ''}
+            </span>
+          )}
         </div>
         {bothConditionsMet ? (
           <div className="flex items-center gap-1 px-2 py-1 bg-green-500/20 border border-green-500/30 rounded text-xs text-green-400 animate-pulse">
@@ -347,7 +372,7 @@ export default function Step2ProgressBars({ update, currentPrice }: Step2Progres
 
       {/* Price Progress Bar */}
       <PriceProgressBar
-        currentPrice={currentPrice}
+        currentPrice={effectiveCurrentPrice}
         dayLow={dayLow}
         dayHigh={dayHigh}
         entryPrice={entryPrice}
@@ -364,7 +389,7 @@ export default function Step2ProgressBars({ update, currentPrice }: Step2Progres
           </span>
           <span className={`flex items-center gap-1 ${priceConditionMet ? 'text-green-400' : 'text-gray-500'}`}>
             <span className={`w-2 h-2 rounded-full ${priceConditionMet ? 'bg-green-500' : 'bg-gray-600'}`} />
-            Price {priceConditionMet ? 'Breakout!' : `${Math.abs(((entryPrice - currentPrice) / currentPrice) * 100).toFixed(2)}% away`}
+            Price {priceConditionMet ? 'Breakout!' : `${Math.abs(((entryPrice - effectiveCurrentPrice) / effectiveCurrentPrice) * 100).toFixed(2)}% away`}
           </span>
         </div>
         <span className="text-gray-600">

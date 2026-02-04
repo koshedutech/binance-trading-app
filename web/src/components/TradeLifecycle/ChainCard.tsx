@@ -324,11 +324,9 @@ export default function ChainCard({
     );
   };
 
-  // Format price (null-safe)
+  // Format price with 8 decimal precision (Binance standard, null-safe)
   const formatPrice = (price: number | null | undefined) => {
     const safePrice = price ?? 0;
-    if (safePrice >= 1000) return safePrice.toFixed(2);
-    if (safePrice >= 1) return safePrice.toFixed(4);
     return safePrice.toFixed(8);
   };
 
@@ -717,11 +715,11 @@ export default function ChainCard({
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Entry Price</span>
-                    <span className="text-sm font-mono text-blue-400">${chain.positionState.entryPrice.toFixed(4)}</span>
+                    <span className="text-sm font-mono text-blue-400">${chain.positionState.entryPrice.toFixed(8)}</span>
                   </div>
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Entry Value</span>
-                    <span className="text-sm font-mono text-gray-300">${chain.positionState.entryValue.toFixed(2)}</span>
+                    <span className="text-sm font-mono text-gray-300">${chain.positionState.entryValue.toFixed(8)}</span>
                   </div>
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Quantity</span>
@@ -736,7 +734,7 @@ export default function ChainCard({
                   </div>
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Entry Fees</span>
-                    <span className="text-sm font-mono text-orange-400">${chain.positionState.entryFees.toFixed(4)}</span>
+                    <span className="text-sm font-mono text-orange-400">${chain.positionState.entryFees.toFixed(8)}</span>
                   </div>
                 </div>
 
@@ -745,24 +743,24 @@ export default function ChainCard({
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-gray-800/50 rounded-lg p-3">
                       <span className="text-xs text-gray-500 block mb-1">Current Price</span>
-                      <span className="text-sm font-mono text-white">${currentPrice.toFixed(4)}</span>
+                      <span className="text-sm font-mono text-white">${currentPrice.toFixed(8)}</span>
                     </div>
                     {chain.positionAnalytics?.breakeven_price && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">Breakeven</span>
-                        <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(4)}</span>
+                        <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(8)}</span>
                       </div>
                     )}
                     {chain.slOrder && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">Stop Loss</span>
-                        <span className="text-sm font-mono text-red-400">${(chain.slOrder.stopPrice || chain.slOrder.price || 0).toFixed(4)}</span>
+                        <span className="text-sm font-mono text-red-400">${(chain.slOrder.stopPrice || chain.slOrder.price || 0).toFixed(8)}</span>
                       </div>
                     )}
                     {chain.tpOrders.length > 0 && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">TP1</span>
-                        <span className="text-sm font-mono text-green-400">${(chain.tpOrders[0].price || 0).toFixed(4)}</span>
+                        <span className="text-sm font-mono text-green-400">${(chain.tpOrders[0].price || 0).toFixed(8)}</span>
                       </div>
                     )}
                   </div>
@@ -819,24 +817,24 @@ export default function ChainCard({
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-gray-800/50 rounded-lg p-3">
                       <span className="text-xs text-gray-500 block mb-1">Current Price</span>
-                      <span className="text-sm font-mono text-white">${currentPrice.toFixed(2)}</span>
+                      <span className="text-sm font-mono text-white">${currentPrice.toFixed(8)}</span>
                     </div>
                     {chain.positionAnalytics.breakeven_price && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">Breakeven</span>
-                        <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(2)}</span>
+                        <span className="text-sm font-mono text-yellow-400">${chain.positionAnalytics.breakeven_price.toFixed(8)}</span>
                       </div>
                     )}
                     {chain.positionAnalytics.tp1_price && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">TP1</span>
-                        <span className="text-sm font-mono text-green-400">${chain.positionAnalytics.tp1_price.toFixed(2)}</span>
+                        <span className="text-sm font-mono text-green-400">${chain.positionAnalytics.tp1_price.toFixed(8)}</span>
                       </div>
                     )}
                     {chain.positionAnalytics.stop_loss && (
                       <div className="bg-gray-800/50 rounded-lg p-3">
                         <span className="text-xs text-gray-500 block mb-1">Stop Loss</span>
-                        <span className="text-sm font-mono text-red-400">${chain.positionAnalytics.stop_loss.toFixed(2)}</span>
+                        <span className="text-sm font-mono text-red-400">${chain.positionAnalytics.stop_loss.toFixed(8)}</span>
                       </div>
                     )}
                   </div>
@@ -1047,11 +1045,11 @@ export default function ChainCard({
                                 </span>
                                 <span className="text-gray-600">|</span>
                                 <span className="text-gray-400">
-                                  Initial: <span className="font-mono text-gray-300">${(summary.initialPrice ?? 0).toFixed(2)}</span>
+                                  Initial: <span className="font-mono text-gray-300">${(summary.initialPrice ?? 0).toFixed(8)}</span>
                                 </span>
                                 <span className="text-gray-600">|</span>
                                 <span className="text-gray-400">
-                                  Current: <span className="font-mono text-green-400">${(slEconomics.price ?? 0).toFixed(2)}</span>
+                                  Current: <span className="font-mono text-green-400">${(slEconomics.price ?? 0).toFixed(8)}</span>
                                 </span>
                                 <span className="text-gray-600">|</span>
                                 <span className={`font-medium ${(summary.netDollarImpact ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -1192,7 +1190,7 @@ function LegacyChainView({
               <div className="bg-gray-800/50 rounded-lg p-2">
                 <span className="text-xs text-gray-500 block">Entry Price</span>
                 <span className="text-sm font-mono text-gray-300">
-                  ${chain.positionState.entryPrice?.toFixed(4) || 'N/A'}
+                  ${chain.positionState.entryPrice?.toFixed(8) || 'N/A'}
                 </span>
               </div>
               <div className="bg-gray-800/50 rounded-lg p-2">
@@ -1416,7 +1414,7 @@ function LegacyChainView({
                         <Shield className="w-4 h-4 text-red-400" />
                         <span className="text-sm font-medium text-red-400">Stop Loss</span>
                         <span className="text-xs text-gray-500">
-                          (${(chain.slOrder.stopPrice || chain.slOrder.price || 0).toFixed(2)})
+                          (${(chain.slOrder.stopPrice || chain.slOrder.price || 0).toFixed(8)})
                         </span>
                         {(() => {
                           const summary = calculateSummaryStats(modificationData.SL);
@@ -1452,7 +1450,7 @@ function LegacyChainView({
                           <Target className="w-4 h-4 text-cyan-400" />
                           <span className="text-sm font-medium text-cyan-400">{tpType}</span>
                           <span className="text-xs text-gray-500">
-                            (${(tp.price || 0).toFixed(2)})
+                            (${(tp.price || 0).toFixed(8)})
                           </span>
                           <span className="px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
                             {summary.totalModifications} mod{summary.totalModifications !== 1 ? 's' : ''}

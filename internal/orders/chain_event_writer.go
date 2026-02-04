@@ -23,6 +23,7 @@ type ChainEventWriterDB interface {
 	CreateOrderChain(ctx context.Context, chain *OrderChain) error
 	UpdateOrderChain(ctx context.Context, chain *OrderChain) error
 	GetOrderChainByID(ctx context.Context, userID, chainID string) (*OrderChain, error)
+	GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*OrderChain, error) // For lookups without userID
 	GetActiveOrderChains(ctx context.Context, userID string) ([]*OrderChain, error)
 	CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64) error
 	UpdateOrderChainSLPrice(ctx context.Context, chainID string, newPrice float64) error
@@ -121,12 +122,17 @@ type ChainCacheEventSummary struct {
 	EventSequence int
 }
 
+// ChainClosedCallback is called when a chain is closed with P&L
+// Parameters: userID, mode, strategyGroup, subStrategy, realizedPnL
+type ChainClosedCallback func(ctx context.Context, userID, mode, strategyGroup, subStrategy string, realizedPnL float64)
+
 // ChainEventWriter writes events to the order chain event store
 type ChainEventWriter struct {
-	db     ChainEventWriterDB
-	cache  ChainCacheInterface // Optional: nil if caching disabled
-	logger zerolog.Logger
-	mu     sync.Mutex // Protects sequence number generation
+	db              ChainEventWriterDB
+	cache           ChainCacheInterface  // Optional: nil if caching disabled
+	logger          zerolog.Logger
+	mu              sync.Mutex           // Protects sequence number generation
+	onChainClosed   ChainClosedCallback  // Optional: callback for equity updates
 }
 
 // NewChainEventWriter creates a new ChainEventWriter instance
@@ -152,6 +158,12 @@ func (w *ChainEventWriter) SetCache(cache ChainCacheInterface) {
 	w.cache = cache
 }
 
+// SetOnChainClosed sets the callback for when a chain is closed.
+// This is used for updating sub-strategy equity (compounding).
+func (w *ChainEventWriter) SetOnChainClosed(callback ChainClosedCallback) {
+	w.onChainClosed = callback
+}
+
 // === Chain Lifecycle Methods ===
 
 // CreateChainRequest contains the data needed to create a new chain
@@ -163,18 +175,28 @@ type CreateChainRequest struct {
 	ModeCode      string // "ULT", "SCA", "SWI", "POS"
 	IsHedge       bool
 	ParentChainID string // If hedge, link to parent
+
+	// Strategy identification (for compounding equity)
+	Mode          string // Full mode name: "scalp", "swing", "position", "ultra_fast"
+	StrategyGroup string // e.g., "breakout", "trending"
+	SubStrategy   string // e.g., "ravindra_volume_imbalance"
+	Timeframe     string // e.g., "3m", "5m", "15m" - from pattern detection
 }
 
 // CreateChain creates a new order chain when an entry order is about to be placed
 func (w *ChainEventWriter) CreateChain(ctx context.Context, req CreateChainRequest) (*OrderChain, error) {
 	chain := &OrderChain{
-		UserID:   req.UserID,
-		ChainID:  req.ChainID,
-		Symbol:   req.Symbol,
-		Side:     req.Side,
-		ModeCode: req.ModeCode,
-		Status:   OrderChainStatusPending,
-		IsHedge:  req.IsHedge,
+		UserID:        req.UserID,
+		ChainID:       req.ChainID,
+		Symbol:        req.Symbol,
+		Side:          req.Side,
+		ModeCode:      req.ModeCode,
+		Status:        OrderChainStatusPending,
+		IsHedge:       req.IsHedge,
+		Mode:          req.Mode,
+		StrategyGroup: req.StrategyGroup,
+		SubStrategy:   req.SubStrategy,
+		Timeframe:     req.Timeframe,
 	}
 
 	if req.ParentChainID != "" {
@@ -244,6 +266,11 @@ func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reaso
 		Float64("total_pnl", totalPnL).
 		Float64("total_fees", totalFees).
 		Msg("Order chain closed")
+
+	// Call the onChainClosed callback for equity updates (compounding)
+	if w.onChainClosed != nil && chain != nil && chain.Mode != "" && chain.SubStrategy != "" {
+		w.onChainClosed(ctx, chain.UserID, chain.Mode, chain.StrategyGroup, chain.SubStrategy, totalPnL)
+	}
 
 	return nil
 }
@@ -329,7 +356,8 @@ func (w *ChainEventWriter) RecordEntryFilled(ctx context.Context, chainID string
 	}
 
 	// Update chain status to ACTIVE
-	chain, err := w.db.GetOrderChainByID(ctx, "", chainID)
+	// Use GetOrderChainByChainIDOnly since we don't have userID at this point
+	chain, err := w.db.GetOrderChainByChainIDOnly(ctx, chainID)
 	if err == nil && chain != nil {
 		chain.Status = OrderChainStatusActive
 		chain.EntryPrice = &req.FilledPrice

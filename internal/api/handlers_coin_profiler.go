@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"binance-trading-bot/internal/coinprofiler"
+	"binance-trading-bot/internal/orders"
 
 	"github.com/gin-gonic/gin"
 )
@@ -73,7 +76,10 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 	allCoinData := profiler.GetAllCoinData()
 
 	// Get active positions to dynamically update source
+	// Check BOTH Ginie positions AND Chain Entry order chains
 	activePositionSymbols := make(map[string]bool)
+
+	// Source 1: Ginie Autopilot positions
 	if controller := s.getFuturesAutopilot(); controller != nil {
 		if autopilot := controller.GetGinieAutopilot(); autopilot != nil {
 			for _, pos := range autopilot.GetPositions() {
@@ -84,9 +90,30 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 		}
 	}
 
+	// Source 2: Chain Entry order chains (from database)
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			chainWriter := instance.Autopilot.GetChainEventWriter()
+			if chainWriter != nil {
+				ctx := c.Request.Context()
+				chains, err := chainWriter.GetActiveChains(ctx, userID)
+				if err == nil {
+					for _, chain := range chains {
+						activePositionSymbols[chain.Symbol] = true
+					}
+				}
+			}
+		}
+	}
+
 	// Convert map to slice and enrich source based on active positions
-	coins := make([]map[string]interface{}, 0, len(allCoinData))
+	coins := make([]map[string]interface{}, 0, len(allCoinData)+len(activePositionSymbols))
+	processedSymbols := make(map[string]bool)
+
 	for _, coin := range allCoinData {
+		processedSymbols[coin.Symbol] = true
+
 		// Create a copy of the coin data as a map
 		coinMap := map[string]interface{}{
 			"symbol":     coin.Symbol,
@@ -110,6 +137,25 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 		}
 
 		coins = append(coins, coinMap)
+	}
+
+	// CRITICAL: Add position coins that aren't tracked by the profiler
+	// This ensures positions always appear even if not in any strategy's watchlist
+	for symbol := range activePositionSymbols {
+		if !processedSymbols[symbol] {
+			// Position exists but coin not tracked by profiler - add it
+			coinMap := map[string]interface{}{
+				"symbol":     symbol,
+				"price":      0, // Will be updated via WebSocket
+				"volume_24h": 0,
+				"volatility": 0,
+				"timeframes": map[string]interface{}{},
+				"strategies": []interface{}{},
+				"source":     "position",
+				"updated_at": "",
+			}
+			coins = append(coins, coinMap)
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -201,15 +247,43 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 
 	// Build response with detailed breakdown
 	response := gin.H{
-		"all_timeframes":  []string{},
-		"all_data_fields": []string{"ohlc", "volume", "taker_buy_volume"},
-		"all_symbols":     []string{},
-		"strategy_count":  0,
-		"position_count":  0,
-		"from_strategies": []interface{}{},
-		"from_positions":  []interface{}{},
-		"subscriptions":   map[string]interface{}{},
+		"all_timeframes":     []string{},
+		"all_data_fields":    []string{"ohlc", "volume", "taker_buy_volume"},
+		"all_symbols":        []string{},
+		"strategy_count":     0,
+		"position_count":     0,
+		"from_strategies":    []interface{}{},
+		"from_positions":     []interface{}{},
+		"subscriptions":      map[string]interface{}{},
+		"timeframes_by_mode": map[string][]string{},
 	}
+
+	// Get capacity information for each enabled sub-strategy
+	ctx := c.Request.Context()
+	capacityInfo := s.getStrategyCapacityInfo(ctx, userID)
+
+	// Build timeframes_by_mode mapping from enabled strategies
+	timeframesByMode := make(map[string][]string)
+	for _, cap := range capacityInfo {
+		// Get the timeframes for this mode+strategy combination from the registry
+		stratReqs := coinprofiler.GetStrategyRequirements(cap.Mode, cap.StrategyGroup, cap.SubStrategy)
+		if stratReqs != nil && len(stratReqs.Timeframes) > 0 {
+			// Add timeframes for this mode (deduplicated)
+			existing := timeframesByMode[cap.Mode]
+			tfSet := make(map[string]bool)
+			for _, tf := range existing {
+				tfSet[tf] = true
+			}
+			for _, tf := range stratReqs.Timeframes {
+				if !tfSet[tf] {
+					existing = append(existing, tf)
+					tfSet[tf] = true
+				}
+			}
+			timeframesByMode[cap.Mode] = existing
+		}
+	}
+	response["timeframes_by_mode"] = timeframesByMode
 
 	if combined != nil {
 		response["all_timeframes"] = combined.AllTimeframes
@@ -224,11 +298,11 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 
 		for _, symReq := range combined.BySymbol {
 			if symReq.Source == "strategy" || symReq.Source == "both" {
-				// Build strategy info
+				// Build strategy info with capacity
 				stratInfo := map[string]interface{}{
 					"symbol":     symReq.Symbol,
 					"timeframes": symReq.Timeframes,
-					"strategies": symReq.Strategies,
+					"strategies": s.enrichStrategiesWithCapacity(symReq.Strategies, capacityInfo),
 				}
 				fromStrategies = append(fromStrategies, stratInfo)
 			}
@@ -258,7 +332,7 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 				"timeframes":  symReq.Timeframes,
 				"data_fields": symReq.DataFields,
 				"source":      symReq.Source,
-				"strategies":  symReq.Strategies,
+				"strategies":  s.enrichStrategiesWithCapacity(symReq.Strategies, capacityInfo),
 				"positions":   symReq.Positions,
 			}
 		}
@@ -287,7 +361,149 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 		response["subscriptions"] = subsMap
 	}
 
+	// Add global capacity summary
+	response["capacity_summary"] = capacityInfo
+
 	c.JSON(http.StatusOK, response)
+}
+
+// StrategyCapacityInfo holds position limit information for a sub-strategy
+type StrategyCapacityInfo struct {
+	Mode             string `json:"mode"`
+	StrategyGroup    string `json:"strategy_group"`
+	SubStrategy      string `json:"sub_strategy"`
+	CurrentPositions int    `json:"current_positions"`
+	MaxPositions     int    `json:"max_positions"`
+	CapacityStatus   string `json:"capacity_status"` // "available", "limited", "at_limit"
+}
+
+// getStrategyCapacityInfo returns capacity information for all enabled sub-strategies
+func (s *Server) getStrategyCapacityInfo(ctx context.Context, userID string) []StrategyCapacityInfo {
+	result := []StrategyCapacityInfo{}
+
+	if s.repo == nil {
+		return result
+	}
+
+	// Get all enabled strategies
+	enabledStrategies, err := s.repo.GetEnabledStrategies(ctx, userID)
+	if err != nil {
+		return result
+	}
+
+	// Get active chains for counting current positions per strategy
+	// Access chain event writer through user autopilot manager
+	activeChains := []*orders.OrderChain{}
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			chainWriter := instance.Autopilot.GetChainEventWriter()
+			if chainWriter != nil {
+				chains, err := chainWriter.GetActiveChains(ctx, userID)
+				if err == nil {
+					activeChains = chains
+				}
+			}
+		}
+	}
+
+	// Build capacity info for each enabled sub-strategy
+	for _, es := range enabledStrategies {
+		// Get max_concurrent_trades from sub-strategy settings
+		maxConcurrentTrades := 1 // Default
+
+		subSettings, err := s.repo.GetSubStrategySettings(ctx, userID, es.Mode, es.StrategyGroup, es.SubStrategy)
+		if err == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+			var settingsMap map[string]interface{}
+			if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+						maxConcurrentTrades = int(maxTrades)
+					}
+				}
+			}
+		}
+
+		// Count current positions for this specific sub-strategy
+		// NOTE: Legacy chains may not have Mode/StrategyGroup/SubStrategy populated
+		// In that case, match by ModeCode or count all chains for that mode
+		currentPositions := 0
+		for _, chain := range activeChains {
+			// Exact match if new fields are populated
+			if chain.Mode != "" {
+				if chain.Mode == es.Mode &&
+					chain.StrategyGroup == es.StrategyGroup &&
+					chain.SubStrategy == es.SubStrategy {
+					currentPositions++
+				}
+			} else {
+				// Legacy chain: match by ModeCode
+				// ModeCode mapping: SCA=scalp, SWI=swing, POS=position, ULT=ultra_fast
+				modeCodeMatches := false
+				switch es.Mode {
+				case "scalp":
+					modeCodeMatches = chain.ModeCode == "SCA"
+				case "swing":
+					modeCodeMatches = chain.ModeCode == "SWI"
+				case "position":
+					modeCodeMatches = chain.ModeCode == "POS"
+				case "ultra_fast":
+					modeCodeMatches = chain.ModeCode == "ULT"
+				}
+				if modeCodeMatches {
+					currentPositions++
+				}
+			}
+		}
+
+		// Determine capacity status
+		capacityStatus := "available"
+		if currentPositions >= maxConcurrentTrades {
+			capacityStatus = "at_limit"
+		} else if currentPositions > 0 && float64(currentPositions)/float64(maxConcurrentTrades) >= 0.5 {
+			capacityStatus = "limited"
+		}
+
+		result = append(result, StrategyCapacityInfo{
+			Mode:             es.Mode,
+			StrategyGroup:    es.StrategyGroup,
+			SubStrategy:      es.SubStrategy,
+			CurrentPositions: currentPositions,
+			MaxPositions:     maxConcurrentTrades,
+			CapacityStatus:   capacityStatus,
+		})
+	}
+
+	return result
+}
+
+// enrichStrategiesWithCapacity adds capacity information to strategy references
+func (s *Server) enrichStrategiesWithCapacity(strategies []coinprofiler.StrategyRef, capacityInfo []StrategyCapacityInfo) []map[string]interface{} {
+	result := []map[string]interface{}{}
+
+	for _, strat := range strategies {
+		enriched := map[string]interface{}{
+			"mode":         strat.Mode,
+			"strategy":     strat.Strategy,
+			"sub_strategy": strat.SubStrategy,
+		}
+
+		// Find matching capacity info
+		for _, cap := range capacityInfo {
+			if cap.Mode == strat.Mode &&
+				cap.StrategyGroup == strat.Strategy &&
+				cap.SubStrategy == strat.SubStrategy {
+				enriched["current_positions"] = cap.CurrentPositions
+				enriched["max_positions"] = cap.MaxPositions
+				enriched["capacity_status"] = cap.CapacityStatus
+				break
+			}
+		}
+
+		result = append(result, enriched)
+	}
+
+	return result
 }
 
 // handleStartCoinProfiler starts the Coin Profiler for the authenticated user.

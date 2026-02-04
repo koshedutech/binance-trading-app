@@ -460,6 +460,91 @@ func (r *Repository) DeleteSubStrategySettings(ctx context.Context, userID, mode
 	return nil
 }
 
+// UpdateSubStrategyEquity updates the current_equity value in the budget_allocation settings.
+// This is used for compounding profits/losses when position_sizing is "all_in".
+// The pnl parameter is the realized P&L to add (positive for profit, negative for loss).
+func (r *Repository) UpdateSubStrategyEquity(ctx context.Context, userID, mode, group, subStrategy string, pnl float64) error {
+	// Use PostgreSQL JSONB operations to update just the current_equity field atomically
+	// This avoids race conditions when multiple positions close simultaneously
+	query := `
+		UPDATE user_sub_strategy_settings
+		SET settings = jsonb_set(
+			settings,
+			'{budget_allocation,current_equity}',
+			to_jsonb(COALESCE(
+				(settings->'budget_allocation'->>'current_equity')::numeric,
+				(settings->'budget_allocation'->>'assigned_budget_usd')::numeric,
+				0
+			) + $5)
+		),
+		updated_at = NOW()
+		WHERE user_id = $1 AND mode = $2 AND strategy_group = $3 AND sub_strategy = $4
+		AND settings->'budget_allocation' IS NOT NULL
+	`
+
+	result, err := r.db.Pool.Exec(ctx, query, userID, mode, group, subStrategy, pnl)
+	if err != nil {
+		return fmt.Errorf("failed to update sub-strategy equity: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("sub-strategy not found or no budget_allocation: user=%s, mode=%s, group=%s, sub=%s",
+			userID, mode, group, subStrategy)
+	}
+
+	return nil
+}
+
+// GetSubStrategyEquity returns the current_equity for a sub-strategy.
+// Returns assigned_budget_usd if current_equity is not set.
+func (r *Repository) GetSubStrategyEquity(ctx context.Context, userID, mode, group, subStrategy string) (float64, error) {
+	query := `
+		SELECT COALESCE(
+			(settings->'budget_allocation'->>'current_equity')::numeric,
+			(settings->'budget_allocation'->>'assigned_budget_usd')::numeric,
+			0
+		)
+		FROM user_sub_strategy_settings
+		WHERE user_id = $1 AND mode = $2 AND strategy_group = $3 AND sub_strategy = $4
+	`
+
+	var equity float64
+	err := r.db.Pool.QueryRow(ctx, query, userID, mode, group, subStrategy).Scan(&equity)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get sub-strategy equity: %w", err)
+	}
+
+	return equity, nil
+}
+
+// ResetSubStrategyEquity resets the current_equity to assigned_budget_usd.
+// This is used to start fresh after a series of losses or by user request.
+func (r *Repository) ResetSubStrategyEquity(ctx context.Context, userID, mode, group, subStrategy string) error {
+	query := `
+		UPDATE user_sub_strategy_settings
+		SET settings = jsonb_set(
+			settings,
+			'{budget_allocation,current_equity}',
+			settings->'budget_allocation'->'assigned_budget_usd'
+		),
+		updated_at = NOW()
+		WHERE user_id = $1 AND mode = $2 AND strategy_group = $3 AND sub_strategy = $4
+		AND settings->'budget_allocation' IS NOT NULL
+	`
+
+	result, err := r.db.Pool.Exec(ctx, query, userID, mode, group, subStrategy)
+	if err != nil {
+		return fmt.Errorf("failed to reset sub-strategy equity: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("sub-strategy not found or no budget_allocation: user=%s, mode=%s, group=%s, sub=%s",
+			userID, mode, group, subStrategy)
+	}
+
+	return nil
+}
+
 // =====================================================
 // QUERY OPERATIONS
 // =====================================================

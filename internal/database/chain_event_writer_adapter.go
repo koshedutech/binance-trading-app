@@ -32,6 +32,11 @@ func (a *ChainEventWriterDBAdapter) GetOrderChainByID(ctx context.Context, userI
 	return a.db.GetOrderChainByID(ctx, userID, chainID)
 }
 
+// GetOrderChainByChainIDOnly implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*orders.OrderChain, error) {
+	return a.db.GetOrderChainByChainIDOnly(ctx, chainID)
+}
+
 // GetActiveOrderChains implements ChainEventWriterDB
 func (a *ChainEventWriterDBAdapter) GetActiveOrderChains(ctx context.Context, userID string) ([]*orders.OrderChain, error) {
 	return a.db.GetActiveOrderChains(ctx, userID)

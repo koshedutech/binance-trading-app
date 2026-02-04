@@ -93,6 +93,12 @@ type OrderChain struct {
 	Side     string `json:"side"`     // "LONG" or "SHORT"
 	ModeCode string `json:"mode_code"` // "ULT", "SCA", "SWI", "POS"
 
+	// Strategy identification (for compounding equity)
+	Mode          string `json:"mode,omitempty"`           // Full mode name: "scalp", "swing", "position", "ultra_fast"
+	StrategyGroup string `json:"strategy_group,omitempty"` // e.g., "breakout", "trending"
+	SubStrategy   string `json:"sub_strategy,omitempty"`   // e.g., "ravindra_volume_imbalance"
+	Timeframe     string `json:"timeframe,omitempty"`      // e.g., "3m", "5m", "15m" - from strategy pattern detection
+
 	// Current state
 	Status OrderChainStatus `json:"status"`
 

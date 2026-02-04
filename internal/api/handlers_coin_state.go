@@ -731,20 +731,40 @@ func (s *Server) handleOverrideEntry(c *gin.Context) {
 		quantity = minQty
 	}
 
-	// Step 5: Generate chain ID using ClientOrderIdGenerator
+	// Step 5: Generate chain ID using ClientOrderIdGenerator (Epic 7 - Sequential Numbering)
 	tradingMode := orders.ModeFromString(modeStr)
 	modeCode := orders.ModeCode[tradingMode]
 	if modeCode == "" {
 		modeCode = "SCA" // Default to scalp
 	}
+	var chainID, entryClientOrderID string
 
-	// Generate a unique chain ID in format: [MODE]-[DDMMM]-[NNNNN]-E
-	// Since we may not have the full generator setup, use a fallback format
-	now := time.Now().UTC()
-	dateStr := now.Format("02Jan")
-	seqNum := now.UnixNano() % 100000 // Simple sequence based on nanoseconds
-	chainID := fmt.Sprintf("%s-%s-%05d", modeCode, dateStr, seqNum)
-	entryClientOrderID := fmt.Sprintf("%s-E", chainID)
+	// Use proper sequential generator if settings cache is available
+	if s.settingsCacheService != nil {
+		orderIdGen, err := orders.NewClientOrderIdGenerator(s.settingsCacheService, userIDStr, nil)
+		if err == nil {
+			fullID, baseID, genErr := orderIdGen.Generate(ctx, tradingMode, orders.OrderTypeEntry)
+			if genErr == nil {
+				chainID = baseID
+				entryClientOrderID = fullID
+			} else {
+				log.Printf("[OVERRIDE] Warning: Generator error, using fallback: %v", genErr)
+				fullID, baseID = orderIdGen.GenerateFallback(tradingMode, orders.OrderTypeEntry)
+				chainID = baseID
+				entryClientOrderID = fullID
+			}
+		}
+	}
+
+	// Fallback if generator not available
+	if chainID == "" {
+		now := time.Now().UTC()
+		dateStr := now.Format("02Jan")
+		seqNum := now.UnixNano() % 100000 // Fallback sequence based on nanoseconds
+		chainID = fmt.Sprintf("%s-%s-%05d", modeCode, dateStr, seqNum)
+		entryClientOrderID = fmt.Sprintf("%s-E", chainID)
+		log.Printf("[OVERRIDE] Warning: Using fallback order ID generation (no generator available)")
+	}
 
 	// Step 6: Determine order side based on direction
 	var orderSide string

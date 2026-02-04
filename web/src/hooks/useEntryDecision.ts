@@ -184,13 +184,119 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
   useEffect(() => {
     // WebSocket message handler - IMMEDIATE updates, no throttling
+    // CRITICAL: Merge strategy data to preserve reference_candle and other state that may not be in every update
     const handleStrategyUpdate = (event: WSEvent) => {
       if (isEntryDecisionResponse(event.data)) {
-        // Immediate update - no delays!
-        setStrategies(event.data.strategies);
+        const newStrategies = event.data.strategies;
+
+        // Merge with existing strategies to preserve fields that may not be in the update
+        // This prevents UI flicker when reference_candle or other fields are temporarily missing
+        setStrategies(prevStrategies => {
+          return newStrategies.map(newStrategy => {
+            // Find the previous strategy with the same identity
+            const prevStrategy = prevStrategies.find(s =>
+              s.strategy === newStrategy.strategy &&
+              s.sub_strategy === newStrategy.sub_strategy &&
+              s.timeframe === newStrategy.timeframe
+            );
+
+            if (!prevStrategy) return newStrategy;
+
+            // Merge coins: preserve reference_candle and entry_candle from previous state
+            const mergedCoins = newStrategy.coins.map(newCoin => {
+              const prevCoin = prevStrategy.coins.find(c => c.symbol === newCoin.symbol);
+              if (!prevCoin) return newCoin;
+
+              // Merge: new data takes priority, but preserve important fields if missing
+              // CRITICAL: Preserve step and status to prevent UI flicker when these are temporarily missing
+
+              // Smart status preservation: If we were in Step 2 (have reference_candle) and the new status
+              // would regress to 'watching', preserve the previous status to prevent flicker.
+              // This handles partial WebSocket updates that don't include all fields.
+              const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+              const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+              const hasReferenceCandle = newCoin.reference_candle || prevCoin.reference_candle;
+              const newStatusIsRegression = newCoin.status === 'watching' || !newCoin.status;
+
+              // Determine the status to use
+              const mergedStatus = (prevWasStep2 && hasReferenceCandle && newStatusIsRegression)
+                ? prevCoin.status  // Preserve Step 2 status when it would regress
+                : (newCoin.status || prevCoin.status);
+
+              return {
+                ...newCoin,
+                // Preserve step if not in new data (prevents section from hiding)
+                step: newCoin.step !== undefined && newCoin.step > 0 ? newCoin.step : prevCoin.step,
+                // Use smart status preservation (see above)
+                status: mergedStatus,
+                // Preserve step_details if not in new data
+                step_details: newCoin.step_details || prevCoin.step_details,
+                // Preserve reference_candle if not in new data
+                reference_candle: newCoin.reference_candle || prevCoin.reference_candle,
+                // Preserve entry_candle if not in new data
+                entry_candle: newCoin.entry_candle || prevCoin.entry_candle,
+                // Preserve current_price if not in new data (prevents price flickering)
+                current_price: newCoin.current_price || prevCoin.current_price,
+                // Preserve volume data if not in new data
+                volume_multiplier: newCoin.volume_multiplier ?? prevCoin.volume_multiplier,
+                volume_threshold: newCoin.volume_threshold ?? prevCoin.volume_threshold,
+              };
+            });
+
+            return { ...newStrategy, coins: mergedCoins };
+          });
+        });
+
         if (event.data.by_mode) {
-          setByMode(event.data.by_mode);
+          // Also merge by_mode data to preserve reference_candle
+          setByMode(prevByMode => {
+            return event.data.by_mode!.map(newModeGroup => {
+              const prevModeGroup = prevByMode.find(m => m.mode === newModeGroup.mode);
+              if (!prevModeGroup) return newModeGroup;
+
+              const mergedStrategies = newModeGroup.strategies.map(newStrategy => {
+                const prevStrategy = prevModeGroup.strategies.find(s =>
+                  s.strategy === newStrategy.strategy &&
+                  s.sub_strategy === newStrategy.sub_strategy
+                );
+                if (!prevStrategy) return newStrategy;
+
+                const mergedCoins = newStrategy.coins.map(newCoin => {
+                  const prevCoin = prevStrategy.coins.find(c => c.symbol === newCoin.symbol);
+                  if (!prevCoin) return newCoin;
+
+                  // CRITICAL: Preserve step and status to prevent UI flicker
+                  // Smart status preservation (same logic as strategies merge above)
+                  const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+                  const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+                  const hasReferenceCandle = newCoin.reference_candle || prevCoin.reference_candle;
+                  const newStatusIsRegression = newCoin.status === 'watching' || !newCoin.status;
+
+                  const mergedStatus = (prevWasStep2 && hasReferenceCandle && newStatusIsRegression)
+                    ? prevCoin.status
+                    : (newCoin.status || prevCoin.status);
+
+                  return {
+                    ...newCoin,
+                    step: newCoin.step !== undefined && newCoin.step > 0 ? newCoin.step : prevCoin.step,
+                    status: mergedStatus,
+                    step_details: newCoin.step_details || prevCoin.step_details,
+                    reference_candle: newCoin.reference_candle || prevCoin.reference_candle,
+                    entry_candle: newCoin.entry_candle || prevCoin.entry_candle,
+                    current_price: newCoin.current_price || prevCoin.current_price,
+                    volume_multiplier: newCoin.volume_multiplier ?? prevCoin.volume_multiplier,
+                    volume_threshold: newCoin.volume_threshold ?? prevCoin.volume_threshold,
+                  };
+                });
+
+                return { ...newStrategy, coins: mergedCoins };
+              });
+
+              return { ...newModeGroup, strategies: mergedStrategies };
+            });
+          });
         }
+
         setStats({
           totalStrategies: event.data.total_strategies || 0,
           enabledStrategies: event.data.enabled_strategies || 0,

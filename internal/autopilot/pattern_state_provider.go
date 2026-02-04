@@ -87,6 +87,37 @@ func (p *PatternStateProvider) GetAllChainCoinStates(ctx context.Context, userID
 	return states, nil
 }
 
+// GetCoinStateForEntry returns a coin state for a specific symbol with actual SL/TP prices
+// from pattern detection. This is used by ExecuteImmediateEntry for tick-level breakout orders.
+// If pattern is not found or not ready, returns nil.
+func (p *PatternStateProvider) GetCoinStateForEntry(ctx context.Context, userID, symbol, mode, timeframe string) (*ChainCoinState, error) {
+	if p.realtimeMatcher == nil {
+		return nil, nil
+	}
+
+	// Get the pattern matcher
+	patternMatcher := p.realtimeMatcher.GetPatternMatcher()
+	if patternMatcher == nil {
+		return nil, nil
+	}
+
+	// Get pattern for this specific symbol
+	pattern := patternMatcher.GetPattern(symbol, mode, timeframe)
+	if pattern == nil {
+		log.Printf("[PATTERN-STATE-PROVIDER] GetCoinStateForEntry: No pattern found for %s:%s:%s", symbol, mode, timeframe)
+		return nil, nil
+	}
+
+	// Convert to ChainCoinState (includes loading SL/TP prices)
+	state := p.patternToChainState(pattern, patternMatcher)
+	if state != nil {
+		log.Printf("[PATTERN-STATE-PROVIDER] GetCoinStateForEntry: Got state for %s with SLPrice=%.6f, TPPrice=%.6f, RiskAmount=%.6f",
+			symbol, state.SLPrice, state.TPPrice, state.RiskAmount)
+	}
+
+	return state, nil
+}
+
 // patternToChainState converts a PatternProgress to a ChainCoinState for order execution.
 func (p *PatternStateProvider) patternToChainState(
 	pattern *entrydecision.PatternProgress,
@@ -149,7 +180,7 @@ func (p *PatternStateProvider) patternToChainState(
 		Timeframe:     pattern.Timeframe,
 	}
 
-	// Add price from coin match if available
+	// Add price and entry levels from coin match if available
 	if coinMatch != nil {
 		state.Price = coinMatch.CurrentPrice
 
@@ -157,23 +188,38 @@ func (p *PatternStateProvider) patternToChainState(
 		if coinMatch.EntryCandle != nil && coinMatch.EntryCandle.EntryPrice > 0 {
 			state.Price = coinMatch.EntryCandle.EntryPrice
 		}
+
+		// Pass actual SL/TP prices from pattern detection (preferred over percentages)
+		// These are calculated from Support Price (Consolidation Low) at runtime
+		if coinMatch.EntryLevelPrice > 0 {
+			state.EntryPrice = coinMatch.EntryLevelPrice
+		}
+		if coinMatch.StopLossPrice > 0 {
+			state.SLPrice = coinMatch.StopLossPrice
+			log.Printf("[PATTERN-STATE-PROVIDER] Actual SL price from pattern: %.6f", coinMatch.StopLossPrice)
+		}
+		if coinMatch.TakeProfitPrice > 0 {
+			state.TPPrice = coinMatch.TakeProfitPrice
+			log.Printf("[PATTERN-STATE-PROVIDER] Actual TP price from pattern: %.6f", coinMatch.TakeProfitPrice)
+		}
+		if coinMatch.RiskAmount > 0 {
+			state.RiskAmount = coinMatch.RiskAmount
+			log.Printf("[PATTERN-STATE-PROVIDER] Risk amount: %.6f (%.2f%%)", coinMatch.RiskAmount, coinMatch.RiskPercent)
+		}
 	}
 
 	// Get strategy settings for budget/SL/TP configuration
 	if p.repo != nil {
 		ctx := context.Background()
 
-		// Get strategy group settings for position size and leverage
+		// Get strategy group settings for leverage (budget comes from sub-strategy)
 		groupSettings, err := p.repo.GetStrategyGroupSettings(ctx, p.userID, pattern.Mode, pattern.Strategy)
 		if err == nil && groupSettings != nil {
-			// PositionSizePercent is stored as percentage (e.g., 2.0 = 2%)
-			// For now, use it as a rough USD equivalent (will need account balance for proper calculation)
-			// The sub-strategy settings may have a budget_usd override
-			state.BudgetUSD = groupSettings.PositionSizePercent * 5 // Default: treat 2% as ~$10 base
+			// Only get leverage from strategy group - budget should come from sub-strategy
 			state.MaxLeverage = groupSettings.MaxLeverage
 
-			log.Printf("[PATTERN-STATE-PROVIDER] Strategy settings: mode=%s, group=%s, posSize=%f%%, leverage=%d",
-				pattern.Mode, pattern.Strategy, groupSettings.PositionSizePercent, groupSettings.MaxLeverage)
+			log.Printf("[PATTERN-STATE-PROVIDER] Strategy group settings: mode=%s, group=%s, leverage=%d",
+				pattern.Mode, pattern.Strategy, groupSettings.MaxLeverage)
 		}
 
 		// Get sub-strategy specific settings for custom SL/TP
@@ -182,17 +228,68 @@ func (p *PatternStateProvider) patternToChainState(
 			// Parse settings JSON for custom budget, SL, TP
 			var settingsMap map[string]interface{}
 			if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
-				// Check for budget_usd override
-				if budgetUSD, ok := settingsMap["budget_usd"].(float64); ok && budgetUSD > 0 {
-					state.BudgetUSD = budgetUSD
-					log.Printf("[PATTERN-STATE-PROVIDER] Sub-strategy budget override: %.2f USD", budgetUSD)
+				// Check for budget_allocation.assigned_budget_usd (nested object)
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					assignedBudget := 0.0
+					currentEquity := 0.0
+					useIncremental := false
+					positionSizing := ""
+
+					// Get assigned budget
+					if budgetUSD, ok := budgetAlloc["assigned_budget_usd"].(float64); ok && budgetUSD > 0 {
+						assignedBudget = budgetUSD
+					}
+
+					// Get current equity (compounded value from wins/losses)
+					if equity, ok := budgetAlloc["current_equity"].(float64); ok && equity > 0 {
+						currentEquity = equity
+					}
+
+					// Get position sizing mode
+					if sizing, ok := budgetAlloc["position_sizing"].(string); ok {
+						positionSizing = sizing
+					}
+
+					// Get incremental equity flag
+					if incremental, ok := budgetAlloc["use_incremental_equity"].(bool); ok {
+						useIncremental = incremental
+					}
+
+					// Determine which budget to use:
+					// - "all_in" with use_incremental_equity: use current_equity (compounding)
+					// - Otherwise: use assigned_budget_usd (fixed)
+					if positionSizing == "all_in" && useIncremental && currentEquity > 0 {
+						state.BudgetUSD = currentEquity
+						log.Printf("[PATTERN-STATE-PROVIDER] Using compounded budget: %.2f USD (assigned: %.2f, gain: %.2f)",
+							currentEquity, assignedBudget, currentEquity-assignedBudget)
+					} else if assignedBudget > 0 {
+						state.BudgetUSD = assignedBudget
+						log.Printf("[PATTERN-STATE-PROVIDER] Using assigned budget: %.2f USD", assignedBudget)
+					}
+
+					// Also get max_concurrent_trades for position limit enforcement
+					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+						log.Printf("[PATTERN-STATE-PROVIDER] Sub-strategy max concurrent trades: %.0f", maxTrades)
+					}
 				}
-				// Check for SL/TP overrides
-				if slPercent, ok := settingsMap["sl_percent"].(float64); ok && slPercent > 0 {
-					state.SLPercent = slPercent
+
+				// Check for risk_reward settings (used for R:R based SL/TP)
+				if riskReward, ok := settingsMap["risk_reward"].(map[string]interface{}); ok {
+					if risk, ok := riskReward["risk"].(float64); ok && risk > 0 {
+						if reward, ok := riskReward["reward"].(float64); ok && reward > 0 {
+							// Store R:R ratio for TP calculation (Entry + Risk × Reward)
+							state.TPPercent = reward / risk // R:R ratio (e.g., 4.0 for 1:4)
+							log.Printf("[PATTERN-STATE-PROVIDER] Sub-strategy R:R ratio: 1:%.0f", reward/risk)
+						}
+					}
 				}
-				if tpPercent, ok := settingsMap["tp_percent"].(float64); ok && tpPercent > 0 {
-					state.TPPercent = tpPercent
+
+				// Check for pattern_detection.max_sl_percent (caps SL percentage)
+				if patternDet, ok := settingsMap["pattern_detection"].(map[string]interface{}); ok {
+					if maxSL, ok := patternDet["max_sl_percent"].(float64); ok && maxSL > 0 {
+						state.SLPercent = maxSL
+						log.Printf("[PATTERN-STATE-PROVIDER] Sub-strategy max SL: %.2f%%", maxSL)
+					}
 				}
 			}
 		}

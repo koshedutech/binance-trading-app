@@ -13577,6 +13577,79 @@ func (ga *GinieAutopilot) periodicOrphanOrderCleanup() {
 	}
 }
 
+// HandleSLTPOrderFilled handles when a SL or TP order is filled on Binance
+// This is called from the WebSocket stream when an order fills to cancel the counterpart order
+// orderType should be "STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", or "TAKE_PROFIT"
+func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string, orderID int64) {
+	ga.mu.Lock()
+	defer ga.mu.Unlock()
+
+	// Determine if this was SL or TP based on order type
+	isSLFill := orderType == "STOP_MARKET" || orderType == "STOP"
+	isTPFill := orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT"
+
+	ga.logger.Info("SL/TP order filled - canceling ALL remaining algo orders for symbol",
+		"symbol", symbol,
+		"order_type", orderType,
+		"order_id", orderID,
+		"is_sl_fill", isSLFill,
+		"is_tp_fill", isTPFill)
+
+	// CRITICAL FIX: Always cancel ALL algo orders for this symbol when SL or TP fills
+	// This handles both GinieAutopilot-tracked positions AND Chain Entry Runner positions
+	// which may not be tracked in ga.positions.
+	// Using CancelAllAlgoOrders is simpler and more robust than tracking individual order IDs.
+	if ga.futuresClient != nil {
+		err := ga.futuresClient.CancelAllAlgoOrders(symbol)
+		if err != nil {
+			ga.logger.Warn("Failed to cancel all algo orders after SL/TP fill (may already be cancelled)",
+				"symbol", symbol,
+				"error", err.Error())
+		} else {
+			ga.logger.Info("Cancelled ALL remaining algo orders after SL/TP fill",
+				"symbol", symbol,
+				"filled_order_type", orderType)
+		}
+	}
+
+	// Also update tracked position state if we have it
+	var pos *GiniePosition
+	for _, p := range ga.positions {
+		if p.Symbol == symbol {
+			pos = p
+			break
+		}
+	}
+
+	if pos == nil {
+		ga.logger.Debug("HandleSLTPOrderFilled: No tracked position for symbol (Chain Entry position)",
+			"symbol", symbol,
+			"order_type", orderType)
+		return
+	}
+
+	ga.logger.Info("Updating tracked position state after SL/TP fill",
+		"symbol", symbol,
+		"sl_order_id", pos.StopLossAlgoID,
+		"tp_order_ids", pos.TakeProfitAlgoIDs)
+
+	// Clear tracked order IDs since we already cancelled all algo orders above
+	pos.TakeProfitAlgoIDs = nil
+	pos.StopLossAlgoID = 0
+
+	// NOTE: The old per-order cancellation logic below is kept for reference but no longer executed
+	// since CancelAllAlgoOrders() already cancelled everything.
+	_ = isSLFill // Suppress unused variable warning
+	_ = isTPFill // Suppress unused variable warning
+
+	// OLD CODE (no longer needed - all orders cancelled above):
+	// if isSLFill { ... cancel individual TP orders ... }
+	// if isTPFill { ... cancel individual SL/TP orders ... }
+
+	// Note: Position removal is handled by the account/position update stream
+	// when Binance reports the position as closed (quantity = 0)
+}
+
 // cancelExistingSLTPOrders cancels all existing SL/TP algo orders for a position
 func (ga *GinieAutopilot) cancelExistingSLTPOrders(pos *GiniePosition) {
 	if pos == nil {

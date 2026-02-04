@@ -454,6 +454,9 @@ type AlgoOrderParams struct {
 	// Trailing stop specific
 	ActivatePrice float64 `json:"activatePrice,omitempty"` // For TRAILING_STOP_MARKET
 	CallbackRate  float64 `json:"callbackRate,omitempty"`  // 0.1-10% for trailing stop
+	// Precision for formatting (prevents Binance -1111 precision errors)
+	PricePrecision    int `json:"-"` // Number of decimal places for price (default: use -1 which is auto)
+	QuantityPrecision int `json:"-"` // Number of decimal places for quantity (default: use -1 which is auto)
 }
 
 // AlgoOrderResponse represents response from placing an algo order

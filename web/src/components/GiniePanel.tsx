@@ -229,6 +229,8 @@ export default function GiniePanel() {
   const [isEditingCBConfig, setIsEditingCBConfig] = useState(false);
   // Source filter for positions/history (AI vs Strategy)
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ai' | 'strategy'>('all');
+  // Active chain symbols - positions from Chain Runner (new engine) that should be filtered out
+  const [activeChainSymbols, setActiveChainSymbols] = useState<Set<string>>(new Set());
   // Trend Timeframes state
   const [trendTimeframes, setTrendTimeframes] = useState({
     ultra_fast: '5m',
@@ -446,6 +448,19 @@ export default function GiniePanel() {
       const classified = classifyError(err, 'mode circuit breaker status');
       console.error(`[MODE-CB-STATUS] ${classified.technicalMessage}`, err);
       // Note: No dedicated error state for mode circuit breaker currently
+    }
+  };
+
+  // Fetch active order chains to filter out Chain Runner (new engine) positions from Pos tab
+  // These positions are managed by the new Entry Decision Engine, not old Ginie
+  const fetchActiveChainSymbols = async () => {
+    try {
+      const data = await futuresApi.getOrderChainsWithState({ status: 'active' });
+      const symbols = new Set(data.chains.map(chain => chain.symbol));
+      setActiveChainSymbols(symbols);
+    } catch (err: any) {
+      // Silently fail - if we can't fetch chains, show all positions as fallback
+      console.error('[ACTIVE-CHAINS] Failed to fetch active chain symbols:', err);
     }
   };
 
@@ -747,6 +762,8 @@ export default function GiniePanel() {
     const handlePositionUpdate = () => {
       // Refresh autopilot status when positions change
       fetchAutopilotStatus(false);
+      // Also refresh active chain symbols to keep Pos tab filter accurate
+      fetchActiveChainSymbols();
     };
 
     // Subscribe to balance updates
@@ -946,6 +963,7 @@ export default function GiniePanel() {
     fetchScalpReentryConfig(); // Fetch scalp re-entry configuration
     syncPositionsOnLoad(); // Auto-sync positions on mount
     fetchPositions(); // Fetch real-time Binance positions for accurate pricing
+    fetchActiveChainSymbols(); // Fetch active chains to filter out Chain Runner positions
 
     // WebSocket handler for Ginie status updates (Story 12.5)
     const handleGinieStatusUpdate = (event: WSEvent) => {
@@ -4987,7 +5005,7 @@ export default function GiniePanel() {
           onClick={() => setActiveTab('positions')}
           className={`px-2 py-0.5 rounded text-xs ${activeTab === 'positions' ? 'bg-purple-900/50 text-purple-400' : 'text-gray-400 hover:text-white'}`}
         >
-          Pos ({autopilotStatus?.positions?.length ?? 0})
+          Pos ({autopilotStatus?.positions?.filter(p => !activeChainSymbols.has(p.symbol)).length ?? 0})
         </button>
         <button
           onClick={() => setActiveTab('history')}
@@ -5051,13 +5069,17 @@ export default function GiniePanel() {
           </div>
           <div className="max-h-80 overflow-y-auto space-y-2">
             {autopilotStatus.positions
+              // Filter out Chain Runner (new engine) positions - they are shown in Trade Lifecycle tab
+              .filter(pos => !activeChainSymbols.has(pos.symbol))
               .filter(pos => sourceFilter === 'all' || pos.source === sourceFilter)
               .length === 0 ? (
               <div className="text-center text-gray-500 py-4">
-                No {sourceFilter === 'all' ? 'active' : sourceFilter} positions
+                No {sourceFilter === 'all' ? 'active' : sourceFilter} positions (legacy Ginie only)
               </div>
             ) : (
               autopilotStatus.positions
+                // Filter out Chain Runner (new engine) positions - they are shown in Trade Lifecycle tab
+                .filter(pos => !activeChainSymbols.has(pos.symbol))
                 .filter(pos => sourceFilter === 'all' || pos.source === sourceFilter)
                 .map((pos) => {
                   // Find matching Binance position for real-time price

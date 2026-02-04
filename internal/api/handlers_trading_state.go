@@ -101,6 +101,13 @@ func (s *Server) handleEnableTrading(c *gin.Context) {
 
 	log.Printf("[TRADING-STATE] Trading enabled for user %s, reason: %s", userID, req.Reason)
 
+	// Refresh coin profiler subscriptions to include strategy requirements
+	if s.userAutopilotManager != nil {
+		if _, err := s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID); err != nil {
+			log.Printf("[TRADING-STATE] Warning: Failed to refresh coin profiler subscriptions for user %s: %v", userID, err)
+		}
+	}
+
 	// Get updated state
 	state, err := controller.GetTradingState(ctx, userID)
 	if err != nil {
@@ -154,6 +161,13 @@ func (s *Server) handleDisableTrading(c *gin.Context) {
 	}
 
 	log.Printf("[TRADING-STATE] Trading disabled for user %s, reason: %s", userID, req.Reason)
+
+	// Refresh coin profiler subscriptions to only include position requirements (no strategies)
+	if s.userAutopilotManager != nil {
+		if _, err := s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID); err != nil {
+			log.Printf("[TRADING-STATE] Warning: Failed to refresh coin profiler subscriptions for user %s: %v", userID, err)
+		}
+	}
 
 	// Get updated state
 	state, err := controller.GetTradingState(ctx, userID)
@@ -212,6 +226,13 @@ func (s *Server) handleSetTradingState(c *gin.Context) {
 		action = "disabled"
 	}
 	log.Printf("[TRADING-STATE] Trading %s for user %s, reason: %s", action, userID, req.Reason)
+
+	// Refresh coin profiler subscriptions based on new trading state
+	if s.userAutopilotManager != nil {
+		if _, err := s.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, userID); err != nil {
+			log.Printf("[TRADING-STATE] Warning: Failed to refresh coin profiler subscriptions for user %s: %v", userID, err)
+		}
+	}
 
 	// Get updated state
 	state, err := controller.GetTradingState(ctx, userID)

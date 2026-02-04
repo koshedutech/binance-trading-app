@@ -27,6 +27,9 @@ interface Position {
     percent: number;
     gain_pct: number;
   }>;
+  // Chain Runner identification
+  chain_base_id?: string;
+  decision_mode?: 'classic' | 'new_engine';
 }
 
 export default function PositionOptimizationMonitor() {
@@ -141,12 +144,40 @@ export default function PositionOptimizationMonitor() {
     cfg => cfg?.position_optimization?.hedge_mode_enabled
   );
 
+  // Helper: Check if a position should be shown in Position Optimization Monitor
+  // IMPORTANT: Only show CLASSIC positions (OLD Ginie system), NOT new_engine positions
+  // New Entry Decision Engine positions (Chain Runner) don't use TP1/TP2/TP3 levels - they have their own exit logic
+  // Show positions where:
+  // 1. NOT a Chain Runner position (mode code not in SCA/SWI/ULT/POS)
+  // 2. NOT a new_engine position (decision_mode !== 'new_engine')
+  // 3. AND position_optimization.enabled = true for the mode
+  const shouldShowPosition = (pos: Position): boolean => {
+    // Filter out Chain Runner / Entry Decision Engine positions by mode code
+    // These modes are managed by the Chain Entry Runner with their own exit logic
+    const CHAIN_RUNNER_MODE_CODES = ['scalp', 'swing', 'ultra_fast', 'position'];
+    const isChainRunnerMode = pos.mode && CHAIN_RUNNER_MODE_CODES.includes(pos.mode.toLowerCase());
+
+    // Also check decision_mode and chain_base_id for additional filtering
+    if (pos.decision_mode === 'new_engine' || pos.chain_base_id || isChainRunnerMode) {
+      return false;
+    }
+
+    // Only show if position_optimization is explicitly enabled for this mode
+    // Don't show just because TP levels exist - that could be from old/legacy data
+    const modeConfig = modeConfigs[pos.mode];
+    const posOptEnabled = modeConfig?.position_optimization?.enabled ?? false;
+    return posOptEnabled;
+  };
+
+  // Filter positions for the monitor tab
+  const optimizedPositions = positions.filter(shouldShowPosition);
+
   return (
     <CollapsibleCard
       title="Position Optimization Monitor"
       icon={<Repeat className="w-4 h-4" />}
       defaultExpanded={false}
-      badge={positions.length > 0 ? `${positions.length}` : undefined}
+      badge={optimizedPositions.length > 0 ? `${optimizedPositions.length}` : undefined}
       badgeColor="purple"
     >
       <div className="space-y-3">
@@ -181,8 +212,8 @@ export default function PositionOptimizationMonitor() {
         {/* Monitor Tab */}
         {activeTab === 'monitor' && (
           <div className="space-y-2">
-            {positions.length > 0 ? (
-              [...positions]
+            {optimizedPositions.length > 0 ? (
+              [...optimizedPositions]
                 .sort((a, b) => {
                   const aProgress = a.current_tp_level || 0;
                   const bProgress = b.current_tp_level || 0;

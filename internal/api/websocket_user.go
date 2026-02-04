@@ -290,6 +290,10 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 			BroadcastUserOrderUpdate(userID, orderData)
 		}
 	})
+	events.SetBroadcastPositionCreated(func(userID string, data interface{}) {
+		// Position created broadcasts (new position opened after entry fill)
+		BroadcastPositionCreated(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -384,13 +388,27 @@ func BroadcastUserSignal(userID string, signal map[string]interface{}) {
 }
 
 // BroadcastUserOrderUpdate broadcasts an order update to a specific user
+// Supports special event types for state reconciliation:
+// - "ORDER_SYNC": Full order sync from Binance
+// - "CHAIN_CLOSED": A chain was closed during reconciliation
 func BroadcastUserOrderUpdate(userID string, order map[string]interface{}) {
 	if userWSHub == nil {
 		return
 	}
 
+	// Check if this is a special event type
+	eventType := events.EventOrderUpdate
+	if typeVal, ok := order["type"].(string); ok {
+		switch typeVal {
+		case "ORDER_SYNC":
+			eventType = events.EventOrderSync
+		case "CHAIN_CLOSED":
+			eventType = events.EventChainClosed
+		}
+	}
+
 	event := events.Event{
-		Type:      events.EventOrderUpdate,
+		Type:      eventType,
 		Timestamp: time.Now(),
 		Data:      order,
 	}
@@ -588,6 +606,25 @@ func BroadcastExitDecisionUpdate(userID string, exitDecision interface{}) {
 		Timestamp: time.Now(),
 		Data: map[string]interface{}{
 			"exit_decision": exitDecision,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastPositionCreated broadcasts a position created event to a specific user
+// Called when a new position is opened (entry order filled)
+// Enables instant UI update without requiring manual refresh
+func BroadcastPositionCreated(userID string, positionData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventPositionCreated,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"position": positionData,
 		},
 	}
 

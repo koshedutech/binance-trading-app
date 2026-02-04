@@ -11,6 +11,7 @@ import (
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -27,18 +28,20 @@ import (
 // - RealtimePatternMatcher (evaluates patterns on candle close, triggers Entry Decision updates)
 // - ExitDecisionService (monitors positions for TP/SL/trailing stop exits)
 // - PositionController (Story 10.4: executes exit signals on Binance)
+// - RavindraPositionMonitor (R:R-based trailing stop: 1:2 breakeven, 1:3 profit lock)
 type UserAutopilotInstance struct {
-	UserID                 string
-	FuturesClient          binance.FuturesClient
-	LLMAnalyzer            *llm.Analyzer
-	Autopilot              *GinieAutopilot
-	ChainEntryRunner       *ChainEntryRunner                       // Automatic chain entries (independent of Ginie)
-	CoinProfiler           *coinprofiler.CoinProfiler              // Epic 14: Real-time data collection
-	RealtimePatternMatcher *entrydecision.RealtimePatternMatcher   // Epic 14: Pattern evaluation on candle close
-	ExitDecisionService    *exitdecision.Service                   // Epic 14: Exit signal monitoring
-	PositionController     *PositionController                     // Story 10.4: Exit signal executor
-	CreatedAt              time.Time
-	LastActive             time.Time
+	UserID                  string
+	FuturesClient           binance.FuturesClient
+	LLMAnalyzer             *llm.Analyzer
+	Autopilot               *GinieAutopilot
+	ChainEntryRunner        *ChainEntryRunner                       // Automatic chain entries (independent of Ginie)
+	CoinProfiler            *coinprofiler.CoinProfiler              // Epic 14: Real-time data collection
+	RealtimePatternMatcher  *entrydecision.RealtimePatternMatcher   // Epic 14: Pattern evaluation on candle close
+	ExitDecisionService     *exitdecision.Service                   // Epic 14: Exit signal monitoring
+	PositionController      *PositionController                     // Story 10.4: Exit signal executor
+	RavindraPositionMonitor *RavindraPositionMonitor                // R:R-based trailing stop management
+	CreatedAt               time.Time
+	LastActive              time.Time
 
 	mu sync.RWMutex
 }
@@ -81,6 +84,14 @@ func (u *UserAutopilotInstance) IsPositionControllerRunning() bool {
 		return false
 	}
 	return u.PositionController.IsRunning()
+}
+
+// IsRavindraMonitorRunning returns whether this user's Ravindra position monitor is active
+func (u *UserAutopilotInstance) IsRavindraMonitorRunning() bool {
+	if u.RavindraPositionMonitor == nil {
+		return false
+	}
+	return u.RavindraPositionMonitor.IsRunning()
 }
 
 // TouchLastActive updates the last active timestamp
@@ -687,12 +698,46 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	// Epic 14: Wire immediate breakout callback for instant order execution
 	// This enables orders to be placed the MOMENT price breaks out, not waiting for scan cycle.
-	realtimeMatcher.SetBreakoutCallback(func(symbol, direction, mode string, price float64) {
-		if err := chainEntryRunner.ExecuteImmediateEntry(symbol, direction, mode, price); err != nil {
+	realtimeMatcher.SetBreakoutCallback(func(symbol, direction, mode, strategyGroup, subStrategy string, price float64) {
+		if err := chainEntryRunner.ExecuteImmediateEntry(symbol, direction, mode, strategyGroup, subStrategy, price); err != nil {
 			m.logger.Error("Immediate breakout entry failed", "symbol", symbol, "direction", direction, "error", err)
 		}
 	})
 	m.logger.Info("Breakout callback wired for immediate order execution", "user_id", userID)
+
+	// Epic 14: Wire capacity checker for proactive limit enforcement
+	// This is called BEFORE triggering breakout to check if new entries are allowed.
+	// When max_concurrent_trades is reached, breakouts are detected but orders are NOT placed.
+	// Pattern matching continues (for UI display) but entry is blocked at source.
+	realtimeMatcher.SetCapacityChecker(func() (bool, int, int) {
+		ctx := context.Background()
+		activeChains, err := m.chainEventWriter.GetActiveChains(ctx, userID)
+		if err != nil {
+			m.logger.Error("Capacity check failed - allowing entry", "error", err)
+			return true, 0, 1 // Default to allowing if check fails
+		}
+		currentCount := len(activeChains)
+
+		// Get max_concurrent_trades from sub-strategy settings (breakout/ravindra_volume_imbalance)
+		maxConcurrentTrades := 1 // Default
+		if m.repo != nil {
+			subSettings, err := m.repo.GetSubStrategySettings(ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance")
+			if err == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+				var settingsMap map[string]interface{}
+				if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
+					if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+						if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+							maxConcurrentTrades = int(maxTrades)
+						}
+					}
+				}
+			}
+		}
+
+		canEnter := currentCount < maxConcurrentTrades
+		return canEnter, currentCount, maxConcurrentTrades
+	})
+	m.logger.Info("Capacity checker wired for proactive limit enforcement", "user_id", userID)
 
 	// Epic 14: Create ExitDecisionService for position exit monitoring
 	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)
@@ -710,18 +755,37 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	)
 	m.logger.Info("PositionController created for user", "user_id", userID)
 
+	// Create RavindraPositionMonitor for R:R-based trailing stop management
+	// This implements the Ravindra strategy: move SL to breakeven at 1:2 R:R, lock 1R profit at 1:3 R:R
+	// The monitor runs independently and checks positions periodically for milestone triggers
+	priceProvider := &futuresClientPriceProvider{client: futuresClient}
+	ravindraMonitor := NewRavindraPositionMonitor(
+		futuresClient,
+		m.chainEventWriter,
+		priceProvider,
+		DefaultRavindraPositionMonitorConfig(),
+	)
+	m.logger.Info("RavindraPositionMonitor created for user", "user_id", userID)
+
+	// Wire RavindraPositionMonitor to ChainEntryRunner for automatic position registration
+	// When ChainEntryRunner places an entry with SL/TP, it will register the position
+	// with the monitor for R:R milestone tracking
+	chainEntryRunner.SetRavindraMonitor(ravindraMonitor)
+	m.logger.Info("RavindraPositionMonitor wired to ChainEntryRunner", "user_id", userID)
+
 	instance := &UserAutopilotInstance{
-		UserID:                 userID,
-		FuturesClient:          futuresClient,
-		LLMAnalyzer:            llmAnalyzer,
-		Autopilot:              autopilot,
-		ChainEntryRunner:       chainEntryRunner,
-		CoinProfiler:           coinProfiler,        // Epic 14: Real-time data collection
-		RealtimePatternMatcher: realtimeMatcher,     // Epic 14: Pattern evaluation on candle close
-		ExitDecisionService:    exitDecisionSvc,     // Epic 14: Exit signal monitoring
-		PositionController:     positionController,  // Story 10.4: Exit signal executor
-		CreatedAt:              time.Now(),
-		LastActive:             time.Now(),
+		UserID:                  userID,
+		FuturesClient:           futuresClient,
+		LLMAnalyzer:             llmAnalyzer,
+		Autopilot:               autopilot,
+		ChainEntryRunner:        chainEntryRunner,
+		CoinProfiler:            coinProfiler,        // Epic 14: Real-time data collection
+		RealtimePatternMatcher:  realtimeMatcher,     // Epic 14: Pattern evaluation on candle close
+		ExitDecisionService:     exitDecisionSvc,     // Epic 14: Exit signal monitoring
+		PositionController:      positionController,  // Story 10.4: Exit signal executor
+		RavindraPositionMonitor: ravindraMonitor,     // R:R-based trailing stop management
+		CreatedAt:               time.Now(),
+		LastActive:              time.Now(),
 	}
 
 	// Wire ExitDecisionService providers (after all components are created)
@@ -868,12 +932,20 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 			instance.ChainEntryRunner.Start()
 		}
 
+		// 5. Start RavindraPositionMonitor (R:R-based trailing stop management)
+		// This monitors positions for 1:2 and 1:3 R:R milestones and updates SL accordingly
+		if instance.RavindraPositionMonitor != nil && !instance.RavindraPositionMonitor.IsRunning() {
+			m.logger.Info("Starting RavindraPositionMonitor for chain system", "user_id", userID)
+			instance.RavindraPositionMonitor.Start()
+		}
+
 		m.logger.Info("Chain Trading System fully started",
 			"user_id", userID,
 			"coin_profiler", instance.IsCoinProfilerRunning(),
 			"exit_decision", instance.IsExitDecisionRunning(),
 			"position_controller", instance.IsPositionControllerRunning(),
-			"chain_entry_runner", instance.IsChainEntryRunnerRunning())
+			"chain_entry_runner", instance.IsChainEntryRunnerRunning(),
+			"ravindra_monitor", instance.IsRavindraMonitorRunning())
 	}
 
 	return nil
@@ -913,13 +985,19 @@ func (m *UserAutopilotManager) StopAutopilot(userID string) error {
 		}
 	}
 
-	// 4. Stop ChainEntryRunner
+	// 4. Stop RavindraPositionMonitor (R:R-based trailing stop)
+	if instance.RavindraPositionMonitor != nil && instance.RavindraPositionMonitor.IsRunning() {
+		m.logger.Info("Stopping RavindraPositionMonitor", "user_id", userID)
+		instance.RavindraPositionMonitor.Stop()
+	}
+
+	// 5. Stop ChainEntryRunner
 	if instance.ChainEntryRunner != nil && instance.ChainEntryRunner.IsRunning() {
 		m.logger.Info("Stopping ChainEntryRunner", "user_id", userID)
 		instance.ChainEntryRunner.Stop()
 	}
 
-	// 5. Stop Ginie if running
+	// 6. Stop Ginie if running
 	if instance.Autopilot.IsRunning() {
 		m.logger.Info("Stopping Ginie autopilot", "user_id", userID)
 		instance.Autopilot.Stop()
@@ -1056,7 +1134,7 @@ func (m *UserAutopilotManager) Shutdown() {
 	m.cleanupWg.Wait()
 
 	// Stop all running autopilots, chain entry runners, coin profilers, position controllers, and exit decision services
-	// Shutdown order: PositionController -> ExitDecision -> CoinProfiler -> ChainEntryRunner -> Autopilot (reverse of startup)
+	// Shutdown order: PositionController -> ExitDecision -> CoinProfiler -> RavindraMonitor -> ChainEntryRunner -> Autopilot (reverse of startup)
 	m.instances.Range(func(key, value any) bool {
 		userID := key.(string)
 		instance := value.(*UserAutopilotInstance)
@@ -1077,6 +1155,12 @@ func (m *UserAutopilotManager) Shutdown() {
 		if instance.IsCoinProfilerRunning() {
 			m.logger.Info("Stopping coin profiler for user during shutdown", "user_id", userID)
 			instance.CoinProfiler.Stop()
+		}
+
+		// Stop RavindraPositionMonitor (R:R-based trailing stop)
+		if instance.IsRavindraMonitorRunning() {
+			m.logger.Info("Stopping ravindra position monitor for user during shutdown", "user_id", userID)
+			instance.RavindraPositionMonitor.Stop()
 		}
 
 		if instance.IsChainEntryRunnerRunning() {
@@ -1159,6 +1243,10 @@ func (m *UserAutopilotManager) GetChainEntryRunnerStatus(userID string) *ChainEn
 
 	stats := instance.ChainEntryRunner.GetStats()
 
+	// Calculate position limits from sub-strategy max_concurrent_trades
+	ctx := context.Background()
+	currentPositions, maxPositions := instance.ChainEntryRunner.CalculateMaxPositionsFromSubStrategies(ctx)
+
 	return &ChainEntryRunnerStatus{
 		UserID:            userID,
 		Running:           instance.ChainEntryRunner.IsRunning(),
@@ -1168,6 +1256,8 @@ func (m *UserAutopilotManager) GetChainEntryRunnerStatus(userID string) *ChainEn
 		FailedEntries:     stats.FailedEntries,
 		LastScanTime:      stats.LastScanTime,
 		LastEntryTime:     stats.LastEntryTime,
+		CurrentPositions:  currentPositions,
+		MaxPositions:      maxPositions,
 	}
 }
 
@@ -1182,6 +1272,9 @@ type ChainEntryRunnerStatus struct {
 	LastScanTime      time.Time `json:"last_scan_time,omitempty"`
 	LastEntryTime     time.Time `json:"last_entry_time,omitempty"`
 	Message           string    `json:"message,omitempty"`
+	// Position limits calculated from active sub-strategies' max_concurrent_trades
+	CurrentPositions int `json:"current_positions"`
+	MaxPositions     int `json:"max_positions"`
 }
 
 // UpdateUserDryRun updates the dry run mode for a specific user
@@ -1416,6 +1509,16 @@ func (m *UserAutopilotManager) StopCoinProfiler(userID string) error {
 	}
 
 	m.logger.Info("Stopping coin profiler for user", "user_id", userID)
+
+	// CRITICAL: Clear all pattern data from Entry Decision strategies
+	// When Coin Profiler is stopped, all collected data becomes stale and meaningless.
+	// The patterns must be cleared so that when the profiler restarts, fresh data
+	// is collected and new patterns are detected from scratch.
+	if instance.RealtimePatternMatcher != nil {
+		m.logger.Info("Clearing all Entry Decision pattern data (CoinProfiler stopping)", "user_id", userID)
+		instance.RealtimePatternMatcher.ClearAllPatterns()
+	}
+
 	if err := instance.CoinProfiler.Stop(); err != nil {
 		return fmt.Errorf("failed to stop coin profiler: %w", err)
 	}
@@ -1453,8 +1556,13 @@ func (m *UserAutopilotManager) GetCoinProfiler(userID string) *coinprofiler.Coin
 }
 
 // RefreshCoinProfilerSubscriptions refreshes the Coin Profiler subscriptions for a user.
-// This should be called when strategies are enabled/disabled to update data collection.
+// This should be called when strategies are enabled/disabled or when trading state changes.
 // Returns the count of enabled strategies after refresh.
+//
+// IMPORTANT: When trading is OFF, this method:
+// 1. Clears all strategy-related pattern data from Entry Decision
+// 2. Only subscribes to position symbols (for exit monitoring)
+// 3. The cleared data must be re-collected when trading is turned back ON
 func (m *UserAutopilotManager) RefreshCoinProfilerSubscriptions(ctx context.Context, userID string) (int, error) {
 	instance := m.GetInstance(userID)
 	if instance == nil {
@@ -1471,12 +1579,36 @@ func (m *UserAutopilotManager) RefreshCoinProfilerSubscriptions(ctx context.Cont
 		return 0, nil
 	}
 
-	m.logger.Info("Refreshing CoinProfiler subscriptions due to strategy change", "user_id", userID)
+	// Check trading state to determine if we should clear strategy patterns
+	tradingEnabled := false
+	tradingController := GetTradingController()
+	if tradingController != nil {
+		enabled, err := tradingController.IsTradingEnabled(ctx, userID)
+		if err != nil {
+			m.logger.Warn("Failed to check trading state during refresh", "user_id", userID, "error", err)
+		} else {
+			tradingEnabled = enabled
+		}
+	}
 
-	// Re-initialize subscriptions based on current enabled strategies
+	// CRITICAL: When trading is turned OFF, clear all strategy-related pattern data
+	// This ensures stale patterns don't persist and cause incorrect entries when
+	// trading is turned back ON. Fresh data collection is required after OFF→ON.
+	if !tradingEnabled {
+		if instance.RealtimePatternMatcher != nil {
+			m.logger.Info("Trade Cycle OFF - clearing all Entry Decision strategy patterns", "user_id", userID)
+			instance.RealtimePatternMatcher.ClearAllPatterns()
+		}
+	}
+
+	m.logger.Info("Refreshing CoinProfiler subscriptions",
+		"user_id", userID,
+		"trading_enabled", tradingEnabled)
+
+	// Re-initialize subscriptions based on current trading state and enabled strategies
 	m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
 
-	// Get the count of enabled strategies
+	// Get the count of enabled strategies (for return value)
 	dbStrategies, err := m.repo.GetEnabledStrategies(ctx, userID)
 	if err != nil {
 		m.logger.Error("Failed to get enabled strategies count", "user_id", userID, "error", err)
@@ -1503,36 +1635,62 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 
 	m.logger.Info("Initializing CoinProfiler subscriptions", "user_id", userID)
 
-	// Step 1: Get enabled strategies from database
-	dbStrategies, err := m.repo.GetEnabledStrategies(ctx, userID)
-	if err != nil {
-		m.logger.Error("Failed to get enabled strategies", "user_id", userID, "error", err)
-		// Continue anyway - we can still subscribe for positions
-		dbStrategies = []database.EnabledSubStrategy{}
-	}
-	m.logger.Info("Found enabled strategies", "user_id", userID, "count", len(dbStrategies))
-
-	// Step 2: Convert database types to coinprofiler types
-	cpStrategies := make([]coinprofiler.EnabledSubStrategy, 0, len(dbStrategies))
-	for _, s := range dbStrategies {
-		cpStrategies = append(cpStrategies, coinprofiler.EnabledSubStrategy{
-			Mode:          s.Mode,
-			StrategyGroup: s.StrategyGroup,
-			SubStrategy:   s.SubStrategy,
-		})
+	// Check if trading is enabled - this determines if we include strategy requirements
+	tradingEnabled := false
+	tradingController := GetTradingController()
+	if tradingController != nil {
+		enabled, err := tradingController.IsTradingEnabled(ctx, userID)
+		if err != nil {
+			m.logger.Warn("Failed to check trading state, assuming disabled", "user_id", userID, "error", err)
+		} else {
+			tradingEnabled = enabled
+		}
 	}
 
-	// Step 3: Get requirements for each strategy
-	strategyReqs := coinprofiler.GetRequirementsForStrategies(cpStrategies)
+	// Initialize aggregated requirements - only include strategies if trading is ON
+	var aggregatedReqs *coinprofiler.AggregatedRequirements
 
-	// Step 4: Aggregate all strategy requirements
-	aggregatedReqs := coinprofiler.AggregateRequirements(strategyReqs)
-	m.logger.Info("Aggregated strategy requirements",
-		"user_id", userID,
-		"strategies", aggregatedReqs.TotalStrategies,
-		"timeframes", aggregatedReqs.AllTimeframes)
+	if tradingEnabled {
+		// Trading is ON - include strategy requirements for entry scanning
+		// Step 1: Get enabled strategies from database
+		dbStrategies, err := m.repo.GetEnabledStrategies(ctx, userID)
+		if err != nil {
+			m.logger.Error("Failed to get enabled strategies", "user_id", userID, "error", err)
+			// Continue anyway - we can still subscribe for positions
+			dbStrategies = []database.EnabledSubStrategy{}
+		}
+		m.logger.Info("Found enabled strategies (trading ON)", "user_id", userID, "count", len(dbStrategies))
 
-	// Step 5: Get open positions for exit monitoring
+		// Step 2: Convert database types to coinprofiler types
+		cpStrategies := make([]coinprofiler.EnabledSubStrategy, 0, len(dbStrategies))
+		for _, s := range dbStrategies {
+			cpStrategies = append(cpStrategies, coinprofiler.EnabledSubStrategy{
+				Mode:          s.Mode,
+				StrategyGroup: s.StrategyGroup,
+				SubStrategy:   s.SubStrategy,
+			})
+		}
+
+		// Step 3: Get requirements for each strategy
+		strategyReqs := coinprofiler.GetRequirementsForStrategies(cpStrategies)
+
+		// Step 4: Aggregate all strategy requirements
+		aggregatedReqs = coinprofiler.AggregateRequirements(strategyReqs)
+		m.logger.Info("Aggregated strategy requirements",
+			"user_id", userID,
+			"strategies", aggregatedReqs.TotalStrategies,
+			"timeframes", aggregatedReqs.AllTimeframes)
+	} else {
+		// Trading is OFF - skip strategy requirements, only monitor positions
+		m.logger.Info("Trading is OFF - skipping strategy requirements, only monitoring positions", "user_id", userID)
+		aggregatedReqs = &coinprofiler.AggregatedRequirements{
+			AllTimeframes: []string{},
+			AllDataFields: []string{},
+			ByStrategy:    []coinprofiler.StrategyRequirements{},
+		}
+	}
+
+	// Step 5: Get open positions for exit monitoring (always included)
 	var positions []coinprofiler.Position
 	if instance.Autopilot != nil {
 		giniePositions := instance.Autopilot.GetPositions()
@@ -1547,10 +1705,9 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 	positionReqs := coinprofiler.GetPositionRequirements(positions)
 	combinedReqs := coinprofiler.CombineRequirements(aggregatedReqs, positionReqs)
 
-	// Step 6b: If we have timeframes but no symbols, add default watchlist
-	// Strategies provide timeframes but not symbols - we need symbols from somewhere
-	// Use top coins as default entry scanning candidates
-	if len(aggregatedReqs.AllTimeframes) > 0 && len(combinedReqs.AllSymbols) == 0 {
+	// Step 6b: If trading is ON and we have timeframes but no symbols, add default watchlist
+	// Only add default watchlist when trading is enabled (for entry scanning)
+	if tradingEnabled && len(aggregatedReqs.AllTimeframes) > 0 && len(combinedReqs.AllSymbols) == 0 {
 		defaultSymbols := []string{
 			"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
 			"ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT",
@@ -1575,6 +1732,7 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 
 	m.logger.Info("Combined requirements",
 		"user_id", userID,
+		"trading_enabled", tradingEnabled,
 		"symbols", len(combinedReqs.AllSymbols),
 		"timeframes", combinedReqs.AllTimeframes)
 
@@ -1586,6 +1744,7 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 
 	m.logger.Info("CoinProfiler subscriptions initialized successfully",
 		"user_id", userID,
+		"trading_enabled", tradingEnabled,
 		"symbols", len(combinedReqs.AllSymbols),
 		"strategies", aggregatedReqs.TotalStrategies,
 		"positions", len(positions))
@@ -1599,6 +1758,27 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 // giniePositionAdapter adapts GiniePosition to the coinprofiler.Position interface.
 type giniePositionAdapter struct {
 	pos *GiniePosition
+}
+
+// futuresClientPriceProvider adapts FuturesClient to the PriceProvider interface
+// required by RavindraPositionMonitor.
+type futuresClientPriceProvider struct {
+	client binance.FuturesClient
+}
+
+// GetMarkPrice implements the PriceProvider interface.
+// It returns the mark price for a symbol from the Binance Futures API.
+func (p *futuresClientPriceProvider) GetMarkPrice(symbol string) (float64, error) {
+	if p.client == nil {
+		return 0, fmt.Errorf("futures client is nil")
+	}
+
+	markPrice, err := p.client.GetMarkPrice(symbol)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get mark price for %s: %w", symbol, err)
+	}
+
+	return markPrice.MarkPrice, nil
 }
 
 func (a *giniePositionAdapter) GetSymbol() string {

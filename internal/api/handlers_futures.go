@@ -790,6 +790,11 @@ type OrderChainWithState struct {
 	FilledValue        float64                `json:"filled_value"`
 	CreatedAt          int64                  `json:"created_at"`
 	UpdatedAt          int64                  `json:"updated_at"`
+	// Strategy identification fields
+	Mode          string `json:"mode,omitempty"`           // Full mode name: scalp, swing, position, ultra_fast
+	StrategyGroup string `json:"strategy_group,omitempty"` // e.g., breakout, trending
+	SubStrategy   string `json:"sub_strategy,omitempty"`   // e.g., ravindra_volume_imbalance
+	Timeframe     string `json:"timeframe,omitempty"`      // e.g., 3m, 5m, 15m from pattern detection
 }
 
 // ChainOrderInfo represents order info within a chain
@@ -1080,6 +1085,10 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 				Status:             strings.ToLower(string(dbChain.Status)),
 				CreatedAt:          dbChain.CreatedAt.UnixMilli(),
 				UpdatedAt:          dbChain.UpdatedAt.UnixMilli(),
+				Mode:               dbChain.Mode,
+				StrategyGroup:      dbChain.StrategyGroup,
+				SubStrategy:        dbChain.SubStrategy,
+				Timeframe:          dbChain.Timeframe,
 			}
 			chainIDs = append(chainIDs, chainID)
 		}
@@ -1136,6 +1145,23 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 					log.Printf("[ORDER-CHAINS] Added entry order from DB for chain %s: price=%.4f, qty=%.4f",
 						chainID, entryPrice, entryQty)
 				}
+			}
+		}
+
+		// Enrich chain with strategy information from DB (even if entry order already exists)
+		if dbChain, exists := dbOrderChainsMap[chainID]; exists && dbChain != nil {
+			// Only set if not already set (preserve any values already populated)
+			if chain.Mode == "" && dbChain.Mode != "" {
+				chain.Mode = dbChain.Mode
+			}
+			if chain.StrategyGroup == "" && dbChain.StrategyGroup != "" {
+				chain.StrategyGroup = dbChain.StrategyGroup
+			}
+			if chain.SubStrategy == "" && dbChain.SubStrategy != "" {
+				chain.SubStrategy = dbChain.SubStrategy
+			}
+			if chain.Timeframe == "" && dbChain.Timeframe != "" {
+				chain.Timeframe = dbChain.Timeframe
 			}
 		}
 	}

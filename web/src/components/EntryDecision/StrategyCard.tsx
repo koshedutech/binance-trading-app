@@ -22,16 +22,56 @@ import {
 import PatternProgress, { PatternProgressCompact } from './PatternProgress';
 import ScoreDisplay, { ScoreDisplayCompact } from './ScoreDisplay';
 import RequirementsPanel from './RequirementsPanel';
+import Step2ProgressBars from './Step2ProgressBars';
 import type {
   StrategyMatch,
   CoinMatch,
   StrategyType,
   PatternStatus,
+  PatternUpdate,
   formatStrategyName,
   isCoinReady,
   getReadyCount,
   getWatchingCount,
 } from '../../types/entryDecision';
+
+// ==================== Helper: Convert CoinMatch to PatternUpdate ====================
+
+/**
+ * Converts CoinMatch data to PatternUpdate format for Step2ProgressBars
+ * This allows Step2ProgressBars to be used in StrategyCard with CoinMatch data
+ */
+function coinMatchToPatternUpdate(coin: CoinMatch): PatternUpdate {
+  return {
+    symbol: coin.symbol,
+    timeframe: '15m', // Default, actual timeframe comes from strategy
+    mode: 'scalp', // Default
+    strategy: 'volume_imbalance', // Default
+    sub_strategy: 'ravindra_volume_imbalance', // Default
+    current_step: coin.step || 0,
+    total_steps: coin.total_steps || 2,
+    status: coin.status || 'watching',
+    step_details: coin.step_details || [],
+    reference_candle: coin.reference_candle,
+    current_price: coin.current_price,
+    day_high: coin.day_high,
+    day_low: coin.day_low,
+    // Use actual volume threshold from coin data (from strategy settings)
+    // Default to 2.0 which is common for volume imbalance patterns
+    volume_threshold: coin.volume_threshold || 2.0,
+    direction: coin.direction,
+    updated_at: coin.updated_at,
+    // Step 2 specific fields - use current data with fallbacks
+    current_candle_volume_multiplier: coin.volume_multiplier,
+    // Consolidation average: midpoint between 1x (baseline) and reference volume
+    consolidation_avg_volume_multiplier: coin.reference_candle
+      ? (coin.reference_candle.volume_multiplier + 1) / 2
+      : 1.5,
+    consolidation_avg_price: coin.reference_candle
+      ? (coin.reference_candle.high + coin.reference_candle.low) / 2
+      : coin.current_price,
+  };
+}
 
 // ==================== Interfaces ====================
 
@@ -365,6 +405,8 @@ function CoinRow({
 }: CoinRowProps) {
   const isReady = checkCoinReady(coin);
   const isActive = coin.status === 'accumulation' || coin.status === 'consolidating';
+  // Position running means Chain Runner has an active position - detailed info shown in Trade Lifecycle
+  const isPositionRunning = coin.status === 'position_running' || coin.has_active_position;
   const stageInfo = STAGE_LABELS[coin.step || 0];
   const statusInfo = STATUS_STAGE_LABELS[coin.status || 'watching'];
 
@@ -482,47 +524,62 @@ function CoinRow({
         </div>
       )}
 
-      {/* Bottom Row: Stage Details (only for pattern strategies with active tracking) */}
-      {strategyType === 'pattern' && coin.step !== undefined && coin.step > 0 && (
+      {/* Bottom Row: Stage Details (only for pattern strategies with active tracking)
+          When position is running, show simplified view - details are in Trade Lifecycle
+          CRITICAL: Use reference_candle as primary indicator to prevent flicker during WebSocket updates
+          reference_candle is preserved in merge logic, making this condition stable */}
+      {strategyType === 'pattern' && (coin.reference_candle || (coin.step !== undefined && coin.step > 0)) && (
         <div className="mt-2 pt-2 border-t border-gray-700/30 space-y-2">
-          {/* Row 1: Step info and progress */}
-          <div className="flex items-center justify-between w-full">
-            <div className="flex items-center gap-2">
-              {coin.step_details && coin.step_details[coin.step - 1] ? (
-                <>
-                  <span className={`text-xs font-medium ${stageInfo?.color || 'text-gray-400'}`}>
-                    Step {coin.step}: {coin.step_details[coin.step - 1].name}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    {coin.step_details[coin.step - 1].completed
-                      ? `✓ ${coin.step_details[coin.step - 1].progress}`
-                      : coin.step_details[coin.step - 1].progress || statusInfo?.description
-                    }
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span className={`text-xs font-medium ${stageInfo?.color || 'text-gray-400'}`}>
-                    Step {coin.step}: {stageInfo?.name || 'Unknown'}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    {statusInfo?.description || coin.details || ''}
-                  </span>
-                </>
-              )}
-            </div>
-
-            {/* Additional details from step_details */}
-            {coin.step_details && coin.step_details[coin.step - 1]?.details && (
-              <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-0.5 rounded">
-                {coin.step_details[coin.step - 1].details}
+          {/* Position Running - Simplified View */}
+          {isPositionRunning ? (
+            <div className="flex items-center gap-2 px-2 py-1.5 bg-cyan-500/10 border border-cyan-500/30 rounded">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
               </span>
-            )}
-          </div>
+              <span className="text-cyan-400 text-xs font-medium">Position Active</span>
+              <span className="text-gray-500 text-xs ml-auto">See Trade Lifecycle for P&L and stage details</span>
+            </div>
+          ) : (
+            <>
+              {/* Row 1: Step info and progress */}
+              <div className="flex items-center justify-between w-full">
+                <div className="flex items-center gap-2">
+                  {coin.step_details && coin.step_details[coin.step - 1] ? (
+                    <>
+                      <span className={`text-xs font-medium ${stageInfo?.color || 'text-gray-400'}`}>
+                        Step {coin.step}: {coin.step_details[coin.step - 1].name}
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        {coin.step_details[coin.step - 1].completed
+                          ? `✓ ${coin.step_details[coin.step - 1].progress}`
+                          : coin.step_details[coin.step - 1].progress || statusInfo?.description
+                        }
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className={`text-xs font-medium ${stageInfo?.color || 'text-gray-400'}`}>
+                        Step {coin.step}: {stageInfo?.name || 'Unknown'}
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        {statusInfo?.description || coin.details || ''}
+                      </span>
+                    </>
+                  )}
+                </div>
 
-          {/* Row 2: Reference candle and Entry candle side by side */}
-          {(coin.reference_candle || coin.entry_candle) && (
-            <div className="flex flex-col gap-1.5 bg-gray-900/50 rounded px-2 py-1.5">
+                {/* Additional details from step_details */}
+                {coin.step_details && coin.step_details[coin.step - 1]?.details && (
+                  <span className="text-xs text-gray-400 bg-gray-700/50 px-2 py-0.5 rounded">
+                    {coin.step_details[coin.step - 1].details}
+                  </span>
+                )}
+              </div>
+
+              {/* Row 2: Reference candle and Entry candle side by side */}
+              {(coin.reference_candle || coin.entry_candle) && (
+                <div className="flex flex-col gap-1.5 bg-gray-900/50 rounded px-2 py-1.5">
               {/* Two-column layout: Reference (left) | Entry (right) */}
               <div className="grid grid-cols-2 gap-3 border-b border-gray-700/50 pb-1.5">
                 {/* LEFT: Reference Candle */}
@@ -733,36 +790,39 @@ function CoinRow({
                     )}
                   </div>
                 )}
+                </div>
               </div>
-            </div>
-          )}
+              )}
 
-          {/* Row 3: Breakout level reference */}
-          {coin.reference_candle && coin.current_price && (
-            <div className="flex items-center justify-between text-xs text-gray-500">
-              <span>
-                Breakout @ <span className="text-yellow-400 font-mono">
-                  ${coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}
-                </span>
-              </span>
-              <span>
-                Current: <span className="text-white font-mono">
-                  ${coin.current_price.toFixed(coin.current_price > 100 ? 2 : 4)}
-                </span>
-              </span>
-            </div>
-          )}
+              {/* Row 3: Breakout level reference */}
+              {coin.reference_candle && coin.current_price && (
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <span>
+                    Breakout @ <span className="text-yellow-400 font-mono">
+                      ${coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}
+                    </span>
+                  </span>
+                  <span>
+                    Current: <span className="text-white font-mono">
+                      ${coin.current_price.toFixed(coin.current_price > 100 ? 2 : 4)}
+                    </span>
+                  </span>
+                </div>
+              )}
 
-          {/* Position Running Timer - shows when there's an active position */}
-          {coin.has_active_position && coin.position_opened_at && (
-            <div className="mt-2">
-              <PositionRunningTimer
-                positionOpenedAt={coin.position_opened_at}
-                entryPrice={coin.position_entry_price}
-                currentPrice={coin.current_price}
-                chainId={coin.chain_id}
-              />
-            </div>
+              {/* Step 2 Progress Bars - Volume and Price progress toward entry */}
+              {/* CRITICAL FIX: Use reference_candle presence as primary condition to prevent flicker.
+                  reference_candle is preserved during WebSocket merges, making this condition stable.
+                  The status check is secondary - if we have reference_candle, we're in Step 2.
+                  Step2ProgressBars handles missing data internally with a placeholder. */}
+              {coin.reference_candle && (
+                <Step2ProgressBars
+                  update={coinMatchToPatternUpdate(coin)}
+                  currentPrice={coin.current_price || 0}
+                  candlesSinceReference={coin.candles_since_reference}
+                />
+              )}
+            </>
           )}
         </div>
       )}

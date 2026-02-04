@@ -25,6 +25,7 @@ type UserDataStream struct {
 	onAccountUpdate  func(*AccountUpdateEvent)
 	onOrderUpdate    func(*OrderUpdateEvent)
 	onPositionUpdate func(*PositionUpdateEvent)
+	onConnect        func() // Called after successful WebSocket connection/reconnection
 
 	// Cached data from stream
 	positions      map[string]*StreamPosition
@@ -185,6 +186,15 @@ func (s *UserDataStream) SetPositionUpdateCallback(cb func(*PositionUpdateEvent)
 	s.onPositionUpdate = cb
 }
 
+// SetOnConnectCallback sets the callback for when WebSocket connects/reconnects.
+// IMPORTANT: This callback is triggered AFTER successful connection, enabling
+// state reconciliation with Binance REST API to fix any stale data.
+func (s *UserDataStream) SetOnConnectCallback(cb func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onConnect = cb
+}
+
 // Start begins the user data stream connection
 func (s *UserDataStream) Start() error {
 	s.mu.Lock()
@@ -307,10 +317,24 @@ func (s *UserDataStream) connect() {
 
 		s.mu.Lock()
 		s.wsConn = conn
+		reconnectCount := s.reconnects
 		s.reconnects = 0
+		onConnectCb := s.onConnect
 		s.mu.Unlock()
 
-		log.Printf("[USER-DATA-STREAM] Connected successfully")
+		if reconnectCount > 0 {
+			log.Printf("[USER-DATA-STREAM] Reconnected successfully (attempt #%d)", reconnectCount)
+		} else {
+			log.Printf("[USER-DATA-STREAM] Connected successfully")
+		}
+
+		// CRITICAL: Call onConnect callback to trigger state sync with Binance REST API.
+		// This fixes stale data that accumulated while disconnected.
+		// The callback should fetch current orders/positions from Binance and reconcile.
+		if onConnectCb != nil {
+			log.Printf("[USER-DATA-STREAM] Triggering state sync callback after connection")
+			go onConnectCb() // Run in goroutine to not block WebSocket read loop
+		}
 
 		// Read messages
 		s.readLoop(conn)

@@ -16,6 +16,8 @@ const (
 	EventOrderFilled       EventType = "ORDER_FILLED"
 	EventOrderCancelled    EventType = "ORDER_CANCELLED"
 	EventOrderUpdate       EventType = "ORDER_UPDATE"
+	EventOrderSync         EventType = "ORDER_SYNC"
+	EventChainClosed       EventType = "CHAIN_CLOSED"
 	EventSignalGenerated   EventType = "SIGNAL_GENERATED"
 	EventStrategyToggled   EventType = "STRATEGY_TOGGLED"
 	EventScreenerUpdate    EventType = "SCREENER_UPDATE"
@@ -54,6 +56,9 @@ const (
 
 	// Epic 14: Settings Changed Notification
 	EventSettingsChanged EventType = "SETTINGS_CHANGED"
+
+	// Position Created: Broadcast when a new position is opened (entry filled)
+	EventPositionCreated EventType = "POSITION_CREATED"
 )
 
 // Event represents a system event
@@ -252,6 +257,7 @@ var (
 	broadcastExitDecisionUpdate BroadcastFunc // Story 10.3: Exit Decision Monitoring
 	broadcastOrderUpdate        BroadcastFunc // Order status updates (placed/cancelled/filled)
 	broadcastSettingsChanged    BroadcastFunc // Epic 14: Settings change notifications
+	broadcastPositionCreated    BroadcastFunc // Position created broadcasts (new position opened)
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -414,5 +420,20 @@ func SetBroadcastSettingsChanged(fn BroadcastFunc) {
 func BroadcastSettingsChanged(userID string, data interface{}) {
 	if broadcastSettingsChanged != nil && userID != "" {
 		go broadcastSettingsChanged(userID, data)
+	}
+}
+
+// SetBroadcastPositionCreated sets the callback for position created broadcasts
+// Used to notify UI when a new position is opened (entry order filled)
+func SetBroadcastPositionCreated(fn BroadcastFunc) {
+	broadcastPositionCreated = fn
+}
+
+// BroadcastPositionCreated broadcasts a position created event to a user
+// Called when an entry order is filled and a new position is opened
+// Data should include: symbol, side, entry_price, quantity, chain_id, timeframe, strategy info
+func BroadcastPositionCreated(userID string, data interface{}) {
+	if broadcastPositionCreated != nil && userID != "" {
+		go broadcastPositionCreated(userID, data)
 	}
 }

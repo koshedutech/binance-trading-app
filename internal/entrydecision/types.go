@@ -138,6 +138,16 @@ type CoinMatch struct {
 	PositionEntryPrice   float64    `json:"position_entry_price,omitempty"`   // Position entry price (actual fill price from Binance)
 	PositionQuantity     float64    `json:"position_quantity,omitempty"`      // Position quantity
 	ChainID              string     `json:"chain_id,omitempty"`               // Chain ID for the position
+
+	// Entry levels from pattern detection (for actual SL/TP prices, not percentages)
+	// These are calculated from Support Price (Consolidation Low) at pattern detection time
+	SupportPrice    float64 `json:"support_price,omitempty"`     // Support price (ConsolidationLow) - SL for longs
+	ResistancePrice float64 `json:"resistance_price,omitempty"`  // Resistance price (ConsolidationHigh) - SL for shorts
+	EntryLevelPrice float64 `json:"entry_level_price,omitempty"` // Calculated entry price from pattern
+	StopLossPrice   float64 `json:"stop_loss_price,omitempty"`   // Actual SL price (Support with buffer)
+	TakeProfitPrice float64 `json:"take_profit_price,omitempty"` // Actual TP price (Entry + Risk × R:R)
+	RiskAmount      float64 `json:"risk_amount,omitempty"`       // Risk in price terms (Entry - SL for long)
+	RiskPercent     float64 `json:"risk_percent,omitempty"`      // Risk as percentage of entry
 }
 
 // ReferenceCandle holds information about the reference candle for pattern tracking.

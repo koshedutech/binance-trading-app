@@ -1,9 +1,9 @@
 // Story 7.15: Order Tree Node Component
 // Story 7.19: Enhanced with timezone support via formatTime prop
-// Story 7.21: Enhanced with inline modification history using ModificationRowList
+// Story 7.21: Modifications displayed as tree child nodes under SL/TP orders
 // Enhanced: Added duration counter, buy/sell side, order value display
 // Individual node in the order chain tree structure
-import React, { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -18,11 +18,9 @@ import {
   Clock,
   Edit3,
   Timer,
-  DollarSign,
-  History,
 } from 'lucide-react';
-import { ChainOrder, PositionState, ORDER_TYPE_CONFIG, OrderTypeSuffix } from './types';
-import { ModificationRowList, calculateSummaryStats, formatDollarImpact } from './ModificationHistory';
+import { ChainOrder, PositionState, ORDER_TYPE_CONFIG, OrderTypeSuffix, PositionAnalyticsData } from './types';
+import { formatDollarImpact } from './ModificationHistory';
 import type { ModificationEvent, ModifiableOrderType } from './ModificationHistory/types';
 
 // Format duration from timestamp to human readable (e.g., "15m", "2h 30m", "1d 5h")
@@ -80,6 +78,7 @@ interface OrderTreeNodeProps {
   type: TreeNodeType;
   order?: ChainOrder;
   positionState?: PositionState;
+  positionAnalytics?: PositionAnalyticsData; // Story 11.40: Position analytics for stage badge
   modificationCount?: number;
   modifications?: ModificationEvent[];
   chainId: string;
@@ -134,11 +133,9 @@ function getStatusIndicator(status: string) {
   return statusConfig[status] || statusConfig.NEW;
 }
 
-// Format price based on magnitude (null-safe)
+// Format price with 8 decimal precision (Binance standard, null-safe)
 function formatPrice(price: number | null | undefined): string {
   const safePrice = price ?? 0;
-  if (safePrice >= 1000) return safePrice.toFixed(2);
-  if (safePrice >= 1) return safePrice.toFixed(4);
   return safePrice.toFixed(8);
 }
 
@@ -152,10 +149,27 @@ const defaultFormatTime = (timestamp: string | number): string => {
   }
 };
 
+// Helper to get stage display configuration
+function getStageConfig(stage: PositionAnalyticsData['stage']) {
+  switch (stage) {
+    case 'RISK_ZONE':
+      return { label: 'Risk Zone', color: 'text-red-400', bgColor: 'bg-red-500/20' };
+    case 'BREAKEVEN':
+      return { label: 'Breakeven', color: 'text-yellow-400', bgColor: 'bg-yellow-500/20' };
+    case 'TP1':
+      return { label: 'TP1+', color: 'text-green-400', bgColor: 'bg-green-500/20' };
+    case 'EFFICIENCY':
+      return { label: 'Efficiency', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20' };
+    default:
+      return { label: 'Unknown', color: 'text-gray-400', bgColor: 'bg-gray-500/20' };
+  }
+}
+
 export default function OrderTreeNode({
   type,
   order,
   positionState,
+  positionAnalytics,
   modificationCount = 0,
   modifications,
   chainId,
@@ -307,208 +321,360 @@ export default function OrderTreeNode({
             </div>
           )}
 
-          {/* Order type icon and label */}
-          <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
-          <span className={`font-medium ${config.color}`}>{config.label}</span>
-
-          {/* Buy/Sell side badge for entry orders and positions */}
-          {(type === 'ENTRY' || type === 'POSITION') && (order || positionState) && (
-            <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
-              (order?.side || positionState?.entrySide) === 'BUY'
-                ? 'bg-green-500/20 text-green-400'
-                : 'bg-red-500/20 text-red-400'
-            }`}>
-              {(order?.side || positionState?.entrySide) === 'BUY'
-                ? <TrendingUp className="w-3 h-3" />
-                : <TrendingDown className="w-3 h-3" />
-              }
-              {(order?.side || positionState?.entrySide) === 'BUY' ? 'LONG' : 'SHORT'}
-            </span>
-          )}
-
-          {/* Modification count badge */}
-          {isModifiable && modificationCount > 0 && (
-            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
-              <Edit3 className="w-3 h-3" />
-              {modificationCount}
-            </span>
-          )}
-
-          {/* Status indicator */}
-          <span className={`flex items-center gap-1 text-xs ${statusIndicator.color}`}>
-            <statusIndicator.icon className="w-3.5 h-3.5" />
-            {statusIndicator.label}
-          </span>
-
-          {/* Countdown timer for pending entry orders */}
-          {countdown && type === 'ENTRY' && (
-            <span
-              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
-                parseInt(countdown.split(':')[0]) < 1
-                  ? 'bg-red-500/30 text-red-400 animate-pulse'
-                  : 'bg-orange-500/20 text-orange-400'
-              }`}
-              title="Time remaining before order timeout"
-            >
-              <Clock className="w-3 h-3" />
-              {countdown}
-            </span>
-          )}
-
-          {/* Duration counter for pending non-entry orders */}
-          {duration && type !== 'ENTRY' && (
-            <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400" title="Time since order placed">
-              <Timer className="w-3 h-3" />
-              {duration}
-            </span>
-          )}
-
-          {/* Spacer */}
-          <div className="flex-1" />
-
-          {/* Price display */}
-          {displayPrice > 0 && (
-            <div className="text-right">
-              <span className="text-gray-200 font-mono text-sm">${formatPrice(displayPrice)}</span>
-              <span className="text-xs text-gray-500 ml-1">{priceLabel}</span>
-            </div>
-          )}
-
-          {/* Position-specific: quantity, value, and P&L */}
-          {type === 'POSITION' && positionState && (
+          {/* POSITION type: Full details with entry price, current price, P&L */}
+          {type === 'POSITION' ? (
             <>
-              <div className="text-right ml-3">
-                <span className="text-gray-300 font-mono text-sm">{(positionState.entryQuantity ?? 0).toFixed(4)}</span>
-                <span className="text-xs text-gray-500 ml-1">Qty</span>
-              </div>
-              {/* Position value */}
-              <div className="text-right ml-3">
-                <span className="text-gray-300 font-mono text-sm">
-                  {formatValue(positionState.entryPrice ?? 0, positionState.entryQuantity ?? 0)}
+              {/* Position icon and label */}
+              <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
+              <span className={`font-medium ${config.color}`}>{config.label}</span>
+
+              {/* Side badge */}
+              {positionState && (
+                <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+                  positionState.entrySide === 'BUY'
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-red-500/20 text-red-400'
+                }`}>
+                  {positionState.entrySide === 'BUY'
+                    ? <TrendingUp className="w-3 h-3" />
+                    : <TrendingDown className="w-3 h-3" />
+                  }
+                  {positionState.entrySide === 'BUY' ? 'LONG' : 'SHORT'}
                 </span>
-                <span className="text-xs text-gray-500 ml-1">Value</span>
-              </div>
-              {(positionState.realizedPnl ?? 0) !== 0 && (
+              )}
+
+              {/* Stage badge (from position analytics) */}
+              {positionAnalytics && (
+                <span className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${getStageConfig(positionAnalytics.stage).bgColor} ${getStageConfig(positionAnalytics.stage).color}`}>
+                  {getStageConfig(positionAnalytics.stage).label}
+                </span>
+              )}
+
+              {/* Status indicator */}
+              <span className={`flex items-center gap-1 text-xs ${statusIndicator.color}`}>
+                <statusIndicator.icon className="w-3.5 h-3.5" />
+                {statusIndicator.label}
+              </span>
+
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Entry Price */}
+              {positionState && positionState.entryPrice > 0 && (
+                <div className="text-right">
+                  <span className="text-gray-200 font-mono text-sm">${formatPrice(positionState.entryPrice)}</span>
+                  <span className="text-xs text-gray-500 ml-1">Entry</span>
+                </div>
+              )}
+
+              {/* Current Price (from analytics) */}
+              {positionAnalytics && positionAnalytics.current_price > 0 && (
                 <div className="text-right ml-3">
-                  <span
-                    className={`font-mono text-sm ${
-                      (positionState.realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'
-                    }`}
-                  >
-                    {(positionState.realizedPnl ?? 0) >= 0 ? '+' : ''}${(positionState.realizedPnl ?? 0).toFixed(2)}
+                  <span className="text-blue-400 font-mono text-sm">${formatPrice(positionAnalytics.current_price)}</span>
+                  <span className="text-xs text-gray-500 ml-1">Mark</span>
+                </div>
+              )}
+
+              {/* Quantity */}
+              {positionState && positionState.entryQuantity > 0 && (
+                <div className="text-right ml-3">
+                  <span className="text-gray-300 font-mono text-sm">{positionState.entryQuantity.toFixed(4)}</span>
+                  <span className="text-xs text-gray-500 ml-1">Qty</span>
+                </div>
+              )}
+
+              {/* Notional Value */}
+              {positionState && positionState.entryValue > 0 && (
+                <div className="text-right ml-3">
+                  <span className="text-gray-300 font-mono text-sm">${positionState.entryValue.toFixed(2)}</span>
+                  <span className="text-xs text-gray-500 ml-1">Value</span>
+                </div>
+              )}
+
+              {/* Unrealized P&L (from analytics) */}
+              {positionAnalytics && positionAnalytics.unrealized_pnl !== undefined && (
+                <div className="text-right ml-3">
+                  <span className={`font-mono text-sm ${positionAnalytics.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {positionAnalytics.unrealized_pnl >= 0 ? '+' : ''}${positionAnalytics.unrealized_pnl.toFixed(2)}
                   </span>
-                  <span className="text-xs text-gray-500 ml-1">P&L</span>
+                  <span className="text-xs text-gray-500 ml-1">PnL</span>
                 </div>
               )}
             </>
-          )}
-
-          {/* Order-specific: quantity and value */}
-          {order && (
+          ) : (
             <>
-              <div className="text-right ml-3">
-                <span className="text-gray-300 font-mono text-sm">
-                  {(order.executedQty ?? 0) > 0 ? `${(order.executedQty ?? 0).toFixed(4)}/` : ''}
-                  {(order.origQty ?? 0).toFixed(4)}
+              {/* Non-POSITION types: Full detail rendering */}
+              {/* Order type icon and label */}
+              <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
+              <span className={`font-medium ${config.color}`}>{config.label}</span>
+
+              {/* Buy/Sell side badge for entry orders */}
+              {type === 'ENTRY' && order && (
+                <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+                  order.side === 'BUY'
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-red-500/20 text-red-400'
+                }`}>
+                  {order.side === 'BUY'
+                    ? <TrendingUp className="w-3 h-3" />
+                    : <TrendingDown className="w-3 h-3" />
+                  }
+                  {order.side === 'BUY' ? 'LONG' : 'SHORT'}
                 </span>
-                <span className="text-xs text-gray-500 ml-1">Qty</span>
-              </div>
-              {/* Order value - use stopPrice for STOP orders, avgPrice for filled, or price as fallback */}
-              <div className="text-right ml-3">
-                <span className="text-gray-300 font-mono text-sm">
-                  {formatValue(
-                    order.avgPrice && order.avgPrice > 0
-                      ? order.avgPrice
-                      : (order.stopPrice && order.stopPrice > 0 ? order.stopPrice : order.price),
-                    order.origQty
+              )}
+
+              {/* Modification count badge */}
+              {isModifiable && modificationCount > 0 && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
+                  <Edit3 className="w-3 h-3" />
+                  {modificationCount}
+                </span>
+              )}
+
+              {/* Status indicator */}
+              <span className={`flex items-center gap-1 text-xs ${statusIndicator.color}`}>
+                <statusIndicator.icon className="w-3.5 h-3.5" />
+                {statusIndicator.label}
+              </span>
+
+              {/* Countdown timer for pending entry orders */}
+              {countdown && type === 'ENTRY' && (
+                <span
+                  className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+                    parseInt(countdown.split(':')[0]) < 1
+                      ? 'bg-red-500/30 text-red-400 animate-pulse'
+                      : 'bg-orange-500/20 text-orange-400'
+                  }`}
+                  title="Time remaining before order timeout"
+                >
+                  <Clock className="w-3 h-3" />
+                  {countdown}
+                </span>
+              )}
+
+              {/* Duration counter for pending non-entry orders */}
+              {duration && type !== 'ENTRY' && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400" title="Time since order placed">
+                  <Timer className="w-3 h-3" />
+                  {duration}
+                </span>
+              )}
+
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Price display */}
+              {displayPrice > 0 && (
+                <div className="text-right">
+                  <span className="text-gray-200 font-mono text-sm">${formatPrice(displayPrice)}</span>
+                  <span className="text-xs text-gray-500 ml-1">{priceLabel}</span>
+                </div>
+              )}
+
+              {/* Order-specific: quantity and value */}
+              {order && (
+                <>
+                  <div className="text-right ml-3">
+                    <span className="text-gray-300 font-mono text-sm">
+                      {(order.executedQty ?? 0) > 0 ? `${(order.executedQty ?? 0).toFixed(4)}/` : ''}
+                      {(order.origQty ?? 0).toFixed(4)}
+                    </span>
+                    <span className="text-xs text-gray-500 ml-1">Qty</span>
+                  </div>
+                  {/* Order value - use stopPrice for STOP orders, avgPrice for filled, or price as fallback */}
+                  <div className="text-right ml-3">
+                    <span className="text-gray-300 font-mono text-sm">
+                      {formatValue(
+                        order.avgPrice && order.avgPrice > 0
+                          ? order.avgPrice
+                          : (order.stopPrice && order.stopPrice > 0 ? order.stopPrice : order.price),
+                        order.origQty
+                      )}
+                    </span>
+                    <span className="text-xs text-gray-500 ml-1">Value</span>
+                  </div>
+                  {/* Filled value when partially/fully filled */}
+                  {order.executedQty > 0 && order.avgPrice && order.avgPrice > 0 && (
+                    <div className="text-right ml-3">
+                      <span className="text-green-400 font-mono text-sm">
+                        {formatValue(order.avgPrice, order.executedQty)}
+                      </span>
+                      <span className="text-xs text-gray-500 ml-1">Filled</span>
+                    </div>
                   )}
-                </span>
-                <span className="text-xs text-gray-500 ml-1">Value</span>
-              </div>
-              {/* Filled value when partially/fully filled */}
-              {order.executedQty > 0 && order.avgPrice && order.avgPrice > 0 && (
-                <div className="text-right ml-3">
-                  <span className="text-green-400 font-mono text-sm">
-                    {formatValue(order.avgPrice, order.executedQty)}
-                  </span>
-                  <span className="text-xs text-gray-500 ml-1">Filled</span>
-                </div>
+                </>
               )}
+
+              {/* Timestamp - Story 7.19: Using timezone-aware formatter */}
+              {order ? (
+                <div className="text-xs text-gray-500 ml-3">
+                  {formatTime(order.time)}
+                </div>
+              ) : null}
             </>
           )}
-
-          {/* Timestamp - Story 7.19: Using timezone-aware formatter */}
-          {type === 'POSITION' && positionState ? (
-            <div className="text-xs text-gray-500 ml-3">
-              {formatTime(positionState.entryFilledAt)}
-            </div>
-          ) : order ? (
-            <div className="text-xs text-gray-500 ml-3">
-              {formatTime(order.time)}
-            </div>
-          ) : null}
         </div>
       </div>
 
-      {/* Expanded modification history - Story 7.21: Inline row display */}
+      {/* Expanded modification history - Rendered as child tree nodes */}
       {expanded && isModifiable && (
-        <div className="mt-2" style={{ marginLeft: `${(depth + 1) * 24}px` }}>
+        <div className="mt-1 space-y-1">
           {loadingMods ? (
-            <div className="text-sm text-gray-500 animate-pulse py-2">
+            <div className="text-sm text-gray-500 animate-pulse py-2" style={{ marginLeft: `${(depth + 1) * 24}px` }}>
               Loading modification history...
             </div>
           ) : localModifications.length > 0 ? (
-            <div className="bg-gray-900/50 rounded-lg p-3 border border-gray-700/50">
-              {/* Header with summary stats */}
-              {(() => {
-                const summary = calculateSummaryStats(localModifications);
-                return (
-                  <div className="flex items-center gap-3 mb-2 pb-2 border-b border-gray-700/50 text-xs">
-                    <span className="flex items-center gap-1 text-gray-400">
-                      <History className="w-3.5 h-3.5 text-purple-400" />
-                      {summary.totalModifications} modification{summary.totalModifications !== 1 ? 's' : ''}
-                    </span>
-                    <span className="text-gray-600">|</span>
-                    <span className="text-gray-400">
-                      Initial: <span className="font-mono text-gray-300">${(summary.initialPrice ?? 0).toFixed(2)}</span>
-                    </span>
-                    <span className="text-gray-600">|</span>
-                    <span className="text-gray-400">
-                      Current: <span className="font-mono text-green-400">${(displayPrice ?? 0).toFixed(2)}</span>
-                    </span>
-                    <span className="text-gray-600">|</span>
-                    <span className={`font-medium ${(summary.netDollarImpact ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      Net: {formatDollarImpact(summary.netDollarImpact ?? 0)}
-                    </span>
-                    {/* Source breakdown */}
-                    <span className="ml-auto flex items-center gap-2 text-gray-500">
-                      {summary.sources.llmAuto > 0 && (
-                        <span className="text-purple-400">AI: {summary.sources.llmAuto}</span>
-                      )}
-                      {summary.sources.userManual > 0 && (
-                        <span className="text-blue-400">Manual: {summary.sources.userManual}</span>
-                      )}
-                      {summary.sources.trailingStop > 0 && (
-                        <span className="text-yellow-400">Trail: {summary.sources.trailingStop}</span>
-                      )}
-                    </span>
-                  </div>
-                );
-              })()}
-              {/* Modification row list */}
-              <ModificationRowList
-                events={localModifications}
-                orderType={type as ModifiableOrderType}
-                formatTime={formatTime}
-              />
-            </div>
+            <>
+              {/* Render each modification as a child tree node */}
+              {localModifications
+                .sort((a, b) => a.version - b.version)
+                .map((mod, idx) => (
+                  <ModificationTreeNode
+                    key={mod.id || idx}
+                    modification={mod}
+                    parentType={type}
+                    depth={depth + 1}
+                    isLast={idx === localModifications.length - 1}
+                    formatTime={formatTime}
+                  />
+                ))
+              }
+            </>
           ) : (
-            <div className="text-sm text-gray-500 py-2">
+            <div className="text-sm text-gray-500 py-2" style={{ marginLeft: `${(depth + 1) * 24}px` }}>
               No modification history available.
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// Sub-component for rendering a single modification as a tree node
+interface ModificationTreeNodeProps {
+  modification: ModificationEvent;
+  parentType: TreeNodeType;
+  depth: number;
+  isLast: boolean;
+  formatTime?: (timestamp: string | number) => string;
+}
+
+function ModificationTreeNode({
+  modification,
+  parentType,
+  depth,
+  isLast,
+  formatTime = defaultFormatTime,
+}: ModificationTreeNodeProps) {
+  // Tree connector characters
+  const getConnector = () => {
+    if (depth === 0) return '';
+    return isLast ? '\u2514\u2500\u2500 ' : '\u251C\u2500\u2500 '; // └── or ├──
+  };
+
+  // Determine the display for this modification
+  const isInitialPlacement = modification.eventType === 'PLACED' && modification.version === 1;
+  const isPriceChange = modification.eventType === 'MODIFIED';
+
+  // Get source display info
+  const getSourceDisplay = () => {
+    switch (modification.modificationSource) {
+      case 'LLM_AUTO':
+        return { label: 'AI', color: 'text-purple-400', bg: 'bg-purple-500/20', icon: '🤖' };
+      case 'USER_MANUAL':
+        return { label: 'Manual', color: 'text-blue-400', bg: 'bg-blue-500/20', icon: '👤' };
+      case 'TRAILING_STOP':
+        return { label: 'Trail', color: 'text-yellow-400', bg: 'bg-yellow-500/20', icon: '📈' };
+      default:
+        return { label: 'Unknown', color: 'text-gray-400', bg: 'bg-gray-500/20', icon: '•' };
+    }
+  };
+
+  const sourceDisplay = getSourceDisplay();
+
+  // Determine impact color
+  const getImpactColor = () => {
+    if (isInitialPlacement) return 'text-gray-400';
+    if (modification.impactDirection === 'BETTER' || modification.impactDirection === 'TIGHTER') return 'text-green-400';
+    if (modification.impactDirection === 'WORSE' || modification.impactDirection === 'WIDER') return 'text-red-400';
+    return 'text-gray-400';
+  };
+
+  const bgColor = isInitialPlacement
+    ? 'bg-gray-800/30'
+    : modification.impactDirection === 'BETTER' || modification.impactDirection === 'TIGHTER'
+    ? 'bg-green-900/20'
+    : modification.impactDirection === 'WORSE' || modification.impactDirection === 'WIDER'
+    ? 'bg-red-900/20'
+    : 'bg-gray-800/30';
+
+  return (
+    <div className="flex items-start">
+      {/* Tree connector */}
+      <span className="font-mono text-gray-600 select-none whitespace-pre" style={{ minWidth: `${depth * 24}px` }}>
+        {getConnector()}
+      </span>
+
+      {/* Modification content */}
+      <div className={`flex-1 flex items-center gap-2 px-2 py-1.5 rounded-lg ${bgColor} border border-gray-700/30 text-xs`}>
+        {/* Version badge */}
+        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700 text-gray-300 font-mono text-[10px]">
+          {modification.version}
+        </span>
+
+        {/* Event type */}
+        {isInitialPlacement ? (
+          <span className="text-gray-400">Initial</span>
+        ) : (
+          <span className={getImpactColor()}>
+            {modification.impactDirection === 'TIGHTER' ? '↑ Tightened' :
+             modification.impactDirection === 'WIDER' ? '↓ Widened' :
+             modification.impactDirection === 'BETTER' ? '↑ Improved' :
+             modification.impactDirection === 'WORSE' ? '↓ Reduced' : 'Modified'}
+          </span>
+        )}
+
+        {/* Source badge */}
+        <span className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${sourceDisplay.bg} ${sourceDisplay.color}`}>
+          <span>{sourceDisplay.icon}</span>
+          <span>{sourceDisplay.label}</span>
+        </span>
+
+        {/* Price change */}
+        {isPriceChange && modification.oldPrice !== null && (
+          <span className="text-gray-400 font-mono">
+            ${(modification.oldPrice ?? 0).toFixed(2)} → ${(modification.newPrice ?? 0).toFixed(2)}
+          </span>
+        )}
+        {isInitialPlacement && (
+          <span className="text-gray-400 font-mono">
+            ${(modification.newPrice ?? 0).toFixed(2)}
+          </span>
+        )}
+
+        {/* Dollar impact */}
+        {modification.dollarImpact !== 0 && !isInitialPlacement && (
+          <span className={`font-medium ${(modification.dollarImpact ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {(modification.dollarImpact ?? 0) >= 0 ? '+' : ''}{formatDollarImpact(modification.dollarImpact ?? 0)}
+          </span>
+        )}
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Reason (truncated) */}
+        {modification.modificationReason && !isInitialPlacement && (
+          <span className="text-gray-500 truncate max-w-[200px]" title={modification.modificationReason}>
+            {modification.modificationReason}
+          </span>
+        )}
+
+        {/* Timestamp */}
+        <span className="text-gray-500">
+          {formatTime(modification.createdAt)}
+        </span>
+      </div>
     </div>
   );
 }

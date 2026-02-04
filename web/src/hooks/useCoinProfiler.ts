@@ -58,6 +58,19 @@ export interface StrategyRef {
   mode: string;
   strategy: string;
   sub_strategy: string;
+  // Capacity fields (added by backend when available)
+  current_positions?: number;
+  max_positions?: number;
+  capacity_status?: 'available' | 'limited' | 'at_limit';
+}
+
+export interface StrategyCapacityInfo {
+  mode: string;
+  strategy_group: string;
+  sub_strategy: string;
+  current_positions: number;
+  max_positions: number;
+  capacity_status: 'available' | 'limited' | 'at_limit';
 }
 
 export interface PositionRequirement {
@@ -89,6 +102,10 @@ export interface CoinProfilerRequirements {
     strategies: StrategyRef[];
     positions: PositionRequirement[];
   }>;
+  // Capacity summary for all enabled sub-strategies
+  capacity_summary?: StrategyCapacityInfo[];
+  // Maps mode to its required timeframes (e.g., {"scalp": ["3m"], "swing": ["1h"]})
+  timeframes_by_mode?: Record<string, string[]>;
 }
 
 export interface CoinProfilerActionResponse {
@@ -316,6 +333,25 @@ export interface CoinDataUpdate {
     close_time: string;
     updated_at: string;
   };
+}
+
+/**
+ * Position created event from WebSocket
+ * Broadcast when a new position is opened (entry order filled)
+ */
+export interface PositionCreatedEvent {
+  chain_id: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  entry_price: number;
+  quantity: number;
+  mode: string;
+  mode_code: string;
+  strategy_group: string;
+  sub_strategy: string;
+  timeframe: string;
+  order_id: number;
+  created_at: string;
 }
 
 /**

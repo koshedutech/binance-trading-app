@@ -56,6 +56,15 @@ type PatternUpdate struct {
 	// Volume progress (real-time volume ratio for UI display)
 	VolumeProgress *VolumeProgress `json:"volume_progress,omitempty"`
 
+	// Reference candle from Stage 1 (persisted into Stage 2+ for context)
+	ReferenceCandle *ReferenceCandle `json:"reference_candle,omitempty"`
+
+	// Price context for UI progress bars
+	CurrentPrice    float64 `json:"current_price,omitempty"`    // Current market price
+	DayHigh         float64 `json:"day_high,omitempty"`         // Day's high price
+	DayLow          float64 `json:"day_low,omitempty"`          // Day's low price
+	VolumeThreshold float64 `json:"volume_threshold,omitempty"` // Volume threshold (e.g., 3.0 for 3x)
+
 	// Direction - the actual direction being tracked (long/short)
 	Direction string `json:"direction,omitempty"`
 
@@ -118,8 +127,12 @@ type VolumeProgressCallback func(progress VolumeProgress)
 
 // BreakoutCallback is called immediately when tick-level breakout is detected.
 // This enables instant order execution without waiting for scan cycle.
-// Parameters: symbol, direction ("long"/"short"), mode, price at breakout
-type BreakoutCallback func(symbol, direction, mode string, price float64)
+// Parameters: symbol, direction ("long"/"short"), mode, strategyGroup, subStrategy, price at breakout
+type BreakoutCallback func(symbol, direction, mode, strategyGroup, subStrategy string, price float64)
+
+// CapacityChecker is called to check if there's capacity for new entries.
+// Returns (canEnter bool, currentCount int, maxCount int).
+type CapacityChecker func() (bool, int, int)
 
 // RealtimePatternMatcher handles real-time pattern evaluation on candle close events.
 type RealtimePatternMatcher struct {
@@ -134,6 +147,10 @@ type RealtimePatternMatcher struct {
 
 	// Callback for immediate breakout order execution
 	onBreakout BreakoutCallback
+
+	// Capacity checker - called before triggering breakout to check if entry is allowed
+	// This enables proactive capacity management: when at limit, breakouts are skipped
+	capacityChecker CapacityChecker
 
 	// User identification for targeted broadcasts
 	userID string
@@ -213,6 +230,18 @@ func (r *RealtimePatternMatcher) SetBreakoutCallback(callback BreakoutCallback) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onBreakout = callback
+}
+
+// SetCapacityChecker sets the capacity checker function.
+// This function is called before triggering a breakout to check if new entries are allowed.
+// If the checker returns false (at capacity), the breakout is logged but not executed.
+// This enables proactive capacity management - pattern matching continues for UI display,
+// but no orders are placed when at max_concurrent_trades limit.
+func (r *RealtimePatternMatcher) SetCapacityChecker(checker CapacityChecker) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.capacityChecker = checker
+	log.Printf("[REALTIME-PATTERN] Capacity checker registered for proactive limit enforcement")
 }
 
 // OnVolumeProgress is called on every tick with volume progress data from CoinProfiler.
@@ -539,14 +568,61 @@ func (r *RealtimePatternMatcher) buildPatternUpdate(
 		UpdatedAt:   time.Now(),
 	}
 
-	// Get pattern state for entry levels
+	// Calculate current price and day high/low from candles
+	var currentPrice float64
+	var dayHigh, dayLow float64
+	if len(candles) > 0 {
+		currentPrice = candles[len(candles)-1].Close
+		update.CurrentPrice = currentPrice
+
+		// Calculate day high/low from recent candles (last 24 for daily context)
+		lookback := min(len(candles), 96) // ~24h worth of 15m candles or ~8h of 5m candles
+		dayHigh = candles[len(candles)-1].High
+		dayLow = candles[len(candles)-1].Low
+		for i := len(candles) - lookback; i < len(candles); i++ {
+			if candles[i].High > dayHigh {
+				dayHigh = candles[i].High
+			}
+			if candles[i].Low < dayLow {
+				dayLow = candles[i].Low
+			}
+		}
+		update.DayHigh = dayHigh
+		update.DayLow = dayLow
+	}
+
+	// Get pattern state for entry levels and reference candle
 	state := r.getPatternState(symbol, progress.Mode, timeframe)
 	if state != nil {
 		update.Direction = state.Direction
 
+		// Get volume threshold from config
+		if r.patternMatcher != nil {
+			update.VolumeThreshold = r.patternMatcher.config.MinVolumeSpikeMultiplier
+		}
+
+		// Include reference candle data for Stage 2+ context display
+		// This shows where the volume spike occurred
+		if state.ReferenceCandle != nil && progress.CurrentStep >= 2 {
+			// Convert internal Candle type to ReferenceCandle type for the update
+			volumeMultiplier := 0.0
+			if state.AverageVolumeAtSpike > 0 {
+				volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+			}
+			update.ReferenceCandle = &ReferenceCandle{
+				OpenTime:         state.ReferenceCandle.OpenTime,
+				CloseTime:        state.ReferenceCandle.Time, // Time is close time
+				Open:             state.ReferenceCandle.Open,
+				High:             state.ReferenceCandle.High,
+				Low:              state.ReferenceCandle.Low,
+				Close:            state.ReferenceCandle.Close,
+				Volume:           state.ReferenceCandle.Volume,
+				VolumeMultiplier: volumeMultiplier,
+			}
+		}
+
 		// Calculate entry levels if we have enough state
-		if state.ReferenceCandle != nil && len(candles) > 0 {
-			currentPrice := candles[len(candles)-1].Close
+		if state.ReferenceCandle != nil && currentPrice > 0 {
 			update.EntryLevels = r.calculateEntryLevels(state, currentPrice)
 		}
 	}
@@ -773,6 +849,7 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 	r.mu.RLock()
 	callback := r.onPatternUpdate
 	breakoutCallback := r.onBreakout
+	capacityChecker := r.capacityChecker
 	userID := r.userID
 	r.mu.RUnlock()
 
@@ -781,31 +858,51 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		log.Printf("[REALTIME-BREAKOUT] %s:%s - TICK-LEVEL BREAKOUT! Direction: %s, Price: %.6f",
 			symbol, timeframe, state.Direction, price)
 
+		// PROACTIVE CAPACITY CHECK: Before triggering entry, check if we have capacity
+		// This prevents wasteful order attempts when max_concurrent_trades is reached
+		canEnter := true
+		if capacityChecker != nil {
+			var currentCount, maxCount int
+			canEnter, currentCount, maxCount = capacityChecker()
+			if !canEnter {
+				log.Printf("[REALTIME-BREAKOUT] BLOCKED: max_concurrent_trades reached (%d/%d) - skipping breakout entry for %s",
+					currentCount, maxCount, symbol)
+				// Pattern is still marked as ready (breakout detected) but no order is placed
+				// When capacity opens, user can manually trigger or wait for next pattern
+			}
+		}
+
 		// Mark pattern as ready (breakout detected)
 		r.patternMatcher.mu.Lock()
 		patternKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
 		internalProgress := r.patternMatcher.patterns[patternKey]
 		if internalProgress != nil && internalProgress.Status != PatternStatusReady {
 			// Mark Step 2 as complete
+			statusDetail := fmt.Sprintf("Tick-level breakout! %s @ %.6f", state.Direction, price)
+			if !canEnter {
+				statusDetail = fmt.Sprintf("BREAKOUT DETECTED but blocked by max_concurrent_trades limit! %s @ %.6f", state.Direction, price)
+			}
 			internalProgress.StepDetails[1] = StepDetail{
 				StepNumber:  2,
 				Name:        "Breakout",
 				Completed:   true,
 				CompletedAt: time.Now(),
 				Progress:    "LIVE",
-				Details:     fmt.Sprintf("Tick-level breakout! %s @ %.6f", state.Direction, price),
+				Details:     statusDetail,
 			}
 			internalProgress.SetStatus(PatternStatusReady)
 			internalProgress.UpdatedAt = time.Now()
 		}
 		r.patternMatcher.mu.Unlock()
 
-		// CRITICAL: Trigger immediate order execution callback
+		// CRITICAL: Only trigger entry callback if capacity is available
 		// This enables instant order placement the moment breakout occurs
-		if breakoutCallback != nil {
+		if breakoutCallback != nil && canEnter {
 			log.Printf("[REALTIME-BREAKOUT] Triggering immediate entry callback for %s: %s @ %.6f",
 				symbol, state.Direction, price)
-			go breakoutCallback(symbol, state.Direction, mode, price)
+			// Pass strategy identifiers for proper budget/leverage loading
+			// This is the Ravindra Volume Imbalance strategy which is always: breakout/ravindra_volume_imbalance
+			go breakoutCallback(symbol, state.Direction, mode, "breakout", "ravindra_volume_imbalance", price)
 		}
 
 		// Get updated progress for broadcast
@@ -839,20 +936,47 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 			}
 		}
 
+		// Get volume threshold from config
+		volumeThreshold := 3.0
+		if r.patternMatcher != nil {
+			volumeThreshold = r.patternMatcher.config.MinVolumeSpikeMultiplier
+		}
+
 		update := PatternUpdate{
-			UserID:      userID,
-			Symbol:      symbol,
-			Timeframe:   timeframe,
-			Mode:        progress.Mode,
-			Strategy:    progress.Strategy,
-			SubStrategy: progress.SubStrategy,
-			CurrentStep: progress.CurrentStep,
-			TotalSteps:  progress.TotalSteps,
-			Status:      progress.Status,
-			StepDetails: stepDetails,
-			Direction:   state.Direction,
-			LookingFor:  r.getLookingForDirection(),
-			UpdatedAt:   time.Now(),
+			UserID:          userID,
+			Symbol:          symbol,
+			Timeframe:       timeframe,
+			Mode:            progress.Mode,
+			Strategy:        progress.Strategy,
+			SubStrategy:     progress.SubStrategy,
+			CurrentStep:     progress.CurrentStep,
+			TotalSteps:      progress.TotalSteps,
+			Status:          progress.Status,
+			StepDetails:     stepDetails,
+			Direction:       state.Direction,
+			LookingFor:      r.getLookingForDirection(),
+			CurrentPrice:    price,
+			VolumeThreshold: volumeThreshold,
+			UpdatedAt:       time.Now(),
+		}
+
+		// Include reference candle for Stage 2 context display
+		if state.ReferenceCandle != nil && progress.CurrentStep >= 2 {
+			// Convert internal Candle to ReferenceCandle type
+			volumeMultiplier := 0.0
+			if state.AverageVolumeAtSpike > 0 {
+				volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+			}
+			update.ReferenceCandle = &ReferenceCandle{
+				OpenTime:         state.ReferenceCandle.OpenTime,
+				CloseTime:        state.ReferenceCandle.Time,
+				Open:             state.ReferenceCandle.Open,
+				High:             state.ReferenceCandle.High,
+				Low:              state.ReferenceCandle.Low,
+				Close:            state.ReferenceCandle.Close,
+				Volume:           state.ReferenceCandle.Volume,
+				VolumeMultiplier: volumeMultiplier,
+			}
 		}
 
 		// Calculate and include entry levels with current price
