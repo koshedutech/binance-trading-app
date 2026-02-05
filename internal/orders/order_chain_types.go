@@ -4,6 +4,7 @@
 package orders
 
 import (
+	"encoding/json"
 	"time"
 )
 
@@ -143,6 +144,9 @@ type OrderChain struct {
 	// P&L
 	RealizedPnL *float64 `json:"realized_pnl,omitempty"`
 	TotalFees   *float64 `json:"total_fees,omitempty"`
+
+	// Entry decision context (stored as JSON, populated when order is placed)
+	EntryContext json.RawMessage `json:"entry_context,omitempty"`
 }
 
 // ChainEvent represents a single event in the order chain lifecycle

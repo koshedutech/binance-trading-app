@@ -133,8 +133,8 @@ type VolumeProgressCallback func(progress VolumeProgress)
 
 // BreakoutCallback is called immediately when tick-level breakout is detected.
 // This enables instant order execution without waiting for scan cycle.
-// Parameters: symbol, direction ("long"/"short"), mode, strategyGroup, subStrategy, price at breakout
-type BreakoutCallback func(symbol, direction, mode, strategyGroup, subStrategy string, price float64)
+// Parameters: symbol, direction ("long"/"short"), mode, strategyGroup, subStrategy, timeframe, price at breakout
+type BreakoutCallback func(symbol, direction, mode, strategyGroup, subStrategy, timeframe string, price float64)
 
 // CapacityChecker is called to check if there's capacity for new entries.
 // Returns (canEnter bool, currentCount int, maxCount int).
@@ -1358,11 +1358,11 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		// CRITICAL: Only trigger entry callback if capacity is available
 		// This enables instant order placement the moment breakout occurs
 		if breakoutCallback != nil && canEnter {
-			log.Printf("[REALTIME-BREAKOUT] Triggering immediate entry callback for %s: %s @ %.6f",
-				symbol, state.Direction, price)
-			// Pass strategy identifiers for proper budget/leverage loading
+			log.Printf("[REALTIME-BREAKOUT] Triggering immediate entry callback for %s: %s @ %.6f (timeframe=%s)",
+				symbol, state.Direction, price, timeframe)
+			// Pass strategy identifiers and timeframe for proper budget/leverage loading
 			// This is the Ravindra Volume Imbalance strategy which is always: breakout/ravindra_volume_imbalance
-			go breakoutCallback(symbol, state.Direction, mode, "breakout", "ravindra_volume_imbalance", price)
+			go breakoutCallback(symbol, state.Direction, mode, "breakout", "ravindra_volume_imbalance", timeframe, price)
 		}
 
 		// Get updated progress for broadcast

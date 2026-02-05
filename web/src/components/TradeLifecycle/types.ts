@@ -120,6 +120,16 @@ export interface OrderChain {
   hedgePositionState?: PositionState;
   // Story 11.40: Position Analytics for Chain View
   positionAnalytics?: PositionAnalyticsData;
+  // Entry decision context (persisted from pattern detection)
+  entryContext?: {
+    direction?: string;
+    timeframe?: string;
+    entry_price?: number;
+    sl_price?: number;
+    tp_price?: number;
+    risk_amount?: number;
+    breakout_at?: string;
+  };
 }
 
 // Story 11.40: Position Analytics for Chain View

@@ -15,6 +15,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,6 +48,7 @@ type ChainCoinState struct {
 	StrategyGroup    string  // e.g., "breakout"
 	SubStrategy      string  // e.g., "ravindra_volume_imbalance"
 	Timeframe        string  // e.g., "3m", "15m"
+	Direction        string  // "LONG" or "SHORT" - set from pattern detection
 	BudgetUSD        float64 // Position size budget in USD from strategy settings
 	MaxLeverage      int     // Maximum leverage from strategy settings
 	SLPercent        float64 // Stop loss percentage (max_sl_percent) - used as GATE during pattern detection
@@ -626,10 +628,13 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		modeStr = "scalp"
 	}
 
-	// Determine direction from trend
-	direction := "LONG"
-	if state.Trend1H == "BEARISH" || state.Trend15M == "BEARISH" {
-		direction = "SHORT"
+	// Use pattern-detected direction if set, fall back to trend-based
+	direction := strings.ToUpper(state.Direction)
+	if direction == "" {
+		direction = "LONG"
+		if state.Trend1H == "BEARISH" || state.Trend15M == "BEARISH" {
+			direction = "SHORT"
+		}
 	}
 
 	log.Printf("[CHAIN-ENTRY] Executing entry for %s, mode=%s, direction=%s, score=%d",
@@ -743,7 +748,22 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		positionSide = binance.PositionSideShort
 	}
 
-	// Step 7: Create order chain - MANDATORY for chain system integrity
+	// Step 7: Build entry context from pattern detection data (for UI display)
+	var entryContextJSON json.RawMessage
+	entryCtx := map[string]interface{}{
+		"direction":   direction,
+		"timeframe":   state.Timeframe,
+		"entry_price": state.EntryPrice,
+		"sl_price":    state.SLPrice,
+		"tp_price":    state.TPPrice,
+		"risk_amount": state.RiskAmount,
+		"breakout_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if entryCtxBytes, err := json.Marshal(entryCtx); err == nil {
+		entryContextJSON = entryCtxBytes
+	}
+
+	// Step 8: Create order chain - MANDATORY for chain system integrity
 	// If database write fails, abort entry to prevent orphaned positions that Ginie picks up
 	if r.chainEventWriter != nil {
 		_, err := r.chainEventWriter.CreateChain(ctx, orders.CreateChainRequest{
@@ -757,6 +777,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			StrategyGroup: state.StrategyGroup,   // e.g., breakout
 			SubStrategy:   state.SubStrategy,     // e.g., ravindra_volume_imbalance
 			Timeframe:     state.Timeframe,       // e.g., 3m, 5m, 15m from pattern detection
+			EntryContext:  entryContextJSON,
 		})
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] ABORTED: Failed to create order chain in database - cannot place order without chain record: %v", err)
@@ -1326,10 +1347,11 @@ func (r *ChainEntryRunner) ClearAllCooldowns() {
 // - mode: Trading mode (e.g., "scalp", "swing")
 // - strategyGroup: Strategy group (e.g., "breakout")
 // - subStrategy: Sub-strategy name (e.g., "ravindra_volume_imbalance")
+// - timeframe: Candle timeframe (e.g., "3m", "5m", "15m")
 // - price: Current market price at breakout detection
 //
 // Returns error if entry cannot be executed.
-func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strategyGroup, subStrategy string, price float64) error {
+func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strategyGroup, subStrategy, timeframe string, price float64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -1388,15 +1410,27 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 	// This ensures correct R:R ratio for both LONG and SHORT positions
 	var state *ChainCoinState
 
-	// Try to get the state from pattern provider (includes actual SL/TP prices)
-	if r.stateProvider != nil {
-		// Try common timeframes for the pattern
-		for _, timeframe := range []string{"3m", "5m", "15m", "1m"} {
-			patternState, err := r.stateProvider.GetCoinStateForEntry(ctx, r.userID, symbol, mode, timeframe)
+	// Try to get the state from pattern provider using the specific timeframe from breakout
+	if r.stateProvider != nil && timeframe != "" {
+		patternState, err := r.stateProvider.GetCoinStateForEntry(ctx, r.userID, symbol, mode, timeframe)
+		if err == nil && patternState != nil && patternState.SLPrice > 0 && patternState.TPPrice > 0 {
+			state = patternState
+			log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded pattern state with actual SL/TP: symbol=%s, timeframe=%s, SL=%.6f, TP=%.6f, Risk=%.6f",
+				symbol, timeframe, state.SLPrice, state.TPPrice, state.RiskAmount)
+		}
+	}
+
+	// Fallback: try common timeframes if specific timeframe didn't work
+	if state == nil && r.stateProvider != nil {
+		for _, tf := range []string{"3m", "5m", "15m", "1m"} {
+			if tf == timeframe {
+				continue // Already tried
+			}
+			patternState, err := r.stateProvider.GetCoinStateForEntry(ctx, r.userID, symbol, mode, tf)
 			if err == nil && patternState != nil && patternState.SLPrice > 0 && patternState.TPPrice > 0 {
 				state = patternState
-				log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded pattern state with actual SL/TP: symbol=%s, SL=%.6f, TP=%.6f, Risk=%.6f",
-					symbol, state.SLPrice, state.TPPrice, state.RiskAmount)
+				log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded pattern state from fallback timeframe %s: symbol=%s, SL=%.6f, TP=%.6f",
+					tf, symbol, state.SLPrice, state.TPPrice)
 				break
 			}
 		}
@@ -1414,6 +1448,8 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 			ActiveStrategy: mode,
 			StrategyGroup:  strategyGroup,
 			SubStrategy:    subStrategy,
+			Timeframe:      timeframe,
+			Direction:      strings.ToUpper(direction),
 			Decision:       "READY",
 			Trend1H:        trend,
 			Trend15M:       trend,
@@ -1426,6 +1462,11 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 		state.SubStrategy = subStrategy
 		state.ActiveStrategy = mode
 		state.Price = price // Use current breakout price
+		// Ensure direction from breakout callback is used (pattern may already have it,
+		// but callback direction is authoritative)
+		if direction != "" {
+			state.Direction = strings.ToUpper(direction)
+		}
 	}
 
 	// Load budget and leverage from user settings

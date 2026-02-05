@@ -1269,6 +1269,9 @@ type GinieAutopilot struct {
 	// Position tracking
 	positions map[string]*GiniePosition
 
+	// WebSocket broadcast callback for CHAIN_CLOSED events
+	onOrderUpdate func(userID string, order map[string]interface{})
+
 	// Per-coin blocking for big losses
 	blockedCoins     map[string]*CoinBlockInfo // Coins blocked due to big losses
 	coinConsecLosses map[string]int            // Track consecutive losses per coin
@@ -8491,6 +8494,11 @@ func (ga *GinieAutopilot) SetChainEventWriter(writer *orders.ChainEventWriter) {
 	ga.chainEventWriter = writer
 }
 
+// SetOrderUpdateCallback sets the WebSocket broadcast callback for chain events (CHAIN_CLOSED etc.)
+func (ga *GinieAutopilot) SetOrderUpdateCallback(callback func(userID string, order map[string]interface{})) {
+	ga.onOrderUpdate = callback
+}
+
 // GetChainEventWriter returns the chain event writer (for testing/API access)
 func (ga *GinieAutopilot) GetChainEventWriter() *orders.ChainEventWriter {
 	return ga.chainEventWriter
@@ -13617,7 +13625,81 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 		}
 	}
 
-	// Also update tracked position state if we have it
+	// CRITICAL: Record SL/TP fill event and close chain in database BEFORE checking pos.
+	// This ensures chain close is recorded for BOTH GinieAutopilot and Chain Entry positions.
+	// Chain Entry positions are NOT tracked in ga.positions, so the pos == nil check below
+	// would skip this recording if it came after.
+	if ga.chainEventWriter != nil && (isSLFill || isTPFill) {
+		ctx := context.Background()
+		activeChains, err := ga.chainEventWriter.GetActiveChains(ctx, ga.userID)
+		if err != nil {
+			ga.logger.Warn("Failed to get active chains for SL/TP fill recording",
+				"symbol", symbol,
+				"error", err.Error())
+		} else {
+			// Find matching chain by symbol
+			var matchedChainID string
+			for _, chain := range activeChains {
+				if chain.Symbol == symbol {
+					matchedChainID = chain.ChainID
+					break
+				}
+			}
+
+			if matchedChainID != "" {
+				var closeReason string
+				if isSLFill {
+					closeReason = string(orders.CloseReasonSLHit)
+					if err := ga.chainEventWriter.RecordSLFilled(ctx, matchedChainID, orders.ChainSLFilledEvent{
+						FilledPrice:     filledPrice,
+						PnL:             realizedProfit,
+						Fees:            commission,
+						BinanceTimestamp: binanceTimestamp,
+					}); err != nil {
+						ga.logger.Warn("Failed to record SL filled event",
+							"chain_id", matchedChainID, "error", err.Error())
+					}
+				} else if isTPFill {
+					closeReason = string(orders.CloseReasonTPHit)
+					if err := ga.chainEventWriter.RecordTPFilled(ctx, matchedChainID, orders.ChainTPFilledEvent{
+						FilledPrice:     filledPrice,
+						PnL:             realizedProfit,
+						Fees:            commission,
+						BinanceTimestamp: binanceTimestamp,
+					}); err != nil {
+						ga.logger.Warn("Failed to record TP filled event",
+							"chain_id", matchedChainID, "error", err.Error())
+					}
+				}
+
+				if err := ga.chainEventWriter.CloseChain(ctx, matchedChainID,
+					closeReason, realizedProfit, commission); err != nil {
+					ga.logger.Warn("Failed to close chain after SL/TP fill",
+						"chain_id", matchedChainID, "error", err.Error())
+				} else {
+					ga.logger.Info("Chain closed after SL/TP fill",
+						"chain_id", matchedChainID, "symbol", symbol,
+						"close_reason", closeReason, "pnl", realizedProfit)
+
+					// Broadcast CHAIN_CLOSED to frontend for immediate UI update
+					if ga.onOrderUpdate != nil && ga.userID != "" {
+						ga.onOrderUpdate(ga.userID, map[string]interface{}{
+							"type":         "CHAIN_CLOSED",
+							"chain_id":     matchedChainID,
+							"symbol":       symbol,
+							"close_reason": closeReason,
+							"realized_pnl": realizedProfit,
+						})
+					}
+				}
+			} else {
+				ga.logger.Debug("No active chain found for SL/TP fill recording",
+					"symbol", symbol, "order_type", orderType)
+			}
+		}
+	}
+
+	// Update tracked position state if we have it (Ginie positions only)
 	var pos *GiniePosition
 	for _, p := range ga.positions {
 		if p.Symbol == symbol {
@@ -13641,71 +13723,6 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 	// Clear tracked order IDs since we already cancelled all algo orders above
 	pos.TakeProfitAlgoIDs = nil
 	pos.StopLossAlgoID = 0
-
-	// Record SL/TP fill event and close chain in database
-	if ga.chainEventWriter != nil && (isSLFill || isTPFill) {
-		ctx := context.Background()
-		activeChains, err := ga.chainEventWriter.GetActiveChains(ctx, ga.userID)
-		if err != nil {
-			ga.logger.Warn("Failed to get active chains for SL/TP fill recording",
-				"symbol", symbol,
-				"error", err.Error())
-		} else {
-			// Find matching chain by symbol
-			var matchedChainID string
-			for _, chain := range activeChains {
-				if chain.Symbol == symbol {
-					matchedChainID = chain.ChainID
-					break
-				}
-			}
-
-			if matchedChainID != "" {
-				if isSLFill {
-					if err := ga.chainEventWriter.RecordSLFilled(ctx, matchedChainID, orders.ChainSLFilledEvent{
-						FilledPrice:     filledPrice,
-						PnL:             realizedProfit,
-						Fees:            commission,
-						BinanceTimestamp: binanceTimestamp,
-					}); err != nil {
-						ga.logger.Warn("Failed to record SL filled event",
-							"chain_id", matchedChainID, "error", err.Error())
-					}
-					if err := ga.chainEventWriter.CloseChain(ctx, matchedChainID,
-						string(orders.CloseReasonSLHit), realizedProfit, commission); err != nil {
-						ga.logger.Warn("Failed to close chain after SL fill",
-							"chain_id", matchedChainID, "error", err.Error())
-					} else {
-						ga.logger.Info("Chain closed after SL fill",
-							"chain_id", matchedChainID, "symbol", symbol,
-							"pnl", realizedProfit)
-					}
-				} else if isTPFill {
-					if err := ga.chainEventWriter.RecordTPFilled(ctx, matchedChainID, orders.ChainTPFilledEvent{
-						FilledPrice:     filledPrice,
-						PnL:             realizedProfit,
-						Fees:            commission,
-						BinanceTimestamp: binanceTimestamp,
-					}); err != nil {
-						ga.logger.Warn("Failed to record TP filled event",
-							"chain_id", matchedChainID, "error", err.Error())
-					}
-					if err := ga.chainEventWriter.CloseChain(ctx, matchedChainID,
-						string(orders.CloseReasonTPHit), realizedProfit, commission); err != nil {
-						ga.logger.Warn("Failed to close chain after TP fill",
-							"chain_id", matchedChainID, "error", err.Error())
-					} else {
-						ga.logger.Info("Chain closed after TP fill",
-							"chain_id", matchedChainID, "symbol", symbol,
-							"pnl", realizedProfit)
-					}
-				}
-			} else {
-				ga.logger.Debug("No active chain found for SL/TP fill recording",
-					"symbol", symbol, "order_type", orderType)
-			}
-		}
-	}
 
 	// Note: Position removal is handled by the account/position update stream
 	// when Binance reports the position as closed (quantity = 0)

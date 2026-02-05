@@ -718,9 +718,9 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	// Epic 14: Wire immediate breakout callback for instant order execution
 	// This enables orders to be placed the MOMENT price breaks out, not waiting for scan cycle.
-	realtimeMatcher.SetBreakoutCallback(func(symbol, direction, mode, strategyGroup, subStrategy string, price float64) {
-		if err := chainEntryRunner.ExecuteImmediateEntry(symbol, direction, mode, strategyGroup, subStrategy, price); err != nil {
-			m.logger.Error("Immediate breakout entry failed", "symbol", symbol, "direction", direction, "error", err)
+	realtimeMatcher.SetBreakoutCallback(func(symbol, direction, mode, strategyGroup, subStrategy, timeframe string, price float64) {
+		if err := chainEntryRunner.ExecuteImmediateEntry(symbol, direction, mode, strategyGroup, subStrategy, timeframe, price); err != nil {
+			m.logger.Error("Immediate breakout entry failed", "symbol", symbol, "direction", direction, "timeframe", timeframe, "error", err)
 		}
 	})
 	m.logger.Info("Breakout callback wired for immediate order execution", "user_id", userID)

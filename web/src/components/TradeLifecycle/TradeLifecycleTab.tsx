@@ -232,6 +232,8 @@ export default function TradeLifecycleTab({
         new_engine_scores: apiChain.position_analytics.new_engine_scores,
         unrealized_pnl: apiChain.position_analytics.unrealized_pnl,
       } : undefined,
+      // Entry decision context from pattern detection
+      entryContext: apiChain.entry_context || undefined,
     };
   };
 
@@ -1595,6 +1597,40 @@ export default function TradeLifecycleTab({
                                           {progressToTP > 0 ? `${progressToTP.toFixed(0)}% to TP` : ''}
                                         </span>
                                       </div>
+                                    </>
+                                  );
+                                })()}
+                              </div>
+                            )}
+
+                            {/* Expected TP Profit & SL Loss */}
+                            {tp1Price > 0 && slPrice > 0 && entryPrice > 0 && remainingQty > 0 && (
+                              <div className="flex items-center justify-between text-xs mb-2 px-1">
+                                {(() => {
+                                  const feeRate = 0.0004; // 0.04% taker fee
+                                  const entryFee = entryPrice * remainingQty * feeRate;
+
+                                  // Expected TP Profit
+                                  const tpPriceChange = isLong ? tp1Price - entryPrice : entryPrice - tp1Price;
+                                  const tpGrossPnl = tpPriceChange * remainingQty;
+                                  const tpExitFee = tp1Price * remainingQty * feeRate;
+                                  const expectedTpProfit = tpGrossPnl - entryFee - tpExitFee;
+
+                                  // Expected SL Loss
+                                  const slPriceChange = isLong ? slPrice - entryPrice : entryPrice - slPrice;
+                                  const slGrossPnl = slPriceChange * remainingQty;
+                                  const slExitFee = slPrice * remainingQty * feeRate;
+                                  const expectedSlLoss = slGrossPnl - entryFee - slExitFee;
+
+                                  return (
+                                    <>
+                                      <span className="text-green-400">
+                                        TP: +${expectedTpProfit.toFixed(2)}
+                                      </span>
+                                      <span className="text-gray-600">|</span>
+                                      <span className="text-red-400">
+                                        SL: {expectedSlLoss >= 0 ? '+' : ''}${expectedSlLoss.toFixed(2)}
+                                      </span>
                                     </>
                                   );
                                 })()}

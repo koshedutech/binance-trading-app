@@ -4819,6 +4819,16 @@ export interface OrderChainWithState {
   filled_value: number;
   created_at: number;
   updated_at: number;
+  // Entry decision context from pattern detection (persisted in DB)
+  entry_context?: {
+    direction?: string;
+    timeframe?: string;
+    entry_price?: number;
+    sl_price?: number;
+    tp_price?: number;
+    risk_amount?: number;
+    breakout_at?: string;
+  };
 }
 
 export interface OrderChainsWithStateResponse {

@@ -10,6 +10,7 @@ package orders
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -181,6 +182,9 @@ type CreateChainRequest struct {
 	StrategyGroup string // e.g., "breakout", "trending"
 	SubStrategy   string // e.g., "ravindra_volume_imbalance"
 	Timeframe     string // e.g., "3m", "5m", "15m" - from pattern detection
+
+	// Entry decision context (reference candle data, volume multiplier, etc.)
+	EntryContext json.RawMessage
 }
 
 // CreateChain creates a new order chain when an entry order is about to be placed
@@ -197,6 +201,7 @@ func (w *ChainEventWriter) CreateChain(ctx context.Context, req CreateChainReque
 		StrategyGroup: req.StrategyGroup,
 		SubStrategy:   req.SubStrategy,
 		Timeframe:     req.Timeframe,
+		EntryContext:  req.EntryContext,
 	}
 
 	if req.ParentChainID != "" {

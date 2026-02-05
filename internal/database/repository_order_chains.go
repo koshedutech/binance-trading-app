@@ -27,7 +27,8 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			mode, strategy_group, sub_strategy, timeframe
+			mode, strategy_group, sub_strategy, timeframe,
+			entry_context
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10,
@@ -38,7 +39,8 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			$21, $22, $23, $24,
 			$25, $26, $27, $28,
 			$29, $30,
-			$31, $32, $33, $34
+			$31, $32, $33, $34,
+			$35
 		)
 		ON CONFLICT (user_id, chain_id) DO UPDATE SET
 			status = EXCLUDED.status,
@@ -66,7 +68,8 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			mode = COALESCE(EXCLUDED.mode, order_chains.mode),
 			strategy_group = COALESCE(EXCLUDED.strategy_group, order_chains.strategy_group),
 			sub_strategy = COALESCE(EXCLUDED.sub_strategy, order_chains.sub_strategy),
-			timeframe = COALESCE(EXCLUDED.timeframe, order_chains.timeframe)
+			timeframe = COALESCE(EXCLUDED.timeframe, order_chains.timeframe),
+			entry_context = COALESCE(EXCLUDED.entry_context, order_chains.entry_context)
 		RETURNING id, created_at`
 
 	now := time.Now()
@@ -112,6 +115,7 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 		chain.StrategyGroup,
 		chain.SubStrategy,
 		chain.Timeframe,
+		chain.EntryContext,
 	).Scan(&chain.ID, &chain.CreatedAt)
 
 	if err != nil {
@@ -204,7 +208,7 @@ func (db *DB) GetOrderChainByID(ctx context.Context, userID, chainID string) (*o
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 		FROM order_chains
 		WHERE user_id = $1 AND chain_id = $2`
 
@@ -245,6 +249,7 @@ func (db *DB) GetOrderChainByID(ctx context.Context, userID, chainID string) (*o
 		&chain.StrategyGroup,
 		&chain.SubStrategy,
 		&chain.Timeframe,
+		&chain.EntryContext,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -275,7 +280,7 @@ func (db *DB) GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 		FROM order_chains
 		WHERE chain_id = $1`
 
@@ -316,6 +321,7 @@ func (db *DB) GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*
 		&chain.StrategyGroup,
 		&chain.SubStrategy,
 		&chain.Timeframe,
+		&chain.EntryContext,
 	)
 
 	if err == pgx.ErrNoRows {
@@ -348,7 +354,7 @@ func (db *DB) GetOrderChainsByUserID(ctx context.Context, userID string, status 
 				sl_modification_count, tp_modification_count, event_count, last_event_seq,
 				created_at, updated_at, closed_at, close_reason,
 				realized_pnl, total_fees,
-				COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+				COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 			FROM order_chains
 			WHERE user_id = $1 AND status = $2
 			ORDER BY created_at DESC`
@@ -364,7 +370,7 @@ func (db *DB) GetOrderChainsByUserID(ctx context.Context, userID string, status 
 				sl_modification_count, tp_modification_count, event_count, last_event_seq,
 				created_at, updated_at, closed_at, close_reason,
 				realized_pnl, total_fees,
-				COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+				COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 			FROM order_chains
 			WHERE user_id = $1
 			ORDER BY created_at DESC`
@@ -396,7 +402,7 @@ func (db *DB) GetActiveOrderChains(ctx context.Context, userID string) ([]*order
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 		FROM order_chains
 		WHERE user_id = $1 AND status IN ('ACTIVE', 'PARTIAL')
 		ORDER BY created_at DESC`
@@ -428,7 +434,7 @@ func (db *DB) GetOrderChainsByChainIDs(ctx context.Context, userID string, chain
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 		FROM order_chains
 		WHERE user_id = $1 AND chain_id = ANY($2)`
 
@@ -501,7 +507,7 @@ func (db *DB) GetRecentOrderChains(ctx context.Context, userID string, limit int
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 		FROM order_chains
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -545,7 +551,7 @@ func (db *DB) GetOrderChainsWithFilter(ctx context.Context, filter OrderChainFil
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
 		FROM order_chains
 		WHERE user_id = $1`
 
@@ -771,6 +777,7 @@ func scanOrderChains(rows pgx.Rows) ([]*orders.OrderChain, error) {
 			&chain.StrategyGroup,
 			&chain.SubStrategy,
 			&chain.Timeframe,
+			&chain.EntryContext,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan order chain row: %w", err)

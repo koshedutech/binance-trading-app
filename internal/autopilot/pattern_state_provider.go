@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/entrydecision"
@@ -167,6 +168,7 @@ func (p *PatternStateProvider) patternToChainState(
 		ActiveStrategy: pattern.Mode, // scalp, swing, position, ultra_fast
 		Decision:       "READY",      // Pattern is ready for entry
 		Regime:         "TRENDING",   // Assume trending for breakout patterns
+		Direction:      strings.ToUpper(direction), // Pattern-detected direction (LONG/SHORT)
 		Trend1H:        trend,
 		Trend15M:       trend,
 		ScoreFinal:     score,

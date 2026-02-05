@@ -1049,6 +1049,12 @@ func (fc *FuturesController) SetWebSocketCallbacks(
 	fc.onPositionUpdate = onPosition
 	fc.onOrderUpdate = onOrder
 	fc.onTradeUpdate = onTrade
+
+	// Wire onOrderUpdate to GinieAutopilot so it can broadcast CHAIN_CLOSED events
+	if fc.ginieAutopilot != nil {
+		fc.ginieAutopilot.SetOrderUpdateCallback(onOrder)
+	}
+
 	fc.logger.Info("WebSocket broadcast callbacks configured")
 }
 

@@ -93,6 +93,8 @@ interface OrderTreeNodeProps {
   entryQuantity?: number;
   // Fee rate for P&L calculation (default 0.05% = 0.0005)
   feeRate?: number;
+  // Live price for real-time position value updates
+  livePrice?: number;
 }
 
 // Get icon for node type
@@ -224,6 +226,7 @@ export default function OrderTreeNode({
   entryPrice,
   entryQuantity,
   feeRate = 0.0005,
+  livePrice,
 }: OrderTreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
@@ -413,13 +416,16 @@ export default function OrderTreeNode({
                 </div>
               )}
 
-              {/* Current Price (from analytics) */}
-              {positionAnalytics && positionAnalytics.current_price > 0 && (
-                <div className="text-right ml-3">
-                  <span className="text-blue-400 font-mono text-sm">${formatPrice(positionAnalytics.current_price)}</span>
-                  <span className="text-xs text-gray-500 ml-1">Mark</span>
-                </div>
-              )}
+              {/* Current Price (live price preferred, fallback to analytics) */}
+              {(() => {
+                const displayPrice = livePrice || positionAnalytics?.current_price || 0;
+                return displayPrice > 0 ? (
+                  <div className="text-right ml-3">
+                    <span className="text-blue-400 font-mono text-sm">${formatPrice(displayPrice)}</span>
+                    <span className="text-xs text-gray-500 ml-1">{livePrice ? 'Live' : 'Mark'}</span>
+                  </div>
+                ) : null;
+              })()}
 
               {/* Quantity */}
               {positionState && positionState.entryQuantity > 0 && (
@@ -429,23 +435,41 @@ export default function OrderTreeNode({
                 </div>
               )}
 
-              {/* Notional Value */}
+              {/* Notional Value (recalculated with live price if available) */}
               {positionState && positionState.entryValue > 0 && (
                 <div className="text-right ml-3">
-                  <span className="text-gray-300 font-mono text-sm">${positionState.entryValue.toFixed(2)}</span>
+                  <span className="text-gray-300 font-mono text-sm">
+                    ${livePrice && positionState.entryQuantity > 0
+                      ? (livePrice * positionState.entryQuantity).toFixed(2)
+                      : positionState.entryValue.toFixed(2)
+                    }
+                  </span>
                   <span className="text-xs text-gray-500 ml-1">Value</span>
                 </div>
               )}
 
-              {/* Unrealized P&L (from analytics) */}
-              {positionAnalytics && positionAnalytics.unrealized_pnl !== undefined && (
-                <div className="text-right ml-3">
-                  <span className={`font-mono text-sm ${positionAnalytics.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {positionAnalytics.unrealized_pnl >= 0 ? '+' : ''}${positionAnalytics.unrealized_pnl.toFixed(2)}
-                  </span>
-                  <span className="text-xs text-gray-500 ml-1">PnL</span>
-                </div>
-              )}
+              {/* Unrealized P&L (recalculated with live price if available) */}
+              {(() => {
+                const displayPrice = livePrice || positionAnalytics?.current_price || 0;
+                const ePrice = positionState?.entryPrice || 0;
+                const qty = positionState?.remainingQuantity || positionState?.entryQuantity || 0;
+                const isLongPos = positionSide === 'LONG';
+                let pnl: number;
+                if (livePrice && ePrice > 0 && qty > 0) {
+                  pnl = isLongPos ? (displayPrice - ePrice) * qty : (ePrice - displayPrice) * qty;
+                } else {
+                  pnl = positionAnalytics?.unrealized_pnl ?? 0;
+                }
+                const hasPnl = displayPrice > 0 && ePrice > 0;
+                return hasPnl ? (
+                  <div className="text-right ml-3">
+                    <span className={`font-mono text-sm ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                    </span>
+                    <span className="text-xs text-gray-500 ml-1">PnL</span>
+                  </div>
+                ) : null;
+              })()}
             </>
           ) : (
             <>
