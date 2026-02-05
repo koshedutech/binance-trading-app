@@ -284,6 +284,17 @@ func NewVolumeImbalancePatternMatcher(config *PatternMatcherConfig) *VolumeImbal
 	}
 }
 
+// GetConfig returns the current pattern matcher configuration.
+// Used by API handlers to expose strategy-level config to the frontend.
+func (m *VolumeImbalancePatternMatcher) GetConfig() PatternMatcherConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config == nil {
+		return *DefaultPatternMatcherConfig()
+	}
+	return *m.config
+}
+
 // ReloadConfig updates the pattern matcher configuration without resetting pattern progress.
 // This allows dynamic configuration updates (e.g., when user changes strategy settings)
 // while preserving existing pattern detection state.
@@ -992,6 +1003,20 @@ func (m *VolumeImbalancePatternMatcher) ResetPattern(symbol, mode, timeframe str
 	m.resetPatternUnlocked(patternKey, "Manual reset")
 }
 
+// ClearPatternForSymbol clears the pattern for a specific symbol.
+// This should be called when an entry order is filled and a position is opened.
+// It removes the pattern from tracking so the coin profiler can look for new entries.
+func (m *VolumeImbalancePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	patternKey := m.patternKey(symbol, mode, timeframe)
+	delete(m.patterns, patternKey)
+	delete(m.states, patternKey)
+
+	log.Printf("[PATTERN] Cleared pattern for %s (position opened)", symbol)
+}
+
 // ============================================================================
 // PATTERN RETRIEVAL AND MANAGEMENT
 // ============================================================================
@@ -1151,6 +1176,10 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 	}
 
 	cm := progress.ToCoinMatch()
+
+	// Always set VolumeThreshold from config, regardless of candle data.
+	// This ensures the frontend always has the configured threshold for display.
+	cm.VolumeThreshold = m.config.MinVolumeSpikeMultiplier
 
 	// Always populate volume metrics for progress bar display (especially for watching state)
 	if candles != nil && len(candles) >= m.config.LookbackPeriod {

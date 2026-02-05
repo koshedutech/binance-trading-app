@@ -157,6 +157,9 @@ type UserAutopilotManager struct {
 	// Epic 14: Callback for settings changes (set by API layer for WebSocket broadcasting)
 	settingsChangeCallback SettingsChangeCallback
 
+	// Epic 14: Callback to clear entry decision UI when profiler stops
+	entryDecisionClearCallback func(string)
+
 	mu sync.RWMutex
 }
 
@@ -327,6 +330,15 @@ func (m *UserAutopilotManager) SetSettingsChangeCallback(callback SettingsChange
 	defer m.mu.Unlock()
 	m.settingsChangeCallback = callback
 	m.logger.Info("SettingsChangeCallback set on UserAutopilotManager for real-time settings notifications")
+}
+
+// SetEntryDecisionClearCallback sets the callback invoked when the coin profiler stops.
+// This clears stale entry decision data from caches and notifies the frontend via WebSocket.
+func (m *UserAutopilotManager) SetEntryDecisionClearCallback(callback func(string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entryDecisionClearCallback = callback
+	m.logger.Info("EntryDecisionClearCallback set on UserAutopilotManager")
 }
 
 // NotifySettingsChanged notifies the autopilot system that settings have changed.
@@ -676,6 +688,14 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	realtimeMatcher := entrydecision.NewRealtimePatternMatcher(patternMatcher, nil)
 	// Set userID for targeted broadcasts
 	realtimeMatcher.SetUserID(userID)
+	// Wire pattern state persistence for restart recovery
+	if m.repo != nil {
+		persister := NewPatternStatePersisterAdapter(m.repo)
+		realtimeMatcher.SetPersister(persister)
+		// Restore any previously saved pattern states from DB
+		realtimeMatcher.RestorePatternStates()
+		m.logger.Info("Pattern state persistence wired and restored from DB", "user_id", userID)
+	}
 	// Register with CoinProfiler to receive candle close events
 	realtimeMatcher.RegisterWithCoinProfiler(coinProfiler)
 	// Wire pattern update callback for real-time WebSocket broadcasting
@@ -738,6 +758,15 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		return canEnter, currentCount, maxConcurrentTrades
 	})
 	m.logger.Info("Capacity checker wired for proactive limit enforcement", "user_id", userID)
+
+	// Epic 14: Wire entry placed callback for pattern cleanup
+	// When an entry order is placed, clear the pattern so coin profiler can look for new entries
+	chainEntryRunner.SetOnEntryPlacedCallback(func(symbol, mode, timeframe string) {
+		m.logger.Info("Entry placed - clearing pattern for new entries",
+			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
+		realtimeMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
+	})
+	m.logger.Info("Entry placed callback wired for pattern cleanup", "user_id", userID)
 
 	// Epic 14: Create ExitDecisionService for position exit monitoring
 	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)
@@ -1074,6 +1103,17 @@ func (m *UserAutopilotManager) GetTradeHistory(userID string, limit int) []Ginie
 		return nil
 	}
 	return instance.Autopilot.GetTradeHistory(limit)
+}
+
+// IsCoinProfilerRunningForUser checks if a specific user's CoinProfiler is running.
+// Used by API handlers to guard coin population - when profiler is not running,
+// no coins should be shown (they would be stale from previous sessions).
+func (m *UserAutopilotManager) IsCoinProfilerRunningForUser(userID string) bool {
+	instance := m.GetInstance(userID)
+	if instance == nil {
+		return false
+	}
+	return instance.IsCoinProfilerRunning()
 }
 
 // IsRunning checks if a user's autopilot is running
@@ -1523,6 +1563,15 @@ func (m *UserAutopilotManager) StopCoinProfiler(userID string) error {
 		return fmt.Errorf("failed to stop coin profiler: %w", err)
 	}
 	instance.TouchLastActive()
+
+	// Notify frontend to clear stale entry decision data
+	m.mu.RLock()
+	clearCb := m.entryDecisionClearCallback
+	m.mu.RUnlock()
+	if clearCb != nil {
+		m.logger.Info("Broadcasting entry decision clear signal", "user_id", userID)
+		clearCb(userID)
+	}
 
 	return nil
 }

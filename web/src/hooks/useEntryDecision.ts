@@ -187,7 +187,43 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     // CRITICAL: Merge strategy data to preserve reference_candle and other state that may not be in every update
     const handleStrategyUpdate = (event: WSEvent) => {
       if (isEntryDecisionResponse(event.data)) {
+        // Handle clear signal: profiler stopped, reset all state
+        if (event.data.cleared) {
+          setStrategies([]);
+          setByMode([]);
+          setStats({
+            totalStrategies: 0,
+            enabledStrategies: 0,
+            totalCoinsReady: 0,
+            totalCoinsWatching: 0,
+          });
+          setNextCandleClose(null);
+          setLookingFor(null);
+          setLastUpdated(new Date());
+          setIsRealTime(true);
+          return;
+        }
+
         const newStrategies = event.data.strategies;
+
+        // If strategies are empty and all counts are 0, replace state entirely (don't merge)
+        if (
+          newStrategies.length === 0 &&
+          (event.data.total_coins_ready || 0) === 0 &&
+          (event.data.total_coins_watching || 0) === 0
+        ) {
+          setStrategies([]);
+          setByMode(event.data.by_mode || []);
+          setStats({
+            totalStrategies: event.data.total_strategies || 0,
+            enabledStrategies: event.data.enabled_strategies || 0,
+            totalCoinsReady: 0,
+            totalCoinsWatching: 0,
+          });
+          setLastUpdated(new Date());
+          setIsRealTime(true);
+          return;
+        }
 
         // Merge with existing strategies to preserve fields that may not be in the update
         // This prevents UI flicker when reference_candle or other fields are temporarily missing
@@ -320,6 +356,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     };
 
     // Real-time pattern update handler - merges individual coin updates for live proximity display
+    // CRITICAL: Uses smart preservation logic to prevent UI flicker when step would regress
     const handlePatternUpdate = (event: WSEvent) => {
       const update = event.data as PatternUpdate;
       if (!isPatternUpdate(update)) return;
@@ -333,25 +370,56 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
           // Create updated coin with real-time data
           const updatedCoins = [...strategy.coins];
-          const coin = { ...updatedCoins[coinIndex] };
+          const prevCoin = updatedCoins[coinIndex];
+          const coin = { ...prevCoin };
 
-          // Update status and step from pattern update
-          coin.status = update.status;
-          coin.step = update.current_step;
-          coin.total_steps = update.total_steps;
-          coin.step_details = update.step_details;
-          coin.direction = update.direction as 'long' | 'short' | 'neutral' | undefined;
+          // CRITICAL: Smart status preservation to prevent UI flicker
+          // If we were in Step 2 (have reference_candle) and the new update would regress
+          // to 'watching', preserve the previous status unless it's a legitimate state change
+          const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+          const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+          const hasReferenceCandle = update.reference_candle || prevCoin.reference_candle;
+          const newStatusIsRegression = update.status === 'watching' || !update.status;
+
+          // Determine if this is a legitimate step change or a regressive update
+          const shouldPreserveStep2 = prevWasStep2 && hasReferenceCandle && newStatusIsRegression;
+
+          // Update status with smart preservation
+          coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
+
+          // Update step - never regress from Step 2+ to Step 1 if we have reference_candle
+          if (update.current_step !== undefined && update.current_step > 0) {
+            // If update has a valid step, use it unless it's a regression with reference_candle
+            if (shouldPreserveStep2 && update.current_step < (prevCoin.step || 1)) {
+              coin.step = prevCoin.step; // Preserve higher step
+            } else {
+              coin.step = update.current_step;
+            }
+          } else {
+            coin.step = prevCoin.step; // Preserve existing step if not in update
+          }
+
+          // Preserve or update other fields
+          coin.total_steps = update.total_steps || prevCoin.total_steps;
+          coin.step_details = update.step_details || prevCoin.step_details;
+          coin.direction = (update.direction as 'long' | 'short' | 'neutral' | undefined) || prevCoin.direction;
           coin.updated_at = update.updated_at;
+
+          // Preserve reference_candle - critical for Step 2 display
+          coin.reference_candle = update.reference_candle || prevCoin.reference_candle;
 
           // Update entry levels with real-time price data
           if (update.entry_levels) {
-            coin.current_price = update.entry_levels.current_price;
+            coin.current_price = update.entry_levels.current_price || prevCoin.current_price;
             // Calculate proximity to breakout from entry levels
             if (update.entry_levels.entry_price && update.entry_levels.current_price) {
               coin.proximity_to_breakout =
                 ((update.entry_levels.current_price - update.entry_levels.entry_price) /
                   update.entry_levels.entry_price) * 100;
             }
+          } else {
+            // Preserve existing current_price if not in update
+            coin.current_price = prevCoin.current_price;
           }
 
           // Update volume progress if available
@@ -367,7 +435,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
         });
       });
 
-      // Also update byMode for grouped view
+      // Also update byMode for grouped view with same preservation logic
       setByMode(prevByMode => {
         return prevByMode.map(modeGroup => ({
           ...modeGroup,
@@ -376,14 +444,33 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             if (coinIndex === -1) return strategy;
 
             const updatedCoins = [...strategy.coins];
-            const coin = { ...updatedCoins[coinIndex] };
+            const prevCoin = updatedCoins[coinIndex];
+            const coin = { ...prevCoin };
 
-            coin.status = update.status;
-            coin.step = update.current_step;
-            coin.direction = update.direction as 'long' | 'short' | 'neutral' | undefined;
+            // CRITICAL: Same smart preservation logic as above
+            const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+            const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+            const hasReferenceCandle = update.reference_candle || prevCoin.reference_candle;
+            const newStatusIsRegression = update.status === 'watching' || !update.status;
+            const shouldPreserveStep2 = prevWasStep2 && hasReferenceCandle && newStatusIsRegression;
+
+            coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
+
+            if (update.current_step !== undefined && update.current_step > 0) {
+              if (shouldPreserveStep2 && update.current_step < (prevCoin.step || 1)) {
+                coin.step = prevCoin.step;
+              } else {
+                coin.step = update.current_step;
+              }
+            } else {
+              coin.step = prevCoin.step;
+            }
+
+            coin.direction = (update.direction as 'long' | 'short' | 'neutral' | undefined) || prevCoin.direction;
+            coin.reference_candle = update.reference_candle || prevCoin.reference_candle;
 
             if (update.entry_levels) {
-              coin.current_price = update.entry_levels.current_price;
+              coin.current_price = update.entry_levels.current_price || prevCoin.current_price;
               if (update.entry_levels.entry_price && update.entry_levels.current_price) {
                 coin.proximity_to_breakout =
                   ((update.entry_levels.current_price - update.entry_levels.entry_price) /

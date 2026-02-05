@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -203,8 +204,15 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 		}
 	}
 
+	// Check if CoinProfiler is running - only populate coins when it is
+	profilerRunning := entryDecisionBroadcastServer.userAutopilotManager != nil &&
+		entryDecisionBroadcastServer.userAutopilotManager.IsCoinProfilerRunningForUser(userID)
+
 	// Build response
 	response := entrydecision.NewEntryDecisionResponse()
+
+	// Get pattern matcher (shared across strategies for this user)
+	patternMatcher := entryDecisionBroadcastServer.getOrCreatePatternMatcher(userID)
 
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
@@ -222,9 +230,20 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 		sm.NextCandleClose = calculateNextCandleCloseForTimeframe(strategy.Timeframe)
 		sm.LookingFor = globalLookingFor // Use global direction setting
 
-		// Get pattern matcher to check for tracked coins
-		patternMatcher := entryDecisionBroadcastServer.getOrCreatePatternMatcher(userID)
+		// Populate strategy config from pattern matcher for dynamic UI display
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
+			pmConfig := patternMatcher.GetConfig()
+			sm.Config = map[string]interface{}{
+				"volume_spike_multiplier": pmConfig.MinVolumeSpikeMultiplier,
+				"lookback_period":         pmConfig.LookbackPeriod,
+				"breakout_volume_surge":   pmConfig.BreakoutVolumeSurge,
+				"pattern_expiration_mins": pmConfig.PatternExpirationMinutes,
+				"risk_reward_ratio":       4.0,
+			}
+		}
+
+		// Only populate coins when CoinProfiler is running
+		if profilerRunning && patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
 			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
 			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
@@ -465,10 +484,17 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 	// This prevents coins with active positions from showing "watching" status
 	activePositions := s.getActivePositionsMap(userID)
 
+	// Check if CoinProfiler is running - only populate coins when it is
+	// When profiler is not running, coins from restored pattern states would be stale
+	profilerRunning := s.userAutopilotManager != nil &&
+		s.userAutopilotManager.IsCoinProfilerRunningForUser(userID)
+
 	// Reset stale patterns (position_running status but no active position)
 	// This ensures patterns reset to watching when positions are closed
 	patternMatcher := s.getOrCreatePatternMatcher(userID)
-	s.resetStalePatterns(userID, patternMatcher, activePositions)
+	if profilerRunning {
+		s.resetStalePatterns(userID, patternMatcher, activePositions)
+	}
 
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
@@ -482,9 +508,21 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 		)
 		sm.Enabled = true
 
-		// Get pattern matcher to check for tracked coins
-		patternMatcher := s.getOrCreatePatternMatcher(userID)
+		// Populate strategy config from pattern matcher for dynamic UI display
 		if patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
+			pmConfig := patternMatcher.GetConfig()
+			sm.Config = map[string]interface{}{
+				"volume_spike_multiplier": pmConfig.MinVolumeSpikeMultiplier,
+				"lookback_period":         pmConfig.LookbackPeriod,
+				"breakout_volume_surge":   pmConfig.BreakoutVolumeSurge,
+				"pattern_expiration_mins": pmConfig.PatternExpirationMinutes,
+				"risk_reward_ratio":       4.0, // Default R:R from pattern_matcher.go
+			}
+		}
+
+		// Only populate coins when CoinProfiler is running
+		// Exception: coins with active positions still appear
+		if profilerRunning && patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
 			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
 			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
@@ -1059,23 +1097,60 @@ func (b *PatternUpdateBroadcaster) BroadcastPatternUpdate(update entrydecision.P
 	return nil
 }
 
+// BroadcastEntryDecisionClear clears all cached entry decision data for a user and
+// broadcasts a clear signal to the frontend. Called when the coin profiler stops.
+func BroadcastEntryDecisionClear(userID string) {
+	// 1. Remove user from all caches so broadcast loop stops sending stale data
+	entryDecisionCacheMu.Lock()
+	delete(patternMatcherCache, userID)
+	delete(entryDecisionMatcherCache, userID)
+	delete(scoreCalculatorCache, userID)
+	entryDecisionCacheMu.Unlock()
+
+	// 2. Clear lastBroadcastState entries for this user (they contain stale state keys)
+	lastBroadcastStateMu.Lock()
+	for key := range lastBroadcastState {
+		delete(lastBroadcastState, key)
+	}
+	lastBroadcastStateMu.Unlock()
+
+	// 3. Broadcast a clear event to the frontend
+	clearData := map[string]interface{}{
+		"strategies":          []interface{}{},
+		"by_mode":             []interface{}{},
+		"total_strategies":    0,
+		"enabled_strategies":  0,
+		"total_coins_ready":   0,
+		"total_coins_watching": 0,
+		"cleared":             true,
+		"updated_at":          time.Now(),
+	}
+	BroadcastEntryDecisionUpdate(clearData)
+	log.Printf("[ENTRY-DECISION-CLEAR] Cleared all entry decision data for user %s", userID)
+}
+
+// lastBroadcastState tracks the last broadcast state for each symbol to detect real changes
+var (
+	lastBroadcastStateMu sync.RWMutex
+	lastBroadcastState   = make(map[string]struct {
+		step   int
+		status string
+	})
+)
+
 // BroadcastPatternUpdateFunc is a standalone function that broadcasts pattern updates.
 // This is used as the callback for UserAutopilotManager.SetPatternUpdateCallback.
 // It wraps the event creation and broadcasting logic for real-time pattern state changes.
 //
-// IMPORTANT: This function broadcasts TWO events for true real-time updates:
-// 1. ENTRY_DECISION_PATTERN_UPDATE - The specific pattern change (incremental)
-// 2. ENTRY_DECISION_UPDATE - The full strategy data (so UI updates immediately)
+// IMPORTANT: This function broadcasts incremental pattern updates on every tick.
+// Full ENTRY_DECISION_UPDATE is only sent when step/status changes to prevent flicker.
 func BroadcastPatternUpdateFunc(update entrydecision.PatternUpdate) {
-	log.Printf("[ENTRY-DECISION-BROADCAST] Received pattern update for %s:%s status=%s looking_for=%s",
-		update.Symbol, update.Timeframe, update.Status, update.LookingFor)
-
 	if userWSHub == nil {
-		log.Printf("[ENTRY-DECISION-BROADCAST] WARNING: userWSHub is nil, cannot broadcast")
 		return
 	}
 
-	// 1. Broadcast the specific pattern update event
+	// 1. ALWAYS broadcast the specific pattern update event (incremental - for real-time volume/price)
+	// CRITICAL: Include reference_candle and volume_progress to prevent UI flicker
 	patternEvent := events.Event{
 		Type:      events.EventEntryDecisionPatternUpdate,
 		Timestamp: time.Now(),
@@ -1090,23 +1165,50 @@ func BroadcastPatternUpdateFunc(update entrydecision.PatternUpdate) {
 			"status":            string(update.Status),
 			"step_details":      update.StepDetails,
 			"entry_levels":      update.EntryLevels,
+			"reference_candle":  update.ReferenceCandle, // CRITICAL: Include for Step 2 preservation
+			"volume_progress":   update.VolumeProgress,  // Include for real-time volume display
 			"direction":         update.Direction,
 			"looking_for":       update.LookingFor,
+			"current_price":     update.CurrentPrice,
 			"next_candle_close": update.NextCandleClose,
 			"last_evaluated_at": update.LastEvaluatedAt,
 			"updated_at":        update.UpdatedAt,
 		},
 	}
 	userWSHub.BroadcastToAll(patternEvent)
-	log.Printf("[ENTRY-DECISION-BROADCAST] Sent ENTRY_DECISION_PATTERN_UPDATE for %s", update.Symbol)
 
-	// 2. IMMEDIATELY broadcast the full ENTRY_DECISION_UPDATE for this user
-	// This is what the frontend listens to for the "Live" indicator
-	if update.UserID != "" && entryDecisionBroadcastServer != nil {
-		data := buildEntryDecisionBroadcastData(update.UserID)
-		if data != nil {
-			BroadcastEntryDecisionUpdate(data)
-			log.Printf("[ENTRY-DECISION-BROADCAST] Sent ENTRY_DECISION_UPDATE for user %s", update.UserID)
+	// 2. Only broadcast full ENTRY_DECISION_UPDATE when there's a REAL state change
+	// This prevents the full update from overwriting incremental updates on every tick
+	stateKey := fmt.Sprintf("%s:%s:%s", update.Symbol, update.Mode, update.Timeframe)
+
+	lastBroadcastStateMu.RLock()
+	lastState, exists := lastBroadcastState[stateKey]
+	lastBroadcastStateMu.RUnlock()
+
+	isStateChange := !exists ||
+		lastState.step != update.CurrentStep ||
+		lastState.status != string(update.Status)
+
+	if isStateChange {
+		// Update tracked state
+		lastBroadcastStateMu.Lock()
+		lastBroadcastState[stateKey] = struct {
+			step   int
+			status string
+		}{
+			step:   update.CurrentStep,
+			status: string(update.Status),
+		}
+		lastBroadcastStateMu.Unlock()
+
+		// Broadcast full update on state change
+		if update.UserID != "" && entryDecisionBroadcastServer != nil {
+			data := buildEntryDecisionBroadcastData(update.UserID)
+			if data != nil {
+				BroadcastEntryDecisionUpdate(data)
+				log.Printf("[ENTRY-DECISION-BROADCAST] State change for %s step=%d status=%s - sent full update",
+					update.Symbol, update.CurrentStep, update.Status)
+			}
 		}
 	}
 }

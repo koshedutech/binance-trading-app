@@ -248,14 +248,14 @@ function PriceProgressBar({
           </div>
         </div>
 
-        {/* Reference Candle High Price Marker (Breakout Entry Level) */}
+        {/* Reference Candle Entry Level Marker (High for longs, Low for shorts) */}
         <div
           className="absolute top-0 bottom-0 flex flex-col items-center z-10"
           style={{ left: `${Math.min(Math.max(entryPosition, 5), 95)}%`, transform: 'translateX(-50%)' }}
         >
           <div className="w-1.5 h-full bg-purple-500" />
-          <div className="absolute -top-4 text-[9px] text-purple-400 font-medium whitespace-nowrap">
-            Ref High
+          <div className={`absolute ${isLong ? '-top-4' : '-bottom-4'} text-[9px] text-purple-400 font-medium whitespace-nowrap`}>
+            {isLong ? 'Ref High' : 'Ref Low'}
           </div>
         </div>
 
@@ -317,16 +317,16 @@ export default function Step2ProgressBars({ update, currentPrice, candlesSinceRe
   const avgVolumeMultiplier = update.consolidation_avg_volume_multiplier
     || (referenceVolumeMultiplier + 1) / 2; // Fallback: midpoint
 
+  const direction = update.direction || 'long';
+
   // Price data
   const dayLow = update.day_low || referenceCandle.low * 0.98;
   const dayHigh = update.day_high || referenceCandle.high * 1.02;
-  const entryPrice = referenceCandle.high; // Entry at reference high for longs
+  const entryPrice = direction === 'long' ? referenceCandle.high : referenceCandle.low; // Entry at reference high for longs, low for shorts
 
   // Average price from reference to last candle
   const avgPrice = update.consolidation_avg_price
     || (referenceCandle.open + referenceCandle.close) / 2; // Fallback: ref candle mid
-
-  const direction = update.direction || 'long';
 
   // Check if both conditions are met
   const volumeConditionMet = currentVolumeMultiplier >= entryThreshold;

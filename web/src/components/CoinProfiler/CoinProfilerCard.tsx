@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Database,
   ChevronDown,
@@ -67,8 +67,42 @@ export default function CoinProfilerCard() {
     return coins.filter(c => c.source === 'position' || c.source === 'both').length;
   }, [coins]);
 
+  // WebSocket-driven position adjustment for instant Stop button locking
+  // This bridges the gap between position creation and the next poll cycle
+  const [wsPositionAdjustment, setWsPositionAdjustment] = useState(0);
+  const prevPollCountRef = useRef(positionCoinsCount);
+
+  // Reset adjustment when poll data arrives (poll is source of truth)
+  useEffect(() => {
+    if (positionCoinsCount !== prevPollCountRef.current) {
+      setWsPositionAdjustment(0);
+      prevPollCountRef.current = positionCoinsCount;
+    }
+  }, [positionCoinsCount]);
+
+  // Subscribe to position lifecycle WebSocket events
+  const handlePositionCreated = useCallback(() => {
+    setWsPositionAdjustment(prev => prev + 1);
+  }, []);
+
+  const handleChainClosed = useCallback(() => {
+    setWsPositionAdjustment(prev => Math.max(0, prev - 1));
+  }, []);
+
+  useEffect(() => {
+    wsService.subscribe('POSITION_CREATED', handlePositionCreated);
+    wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+
+    return () => {
+      wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
+      wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+    };
+  }, [handlePositionCreated, handleChainClosed]);
+
+  const effectivePositionCount = positionCoinsCount + wsPositionAdjustment;
+
   // Control restrictions
-  const canStopProfiler = positionCoinsCount === 0; // Can only stop if no positions
+  const canStopProfiler = effectivePositionCount === 0; // Can only stop if no positions
   const canStartProfiler = tradingEnabled; // Can only start if trading is ON
 
   // Subscribe to WebSocket events for real-time coin updates
@@ -205,7 +239,7 @@ export default function CoinProfilerCard() {
                     ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
                     : 'bg-red-500/20 hover:bg-red-500/30 text-red-400'
                 }`}
-                title={!canStopProfiler ? `Cannot stop: ${positionCoinsCount} position(s) active. Pause Trade Cycle instead.` : 'Stop Profiler'}
+                title={!canStopProfiler ? `Cannot stop: ${effectivePositionCount} position(s) active. Pause Trade Cycle instead.` : 'Stop Profiler'}
               >
                 {isStopping ? (
                   <RefreshCw className="w-3 h-3 animate-spin" />
@@ -254,7 +288,7 @@ export default function CoinProfilerCard() {
           <div className="flex items-center gap-2 text-yellow-400 text-xs">
             <AlertTriangle className="w-4 h-4" />
             <span>
-              Cannot stop Coin Profiler: <strong>{positionCoinsCount} position(s)</strong> are active.
+              Cannot stop Coin Profiler: <strong>{effectivePositionCount} position(s)</strong> are active.
               Use <strong>Trade Cycle OFF</strong> to pause new entries while monitoring positions.
             </span>
             <button

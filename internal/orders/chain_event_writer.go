@@ -253,9 +253,11 @@ func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reaso
 		return fmt.Errorf("failed to close order chain: %w", err)
 	}
 
-	// Delete from cache on close - Story 7.20 (AC6)
+	// CHANGED: Keep closed chains in cache instead of deleting them
+	// This allows the UI to show the complete history including closed orders
 	if userID != "" {
-		w.deleteCacheOnClose(ctx, userID, chainID)
+		// Update cache with closed status instead of deleting
+		w.updateCacheOnClose(ctx, userID, chainID, reason, totalPnL, totalFees)
 		// Push close event to recent events
 		w.pushRecentEventToCache(ctx, userID, chainID, EventChainClosed, nil, nil, nil, nil, &totalPnL, seq)
 	}
@@ -1015,7 +1017,22 @@ func (w *ChainEventWriter) pushRecentEventToCache(ctx context.Context, userID, c
 	}()
 }
 
+// updateCacheOnClose keeps the chain in cache on close instead of deleting
+// This allows the UI to show the complete order history including closed chains
+// The chain status is already updated in the database; we just don't remove from cache
+func (w *ChainEventWriter) updateCacheOnClose(ctx context.Context, userID, chainID, closeReason string, totalPnL, totalFees float64) {
+	// Simply log that we're keeping the chain visible - don't delete from cache
+	// The frontend will fetch updated status from the database/API
+	w.logger.Info().
+		Str("chain_id", chainID).
+		Str("user_id", userID).
+		Str("close_reason", closeReason).
+		Float64("realized_pnl", totalPnL).
+		Msg("Chain closed - keeping in cache for UI visibility (not deleting)")
+}
+
 // deleteCacheOnClose removes the chain from cache when it's closed
+// DEPRECATED: Use updateCacheOnClose instead to keep closed chains visible
 func (w *ChainEventWriter) deleteCacheOnClose(ctx context.Context, userID, chainID string) {
 	if w.cache == nil {
 		return

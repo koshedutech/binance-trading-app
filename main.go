@@ -265,6 +265,13 @@ func main() {
 	}
 	logger.Info("Research Candles migration completed")
 
+	// Run Pattern State migration (050) - Epic 14: Pattern State Persistence
+	// Creates pattern_states table for persisting entry decision pattern state across restarts
+	if err := db.RunPatternStateMigration(ctx); err != nil {
+		log.Printf("Warning: Pattern State migration failed: %v", err)
+	}
+	logger.Info("Pattern State migration completed")
+
 	// Create repository early for API key service
 	earlyRepo := database.NewRepository(db)
 
@@ -1046,6 +1053,10 @@ func main() {
 		// This enables live settings propagation - when settings change, the frontend is notified
 		// immediately via WebSocket, allowing UI components to refresh without polling
 		userAutopilotManager.SetSettingsChangeCallback(api.BroadcastSettingsChanged)
+
+		// Epic 14: Wire entry decision clear callback for profiler stop cleanup
+		// When CoinProfiler stops, clears cached data and broadcasts clear signal to frontend
+		userAutopilotManager.SetEntryDecisionClearCallback(api.BroadcastEntryDecisionClear)
 
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}

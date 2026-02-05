@@ -88,6 +88,11 @@ interface OrderTreeNodeProps {
   onLoadModifications?: (orderType: ModifiableOrderType) => Promise<ModificationEvent[]>;
   // Story 7.19: Timezone-aware time formatter
   formatTime?: (timestamp: string | number) => string;
+  // Expected P&L for TP/SL orders (calculated from entry price)
+  entryPrice?: number;
+  entryQuantity?: number;
+  // Fee rate for P&L calculation (default 0.05% = 0.0005)
+  feeRate?: number;
 }
 
 // Get icon for node type
@@ -165,6 +170,44 @@ function getStageConfig(stage: PositionAnalyticsData['stage']) {
   }
 }
 
+// Calculate expected P&L for TP/SL orders
+function calculateExpectedPnL(
+  orderType: TreeNodeType,
+  orderPrice: number,
+  entryPrice: number,
+  quantity: number,
+  positionSide: 'LONG' | 'SHORT',
+  feeRate: number = 0.0005 // 0.05% default taker fee
+): { pnl: number; pnlPercent: number } | null {
+  if (!orderPrice || !entryPrice || !quantity || orderPrice <= 0 || entryPrice <= 0) {
+    return null;
+  }
+
+  // Only calculate for SL and TP orders
+  if (!['SL', 'TP1', 'TP2', 'TP3'].includes(orderType)) {
+    return null;
+  }
+
+  // Calculate gross P&L based on position side
+  let grossPnL: number;
+  if (positionSide === 'LONG') {
+    grossPnL = (orderPrice - entryPrice) * quantity;
+  } else {
+    grossPnL = (entryPrice - orderPrice) * quantity;
+  }
+
+  // Calculate fees (entry + exit)
+  const entryValue = entryPrice * quantity;
+  const exitValue = orderPrice * quantity;
+  const totalFees = (entryValue + exitValue) * feeRate;
+
+  // Net P&L after fees
+  const netPnL = grossPnL - totalFees;
+  const pnlPercent = entryValue > 0 ? (netPnL / entryValue) * 100 : 0;
+
+  return { pnl: netPnL, pnlPercent };
+}
+
 export default function OrderTreeNode({
   type,
   order,
@@ -178,6 +221,9 @@ export default function OrderTreeNode({
   depth,
   onLoadModifications,
   formatTime = defaultFormatTime, // Story 7.19: Use provided formatter or default
+  entryPrice,
+  entryQuantity,
+  feeRate = 0.0005,
 }: OrderTreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
@@ -503,6 +549,31 @@ export default function OrderTreeNode({
                     </div>
                   )}
                 </>
+              )}
+
+              {/* Expected P&L for SL/TP orders */}
+              {['SL', 'TP1', 'TP2', 'TP3'].includes(type) && entryPrice && entryPrice > 0 && displayPrice > 0 && (
+                (() => {
+                  const qty = entryQuantity || order?.origQty || 0;
+                  const expectedPnL = calculateExpectedPnL(type, displayPrice, entryPrice, qty, positionSide, feeRate);
+                  if (!expectedPnL) return null;
+
+                  const isSL = type === 'SL';
+                  const label = isSL ? 'Exp. Loss' : 'Exp. Profit';
+                  const colorClass = expectedPnL.pnl >= 0 ? 'text-green-400' : 'text-red-400';
+
+                  return (
+                    <div className="text-right ml-3">
+                      <span className={`font-mono text-sm font-medium ${colorClass}`}>
+                        {expectedPnL.pnl >= 0 ? '+' : ''}${expectedPnL.pnl.toFixed(2)}
+                      </span>
+                      <span className={`text-xs ml-1 ${colorClass}`}>
+                        ({expectedPnL.pnlPercent >= 0 ? '+' : ''}{expectedPnL.pnlPercent.toFixed(2)}%)
+                      </span>
+                      <span className="text-xs text-gray-500 ml-1">{label}</span>
+                    </div>
+                  );
+                })()
               )}
 
               {/* Timestamp - Story 7.19: Using timezone-aware formatter */}

@@ -266,6 +266,11 @@ type StrategyMatch struct {
 	// Matching coins
 	Coins []CoinMatch `json:"coins"` // All coins being tracked by this strategy
 
+	// Strategy-specific configuration (for dynamic UI display)
+	// Populated from the pattern matcher's current config so the frontend
+	// can show actual configured values instead of hardcoded defaults.
+	Config map[string]interface{} `json:"config,omitempty"`
+
 	// Strategy requirements (for UI display)
 	Requirements *StrategyRequirements `json:"requirements,omitempty"`
 

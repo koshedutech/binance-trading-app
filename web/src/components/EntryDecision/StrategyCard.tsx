@@ -494,8 +494,8 @@ function CoinRow({
           {/* Volume Multiplier */}
           {coin.volume_multiplier && (
             <span className={`font-mono ${
-              coin.volume_multiplier >= 3.0 ? 'text-green-400' :
-              coin.volume_multiplier >= 2.0 ? 'text-yellow-400' :
+              coin.volume_multiplier >= (coin.volume_threshold || 3.0) ? 'text-green-400' :
+              coin.volume_multiplier >= (coin.volume_threshold || 3.0) * 0.67 ? 'text-yellow-400' :
               'text-gray-500'
             }`}>
               {coin.volume_multiplier.toFixed(1)}x avg
@@ -1083,7 +1083,7 @@ function CoinRow({
           ) : (
             /* Fallback when no volume data */
             <span className="text-xs text-gray-500">
-              🔍 Scanning for volume spike (3x average)...
+              🔍 Scanning for volume spike ({(coin.volume_threshold || 3).toFixed(0)}x average)...
             </span>
           )}
         </div>
@@ -1274,8 +1274,8 @@ export default function StrategyCard({
             )}
           </div>
 
-          {/* Per-Strategy Countdown Timer */}
-          {strategy.type === 'pattern' && nextCandleClose && (
+          {/* Per-Strategy Countdown Timer - Always visible */}
+          {nextCandleClose && (
             <CountdownTimer
               targetTime={nextCandleClose}
               lookingFor={strategy.looking_for || null}
@@ -1327,6 +1327,12 @@ export default function StrategyCard({
                 subStrategy={strategy.sub_strategy}
                 timeframe={strategy.timeframe}
                 defaultExpanded={true}
+                volumeImbalanceConfig={strategy.config ? {
+                  volumeSpikeMultiplier: strategy.config.volume_spike_multiplier,
+                  lookbackPeriod: strategy.config.lookback_period,
+                  breakoutVolumeSurge: strategy.config.breakout_volume_surge,
+                  patternExpirationMinutes: strategy.config.pattern_expiration_mins,
+                } : undefined}
               />
             </div>
           )}
@@ -1370,6 +1376,12 @@ export default function StrategyCard({
                 subStrategy={strategy.sub_strategy}
                 timeframe={strategy.timeframe}
                 defaultExpanded={true}
+                volumeImbalanceConfig={strategy.config ? {
+                  volumeSpikeMultiplier: strategy.config.volume_spike_multiplier,
+                  lookbackPeriod: strategy.config.lookback_period,
+                  breakoutVolumeSurge: strategy.config.breakout_volume_surge,
+                  patternExpirationMinutes: strategy.config.pattern_expiration_mins,
+                } : undefined}
               />
             </div>
           )}

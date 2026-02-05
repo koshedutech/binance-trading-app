@@ -14,6 +14,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -116,6 +117,10 @@ type ChainEntryRunner struct {
 
 	// Ravindra Position Monitor for trailing stop management
 	ravindraMonitor *RavindraPositionMonitor
+
+	// Callback for entry order placement (called after order is placed, before fill confirmation)
+	// Parameters: symbol, mode, timeframe
+	onEntryPlaced func(symbol, mode, timeframe string)
 
 	// Runtime state
 	running        bool
@@ -222,6 +227,14 @@ func (r *ChainEntryRunner) Stop() {
 }
 
 // IsRunning returns whether the runner is active
+// SetOnEntryPlacedCallback sets the callback for when an entry order is placed.
+// This is called after the order is successfully placed, allowing cleanup of pattern state.
+func (r *ChainEntryRunner) SetOnEntryPlacedCallback(callback func(symbol, mode, timeframe string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onEntryPlaced = callback
+}
+
 func (r *ChainEntryRunner) IsRunning() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -754,70 +767,113 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		return fmt.Errorf("chainEventWriter not available - cannot place untracked orders")
 	}
 
-	// Step 8: Place MARKET order
+	// Step 8: Place LIMIT order (maker-friendly entry)
+	// Instead of MARKET order (always taker), use LIMIT order:
+	// - Controlled entry price (no slippage beyond limit)
+	// - Chance to be a maker (lower fees: maker < taker)
+	// - Price capped at slightly above/below breakout level
+	limitPriceOffset := 0.001 // 0.1% offset to increase fill probability while controlling price
+	var limitPrice float64
+	if direction == "LONG" {
+		// For LONG: buy slightly above current price to increase fill chance
+		limitPrice = currentPrice * (1 + limitPriceOffset)
+	} else {
+		// For SHORT: sell slightly below current price to increase fill chance
+		limitPrice = currentPrice * (1 - limitPriceOffset)
+	}
+	limitPrice = roundToTickSizeFromSymbol(limitPrice, symbolInfo)
+
 	orderParams := binance.FuturesOrderParams{
 		Symbol:           symbol,
 		Side:             orderSide,
 		PositionSide:     positionSide,
-		Type:             binance.FuturesOrderTypeMarket,
+		Type:             binance.FuturesOrderTypeLimit,
 		Quantity:         quantity,
+		Price:            limitPrice,
+		TimeInForce:      binance.TimeInForceGTC,
 		NewClientOrderId: entryClientOrderID,
 	}
 
-	log.Printf("[CHAIN-ENTRY] Placing MARKET %s order for %s: qty=%.6f, positionSizeUSD=%.2f, chainID=%s",
-		orderSide, symbol, quantity, positionSizeUSD, chainID)
+	log.Printf("[CHAIN-ENTRY] Placing LIMIT %s order for %s: qty=%.6f, limitPrice=%.6f, positionSizeUSD=%.2f, chainID=%s",
+		orderSide, symbol, quantity, limitPrice, positionSizeUSD, chainID)
 
 	orderResp, err := r.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
-		log.Printf("[CHAIN-ENTRY] FAILED to place order for %s: %v", symbol, err)
+		log.Printf("[CHAIN-ENTRY] FAILED to place LIMIT order for %s: %v", symbol, err)
 		return fmt.Errorf("failed to place entry order: %w", err)
 	}
 
-	// DEBUG: Log the full order response to diagnose SL/TP placement issues
-	log.Printf("[CHAIN-ENTRY] DEBUG Order Response: orderID=%d, status=%q, executedQty=%.6f, avgPrice=%.6f, origQty=%.6f",
-		orderResp.OrderId, orderResp.Status, orderResp.ExecutedQty, orderResp.AvgPrice, orderResp.OrigQty)
+	log.Printf("[CHAIN-ENTRY] LIMIT order placed: orderID=%d, status=%q, limitPrice=%.6f",
+		orderResp.OrderId, orderResp.Status, limitPrice)
 
 	// Step 9: Record entry placed event
 	if r.chainEventWriter != nil {
 		err := r.chainEventWriter.RecordEntryPlaced(ctx, chainID, orders.ChainEntryPlacedEvent{
 			BinanceOrderID:       orderResp.OrderId,
 			BinanceClientOrderID: entryClientOrderID,
-			Price:                orderResp.AvgPrice,
+			Price:                limitPrice,
 			Quantity:             quantity,
 			BinanceTimestamp:     orderResp.UpdateTime,
 		})
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry placed event: %v", err)
 		}
+	}
 
-		// Step 9b: For MARKET orders, record entry filled event immediately
-		// MARKET orders execute immediately, so we record fill even if ExecutedQty is reported later
-		// This ensures the chain shows ACTIVE status with correct quantity/price
-		filledQty := orderResp.ExecutedQty
+	// Step 9b: Wait for LIMIT order fill
+	// Timeout matches candle duration so order has one full candle to fill
+	fillTimeout := parseTimeframeToDuration(state.Timeframe)
+	if fillTimeout < time.Minute {
+		fillTimeout = time.Minute // Minimum 1 minute
+	}
+
+	var filledPrice float64
+	var filledQty float64
+
+	// Check if LIMIT order filled immediately (at or better than limit price)
+	if orderResp.Status == "FILLED" && orderResp.AvgPrice > 0 {
+		filledPrice = orderResp.AvgPrice
+		filledQty = orderResp.ExecutedQty
 		if filledQty <= 0 {
-			// For MARKET orders, if ExecutedQty is not yet populated, use requested quantity
 			filledQty = quantity
-			log.Printf("[CHAIN-ENTRY] ExecutedQty=0, using requested quantity %.6f for MARKET order", filledQty)
 		}
-		filledPrice := orderResp.AvgPrice
-		if filledPrice <= 0 {
-			filledPrice = currentPrice
+		log.Printf("[CHAIN-ENTRY] LIMIT order filled immediately: price=%.6f, qty=%.6f", filledPrice, filledQty)
+	} else {
+		// Poll for fill until timeout (candle duration)
+		log.Printf("[CHAIN-ENTRY] Waiting for LIMIT order fill: timeout=%v (timeframe=%s)", fillTimeout, state.Timeframe)
+		filledOrder, fillErr := r.waitForLimitFill(symbol, orderResp.OrderId, fillTimeout)
+		if fillErr != nil {
+			log.Printf("[CHAIN-ENTRY] LIMIT order not filled for %s: %v", symbol, fillErr)
+			return fmt.Errorf("limit order not filled: %w", fillErr)
 		}
-		// Record entry filled for MARKET orders (they should always fill)
-		err = r.chainEventWriter.RecordEntryFilled(ctx, chainID, orders.ChainEntryFilledEvent{
+		filledPrice = filledOrder.AvgPrice
+		filledQty = filledOrder.ExecutedQty
+		if filledQty <= 0 {
+			filledQty = quantity
+		}
+		log.Printf("[CHAIN-ENTRY] LIMIT order filled after waiting: price=%.6f, qty=%.6f", filledPrice, filledQty)
+	}
+
+	if filledPrice <= 0 {
+		filledPrice = limitPrice
+	}
+
+	// Step 9c: Record entry filled event (use background ctx since parent may have expired during fill wait)
+	postFillCtx := context.Background()
+	if r.chainEventWriter != nil {
+		err = r.chainEventWriter.RecordEntryFilled(postFillCtx, chainID, orders.ChainEntryFilledEvent{
 			FilledPrice:      filledPrice,
 			FilledQuantity:   filledQty,
-			Fees:             0, // Fees will be tracked separately via WebSocket
+			Fees:             0, // Fees tracked separately via WebSocket
 			BinanceTimestamp: orderResp.UpdateTime,
 		})
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry filled event: %v", err)
 		} else {
-			log.Printf("[CHAIN-ENTRY] Recorded entry filled: chainID=%s, status=%q, price=%.6f, qty=%.6f",
-				chainID, orderResp.Status, filledPrice, filledQty)
+			log.Printf("[CHAIN-ENTRY] Recorded entry filled: chainID=%s, price=%.6f, qty=%.6f",
+				chainID, filledPrice, filledQty)
 
 			// Broadcast POSITION_CREATED event to UI for instant update
-			// This allows the frontend to show the new position without requiring manual refresh
 			events.BroadcastPositionCreated(r.userID, map[string]interface{}{
 				"chain_id":       chainID,
 				"symbol":         symbol,
@@ -837,16 +893,9 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		}
 	}
 
-	// Step 10: Calculate SL/TP prices
-	entryPrice := orderResp.AvgPrice
-	if entryPrice <= 0 {
-		entryPrice = currentPrice
-	}
-
-	filledQuantity := orderResp.ExecutedQty
-	if filledQuantity <= 0 {
-		filledQuantity = quantity
-	}
+	// Step 10: Calculate SL/TP prices using actual fill price
+	entryPrice := filledPrice
+	filledQuantity := filledQty
 
 	// Calculate SL/TP prices
 	// PREFERRED: Use actual prices from pattern detection (Support/Resistance based)
@@ -912,7 +961,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	if !shouldPlaceSLTP {
 		log.Printf("[CHAIN-ENTRY] WARNING: filledQuantity is 0, cannot place SL/TP orders")
 	} else {
-		log.Printf("[CHAIN-ENTRY] Proceeding to place SL/TP: status=%q, filledQty=%.6f", orderResp.Status, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Proceeding to place SL/TP: filledQty=%.6f", filledQuantity)
 	}
 	if shouldPlaceSLTP {
 		// Determine close side (opposite of entry side)
@@ -956,7 +1005,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 
 			// Record SL placed event
 			if r.chainEventWriter != nil {
-				err := r.chainEventWriter.RecordSLPlaced(ctx, chainID, orders.ChainSLPlacedEvent{
+				err := r.chainEventWriter.RecordSLPlaced(postFillCtx, chainID, orders.ChainSLPlacedEvent{
 					BinanceOrderID:       slResp.AlgoId,
 					BinanceClientOrderID: slClientOrderID,
 					Price:                slPrice,
@@ -993,7 +1042,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 
 			// Record TP placed event
 			if r.chainEventWriter != nil {
-				err := r.chainEventWriter.RecordTPPlaced(ctx, chainID, orders.ChainTPPlacedEvent{
+				err := r.chainEventWriter.RecordTPPlaced(postFillCtx, chainID, orders.ChainTPPlacedEvent{
 					BinanceOrderID:       tpResp.AlgoId,
 					BinanceClientOrderID: tpClientOrderID,
 					Price:                tpPrice,
@@ -1038,6 +1087,73 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		direction, symbol, entryPrice, filledQuantity, orderResp.OrderId, chainID, slPrice, tpPrice)
 
 	return nil
+}
+
+// waitForLimitFill polls order status until filled, cancelled, or timeout.
+// Returns the filled order or error. On timeout, cancels the order automatically.
+func (r *ChainEntryRunner) waitForLimitFill(symbol string, orderID int64, timeout time.Duration) (*binance.FuturesOrder, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Timeout reached - cancel the unfilled order
+			log.Printf("[CHAIN-ENTRY] LIMIT order timeout for %s (orderID=%d) after %v - cancelling", symbol, orderID, timeout)
+			if cancelErr := r.futuresClient.CancelFuturesOrder(symbol, orderID); cancelErr != nil {
+				log.Printf("[CHAIN-ENTRY] Warning: Failed to cancel LIMIT order %d: %v", orderID, cancelErr)
+			} else {
+				log.Printf("[CHAIN-ENTRY] LIMIT order cancelled: orderID=%d", orderID)
+			}
+			return nil, fmt.Errorf("limit order not filled within %v timeout", timeout)
+		case <-ticker.C:
+			order, err := r.futuresClient.GetOrder(symbol, orderID)
+			if err != nil {
+				log.Printf("[CHAIN-ENTRY] Warning: Failed to query order status (orderID=%d): %v", orderID, err)
+				continue
+			}
+			switch order.Status {
+			case "FILLED":
+				return order, nil
+			case "CANCELED", "EXPIRED", "REJECTED":
+				return nil, fmt.Errorf("order %s (status=%s)", symbol, order.Status)
+			default:
+				// NEW, PARTIALLY_FILLED - continue waiting
+				if order.ExecutedQty > 0 {
+					log.Printf("[CHAIN-ENTRY] LIMIT order partially filled: %.6f/%.6f", order.ExecutedQty, order.OrigQty)
+				}
+			}
+		}
+	}
+}
+
+// parseTimeframeToDuration converts a timeframe string (e.g., "3m", "5m", "1h") to time.Duration.
+func parseTimeframeToDuration(timeframe string) time.Duration {
+	if len(timeframe) < 2 {
+		return time.Minute // default
+	}
+
+	numStr := timeframe[:len(timeframe)-1]
+	unit := timeframe[len(timeframe)-1:]
+
+	num, err := strconv.Atoi(numStr)
+	if err != nil || num <= 0 {
+		return time.Minute
+	}
+
+	switch unit {
+	case "m":
+		return time.Duration(num) * time.Minute
+	case "h":
+		return time.Duration(num) * time.Hour
+	case "d":
+		return time.Duration(num) * 24 * time.Hour
+	default:
+		return time.Minute
+	}
 }
 
 // roundToTickSizeFromSymbol rounds a price to the symbol's tick size precision.
@@ -1358,6 +1474,15 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 	// Explicitly release the slot now that the chain is in the database
 	releaseSlot()
 	slotReleased = true
+
+	// Notify that entry order was placed (allows pattern clearing for new entries on this symbol)
+	r.mu.RLock()
+	callback := r.onEntryPlaced
+	r.mu.RUnlock()
+	if callback != nil && state.Timeframe != "" {
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Calling onEntryPlaced callback for %s:%s:%s", symbol, mode, state.Timeframe)
+		callback(symbol, mode, state.Timeframe)
+	}
 
 	log.Printf("[CHAIN-ENTRY-IMMEDIATE] SUCCESS: Breakout entry placed for %s", symbol)
 	return nil

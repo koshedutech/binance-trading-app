@@ -4,6 +4,7 @@ package entrydecision
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -77,6 +78,11 @@ type PatternUpdate struct {
 	// Last evaluation timestamp (so frontend knows data is fresh)
 	LastEvaluatedAt time.Time `json:"last_evaluated_at,omitempty"`
 
+	// Position tracking (when position is actually open on Binance)
+	HasActivePosition  bool    `json:"has_active_position,omitempty"`  // Whether there's an active position for this coin
+	PositionEntryPrice float64 `json:"position_entry_price,omitempty"` // Position entry price (actual fill price from Binance)
+	ChainID            string  `json:"chain_id,omitempty"`             // Chain ID for the position
+
 	// Timestamp
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -134,6 +140,55 @@ type BreakoutCallback func(symbol, direction, mode, strategyGroup, subStrategy s
 // Returns (canEnter bool, currentCount int, maxCount int).
 type CapacityChecker func() (bool, int, int)
 
+// ============================================================================
+// PATTERN STATE PERSISTENCE INTERFACE
+// ============================================================================
+
+// PersistedPatternState is the serializable representation of a pattern state
+// for database storage. It contains all fields needed to restore a pattern
+// after server restart.
+type PersistedPatternState struct {
+	UserID          string          `json:"user_id"`
+	Symbol          string          `json:"symbol"`
+	Mode            string          `json:"mode"`
+	Timeframe       string          `json:"timeframe"`
+	Strategy        string          `json:"strategy"`
+	SubStrategy     string          `json:"sub_strategy"`
+	Status          string          `json:"status"`
+	CurrentStep     int             `json:"current_step"`
+	Direction       string          `json:"direction"`
+	ReferenceCandle json.RawMessage `json:"reference_candle,omitempty"`
+	ConsolidationData json.RawMessage `json:"consolidation_data,omitempty"`
+	EntryLevels     json.RawMessage `json:"entry_levels,omitempty"`
+	PatternData     json.RawMessage `json:"pattern_data,omitempty"`
+	StartedAt       *time.Time      `json:"started_at,omitempty"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+}
+
+// ConsolidationSnapshot captures consolidation-related state for serialization.
+type ConsolidationSnapshot struct {
+	ConsolidationCandles  int     `json:"consolidation_candles"`
+	ConsolidationLow      float64 `json:"consolidation_low"`
+	ConsolidationHigh     float64 `json:"consolidation_high"`
+	ConsolidationAvgVol   float64 `json:"consolidation_avg_vol"`
+	VolumeTrend           float64 `json:"volume_trend"`
+	AverageVolumeAtSpike  float64 `json:"average_volume_at_spike"`
+}
+
+// PatternStatePersister defines the interface for persisting pattern states to a database.
+// This interface is implemented by the database.Repository to avoid circular imports.
+type PatternStatePersister interface {
+	// SavePatternStateToDB saves a pattern state (upsert by user_id, symbol, mode, timeframe).
+	SavePatternStateToDB(ctx context.Context, state *PersistedPatternState) error
+	// GetPatternStatesFromDB retrieves all active pattern states for a user.
+	GetPatternStatesFromDB(ctx context.Context, userID string) ([]PersistedPatternState, error)
+	// DeletePatternStateFromDB removes a specific pattern state.
+	DeletePatternStateFromDB(ctx context.Context, userID, symbol, mode, timeframe string) error
+	// DeleteAllPatternStatesFromDB removes all pattern states for a user.
+	DeleteAllPatternStatesFromDB(ctx context.Context, userID string) error
+}
+
 // RealtimePatternMatcher handles real-time pattern evaluation on candle close events.
 type RealtimePatternMatcher struct {
 	// Pattern matcher for Volume Imbalance strategy
@@ -164,6 +219,9 @@ type RealtimePatternMatcher struct {
 
 	// Volume progress storage - latest volume progress per symbol
 	volumeProgress map[string]*VolumeProgress // key: symbol:timeframe
+
+	// Database persistence for pattern state recovery after restart
+	persister PatternStatePersister
 
 	mu sync.RWMutex
 }
@@ -244,8 +302,297 @@ func (r *RealtimePatternMatcher) SetCapacityChecker(checker CapacityChecker) {
 	log.Printf("[REALTIME-PATTERN] Capacity checker registered for proactive limit enforcement")
 }
 
+// SetPersister sets the database persister for saving/restoring pattern states across restarts.
+// This should be called during initialization before any pattern processing begins.
+func (r *RealtimePatternMatcher) SetPersister(persister PatternStatePersister) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.persister = persister
+	log.Printf("[REALTIME-PATTERN] Pattern state persister registered for DB persistence")
+}
+
+// RestorePatternStates loads persisted pattern states from the database and restores them
+// into the in-memory pattern matcher. This should be called during initialization after
+// the persister has been set and the user ID is known.
+func (r *RealtimePatternMatcher) RestorePatternStates() {
+	r.mu.RLock()
+	persister := r.persister
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if persister == nil || userID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	states, err := persister.GetPatternStatesFromDB(ctx, userID)
+	if err != nil {
+		log.Printf("[REALTIME-PATTERN] Failed to restore pattern states from DB: %v", err)
+		return
+	}
+
+	if len(states) == 0 {
+		log.Printf("[REALTIME-PATTERN] No persisted pattern states to restore for user %s", userID)
+		return
+	}
+
+	restored := 0
+	for _, ps := range states {
+		if err := r.restoreSinglePattern(ps); err != nil {
+			log.Printf("[REALTIME-PATTERN] Failed to restore pattern %s:%s:%s: %v",
+				ps.Symbol, ps.Mode, ps.Timeframe, err)
+			continue
+		}
+		restored++
+	}
+
+	log.Printf("[REALTIME-PATTERN] Restored %d/%d pattern states from DB for user %s",
+		restored, len(states), userID)
+}
+
+// restoreSinglePattern restores a single pattern state from a persisted record.
+func (r *RealtimePatternMatcher) restoreSinglePattern(ps PersistedPatternState) error {
+	if r.patternMatcher == nil {
+		return fmt.Errorf("pattern matcher not initialized")
+	}
+
+	patternKey := fmt.Sprintf("%s:%s:%s", ps.Symbol, ps.Mode, ps.Timeframe)
+
+	// Deserialize reference candle
+	var refCandle *Candle
+	if len(ps.ReferenceCandle) > 0 {
+		refCandle = &Candle{}
+		if err := json.Unmarshal(ps.ReferenceCandle, refCandle); err != nil {
+			return fmt.Errorf("failed to unmarshal reference candle: %w", err)
+		}
+	}
+
+	// Deserialize consolidation data
+	var consolidation ConsolidationSnapshot
+	if len(ps.ConsolidationData) > 0 {
+		if err := json.Unmarshal(ps.ConsolidationData, &consolidation); err != nil {
+			return fmt.Errorf("failed to unmarshal consolidation data: %w", err)
+		}
+	}
+
+	// Reconstruct PatternState
+	state := &PatternState{
+		ReferenceCandle:      refCandle,
+		AverageVolumeAtSpike: consolidation.AverageVolumeAtSpike,
+		ConsolidationCandles: consolidation.ConsolidationCandles,
+		ConsolidationLow:     consolidation.ConsolidationLow,
+		ConsolidationHigh:    consolidation.ConsolidationHigh,
+		ConsolidationAvgVol:  consolidation.ConsolidationAvgVol,
+		VolumeTrend:          consolidation.VolumeTrend,
+		Direction:            ps.Direction,
+	}
+
+	// Reconstruct PatternProgress
+	totalSteps := 2
+	progress := NewPatternProgress(ps.Symbol, ps.Strategy, ps.SubStrategy, ps.Mode, ps.Timeframe, totalSteps)
+	progress.CurrentStep = ps.CurrentStep
+	progress.Status = PatternStatus(ps.Status)
+	if ps.StartedAt != nil {
+		progress.StartedAt = *ps.StartedAt
+	}
+	progress.UpdatedAt = ps.UpdatedAt
+	if ps.ExpiresAt != nil {
+		progress.ExpiresAt = *ps.ExpiresAt
+	}
+
+	// Restore step details based on current step
+	if ps.CurrentStep >= 2 && refCandle != nil {
+		// Step 1 was completed (volume spike detected)
+		volMultiplier := 0.0
+		if consolidation.AverageVolumeAtSpike > 0 {
+			volMultiplier = refCandle.Volume / consolidation.AverageVolumeAtSpike
+		}
+		directionLabel := "Long Setup"
+		if ps.Direction == "short" {
+			directionLabel = "Short Setup"
+		}
+		progress.StepDetails[0] = StepDetail{
+			StepNumber: 1,
+			Name:       "Volume Spike",
+			Completed:  true,
+			Progress:   fmt.Sprintf("%.1fx avg (%s) [restored]", volMultiplier, directionLabel),
+			Details:    fmt.Sprintf("Reference: H=%.6f L=%.6f", refCandle.High, refCandle.Low),
+		}
+	}
+
+	// Store in pattern matcher
+	r.patternMatcher.mu.Lock()
+	r.patternMatcher.patterns[patternKey] = progress
+	r.patternMatcher.states[patternKey] = state
+	r.patternMatcher.mu.Unlock()
+
+	// Also store in our last states cache
+	r.mu.Lock()
+	r.lastStates[patternKey] = progress
+	r.mu.Unlock()
+
+	log.Printf("[REALTIME-PATTERN] Restored pattern %s step=%d status=%s direction=%s",
+		patternKey, ps.CurrentStep, ps.Status, ps.Direction)
+
+	return nil
+}
+
+// savePatternStateAsync saves the current pattern state to the database asynchronously.
+// This is fire-and-forget to avoid blocking pattern processing.
+// Only saves patterns that are in step 2+ (have a reference candle).
+func (r *RealtimePatternMatcher) savePatternStateAsync(symbol, mode, timeframe string) {
+	r.mu.RLock()
+	persister := r.persister
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if persister == nil || userID == "" {
+		return
+	}
+
+	// Get pattern progress and state
+	progress := r.patternMatcher.GetPattern(symbol, mode, timeframe)
+	if progress == nil {
+		return
+	}
+
+	// Only save patterns at step 2+ (skip "watching" states)
+	if progress.CurrentStep < 2 {
+		return
+	}
+
+	// Get internal state
+	state := r.getPatternState(symbol, mode, timeframe)
+	if state == nil {
+		return
+	}
+
+	// Build the persisted state
+	ps := r.buildPersistedState(userID, symbol, mode, timeframe, progress, state)
+	if ps == nil {
+		return
+	}
+
+	// Save asynchronously
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := persister.SavePatternStateToDB(ctx, ps); err != nil {
+			log.Printf("[REALTIME-PATTERN] Failed to save pattern state %s:%s:%s to DB: %v",
+				symbol, mode, timeframe, err)
+		}
+	}()
+}
+
+// deletePatternStateAsync deletes a pattern state from the database asynchronously.
+func (r *RealtimePatternMatcher) deletePatternStateAsync(symbol, mode, timeframe string) {
+	r.mu.RLock()
+	persister := r.persister
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if persister == nil || userID == "" {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := persister.DeletePatternStateFromDB(ctx, userID, symbol, mode, timeframe); err != nil {
+			log.Printf("[REALTIME-PATTERN] Failed to delete pattern state %s:%s:%s from DB: %v",
+				symbol, mode, timeframe, err)
+		}
+	}()
+}
+
+// deleteAllPatternStatesAsync deletes all pattern states from the database asynchronously.
+func (r *RealtimePatternMatcher) deleteAllPatternStatesAsync() {
+	r.mu.RLock()
+	persister := r.persister
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if persister == nil || userID == "" {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := persister.DeleteAllPatternStatesFromDB(ctx, userID); err != nil {
+			log.Printf("[REALTIME-PATTERN] Failed to delete all pattern states from DB: %v", err)
+		}
+	}()
+}
+
+// buildPersistedState creates a PersistedPatternState from the current pattern state.
+func (r *RealtimePatternMatcher) buildPersistedState(
+	userID, symbol, mode, timeframe string,
+	progress *PatternProgress,
+	state *PatternState,
+) *PersistedPatternState {
+	ps := &PersistedPatternState{
+		UserID:      userID,
+		Symbol:      symbol,
+		Mode:        mode,
+		Timeframe:   timeframe,
+		Strategy:    progress.Strategy,
+		SubStrategy: progress.SubStrategy,
+		Status:      string(progress.Status),
+		CurrentStep: progress.CurrentStep,
+		Direction:   state.Direction,
+		UpdatedAt:   time.Now(),
+	}
+
+	// Set started_at
+	if !progress.StartedAt.IsZero() {
+		startedAt := progress.StartedAt
+		ps.StartedAt = &startedAt
+	}
+
+	// Set expires_at
+	if !progress.ExpiresAt.IsZero() {
+		expiresAt := progress.ExpiresAt
+		ps.ExpiresAt = &expiresAt
+	}
+
+	// Serialize reference candle
+	if state.ReferenceCandle != nil {
+		data, err := json.Marshal(state.ReferenceCandle)
+		if err != nil {
+			log.Printf("[REALTIME-PATTERN] Failed to marshal reference candle: %v", err)
+			return nil
+		}
+		ps.ReferenceCandle = data
+	}
+
+	// Serialize consolidation data
+	consolidation := ConsolidationSnapshot{
+		ConsolidationCandles: state.ConsolidationCandles,
+		ConsolidationLow:     state.ConsolidationLow,
+		ConsolidationHigh:    state.ConsolidationHigh,
+		ConsolidationAvgVol:  state.ConsolidationAvgVol,
+		VolumeTrend:          state.VolumeTrend,
+		AverageVolumeAtSpike: state.AverageVolumeAtSpike,
+	}
+	data, err := json.Marshal(consolidation)
+	if err != nil {
+		log.Printf("[REALTIME-PATTERN] Failed to marshal consolidation data: %v", err)
+		return nil
+	}
+	ps.ConsolidationData = data
+
+	return ps
+}
+
 // OnVolumeProgress is called on every tick with volume progress data from CoinProfiler.
 // It stores the latest volume progress and broadcasts it via WebSocket in real-time.
+// CRITICAL: Preserves existing pattern state (Step 2+) to prevent UI flicker.
 func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgressData) {
 	// Convert CoinProfiler data to our VolumeProgress type
 	progress := &VolumeProgress{
@@ -281,19 +628,74 @@ func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgre
 	r.mu.RUnlock()
 
 	if patternCallback != nil {
+		// CRITICAL FIX: Check existing pattern state before broadcasting
+		// If the coin is already in Step 2+ (has reference_candle), preserve that state
+		// to prevent UI flickering from "Accumulating" back to "Watching"
+		mode := r.defaultMode
+		existingProgress := r.patternMatcher.GetPattern(data.Symbol, mode, data.Timeframe)
+		existingState := r.getPatternState(data.Symbol, mode, data.Timeframe)
+
+		// Default values for Step 1 (no pattern yet)
+		currentStep := 1
+		totalSteps := 2
+		status := PatternStatusWatching
+		var stepDetails []StepDetail
+		var referenceCandle *ReferenceCandle
+		var entryLevels *EntryLevels
+		direction := ""
+
+		// If we have existing pattern progress in Step 2+, preserve it
+		if existingProgress != nil && existingProgress.CurrentStep >= 2 {
+			currentStep = existingProgress.CurrentStep
+			totalSteps = existingProgress.TotalSteps
+			status = existingProgress.Status
+			stepDetails = existingProgress.StepDetails
+
+			// Get state for reference candle and direction
+			if existingState != nil {
+				direction = existingState.Direction
+
+				// Include reference candle for Step 2+ context
+				if existingState.ReferenceCandle != nil {
+					volumeMultiplier := 0.0
+					if existingState.AverageVolumeAtSpike > 0 {
+						volumeMultiplier = existingState.ReferenceCandle.Volume / existingState.AverageVolumeAtSpike
+					}
+					referenceCandle = &ReferenceCandle{
+						OpenTime:         existingState.ReferenceCandle.OpenTime,
+						CloseTime:        existingState.ReferenceCandle.Time,
+						Open:             existingState.ReferenceCandle.Open,
+						High:             existingState.ReferenceCandle.High,
+						Low:              existingState.ReferenceCandle.Low,
+						Close:            existingState.ReferenceCandle.Close,
+						Volume:           existingState.ReferenceCandle.Volume,
+						VolumeMultiplier: volumeMultiplier,
+					}
+
+					// Calculate entry levels with current price
+					entryLevels = r.calculateEntryLevels(existingState, data.CurrentPrice)
+				}
+			}
+		}
+
 		update := PatternUpdate{
-			UserID:         userID,
-			Symbol:         data.Symbol,
-			Timeframe:      data.Timeframe,
-			Mode:           r.defaultMode,
-			Strategy:       "volume_imbalance",
-			SubStrategy:    "ravindra_volume_imbalance",
-			CurrentStep:    1,
-			TotalSteps:     2,
-			Status:         PatternStatusWatching,
-			VolumeProgress: progress,
-			LookingFor:     r.getLookingForDirection(),
-			UpdatedAt:      time.Now(),
+			UserID:          userID,
+			Symbol:          data.Symbol,
+			Timeframe:       data.Timeframe,
+			Mode:            mode,
+			Strategy:        "volume_imbalance",
+			SubStrategy:     "ravindra_volume_imbalance",
+			CurrentStep:     currentStep,
+			TotalSteps:      totalSteps,
+			Status:          status,
+			StepDetails:     stepDetails,
+			VolumeProgress:  progress,
+			ReferenceCandle: referenceCandle,
+			EntryLevels:     entryLevels,
+			Direction:       direction,
+			CurrentPrice:    data.CurrentPrice,
+			LookingFor:      r.getLookingForDirection(),
+			UpdatedAt:       time.Now(),
 		}
 		patternCallback(update)
 	}
@@ -344,7 +746,35 @@ func (r *RealtimePatternMatcher) ClearAllPatterns() {
 	r.volumeProgress = make(map[string]*VolumeProgress)
 	r.mu.Unlock()
 
+	// Delete all persisted pattern states from DB (async)
+	r.deleteAllPatternStatesAsync()
+
 	log.Printf("[REALTIME-PATTERN] Cleared all pattern states for fresh start")
+}
+
+// ClearPatternForSymbol clears the pattern for a specific symbol when a position is opened.
+// This notifies the system to stop looking for new entry patterns on this symbol until
+// the position is closed. It should be called when an entry order is FILLED.
+func (r *RealtimePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe string) {
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Clear from underlying pattern matcher
+	r.patternMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
+
+	// Clear from our cached states
+	r.mu.Lock()
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	delete(r.lastStates, stateKey)
+	volKey := fmt.Sprintf("%s:%s", symbol, timeframe)
+	delete(r.volumeProgress, volKey)
+	r.mu.Unlock()
+
+	// Delete persisted pattern state from DB (async)
+	r.deletePatternStateAsync(symbol, mode, timeframe)
+
+	log.Printf("[REALTIME-PATTERN] Cleared pattern for %s:%s:%s (position opened)", symbol, mode, timeframe)
 }
 
 // OnCandleClose is called when a candle closes. This is the main entry point
@@ -421,6 +851,9 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 		r.mu.Lock()
 		r.lastStates[stateKey] = progress
 		r.mu.Unlock()
+
+		// Persist pattern state to DB (async, fire-and-forget)
+		r.savePatternStateAsync(symbol, mode, timeframe)
 	}
 
 	// ALWAYS broadcast update (so frontend knows system is alive)
@@ -648,33 +1081,51 @@ func (r *RealtimePatternMatcher) getPatternState(symbol, mode, timeframe string)
 }
 
 // calculateEntryLevels computes entry, SL, and TP levels based on pattern state.
+// Direction-aware: LONG uses reference HIGH as entry, SHORT uses reference LOW.
 func (r *RealtimePatternMatcher) calculateEntryLevels(state *PatternState, currentPrice float64) *EntryLevels {
 	if state == nil || state.ReferenceCandle == nil {
 		return nil
 	}
 
-	// Entry: At/above reference candle high
-	entryPrice := state.ReferenceCandle.High
+	var entryPrice, stopLoss, risk, takeProfit float64
 
-	// Stop Loss: Below consolidation low (or reference low) - 0.1%
-	stopLossBase := state.ConsolidationLow
-	if stopLossBase <= 0 {
-		stopLossBase = state.ReferenceCandle.Low
+	if state.Direction == "short" {
+		// SHORT: Entry at/below reference candle low, SL above consolidation high
+		entryPrice = state.ReferenceCandle.Low
+
+		stopLossBase := state.ConsolidationHigh
+		if stopLossBase <= 0 {
+			stopLossBase = state.ReferenceCandle.High
+		}
+		stopLoss = stopLossBase * 1.001 // 0.1% above resistance
+
+		risk = stopLoss - entryPrice
+		if risk <= 0 {
+			return nil // Invalid risk
+		}
+
+		takeProfit = entryPrice - (risk * r.riskReward)
+	} else {
+		// LONG: Entry at/above reference candle high, SL below consolidation low
+		entryPrice = state.ReferenceCandle.High
+
+		stopLossBase := state.ConsolidationLow
+		if stopLossBase <= 0 {
+			stopLossBase = state.ReferenceCandle.Low
+		}
+		stopLoss = stopLossBase * 0.999 // 0.1% below support
+
+		risk = entryPrice - stopLoss
+		if risk <= 0 {
+			return nil // Invalid risk
+		}
+
+		takeProfit = entryPrice + (risk * r.riskReward)
 	}
-	stopLoss := stopLossBase * 0.999 // 0.1% below
 
-	// Risk calculation
-	risk := entryPrice - stopLoss
-	if risk <= 0 {
-		return nil // Invalid risk
-	}
-
-	// Take Profit: Entry + (Risk × R:R ratio)
-	takeProfit := entryPrice + (risk * r.riskReward)
-
-	// Calculate percentages
+	// Calculate percentages (direction-independent using absolute risk)
 	riskPercent := (risk / entryPrice) * 100
-	rewardPercent := ((takeProfit - entryPrice) / entryPrice) * 100
+	rewardPercent := (risk * r.riskReward / entryPrice) * 100
 
 	return &EntryLevels{
 		EntryPrice:      entryPrice,
@@ -916,6 +1367,9 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		r.mu.Lock()
 		r.lastStates[stateKey] = progress
 		r.mu.Unlock()
+
+		// Persist breakout state to DB (async, fire-and-forget)
+		r.savePatternStateAsync(symbol, mode, timeframe)
 	}
 
 	// ALWAYS broadcast update for consolidating coins - even without breakout

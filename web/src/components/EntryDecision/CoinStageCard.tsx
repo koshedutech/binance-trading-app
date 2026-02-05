@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Entry Decision Real-Time Monitoring
 // Displays live coin progress with entry levels and pattern stage tracking
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -25,6 +25,19 @@ import type {
   PATTERN_STATUS_COLORS,
   PATTERN_STATUS_LABELS,
 } from '../../types/entryDecision';
+
+// ==================== Helper Functions ====================
+
+/**
+ * Format seconds into a compact timer display (e.g., "1m 30s" or "45s")
+ */
+const formatTimer = (seconds: number): string => {
+  if (seconds < 0) return '0s';
+  const mins = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+};
 
 // ==================== Interfaces ====================
 
@@ -329,6 +342,107 @@ export default function CoinStageCard({
   const isStageTwo = update.current_step >= 2;
   const price = currentPrice || update.entry_levels?.current_price;
 
+  // ==================== Timer States ====================
+
+  // Time since reference candle found (Stage 2+)
+  const [timeSinceReference, setTimeSinceReference] = useState<number>(
+    update.seconds_since_reference || 0
+  );
+
+  // Order expiry countdown (Ready state)
+  const [timeUntilExpiry, setTimeUntilExpiry] = useState<number>(
+    update.seconds_until_expiry || 0
+  );
+
+  // Position running timer
+  const [positionRunningTime, setPositionRunningTime] = useState<number>(0);
+
+  // Update timers every second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Timer 1: Time since reference candle (Stage 2+)
+      if (isStageTwo && update.reference_detected_at) {
+        const now = Date.now();
+        const detectedAt = new Date(update.reference_detected_at).getTime();
+        const elapsed = Math.floor((now - detectedAt) / 1000);
+        setTimeSinceReference(elapsed);
+      } else if (update.seconds_since_reference !== undefined) {
+        setTimeSinceReference((prev) => prev + 1);
+      }
+
+      // Timer 2: Order expiry countdown (Ready state)
+      if (isReady && update.seconds_until_expiry !== undefined) {
+        setTimeUntilExpiry((prev) => Math.max(0, prev - 1));
+      }
+
+      // Timer 3: Position running timer
+      if (isPositionRunning && update.position_opened_at) {
+        const now = Date.now();
+        const openedAt = new Date(update.position_opened_at).getTime();
+        const elapsed = Math.floor((now - openedAt) / 1000);
+        setPositionRunningTime(elapsed);
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isStageTwo, isReady, isPositionRunning, update.reference_detected_at, update.seconds_until_expiry, update.position_opened_at, update.seconds_since_reference]);
+
+  // Candle countdown timer (always visible on every card)
+  // Uses next_candle_close from backend, or calculates from timeframe as fallback
+  const calcCandleRemaining = (): number => {
+    // Priority 1: Backend-provided next candle close time
+    if (update.next_candle_close) {
+      const target = new Date(update.next_candle_close).getTime();
+      return Math.max(0, Math.floor((target - Date.now()) / 1000));
+    }
+    // Priority 2: Volume progress time remaining
+    if (update.volume_progress?.time_remaining_ms) {
+      return Math.max(0, Math.floor(update.volume_progress.time_remaining_ms / 1000));
+    }
+    // Priority 3: Calculate from timeframe (UTC-aligned candle intervals)
+    const tf = update.timeframe;
+    if (tf) {
+      const num = parseInt(tf);
+      const unit = tf.replace(/[0-9]/g, '');
+      let intervalMs = 0;
+      if (unit === 'm') intervalMs = num * 60 * 1000;
+      else if (unit === 'h') intervalMs = num * 60 * 60 * 1000;
+      if (intervalMs > 0) {
+        const elapsed = Date.now() % intervalMs;
+        return Math.max(0, Math.floor((intervalMs - elapsed) / 1000));
+      }
+    }
+    return 0;
+  };
+
+  const [candleCountdown, setCandleCountdown] = useState<number>(calcCandleRemaining);
+
+  // Recalculate when backend data arrives (keeps timer accurate)
+  useEffect(() => {
+    setCandleCountdown(calcCandleRemaining());
+  }, [update.next_candle_close, update.volume_progress?.time_remaining_ms]);
+
+  // Tick every second, resync from timeframe when hitting 0
+  useEffect(() => {
+    const id = setInterval(() => {
+      setCandleCountdown(prev => {
+        if (prev <= 1) return calcCandleRemaining(); // Resync on wrap
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [update.timeframe]);
+
+  // Update timers when props change
+  useEffect(() => {
+    if (update.seconds_since_reference !== undefined) {
+      setTimeSinceReference(update.seconds_since_reference);
+    }
+    if (update.seconds_until_expiry !== undefined) {
+      setTimeUntilExpiry(update.seconds_until_expiry);
+    }
+  }, [update.seconds_since_reference, update.seconds_until_expiry]);
+
   return (
     <div
       className={`
@@ -373,12 +487,60 @@ export default function CoinStageCard({
             <span className="text-xs text-gray-500 px-1.5 py-0.5 bg-gray-700/50 rounded">
               {update.timeframe}
             </span>
+
+            {/* Candle Countdown Timer - Always visible next to symbol */}
+            <span className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono ${
+              candleCountdown <= 10
+                ? 'bg-red-500/20 text-red-400 animate-pulse'
+                : candleCountdown <= 30
+                  ? 'bg-orange-500/20 text-orange-400'
+                  : 'bg-gray-700/50 text-gray-300'
+            }`}>
+              <Clock className="w-2.5 h-2.5" />
+              {formatTimer(candleCountdown)}
+            </span>
           </div>
 
           {/* Status Badge */}
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors.bg} ${colors.text}`}>
             {STATUS_LABELS[update.status] || update.status}
           </span>
+        </div>
+
+        {/* Timer Displays Row */}
+        <div className="flex items-center gap-3 mb-2">
+          {/* Timer 1: Time since reference candle (Stage 2+) */}
+          {isStageTwo && !isPositionRunning && (update.reference_detected_at || update.seconds_since_reference !== undefined) && (
+            <div className="flex items-center gap-1 text-[10px]">
+              <Clock className="w-3 h-3 text-gray-500" />
+              <span className="text-gray-500">Since ref:</span>
+              <span className="text-white font-mono">{formatTimer(timeSinceReference)}</span>
+            </div>
+          )}
+
+          {/* Timer 2: Order expiry countdown (Ready state) */}
+          {isReady && update.seconds_until_expiry !== undefined && (
+            <div className="flex items-center gap-1 text-[10px]">
+              <Clock className="w-3 h-3 text-yellow-500" />
+              <span className="text-gray-500">Expires in:</span>
+              <span className={`font-mono font-medium ${
+                timeUntilExpiry > 30 ? 'text-yellow-400' :
+                timeUntilExpiry > 10 ? 'text-orange-400' :
+                'text-red-400 animate-pulse'
+              }`}>
+                {formatTimer(timeUntilExpiry)}
+              </span>
+            </div>
+          )}
+
+          {/* Timer 3: Position running timer */}
+          {isPositionRunning && update.position_opened_at && (
+            <div className="flex items-center gap-1 text-[10px]">
+              <Clock className="w-3 h-3 text-cyan-500" />
+              <span className="text-gray-500">Position:</span>
+              <span className="text-cyan-400 font-mono">{formatTimer(positionRunningTime)}</span>
+            </div>
+          )}
         </div>
 
         {/* Price */}
@@ -388,6 +550,43 @@ export default function CoinStageCard({
             <span className="font-mono text-white">
               ${price.toFixed(price > 100 ? 2 : 4)}
             </span>
+          </div>
+        )}
+
+        {/* Requirements Section - Stage 1 only */}
+        {!compact && (update.current_step === 1 || update.status === 'watching') && (
+          <div className="mb-3 p-2 bg-gray-800/30 rounded border border-gray-700/50">
+            <div className="flex items-center gap-3 text-[10px]">
+              <span className="text-gray-500 font-medium">Requirements:</span>
+              <div className="flex items-center gap-3 flex-wrap">
+                {/* Volume Requirement */}
+                {(update.volume_threshold || update.volume_progress?.required_ratio) && (
+                  <span className="text-gray-400">
+                    Volume ≥ <span className="text-yellow-400 font-mono">
+                      {(update.volume_threshold || update.volume_progress?.required_ratio || 0).toFixed(1)}x
+                    </span> avg
+                  </span>
+                )}
+                {/* Direction Requirement */}
+                {(update.direction || update.looking_for) && (
+                  <span className="text-gray-400">
+                    Direction: <span className={`font-medium ${
+                      (update.direction || update.looking_for)?.toLowerCase() === 'long'
+                        ? 'text-green-400'
+                        : (update.direction || update.looking_for)?.toLowerCase() === 'short'
+                          ? 'text-red-400'
+                          : 'text-gray-400'
+                    }`}>
+                      {(update.direction || update.looking_for)?.toUpperCase()}
+                    </span>
+                  </span>
+                )}
+                {/* Timeframe */}
+                <span className="text-gray-400">
+                  Timeframe: <span className="text-blue-400 font-mono">{update.timeframe}</span>
+                </span>
+              </div>
+            </div>
           </div>
         )}
 
@@ -459,16 +658,59 @@ export default function CoinStageCard({
           />
         )}
 
-        {/* Position Running indicator - simplified view for Entry Decision.
-            Detailed position info (P&L, entry price, stages) is shown in Trade Lifecycle. */}
+        {/* Position Running indicator - shows position mode instead of strategy tracking.
+            When a position is active, we display entry price, chain ID, and direction.
+            Full P&L and stage details are shown in Trade Lifecycle. */}
         {isPositionRunning && (
-          <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
-            </span>
-            <span className="text-cyan-400 text-sm font-medium">Position Active</span>
-            <span className="text-gray-500 text-xs ml-auto">See Trade Lifecycle for details</span>
+          <div className="mt-3 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg space-y-2">
+            {/* Position Mode Badge */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+                </span>
+                <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-xs font-medium uppercase">
+                  Position Mode
+                </span>
+              </div>
+              {/* Direction Badge */}
+              {update.direction && (
+                <span className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
+                  update.direction === 'long'
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-red-500/20 text-red-400'
+                }`}>
+                  {update.direction === 'long' ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                  <span className="uppercase">{update.direction}</span>
+                </span>
+              )}
+            </div>
+
+            {/* Position Details */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              {/* Entry Price */}
+              {update.position_entry_price && (
+                <div className="flex flex-col">
+                  <span className="text-gray-500">Entry Price</span>
+                  <span className="text-white font-mono">
+                    ${update.position_entry_price.toFixed(update.position_entry_price > 100 ? 2 : 4)}
+                  </span>
+                </div>
+              )}
+              {/* Chain ID */}
+              {update.chain_id && (
+                <div className="flex flex-col">
+                  <span className="text-gray-500">Chain ID</span>
+                  <span className="text-cyan-400 font-mono text-[10px]">{update.chain_id}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Trade Lifecycle Link */}
+            <div className="text-gray-500 text-[10px] pt-1 border-t border-cyan-500/20">
+              See Trade Lifecycle for full P&L and stage details
+            </div>
           </div>
         )}
 

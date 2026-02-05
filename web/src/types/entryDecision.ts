@@ -208,6 +208,15 @@ export interface StrategyMatch {
   /** All coins being tracked by this strategy */
   coins: CoinMatch[];
 
+  /** Strategy-specific configuration from backend (dynamic, not hardcoded) */
+  config?: {
+    volume_spike_multiplier?: number;
+    lookback_period?: number;
+    breakout_volume_surge?: number;
+    pattern_expiration_mins?: number;
+    risk_reward_ratio?: number;
+  };
+
   /** Strategy requirements for UI display */
   requirements?: StrategyRequirements;
 
@@ -262,6 +271,8 @@ export interface EntryDecisionStrategiesResponse {
   looking_for?: string;
   /** When patterns were last evaluated */
   last_evaluated_at?: string;
+  /** When true, signals that profiler stopped and all data should be cleared */
+  cleared?: boolean;
 }
 
 /**
@@ -593,6 +604,14 @@ export interface PatternUpdate {
   last_evaluated_at?: string;
   /** Last update */
   updated_at: string;
+
+  // Position tracking (when position is actually open on Binance)
+  /** Whether there's an active position for this coin */
+  has_active_position?: boolean;
+  /** Position entry price (actual fill price from Binance) */
+  position_entry_price?: number;
+  /** Chain ID for the position */
+  chain_id?: string;
 
   // Step 2 Progress Bar fields (average from reference candle to last candle)
   /** Average volume multiplier from reference candle to last candle (before current) */

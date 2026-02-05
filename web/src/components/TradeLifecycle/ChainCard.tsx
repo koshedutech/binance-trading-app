@@ -530,6 +530,9 @@ export default function ChainCard({
                         modificationCount={chain.modificationCounts?.[tp.orderType || 'TP1'] || 0}
                         modifications={modificationData[(tp.orderType || 'TP1') as ModifiableOrderType]}
                         onLoadModifications={loadModifications}
+                        entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
+                        entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
+                        feeRate={takerFeeRate}
                       />
                     ))}
                     {chain.slOrder && (
@@ -543,6 +546,9 @@ export default function ChainCard({
                         modificationCount={chain.modificationCounts?.SL || 0}
                         modifications={modificationData.SL}
                         onLoadModifications={loadModifications}
+                        entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
+                        entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
+                        feeRate={takerFeeRate}
                       />
                     )}
                   </div>
@@ -565,6 +571,9 @@ export default function ChainCard({
                     modificationCount={chain.modificationCounts?.[tp.orderType || 'TP1'] || 0}
                     modifications={modificationData[(tp.orderType || 'TP1') as ModifiableOrderType]}
                     onLoadModifications={loadModifications}
+                    entryPrice={entryOrder?.avgPrice || entryOrder?.price}
+                    entryQuantity={entryOrder?.executedQty || entryOrder?.origQty}
+                    feeRate={takerFeeRate}
                   />
                 ))}
                 {chain.slOrder && (
@@ -578,6 +587,9 @@ export default function ChainCard({
                     modificationCount={chain.modificationCounts?.SL || 0}
                     modifications={modificationData.SL}
                     onLoadModifications={loadModifications}
+                    entryPrice={entryOrder?.avgPrice || entryOrder?.price}
+                    entryQuantity={entryOrder?.executedQty || entryOrder?.origQty}
+                    feeRate={takerFeeRate}
                   />
                 )}
               </div>

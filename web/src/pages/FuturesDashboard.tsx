@@ -328,6 +328,26 @@ export default function FuturesDashboard() {
         <NewsDashboard />
       </div>
 
+      {/* Account Summary - Collapsible Stats Card */}
+      <div className="mb-4">
+        <AccountStatsCard />
+      </div>
+
+      {/* P&L Summary - Daily & Weekly */}
+      <div className="mb-4">
+        <PnLSummaryCard />
+      </div>
+
+      {/* Trade Cycle - Between Positions and Orders */}
+      <div className="mb-4">
+        <TradeLifecycleTab />
+      </div>
+
+      {/* Open Orders & Trade History */}
+      <div className="mb-4">
+        <FuturesOrdersHistory />
+      </div>
+
       {/* Ginie AI Trader - Primary Futures Trading AI (Collapsible, default collapsed) */}
       <div className="mb-4">
         <CollapsibleCard
@@ -345,21 +365,6 @@ export default function FuturesDashboard() {
         </CollapsibleCard>
       </div>
 
-      {/* Account Summary - Collapsible Stats Card */}
-      <div className="mb-4">
-        <AccountStatsCard />
-      </div>
-
-      {/* P&L Summary - Daily & Weekly */}
-      <div className="mb-4">
-        <PnLSummaryCard />
-      </div>
-
-      {/* Position Optimization Monitor - Before Positions */}
-      <div className="mb-4">
-        <PositionOptimizationMonitor />
-      </div>
-
       {/* Positions Table */}
       <div className="mb-4">
         <FuturesPositionsTable
@@ -370,14 +375,22 @@ export default function FuturesDashboard() {
         />
       </div>
 
-      {/* Trade Cycle - Between Positions and Orders */}
+      {/* Position Optimization Monitor */}
       <div className="mb-4">
-        <TradeLifecycleTab />
+        <PositionOptimizationMonitor />
       </div>
 
-      {/* Open Orders & Trade History */}
+      {/* Mode Strategy Settings - Configure strategies for each mode */}
       <div className="mb-4">
-        <FuturesOrdersHistory />
+        <CollapsibleCard
+          title="Mode Strategy Settings"
+          icon={<Settings className="w-4 h-4" />}
+          defaultExpanded={false}
+          badge="Strategies"
+          badgeColor="purple"
+        >
+          <ModeStrategySettings />
+        </CollapsibleCard>
       </div>
 
       {/* Trade Source Performance Stats - Below Orders */}
@@ -416,19 +429,6 @@ export default function FuturesDashboard() {
           badgeColor="yellow"
         >
           <ModeSafetyPanel />
-        </CollapsibleCard>
-      </div>
-
-      {/* Mode Strategy Settings - Configure strategies for each mode */}
-      <div className="mb-4">
-        <CollapsibleCard
-          title="Mode Strategy Settings"
-          icon={<Settings className="w-4 h-4" />}
-          defaultExpanded={false}
-          badge="Strategies"
-          badgeColor="purple"
-        >
-          <ModeStrategySettings />
         </CollapsibleCard>
       </div>
 
