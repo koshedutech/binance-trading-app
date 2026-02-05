@@ -27,7 +27,7 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
 			created_at, updated_at, closed_at, close_reason,
 			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe
+			mode, strategy_group, sub_strategy, timeframe
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10,

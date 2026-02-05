@@ -457,6 +457,16 @@ export default function ChainCard({
             <span className={`text-sm ${directionColor}`}>{chain.positionSide}</span>
           </div>
 
+          {/* Realized PNL for completed chains */}
+          {chain.status === 'completed' && chain.positionState?.realizedPnl != null && (
+            <span className={`font-mono font-medium text-sm ${
+              chain.positionState.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'
+            }`}>
+              {chain.positionState.realizedPnl >= 0 ? '+' : ''}
+              ${(chain.positionState.realizedPnl ?? 0).toFixed(2)}
+            </span>
+          )}
+
           {/* Order count */}
           <div className="flex items-center gap-1.5 text-gray-400 text-sm">
             <Activity className="w-3.5 h-3.5" />
@@ -913,7 +923,13 @@ export default function ChainCard({
                   {tpEconomics.map((tp) => (
                     <div
                       key={tp.orderId}
-                      className="flex items-center justify-between py-2 px-3 bg-gray-800/50 rounded-lg text-sm"
+                      className={`flex items-center justify-between py-2 px-3 rounded-lg text-sm ${
+                        tp.status === 'FILLED'
+                          ? 'bg-green-500/10 border border-green-500/30'
+                          : tp.status === 'CANCELED'
+                            ? 'bg-gray-800/30 opacity-50'
+                            : 'bg-gray-800/50'
+                      }`}
                     >
                       <div className="flex items-center gap-3">
                         <Target className="w-4 h-4 text-cyan-400" />
@@ -988,8 +1004,14 @@ export default function ChainCard({
 
               {slSectionExpanded && (
                 <div className="px-4 pb-3 space-y-2">
-                  {/* SL Main Row */}
-                  <div className="flex items-center justify-between py-2 px-3 bg-gray-800/50 rounded-lg text-sm">
+                  {/* SL Main Row - highlighted based on fill status */}
+                  <div className={`flex items-center justify-between py-2 px-3 rounded-lg text-sm ${
+                    slEconomics.status === 'FILLED'
+                      ? 'bg-red-500/10 border border-red-500/30'
+                      : slEconomics.status === 'CANCELED'
+                        ? 'bg-gray-800/30 opacity-50'
+                        : 'bg-gray-800/50'
+                  }`}>
                     <div className="flex items-center gap-3">
                       <Shield className="w-4 h-4 text-red-400" />
                       <span className="font-medium text-red-400">SL</span>
@@ -1090,17 +1112,11 @@ export default function ChainCard({
           )}
 
           {/* Chain info footer - Show ENTRY values only, not sum of all orders */}
-          <div className="pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+          <div className="pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
             <div>
               <span className="text-gray-500">Created:</span>
               <span className="ml-2 text-gray-300">
                 {formatDateTime(chain.createdAt)}
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-500">Updated:</span>
-              <span className="ml-2 text-gray-300">
-                {formatDateTime(chain.updatedAt)}
               </span>
             </div>
             <div>
@@ -1125,6 +1141,40 @@ export default function ChainCard({
                 ) : (
                   <span className="text-gray-500">$0.00</span>
                 )}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500">Close Value:</span>
+              <span className="ml-2 text-gray-300 font-mono">
+                {(() => {
+                  // Find filled SL or TP order
+                  const filledExit = chain.slOrder?.status === 'FILLED'
+                    ? chain.slOrder
+                    : chain.tpOrders.find(tp => tp.status === 'FILLED');
+                  if (filledExit) {
+                    const exitPrice = filledExit.avgPrice || filledExit.stopPrice || filledExit.price || 0;
+                    const exitQty = filledExit.executedQty || filledExit.origQty || 0;
+                    return `$${(exitPrice * exitQty).toFixed(2)}`;
+                  }
+                  return <span className="text-gray-500">N/A</span>;
+                })()}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500">Duration:</span>
+              <span className="ml-2 text-gray-300 font-mono">
+                {(() => {
+                  const start = chain.createdAt;
+                  const end = chain.positionState?.closedAt
+                    ? new Date(chain.positionState.closedAt).getTime()
+                    : chain.updatedAt;
+                  const diffMs = end - start;
+                  if (diffMs <= 0) return 'N/A';
+                  const hours = Math.floor(diffMs / (1000 * 60 * 60));
+                  const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                  if (hours > 0) return `${hours}h ${mins}m`;
+                  return `${mins}m`;
+                })()}
               </span>
             </div>
           </div>

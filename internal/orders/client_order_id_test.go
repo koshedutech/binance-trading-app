@@ -68,6 +68,18 @@ func (m *MockCacheService) IncrementDailySequence(ctx context.Context, userID, d
 	return m.sequences[key], nil
 }
 
+// DecrementDailySequence mocks the atomic sequence decrement
+func (m *MockCacheService) DecrementDailySequence(ctx context.Context, userID, dateKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := fmt.Sprintf("user:%s:sequence:%s", userID, dateKey)
+	if m.sequences[key] > 0 {
+		m.sequences[key]--
+	}
+	return nil
+}
+
 // SetSequence sets a specific sequence value for testing
 func (m *MockCacheService) SetSequence(userID, dateKey string, value int64) {
 	m.mu.Lock()

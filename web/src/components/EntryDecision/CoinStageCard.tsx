@@ -70,7 +70,8 @@ const STATUS_COLORS: Record<PatternStatus, { bg: string; text: string; border: s
   ready: { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30' },
   failed: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30' },
   expired: { bg: 'bg-gray-500/20', text: 'text-gray-500', border: 'border-gray-500/30' },
-  position_running: { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500/30' },
+  position_running: { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30' },
+  position_closed: { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500/30' },
 };
 
 const STATUS_LABELS: Record<PatternStatus, string> = {
@@ -80,7 +81,8 @@ const STATUS_LABELS: Record<PatternStatus, string> = {
   ready: 'Ready',
   failed: 'Failed',
   expired: 'Expired',
-  position_running: 'Position Running',
+  position_running: 'In Position',
+  position_closed: 'Closed',
 };
 
 // ==================== Entry Levels Panel ====================
@@ -536,9 +538,9 @@ export default function CoinStageCard({
           {/* Timer 3: Position running timer */}
           {isPositionRunning && update.position_opened_at && (
             <div className="flex items-center gap-1 text-[10px]">
-              <Clock className="w-3 h-3 text-cyan-500" />
+              <Clock className="w-3 h-3 text-orange-500" />
               <span className="text-gray-500">Position:</span>
-              <span className="text-cyan-400 font-mono">{formatTimer(positionRunningTime)}</span>
+              <span className="text-orange-400 font-mono">{formatTimer(positionRunningTime)}</span>
             </div>
           )}
         </div>
@@ -632,7 +634,7 @@ export default function CoinStageCard({
             currentPrice={price}
             dayHigh={update.day_high}
             dayLow={update.day_low}
-            volumeThreshold={update.volume_threshold || 3.0}
+            volumeThreshold={update.volume_threshold}
             direction={update.direction || 'long'}
           />
         )}
@@ -659,19 +661,19 @@ export default function CoinStageCard({
         )}
 
         {/* Position Running indicator - shows position mode instead of strategy tracking.
-            When a position is active, we display entry price, chain ID, and direction.
+            When a position is active, we display entry price, chain ID, direction, and timers.
             Full P&L and stage details are shown in Trade Lifecycle. */}
         {isPositionRunning && (
-          <div className="mt-3 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg space-y-2">
+          <div className="mt-3 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg space-y-2">
             {/* Position Mode Badge */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500"></span>
                 </span>
-                <span className="px-2 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-xs font-medium uppercase">
-                  Position Mode
+                <span className="px-2 py-0.5 bg-orange-500/20 text-orange-400 rounded text-xs font-bold uppercase">
+                  POSITION
                 </span>
               </div>
               {/* Direction Badge */}
@@ -693,7 +695,7 @@ export default function CoinStageCard({
               {update.position_entry_price && (
                 <div className="flex flex-col">
                   <span className="text-gray-500">Entry Price</span>
-                  <span className="text-white font-mono">
+                  <span className="text-white font-mono font-medium">
                     ${update.position_entry_price.toFixed(update.position_entry_price > 100 ? 2 : 4)}
                   </span>
                 </div>
@@ -702,14 +704,60 @@ export default function CoinStageCard({
               {update.chain_id && (
                 <div className="flex flex-col">
                   <span className="text-gray-500">Chain ID</span>
-                  <span className="text-cyan-400 font-mono text-[10px]">{update.chain_id}</span>
+                  <span className="text-orange-400 font-mono text-[10px]">{update.chain_id}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Timers Row */}
+            <div className="flex items-center gap-4 text-xs">
+              {/* Ref to Entry time (frozen) */}
+              {update.seconds_ref_to_entry !== undefined && update.seconds_ref_to_entry > 0 && (
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500">Ref→Entry:</span>
+                  <span className="text-orange-300 font-mono">{formatTimer(update.seconds_ref_to_entry)}</span>
+                </div>
+              )}
+              {/* Position running time (live) */}
+              {update.position_opened_at && (
+                <div className="flex items-center gap-1">
+                  <Clock className="w-3 h-3 text-orange-500" />
+                  <span className="text-gray-500">Running:</span>
+                  <span className="text-orange-400 font-mono">{formatTimer(positionRunningTime)}</span>
                 </div>
               )}
             </div>
 
             {/* Trade Lifecycle Link */}
-            <div className="text-gray-500 text-[10px] pt-1 border-t border-cyan-500/20">
+            <div className="text-gray-500 text-[10px] pt-1 border-t border-orange-500/20">
               See Trade Lifecycle for full P&L and stage details
+            </div>
+          </div>
+        )}
+
+        {/* Position Closed PNL Display */}
+        {update.status === 'position_closed' && update.closed_pnl != null && (
+          <div className={`mt-3 p-3 rounded-lg border ${
+            update.closed_pnl >= 0
+              ? 'bg-green-500/10 border-green-500/30'
+              : 'bg-red-500/10 border-red-500/30'
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                  update.closed_reason === 'TP_HIT'
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-red-500/20 text-red-400'
+                }`}>
+                  {update.closed_reason === 'TP_HIT' ? 'TP' : 'SL'}
+                </span>
+                <span className="text-gray-400 text-xs">Position Closed</span>
+              </div>
+              <span className={`font-mono font-bold text-lg ${
+                update.closed_pnl >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {update.closed_pnl >= 0 ? '+' : ''}${(update.closed_pnl ?? 0).toFixed(2)}
+              </span>
             </div>
           </div>
         )}

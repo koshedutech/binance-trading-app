@@ -61,6 +61,8 @@ type SettingsCacheReader interface {
 	// IncrementDailySequence atomically increments and returns the daily sequence for a user.
 	// Used by Epic 7 for clientOrderId generation.
 	IncrementDailySequence(ctx context.Context, userID, dateKey string) (int64, error)
+	// DecrementDailySequence releases a consumed sequence number when an order fails.
+	DecrementDailySequence(ctx context.Context, userID, dateKey string) error
 	// IsHealthy returns whether the cache is available
 	IsHealthy() bool
 	// LoadUserSettings pre-loads all user settings into cache for warm-up
@@ -13580,7 +13582,8 @@ func (ga *GinieAutopilot) periodicOrphanOrderCleanup() {
 // HandleSLTPOrderFilled handles when a SL or TP order is filled on Binance
 // This is called from the WebSocket stream when an order fills to cancel the counterpart order
 // orderType should be "STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", or "TAKE_PROFIT"
-func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string, orderID int64) {
+func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string, orderID int64,
+	filledPrice float64, realizedProfit float64, commission float64, binanceTimestamp int64) {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -13592,6 +13595,8 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 		"symbol", symbol,
 		"order_type", orderType,
 		"order_id", orderID,
+		"filled_price", filledPrice,
+		"realized_profit", realizedProfit,
 		"is_sl_fill", isSLFill,
 		"is_tp_fill", isTPFill)
 
@@ -13637,14 +13642,70 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 	pos.TakeProfitAlgoIDs = nil
 	pos.StopLossAlgoID = 0
 
-	// NOTE: The old per-order cancellation logic below is kept for reference but no longer executed
-	// since CancelAllAlgoOrders() already cancelled everything.
-	_ = isSLFill // Suppress unused variable warning
-	_ = isTPFill // Suppress unused variable warning
+	// Record SL/TP fill event and close chain in database
+	if ga.chainEventWriter != nil && (isSLFill || isTPFill) {
+		ctx := context.Background()
+		activeChains, err := ga.chainEventWriter.GetActiveChains(ctx, ga.userID)
+		if err != nil {
+			ga.logger.Warn("Failed to get active chains for SL/TP fill recording",
+				"symbol", symbol,
+				"error", err.Error())
+		} else {
+			// Find matching chain by symbol
+			var matchedChainID string
+			for _, chain := range activeChains {
+				if chain.Symbol == symbol {
+					matchedChainID = chain.ChainID
+					break
+				}
+			}
 
-	// OLD CODE (no longer needed - all orders cancelled above):
-	// if isSLFill { ... cancel individual TP orders ... }
-	// if isTPFill { ... cancel individual SL/TP orders ... }
+			if matchedChainID != "" {
+				if isSLFill {
+					if err := ga.chainEventWriter.RecordSLFilled(ctx, matchedChainID, orders.ChainSLFilledEvent{
+						FilledPrice:     filledPrice,
+						PnL:             realizedProfit,
+						Fees:            commission,
+						BinanceTimestamp: binanceTimestamp,
+					}); err != nil {
+						ga.logger.Warn("Failed to record SL filled event",
+							"chain_id", matchedChainID, "error", err.Error())
+					}
+					if err := ga.chainEventWriter.CloseChain(ctx, matchedChainID,
+						string(orders.CloseReasonSLHit), realizedProfit, commission); err != nil {
+						ga.logger.Warn("Failed to close chain after SL fill",
+							"chain_id", matchedChainID, "error", err.Error())
+					} else {
+						ga.logger.Info("Chain closed after SL fill",
+							"chain_id", matchedChainID, "symbol", symbol,
+							"pnl", realizedProfit)
+					}
+				} else if isTPFill {
+					if err := ga.chainEventWriter.RecordTPFilled(ctx, matchedChainID, orders.ChainTPFilledEvent{
+						FilledPrice:     filledPrice,
+						PnL:             realizedProfit,
+						Fees:            commission,
+						BinanceTimestamp: binanceTimestamp,
+					}); err != nil {
+						ga.logger.Warn("Failed to record TP filled event",
+							"chain_id", matchedChainID, "error", err.Error())
+					}
+					if err := ga.chainEventWriter.CloseChain(ctx, matchedChainID,
+						string(orders.CloseReasonTPHit), realizedProfit, commission); err != nil {
+						ga.logger.Warn("Failed to close chain after TP fill",
+							"chain_id", matchedChainID, "error", err.Error())
+					} else {
+						ga.logger.Info("Chain closed after TP fill",
+							"chain_id", matchedChainID, "symbol", symbol,
+							"pnl", realizedProfit)
+					}
+				}
+			} else {
+				ga.logger.Debug("No active chain found for SL/TP fill recording",
+					"symbol", symbol, "order_type", orderType)
+			}
+		}
+	}
 
 	// Note: Position removal is handled by the account/position update stream
 	// when Binance reports the position as closed (quantity = 0)

@@ -5249,7 +5249,8 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 					"order_id", order.OrderId,
 					"order_status", order.OrderStatus,
 					"last_filled_qty", order.LastFilledQty)
-				fc.ginieAutopilot.HandleSLTPOrderFilled(order.Symbol, orderType, order.OrderId)
+				fc.ginieAutopilot.HandleSLTPOrderFilled(order.Symbol, orderType, order.OrderId,
+				order.LastFilledPrice, order.RealizedProfit, order.Commission, order.OrderTradeTime)
 			}
 		}
 

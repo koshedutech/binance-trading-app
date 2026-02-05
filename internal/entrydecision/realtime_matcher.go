@@ -168,12 +168,13 @@ type PersistedPatternState struct {
 
 // ConsolidationSnapshot captures consolidation-related state for serialization.
 type ConsolidationSnapshot struct {
-	ConsolidationCandles  int     `json:"consolidation_candles"`
-	ConsolidationLow      float64 `json:"consolidation_low"`
-	ConsolidationHigh     float64 `json:"consolidation_high"`
-	ConsolidationAvgVol   float64 `json:"consolidation_avg_vol"`
-	VolumeTrend           float64 `json:"volume_trend"`
-	AverageVolumeAtSpike  float64 `json:"average_volume_at_spike"`
+	ConsolidationCandles  int        `json:"consolidation_candles"`
+	ConsolidationLow      float64    `json:"consolidation_low"`
+	ConsolidationHigh     float64    `json:"consolidation_high"`
+	ConsolidationAvgVol   float64    `json:"consolidation_avg_vol"`
+	VolumeTrend           float64    `json:"volume_trend"`
+	AverageVolumeAtSpike  float64    `json:"average_volume_at_spike"`
+	ReferenceDetectedAt   *time.Time `json:"reference_detected_at,omitempty"`
 }
 
 // PatternStatePersister defines the interface for persisting pattern states to a database.
@@ -388,6 +389,10 @@ func (r *RealtimePatternMatcher) restoreSinglePattern(ps PersistedPatternState) 
 		VolumeTrend:          consolidation.VolumeTrend,
 		Direction:            ps.Direction,
 	}
+	// Restore ReferenceDetectedAt from persisted consolidation data
+	if consolidation.ReferenceDetectedAt != nil {
+		state.ReferenceDetectedAt = *consolidation.ReferenceDetectedAt
+	}
 
 	// Reconstruct PatternProgress
 	totalSteps := 2
@@ -579,6 +584,10 @@ func (r *RealtimePatternMatcher) buildPersistedState(
 		ConsolidationAvgVol:  state.ConsolidationAvgVol,
 		VolumeTrend:          state.VolumeTrend,
 		AverageVolumeAtSpike: state.AverageVolumeAtSpike,
+	}
+	if !state.ReferenceDetectedAt.IsZero() {
+		refDetectedAt := state.ReferenceDetectedAt
+		consolidation.ReferenceDetectedAt = &refDetectedAt
 	}
 	data, err := json.Marshal(consolidation)
 	if err != nil {

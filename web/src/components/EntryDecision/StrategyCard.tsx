@@ -41,7 +41,7 @@ import type {
  * Converts CoinMatch data to PatternUpdate format for Step2ProgressBars
  * This allows Step2ProgressBars to be used in StrategyCard with CoinMatch data
  */
-function coinMatchToPatternUpdate(coin: CoinMatch): PatternUpdate {
+function coinMatchToPatternUpdate(coin: CoinMatch, strategyVolumeThreshold?: number): PatternUpdate {
   return {
     symbol: coin.symbol,
     timeframe: '15m', // Default, actual timeframe comes from strategy
@@ -56,9 +56,8 @@ function coinMatchToPatternUpdate(coin: CoinMatch): PatternUpdate {
     current_price: coin.current_price,
     day_high: coin.day_high,
     day_low: coin.day_low,
-    // Use actual volume threshold from coin data (from strategy settings)
-    // Default to 2.0 which is common for volume imbalance patterns
-    volume_threshold: coin.volume_threshold || 2.0,
+    // Use actual volume threshold: coin-level (real-time) > strategy config (DB) > undefined
+    volume_threshold: coin.volume_threshold || strategyVolumeThreshold,
     direction: coin.direction,
     updated_at: coin.updated_at,
     // Step 2 specific fields - use current data with fallbacks
@@ -93,6 +92,14 @@ interface CoinRowProps {
   strategyType: StrategyType;
   /** Score threshold (for score-based) */
   threshold?: number;
+  /** Volume spike multiplier from strategy config (database value) */
+  strategyVolumeThreshold?: number;
+  /** Strategy display name (e.g., "Ravindra Volume Imbalance") */
+  strategyName?: string;
+  /** Strategy timeframe (e.g., "3m", "15m") */
+  timeframe?: string;
+  /** Next candle close time for countdown timer */
+  nextCandleClose?: Date | null;
   /** Click handler */
   onClick?: () => void;
 }
@@ -326,31 +333,13 @@ function PositionRunningTimer({ positionOpenedAt, entryPrice, currentPrice, chai
     : null;
 
   return (
-    <div className="flex items-center gap-3 px-2 py-1.5 bg-cyan-500/10 border border-cyan-500/30 rounded">
-      {/* Position Running indicator */}
-      <div className="flex items-center gap-1.5">
-        <span className="relative flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
-        </span>
-        <span className="text-cyan-400 text-xs font-medium">Position Running</span>
-      </div>
-
+    <div className="flex items-center gap-2">
       {/* Timer */}
       <div className="flex items-center gap-1 text-xs">
-        <Clock className="w-3 h-3 text-cyan-400" />
-        <span className="font-mono text-cyan-300">{formatTimeElapsed(elapsedSeconds)}</span>
+        <Clock className="w-3 h-3 text-orange-400" />
+        <span className="text-gray-500">Running:</span>
+        <span className="font-mono text-orange-400">{formatTimeElapsed(elapsedSeconds)}</span>
       </div>
-
-      {/* Entry Price */}
-      {entryPrice && (
-        <div className="flex items-center gap-1 text-xs">
-          <span className="text-gray-500">Entry:</span>
-          <span className="font-mono text-white">
-            ${entryPrice.toFixed(entryPrice > 100 ? 2 : 4)}
-          </span>
-        </div>
-      )}
 
       {/* Unrealized P&L */}
       {pnlPercent !== null && (
@@ -358,13 +347,6 @@ function PositionRunningTimer({ positionOpenedAt, entryPrice, currentPrice, chai
           pnlPercent >= 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
         }`}>
           {pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%
-        </span>
-      )}
-
-      {/* Chain ID */}
-      {chainId && (
-        <span className="text-[10px] text-gray-500 font-mono">
-          {chainId}
         </span>
       )}
     </div>
@@ -401,14 +383,82 @@ function CoinRow({
   coin,
   strategyType,
   threshold = 55,
+  strategyVolumeThreshold,
+  strategyName,
+  timeframe,
+  nextCandleClose,
   onClick,
 }: CoinRowProps) {
+  // Volume threshold: prefer coin-level (from real-time data), then strategy config (from DB)
+  const effectiveVolumeThreshold = coin.volume_threshold || strategyVolumeThreshold;
   const isReady = checkCoinReady(coin);
   const isActive = coin.status === 'accumulation' || coin.status === 'consolidating';
   // Position running means Chain Runner has an active position - detailed info shown in Trade Lifecycle
   const isPositionRunning = coin.status === 'position_running' || coin.has_active_position;
+  const isPositionClosed = coin.status === 'position_closed';
   const stageInfo = STAGE_LABELS[coin.step || 0];
   const statusInfo = STATUS_STAGE_LABELS[coin.status || 'watching'];
+  const isStageTwo = (coin.step || 0) >= 2 || !!coin.reference_candle;
+
+  // Elapsed timer since reference candle detected (Stage 2+) - counts up continuously
+  const [elapsedSinceRef, setElapsedSinceRef] = useState<number>(coin.seconds_since_reference || 0);
+
+  useEffect(() => {
+    if (!isStageTwo) return;
+
+    const updateElapsed = () => {
+      if (coin.reference_detected_at) {
+        const detectedAt = new Date(coin.reference_detected_at).getTime();
+        setElapsedSinceRef(Math.floor((Date.now() - detectedAt) / 1000));
+      } else if (coin.seconds_since_reference !== undefined) {
+        setElapsedSinceRef(prev => prev + 1);
+      }
+    };
+
+    updateElapsed();
+    const timer = setInterval(updateElapsed, 1000);
+    return () => clearInterval(timer);
+  }, [isStageTwo, coin.reference_detected_at, coin.seconds_since_reference]);
+
+  // Candle countdown timer (per card) - counts down, resyncs from timeframe on wrap
+  const calcCandleRemaining = (): number => {
+    // Priority 1: Backend-provided next candle close time (if still in the future)
+    if (nextCandleClose) {
+      const diff = Math.floor((nextCandleClose.getTime() - Date.now()) / 1000);
+      if (diff > 0) return diff;
+    }
+    // Priority 2: Calculate from timeframe (UTC-aligned candle intervals)
+    if (timeframe) {
+      const num = parseInt(timeframe);
+      const unit = timeframe.replace(/[0-9]/g, '');
+      let intervalMs = 0;
+      if (unit === 'm') intervalMs = num * 60 * 1000;
+      else if (unit === 'h') intervalMs = num * 60 * 60 * 1000;
+      if (intervalMs > 0) {
+        const elapsed = Date.now() % intervalMs;
+        return Math.max(0, Math.floor((intervalMs - elapsed) / 1000));
+      }
+    }
+    return 0;
+  };
+
+  const [candleCountdown, setCandleCountdown] = useState<number>(calcCandleRemaining);
+
+  // Resync when backend sends new nextCandleClose
+  useEffect(() => {
+    setCandleCountdown(calcCandleRemaining());
+  }, [nextCandleClose]);
+
+  // Tick every second, resync from timeframe when hitting 0
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCandleCountdown(prev => {
+        if (prev <= 1) return calcCandleRemaining(); // Resync on wrap
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [timeframe, nextCandleClose]);
 
   return (
     <button
@@ -424,7 +474,32 @@ function CoinRow({
         }
       `}
     >
-      {/* Top Row: Symbol, Direction, Status */}
+      {/* Strategy Name + Candle Countdown Row */}
+      <div className="flex items-center justify-between w-full mb-1.5">
+        <div className="flex items-center gap-2 text-[10px]">
+          {strategyName && (
+            <span className="text-gray-500">{strategyName}</span>
+          )}
+          {timeframe && (
+            <span className="px-1 py-0.5 bg-gray-700/50 rounded text-gray-400 font-mono">{timeframe}</span>
+          )}
+        </div>
+        {/* Candle Countdown Timer - always visible */}
+        {(nextCandleClose || timeframe) && candleCountdown >= 0 && (
+          <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${
+            candleCountdown <= 10
+              ? 'bg-red-500/20 text-red-400 animate-pulse'
+              : candleCountdown <= 30
+                ? 'bg-orange-500/20 text-orange-400'
+                : 'bg-gray-700/50 text-gray-300'
+          }`}>
+            <Clock className="w-2.5 h-2.5" />
+            {formatTimeElapsed(candleCountdown)}
+          </div>
+        )}
+      </div>
+
+      {/* Top Row: Symbol, Direction, Elapsed Timer, Status */}
       <div className="flex items-center justify-between w-full">
         <div className="flex items-center gap-3">
           <span className={`font-bold ${isReady ? 'text-green-400' : 'text-white'}`}>
@@ -441,6 +516,15 @@ function CoinRow({
               {coin.direction === 'long' && <TrendingUp className="w-3 h-3" />}
               {coin.direction === 'short' && <TrendingDown className="w-3 h-3" />}
               <span className="text-xs uppercase">{coin.direction}</span>
+            </span>
+          )}
+
+          {/* Elapsed timer since reference candle (Stage 2+) */}
+          {isStageTwo && !isPositionRunning && elapsedSinceRef > 0 && (
+            <span className="flex items-center gap-1 text-[10px] text-gray-400">
+              <Clock className="w-2.5 h-2.5" />
+              <span className="font-mono">{formatTimeElapsed(elapsedSinceRef)}</span>
+              <span className="text-gray-500">elapsed</span>
             </span>
           )}
 
@@ -492,10 +576,10 @@ function CoinRow({
           )}
 
           {/* Volume Multiplier */}
-          {coin.volume_multiplier && (
+          {coin.volume_multiplier && effectiveVolumeThreshold && (
             <span className={`font-mono ${
-              coin.volume_multiplier >= (coin.volume_threshold || 3.0) ? 'text-green-400' :
-              coin.volume_multiplier >= (coin.volume_threshold || 3.0) * 0.67 ? 'text-yellow-400' :
+              coin.volume_multiplier >= effectiveVolumeThreshold ? 'text-green-400' :
+              coin.volume_multiplier >= effectiveVolumeThreshold * 0.67 ? 'text-yellow-400' :
               'text-gray-500'
             }`}>
               {coin.volume_multiplier.toFixed(1)}x avg
@@ -530,15 +614,57 @@ function CoinRow({
           reference_candle is preserved in merge logic, making this condition stable */}
       {strategyType === 'pattern' && (coin.reference_candle || (coin.step !== undefined && coin.step > 0)) && (
         <div className="mt-2 pt-2 border-t border-gray-700/30 space-y-2">
-          {/* Position Running - Simplified View */}
+          {/* Position Running - Distinct Orange View */}
           {isPositionRunning ? (
-            <div className="flex items-center gap-2 px-2 py-1.5 bg-cyan-500/10 border border-cyan-500/30 rounded">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
-              </span>
-              <span className="text-cyan-400 text-xs font-medium">Position Active</span>
-              <span className="text-gray-500 text-xs ml-auto">See Trade Lifecycle for P&L and stage details</span>
+            <div className="px-2 py-2 bg-orange-500/10 border border-orange-500/30 rounded space-y-1.5">
+              {/* Row 1: Position badge + direction + entry price */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500"></span>
+                </span>
+                <span className="px-1.5 py-0.5 bg-orange-500/20 text-orange-400 text-xs font-bold rounded uppercase">POSITION</span>
+                {coin.direction && (
+                  <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                    coin.direction === 'long'
+                      ? 'bg-green-500/20 text-green-400'
+                      : 'bg-red-500/20 text-red-400'
+                  }`}>
+                    {coin.direction === 'long' ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                    <span className="uppercase">{coin.direction}</span>
+                  </span>
+                )}
+                {coin.position_entry_price && (
+                  <span className="flex items-center gap-1 text-xs">
+                    <span className="text-gray-500">Entry:</span>
+                    <span className="text-white font-mono font-medium">
+                      ${coin.position_entry_price.toFixed(coin.position_entry_price > 100 ? 2 : 4)}
+                    </span>
+                  </span>
+                )}
+                {coin.chain_id && (
+                  <span className="text-orange-400 font-mono text-[10px]">{coin.chain_id}</span>
+                )}
+              </div>
+              {/* Row 2: Timers */}
+              <div className="flex items-center gap-4 text-xs">
+                {coin.seconds_ref_to_entry !== undefined && coin.seconds_ref_to_entry > 0 && (
+                  <span className="flex items-center gap-1">
+                    <span className="text-gray-500">Ref→Entry:</span>
+                    <span className="text-orange-300 font-mono">{formatTimeElapsed(coin.seconds_ref_to_entry)}</span>
+                  </span>
+                )}
+                {coin.position_opened_at && (
+                  <PositionRunningTimer
+                    positionOpenedAt={coin.position_opened_at}
+                    entryPrice={coin.position_entry_price}
+                    currentPrice={coin.current_price}
+                  />
+                )}
+                {!coin.position_opened_at && (
+                  <span className="text-gray-500 text-xs">See Trade Lifecycle for details</span>
+                )}
+              </div>
             </div>
           ) : (
             <>
@@ -778,7 +904,7 @@ function CoinRow({
                     )}
                     {/* Ready badge or Position Running badge */}
                     {coin.status === 'position_running' ? (
-                      <span className="flex items-center gap-1 px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">
+                      <span className="flex items-center gap-1 px-1.5 py-0.5 bg-orange-500/20 text-orange-400 rounded font-bold">
                         <TrendingUp className="w-3 h-3" />
                         POSITION
                       </span>
@@ -817,13 +943,40 @@ function CoinRow({
                   Step2ProgressBars handles missing data internally with a placeholder. */}
               {coin.reference_candle && (
                 <Step2ProgressBars
-                  update={coinMatchToPatternUpdate(coin)}
+                  update={coinMatchToPatternUpdate(coin, strategyVolumeThreshold)}
                   currentPrice={coin.current_price || 0}
                   candlesSinceReference={coin.candles_since_reference}
                 />
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* Position Closed PNL Display */}
+      {isPositionClosed && coin.closed_pnl != null && (
+        <div className={`mt-2 pt-2 border-t border-gray-700/30 px-2 py-2 rounded ${
+          coin.closed_pnl >= 0
+            ? 'bg-green-500/10 border border-green-500/30'
+            : 'bg-red-500/10 border border-red-500/30'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+                coin.closed_reason === 'TP_HIT'
+                  ? 'bg-green-500/20 text-green-400'
+                  : 'bg-red-500/20 text-red-400'
+              }`}>
+                {coin.closed_reason === 'TP_HIT' ? 'TP' : 'SL'}
+              </span>
+              <span className="text-gray-400 text-xs">Position Closed</span>
+            </div>
+            <span className={`font-mono font-bold ${
+              coin.closed_pnl >= 0 ? 'text-green-400' : 'text-red-400'
+            }`}>
+              {coin.closed_pnl >= 0 ? '+' : ''}${(coin.closed_pnl ?? 0).toFixed(2)}
+            </span>
+          </div>
         </div>
       )}
 
@@ -1083,7 +1236,7 @@ function CoinRow({
           ) : (
             /* Fallback when no volume data */
             <span className="text-xs text-gray-500">
-              🔍 Scanning for volume spike ({(coin.volume_threshold || 3).toFixed(0)}x average)...
+              🔍 Scanning for volume spike {effectiveVolumeThreshold ? `(${effectiveVolumeThreshold.toFixed(0)}x average)` : ''}...
             </span>
           )}
         </div>
@@ -1274,13 +1427,17 @@ export default function StrategyCard({
             )}
           </div>
 
-          {/* Per-Strategy Countdown Timer - Always visible */}
-          {nextCandleClose && (
-            <CountdownTimer
-              targetTime={nextCandleClose}
-              lookingFor={strategy.looking_for || null}
-              compact={true}
-            />
+          {/* Direction indicator at strategy level */}
+          {strategy.looking_for && (
+            <span className={`text-xs uppercase ${
+              strategy.looking_for === 'long' ? 'text-green-400' :
+              strategy.looking_for === 'short' ? 'text-red-400' :
+              'text-purple-400'
+            }`}>
+              {strategy.looking_for === 'long' && <TrendingUp className="w-3 h-3 inline" />}
+              {strategy.looking_for === 'short' && <TrendingDown className="w-3 h-3 inline" />}
+              {strategy.looking_for === 'both' && <ArrowUpDown className="w-3 h-3 inline" />}
+            </span>
           )}
         </div>
 
@@ -1344,6 +1501,10 @@ export default function StrategyCard({
               coin={coin}
               strategyType={strategy.type}
               threshold={strategy.threshold}
+              strategyVolumeThreshold={strategy.config?.volume_spike_multiplier}
+              strategyName={formatName(strategy.strategy, strategy.sub_strategy)}
+              timeframe={strategy.timeframe}
+              nextCandleClose={nextCandleClose}
               onClick={() => onCoinSelect?.(coin.symbol, strategy)}
             />
           ))}

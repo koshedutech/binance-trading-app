@@ -18,7 +18,8 @@ export type PatternStatus =
   | 'ready'
   | 'failed'
   | 'expired'
-  | 'position_running';
+  | 'position_running'
+  | 'position_closed';
 
 /**
  * Trading mode
@@ -165,6 +166,14 @@ export interface CoinMatch {
   position_quantity?: number;
   /** Chain ID for the position */
   chain_id?: string;
+  /** Frozen: seconds from reference detection to entry fill */
+  seconds_ref_to_entry?: number;
+
+  // Closed position info (when position was closed by SL/TP)
+  /** Realized PnL from closed position */
+  closed_pnl?: number;
+  /** Close reason: "SL_HIT" or "TP_HIT" */
+  closed_reason?: string;
 }
 
 // ==================== Strategy Match Types ====================
@@ -448,6 +457,7 @@ export const PATTERN_STATUS_COLORS: Record<PatternStatus, { bg: string; text: st
   ready: { bg: 'bg-green-500/20', text: 'text-green-400' },
   failed: { bg: 'bg-red-500/20', text: 'text-red-400' },
   expired: { bg: 'bg-gray-500/20', text: 'text-gray-500' },
+  position_closed: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
 };
 
 /**
@@ -460,6 +470,7 @@ export const PATTERN_STATUS_LABELS: Record<PatternStatus, string> = {
   ready: 'Ready',
   failed: 'Failed',
   expired: 'Expired',
+  position_closed: 'Closed',
 };
 
 // ==================== Utility Functions ====================
@@ -612,6 +623,10 @@ export interface PatternUpdate {
   position_entry_price?: number;
   /** Chain ID for the position */
   chain_id?: string;
+  /** When position was opened (entry filled) - ISO timestamp */
+  position_opened_at?: string;
+  /** Frozen: seconds from reference detection to entry fill */
+  seconds_ref_to_entry?: number;
 
   // Step 2 Progress Bar fields (average from reference candle to last candle)
   /** Average volume multiplier from reference candle to last candle (before current) */
@@ -620,6 +635,12 @@ export interface PatternUpdate {
   consolidation_avg_price?: number;
   /** Current candle's volume multiplier */
   current_candle_volume_multiplier?: number;
+
+  // Closed position info (when position was closed by SL/TP)
+  /** Realized PnL from closed position */
+  closed_pnl?: number;
+  /** Close reason: "SL_HIT" or "TP_HIT" */
+  closed_reason?: string;
 }
 
 /**

@@ -62,6 +62,10 @@ const (
 	// resetting to "watching" state. This status is set when there's an active position
 	// on Binance for this symbol.
 	PatternStatusPositionRunning PatternStatus = "position_running"
+
+	// PatternStatusPositionClosed indicates a position was recently closed (SL/TP hit).
+	// Shows realized PnL briefly before transitioning back to "watching" state.
+	PatternStatusPositionClosed PatternStatus = "position_closed"
 )
 
 // String returns the string representation of the pattern status.
@@ -80,7 +84,8 @@ func (ps PatternStatus) IsActive() bool {
 		ps == PatternStatusAccumulation ||
 		ps == PatternStatusConsolidating ||
 		ps == PatternStatusReady ||
-		ps == PatternStatusPositionRunning
+		ps == PatternStatusPositionRunning ||
+		ps == PatternStatusPositionClosed
 }
 
 // CoinMatch represents a single coin's match status against a strategy.
@@ -138,6 +143,11 @@ type CoinMatch struct {
 	PositionEntryPrice   float64    `json:"position_entry_price,omitempty"`   // Position entry price (actual fill price from Binance)
 	PositionQuantity     float64    `json:"position_quantity,omitempty"`      // Position quantity
 	ChainID              string     `json:"chain_id,omitempty"`               // Chain ID for the position
+	SecondsRefToEntry    int        `json:"seconds_ref_to_entry,omitempty"`   // Frozen: seconds from ref detection to entry fill
+
+	// Closed position info (when position was closed by SL/TP)
+	ClosedPnL    *float64 `json:"closed_pnl,omitempty"`    // Realized PnL from closed position
+	ClosedReason string   `json:"closed_reason,omitempty"` // "SL_HIT" or "TP_HIT"
 
 	// Entry levels from pattern detection (for actual SL/TP prices, not percentages)
 	// These are calculated from Support Price (Consolidation Low) at pattern detection time

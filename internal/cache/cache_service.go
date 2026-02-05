@@ -317,6 +317,35 @@ func (cs *CacheService) IncrementDailySequence(ctx context.Context, userID, date
 	return val, nil
 }
 
+// DecrementDailySequence atomically decrements a daily sequence counter.
+// Used to release consumed sequence numbers when an order fails before being placed.
+// This prevents gaps in the daily sequence numbering.
+func (cs *CacheService) DecrementDailySequence(ctx context.Context, userID, dateKey string) error {
+	cs.checkHealth(ctx)
+
+	if !cs.IsHealthy() {
+		return fmt.Errorf("redis unavailable (circuit breaker open)")
+	}
+
+	key := fmt.Sprintf(PrefixDailySequence, userID, dateKey)
+
+	val, err := cs.client.Decr(ctx, key).Result()
+	if err != nil {
+		if !isContextError(err) {
+			cs.recordFailure()
+		}
+		return fmt.Errorf("redis decr failed: %w", err)
+	}
+
+	// Safety: don't let sequence go below 0
+	if val < 0 {
+		cs.client.Set(ctx, key, 0, 0) // Reset to 0, keep existing TTL
+	}
+
+	cs.recordSuccess()
+	return nil
+}
+
 // GetCurrentSequence returns the current sequence value for a user on a given date.
 // Used for monitoring - doesn't increment the sequence.
 func (cs *CacheService) GetCurrentSequence(ctx context.Context, userID, dateKey string) (int64, error) {

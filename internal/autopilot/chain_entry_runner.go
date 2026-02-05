@@ -760,10 +760,18 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		})
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] ABORTED: Failed to create order chain in database - cannot place order without chain record: %v", err)
+			// Release the consumed sequence number so daily counter stays accurate
+			if r.orderIdGenerator != nil {
+				r.orderIdGenerator.ReleaseSequence(ctx)
+			}
 			return fmt.Errorf("failed to create order chain (required for chain system): %w", err)
 		}
 	} else {
 		log.Printf("[CHAIN-ENTRY] ABORTED: No chainEventWriter - cannot place order without chain tracking")
+		// Release the consumed sequence number so daily counter stays accurate
+		if r.orderIdGenerator != nil {
+			r.orderIdGenerator.ReleaseSequence(ctx)
+		}
 		return fmt.Errorf("chainEventWriter not available - cannot place untracked orders")
 	}
 

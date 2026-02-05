@@ -45,6 +45,9 @@ type SequenceProvider interface {
 	// IncrementDailySequence atomically increments and returns the daily sequence for a user.
 	// dateKey is in YYYYMMDD format (e.g., "20260115")
 	IncrementDailySequence(ctx context.Context, userID, dateKey string) (int64, error)
+	// DecrementDailySequence atomically decrements the daily sequence for a user.
+	// Used to release consumed sequence numbers when an order fails before being placed.
+	DecrementDailySequence(ctx context.Context, userID, dateKey string) error
 	// IsHealthy returns whether the sequence provider is available
 	IsHealthy() bool
 }
@@ -142,6 +145,22 @@ func (g *ClientOrderIdGenerator) Generate(ctx context.Context, mode TradingMode,
 	// Use fallback when Redis is unavailable
 	fullID, baseID := g.GenerateFallback(mode, orderType)
 	return fullID, baseID, nil
+}
+
+// ReleaseSequence decrements the daily sequence counter to release a consumed sequence number.
+// Call this when an order fails AFTER Generate() was called but BEFORE the order was placed on Binance.
+// This prevents gaps in the sequence numbering (e.g., starting at 00020 instead of 00001).
+func (g *ClientOrderIdGenerator) ReleaseSequence(ctx context.Context) {
+	if g.sequenceProvider == nil || !g.sequenceProvider.IsHealthy() {
+		return
+	}
+
+	nowUTC := time.Now().UTC()
+	dateKey := nowUTC.Format("20060102")
+
+	if err := g.sequenceProvider.DecrementDailySequence(ctx, g.userID, dateKey); err != nil {
+		log.Printf("[ClientOrderIdGenerator] Warning: Failed to release sequence for %s: %v", dateKey, err)
+	}
 }
 
 // GenerateRelated creates a related order ID using the same base ID.

@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"binance-trading-bot/internal/coinprofiler"
+	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/entrydecision"
 	"binance-trading-bot/internal/events"
 
@@ -214,6 +216,14 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 	// Get pattern matcher (shared across strategies for this user)
 	patternMatcher := entryDecisionBroadcastServer.getOrCreatePatternMatcher(userID)
 
+	// Get active positions for enrichment (same as REST endpoint)
+	activePositions := entryDecisionBroadcastServer.getActivePositionsMap(userID)
+
+	// Reset stale patterns (position_running status but no active position)
+	if profilerRunning {
+		entryDecisionBroadcastServer.resetStalePatterns(userID, patternMatcher, activePositions)
+	}
+
 	for _, strategy := range enabledStrategies {
 		strategyType := entrydecision.GetStrategyType(strategy.StrategyGroup, strategy.SubStrategy)
 
@@ -270,6 +280,15 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 							}
 						}
 					}
+
+					// Enrich with active position data (same as REST endpoint)
+					if posInfo, exists := activePositions[cm.Symbol]; exists {
+						enrichCoinMatchWithPosition(cm, posInfo)
+					}
+
+					// Enrich with closed position PnL data (if recently closed)
+					enrichCoinMatchWithClosedPnL(cm)
+
 					sm.AddCoin(*cm)
 				}
 			}
@@ -364,13 +383,18 @@ type ActivePositionInfo struct {
 	Side         string
 	OpenedAt     time.Time
 	UnrealizedPL float64
+	ChainID      string
 }
 
-// getActivePositionsMap returns a map of symbol -> ActivePositionInfo for all active positions
+// getActivePositionsMap returns a map of symbol -> ActivePositionInfo for all active positions.
+// It queries multiple sources to ensure positions are found regardless of how they were opened:
+// 1. Ginie Autopilot (legacy system)
+// 2. Binance directly (for chain-entry positions not tracked by Ginie)
+// 3. Active order chains from DB (for chain ID and opened-at time)
 func (s *Server) getActivePositionsMap(userID string) map[string]*ActivePositionInfo {
 	positions := make(map[string]*ActivePositionInfo)
 
-	// Get positions from Ginie Autopilot
+	// Source 1: Ginie Autopilot
 	if controller := s.getFuturesAutopilot(); controller != nil {
 		if autopilot := controller.GetGinieAutopilot(); autopilot != nil {
 			giniePositions := autopilot.GetPositions()
@@ -382,7 +406,52 @@ func (s *Server) getActivePositionsMap(userID string) map[string]*ActivePosition
 						Quantity:     gPos.RemainingQty,
 						Side:         gPos.Side,
 						OpenedAt:     gPos.EntryTime,
-						UnrealizedPL: 0, // Ginie doesn't track unrealized PL directly
+						UnrealizedPL: 0,
+					}
+				}
+			}
+		}
+	}
+
+	// Source 2: Binance directly (for chain-entry positions not tracked by Ginie)
+	if futuresClient := s.getFuturesClient(); futuresClient != nil {
+		binancePositions, err := futuresClient.GetPositions()
+		if err == nil {
+			for _, pos := range binancePositions {
+				if pos.PositionAmt != 0 {
+					if _, exists := positions[pos.Symbol]; !exists {
+						// Only add if not already from Ginie (avoid duplicates)
+						side := "LONG"
+						if pos.PositionAmt < 0 {
+							side = "SHORT"
+						}
+						positions[pos.Symbol] = &ActivePositionInfo{
+							Symbol:       pos.Symbol,
+							EntryPrice:   pos.EntryPrice,
+							Quantity:     math.Abs(pos.PositionAmt),
+							Side:         side,
+							UnrealizedPL: pos.UnrealizedProfit,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Source 3: Enrich with order chain data (chain ID, entry time)
+	if s.repo != nil && len(positions) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		activeChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+		if err == nil {
+			for _, chain := range activeChains {
+				if posInfo, exists := positions[chain.Symbol]; exists {
+					posInfo.ChainID = chain.ChainID
+					if chain.EntryFilledAt != nil {
+						posInfo.OpenedAt = *chain.EntryFilledAt
+					} else {
+						posInfo.OpenedAt = chain.CreatedAt
 					}
 				}
 			}
@@ -402,8 +471,29 @@ func enrichCoinMatchWithPosition(cm *entrydecision.CoinMatch, posInfo *ActivePos
 	cm.HasActivePosition = true
 	cm.PositionEntryPrice = posInfo.EntryPrice
 	cm.PositionQuantity = posInfo.Quantity
+	cm.ChainID = posInfo.ChainID
 	openedAt := posInfo.OpenedAt
-	cm.PositionOpenedAt = &openedAt
+	if !openedAt.IsZero() {
+		cm.PositionOpenedAt = &openedAt
+	}
+
+	// Calculate SecondsRefToEntry if we have both reference detection time and position opened time
+	if cm.ReferenceDetectedAt != nil && !openedAt.IsZero() {
+		cm.SecondsRefToEntry = int(openedAt.Sub(*cm.ReferenceDetectedAt).Seconds())
+		if cm.SecondsRefToEntry < 0 {
+			cm.SecondsRefToEntry = 0
+		}
+	}
+
+	// Set direction from position side (normalize casing)
+	side := strings.ToUpper(posInfo.Side)
+	if side == "LONG" {
+		cm.Direction = "long"
+	} else if side == "SHORT" {
+		cm.Direction = "short"
+	} else if cm.Direction == "" {
+		cm.Direction = "long" // Default fallback
+	}
 
 	// Set status to position_running so UI knows a position is active
 	// This prevents the UI from showing "watching" when a position exists
@@ -413,6 +503,46 @@ func enrichCoinMatchWithPosition(cm *entrydecision.CoinMatch, posInfo *ActivePos
 	// The entry price from position takes precedence for display
 	if cm.EntryCandle != nil {
 		cm.EntryCandle.EntryPrice = posInfo.EntryPrice
+	}
+}
+
+// closedPositionPnL stores recently closed position PnL data for display
+// Key: symbol, Value: closed PNL info. Auto-expires after 60 seconds.
+type closedPnLInfo struct {
+	PnL         float64
+	CloseReason string
+	ExpiresAt   time.Time
+}
+
+var (
+	closedPnLMap   = make(map[string]*closedPnLInfo)
+	closedPnLMutex sync.Mutex
+)
+
+// getClosedPnL returns closed PNL info for a symbol if still valid
+func getClosedPnL(symbol string) *closedPnLInfo {
+	closedPnLMutex.Lock()
+	defer closedPnLMutex.Unlock()
+	if info, ok := closedPnLMap[symbol]; ok {
+		if time.Now().Before(info.ExpiresAt) {
+			return info
+		}
+		delete(closedPnLMap, symbol)
+	}
+	return nil
+}
+
+// enrichCoinMatchWithClosedPnL enriches a CoinMatch with closed position PnL data
+func enrichCoinMatchWithClosedPnL(cm *entrydecision.CoinMatch) {
+	if cm == nil {
+		return
+	}
+	info := getClosedPnL(cm.Symbol)
+	if info != nil {
+		pnl := info.PnL
+		cm.ClosedPnL = &pnl
+		cm.ClosedReason = info.CloseReason
+		cm.Status = entrydecision.PatternStatusPositionClosed
 	}
 }
 
@@ -430,10 +560,43 @@ func (s *Server) resetStalePatterns(userID string, patternMatcher *entrydecision
 			continue
 		}
 
-		// If pattern is position_running but no active position, reset it
+		// If pattern is position_running but no active position, position was closed
 		if pattern.Status == entrydecision.PatternStatusPositionRunning {
 			if _, hasPosition := activePositions[pattern.Symbol]; !hasPosition {
-				// Position was closed, reset pattern to watching state
+				// Try to get closed chain data for PNL display
+				if s.repo != nil {
+					ctx := context.Background()
+					closedChains, err := s.repo.GetDB().GetOrderChainsWithFilter(ctx, database.OrderChainFilter{
+						UserID: userID,
+						Symbol: pattern.Symbol,
+						Status: "closed",
+						Limit:  1,
+					})
+					if err == nil && len(closedChains) > 0 {
+						chain := closedChains[0]
+						var pnl float64
+						var reason string
+						if chain.RealizedPnL != nil {
+							pnl = *chain.RealizedPnL
+						}
+						if chain.CloseReason != nil {
+							reason = *chain.CloseReason
+						}
+
+						// Store in temporary map for 60s display
+						closedPnLMutex.Lock()
+						closedPnLMap[pattern.Symbol] = &closedPnLInfo{
+							PnL:         pnl,
+							CloseReason: reason,
+							ExpiresAt:   time.Now().Add(60 * time.Second),
+						}
+						closedPnLMutex.Unlock()
+
+						log.Printf("[ENTRY-DECISION] Position closed for %s: PnL=%.2f reason=%s",
+							pattern.Symbol, pnl, reason)
+					}
+				}
+				// Reset pattern to watching state (closed PNL will be enriched from map during broadcast)
 				log.Printf("[ENTRY-DECISION] Resetting stale pattern for %s (position closed)", pattern.Symbol)
 				patternMatcher.ResetPattern(pattern.Symbol, pattern.Mode, pattern.Timeframe)
 			}

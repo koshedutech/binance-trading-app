@@ -1173,6 +1173,13 @@ func (s *SettingsCacheService) IncrementDailySequence(ctx context.Context, userI
 	return s.cache.IncrementDailySequence(ctx, userID, dateKey)
 }
 
+// DecrementDailySequence atomically decrements the daily sequence for a user.
+// Used to release consumed sequence numbers when an order fails before being placed.
+// Delegates to underlying CacheService.
+func (s *SettingsCacheService) DecrementDailySequence(ctx context.Context, userID, dateKey string) error {
+	return s.cache.DecrementDailySequence(ctx, userID, dateKey)
+}
+
 // ============================================================================
 // MODE-STRATEGY CACHE LAYER (Story 11.30)
 // Hierarchical cache for Mode+Strategy configuration
