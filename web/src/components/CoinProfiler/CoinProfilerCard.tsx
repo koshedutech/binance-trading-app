@@ -83,21 +83,37 @@ export default function CoinProfilerCard() {
   // Subscribe to position lifecycle WebSocket events
   const handlePositionCreated = useCallback(() => {
     setWsPositionAdjustment(prev => prev + 1);
-  }, []);
+    // Refetch to update source to "position" or "both"
+    refetchCoins();
+  }, [refetchCoins]);
 
   const handleChainClosed = useCallback(() => {
     setWsPositionAdjustment(prev => Math.max(0, prev - 1));
-  }, []);
+    // Refetch coin data to update source field instantly
+    refetchCoins();
+    refetchReqs();
+  }, [refetchCoins, refetchReqs]);
+
+  // Handle POSITION_UPDATE with status "CLOSED" (catches positions closing without a chain)
+  const handlePositionUpdate = useCallback((event: any) => {
+    const data = event?.data;
+    if (Array.isArray(data) && data.some((p: any) => p.status === 'CLOSED')) {
+      refetchCoins();
+      refetchReqs();
+    }
+  }, [refetchCoins, refetchReqs]);
 
   useEffect(() => {
     wsService.subscribe('POSITION_CREATED', handlePositionCreated);
     wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+    wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
 
     return () => {
       wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+      wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
     };
-  }, [handlePositionCreated, handleChainClosed]);
+  }, [handlePositionCreated, handleChainClosed, handlePositionUpdate]);
 
   const effectivePositionCount = positionCoinsCount + wsPositionAdjustment;
 

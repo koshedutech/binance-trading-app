@@ -13724,8 +13724,28 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 	pos.TakeProfitAlgoIDs = nil
 	pos.StopLossAlgoID = 0
 
-	// Note: Position removal is handled by the account/position update stream
-	// when Binance reports the position as closed (quantity = 0)
+	// Remove position from tracking immediately so /coin-profiler/coins
+	// no longer reports this coin as source "position"
+	delete(ga.positions, symbol)
+	ga.logger.Info("HandleSLTPOrderFilled: Removed position from tracking",
+		"symbol", symbol, "order_type", orderType)
+}
+
+// RemoveTrackedPosition removes a position from ga.positions if present.
+// Called by FuturesController when Binance reports positionAmt=0.
+func (ga *GinieAutopilot) RemoveTrackedPosition(symbol string) {
+	ga.mu.Lock()
+	_, exists := ga.positions[symbol]
+	if exists {
+		delete(ga.positions, symbol)
+	}
+	ga.mu.Unlock()
+
+	if exists {
+		ga.logger.Info("RemoveTrackedPosition: Position removed", "symbol", symbol)
+		// Broadcast updated position list (takes RLock internally, so called after Unlock)
+		ga.broadcastPositionClosure(symbol)
+	}
 }
 
 // cancelExistingSLTPOrders cancels all existing SL/TP algo orders for a position

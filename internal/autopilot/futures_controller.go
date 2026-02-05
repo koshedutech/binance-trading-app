@@ -5123,6 +5123,11 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 				"entry_price", existingPos.EntryPrice)
 			delete(fc.activePositions, positionKey)
 
+			// Also clean up Ginie autopilot's position tracking
+			if fc.ginieAutopilot != nil {
+				go fc.ginieAutopilot.RemoveTrackedPosition(symbol)
+			}
+
 			// Broadcast position closed to frontend via callback
 			if fc.ownerUserID != "" && fc.onPositionUpdate != nil {
 				fc.onPositionUpdate(fc.ownerUserID, []map[string]interface{}{
