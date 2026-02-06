@@ -139,11 +139,28 @@ type OrderChain struct {
 	ClosedAt  *time.Time `json:"closed_at,omitempty"`
 
 	// Close details
-	CloseReason *string `json:"close_reason,omitempty"`
+	CloseReason *string  `json:"close_reason,omitempty"`
+	ClosePrice  *float64 `json:"close_price,omitempty"` // Fill price of the SL/TP that closed the position
 
 	// P&L
 	RealizedPnL *float64 `json:"realized_pnl,omitempty"`
 	TotalFees   *float64 `json:"total_fees,omitempty"`
+
+	// SL order persistence (for closed chain reconstruction)
+	SLBinanceOrderID *int64     `json:"sl_binance_order_id,omitempty"`
+	SLLimitPrice     *float64   `json:"sl_limit_price,omitempty"`
+	SLFillPrice      *float64   `json:"sl_fill_price,omitempty"`
+	SLFillTime       *time.Time `json:"sl_fill_time,omitempty"`
+	SLStatus         *string    `json:"sl_status,omitempty"` // NEW, FILLED, CANCELED
+	SLQuantity       *float64   `json:"sl_quantity,omitempty"`
+
+	// TP order persistence (for closed chain reconstruction)
+	TPBinanceOrderID *int64     `json:"tp_binance_order_id,omitempty"`
+	TPLimitPrice     *float64   `json:"tp_limit_price,omitempty"`
+	TPFillPrice      *float64   `json:"tp_fill_price,omitempty"`
+	TPFillTime       *time.Time `json:"tp_fill_time,omitempty"`
+	TPStatus         *string    `json:"tp_status,omitempty"` // NEW, FILLED, CANCELED
+	TPQuantity       *float64   `json:"tp_quantity,omitempty"`
 
 	// Entry decision context (stored as JSON, populated when order is placed)
 	EntryContext json.RawMessage `json:"entry_context,omitempty"`

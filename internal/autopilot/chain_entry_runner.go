@@ -1055,14 +1055,16 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		pricePrecision, qtyPrecision := getPrecisionFromSymbol(symbolInfo)
 		log.Printf("[CHAIN-ENTRY] Using precision: price=%d, qty=%d for %s", pricePrecision, qtyPrecision, symbol)
 
-		// Place Stop Loss order (STOP_MARKET)
+		// Place Stop Loss order (STOP limit - executes at exact price when trigger hits)
 		slParams := binance.AlgoOrderParams{
 			Symbol:            symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeStopMarket,
+			Type:              binance.FuturesOrderTypeStop,
 			Quantity:          filledQuantity,
+			Price:             slPrice, // Limit execution price = trigger price for exact fill
 			TriggerPrice:      slPrice,
+			TimeInForce:       binance.TimeInForceGTC,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      slClientOrderID,
@@ -1070,7 +1072,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[CHAIN-ENTRY] Placing STOP_MARKET SL order for %s: price=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Placing STOP (limit) SL order for %s: price=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
 
 		slResp, err := r.futuresClient.PlaceAlgoOrder(slParams)
 		if err != nil {
@@ -1089,17 +1091,21 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 				if err != nil {
 					log.Printf("[CHAIN-ENTRY] Warning: Failed to record SL placed event: %v", err)
 				}
+				// Persist SL order details to order_chains for closed chain reconstruction
+				r.chainEventWriter.PersistSLDetails(postFillCtx, chainID, slResp.AlgoId, slPrice, filledQuantity)
 			}
 		}
 
-		// Place Take Profit order (TAKE_PROFIT_MARKET)
+		// Place Take Profit order (TAKE_PROFIT limit - executes at exact price when trigger hits)
 		tpParams := binance.AlgoOrderParams{
 			Symbol:            symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeTakeProfitMarket,
+			Type:              binance.FuturesOrderTypeTakeProfit,
 			Quantity:          filledQuantity,
+			Price:             tpPrice, // Limit execution price = trigger price for exact fill
 			TriggerPrice:      tpPrice,
+			TimeInForce:       binance.TimeInForceGTC,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      tpClientOrderID,
@@ -1107,7 +1113,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT_MARKET TP order for %s: price=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT (limit) TP order for %s: price=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
 
 		tpResp, err := r.futuresClient.PlaceAlgoOrder(tpParams)
 		if err != nil {
@@ -1126,6 +1132,8 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 				if err != nil {
 					log.Printf("[CHAIN-ENTRY] Warning: Failed to record TP placed event: %v", err)
 				}
+				// Persist TP order details to order_chains for closed chain reconstruction
+				r.chainEventWriter.PersistTPDetails(postFillCtx, chainID, tpResp.AlgoId, tpPrice, filledQuantity)
 			}
 
 			// Step 11b: Register position with Ravindra Position Monitor for trailing stop management

@@ -11,7 +11,7 @@ export type ModificationSource = 'LLM_AUTO' | 'USER_MANUAL' | 'TRAILING_STOP';
 export type ImpactDirection = 'BETTER' | 'WORSE' | 'TIGHTER' | 'WIDER' | 'INITIAL';
 
 // Order types that can have modification history
-export type ModifiableOrderType = 'SL' | 'TP1' | 'TP2' | 'TP3' | 'TP4';
+export type ModifiableOrderType = 'SL' | 'TP' | 'TP1' | 'TP2' | 'TP3' | 'TP4';
 
 // Market context at time of modification
 export interface MarketContext {
@@ -272,6 +272,7 @@ export function calculateSummaryStats(events: ModificationEvent[]): Modification
 // Order type display config
 export const ORDER_TYPE_LABELS: Record<ModifiableOrderType, { label: string; icon: string; color: string }> = {
   SL: { label: 'Stop Loss', icon: '🛡️', color: 'text-red-400' },
+  TP: { label: 'Take Profit', icon: '🎯', color: 'text-cyan-400' },
   TP1: { label: 'Take Profit 1', icon: '🎯', color: 'text-cyan-400' },
   TP2: { label: 'Take Profit 2', icon: '🎯', color: 'text-cyan-400' },
   TP3: { label: 'Take Profit 3', icon: '🎯', color: 'text-cyan-400' },

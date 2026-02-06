@@ -3,6 +3,7 @@ package database
 import (
 	"binance-trading-bot/internal/orders"
 	"context"
+	"time"
 )
 
 // ChainEventWriterDBAdapter adapts DB to orders.ChainEventWriterDB interface
@@ -43,8 +44,8 @@ func (a *ChainEventWriterDBAdapter) GetActiveOrderChains(ctx context.Context, us
 }
 
 // CloseOrderChain implements ChainEventWriterDB
-func (a *ChainEventWriterDBAdapter) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64) error {
-	return a.db.CloseOrderChain(ctx, chainID, closeReason, realizedPnL, totalFees)
+func (a *ChainEventWriterDBAdapter) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error {
+	return a.db.CloseOrderChain(ctx, chainID, closeReason, realizedPnL, totalFees, closePrice)
 }
 
 // UpdateOrderChainSLPrice implements ChainEventWriterDB
@@ -65,6 +66,26 @@ func (a *ChainEventWriterDBAdapter) LinkHedgeChain(ctx context.Context, primaryC
 // IncrementOrderChainEventCount implements ChainEventWriterDB
 func (a *ChainEventWriterDBAdapter) IncrementOrderChainEventCount(ctx context.Context, chainID string, newSeq int) error {
 	return a.db.IncrementOrderChainEventCount(ctx, chainID, newSeq)
+}
+
+// UpdateOrderChainSLDetails implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) UpdateOrderChainSLDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error {
+	return a.db.UpdateOrderChainSLDetails(ctx, chainID, binanceOrderID, limitPrice, quantity)
+}
+
+// UpdateOrderChainTPDetails implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) UpdateOrderChainTPDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error {
+	return a.db.UpdateOrderChainTPDetails(ctx, chainID, binanceOrderID, limitPrice, quantity)
+}
+
+// UpdateOrderChainSLFilled implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) UpdateOrderChainSLFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error {
+	return a.db.UpdateOrderChainSLFilled(ctx, chainID, fillPrice, fillTime)
+}
+
+// UpdateOrderChainTPFilled implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) UpdateOrderChainTPFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error {
+	return a.db.UpdateOrderChainTPFilled(ctx, chainID, fillPrice, fillTime)
 }
 
 // ========== Chain Event Operations ==========

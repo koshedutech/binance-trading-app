@@ -1381,6 +1381,256 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		}
 	}
 
+	// 6c. FETCH CLOSED CHAINS FROM DB when status filter requests them
+	// Closed chains have no Binance orders, so they must be loaded from the database
+	if statusFilter == "" || strings.EqualFold(statusFilter, "closed") {
+		closedDBChains, err := s.repo.GetDB().GetOrderChainsWithFilter(ctx, database.OrderChainFilter{
+			UserID:   userID,
+			Status:   "closed",
+			Symbol:   symbolFilter,
+			ModeCode: modeFilter,
+			Limit:    50,
+		})
+		if err != nil {
+			log.Printf("[ORDER-CHAINS] Error fetching closed chains: %v", err)
+		} else {
+			for _, dbChain := range closedDBChains {
+				if dbChain == nil {
+					continue
+				}
+				chainID := dbChain.ChainID
+				// Skip if already in the map (active chain that was inline-closed)
+				if chains[chainID] != nil {
+					continue
+				}
+
+				// Build chain entry from DB
+				positionSide := dbChain.Side // Use order_chains.side directly (LONG/SHORT)
+
+				chainEntry := &OrderChainWithState{
+					ChainID:            chainID,
+					ModeCode:           dbChain.ModeCode,
+					Symbol:             dbChain.Symbol,
+					PositionSide:       positionSide,
+					Orders:             []ChainOrderInfo{},
+					ModificationCounts: make(map[string]int),
+					Status:             "closed",
+					CreatedAt:          dbChain.CreatedAt.UnixMilli(),
+					UpdatedAt:          dbChain.UpdatedAt.UnixMilli(),
+					Mode:               dbChain.Mode,
+					StrategyGroup:      dbChain.StrategyGroup,
+					SubStrategy:        dbChain.SubStrategy,
+					Timeframe:          dbChain.Timeframe,
+				}
+
+				// Reconstruct entry order from DB
+				if dbChain.EntryFilledAt != nil && dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
+					entryTime := dbChain.EntryFilledAt.UnixMilli()
+					var entryOrderID int64
+					if dbChain.EntryBinanceOrderID != nil {
+						entryOrderID = *dbChain.EntryBinanceOrderID
+					}
+					var entryPrice, entryQty float64
+					if dbChain.EntryPrice != nil {
+						entryPrice = *dbChain.EntryPrice
+					}
+					if dbChain.EntryQuantity != nil {
+						entryQty = *dbChain.EntryQuantity
+					}
+
+					// Determine entry side from direction
+					entrySide := "BUY"
+					if positionSide == "SHORT" {
+						entrySide = "SELL"
+					}
+
+					chainEntry.Orders = append(chainEntry.Orders, ChainOrderInfo{
+						OrderID:       entryOrderID,
+						ClientOrderID: chainID + "-E",
+						OrderType:     "E",
+						Symbol:        dbChain.Symbol,
+						Side:          entrySide,
+						Type:          "LIMIT",
+						Status:        "FILLED",
+						Price:         entryPrice,
+						AvgPrice:      entryPrice,
+						Quantity:      entryQty,
+						ExecutedQty:   entryQty,
+						Time:          entryTime,
+						UpdateTime:    entryTime,
+						IsAlgo:        false,
+					})
+				}
+
+				// Reconstruct SL order from persisted DB columns
+				if dbChain.SLLimitPrice != nil && *dbChain.SLLimitPrice > 0 {
+					slStatus := "NEW"
+					if dbChain.SLStatus != nil {
+						slStatus = *dbChain.SLStatus
+					}
+					var slOrderID int64
+					if dbChain.SLBinanceOrderID != nil {
+						slOrderID = *dbChain.SLBinanceOrderID
+					}
+					var slQty float64
+					if dbChain.SLQuantity != nil {
+						slQty = *dbChain.SLQuantity
+					}
+					// Determine close side (opposite of position)
+					closeSide := "SELL"
+					if positionSide == "SHORT" {
+						closeSide = "BUY"
+					}
+					slPrice := *dbChain.SLLimitPrice
+					var slAvgPrice float64
+					var slExecQty float64
+					var slTime int64
+					if dbChain.SLFillPrice != nil {
+						slAvgPrice = *dbChain.SLFillPrice
+					}
+					if slStatus == "FILLED" {
+						slExecQty = slQty
+					}
+					if dbChain.SLFillTime != nil {
+						slTime = dbChain.SLFillTime.UnixMilli()
+					} else {
+						slTime = dbChain.CreatedAt.UnixMilli()
+					}
+
+					chainEntry.Orders = append(chainEntry.Orders, ChainOrderInfo{
+						OrderID:       slOrderID,
+						ClientOrderID: chainID + "-SL",
+						OrderType:     "SL",
+						Symbol:        dbChain.Symbol,
+						Side:          closeSide,
+						Type:          "STOP",
+						Status:        slStatus,
+						Price:         slPrice,
+						StopPrice:     slPrice,
+						Quantity:      slQty,
+						ExecutedQty:   slExecQty,
+						AvgPrice:      slAvgPrice,
+						Time:          slTime,
+						UpdateTime:    slTime,
+						IsAlgo:        true,
+					})
+				}
+
+				// Reconstruct TP order from persisted DB columns
+				if dbChain.TPLimitPrice != nil && *dbChain.TPLimitPrice > 0 {
+					tpStatus := "NEW"
+					if dbChain.TPStatus != nil {
+						tpStatus = *dbChain.TPStatus
+					}
+					var tpOrderID int64
+					if dbChain.TPBinanceOrderID != nil {
+						tpOrderID = *dbChain.TPBinanceOrderID
+					}
+					var tpQty float64
+					if dbChain.TPQuantity != nil {
+						tpQty = *dbChain.TPQuantity
+					}
+					closeSide := "SELL"
+					if positionSide == "SHORT" {
+						closeSide = "BUY"
+					}
+					tpPrice := *dbChain.TPLimitPrice
+					var tpAvgPrice float64
+					var tpExecQty float64
+					var tpTime int64
+					if dbChain.TPFillPrice != nil {
+						tpAvgPrice = *dbChain.TPFillPrice
+					}
+					if tpStatus == "FILLED" {
+						tpExecQty = tpQty
+					}
+					if dbChain.TPFillTime != nil {
+						tpTime = dbChain.TPFillTime.UnixMilli()
+					} else {
+						tpTime = dbChain.CreatedAt.UnixMilli()
+					}
+
+					chainEntry.Orders = append(chainEntry.Orders, ChainOrderInfo{
+						OrderID:       tpOrderID,
+						ClientOrderID: chainID + "-TP",
+						OrderType:     "TP",
+						Symbol:        dbChain.Symbol,
+						Side:          closeSide,
+						Type:          "TAKE_PROFIT",
+						Status:        tpStatus,
+						Price:         tpPrice,
+						StopPrice:     tpPrice,
+						Quantity:      tpQty,
+						ExecutedQty:   tpExecQty,
+						AvgPrice:      tpAvgPrice,
+						Time:          tpTime,
+						UpdateTime:    tpTime,
+						IsAlgo:        true,
+					})
+				}
+
+				// Build position state for closed chain
+				if dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
+					var entryPrice, entryQty float64
+					if dbChain.EntryPrice != nil {
+						entryPrice = *dbChain.EntryPrice
+					}
+					if dbChain.EntryQuantity != nil {
+						entryQty = *dbChain.EntryQuantity
+					}
+					entrySide := "BUY"
+					if positionSide == "SHORT" {
+						entrySide = "SELL"
+					}
+					entryFilledAt := ""
+					if dbChain.EntryFilledAt != nil {
+						entryFilledAt = dbChain.EntryFilledAt.Format(time.RFC3339)
+					}
+					closedAt := ""
+					if dbChain.ClosedAt != nil {
+						closedAt = dbChain.ClosedAt.Format(time.RFC3339)
+					}
+					var realizedPnL float64
+					if dbChain.RealizedPnL != nil {
+						realizedPnL = *dbChain.RealizedPnL
+					}
+
+					chainEntry.PositionState = &PositionStateInfo{
+						ChainID:            chainID,
+						Symbol:             dbChain.Symbol,
+						EntryClientOrderID: chainID + "-E",
+						EntrySide:          entrySide,
+						EntryPrice:         entryPrice,
+						EntryQuantity:      entryQty,
+						EntryValue:         entryPrice * entryQty,
+						EntryFilledAt:      entryFilledAt,
+						Status:             "CLOSED",
+						RemainingQuantity:  0,
+						RealizedPnL:        realizedPnL,
+						CreatedAt:          dbChain.CreatedAt.Format(time.RFC3339),
+						UpdatedAt:          dbChain.UpdatedAt.Format(time.RFC3339),
+						ClosedAt:           closedAt,
+					}
+
+					chainEntry.FilledValue = entryPrice * entryQty
+					chainEntry.TotalValue = entryPrice * entryQty
+				}
+
+				chains[chainID] = chainEntry
+			}
+		}
+	}
+
+	// 6d. Fix positionSide for ALL chains: always use order_chains.side (LONG/SHORT)
+	for chainID, chain := range chains {
+		if dbChain, exists := dbOrderChainsMap[chainID]; exists && dbChain != nil {
+			// order_chains.side stores LONG or SHORT directly
+			if dbChain.Side == "LONG" || dbChain.Side == "SHORT" {
+				chain.PositionSide = dbChain.Side
+			}
+		}
+	}
+
 	// 7. Apply status filter
 	if statusFilter != "" {
 		filteredChains := make(map[string]*OrderChainWithState)
@@ -4258,7 +4508,7 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 
 		// Close the chain in database
 		closeReason := "CLOSED_EXTERNALLY"
-		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0)
+		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, nil)
 		if err != nil {
 			log.Printf("[ORDER-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
 		} else {
@@ -4332,7 +4582,7 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 
 		// This chain is stale - close it
 		log.Printf("[AUTO-SYNC] Closing stale chain %s (symbol=%s)", chain.ChainID, chain.Symbol)
-		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0)
+		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, nil)
 		if err != nil {
 			log.Printf("[AUTO-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
 			continue

@@ -514,6 +514,16 @@ func (m *MockChainEventWriterDB) GetOrderChainByID(ctx context.Context, userID, 
 	return chain, nil
 }
 
+func (m *MockChainEventWriterDB) GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*orders.OrderChain, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	chain, ok := m.chains[chainID]
+	if !ok {
+		return nil, nil
+	}
+	return chain, nil
+}
+
 func (m *MockChainEventWriterDB) GetActiveOrderChains(ctx context.Context, userID string) ([]*orders.OrderChain, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -526,7 +536,7 @@ func (m *MockChainEventWriterDB) GetActiveOrderChains(ctx context.Context, userI
 	return result, nil
 }
 
-func (m *MockChainEventWriterDB) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64) error {
+func (m *MockChainEventWriterDB) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if chain, ok := m.chains[chainID]; ok {
@@ -545,6 +555,22 @@ func (m *MockChainEventWriterDB) UpdateOrderChainTPPrice(ctx context.Context, ch
 }
 
 func (m *MockChainEventWriterDB) LinkHedgeChain(ctx context.Context, primaryChainID, hedgeChainID string) error {
+	return nil
+}
+
+func (m *MockChainEventWriterDB) UpdateOrderChainSLDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error {
+	return nil
+}
+
+func (m *MockChainEventWriterDB) UpdateOrderChainTPDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error {
+	return nil
+}
+
+func (m *MockChainEventWriterDB) UpdateOrderChainSLFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error {
+	return nil
+}
+
+func (m *MockChainEventWriterDB) UpdateOrderChainTPFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error {
 	return nil
 }
 

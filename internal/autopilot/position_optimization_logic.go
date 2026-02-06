@@ -297,7 +297,7 @@ func (g *GinieAutopilot) processExchangeTPFill(pos *GiniePosition, tpLevel int, 
 			ctx := context.Background()
 			closeReason := "TP_HIT"
 			totalFee := pos.EntryFeeUSD + pos.ExitFeeUSD
-			if err := g.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, closeReason, sr.AccumulatedProfit, totalFee); err != nil {
+			if err := g.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, closeReason, sr.AccumulatedProfit, totalFee, nil); err != nil {
 				log.Printf("[POSITION-OPT] WARNING: Failed to close order chain %s: %v", pos.ChainBaseID, err)
 			} else {
 				log.Printf("[POSITION-OPT] Order chain %s closed (exchange fill) with pnl=%.4f", pos.ChainBaseID, sr.AccumulatedProfit)
@@ -556,7 +556,7 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 			ctx := context.Background()
 			closeReason := "TP_HIT"
 			totalFee := pos.EntryFeeUSD + pos.ExitFeeUSD
-			if err := g.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, closeReason, sr.AccumulatedProfit, totalFee); err != nil {
+			if err := g.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, closeReason, sr.AccumulatedProfit, totalFee, nil); err != nil {
 				log.Printf("[POSITION-OPT] WARNING: Failed to close order chain %s: %v", pos.ChainBaseID, err)
 			} else {
 				log.Printf("[POSITION-OPT] Order chain %s closed with reason=%s, pnl=%.4f", pos.ChainBaseID, closeReason, sr.AccumulatedProfit)

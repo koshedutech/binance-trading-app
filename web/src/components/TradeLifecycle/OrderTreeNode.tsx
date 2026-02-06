@@ -63,6 +63,30 @@ function formatCountdown(remainingMs: number): string {
 // Entry orders have 180s timeout for LIMIT orders
 const ENTRY_ORDER_TIMEOUT_MS = 180 * 1000; // 180 seconds
 
+// Format a static duration between two timestamps (for closed positions)
+function formatStaticDuration(startMs: number, endMs: number): string {
+  const diffMs = endMs - startMs;
+  if (diffMs <= 0) return '0s';
+
+  const seconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    const remainingHours = hours % 24;
+    return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
+  }
+  if (hours > 0) {
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+  return `${seconds}s`;
+}
+
 // Format order value (price * quantity) - null-safe
 function formatValue(price: number | null | undefined, quantity: number | null | undefined): string {
   const value = (price ?? 0) * (quantity ?? 0);
@@ -72,7 +96,7 @@ function formatValue(price: number | null | undefined, quantity: number | null |
 }
 
 // Tree node types
-export type TreeNodeType = 'ENTRY' | 'POSITION' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'RB';
+export type TreeNodeType = 'ENTRY' | 'POSITION' | 'TP' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'RB';
 
 interface OrderTreeNodeProps {
   type: TreeNodeType;
@@ -95,6 +119,10 @@ interface OrderTreeNodeProps {
   feeRate?: number;
   // Live price for real-time position value updates
   livePrice?: number;
+  // Whether this order was the exit order that closed the position
+  isExitOrder?: boolean;
+  // Reason for cancellation (for SL/TP that were cancelled when opposite hit)
+  cancelReason?: string;
 }
 
 // Get icon for node type
@@ -104,6 +132,7 @@ function getNodeIcon(type: TreeNodeType) {
       return TrendingUp;
     case 'POSITION':
       return Activity;
+    case 'TP':
     case 'TP1':
     case 'TP2':
     case 'TP3':
@@ -186,7 +215,7 @@ function calculateExpectedPnL(
   }
 
   // Only calculate for SL and TP orders
-  if (!['SL', 'TP1', 'TP2', 'TP3'].includes(orderType)) {
+  if (!['SL', 'TP', 'TP1', 'TP2', 'TP3'].includes(orderType)) {
     return null;
   }
 
@@ -227,6 +256,8 @@ export default function OrderTreeNode({
   entryQuantity,
   feeRate = 0.0005,
   livePrice,
+  isExitOrder,
+  cancelReason,
 }: OrderTreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
@@ -307,7 +338,7 @@ export default function OrderTreeNode({
 
   // Check if this order type can have modifications
   // Note: TP4 is included for future compatibility with ModifiableOrderType
-  const isModifiable = ['SL', 'TP1', 'TP2', 'TP3'].includes(type);
+  const isModifiable = ['SL', 'TP', 'TP1', 'TP2', 'TP3'].includes(type);
 
   // Handle expansion and lazy load modifications
   const handleToggleExpand = useCallback(async () => {
@@ -372,105 +403,153 @@ export default function OrderTreeNode({
 
           {/* POSITION type: Full details with entry price, current price, P&L */}
           {type === 'POSITION' ? (
-            <>
-              {/* Position icon and label */}
-              <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
-              <span className={`font-medium ${config.color}`}>{config.label}</span>
+            (() => {
+              const isClosed = positionState?.status === 'CLOSED';
+              return (
+                <>
+                  {/* Position icon and label */}
+                  <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
+                  <span className={`font-medium ${config.color}`}>{config.label}</span>
 
-              {/* Side badge */}
-              {positionState && (
-                <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
-                  positionState.entrySide === 'BUY'
-                    ? 'bg-green-500/20 text-green-400'
-                    : 'bg-red-500/20 text-red-400'
-                }`}>
-                  {positionState.entrySide === 'BUY'
-                    ? <TrendingUp className="w-3 h-3" />
-                    : <TrendingDown className="w-3 h-3" />
-                  }
-                  {positionState.entrySide === 'BUY' ? 'LONG' : 'SHORT'}
-                </span>
-              )}
-
-              {/* Stage badge (from position analytics) */}
-              {positionAnalytics && (
-                <span className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${getStageConfig(positionAnalytics.stage).bgColor} ${getStageConfig(positionAnalytics.stage).color}`}>
-                  {getStageConfig(positionAnalytics.stage).label}
-                </span>
-              )}
-
-              {/* Status indicator */}
-              <span className={`flex items-center gap-1 text-xs ${statusIndicator.color}`}>
-                <statusIndicator.icon className="w-3.5 h-3.5" />
-                {statusIndicator.label}
-              </span>
-
-              {/* Spacer */}
-              <div className="flex-1" />
-
-              {/* Entry Price */}
-              {positionState && positionState.entryPrice > 0 && (
-                <div className="text-right">
-                  <span className="text-gray-200 font-mono text-sm">${formatPrice(positionState.entryPrice)}</span>
-                  <span className="text-xs text-gray-500 ml-1">Entry</span>
-                </div>
-              )}
-
-              {/* Current Price (live price preferred, fallback to analytics) */}
-              {(() => {
-                const displayPrice = livePrice || positionAnalytics?.current_price || 0;
-                return displayPrice > 0 ? (
-                  <div className="text-right ml-3">
-                    <span className="text-blue-400 font-mono text-sm">${formatPrice(displayPrice)}</span>
-                    <span className="text-xs text-gray-500 ml-1">{livePrice ? 'Live' : 'Mark'}</span>
-                  </div>
-                ) : null;
-              })()}
-
-              {/* Quantity */}
-              {positionState && positionState.entryQuantity > 0 && (
-                <div className="text-right ml-3">
-                  <span className="text-gray-300 font-mono text-sm">{positionState.entryQuantity.toFixed(4)}</span>
-                  <span className="text-xs text-gray-500 ml-1">Qty</span>
-                </div>
-              )}
-
-              {/* Notional Value (recalculated with live price if available) */}
-              {positionState && positionState.entryValue > 0 && (
-                <div className="text-right ml-3">
-                  <span className="text-gray-300 font-mono text-sm">
-                    ${livePrice && positionState.entryQuantity > 0
-                      ? (livePrice * positionState.entryQuantity).toFixed(2)
-                      : positionState.entryValue.toFixed(2)
+                  {/* Side badge - use positionSide prop as authoritative source */}
+                  <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+                    positionSide === 'LONG'
+                      ? 'bg-green-500/20 text-green-400'
+                      : 'bg-red-500/20 text-red-400'
+                  }`}>
+                    {positionSide === 'LONG'
+                      ? <TrendingUp className="w-3 h-3" />
+                      : <TrendingDown className="w-3 h-3" />
                     }
+                    {positionSide}
                   </span>
-                  <span className="text-xs text-gray-500 ml-1">Value</span>
-                </div>
-              )}
 
-              {/* Unrealized P&L (recalculated with live price if available) */}
-              {(() => {
-                const displayPrice = livePrice || positionAnalytics?.current_price || 0;
-                const ePrice = positionState?.entryPrice || 0;
-                const qty = positionState?.remainingQuantity || positionState?.entryQuantity || 0;
-                const isLongPos = positionSide === 'LONG';
-                let pnl: number;
-                if (livePrice && ePrice > 0 && qty > 0) {
-                  pnl = isLongPos ? (displayPrice - ePrice) * qty : (ePrice - displayPrice) * qty;
-                } else {
-                  pnl = positionAnalytics?.unrealized_pnl ?? 0;
-                }
-                const hasPnl = displayPrice > 0 && ePrice > 0;
-                return hasPnl ? (
-                  <div className="text-right ml-3">
-                    <span className={`font-mono text-sm ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                  {/* Stage badge (from position analytics) - only for open positions */}
+                  {!isClosed && positionAnalytics && (
+                    <span className={`flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${getStageConfig(positionAnalytics.stage).bgColor} ${getStageConfig(positionAnalytics.stage).color}`}>
+                      {getStageConfig(positionAnalytics.stage).label}
                     </span>
-                    <span className="text-xs text-gray-500 ml-1">PnL</span>
-                  </div>
-                ) : null;
-              })()}
-            </>
+                  )}
+
+                  {/* Status indicator */}
+                  <span className={`flex items-center gap-1 text-xs ${statusIndicator.color}`}>
+                    <statusIndicator.icon className="w-3.5 h-3.5" />
+                    {statusIndicator.label}
+                  </span>
+
+                  {/* Duration for closed positions */}
+                  {isClosed && positionState.closedAt && (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-gray-500/20 text-gray-400" title="Total position duration">
+                      <Timer className="w-3 h-3" />
+                      {formatStaticDuration(
+                        new Date(positionState.entryFilledAt).getTime(),
+                        new Date(positionState.closedAt).getTime()
+                      )}
+                    </span>
+                  )}
+
+                  {/* Spacer */}
+                  <div className="flex-1" />
+
+                  {/* Entry Price */}
+                  {positionState && positionState.entryPrice > 0 && (
+                    <div className="text-right">
+                      <span className="text-gray-200 font-mono text-sm">${formatPrice(positionState.entryPrice)}</span>
+                      <span className="text-xs text-gray-500 ml-1">Entry</span>
+                    </div>
+                  )}
+
+                  {/* For CLOSED positions: show close price and realized PnL */}
+                  {isClosed ? (
+                    <>
+                      {/* Close Price */}
+                      {positionState.closePrice && positionState.closePrice > 0 && (
+                        <div className="text-right ml-3">
+                          <span className="text-orange-400 font-mono text-sm">${formatPrice(positionState.closePrice)}</span>
+                          <span className="text-xs text-gray-500 ml-1">Close</span>
+                        </div>
+                      )}
+
+                      {/* Quantity */}
+                      {(positionState.entryQuantity ?? 0) > 0 && (
+                        <div className="text-right ml-3">
+                          <span className="text-gray-300 font-mono text-sm">{(positionState.entryQuantity ?? 0).toFixed(4)}</span>
+                          <span className="text-xs text-gray-500 ml-1">Qty</span>
+                        </div>
+                      )}
+
+                      {/* Realized PnL */}
+                      {positionState.realizedPnl != null && (
+                        <div className="text-right ml-3">
+                          <span className={`font-mono text-sm font-medium ${(positionState.realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {(positionState.realizedPnl ?? 0) >= 0 ? '+' : ''}${(positionState.realizedPnl ?? 0).toFixed(2)}
+                          </span>
+                          <span className="text-xs text-gray-500 ml-1">PnL</span>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {/* For OPEN positions: show live price, quantity, value, unrealized PnL */}
+                      {/* Current Price (live price preferred, fallback to analytics) */}
+                      {(() => {
+                        const curPrice = livePrice || positionAnalytics?.current_price || 0;
+                        return curPrice > 0 ? (
+                          <div className="text-right ml-3">
+                            <span className="text-blue-400 font-mono text-sm">${formatPrice(curPrice)}</span>
+                            <span className="text-xs text-gray-500 ml-1">{livePrice ? 'Live' : 'Mark'}</span>
+                          </div>
+                        ) : null;
+                      })()}
+
+                      {/* Quantity */}
+                      {positionState && positionState.entryQuantity > 0 && (
+                        <div className="text-right ml-3">
+                          <span className="text-gray-300 font-mono text-sm">{positionState.entryQuantity.toFixed(4)}</span>
+                          <span className="text-xs text-gray-500 ml-1">Qty</span>
+                        </div>
+                      )}
+
+                      {/* Notional Value (recalculated with live price if available) */}
+                      {positionState && positionState.entryValue > 0 && (
+                        <div className="text-right ml-3">
+                          <span className="text-gray-300 font-mono text-sm">
+                            ${livePrice && positionState.entryQuantity > 0
+                              ? (livePrice * positionState.entryQuantity).toFixed(2)
+                              : positionState.entryValue.toFixed(2)
+                            }
+                          </span>
+                          <span className="text-xs text-gray-500 ml-1">Value</span>
+                        </div>
+                      )}
+
+                      {/* Unrealized P&L (recalculated with live price if available) */}
+                      {(() => {
+                        const curPrice = livePrice || positionAnalytics?.current_price || 0;
+                        const ePrice = positionState?.entryPrice || 0;
+                        const qty = positionState?.remainingQuantity || positionState?.entryQuantity || 0;
+                        const isLongPos = positionSide === 'LONG';
+                        let pnl: number;
+                        if (livePrice && ePrice > 0 && qty > 0) {
+                          pnl = isLongPos ? (curPrice - ePrice) * qty : (ePrice - curPrice) * qty;
+                        } else {
+                          pnl = positionAnalytics?.unrealized_pnl ?? 0;
+                        }
+                        const hasPnl = curPrice > 0 && ePrice > 0;
+                        return hasPnl ? (
+                          <div className="text-right ml-3">
+                            <span className={`font-mono text-sm ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                            </span>
+                            <span className="text-xs text-gray-500 ml-1">PnL</span>
+                          </div>
+                        ) : null;
+                      })()}
+                    </>
+                  )}
+                </>
+              );
+            })()
           ) : (
             <>
               {/* Non-POSITION types: Full detail rendering */}
@@ -478,18 +557,18 @@ export default function OrderTreeNode({
               <Icon className={`w-4 h-4 flex-shrink-0 ${config.color}`} />
               <span className={`font-medium ${config.color}`}>{config.label}</span>
 
-              {/* Buy/Sell side badge for entry orders */}
-              {type === 'ENTRY' && order && (
+              {/* Buy/Sell side badge for entry orders - use positionSide prop as authoritative source */}
+              {type === 'ENTRY' && (
                 <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
-                  order.side === 'BUY'
+                  positionSide === 'LONG'
                     ? 'bg-green-500/20 text-green-400'
                     : 'bg-red-500/20 text-red-400'
                 }`}>
-                  {order.side === 'BUY'
+                  {positionSide === 'LONG'
                     ? <TrendingUp className="w-3 h-3" />
                     : <TrendingDown className="w-3 h-3" />
                   }
-                  {order.side === 'BUY' ? 'LONG' : 'SHORT'}
+                  {positionSide}
                 </span>
               )}
 
@@ -506,6 +585,20 @@ export default function OrderTreeNode({
                 <statusIndicator.icon className="w-3.5 h-3.5" />
                 {statusIndicator.label}
               </span>
+
+              {/* Exit badge for the order that closed the position */}
+              {isExitOrder && order?.status === 'FILLED' && (
+                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-orange-500/20 text-orange-400 font-medium">
+                  ← EXIT
+                </span>
+              )}
+
+              {/* Cancel reason for SL/TP that was cancelled when opposite hit */}
+              {cancelReason && order?.status === 'CANCELED' && (
+                <span className="text-xs text-gray-500 italic">
+                  ({cancelReason})
+                </span>
+              )}
 
               {/* Countdown timer for pending entry orders */}
               {countdown && type === 'ENTRY' && (
@@ -576,7 +669,7 @@ export default function OrderTreeNode({
               )}
 
               {/* Expected P&L for SL/TP orders */}
-              {['SL', 'TP1', 'TP2', 'TP3'].includes(type) && entryPrice && entryPrice > 0 && displayPrice > 0 && (
+              {['SL', 'TP', 'TP1', 'TP2', 'TP3'].includes(type) && entryPrice && entryPrice > 0 && displayPrice > 0 && (
                 (() => {
                   const qty = entryQuantity || order?.origQty || 0;
                   const expectedPnL = calculateExpectedPnL(type, displayPrice, entryPrice, qty, positionSide, feeRate);
@@ -788,20 +881,20 @@ export function buildEntryFromPositionState(positionState: PositionState): Chain
   };
 
   return {
-    orderId: positionState.entryOrderId,
-    clientOrderId: positionState.entryClientOrderId,
-    symbol: positionState.symbol,
-    side: positionState.entrySide,
+    orderId: positionState.entryOrderId ?? 0,
+    clientOrderId: positionState.entryClientOrderId ?? '',
+    symbol: positionState.symbol ?? '',
+    side: positionState.entrySide ?? 'BUY',
     positionSide: positionState.entrySide === 'BUY' ? 'LONG' : 'SHORT',
-    type: 'MARKET',
+    type: 'LIMIT',
     status: 'FILLED',
-    price: positionState.entryPrice,
-    avgPrice: positionState.entryPrice,
-    origQty: positionState.entryQuantity,
-    executedQty: positionState.entryQuantity,
+    price: positionState.entryPrice ?? 0,
+    avgPrice: positionState.entryPrice ?? 0,
+    origQty: positionState.entryQuantity ?? 0,
+    executedQty: positionState.entryQuantity ?? 0,
     stopPrice: 0,
-    time: new Date(positionState.entryFilledAt).getTime(),
-    updateTime: new Date(positionState.updatedAt).getTime(),
+    time: positionState.entryFilledAt ? new Date(positionState.entryFilledAt).getTime() : 0,
+    updateTime: positionState.updatedAt ? new Date(positionState.updatedAt).getTime() : 0,
     orderType: 'E' as OrderTypeSuffix,
     parsed,
   };

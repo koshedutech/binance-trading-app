@@ -8678,7 +8678,7 @@ func (ga *GinieAutopilot) closePosition(symbol string, pos *GiniePosition, curre
 	// This marks the chain as CLOSED in the order_chains table with PnL and close reason
 	if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
 		ctx := context.Background()
-		if err := ga.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, reason, totalPnL, totalFee); err != nil {
+		if err := ga.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, reason, totalPnL, totalFee, nil); err != nil {
 			ga.logger.Warn("Failed to close order chain for position",
 				"symbol", symbol,
 				"chain_id", pos.ChainBaseID,
@@ -9047,7 +9047,7 @@ func (ga *GinieAutopilot) closePositionAtMarket(pos *GiniePosition, reason strin
 	// Epic 7: Close chain when using chain-based position management
 	if ga.shouldUseChainPositionManagement() && ga.chainEventWriter != nil && pos.ChainBaseID != "" {
 		ctx := context.Background()
-		if err := ga.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, reason, totalPnL, exitFee); err != nil {
+		if err := ga.chainEventWriter.CloseChain(ctx, pos.ChainBaseID, reason, totalPnL, exitFee, nil); err != nil {
 			ga.logger.Warn("Failed to close order chain for market close",
 				"symbol", symbol,
 				"chain_id", pos.ChainBaseID,
@@ -13648,32 +13648,44 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 
 			if matchedChainID != "" {
 				var closeReason string
+				fillTime := time.UnixMilli(binanceTimestamp)
+				closePriceVal := filledPrice
 				if isSLFill {
 					closeReason = string(orders.CloseReasonSLHit)
 					if err := ga.chainEventWriter.RecordSLFilled(ctx, matchedChainID, orders.ChainSLFilledEvent{
-						FilledPrice:     filledPrice,
-						PnL:             realizedProfit,
-						Fees:            commission,
+						FilledPrice:      filledPrice,
+						PnL:              realizedProfit,
+						Fees:             commission,
 						BinanceTimestamp: binanceTimestamp,
 					}); err != nil {
 						ga.logger.Warn("Failed to record SL filled event",
 							"chain_id", matchedChainID, "error", err.Error())
 					}
+					// Persist SL fill details and mark TP as CANCELED
+					if err := ga.chainEventWriter.GetDB().UpdateOrderChainSLFilled(ctx, matchedChainID, filledPrice, fillTime); err != nil {
+						ga.logger.Warn("Failed to persist SL fill details",
+							"chain_id", matchedChainID, "error", err.Error())
+					}
 				} else if isTPFill {
 					closeReason = string(orders.CloseReasonTPHit)
 					if err := ga.chainEventWriter.RecordTPFilled(ctx, matchedChainID, orders.ChainTPFilledEvent{
-						FilledPrice:     filledPrice,
-						PnL:             realizedProfit,
-						Fees:            commission,
+						FilledPrice:      filledPrice,
+						PnL:              realizedProfit,
+						Fees:             commission,
 						BinanceTimestamp: binanceTimestamp,
 					}); err != nil {
 						ga.logger.Warn("Failed to record TP filled event",
 							"chain_id", matchedChainID, "error", err.Error())
 					}
+					// Persist TP fill details and mark SL as CANCELED
+					if err := ga.chainEventWriter.GetDB().UpdateOrderChainTPFilled(ctx, matchedChainID, filledPrice, fillTime); err != nil {
+						ga.logger.Warn("Failed to persist TP fill details",
+							"chain_id", matchedChainID, "error", err.Error())
+					}
 				}
 
 				if err := ga.chainEventWriter.CloseChain(ctx, matchedChainID,
-					closeReason, realizedProfit, commission); err != nil {
+					closeReason, realizedProfit, commission, &closePriceVal); err != nil {
 					ga.logger.Warn("Failed to close chain after SL/TP fill",
 						"chain_id", matchedChainID, "error", err.Error())
 				} else {

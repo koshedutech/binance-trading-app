@@ -4,7 +4,7 @@
 
 // Order type suffixes used in client order IDs
 // POSITION is a virtual type representing an active position (not a Binance order type)
-export type OrderTypeSuffix = 'E' | 'TP1' | 'TP2' | 'TP3' | 'RB' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'SL' | 'POSITION';
+export type OrderTypeSuffix = 'E' | 'TP' | 'TP1' | 'TP2' | 'TP3' | 'RB' | 'DCA1' | 'DCA2' | 'DCA3' | 'H' | 'HSL' | 'HTP' | 'SL' | 'POSITION';
 
 // Trading mode codes
 export type TradingModeCode = 'ULT' | 'SCA' | 'SWI' | 'POS';
@@ -21,6 +21,7 @@ export const MODE_DISPLAY_NAMES: Record<TradingModeCode, string> = {
 export const ORDER_TYPE_CONFIG: Record<OrderTypeSuffix, { label: string; color: string; bgColor: string; description: string }> = {
   E: { label: 'Entry', color: 'text-green-400', bgColor: 'bg-green-500/20', description: 'Initial entry order' },
   POSITION: { label: 'Position', color: 'text-purple-400', bgColor: 'bg-purple-500/20', description: 'Active position from filled entry' },
+  TP: { label: 'Take Profit', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit' },
   TP1: { label: 'TP1', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit Level 1' },
   TP2: { label: 'TP2', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit Level 2' },
   TP3: { label: 'TP3', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', description: 'Take Profit Level 3' },
@@ -86,6 +87,8 @@ export interface PositionState {
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
   closedAt?: string; // ISO 8601
+  closePrice?: number;
+  closeReason?: string; // e.g., 'SL_HIT', 'TP_HIT', 'MANUAL'
 }
 
 // Order chain (group of related orders)
@@ -285,6 +288,7 @@ export function groupOrdersIntoChains(orders: ChainOrder[]): OrderChain[] {
       case 'E':
         chain.entryOrder = order;
         break;
+      case 'TP':
       case 'TP1':
       case 'TP2':
       case 'TP3':

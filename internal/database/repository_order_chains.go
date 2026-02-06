@@ -25,8 +25,10 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			remaining_quantity,
 			hedge_chain_id, is_hedge, parent_chain_id,
 			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
+			created_at, updated_at, closed_at, close_reason, close_price,
 			realized_pnl, total_fees,
+			sl_binance_order_id, sl_limit_price, sl_fill_price, sl_fill_time, sl_status, sl_quantity,
+			tp_binance_order_id, tp_limit_price, tp_fill_price, tp_fill_time, tp_status, tp_quantity,
 			mode, strategy_group, sub_strategy, timeframe,
 			entry_context
 		) VALUES (
@@ -37,10 +39,12 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			$17,
 			$18, $19, $20,
 			$21, $22, $23, $24,
-			$25, $26, $27, $28,
-			$29, $30,
-			$31, $32, $33, $34,
-			$35
+			$25, $26, $27, $28, $29,
+			$30, $31,
+			$32, $33, $34, $35, $36, $37,
+			$38, $39, $40, $41, $42, $43,
+			$44, $45, $46, $47,
+			$48
 		)
 		ON CONFLICT (user_id, chain_id) DO UPDATE SET
 			status = EXCLUDED.status,
@@ -63,8 +67,21 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			updated_at = EXCLUDED.updated_at,
 			closed_at = EXCLUDED.closed_at,
 			close_reason = EXCLUDED.close_reason,
+			close_price = COALESCE(EXCLUDED.close_price, order_chains.close_price),
 			realized_pnl = EXCLUDED.realized_pnl,
 			total_fees = EXCLUDED.total_fees,
+			sl_binance_order_id = COALESCE(EXCLUDED.sl_binance_order_id, order_chains.sl_binance_order_id),
+			sl_limit_price = COALESCE(EXCLUDED.sl_limit_price, order_chains.sl_limit_price),
+			sl_fill_price = COALESCE(EXCLUDED.sl_fill_price, order_chains.sl_fill_price),
+			sl_fill_time = COALESCE(EXCLUDED.sl_fill_time, order_chains.sl_fill_time),
+			sl_status = COALESCE(EXCLUDED.sl_status, order_chains.sl_status),
+			sl_quantity = COALESCE(EXCLUDED.sl_quantity, order_chains.sl_quantity),
+			tp_binance_order_id = COALESCE(EXCLUDED.tp_binance_order_id, order_chains.tp_binance_order_id),
+			tp_limit_price = COALESCE(EXCLUDED.tp_limit_price, order_chains.tp_limit_price),
+			tp_fill_price = COALESCE(EXCLUDED.tp_fill_price, order_chains.tp_fill_price),
+			tp_fill_time = COALESCE(EXCLUDED.tp_fill_time, order_chains.tp_fill_time),
+			tp_status = COALESCE(EXCLUDED.tp_status, order_chains.tp_status),
+			tp_quantity = COALESCE(EXCLUDED.tp_quantity, order_chains.tp_quantity),
 			mode = COALESCE(EXCLUDED.mode, order_chains.mode),
 			strategy_group = COALESCE(EXCLUDED.strategy_group, order_chains.strategy_group),
 			sub_strategy = COALESCE(EXCLUDED.sub_strategy, order_chains.sub_strategy),
@@ -109,8 +126,21 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 		chain.UpdatedAt,
 		chain.ClosedAt,
 		chain.CloseReason,
+		chain.ClosePrice,
 		chain.RealizedPnL,
 		chain.TotalFees,
+		chain.SLBinanceOrderID,
+		chain.SLLimitPrice,
+		chain.SLFillPrice,
+		chain.SLFillTime,
+		chain.SLStatus,
+		chain.SLQuantity,
+		chain.TPBinanceOrderID,
+		chain.TPLimitPrice,
+		chain.TPFillPrice,
+		chain.TPFillTime,
+		chain.TPStatus,
+		chain.TPQuantity,
 		chain.Mode,
 		chain.StrategyGroup,
 		chain.SubStrategy,
@@ -153,8 +183,21 @@ func (db *DB) UpdateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			updated_at = $19,
 			closed_at = $20,
 			close_reason = $21,
-			realized_pnl = $22,
-			total_fees = $23
+			close_price = $22,
+			realized_pnl = $23,
+			total_fees = $24,
+			sl_binance_order_id = $25,
+			sl_limit_price = $26,
+			sl_fill_price = $27,
+			sl_fill_time = $28,
+			sl_status = $29,
+			sl_quantity = $30,
+			tp_binance_order_id = $31,
+			tp_limit_price = $32,
+			tp_fill_price = $33,
+			tp_fill_time = $34,
+			tp_status = $35,
+			tp_quantity = $36
 		WHERE id = $1`
 
 	chain.UpdatedAt = time.Now()
@@ -181,8 +224,21 @@ func (db *DB) UpdateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 		chain.UpdatedAt,
 		chain.ClosedAt,
 		chain.CloseReason,
+		chain.ClosePrice,
 		chain.RealizedPnL,
 		chain.TotalFees,
+		chain.SLBinanceOrderID,
+		chain.SLLimitPrice,
+		chain.SLFillPrice,
+		chain.SLFillTime,
+		chain.SLStatus,
+		chain.SLQuantity,
+		chain.TPBinanceOrderID,
+		chain.TPLimitPrice,
+		chain.TPFillPrice,
+		chain.TPFillTime,
+		chain.TPStatus,
+		chain.TPQuantity,
 	)
 
 	if err != nil {
@@ -198,60 +254,9 @@ func (db *DB) GetOrderChainByID(ctx context.Context, userID, chainID string) (*o
 		return nil, nil
 	}
 
-	query := `
-		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-			current_sl_price, current_tp_price,
-			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-			remaining_quantity,
-			hedge_chain_id, is_hedge, parent_chain_id,
-			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
-			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-		FROM order_chains
-		WHERE user_id = $1 AND chain_id = $2`
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains WHERE user_id = $1 AND chain_id = $2`
 
-	chain := &orders.OrderChain{}
-	err := db.Pool.QueryRow(ctx, query, userID, chainID).Scan(
-		&chain.ID,
-		&chain.UserID,
-		&chain.ChainID,
-		&chain.Symbol,
-		&chain.Side,
-		&chain.ModeCode,
-		&chain.Status,
-		&chain.EntryPrice,
-		&chain.EntryQuantity,
-		&chain.EntryFilledAt,
-		&chain.EntryBinanceOrderID,
-		&chain.CurrentSLPrice,
-		&chain.CurrentTPPrice,
-		&chain.PositionOptEnabled,
-		&chain.CurrentTP1Price,
-		&chain.CurrentTP2Price,
-		&chain.CurrentTP3Price,
-		&chain.RemainingQuantity,
-		&chain.HedgeChainID,
-		&chain.IsHedge,
-		&chain.ParentChainID,
-		&chain.SLModificationCount,
-		&chain.TPModificationCount,
-		&chain.EventCount,
-		&chain.LastEventSeq,
-		&chain.CreatedAt,
-		&chain.UpdatedAt,
-		&chain.ClosedAt,
-		&chain.CloseReason,
-		&chain.RealizedPnL,
-		&chain.TotalFees,
-		&chain.Mode,
-		&chain.StrategyGroup,
-		&chain.SubStrategy,
-		&chain.Timeframe,
-		&chain.EntryContext,
-	)
-
+	chain, err := scanOrderChainRow(db.Pool.QueryRow(ctx, query, userID, chainID))
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -270,60 +275,9 @@ func (db *DB) GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*
 		return nil, nil
 	}
 
-	query := `
-		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-			current_sl_price, current_tp_price,
-			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-			remaining_quantity,
-			hedge_chain_id, is_hedge, parent_chain_id,
-			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
-			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-		FROM order_chains
-		WHERE chain_id = $1`
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains WHERE chain_id = $1`
 
-	chain := &orders.OrderChain{}
-	err := db.Pool.QueryRow(ctx, query, chainID).Scan(
-		&chain.ID,
-		&chain.UserID,
-		&chain.ChainID,
-		&chain.Symbol,
-		&chain.Side,
-		&chain.ModeCode,
-		&chain.Status,
-		&chain.EntryPrice,
-		&chain.EntryQuantity,
-		&chain.EntryFilledAt,
-		&chain.EntryBinanceOrderID,
-		&chain.CurrentSLPrice,
-		&chain.CurrentTPPrice,
-		&chain.PositionOptEnabled,
-		&chain.CurrentTP1Price,
-		&chain.CurrentTP2Price,
-		&chain.CurrentTP3Price,
-		&chain.RemainingQuantity,
-		&chain.HedgeChainID,
-		&chain.IsHedge,
-		&chain.ParentChainID,
-		&chain.SLModificationCount,
-		&chain.TPModificationCount,
-		&chain.EventCount,
-		&chain.LastEventSeq,
-		&chain.CreatedAt,
-		&chain.UpdatedAt,
-		&chain.ClosedAt,
-		&chain.CloseReason,
-		&chain.RealizedPnL,
-		&chain.TotalFees,
-		&chain.Mode,
-		&chain.StrategyGroup,
-		&chain.SubStrategy,
-		&chain.Timeframe,
-		&chain.EntryContext,
-	)
-
+	chain, err := scanOrderChainRow(db.Pool.QueryRow(ctx, query, chainID))
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -344,34 +298,12 @@ func (db *DB) GetOrderChainsByUserID(ctx context.Context, userID string, status 
 	var args []interface{}
 
 	if status != "" {
-		query = `
-			SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-				entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-				current_sl_price, current_tp_price,
-				position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-				remaining_quantity,
-				hedge_chain_id, is_hedge, parent_chain_id,
-				sl_modification_count, tp_modification_count, event_count, last_event_seq,
-				created_at, updated_at, closed_at, close_reason,
-				realized_pnl, total_fees,
-				COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-			FROM order_chains
+		query = `SELECT ` + orderChainSelectColumns + ` FROM order_chains
 			WHERE user_id = $1 AND status = $2
 			ORDER BY created_at DESC`
 		args = []interface{}{userID, status}
 	} else {
-		query = `
-			SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-				entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-				current_sl_price, current_tp_price,
-				position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-				remaining_quantity,
-				hedge_chain_id, is_hedge, parent_chain_id,
-				sl_modification_count, tp_modification_count, event_count, last_event_seq,
-				created_at, updated_at, closed_at, close_reason,
-				realized_pnl, total_fees,
-				COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-			FROM order_chains
+		query = `SELECT ` + orderChainSelectColumns + ` FROM order_chains
 			WHERE user_id = $1
 			ORDER BY created_at DESC`
 		args = []interface{}{userID}
@@ -392,18 +324,7 @@ func (db *DB) GetActiveOrderChains(ctx context.Context, userID string) ([]*order
 		return nil, nil
 	}
 
-	query := `
-		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-			current_sl_price, current_tp_price,
-			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-			remaining_quantity,
-			hedge_chain_id, is_hedge, parent_chain_id,
-			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
-			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-		FROM order_chains
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains
 		WHERE user_id = $1 AND status IN ('ACTIVE', 'PARTIAL')
 		ORDER BY created_at DESC`
 
@@ -424,18 +345,7 @@ func (db *DB) GetOrderChainsByChainIDs(ctx context.Context, userID string, chain
 		return result, nil
 	}
 
-	query := `
-		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-			current_sl_price, current_tp_price,
-			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-			remaining_quantity,
-			hedge_chain_id, is_hedge, parent_chain_id,
-			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
-			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-		FROM order_chains
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains
 		WHERE user_id = $1 AND chain_id = ANY($2)`
 
 	rows, err := db.Pool.Query(ctx, query, userID, chainIDs)
@@ -497,18 +407,7 @@ func (db *DB) GetRecentOrderChains(ctx context.Context, userID string, limit int
 		return nil, nil
 	}
 
-	query := `
-		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-			current_sl_price, current_tp_price,
-			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-			remaining_quantity,
-			hedge_chain_id, is_hedge, parent_chain_id,
-			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
-			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-		FROM order_chains
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains
 		WHERE user_id = $1
 		ORDER BY created_at DESC
 		LIMIT $2`
@@ -541,18 +440,7 @@ func (db *DB) GetOrderChainsWithFilter(ctx context.Context, filter OrderChainFil
 		return nil, nil
 	}
 
-	query := `
-		SELECT id, user_id, chain_id, symbol, side, mode_code, status,
-			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
-			current_sl_price, current_tp_price,
-			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
-			remaining_quantity,
-			hedge_chain_id, is_hedge, parent_chain_id,
-			sl_modification_count, tp_modification_count, event_count, last_event_seq,
-			created_at, updated_at, closed_at, close_reason,
-			realized_pnl, total_fees,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context
-		FROM order_chains
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains
 		WHERE user_id = $1`
 
 	args := []interface{}{filter.UserID}
@@ -671,7 +559,7 @@ func (db *DB) UpdateOrderChainTPPrice(ctx context.Context, chainID string, newPr
 }
 
 // CloseOrderChain marks an order chain as closed
-func (db *DB) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64) error {
+func (db *DB) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error {
 	if db.Pool == nil {
 		return nil
 	}
@@ -684,10 +572,11 @@ func (db *DB) CloseOrderChain(ctx context.Context, chainID string, closeReason s
 			realized_pnl = $3,
 			total_fees = $4,
 			remaining_quantity = 0,
+			close_price = COALESCE($5, close_price),
 			updated_at = NOW()
 		WHERE chain_id = $1`
 
-	_, err := db.Pool.Exec(ctx, query, chainID, closeReason, realizedPnL, totalFees)
+	_, err := db.Pool.Exec(ctx, query, chainID, closeReason, realizedPnL, totalFees, closePrice)
 	if err != nil {
 		return fmt.Errorf("failed to close order chain: %w", err)
 	}
@@ -736,49 +625,177 @@ func (db *DB) LinkHedgeChain(ctx context.Context, primaryChainID, hedgeChainID s
 	return nil
 }
 
+// UpdateOrderChainSLDetails persists SL order details when the SL order is placed
+func (db *DB) UpdateOrderChainSLDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			sl_binance_order_id = $2,
+			sl_limit_price = $3,
+			sl_quantity = $4,
+			sl_status = 'NEW',
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID, binanceOrderID, limitPrice, quantity)
+	if err != nil {
+		return fmt.Errorf("failed to update order chain SL details: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateOrderChainTPDetails persists TP order details when the TP order is placed
+func (db *DB) UpdateOrderChainTPDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			tp_binance_order_id = $2,
+			tp_limit_price = $3,
+			tp_quantity = $4,
+			tp_status = 'NEW',
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID, binanceOrderID, limitPrice, quantity)
+	if err != nil {
+		return fmt.Errorf("failed to update order chain TP details: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateOrderChainSLFilled records SL fill details and cancels TP
+func (db *DB) UpdateOrderChainSLFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			sl_fill_price = $2,
+			sl_fill_time = $3,
+			sl_status = 'FILLED',
+			tp_status = 'CANCELED',
+			close_price = $2,
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID, fillPrice, fillTime)
+	if err != nil {
+		return fmt.Errorf("failed to update order chain SL filled: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateOrderChainTPFilled records TP fill details and cancels SL
+func (db *DB) UpdateOrderChainTPFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			tp_fill_price = $2,
+			tp_fill_time = $3,
+			tp_status = 'FILLED',
+			sl_status = 'CANCELED',
+			close_price = $2,
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID, fillPrice, fillTime)
+	if err != nil {
+		return fmt.Errorf("failed to update order chain TP filled: %w", err)
+	}
+
+	return nil
+}
+
+// orderChainSelectColumns is the standard set of columns selected for order chain queries.
+// This must match the order in scanOrderChainRow.
+const orderChainSelectColumns = `id, user_id, chain_id, symbol, side, mode_code, status,
+			entry_price, entry_quantity, entry_filled_at, entry_binance_order_id,
+			current_sl_price, current_tp_price,
+			position_opt_enabled, current_tp1_price, current_tp2_price, current_tp3_price,
+			remaining_quantity,
+			hedge_chain_id, is_hedge, parent_chain_id,
+			sl_modification_count, tp_modification_count, event_count, last_event_seq,
+			created_at, updated_at, closed_at, close_reason, close_price,
+			realized_pnl, total_fees,
+			sl_binance_order_id, sl_limit_price, sl_fill_price, sl_fill_time, sl_status, sl_quantity,
+			tp_binance_order_id, tp_limit_price, tp_fill_price, tp_fill_time, tp_status, tp_quantity,
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context`
+
+// scanOrderChainRow scans a single row into an OrderChain. Column order must match orderChainSelectColumns.
+func scanOrderChainRow(scanner interface{ Scan(dest ...interface{}) error }) (*orders.OrderChain, error) {
+	chain := &orders.OrderChain{}
+	err := scanner.Scan(
+		&chain.ID,
+		&chain.UserID,
+		&chain.ChainID,
+		&chain.Symbol,
+		&chain.Side,
+		&chain.ModeCode,
+		&chain.Status,
+		&chain.EntryPrice,
+		&chain.EntryQuantity,
+		&chain.EntryFilledAt,
+		&chain.EntryBinanceOrderID,
+		&chain.CurrentSLPrice,
+		&chain.CurrentTPPrice,
+		&chain.PositionOptEnabled,
+		&chain.CurrentTP1Price,
+		&chain.CurrentTP2Price,
+		&chain.CurrentTP3Price,
+		&chain.RemainingQuantity,
+		&chain.HedgeChainID,
+		&chain.IsHedge,
+		&chain.ParentChainID,
+		&chain.SLModificationCount,
+		&chain.TPModificationCount,
+		&chain.EventCount,
+		&chain.LastEventSeq,
+		&chain.CreatedAt,
+		&chain.UpdatedAt,
+		&chain.ClosedAt,
+		&chain.CloseReason,
+		&chain.ClosePrice,
+		&chain.RealizedPnL,
+		&chain.TotalFees,
+		&chain.SLBinanceOrderID,
+		&chain.SLLimitPrice,
+		&chain.SLFillPrice,
+		&chain.SLFillTime,
+		&chain.SLStatus,
+		&chain.SLQuantity,
+		&chain.TPBinanceOrderID,
+		&chain.TPLimitPrice,
+		&chain.TPFillPrice,
+		&chain.TPFillTime,
+		&chain.TPStatus,
+		&chain.TPQuantity,
+		&chain.Mode,
+		&chain.StrategyGroup,
+		&chain.SubStrategy,
+		&chain.Timeframe,
+		&chain.EntryContext,
+	)
+	return chain, err
+}
+
 // scanOrderChains scans rows into order chain slice
 func scanOrderChains(rows pgx.Rows) ([]*orders.OrderChain, error) {
 	var chains []*orders.OrderChain
 	for rows.Next() {
-		chain := &orders.OrderChain{}
-		err := rows.Scan(
-			&chain.ID,
-			&chain.UserID,
-			&chain.ChainID,
-			&chain.Symbol,
-			&chain.Side,
-			&chain.ModeCode,
-			&chain.Status,
-			&chain.EntryPrice,
-			&chain.EntryQuantity,
-			&chain.EntryFilledAt,
-			&chain.EntryBinanceOrderID,
-			&chain.CurrentSLPrice,
-			&chain.CurrentTPPrice,
-			&chain.PositionOptEnabled,
-			&chain.CurrentTP1Price,
-			&chain.CurrentTP2Price,
-			&chain.CurrentTP3Price,
-			&chain.RemainingQuantity,
-			&chain.HedgeChainID,
-			&chain.IsHedge,
-			&chain.ParentChainID,
-			&chain.SLModificationCount,
-			&chain.TPModificationCount,
-			&chain.EventCount,
-			&chain.LastEventSeq,
-			&chain.CreatedAt,
-			&chain.UpdatedAt,
-			&chain.ClosedAt,
-			&chain.CloseReason,
-			&chain.RealizedPnL,
-			&chain.TotalFees,
-			&chain.Mode,
-			&chain.StrategyGroup,
-			&chain.SubStrategy,
-			&chain.Timeframe,
-			&chain.EntryContext,
-		)
+		chain, err := scanOrderChainRow(rows)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan order chain row: %w", err)
 		}

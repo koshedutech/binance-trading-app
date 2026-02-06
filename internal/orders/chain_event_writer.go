@@ -26,11 +26,17 @@ type ChainEventWriterDB interface {
 	GetOrderChainByID(ctx context.Context, userID, chainID string) (*OrderChain, error)
 	GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*OrderChain, error) // For lookups without userID
 	GetActiveOrderChains(ctx context.Context, userID string) ([]*OrderChain, error)
-	CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64) error
+	CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error
 	UpdateOrderChainSLPrice(ctx context.Context, chainID string, newPrice float64) error
 	UpdateOrderChainTPPrice(ctx context.Context, chainID string, newPrice float64) error
 	LinkHedgeChain(ctx context.Context, primaryChainID, hedgeChainID string) error
 	IncrementOrderChainEventCount(ctx context.Context, chainID string, newSeq int) error
+
+	// SL/TP persistence operations
+	UpdateOrderChainSLDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error
+	UpdateOrderChainTPDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) error
+	UpdateOrderChainSLFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error
+	UpdateOrderChainTPFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error
 
 	// Chain event operations
 	InsertChainEvent(ctx context.Context, event *ChainEvent) error
@@ -154,6 +160,11 @@ func NewChainEventWriterWithCache(db ChainEventWriterDB, cache ChainCacheInterfa
 	}
 }
 
+// GetDB returns the database interface for direct access (e.g., SL/TP persistence)
+func (w *ChainEventWriter) GetDB() ChainEventWriterDB {
+	return w.db
+}
+
 // SetCache sets the cache interface (allows late binding)
 func (w *ChainEventWriter) SetCache(cache ChainCacheInterface) {
 	w.cache = cache
@@ -227,7 +238,7 @@ func (w *ChainEventWriter) CreateChain(ctx context.Context, req CreateChainReque
 }
 
 // CloseChain marks a chain as closed when the position is fully exited
-func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reason string, totalPnL, totalFees float64) error {
+func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reason string, totalPnL, totalFees float64, closePrice *float64) error {
 	// Get the chain first to get userID for cache operations
 	chain, _ := w.db.GetOrderChainByID(ctx, "", chainID)
 	userID := ""
@@ -254,7 +265,7 @@ func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reaso
 	}
 
 	// Update the chain status
-	if err := w.db.CloseOrderChain(ctx, chainID, reason, totalPnL, totalFees); err != nil {
+	if err := w.db.CloseOrderChain(ctx, chainID, reason, totalPnL, totalFees, closePrice); err != nil {
 		return fmt.Errorf("failed to close order chain: %w", err)
 	}
 
@@ -445,6 +456,20 @@ type ChainSLPlacedEvent struct {
 	BinanceClientOrderID string
 	Price                float64
 	BinanceTimestamp     int64
+}
+
+// PersistSLDetails saves SL order details to the order_chains table for closed chain reconstruction
+func (w *ChainEventWriter) PersistSLDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) {
+	if err := w.db.UpdateOrderChainSLDetails(ctx, chainID, binanceOrderID, limitPrice, quantity); err != nil {
+		w.logger.Warn().Err(err).Str("chain_id", chainID).Msg("Failed to persist SL details")
+	}
+}
+
+// PersistTPDetails saves TP order details to the order_chains table for closed chain reconstruction
+func (w *ChainEventWriter) PersistTPDetails(ctx context.Context, chainID string, binanceOrderID int64, limitPrice float64, quantity float64) {
+	if err := w.db.UpdateOrderChainTPDetails(ctx, chainID, binanceOrderID, limitPrice, quantity); err != nil {
+		w.logger.Warn().Err(err).Str("chain_id", chainID).Msg("Failed to persist TP details")
+	}
 }
 
 // RecordSLPlaced records when a stop loss order is initially placed

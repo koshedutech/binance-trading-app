@@ -324,7 +324,7 @@ func (db *DB) runUserGlobalTradingInlineMigration(ctx context.Context) error {
 // - Order modification events (035) - track SL/TP modifications
 // - Order chain events (036) - master order chain table and event store
 func (db *DB) RunOrderChainMigrations(ctx context.Context) error {
-	log.Println("Running Order Chain database migrations (034-036, 050-051)...")
+	log.Println("Running Order Chain database migrations (034-036, 050-052)...")
 
 	// Define the migrations to run in order
 	migrationFiles := []string{
@@ -333,6 +333,7 @@ func (db *DB) RunOrderChainMigrations(ctx context.Context) error {
 		"036_order_chain_events.sql",
 		"050_order_chain_timeframe.sql",
 		"051_order_chain_entry_context.sql",
+		"052_order_chain_sl_tp_persistence.sql",
 	}
 
 	// Get the project root directory

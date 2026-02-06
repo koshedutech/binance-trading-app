@@ -138,6 +138,7 @@ export default function ChainCard({
   // These sections are now shown in the Order Tree only
   const [modificationData, setModificationData] = useState<Record<ModifiableOrderType, ModificationEvent[]>>({
     SL: [],
+    TP: [],
     TP1: [],
     TP2: [],
     TP3: [],
@@ -413,23 +414,48 @@ export default function ChainCard({
                 {/* Exit Orders (TP/SL) - Children of position (depth 2, parallel) */}
                 {exitOrders.length > 0 && (
                   <div className="space-y-1 mt-1">
-                    {chain.tpOrders.map((tp, idx) => (
+                    {/* TP Hierarchy: single TP at depth 2, or TP parent at depth 2 with TP1/2/3 children at depth 3 */}
+                    {chain.tpOrders.length === 1 && (chain.tpOrders[0].orderType === 'TP' || !chain.tpOrders[0].orderType) ? (
+                      // Single TP order - show as "Take Profit" at depth 2
                       <OrderTreeNode
-                        key={tp.orderId}
-                        type={(tp.orderType || 'TP1') as TreeNodeType}
-                        order={tp}
+                        key={chain.tpOrders[0].orderId}
+                        type="TP"
+                        order={chain.tpOrders[0]}
                         chainId={chain.chainId}
                         positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
                         depth={2}
-                        isLast={!chain.slOrder && idx === chain.tpOrders.length - 1}
-                        modificationCount={chain.modificationCounts?.[tp.orderType || 'TP1'] || 0}
-                        modifications={modificationData[(tp.orderType || 'TP1') as ModifiableOrderType]}
+                        isLast={!chain.slOrder}
+                        modificationCount={chain.modificationCounts?.['TP'] || chain.modificationCounts?.['TP1'] || 0}
+                        modifications={modificationData['TP' as ModifiableOrderType] || modificationData.TP1}
                         onLoadModifications={loadModifications}
                         entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
                         entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
                         feeRate={takerFeeRate}
+                        isExitOrder={chain.tpOrders[0].status === 'FILLED' && chain.positionState?.status === 'CLOSED'}
+                        cancelReason={chain.tpOrders[0].status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - SL hit' : undefined}
                       />
-                    ))}
+                    ) : chain.tpOrders.length > 0 ? (
+                      // Multiple TP orders - show each at depth 2 with their specific type
+                      chain.tpOrders.map((tp, idx) => (
+                        <OrderTreeNode
+                          key={tp.orderId}
+                          type={(tp.orderType || 'TP1') as TreeNodeType}
+                          order={tp}
+                          chainId={chain.chainId}
+                          positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
+                          depth={2}
+                          isLast={!chain.slOrder && idx === chain.tpOrders.length - 1}
+                          modificationCount={chain.modificationCounts?.[tp.orderType || 'TP1'] || 0}
+                          modifications={modificationData[(tp.orderType || 'TP1') as ModifiableOrderType]}
+                          onLoadModifications={loadModifications}
+                          entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
+                          entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
+                          feeRate={takerFeeRate}
+                          isExitOrder={tp.status === 'FILLED' && chain.positionState?.status === 'CLOSED'}
+                          cancelReason={tp.status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - SL hit' : undefined}
+                        />
+                      ))
+                    ) : null}
                     {chain.slOrder && (
                       <OrderTreeNode
                         type="SL"
@@ -444,6 +470,8 @@ export default function ChainCard({
                         entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
                         entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
                         feeRate={takerFeeRate}
+                        isExitOrder={chain.slOrder.status === 'FILLED' && chain.positionState?.status === 'CLOSED'}
+                        cancelReason={chain.slOrder.status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - TP hit' : undefined}
                       />
                     )}
                   </div>
@@ -454,23 +482,42 @@ export default function ChainCard({
             {/* If no position state but we have exit orders, show them as children of entry */}
             {!chain.positionState && exitOrders.length > 0 && (
               <div className="space-y-1 mt-1">
-                {chain.tpOrders.map((tp, idx) => (
+                {/* TP Hierarchy for no-positionState case */}
+                {chain.tpOrders.length === 1 && (chain.tpOrders[0].orderType === 'TP' || !chain.tpOrders[0].orderType) ? (
                   <OrderTreeNode
-                    key={tp.orderId}
-                    type={(tp.orderType || 'TP1') as TreeNodeType}
-                    order={tp}
+                    key={chain.tpOrders[0].orderId}
+                    type="TP"
+                    order={chain.tpOrders[0]}
                     chainId={chain.chainId}
                     positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
                     depth={1}
-                    isLast={!chain.slOrder && idx === chain.tpOrders.length - 1}
-                    modificationCount={chain.modificationCounts?.[tp.orderType || 'TP1'] || 0}
-                    modifications={modificationData[(tp.orderType || 'TP1') as ModifiableOrderType]}
+                    isLast={!chain.slOrder}
+                    modificationCount={chain.modificationCounts?.['TP'] || chain.modificationCounts?.['TP1'] || 0}
+                    modifications={modificationData['TP' as ModifiableOrderType] || modificationData.TP1}
                     onLoadModifications={loadModifications}
                     entryPrice={entryOrder?.avgPrice || entryOrder?.price}
                     entryQuantity={entryOrder?.executedQty || entryOrder?.origQty}
                     feeRate={takerFeeRate}
                   />
-                ))}
+                ) : chain.tpOrders.length > 0 ? (
+                  chain.tpOrders.map((tp, idx) => (
+                    <OrderTreeNode
+                      key={tp.orderId}
+                      type={(tp.orderType || 'TP1') as TreeNodeType}
+                      order={tp}
+                      chainId={chain.chainId}
+                      positionSide={chain.positionSide === 'LONG' ? 'LONG' : 'SHORT'}
+                      depth={1}
+                      isLast={!chain.slOrder && idx === chain.tpOrders.length - 1}
+                      modificationCount={chain.modificationCounts?.[tp.orderType || 'TP1'] || 0}
+                      modifications={modificationData[(tp.orderType || 'TP1') as ModifiableOrderType]}
+                      onLoadModifications={loadModifications}
+                      entryPrice={entryOrder?.avgPrice || entryOrder?.price}
+                      entryQuantity={entryOrder?.executedQty || entryOrder?.origQty}
+                      feeRate={takerFeeRate}
+                    />
+                  ))
+                ) : null}
                 {chain.slOrder && (
                   <OrderTreeNode
                     type="SL"
@@ -579,9 +626,9 @@ export default function ChainCard({
                   </div>
                   <div className="flex items-center gap-3">
                     {/* Realized P&L if any */}
-                    {chain.positionState.realizedPnl !== 0 && (
-                      <span className={`text-xs ${chain.positionState.realizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                        Realized: {chain.positionState.realizedPnl >= 0 ? '+' : ''}{chain.positionState.realizedPnl.toFixed(4)} USDT
+                    {(chain.positionState.realizedPnl ?? 0) !== 0 && (
+                      <span className={`text-xs ${(chain.positionState.realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        Realized: {(chain.positionState.realizedPnl ?? 0) >= 0 ? '+' : ''}{(chain.positionState.realizedPnl ?? 0).toFixed(4)} USDT
                       </span>
                     )}
                     {/* Unrealized P&L - calculated live */}
@@ -622,26 +669,26 @@ export default function ChainCard({
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Entry Price</span>
-                    <span className="text-sm font-mono text-blue-400">${chain.positionState.entryPrice.toFixed(8)}</span>
+                    <span className="text-sm font-mono text-blue-400">${(chain.positionState.entryPrice ?? 0).toFixed(8)}</span>
                   </div>
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Entry Value</span>
-                    <span className="text-sm font-mono text-gray-300">${chain.positionState.entryValue.toFixed(8)}</span>
+                    <span className="text-sm font-mono text-gray-300">${(chain.positionState.entryValue ?? 0).toFixed(8)}</span>
                   </div>
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Quantity</span>
                     <span className="text-sm font-mono text-gray-300">
-                      {chain.positionState.remainingQuantity.toFixed(4)}
-                      {chain.positionState.remainingQuantity !== chain.positionState.entryQuantity && (
+                      {(chain.positionState.remainingQuantity ?? 0).toFixed(4)}
+                      {(chain.positionState.remainingQuantity ?? 0) !== (chain.positionState.entryQuantity ?? 0) && (
                         <span className="text-gray-500 text-xs ml-1">
-                          / {chain.positionState.entryQuantity.toFixed(4)}
+                          / {(chain.positionState.entryQuantity ?? 0).toFixed(4)}
                         </span>
                       )}
                     </span>
                   </div>
                   <div className="bg-gray-800/50 rounded-lg p-3">
                     <span className="text-xs text-gray-500 block mb-1">Entry Fees</span>
-                    <span className="text-sm font-mono text-orange-400">${chain.positionState.entryFees.toFixed(8)}</span>
+                    <span className="text-sm font-mono text-orange-400">${(chain.positionState.entryFees ?? 0).toFixed(8)}</span>
                   </div>
                 </div>
 
@@ -1076,8 +1123,8 @@ function LegacyChainView({
 
                   {/* Take Profit Modifications */}
                   {chain.tpOrders.map((tp) => {
-                    const tpType = tp.orderType as ModifiableOrderType;
-                    if (!tpType || !['TP1', 'TP2', 'TP3', 'TP4'].includes(tpType)) return null;
+                    const tpType = (tp.orderType || 'TP') as ModifiableOrderType;
+                    if (!['TP', 'TP1', 'TP2', 'TP3', 'TP4'].includes(tpType)) return null;
                     const events = modificationData[tpType] || [];
                     if (events.length === 0) return null;
                     const summary = calculateSummaryStats(events);

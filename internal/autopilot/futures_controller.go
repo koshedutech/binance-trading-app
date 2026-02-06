@@ -5660,7 +5660,7 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 	}
 
 	// Close the order chain in database
-	err := fc.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, 0.0)
+	err := fc.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, 0.0, nil)
 	if err != nil {
 		fc.logger.Error("Failed to close stale order chain",
 			"chain_id", chain.ChainID,
