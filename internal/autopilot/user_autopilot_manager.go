@@ -768,6 +768,32 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	})
 	m.logger.Info("Entry placed callback wired for pattern cleanup", "user_id", userID)
 
+	// Wire filling status callback - transitions pattern to Step 3 UI when order is placed
+	chainEntryRunner.SetOnEntryFillingCallback(func(symbol, mode, timeframe string, orderPrice, orderQuantityUSD float64, fillTimeoutSecs int) {
+		m.logger.Info("Entry order placed - setting filling status for Step 3 UI",
+			"symbol", symbol, "mode", mode, "timeframe", timeframe,
+			"order_price", orderPrice, "quantity_usd", orderQuantityUSD,
+			"fill_timeout", fillTimeoutSecs, "user_id", userID)
+		realtimeMatcher.SetPatternFillingStatus(symbol, mode, timeframe, orderPrice, orderQuantityUSD, fillTimeoutSecs)
+	})
+	m.logger.Info("Entry filling callback wired for Step 3 UI transition", "user_id", userID)
+
+	// Wire fill progress callback - broadcasts countdown timer updates for Step 3 UI
+	// Uses UpdateFillProgress which reads full context (ref candle, entry levels, order data)
+	// from the pattern state for rich UI updates every 2 seconds during fill wait
+	chainEntryRunner.SetOnFillProgressCallback(func(symbol, mode, timeframe string, remainingSecs int) {
+		realtimeMatcher.UpdateFillProgress(symbol, mode, timeframe, remainingSecs)
+	})
+	m.logger.Info("Fill progress callback wired for Step 3 countdown", "user_id", userID)
+
+	// Wire entry failed callback - resets pattern to watching so new entries can be detected
+	chainEntryRunner.SetOnEntryFailedCallback(func(symbol, mode, timeframe string) {
+		m.logger.Info("Entry failed - clearing pattern for fresh detection",
+			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
+		realtimeMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
+	})
+	m.logger.Info("Entry failed callback wired for pattern reset", "user_id", userID)
+
 	// Epic 14: Create ExitDecisionService for position exit monitoring
 	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)
 	exitDecisionSvc := exitdecision.NewService(nil, nil, nil) // Providers wired after creation

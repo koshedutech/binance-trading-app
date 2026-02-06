@@ -68,6 +68,7 @@ const STATUS_COLORS: Record<PatternStatus, { bg: string; text: string; border: s
   accumulation: { bg: 'bg-blue-500/20', text: 'text-blue-400', border: 'border-blue-500/30' },
   consolidating: { bg: 'bg-yellow-500/20', text: 'text-yellow-400', border: 'border-yellow-500/30' },
   ready: { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30' },
+  filling: { bg: 'bg-cyan-500/20', text: 'text-cyan-400', border: 'border-cyan-500/30' },
   failed: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30' },
   expired: { bg: 'bg-gray-500/20', text: 'text-gray-500', border: 'border-gray-500/30' },
   position_running: { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30' },
@@ -75,15 +76,38 @@ const STATUS_COLORS: Record<PatternStatus, { bg: string; text: string; border: s
 };
 
 const STATUS_LABELS: Record<PatternStatus, string> = {
-  watching: 'Watching',
-  accumulation: 'Accumulating',
-  consolidating: 'Consolidating',
-  ready: 'Ready',
+  watching: 'Step 1',
+  accumulation: 'Step 1',
+  consolidating: 'Step 2',
+  ready: 'Step 3',
+  filling: 'Filling',
   failed: 'Failed',
   expired: 'Expired',
-  position_running: 'In Position',
+  position_running: 'Position',
   position_closed: 'Closed',
 };
+
+// 4-Step UI mapping: status -> step number (1-4)
+const getStepNumber = (status: PatternStatus): number => {
+  switch (status) {
+    case 'watching':
+    case 'accumulation':
+      return 1; // Step 1: Reference Candle
+    case 'consolidating':
+      return 2; // Step 2: Consolidation
+    case 'ready':
+    case 'filling':
+      return 3; // Step 3: Ready/Filling
+    case 'position_running':
+    case 'position_closed':
+      return 4; // Step 4: Position
+    default:
+      return 1;
+  }
+};
+
+// Step names for 4-step progress indicator
+const STEP_NAMES = ['Ref', 'Consol', 'Ready', 'Position'];
 
 // ==================== Entry Levels Panel ====================
 
@@ -271,58 +295,49 @@ function VolumeProgressBar({ progress, detailed = false }: VolumeProgressBarProp
   );
 }
 
-// ==================== Step Progress Display ====================
+// ==================== 4-Step Progress Display ====================
 
-interface StepProgressProps {
-  currentStep: number;
-  totalSteps: number;
+interface FourStepProgressProps {
   status: PatternStatus;
-  stepDetails: Array<{
-    step_number: number;
-    name: string;
-    completed: boolean;
-    progress: string;
-    details: string;
-  }>;
 }
 
-function StepProgressDisplay({ currentStep, totalSteps, status, stepDetails }: StepProgressProps) {
-  return (
-    <div className="flex items-center gap-2">
-      {/* Step indicators */}
-      <div className="flex items-center gap-1">
-        {Array.from({ length: totalSteps }, (_, i) => {
-          const stepNum = i + 1;
-          const isCompleted = stepNum < currentStep || status === 'ready';
-          const isCurrent = stepNum === currentStep && status !== 'ready';
+function FourStepProgressDisplay({ status }: FourStepProgressProps) {
+  const currentStep = getStepNumber(status);
+  const totalSteps = 4;
 
-          return (
-            <div key={i} className="flex items-center">
+  return (
+    <div className="flex items-center gap-1 mb-3">
+      {Array.from({ length: totalSteps }, (_, i) => {
+        const stepNum = i + 1;
+        const isCompleted = stepNum < currentStep;
+        const isCurrent = stepNum === currentStep;
+
+        return (
+          <div key={i} className="flex items-center">
+            <div className="flex flex-col items-center">
               <div
-                className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium
+                className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold
                   ${isCompleted
-                    ? 'bg-green-500/20 text-green-400 border border-green-500/50'
+                    ? 'bg-green-500/30 text-green-400 border-2 border-green-500/60'
                     : isCurrent
-                      ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/50 animate-pulse'
-                      : 'bg-gray-700/50 text-gray-500 border border-gray-600/50'
+                      ? 'bg-cyan-500/30 text-cyan-400 border-2 border-cyan-500/60 animate-pulse'
+                      : 'bg-gray-700/50 text-gray-500 border-2 border-gray-600/50'
                   }`}
               >
-                {isCompleted ? <CheckCircle className="w-3 h-3" /> : stepNum}
+                {isCompleted ? <CheckCircle className="w-4 h-4" /> : stepNum}
               </div>
-              {i < totalSteps - 1 && (
-                <div className={`w-4 h-0.5 ${isCompleted ? 'bg-green-500/50' : 'bg-gray-700/50'}`} />
-              )}
+              <span className={`text-[9px] mt-0.5 ${
+                isCompleted ? 'text-green-400' : isCurrent ? 'text-cyan-400' : 'text-gray-500'
+              }`}>
+                {STEP_NAMES[i]}
+              </span>
             </div>
-          );
-        })}
-      </div>
-
-      {/* Current step details */}
-      {stepDetails && stepDetails[currentStep - 1] && (
-        <span className="text-xs text-gray-400 ml-2">
-          {stepDetails[currentStep - 1].progress || stepDetails[currentStep - 1].name}
-        </span>
-      )}
+            {i < totalSteps - 1 && (
+              <div className={`w-6 h-0.5 mb-3 mx-0.5 ${isCompleted ? 'bg-green-500/50' : 'bg-gray-700/50'}`} />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -337,11 +352,18 @@ export default function CoinStageCard({
 }: CoinStageCardProps) {
   const colors = STATUS_COLORS[update.status] || STATUS_COLORS.watching;
   const isReady = update.status === 'ready';
+  const isFilling = update.status === 'filling';
   const isActive = update.status === 'accumulation' || update.status === 'consolidating';
-  // Position running means Chain Runner has an active position - detailed info shown in Trade Lifecycle
+  // Position running means Chain Runner has an active position
   const isPositionRunning = update.status === 'position_running';
-  // Stage 2+ means we're past the initial volume spike detection
-  const isStageTwo = update.current_step >= 2;
+  // Step 3 = Ready or Filling (order placed, waiting for fill)
+  const isStepThree = isReady || isFilling;
+  // Step 4 = Position active
+  const isStepFour = isPositionRunning;
+  // Stage 2+ means we're past the initial volume spike detection (steps 2, 3, or 4)
+  const isStageTwo = update.current_step >= 2 || update.status === 'consolidating' || isStepThree || isStepFour;
+  // Get the UI step number (1-4) based on status
+  const uiStep = getStepNumber(update.status);
   const price = currentPrice || update.entry_levels?.current_price;
 
   // ==================== Timer States ====================
@@ -358,6 +380,11 @@ export default function CoinStageCard({
 
   // Position running timer
   const [positionRunningTime, setPositionRunningTime] = useState<number>(0);
+
+  // Fill timeout countdown (Step 3: filling)
+  const [fillTimeoutRemaining, setFillTimeoutRemaining] = useState<number>(
+    update.fill_timeout_seconds || 0
+  );
 
   // Update timers every second
   useEffect(() => {
@@ -384,10 +411,15 @@ export default function CoinStageCard({
         const elapsed = Math.floor((now - openedAt) / 1000);
         setPositionRunningTime(elapsed);
       }
+
+      // Timer 4: Fill timeout countdown (Step 3: filling)
+      if (isFilling && update.fill_timeout_seconds !== undefined) {
+        setFillTimeoutRemaining((prev) => Math.max(0, prev - 1));
+      }
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isStageTwo, isReady, isPositionRunning, update.reference_detected_at, update.seconds_until_expiry, update.position_opened_at, update.seconds_since_reference]);
+  }, [isStageTwo, isReady, isFilling, isPositionRunning, update.reference_detected_at, update.seconds_until_expiry, update.position_opened_at, update.seconds_since_reference, update.fill_timeout_seconds]);
 
   // Candle countdown timer (always visible on every card)
   // Uses next_candle_close from backend, or calculates from timeframe as fallback
@@ -443,27 +475,30 @@ export default function CoinStageCard({
     if (update.seconds_until_expiry !== undefined) {
       setTimeUntilExpiry(update.seconds_until_expiry);
     }
-  }, [update.seconds_since_reference, update.seconds_until_expiry]);
+    if (update.fill_timeout_seconds !== undefined) {
+      setFillTimeoutRemaining(update.fill_timeout_seconds);
+    }
+  }, [update.seconds_since_reference, update.seconds_until_expiry, update.fill_timeout_seconds]);
 
   return (
     <div
       className={`
         rounded-lg border cursor-pointer
         transition-colors duration-200 ease-in-out
-        ${isReady
-          ? 'bg-green-500/5 border-green-500/30 shadow-md shadow-green-500/5'
-          : isActive
-            ? 'bg-gray-900/50 border-yellow-500/30'
-            : 'bg-gray-900/50 border-gray-700/50'
+        ${isStepThree
+          ? 'bg-cyan-500/5 border-cyan-500/30 shadow-md shadow-cyan-500/5'
+          : isStepFour
+            ? 'bg-orange-500/5 border-orange-500/30 shadow-md shadow-orange-500/5'
+            : isActive
+              ? 'bg-gray-900/50 border-yellow-500/30'
+              : 'bg-gray-900/50 border-gray-700/50'
         }
         hover:bg-gray-800/30
       `}
       onClick={onClick}
     >
-      {/* Content wrapper with min-height to prevent flickering on state transitions.
-          Stage 2 cards are taller due to reference candle and entry levels.
-          Position running cards are shorter since details are in Trade Lifecycle. */}
-      <div className={`p-3 ${isPositionRunning ? 'min-h-[140px]' : isStageTwo ? 'min-h-[280px]' : 'min-h-[140px]'}`}>
+      {/* Content wrapper with min-height to prevent flickering on state transitions. */}
+      <div className={`p-3 ${isStepFour ? 'min-h-[320px]' : isStageTwo ? 'min-h-[340px]' : 'min-h-[160px]'}`}>
         {/* Header Row */}
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
@@ -555,6 +590,11 @@ export default function CoinStageCard({
           </div>
         )}
 
+        {/* 4-Step Progress Indicator */}
+        {!compact && (
+          <FourStepProgressDisplay status={update.status} />
+        )}
+
         {/* Requirements Section - Stage 1 only */}
         {!compact && (update.current_step === 1 || update.status === 'watching') && (
           <div className="mb-3 p-2 bg-gray-800/30 rounded border border-gray-700/50">
@@ -592,43 +632,26 @@ export default function CoinStageCard({
           </div>
         )}
 
-        {/* Real-time Volume Progress */}
-        {update.volume_progress && (
+        {/* Real-time Volume Progress - Only in Step 1 */}
+        {uiStep === 1 && update.volume_progress && (
           <VolumeProgressBar progress={update.volume_progress} detailed={!compact} />
-        )}
-
-        {/* Step Progress */}
-        {!compact && (
-          <div className="mb-2">
-            <StepProgressDisplay
-              currentStep={update.current_step}
-              totalSteps={update.total_steps}
-              status={update.status}
-              stepDetails={update.step_details}
-            />
-          </div>
         )}
 
         {/* Compact Step Display */}
         {compact && (
           <div className="flex items-center justify-between text-xs mb-2">
             <span className="text-gray-500">
-              Step {update.current_step}/{update.total_steps}
+              Step {uiStep}/4
             </span>
-            {update.step_details && update.step_details[update.current_step - 1] && (
-              <span className="text-gray-400">
-                {update.step_details[update.current_step - 1].progress}
-              </span>
-            )}
+            <span className="text-gray-400">
+              {STEP_NAMES[uiStep - 1]}
+            </span>
           </div>
         )}
 
-        {/* Reference Candle Context (Stage 2+) - Shows Stage 1 spike info
-            IMPORTANT: Always show this in Stage 2+ to prevent UI flickering when
-            status transitions between watching/consolidating/ready. The Stage 2
-            context provides important reference information for monitoring.
-            NOT shown when position is running - that info is in Trade Lifecycle. */}
-        {!compact && isStageTwo && !isPositionRunning && update.reference_candle && price && (
+        {/* Reference Candle Context - Always show in Steps 2, 3, and 4
+            Preserves reference candle info across all stages for context */}
+        {!compact && isStageTwo && update.reference_candle && price && (
           <ReferenceCandleContext
             referenceCandle={update.reference_candle}
             currentPrice={price}
@@ -639,11 +662,8 @@ export default function CoinStageCard({
           />
         )}
 
-        {/* Entry Levels - Show in Stage 2+ (not just consolidating/ready) to prevent
-            UI flickering. When transitioning between states, the card maintains
-            consistent height and shows the calculated entry levels for reference.
-            NOT shown when position is running - that info is in Trade Lifecycle. */}
-        {!compact && update.entry_levels && isStageTwo && !isPositionRunning && (
+        {/* Entry Levels - Show in Steps 2, 3, and 4 for reference */}
+        {!compact && update.entry_levels && isStageTwo && (
           <EntryLevelsPanel
             levels={update.entry_levels}
             currentPrice={price}
@@ -651,30 +671,90 @@ export default function CoinStageCard({
           />
         )}
 
-        {/* Step 2 Progress Bars - Shows volume and price progress toward reference values
-            Displays real-time progress for entry conditions in Stage 2 */}
-        {!compact && isStageTwo && !isPositionRunning && update.reference_candle && price && (
+        {/* Step 2 Progress Bars - Only show in Step 2 (consolidating)
+            NOT shown in Steps 3 (ready/filling) or 4 (position) */}
+        {!compact && uiStep === 2 && update.reference_candle && price && (
           <Step2ProgressBars
             update={update}
             currentPrice={price}
           />
         )}
 
-        {/* Position Running indicator - shows position mode instead of strategy tracking.
-            When a position is active, we display entry price, chain ID, direction, and timers.
-            Full P&L and stage details are shown in Trade Lifecycle. */}
+        {/* Step 3: Order Filling Section - Shows when order is placed waiting for fill */}
+        {!compact && isStepThree && (
+          <div className="mt-3 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+              </span>
+              <span className="text-cyan-400 font-bold text-xs">⚡ ORDER PLACED</span>
+            </div>
+
+            {/* Order Details */}
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-400">
+                LIMIT {update.direction === 'short' ? 'SELL' : 'BUY'} @
+                <span className="text-white font-mono ml-1">
+                  ${(update.order_price || update.entry_levels?.entry_price || 0).toFixed(
+                    (update.order_price || update.entry_levels?.entry_price || 0) > 100 ? 2 : 4
+                  )}
+                </span>
+              </span>
+              {update.order_quantity_usd && (
+                <span className="text-gray-500">
+                  ${update.order_quantity_usd.toFixed(0)}
+                </span>
+              )}
+            </div>
+
+            {/* Fill Timeout Progress Bar */}
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-500">Waiting to fill...</span>
+                <span className={`font-mono ${
+                  fillTimeoutRemaining > 60 ? 'text-cyan-400' :
+                  fillTimeoutRemaining > 30 ? 'text-yellow-400' :
+                  'text-red-400 animate-pulse'
+                }`}>
+                  Timeout: {formatTimer(fillTimeoutRemaining)}
+                </span>
+              </div>
+              {update.fill_timeout_total && update.fill_timeout_total > 0 && (
+                <div className="h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-1000 ${
+                      fillTimeoutRemaining > 60 ? 'bg-cyan-500' :
+                      fillTimeoutRemaining > 30 ? 'bg-yellow-500' :
+                      'bg-red-500'
+                    }`}
+                    style={{
+                      width: `${Math.max(0, (fillTimeoutRemaining / update.fill_timeout_total) * 100)}%`
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="text-[10px] text-gray-500 pt-1 border-t border-cyan-500/20">
+              If not filled → Cancels and resets to Step 1
+            </div>
+          </div>
+        )}
+
+        {/* Step 4: Position Running - shows position with entry filled info, P&L, R:R progress */}
         {isPositionRunning && (
           <div className="mt-3 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg space-y-2">
-            {/* Position Mode Badge */}
+            {/* Entry Filled Badge */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500"></span>
-                </span>
-                <span className="px-2 py-0.5 bg-orange-500/20 text-orange-400 rounded text-xs font-bold uppercase">
-                  POSITION
-                </span>
+                <CheckCircle className="w-4 h-4 text-green-400" />
+                <span className="text-green-400 font-bold text-xs">✓ ENTRY FILLED</span>
+                {update.position_entry_price && (
+                  <span className="text-white font-mono text-xs">
+                    @ ${update.position_entry_price.toFixed(update.position_entry_price > 100 ? 2 : 4)}
+                  </span>
+                )}
               </div>
               {/* Direction Badge */}
               {update.direction && (
@@ -689,49 +769,63 @@ export default function CoinStageCard({
               )}
             </div>
 
-            {/* Position Details */}
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              {/* Entry Price */}
-              {update.position_entry_price && (
-                <div className="flex flex-col">
-                  <span className="text-gray-500">Entry Price</span>
-                  <span className="text-white font-mono font-medium">
-                    ${update.position_entry_price.toFixed(update.position_entry_price > 100 ? 2 : 4)}
+            {/* Unrealized P&L */}
+            {update.unrealized_pnl !== undefined && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-gray-400">Unrealized P&L:</span>
+                <span className={`font-mono font-bold ${
+                  update.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'
+                }`}>
+                  {update.unrealized_pnl >= 0 ? '+' : ''}${update.unrealized_pnl.toFixed(2)}
+                </span>
+              </div>
+            )}
+
+            {/* R:R Progress */}
+            {update.current_rr !== undefined && update.target_rr !== undefined && (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500">R:R Progress:</span>
+                  <span className={`font-mono ${
+                    update.current_rr >= update.target_rr ? 'text-green-400' :
+                    update.current_rr >= 1 ? 'text-yellow-400' :
+                    'text-gray-400'
+                  }`}>
+                    {update.current_rr.toFixed(2)}R / {update.target_rr}R
                   </span>
                 </div>
-              )}
-              {/* Chain ID */}
-              {update.chain_id && (
-                <div className="flex flex-col">
-                  <span className="text-gray-500">Chain ID</span>
-                  <span className="text-orange-400 font-mono text-[10px]">{update.chain_id}</span>
+                <div className="h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      update.current_rr >= update.target_rr ? 'bg-green-500' :
+                      update.current_rr >= 1 ? 'bg-yellow-500' :
+                      update.current_rr >= 0 ? 'bg-blue-500' :
+                      'bg-red-500'
+                    }`}
+                    style={{
+                      width: `${Math.min(100, Math.max(0, (update.current_rr / update.target_rr) * 100))}%`
+                    }}
+                  />
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
-            {/* Timers Row */}
-            <div className="flex items-center gap-4 text-xs">
-              {/* Ref to Entry time (frozen) */}
-              {update.seconds_ref_to_entry !== undefined && update.seconds_ref_to_entry > 0 && (
-                <div className="flex items-center gap-1">
-                  <span className="text-gray-500">Ref→Entry:</span>
-                  <span className="text-orange-300 font-mono">{formatTimer(update.seconds_ref_to_entry)}</span>
-                </div>
-              )}
-              {/* Position running time (live) */}
-              {update.position_opened_at && (
-                <div className="flex items-center gap-1">
-                  <Clock className="w-3 h-3 text-orange-500" />
-                  <span className="text-gray-500">Running:</span>
-                  <span className="text-orange-400 font-mono">{formatTimer(positionRunningTime)}</span>
-                </div>
-              )}
-            </div>
+            {/* Next Milestone */}
+            {update.next_milestone && (
+              <div className="text-xs">
+                <span className="text-gray-500">Next Milestone: </span>
+                <span className="text-yellow-400">{update.next_milestone}</span>
+              </div>
+            )}
 
-            {/* Trade Lifecycle Link */}
-            <div className="text-gray-500 text-[10px] pt-1 border-t border-orange-500/20">
-              See Trade Lifecycle for full P&L and stage details
-            </div>
+            {/* Position Timer */}
+            {update.position_opened_at && (
+              <div className="flex items-center gap-1 text-xs pt-1 border-t border-orange-500/20">
+                <Clock className="w-3 h-3 text-orange-500" />
+                <span className="text-gray-500">Position Running:</span>
+                <span className="text-orange-400 font-mono">{formatTimer(positionRunningTime)}</span>
+              </div>
+            )}
           </div>
         )}
 
@@ -762,14 +856,6 @@ export default function CoinStageCard({
           </div>
         )}
 
-        {/* Ready Action Hint */}
-        {isReady && (
-          <div className="mt-2 flex items-center gap-2 text-xs text-green-400">
-            <CheckCircle className="w-4 h-4" />
-            <span>Pattern complete - Ready for entry</span>
-          </div>
-        )}
-
         {/* Last Update */}
         <div className="flex items-center gap-1 mt-2 text-[10px] text-gray-600">
           <Clock className="w-3 h-3" />
@@ -789,7 +875,9 @@ interface CoinStageListItemProps {
 
 export function CoinStageListItem({ update, onClick }: CoinStageListItemProps) {
   const colors = STATUS_COLORS[update.status] || STATUS_COLORS.watching;
-  const isReady = update.status === 'ready';
+  const uiStep = getStepNumber(update.status);
+  const isStepThree = update.status === 'ready' || update.status === 'filling';
+  const isStepFour = update.status === 'position_running';
 
   return (
     <button
@@ -797,14 +885,16 @@ export function CoinStageListItem({ update, onClick }: CoinStageListItemProps) {
       onClick={onClick}
       className={`
         w-full flex items-center justify-between p-2 rounded-lg border transition-colors
-        ${isReady
-          ? 'bg-green-500/10 border-green-500/30 hover:bg-green-500/20'
-          : 'bg-gray-800/50 border-gray-700/50 hover:bg-gray-700/50'
+        ${isStepThree
+          ? 'bg-cyan-500/10 border-cyan-500/30 hover:bg-cyan-500/20'
+          : isStepFour
+            ? 'bg-orange-500/10 border-orange-500/30 hover:bg-orange-500/20'
+            : 'bg-gray-800/50 border-gray-700/50 hover:bg-gray-700/50'
         }
       `}
     >
       <div className="flex items-center gap-2">
-        <span className={`font-medium ${isReady ? 'text-green-400' : 'text-white'}`}>
+        <span className={`font-medium ${isStepThree ? 'text-cyan-400' : isStepFour ? 'text-orange-400' : 'text-white'}`}>
           {update.symbol}
         </span>
         <span className="text-xs text-gray-500">{update.timeframe}</span>
@@ -817,10 +907,10 @@ export function CoinStageListItem({ update, onClick }: CoinStageListItemProps) {
 
       <div className="flex items-center gap-2">
         <span className="text-xs text-gray-400">
-          Step {update.current_step}/{update.total_steps}
+          Step {uiStep}/4
         </span>
         <span className={`px-1.5 py-0.5 rounded text-[10px] ${colors.bg} ${colors.text}`}>
-          {STATUS_LABELS[update.status]}
+          {STEP_NAMES[uiStep - 1]}
         </span>
       </div>
     </button>

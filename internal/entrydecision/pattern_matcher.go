@@ -254,6 +254,11 @@ type PatternState struct {
 	EntryPrice         float64   `json:"entry_price"`           // Calculated entry price for order
 	BreakoutVolumeMultiplier float64 `json:"breakout_volume_multiplier"` // Volume multiplier at breakout
 
+	// Step 3: Order filling data (set when LIMIT order is placed, used for fill progress broadcasts)
+	FillingOrderPrice       float64 `json:"filling_order_price,omitempty"`
+	FillingOrderQuantityUSD float64 `json:"filling_order_quantity_usd,omitempty"`
+	FillingTimeoutTotal     int     `json:"filling_timeout_total,omitempty"`
+
 	// Day High/Low tracking (efficient approach - fetched once, updated in real-time)
 	DayHigh           float64   `json:"day_high"`             // Day's highest price
 	DayLow            float64   `json:"day_low"`              // Day's lowest price
@@ -374,11 +379,10 @@ func (m *VolumeImbalancePatternMatcher) MatchPattern(
 		}
 	}
 
-	// Check expiration
+	// Check expiration - reset pattern in-place to watching (keeps map entry to avoid UI flicker)
 	if progress.IsExpired() {
+		log.Printf("[PATTERN] %s - Pattern expired, resetting to watching for fresh detection", progress.Symbol)
 		m.resetPatternUnlocked(patternKey, "Pattern expired")
-		progress.SetStatus(PatternStatusExpired)
-		return m.createCoinMatchWithCandles(progress, state, candles)
 	}
 
 	// Process based on current status
@@ -400,15 +404,19 @@ func (m *VolumeImbalancePatternMatcher) MatchPattern(
 		if !state.ReadyAt.IsZero() && m.config.ReadyExpirationSeconds > 0 {
 			elapsed := time.Since(state.ReadyAt).Seconds()
 			if elapsed > float64(m.config.ReadyExpirationSeconds) {
-				log.Printf("[PATTERN] %s - Ready pattern expired after %.0f seconds (limit: %d)",
+				log.Printf("[PATTERN] %s - Ready pattern expired after %.0f seconds (limit: %d) - resetting to watching",
 					symbol, elapsed, m.config.ReadyExpirationSeconds)
 				m.resetPatternUnlocked(patternKey, "Ready pattern expired - not executed in time")
-				progress.SetStatus(PatternStatusExpired)
 			}
 		}
 
+	case PatternStatusFilling:
+		// Order is being filled - don't interfere, let chain entry runner manage lifecycle
+
 	case PatternStatusFailed, PatternStatusExpired:
-		// Terminal failed/expired states - return current match
+		// Reset stale terminal patterns to watching so they restart on next evaluation
+		log.Printf("[PATTERN] %s - Resetting %s pattern to watching for fresh detection", symbol, progress.Status)
+		m.resetPatternUnlocked(patternKey, fmt.Sprintf("Reset from %s state", progress.Status))
 	}
 
 	return m.createCoinMatchWithCandles(progress, state, candles)
@@ -662,10 +670,9 @@ func (m *VolumeImbalancePatternMatcher) processStep2(
 		return
 	}
 
-	// Check if pattern should be invalidated
+	// Check if pattern should be invalidated - reset to watching for fresh detection
 	if m.isPatternInvalid(state, candles) {
 		m.resetPatternUnlocked(patternKey, "Pattern invalidated during consolidation")
-		progress.SetStatus(PatternStatusFailed)
 		return
 	}
 

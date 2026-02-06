@@ -83,6 +83,12 @@ type PatternUpdate struct {
 	PositionEntryPrice float64 `json:"position_entry_price,omitempty"` // Position entry price (actual fill price from Binance)
 	ChainID            string  `json:"chain_id,omitempty"`             // Chain ID for the position
 
+	// Step 3: Order filling fields (when order is placed, waiting for fill)
+	OrderPrice         float64 `json:"order_price,omitempty"`          // Limit order price
+	OrderQuantityUSD   float64 `json:"order_quantity_usd,omitempty"`   // Order size in USD
+	FillTimeoutSeconds int     `json:"fill_timeout_seconds,omitempty"` // Remaining seconds until fill timeout
+	FillTimeoutTotal   int     `json:"fill_timeout_total,omitempty"`   // Total fill timeout duration in seconds
+
 	// Timestamp
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -784,6 +790,195 @@ func (r *RealtimePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe s
 	r.deletePatternStateAsync(symbol, mode, timeframe)
 
 	log.Printf("[REALTIME-PATTERN] Cleared pattern for %s:%s:%s (position opened)", symbol, mode, timeframe)
+}
+
+// SetPatternFillingStatus transitions a pattern to "filling" status and broadcasts Step 3 UI data.
+// Called when a LIMIT order has been placed and we're waiting for fill.
+func (r *RealtimePatternMatcher) SetPatternFillingStatus(symbol, mode, timeframe string, orderPrice, orderQuantityUSD float64, fillTimeoutSecs int) {
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Update pattern status to filling and store order data on state for fill progress broadcasts
+	r.patternMatcher.mu.Lock()
+	patternKey := r.patternMatcher.patternKey(symbol, mode, timeframe)
+	progress := r.patternMatcher.patterns[patternKey]
+	if progress != nil {
+		progress.SetStatus(PatternStatusFilling)
+		progress.CurrentStep = 3
+		progress.UpdatedAt = time.Now()
+		// Update Step 3 details
+		if len(progress.StepDetails) >= 3 {
+			progress.StepDetails[2] = StepDetail{
+				StepNumber: 3,
+				Name:       "Order Filling",
+				Completed:  false,
+				Progress:   "FILLING",
+				Details:    fmt.Sprintf("LIMIT order @ %.6f, waiting for fill (%ds timeout)", orderPrice, fillTimeoutSecs),
+			}
+		}
+	}
+	// Store filling data on PatternState so UpdateFillProgress can read it
+	state := r.patternMatcher.states[patternKey]
+	if state != nil {
+		state.FillingOrderPrice = orderPrice
+		state.FillingOrderQuantityUSD = orderQuantityUSD
+		state.FillingTimeoutTotal = fillTimeoutSecs
+	}
+	r.patternMatcher.mu.Unlock()
+
+	if progress == nil {
+		log.Printf("[REALTIME-PATTERN] Cannot set filling status - no pattern found for %s:%s:%s", symbol, mode, timeframe)
+		return
+	}
+
+	log.Printf("[REALTIME-PATTERN] Set filling status for %s:%s:%s: price=%.6f, qty=$%.2f, timeout=%ds",
+		symbol, mode, timeframe, orderPrice, orderQuantityUSD, fillTimeoutSecs)
+
+	// Broadcast Step 3 update to UI
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if callback != nil {
+		// Get reference candle and entry levels from internal pattern state for context
+		var refCandle *ReferenceCandle
+		var entryLevels *EntryLevels
+		var direction string
+
+		state := r.getPatternState(symbol, mode, timeframe)
+		if state != nil {
+			direction = state.Direction
+
+			if state.ReferenceCandle != nil {
+				volumeMultiplier := 0.0
+				if state.AverageVolumeAtSpike > 0 {
+					volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+				}
+				refCandle = &ReferenceCandle{
+					OpenTime:         state.ReferenceCandle.OpenTime,
+					CloseTime:        state.ReferenceCandle.Time,
+					Open:             state.ReferenceCandle.Open,
+					High:             state.ReferenceCandle.High,
+					Low:              state.ReferenceCandle.Low,
+					Close:            state.ReferenceCandle.Close,
+					Volume:           state.ReferenceCandle.Volume,
+					VolumeMultiplier: volumeMultiplier,
+				}
+
+				entryLevels = r.calculateEntryLevels(state, orderPrice)
+			}
+		}
+
+		update := PatternUpdate{
+			UserID:             userID,
+			Symbol:             symbol,
+			Timeframe:          timeframe,
+			Mode:               mode,
+			Strategy:           "breakout",
+			SubStrategy:        "ravindra_volume_imbalance",
+			CurrentStep:        3,
+			TotalSteps:         3,
+			Status:             PatternStatusFilling,
+			StepDetails:        progress.StepDetails,
+			EntryLevels:        entryLevels,
+			ReferenceCandle:    refCandle,
+			Direction:          direction,
+			OrderPrice:         orderPrice,
+			OrderQuantityUSD:   orderQuantityUSD,
+			FillTimeoutSeconds: fillTimeoutSecs,
+			FillTimeoutTotal:   fillTimeoutSecs,
+			UpdatedAt:          time.Now(),
+		}
+
+		callback(update)
+	}
+}
+
+// UpdateFillProgress broadcasts updated fill timeout remaining for the Step 3 UI countdown.
+// Called periodically (every 2 seconds) by the chain entry runner during waitForLimitFill.
+func (r *RealtimePatternMatcher) UpdateFillProgress(symbol, mode, timeframe string, remainingSecs int) {
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if callback == nil {
+		return
+	}
+
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Read pattern progress and state under lock
+	r.patternMatcher.mu.RLock()
+	patternKey := r.patternMatcher.patternKey(symbol, mode, timeframe)
+	progress := r.patternMatcher.patterns[patternKey]
+	state := r.patternMatcher.states[patternKey]
+	r.patternMatcher.mu.RUnlock()
+
+	if progress == nil || progress.Status != PatternStatusFilling {
+		return // Only broadcast during filling state
+	}
+
+	// Read filling data from state
+	var refCandle *ReferenceCandle
+	var entryLevels *EntryLevels
+	var direction string
+	var orderPrice float64
+	var orderQtyUSD float64
+	var fillTimeoutTotal int
+
+	if state != nil {
+		direction = state.Direction
+		orderPrice = state.FillingOrderPrice
+		orderQtyUSD = state.FillingOrderQuantityUSD
+		fillTimeoutTotal = state.FillingTimeoutTotal
+
+		if state.ReferenceCandle != nil {
+			volumeMultiplier := 0.0
+			if state.AverageVolumeAtSpike > 0 {
+				volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+			}
+			refCandle = &ReferenceCandle{
+				OpenTime:         state.ReferenceCandle.OpenTime,
+				CloseTime:        state.ReferenceCandle.Time,
+				Open:             state.ReferenceCandle.Open,
+				High:             state.ReferenceCandle.High,
+				Low:              state.ReferenceCandle.Low,
+				Close:            state.ReferenceCandle.Close,
+				Volume:           state.ReferenceCandle.Volume,
+				VolumeMultiplier: volumeMultiplier,
+			}
+
+			entryLevels = r.calculateEntryLevels(state, orderPrice)
+		}
+	}
+
+	update := PatternUpdate{
+		UserID:             userID,
+		Symbol:             symbol,
+		Timeframe:          timeframe,
+		Mode:               mode,
+		Strategy:           "breakout",
+		SubStrategy:        "ravindra_volume_imbalance",
+		CurrentStep:        3,
+		TotalSteps:         3,
+		Status:             PatternStatusFilling,
+		StepDetails:        progress.StepDetails,
+		EntryLevels:        entryLevels,
+		ReferenceCandle:    refCandle,
+		Direction:          direction,
+		OrderPrice:         orderPrice,
+		OrderQuantityUSD:   orderQtyUSD,
+		FillTimeoutSeconds: remainingSecs,
+		FillTimeoutTotal:   fillTimeoutTotal,
+		UpdatedAt:          time.Now(),
+	}
+
+	callback(update)
 }
 
 // OnCandleClose is called when a candle closes. This is the main entry point

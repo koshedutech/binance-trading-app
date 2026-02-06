@@ -1251,6 +1251,11 @@ func (b *PatternUpdateBroadcaster) BroadcastPatternUpdate(update entrydecision.P
 			"entry_levels": update.EntryLevels,
 			"direction":    update.Direction,
 			"updated_at":   update.UpdatedAt,
+			// Step 3: Order filling fields
+			"order_price":          update.OrderPrice,
+			"order_quantity_usd":   update.OrderQuantityUSD,
+			"fill_timeout_seconds": update.FillTimeoutSeconds,
+			"fill_timeout_total":   update.FillTimeoutTotal,
 		},
 	}
 
@@ -1336,6 +1341,11 @@ func BroadcastPatternUpdateFunc(update entrydecision.PatternUpdate) {
 			"next_candle_close": update.NextCandleClose,
 			"last_evaluated_at": update.LastEvaluatedAt,
 			"updated_at":        update.UpdatedAt,
+			// Step 3: Order filling fields
+			"order_price":          update.OrderPrice,
+			"order_quantity_usd":   update.OrderQuantityUSD,
+			"fill_timeout_seconds": update.FillTimeoutSeconds,
+			"fill_timeout_total":   update.FillTimeoutTotal,
 		},
 	}
 	userWSHub.BroadcastToAll(patternEvent)

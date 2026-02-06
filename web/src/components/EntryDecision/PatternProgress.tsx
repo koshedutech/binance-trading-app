@@ -263,53 +263,67 @@ export function PatternProgressFromCoin({
   );
 }
 
-// ==================== Compact Inline Variant ====================
+// ==================== Compact Inline Variant (4-Step UI) ====================
 
 interface PatternProgressCompactProps {
-  /** Current step (1-based) */
+  /** Current step (1-based) - from backend (ignored, we use status) */
   currentStep: number;
-  /** Total steps in pattern */
+  /** Total steps in pattern - from backend (ignored, always 4 in UI) */
   totalSteps: number;
   /** Pattern status */
   status: PatternStatus;
 }
 
+// 4-Step UI mapping: status -> step number (1-4)
+const getStepNumber = (status: PatternStatus): number => {
+  switch (status) {
+    case 'watching':
+    case 'accumulation':
+      return 1; // Step 1: Reference Candle
+    case 'consolidating':
+      return 2; // Step 2: Consolidation
+    case 'ready':
+    case 'filling':
+      return 3; // Step 3: Ready/Filling
+    case 'position_running':
+    case 'position_closed':
+      return 4; // Step 4: Position
+    default:
+      return 1;
+  }
+};
+
+// Step names for 4-step progress indicator
+const STEP_NAMES = ['Ref', 'Consol', 'Ready', 'Position'];
+
 /**
- * Compact inline pattern progress display
+ * Compact inline pattern progress display (4-Step UI)
  */
 export function PatternProgressCompact({
-  currentStep,
-  totalSteps,
   status,
 }: PatternProgressCompactProps) {
+  const uiStep = getStepNumber(status);
+
   const statusColors: Record<PatternStatus, string> = {
     watching: 'text-gray-400',
     accumulation: 'text-blue-400',
     consolidating: 'text-yellow-400',
     ready: 'text-green-400',
+    filling: 'text-cyan-400',
     failed: 'text-red-400',
     expired: 'text-gray-500',
-    position_running: 'text-blue-400',
-  };
-
-  const statusLabels: Record<PatternStatus, string> = {
-    watching: 'Watching',
-    accumulation: 'Accumulating',
-    consolidating: 'Consolidating',
-    ready: 'Ready',
-    failed: 'Failed',
-    expired: 'Expired',
-    position_running: 'Position Running',
+    position_running: 'text-orange-400',
+    position_closed: 'text-blue-400',
   };
 
   return (
     <div className="flex items-center gap-2">
-      <span className={`text-xs font-medium ${statusColors[status]}`}>
-        Step {currentStep}/{totalSteps}
+      <span className={`text-xs font-medium ${statusColors[status] || 'text-gray-400'}`}>
+        Step {uiStep}/4
       </span>
       <ArrowRight className="w-3 h-3 text-gray-600" />
-      <span className={`text-xs ${statusColors[status]}`}>
-        {statusLabels[status]}
+      <span className={`text-xs ${statusColors[status] || 'text-gray-400'}`}>
+        {STEP_NAMES[uiStep - 1]}
       </span>
     </div>
   );

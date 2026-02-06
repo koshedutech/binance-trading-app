@@ -51,6 +51,10 @@ const (
 	// PatternStatusReady indicates all steps are complete and entry is ready.
 	PatternStatusReady PatternStatus = "ready"
 
+	// PatternStatusFilling indicates order has been placed and waiting for fill.
+	// Step 3 in the 4-step UI flow: Reference → Consolidation → Filling → Position
+	PatternStatusFilling PatternStatus = "filling"
+
 	// PatternStatusFailed indicates the pattern broke/failed.
 	PatternStatusFailed PatternStatus = "failed"
 
@@ -84,6 +88,7 @@ func (ps PatternStatus) IsActive() bool {
 		ps == PatternStatusAccumulation ||
 		ps == PatternStatusConsolidating ||
 		ps == PatternStatusReady ||
+		ps == PatternStatusFilling ||
 		ps == PatternStatusPositionRunning ||
 		ps == PatternStatusPositionClosed
 }
@@ -118,6 +123,12 @@ type CoinMatch struct {
 	EntryCandle     *EntryCandle `json:"entry_candle,omitempty"`      // Entry candle data when breakout detected
 	ReadyAt         *time.Time   `json:"ready_at,omitempty"`          // When pattern became ready (UTC)
 	SecondsUntilExpiry int       `json:"seconds_until_expiry,omitempty"` // Seconds until ready pattern expires
+
+	// Step 3: Order filling fields
+	OrderPrice         float64 `json:"order_price,omitempty"`          // Limit order price
+	OrderQuantityUSD   float64 `json:"order_quantity_usd,omitempty"`   // Order size in USD
+	FillTimeoutSeconds int     `json:"fill_timeout_seconds,omitempty"` // Remaining seconds until fill timeout
+	FillTimeoutTotal   int     `json:"fill_timeout_total,omitempty"`   // Total fill timeout duration in seconds
 
 	// Additional context (shared)
 	Direction    string  `json:"direction,omitempty"`     // "long", "short", or "neutral"

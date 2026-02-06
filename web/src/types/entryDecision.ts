@@ -16,6 +16,7 @@ export type PatternStatus =
   | 'accumulation'
   | 'consolidating'
   | 'ready'
+  | 'filling'
   | 'failed'
   | 'expired'
   | 'position_running'
@@ -455,8 +456,10 @@ export const PATTERN_STATUS_COLORS: Record<PatternStatus, { bg: string; text: st
   accumulation: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
   consolidating: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' },
   ready: { bg: 'bg-green-500/20', text: 'text-green-400' },
+  filling: { bg: 'bg-cyan-500/20', text: 'text-cyan-400' },
   failed: { bg: 'bg-red-500/20', text: 'text-red-400' },
   expired: { bg: 'bg-gray-500/20', text: 'text-gray-500' },
+  position_running: { bg: 'bg-orange-500/20', text: 'text-orange-400' },
   position_closed: { bg: 'bg-blue-500/20', text: 'text-blue-400' },
 };
 
@@ -468,8 +471,10 @@ export const PATTERN_STATUS_LABELS: Record<PatternStatus, string> = {
   accumulation: 'Accumulation',
   consolidating: 'Consolidating',
   ready: 'Ready',
+  filling: 'Filling',
   failed: 'Failed',
   expired: 'Expired',
+  position_running: 'Position',
   position_closed: 'Closed',
 };
 
@@ -641,6 +646,28 @@ export interface PatternUpdate {
   closed_pnl?: number;
   /** Close reason: "SL_HIT" or "TP_HIT" */
   closed_reason?: string;
+
+  // Order filling info (Step 3: filling status)
+  /** Order placed price (LIMIT order) */
+  order_price?: number;
+  /** Order quantity in base currency */
+  order_quantity?: number;
+  /** Order quantity in USD */
+  order_quantity_usd?: number;
+  /** Seconds until order fill timeout */
+  fill_timeout_seconds?: number;
+  /** Total fill timeout duration in seconds */
+  fill_timeout_total?: number;
+
+  // Position info for Step 4
+  /** Unrealized PnL for open position */
+  unrealized_pnl?: number;
+  /** Current R:R achieved */
+  current_rr?: number;
+  /** Target R:R */
+  target_rr?: number;
+  /** Next milestone description */
+  next_milestone?: string;
 }
 
 /**

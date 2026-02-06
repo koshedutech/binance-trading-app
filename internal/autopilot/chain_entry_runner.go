@@ -124,6 +124,18 @@ type ChainEntryRunner struct {
 	// Parameters: symbol, mode, timeframe
 	onEntryPlaced func(symbol, mode, timeframe string)
 
+	// Callback for when order is placed and waiting for fill (Step 3 transition)
+	// Parameters: symbol, mode, timeframe, orderPrice, orderQuantityUSD, fillTimeoutSeconds
+	onEntryFilling func(symbol, mode, timeframe string, orderPrice, orderQuantityUSD float64, fillTimeoutSecs int)
+
+	// Callback for when entry fails (order rejected, timeout, etc.) - resets pattern to watching
+	// Parameters: symbol, mode, timeframe
+	onEntryFailed func(symbol, mode, timeframe string)
+
+	// Callback for fill progress updates (countdown timer for UI)
+	// Parameters: symbol, mode, timeframe, remainingSeconds
+	onFillProgress func(symbol, mode, timeframe string, remainingSecs int)
+
 	// Runtime state
 	running        bool
 	stopChan       chan struct{}
@@ -235,6 +247,30 @@ func (r *ChainEntryRunner) SetOnEntryPlacedCallback(callback func(symbol, mode, 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onEntryPlaced = callback
+}
+
+// SetOnEntryFillingCallback sets the callback for when an entry order is placed and waiting for fill.
+// This transitions the pattern to "filling" status so the UI shows Step 3.
+func (r *ChainEntryRunner) SetOnEntryFillingCallback(callback func(symbol, mode, timeframe string, orderPrice, orderQuantityUSD float64, fillTimeoutSecs int)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onEntryFilling = callback
+}
+
+// SetOnEntryFailedCallback sets the callback for when an entry order fails.
+// This resets the pattern to "watching" so new entries can be detected.
+func (r *ChainEntryRunner) SetOnEntryFailedCallback(callback func(symbol, mode, timeframe string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onEntryFailed = callback
+}
+
+// SetOnFillProgressCallback sets the callback for fill progress countdown updates.
+// Called every 2 seconds during waitForLimitFill with remaining seconds until timeout.
+func (r *ChainEntryRunner) SetOnFillProgressCallback(callback func(symbol, mode, timeframe string, remainingSecs int)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onFillProgress = callback
 }
 
 func (r *ChainEntryRunner) IsRunning() bool {
@@ -849,13 +885,23 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		}
 	}
 
-	// Step 9b: Wait for LIMIT order fill
-	// Timeout matches candle duration so order has one full candle to fill
+	// Calculate fill timeout (candle duration) - needed for both UI notification and actual wait
 	fillTimeout := parseTimeframeToDuration(state.Timeframe)
 	if fillTimeout < time.Minute {
 		fillTimeout = time.Minute // Minimum 1 minute
 	}
 
+	// Step 9a: Notify UI that order is placed and waiting for fill (Step 3 transition)
+	r.mu.RLock()
+	fillingCallback := r.onEntryFilling
+	r.mu.RUnlock()
+	if fillingCallback != nil {
+		fillTimeoutSecs := int(fillTimeout.Seconds())
+		fillingCallback(symbol, modeStr, state.Timeframe, limitPrice, positionSizeUSD, fillTimeoutSecs)
+	}
+
+	// Step 9b: Wait for LIMIT order fill
+	// Timeout matches candle duration so order has one full candle to fill
 	var filledPrice float64
 	var filledQty float64
 
@@ -870,7 +916,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	} else {
 		// Poll for fill until timeout (candle duration)
 		log.Printf("[CHAIN-ENTRY] Waiting for LIMIT order fill: timeout=%v (timeframe=%s)", fillTimeout, state.Timeframe)
-		filledOrder, fillErr := r.waitForLimitFill(symbol, orderResp.OrderId, fillTimeout)
+		filledOrder, fillErr := r.waitForLimitFill(symbol, modeStr, state.Timeframe, orderResp.OrderId, fillTimeout)
 		if fillErr != nil {
 			log.Printf("[CHAIN-ENTRY] LIMIT order not filled for %s: %v", symbol, fillErr)
 			return fmt.Errorf("limit order not filled: %w", fillErr)
@@ -1120,8 +1166,10 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 
 // waitForLimitFill polls order status until filled, cancelled, or timeout.
 // Returns the filled order or error. On timeout, cancels the order automatically.
-func (r *ChainEntryRunner) waitForLimitFill(symbol string, orderID int64, timeout time.Duration) (*binance.FuturesOrder, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// mode and timeframe are passed through for fill progress callback broadcasts.
+func (r *ChainEntryRunner) waitForLimitFill(symbol, mode, timeframe string, orderID int64, timeout time.Duration) (*binance.FuturesOrder, error) {
+	deadline := time.Now().Add(timeout)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -1139,6 +1187,18 @@ func (r *ChainEntryRunner) waitForLimitFill(symbol string, orderID int64, timeou
 			}
 			return nil, fmt.Errorf("limit order not filled within %v timeout", timeout)
 		case <-ticker.C:
+			// Broadcast fill progress countdown
+			r.mu.RLock()
+			progressCb := r.onFillProgress
+			r.mu.RUnlock()
+			if progressCb != nil {
+				remaining := int(time.Until(deadline).Seconds())
+				if remaining < 0 {
+					remaining = 0
+				}
+				progressCb(symbol, mode, timeframe, remaining)
+			}
+
 			order, err := r.futuresClient.GetOrder(symbol, orderID)
 			if err != nil {
 				log.Printf("[CHAIN-ENTRY] Warning: Failed to query order status (orderID=%d): %v", orderID, err)
@@ -1509,7 +1569,13 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Failed to execute entry for %s: %v", symbol, err)
 		r.mu.Lock()
 		r.stats.FailedEntries++
+		failedCallback := r.onEntryFailed
 		r.mu.Unlock()
+		// Reset pattern to watching so new entries can be detected
+		if failedCallback != nil && state.Timeframe != "" {
+			log.Printf("[CHAIN-ENTRY-IMMEDIATE] Calling onEntryFailed callback for %s:%s:%s", symbol, mode, state.Timeframe)
+			failedCallback(symbol, mode, state.Timeframe)
+		}
 		// releaseSlot() will be called by defer
 		return err
 	}

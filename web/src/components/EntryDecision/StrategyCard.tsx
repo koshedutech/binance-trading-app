@@ -35,6 +35,29 @@ import type {
   getWatchingCount,
 } from '../../types/entryDecision';
 
+// ==================== Helper: Get UI Step Number (1-4) ====================
+
+/**
+ * Maps pattern status to 4-step UI step number
+ */
+function getUIStepNumber(status: PatternStatus | undefined): number {
+  switch (status) {
+    case 'watching':
+    case 'accumulation':
+      return 1; // Step 1: Reference Candle
+    case 'consolidating':
+      return 2; // Step 2: Consolidation
+    case 'ready':
+    case 'filling':
+      return 3; // Step 3: Ready/Filling
+    case 'position_running':
+    case 'position_closed':
+      return 4; // Step 4: Position
+    default:
+      return 1;
+  }
+}
+
 // ==================== Helper: Convert CoinMatch to PatternUpdate ====================
 
 /**
@@ -937,16 +960,54 @@ function CoinRow({
               )}
 
               {/* Step 2 Progress Bars - Volume and Price progress toward entry */}
-              {/* CRITICAL FIX: Use reference_candle presence as primary condition to prevent flicker.
-                  reference_candle is preserved during WebSocket merges, making this condition stable.
-                  The status check is secondary - if we have reference_candle, we're in Step 2.
-                  Step2ProgressBars handles missing data internally with a placeholder. */}
-              {coin.reference_candle && (
+              {/* Only show in Step 2 (consolidating). Hide in Step 3 (ready/filling) and Step 4 (position). */}
+              {coin.reference_candle && getUIStepNumber(coin.status) === 2 && (
                 <Step2ProgressBars
                   update={coinMatchToPatternUpdate(coin, strategyVolumeThreshold)}
                   currentPrice={coin.current_price || 0}
                   candlesSinceReference={coin.candles_since_reference}
                 />
+              )}
+
+              {/* Step 3: Order Filling UI - Show when ready/filling */}
+              {getUIStepNumber(coin.status) === 3 && (
+                <div className="mt-2 p-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
+                      </span>
+                      <span className="text-cyan-400 font-bold text-xs">⚡ ORDER PLACED</span>
+                    </div>
+                    {/* Fill timeout countdown */}
+                    {coin.seconds_until_expiry !== undefined && coin.seconds_until_expiry > 0 && (
+                      <span className={`text-xs font-mono px-2 py-0.5 rounded ${
+                        coin.seconds_until_expiry > 30 ? 'bg-cyan-500/20 text-cyan-400' :
+                        coin.seconds_until_expiry > 10 ? 'bg-yellow-500/20 text-yellow-400' :
+                        'bg-red-500/20 text-red-400 animate-pulse'
+                      }`}>
+                        Timeout: {coin.seconds_until_expiry}s
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Order details */}
+                  <div className="mt-1.5 flex items-center gap-3 text-xs">
+                    <span className="text-gray-400">
+                      LIMIT {coin.direction === 'short' ? 'SELL' : 'BUY'} @
+                      <span className="text-white font-mono ml-1">
+                        ${(coin.entry_candle?.entry_price || coin.reference_candle?.high || 0).toFixed(
+                          (coin.entry_candle?.entry_price || coin.reference_candle?.high || 0) > 100 ? 2 : 4
+                        )}
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className="mt-1 text-[10px] text-gray-500">
+                    If not filled → Cancels and resets to Step 1
+                  </div>
+                </div>
               )}
             </>
           )}
