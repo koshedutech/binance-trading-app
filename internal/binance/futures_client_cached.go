@@ -1,6 +1,7 @@
 package binance
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -77,15 +78,22 @@ type CachedFuturesClient struct {
 	deduplicatedReqs int64
 	prefetchHits     int64
 	prefetchReqs     int64
+
+	// Exchange info cache (24h TTL - rarely changes)
+	exchangeInfo     *FuturesExchangeInfo
+	exchangeInfoTime time.Time
+	exchangeInfoTTL  time.Duration
+	exchangeInfoMu   sync.RWMutex
 }
 
 // NewCachedFuturesClient creates a new cache-aware futures client wrapper
 func NewCachedFuturesClient(client FuturesClient, cache *MarketDataCache) *CachedFuturesClient {
 	return &CachedFuturesClient{
-		client:         client,
-		cache:          cache,
-		userDataCache:  NewUserDataCache(5*time.Second, 5*time.Second, 3*time.Second),
-		inFlightKlines: make(map[string]*inFlightRequest),
+		client:          client,
+		cache:           cache,
+		userDataCache:   NewUserDataCache(30*time.Second, 30*time.Second, 30*time.Second),
+		inFlightKlines:  make(map[string]*inFlightRequest),
+		exchangeInfoTTL: 24 * time.Hour,
 	}
 }
 
@@ -215,6 +223,55 @@ func (c *CachedFuturesClient) InvalidateUserDataCache() {
 		udc.mu.Unlock()
 		log.Printf("[USER-DATA-CACHE] Cache invalidated")
 	}
+}
+
+// UpdatePositionsFromStream updates the positions cache from WebSocket data
+func (udc *UserDataCache) UpdatePositionsFromStream(positions []FuturesPosition) {
+	udc.mu.Lock()
+	defer udc.mu.Unlock()
+	udc.positions = positions
+	udc.positionsTime = time.Now()
+}
+
+// UpdateOrderFromStream updates a single order in the cache from WebSocket data
+// This keeps the cache fresh without needing REST API calls
+func (udc *UserDataCache) UpdateOrderFromStream(symbol string, orderID int64, status string) {
+	udc.mu.Lock()
+	defer udc.mu.Unlock()
+
+	// If order is cancelled/filled/expired, remove from open orders cache
+	if status == "CANCELED" || status == "FILLED" || status == "EXPIRED" {
+		for key, orders := range udc.openOrders {
+			filtered := make([]FuturesOrder, 0, len(orders))
+			for _, o := range orders {
+				if o.OrderId != orderID {
+					filtered = append(filtered, o)
+				}
+			}
+			if len(filtered) != len(orders) {
+				udc.openOrders[key] = filtered
+				udc.openOrdersTime[key] = time.Now()
+			}
+		}
+	}
+
+	// Invalidate algo orders cache on any change (simpler than tracking individual algo orders)
+	udc.openAlgoOrders = make(map[string][]AlgoOrder)
+	udc.openAlgoOrdersTime = make(map[string]time.Time)
+}
+
+// InvalidatePositions clears the positions cache so the next call fetches fresh data
+func (udc *UserDataCache) InvalidatePositions() {
+	udc.mu.Lock()
+	defer udc.mu.Unlock()
+	udc.positions = nil
+}
+
+// GetUserDataCache returns the user data cache for WebSocket population
+func (c *CachedFuturesClient) GetUserDataCache() *UserDataCache {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.userDataCache
 }
 
 // ==================== COMMISSION RATES (pass-through, rates don't change often) ====================
@@ -555,14 +612,67 @@ func (c *CachedFuturesClient) GetFundingRateHistory(symbol string, limit int) ([
 	return c.client.GetFundingRateHistory(symbol, limit)
 }
 
-// ==================== EXCHANGE INFO (no caching) ====================
+// ==================== EXCHANGE INFO (cached with 24h TTL) ====================
 
 func (c *CachedFuturesClient) GetFuturesExchangeInfo() (*FuturesExchangeInfo, error) {
-	return c.client.GetFuturesExchangeInfo()
+	c.exchangeInfoMu.RLock()
+	if c.exchangeInfo != nil && time.Since(c.exchangeInfoTime) < c.exchangeInfoTTL {
+		result := c.exchangeInfo
+		c.exchangeInfoMu.RUnlock()
+		return result, nil
+	}
+	c.exchangeInfoMu.RUnlock()
+
+	// Cache miss or expired - fetch from API
+	result, err := c.client.GetFuturesExchangeInfo()
+	if err != nil {
+		// If we have stale data and API fails, return stale data
+		c.exchangeInfoMu.RLock()
+		if c.exchangeInfo != nil {
+			stale := c.exchangeInfo
+			c.exchangeInfoMu.RUnlock()
+			log.Printf("[EXCHANGE-INFO-CACHE] API failed, returning stale data: %v", err)
+			return stale, nil
+		}
+		c.exchangeInfoMu.RUnlock()
+		return nil, err
+	}
+
+	c.exchangeInfoMu.Lock()
+	c.exchangeInfo = result
+	c.exchangeInfoTime = time.Now()
+	c.exchangeInfoMu.Unlock()
+
+	log.Printf("[EXCHANGE-INFO-CACHE] Cached exchange info (%d symbols, TTL: 24h)", len(result.Symbols))
+	return result, nil
 }
 
 func (c *CachedFuturesClient) GetFuturesSymbols() ([]string, error) {
-	return c.client.GetFuturesSymbols()
+	info, err := c.GetFuturesExchangeInfo()
+	if err != nil {
+		return nil, err
+	}
+	symbols := make([]string, 0, len(info.Symbols))
+	for _, s := range info.Symbols {
+		if s.Status == "TRADING" {
+			symbols = append(symbols, s.Symbol)
+		}
+	}
+	return symbols, nil
+}
+
+// GetSymbolInfo returns cached exchange info for a specific symbol
+func (c *CachedFuturesClient) GetSymbolInfo(symbol string) (*FuturesSymbolInfo, error) {
+	info, err := c.GetFuturesExchangeInfo()
+	if err != nil {
+		return nil, err
+	}
+	for i := range info.Symbols {
+		if info.Symbols[i].Symbol == symbol {
+			return &info.Symbols[i], nil
+		}
+	}
+	return nil, fmt.Errorf("symbol %s not found in exchange info", symbol)
 }
 
 // ==================== HISTORY (no caching) ====================

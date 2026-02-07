@@ -1177,28 +1177,40 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 				// Persist TP order details to order_chains for closed chain reconstruction
 				r.chainEventWriter.PersistTPDetails(postFillCtx, chainID, tpResp.AlgoId, tpPrice, filledQuantity)
 			}
+		}
 
-			// Step 11b: Register position with Ravindra Position Monitor for trailing stop management
-			// This enables automatic SL updates at 1:2 (breakeven) and 1:3 (1:1 profit lock) milestones
-			if r.ravindraMonitor != nil && slResp != nil {
-				ravindraPos := CreateRavindraPositionFromChainEntry(
-					chainID,
-					symbol,
-					r.userID,
-					direction,
-					entryPrice,
-					filledQuantity,
-					slPrice,
-					tpPrice,
-					slResp.AlgoId,
-					tpResp.AlgoId,
-					nil, // Use default config
-				)
-				if err := r.ravindraMonitor.AddPosition(ravindraPos); err != nil {
-					log.Printf("[CHAIN-ENTRY] Warning: Failed to register position with Ravindra monitor: %v", err)
-				} else {
-					log.Printf("[CHAIN-ENTRY] Position registered with Ravindra monitor: chainID=%s, SL milestones: BE@1:2, 1R@1:3", chainID)
-				}
+		// Step 11b: Register position with Ravindra Position Monitor for trailing stop management
+		// This enables automatic SL updates at 1:2 (breakeven) and 1:3 (1:1 profit lock) milestones
+		// Placed OUTSIDE the TP success/failure blocks so registration happens regardless of TP placement result
+		if r.ravindraMonitor != nil && entryPrice > 0 {
+			slOrderID := int64(0)
+			if slResp != nil {
+				slOrderID = slResp.AlgoId
+			}
+			tpOrderID := int64(0)
+			if tpResp != nil {
+				tpOrderID = tpResp.AlgoId
+			}
+
+			ravindraPos := CreateRavindraPositionFromChainEntry(
+				chainID,
+				symbol,
+				r.userID,
+				direction,
+				entryPrice,
+				filledQuantity,
+				slPrice,
+				tpPrice,
+				slOrderID,
+				tpOrderID,
+				nil, // Use default config
+				pricePrecision,
+				qtyPrecision,
+			)
+			if err := r.ravindraMonitor.AddPosition(ravindraPos); err != nil {
+				log.Printf("[CHAIN-ENTRY] Warning: Failed to register position with Ravindra monitor: %v", err)
+			} else {
+				log.Printf("[CHAIN-ENTRY] Position registered with Ravindra monitor: chainID=%s, symbol=%s, SL milestones: BE@1:2, 1R@1:3", chainID, symbol)
 			}
 		}
 	}

@@ -29,7 +29,17 @@ import (
 var (
 	// symbolRegex validates trading pair format (alphanumeric, 2-20 chars, typically ends in USDT/BUSD)
 	symbolRegex = regexp.MustCompile(`^[A-Z0-9]{2,20}$`)
+
+	// orderChainsCache caches the response from handleGetOrderChainsWithState to reduce Binance REST API calls.
+	// Key: userID + ":" + statusFilter, Value: cached JSON response
+	orderChainsCacheMu   sync.Mutex
+	orderChainsCacheData = make(map[string]orderChainsCacheEntry)
 )
+
+type orderChainsCacheEntry struct {
+	data      interface{}
+	timestamp time.Time
+}
 
 // validateSymbol validates a trading symbol for security and format
 func validateSymbol(symbol string) (string, error) {
@@ -863,25 +873,45 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 	modeFilter := c.Query("mode")
 	statusFilter := c.Query("status") // active, partial, closed
 
+	// Handler-level response cache: serve cached response if within 15s to reduce Binance REST API calls
+	cacheKey := userID + ":" + statusFilter + ":" + symbolFilter + ":" + modeFilter
+	orderChainsCacheMu.Lock()
+	if entry, ok := orderChainsCacheData[cacheKey]; ok && time.Since(entry.timestamp) < 15*time.Second {
+		orderChainsCacheMu.Unlock()
+		c.JSON(http.StatusOK, entry.data)
+		return
+	}
+	orderChainsCacheMu.Unlock()
+
 	// 1. Get regular open orders from Binance
-	regularOrders, err := futuresClient.GetOpenOrders(symbolFilter)
-	if err != nil {
+	regularOrders, ordersErr := futuresClient.GetOpenOrders(symbolFilter)
+	if ordersErr != nil {
 		regularOrders = []binance.FuturesOrder{}
 	}
 
 	// 2. Get algo/conditional orders (TP/SL orders)
-	algoOrders, err := futuresClient.GetOpenAlgoOrders(symbolFilter)
-	if err != nil {
+	algoOrders, algoErr := futuresClient.GetOpenAlgoOrders(symbolFilter)
+	if algoErr != nil {
 		algoOrders = []binance.AlgoOrder{}
 	}
-
-	// AUTOMATIC STALE ORDER RECONCILIATION
-	// Run in background goroutine to update database for future requests
-	go s.reconcileStaleOrderChains(userID, regularOrders, futuresClient)
 
 	// Get Binance positions synchronously for inline status verification AND synthetic positionState
 	// This ensures the current response reflects accurate position state from Binance live data
 	binancePositions, posErr := futuresClient.GetPositions()
+
+	// AUTOMATIC STALE ORDER RECONCILIATION
+	// Run in background goroutine to update database for future requests
+	// Pass already-fetched positions to avoid redundant REST API call
+	// ONLY run when ALL THREE API calls succeeded - incomplete data causes false closes
+	// (e.g., if algo orders fetch failed but positions succeeded, reconciliation would see
+	// empty algo orders → think no SL/TP exists → incorrectly close active chains)
+	if posErr == nil && ordersErr == nil && algoErr == nil {
+		go s.reconcileStaleOrderChains(userID, regularOrders, algoOrders, binancePositions, futuresClient)
+	}
+
+	// Track whether ALL API data is reliable for inline status verification
+	apiDataReliable := posErr == nil && ordersErr == nil && algoErr == nil
+
 	positionsBySymbol := make(map[string]float64)             // symbol -> position amount (for status verification)
 	binancePositionsBySymbol := make(map[string]binance.FuturesPosition) // symbol -> full position data (for synthetic positionState)
 	if posErr == nil {
@@ -1199,7 +1229,7 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 			hasSL := false
 			hasTP := false
 			for _, order := range chain.Orders {
-				if order.OrderType == "SL" {
+				if order.OrderType == "SL" || strings.HasPrefix(order.OrderType, "SL") {
 					hasSL = true
 				}
 				if order.OrderType == "TP" || strings.HasPrefix(order.OrderType, "TP") {
@@ -1494,19 +1524,23 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 	// 6b. INLINE STATUS VERIFICATION against actual Binance state
 	// This fixes the issue where DB has stale "active" status but position is actually closed
 	// Without this, closed positions would still appear as "active" until background reconciliation runs
-	for chainID, chain := range chains {
-		// Only verify chains that appear active/partial
-		if chain.Status == "active" || chain.Status == "partial" {
-			hasOpenPosition := positionsBySymbol[chain.Symbol] != 0
-			hasOpenOrders := chainsWithOpenOrders[chainID]
+	// Only verify when ALL API data is reliable - incomplete data causes false status changes
+	// (e.g., if orders API failed, chainsWithOpenOrders would be empty → falsely marks chains as closed)
+	if apiDataReliable {
+		for chainID, chain := range chains {
+			// Only verify chains that appear active/partial
+			if chain.Status == "active" || chain.Status == "partial" {
+				hasOpenPosition := positionsBySymbol[chain.Symbol] != 0
+				hasOpenOrders := chainsWithOpenOrders[chainID]
 
-			// If no position AND no open orders for this chain, it's actually closed
-			if !hasOpenPosition && !hasOpenOrders {
-				log.Printf("[ORDER-CHAINS] Inline status fix: chain %s marked closed (no position/orders on Binance)", chainID)
-				chain.Status = "closed"
-				// Also update position state status if present
-				if chain.PositionState != nil && chain.PositionState.Status != "CLOSED" {
-					chain.PositionState.Status = "CLOSED"
+				// If no position AND no open orders for this chain, it's actually closed
+				if !hasOpenPosition && !hasOpenOrders {
+					log.Printf("[ORDER-CHAINS] Inline status fix: chain %s marked closed (no position/orders on Binance)", chainID)
+					chain.Status = "closed"
+					// Also update position state status if present
+					if chain.PositionState != nil && chain.PositionState.Status != "CLOSED" {
+						chain.PositionState.Status = "CLOSED"
+					}
 				}
 			}
 		}
@@ -1593,11 +1627,21 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 					})
 				}
 
+				// Determine close reason for SL/TP status derivation
+				closeReason := ""
+				if dbChain.CloseReason != nil {
+					closeReason = *dbChain.CloseReason
+				}
+
 				// Reconstruct SL order from persisted DB columns
 				if dbChain.SLLimitPrice != nil && *dbChain.SLLimitPrice > 0 {
 					slStatus := "NEW"
 					if dbChain.SLStatus != nil {
 						slStatus = *dbChain.SLStatus
+					} else if closeReason == "SL_HIT" {
+						slStatus = "FILLED"
+					} else if closeReason == "TP_HIT" || closeReason == "MANUAL" {
+						slStatus = "CANCELED"
 					}
 					var slOrderID int64
 					if dbChain.SLBinanceOrderID != nil {
@@ -1652,6 +1696,10 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 					tpStatus := "NEW"
 					if dbChain.TPStatus != nil {
 						tpStatus = *dbChain.TPStatus
+					} else if closeReason == "TP_HIT" {
+						tpStatus = "FILLED"
+					} else if closeReason == "SL_HIT" || closeReason == "MANUAL" {
+						tpStatus = "CANCELED"
 					}
 					var tpOrderID int64
 					if dbChain.TPBinanceOrderID != nil {
@@ -1805,11 +1853,23 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		result = append(result, chain)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	// Sort by creation date descending (newest first) for stable display order
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
+
+	responseData := gin.H{
 		"chains":      result,
 		"total":       len(result),
 		"chain_count": len(result),
-	})
+	}
+
+	// Cache the response for 15s to reduce Binance REST API calls
+	orderChainsCacheMu.Lock()
+	orderChainsCacheData[cacheKey] = orderChainsCacheEntry{data: responseData, timestamp: time.Now()}
+	orderChainsCacheMu.Unlock()
+
+	c.JSON(http.StatusOK, responseData)
 }
 
 // determinePositionSide converts entry side (BUY/SELL) to position side (LONG/SHORT)
@@ -1859,7 +1919,12 @@ func extractOrderTypeFromClientOrderID(clientOrderID string) string {
 	}
 	parts := strings.Split(clientOrderID, "-")
 	if len(parts) >= 4 {
-		return parts[len(parts)-1]
+		suffix := parts[len(parts)-1]
+		// For replaced orders (e.g., SCALP-20260207-004-SL-R), extract the actual order type
+		if suffix == "R" && len(parts) >= 5 {
+			return parts[len(parts)-2]
+		}
+		return suffix
 	}
 	return ""
 }
@@ -3428,19 +3493,37 @@ func (s *Server) getFuturesClientForUser(c *gin.Context) binance.FuturesClient {
 	if s.authEnabled && s.apiKeyService != nil {
 		log.Printf("[DEBUG] getFuturesClientForUser: authEnabled=%v, userID=%s in LIVE mode", s.authEnabled, userID)
 		if userID != "" {
+			// Check cache first (5 minute TTL)
+			s.userFuturesClientsMu.RLock()
+			if entry, ok := s.userFuturesClients[userID]; ok && time.Since(entry.createdAt) < 5*time.Minute {
+				s.userFuturesClientsMu.RUnlock()
+				return entry.client
+			}
+			s.userFuturesClientsMu.RUnlock()
+
 			// Try mainnet first, then testnet
 			keys, err := s.apiKeyService.GetActiveBinanceKey(ctx, userID, false)
 			if err != nil {
 				log.Printf("[DEBUG] getFuturesClientForUser: mainnet key lookup failed: %v, trying testnet", err)
-				// Try testnet
 				keys, err = s.apiKeyService.GetActiveBinanceKey(ctx, userID, true)
 			}
 			if err == nil && keys != nil && keys.APIKey != "" && keys.SecretKey != "" {
-				log.Printf("[DEBUG] getFuturesClientForUser: Found user keys, creating client (testnet=%v, keyLen=%d)", keys.IsTestnet, len(keys.APIKey))
-				// Create user-specific futures client
-				client := binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
-				if client != nil {
-					return client
+				log.Printf("[DEBUG] getFuturesClientForUser: Found user keys, creating cached client (testnet=%v)", keys.IsTestnet)
+				rawClient := binance.NewFuturesClient(keys.APIKey, keys.SecretKey, keys.IsTestnet)
+				if rawClient != nil {
+					// Wrap with CachedFuturesClient for response caching (30s TTL)
+					cachedClient := binance.NewCachedFuturesClient(rawClient, nil)
+					// Store in cache
+					s.userFuturesClientsMu.Lock()
+					if s.userFuturesClients == nil {
+						s.userFuturesClients = make(map[string]*userFuturesClientEntry)
+					}
+					s.userFuturesClients[userID] = &userFuturesClientEntry{
+						client:    cachedClient,
+						createdAt: time.Now(),
+					}
+					s.userFuturesClientsMu.Unlock()
+					return cachedClient
 				}
 			} else {
 				log.Printf("[DEBUG] getFuturesClientForUser: No valid keys found, err=%v, keys=%v", err, keys != nil)
@@ -4613,6 +4696,24 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 	}
 	log.Printf("[ORDER-SYNC] Found %d open orders on Binance", len(openOrders))
 
+	// 1b. Get algo/conditional orders (SL/TP) from Binance
+	algoOrders, err := futuresClient.GetOpenAlgoOrders("")
+	if err != nil {
+		algoOrders = []binance.AlgoOrder{}
+		log.Printf("[ORDER-SYNC] Failed to fetch algo orders (non-fatal): %v", err)
+	}
+
+	// Build set of open algo order client IDs (for SL/TP detection)
+	openAlgoClientIDs := make(map[string]bool)
+	for _, ao := range algoOrders {
+		if ao.ClientAlgoId != "" {
+			openAlgoClientIDs[ao.ClientAlgoId] = true
+			log.Printf("[ORDER-SYNC] Open algo order on Binance: %s (symbol=%s, type=%s)",
+				ao.ClientAlgoId, ao.Symbol, ao.OrderType)
+		}
+	}
+	log.Printf("[ORDER-SYNC] Found %d open algo orders on Binance", len(algoOrders))
+
 	// 2. Get active order chains from our database
 	activeChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
 	if err != nil {
@@ -4634,6 +4735,15 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 		}
 	}
 	log.Printf("[ORDER-SYNC] Found %d active positions on Binance", len(positionsBySymbol))
+
+	// Get ChainEventWriter for proper close cascade (callbacks, broadcast, cache)
+	var chainWriter *orders.ChainEventWriter
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			chainWriter = instance.Autopilot.GetChainEventWriter()
+		}
+	}
 
 	// 4. Find and close stale chains by comparing CLIENT ORDER IDs
 	closedChains := 0
@@ -4659,13 +4769,38 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 			continue
 		}
 
+		// Check if chain has active SL or TP algo orders
+		slClientID := chain.ChainID + "-SL"
+		tpClientID := chain.ChainID + "-TP"
+		if openAlgoClientIDs[slClientID] || openAlgoClientIDs[tpClientID] {
+			log.Printf("[ORDER-SYNC] Chain %s has active algo order (SL/TP) - skipping", chain.ChainID)
+			continue
+		}
+
+		// Grace period: don't close chains that became active very recently
+		// This prevents race condition with WebSocket SL/TP fill processing
+		if chain.EntryFilledAt != nil {
+			timeSinceFill := time.Since(*chain.EntryFilledAt)
+			if timeSinceFill < 30*time.Second {
+				log.Printf("[ORDER-SYNC] Chain %s filled %.0fs ago - skipping reconciliation (grace period)", chain.ChainID, timeSinceFill.Seconds())
+				continue
+			}
+		} else if time.Since(chain.UpdatedAt) < 30*time.Second {
+			log.Printf("[ORDER-SYNC] Chain %s updated %.0fs ago - skipping reconciliation (grace period)", chain.ChainID, time.Since(chain.UpdatedAt).Seconds())
+			continue
+		}
+
 		// Neither entry order open nor position exists - this is a stale chain
-		log.Printf("[ORDER-SYNC] Chain %s is STALE - entry not open and no position for %s",
+		log.Printf("[ORDER-SYNC] Chain %s is STALE - entry not open, no position, no algo orders for %s",
 			chain.ChainID, chain.Symbol)
 
-		// Close the chain in database
+		// Close the chain using ChainEventWriter for proper cascade
 		closeReason := "CLOSED_EXTERNALLY"
-		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, nil)
+		if chainWriter != nil {
+			err = chainWriter.CloseChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, nil)
+		} else {
+			err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, nil)
+		}
 		if err != nil {
 			log.Printf("[ORDER-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
 		} else {
@@ -4691,17 +4826,33 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 		"success":        true,
 		"message":        fmt.Sprintf("Synced order state: closed %d stale chains", closedChains),
 		"open_orders":    len(openOrders),
+		"algo_orders":    len(algoOrders),
 		"active_chains":  len(activeChains),
 		"closed_chains":  closedChains,
 	})
 }
 
+var (
+	reconcileLastRun   = make(map[string]time.Time) // userID -> last reconciliation time
+	reconcileLastRunMu sync.Mutex
+)
+
 // reconcileStaleOrderChains runs in the background to automatically close stale order chains
 // Called when user views order chains - compares database state with Binance open orders
-func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.FuturesOrder, futuresClient binance.FuturesClient) {
+func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.FuturesOrder, openAlgoOrders []binance.AlgoOrder, positions []binance.FuturesPosition, futuresClient binance.FuturesClient) {
+	// Throttle: only run reconciliation once per 60 seconds per user
+	reconcileLastRunMu.Lock()
+	lastRun, exists := reconcileLastRun[userID]
+	if exists && time.Since(lastRun) < 60*time.Second {
+		reconcileLastRunMu.Unlock()
+		return
+	}
+	reconcileLastRun[userID] = time.Now()
+	reconcileLastRunMu.Unlock()
+
 	ctx := context.Background()
 
-	// Build map of client order IDs that are open on Binance
+	// Build map of client order IDs that are open on Binance (regular orders)
 	openClientOrderIDs := make(map[string]bool)
 	for _, order := range openOrders {
 		if order.ClientOrderId != "" {
@@ -4709,14 +4860,19 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 		}
 	}
 
-	// Get current positions from Binance
-	positions, err := futuresClient.GetPositions()
+	// Build set of open algo order client IDs (for SL/TP detection)
+	openAlgoClientIDs := make(map[string]bool)
+	for _, ao := range openAlgoOrders {
+		if ao.ClientAlgoId != "" {
+			openAlgoClientIDs[ao.ClientAlgoId] = true
+		}
+	}
+
+	// Use positions passed from caller (already fetched - avoid redundant REST API call)
 	positionsBySymbol := make(map[string]bool)
-	if err == nil {
-		for _, pos := range positions {
-			if pos.PositionAmt != 0 {
-				positionsBySymbol[pos.Symbol] = true
-			}
+	for _, pos := range positions {
+		if pos.PositionAmt != 0 {
+			positionsBySymbol[pos.Symbol] = true
 		}
 	}
 
@@ -4725,6 +4881,15 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 	if err != nil {
 		log.Printf("[AUTO-SYNC] Failed to get active chains: %v", err)
 		return
+	}
+
+	// Get ChainEventWriter for proper close cascade (callbacks, broadcast, cache)
+	var chainWriter *orders.ChainEventWriter
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.Autopilot != nil {
+			chainWriter = instance.Autopilot.GetChainEventWriter()
+		}
 	}
 
 	// Find and close stale chains
@@ -4737,9 +4902,37 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 			continue // Not stale
 		}
 
+		// Check if chain has active SL or TP algo orders (including replaced orders with -R suffix)
+		slClientID := chain.ChainID + "-SL"
+		tpClientID := chain.ChainID + "-TP"
+		slClientIDR := chain.ChainID + "-SL-R"
+		tpClientIDR := chain.ChainID + "-TP-R"
+		if openAlgoClientIDs[slClientID] || openAlgoClientIDs[tpClientID] || openAlgoClientIDs[slClientIDR] || openAlgoClientIDs[tpClientIDR] {
+			// SL or TP algo order is still active - chain is NOT closed
+			continue
+		}
+
+		// Grace period: don't close chains that became active very recently
+		// This prevents race condition with WebSocket SL/TP fill processing
+		if chain.EntryFilledAt != nil {
+			timeSinceFill := time.Since(*chain.EntryFilledAt)
+			if timeSinceFill < 30*time.Second {
+				log.Printf("[AUTO-SYNC] Chain %s filled %.0fs ago - skipping reconciliation (grace period)", chain.ChainID, timeSinceFill.Seconds())
+				continue
+			}
+		} else if time.Since(chain.UpdatedAt) < 30*time.Second {
+			log.Printf("[AUTO-SYNC] Chain %s updated %.0fs ago - skipping reconciliation (grace period)", chain.ChainID, time.Since(chain.UpdatedAt).Seconds())
+			continue
+		}
+
 		// This chain is stale - close it
 		log.Printf("[AUTO-SYNC] Closing stale chain %s (symbol=%s)", chain.ChainID, chain.Symbol)
-		err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, nil)
+
+		if chainWriter != nil {
+			err = chainWriter.CloseChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, nil)
+		} else {
+			err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, nil)
+		}
 		if err != nil {
 			log.Printf("[AUTO-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
 			continue
@@ -4759,4 +4952,263 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 	if closedCount > 0 {
 		log.Printf("[AUTO-SYNC] Closed %d stale chains for user %s", closedCount, userID)
 	}
+}
+
+// handleReplaceChainOrders re-places SL and TP algo orders for an active chain.
+// This is used when orders were cancelled externally on Binance and need to be restored.
+// POST /api/futures/order-chains/:chainId/replace-orders
+func (s *Server) handleReplaceChainOrders(c *gin.Context) {
+	userID, ok := s.getUserIDRequired(c)
+	if !ok {
+		return
+	}
+
+	chainID := c.Param("chainId")
+	if chainID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "chainId parameter is required"})
+		return
+	}
+
+	// Parse optional override prices from request body
+	type ReplaceOrdersRequest struct {
+		SLPrice float64 `json:"sl_price"` // If 0, use current_sl_price from chain
+		TPPrice float64 `json:"tp_price"` // If 0, use current_tp_price from chain
+	}
+
+	var req ReplaceOrdersRequest
+	// Bind JSON body if present (it's optional)
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body: " + err.Error()})
+			return
+		}
+	}
+
+	// Look up the chain from DB
+	ctx := c.Request.Context()
+	chain, err := s.repo.GetDB().GetOrderChainByID(ctx, userID, chainID)
+	if err != nil {
+		log.Printf("[REPLACE-ORDERS] Error looking up chain %s: %v", chainID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to look up order chain"})
+		return
+	}
+	if chain == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("order chain %s not found", chainID)})
+		return
+	}
+
+	// Accept both ACTIVE and CLOSED chains (CLOSED chains will be re-activated)
+	wasClosedChain := !chain.IsActive()
+
+	// Validate chain has entry data
+	if chain.EntryPrice == nil || chain.EntryQuantity == nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("chain %s missing entry_price or entry_quantity", chainID),
+		})
+		return
+	}
+
+	// Determine SL and TP prices (use overrides if provided, else from chain)
+	slPrice := req.SLPrice
+	if slPrice == 0 {
+		if chain.CurrentSLPrice != nil {
+			slPrice = *chain.CurrentSLPrice
+		}
+	}
+	tpPrice := req.TPPrice
+	if tpPrice == 0 {
+		if chain.CurrentTPPrice != nil {
+			tpPrice = *chain.CurrentTPPrice
+		}
+	}
+
+	if slPrice == 0 && tpPrice == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "no SL or TP price available (provide in request body or ensure chain has prices in DB)",
+		})
+		return
+	}
+
+	// Get Binance futures client
+	futuresClient := s.getFuturesClientForUser(c)
+	if futuresClient == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no Binance API keys configured"})
+		return
+	}
+
+	// Determine order parameters based on position side
+	// For closing a position: SHORT position closes with BUY, LONG position closes with SELL
+	var closeSide string
+	var positionSide binance.PositionSide
+	if chain.Side == "SHORT" {
+		closeSide = "BUY"
+		positionSide = binance.PositionSideShort
+	} else {
+		closeSide = "SELL"
+		positionSide = binance.PositionSideLong
+	}
+
+	quantity := *chain.EntryQuantity
+	if chain.RemainingQuantity != nil && *chain.RemainingQuantity > 0 {
+		quantity = *chain.RemainingQuantity
+	}
+
+	// Get precision from exchange info
+	pricePrecision := 8
+	qtyPrecision := 8
+	exchangeInfo, err := futuresClient.GetFuturesExchangeInfo()
+	if err == nil && exchangeInfo != nil {
+		for _, sym := range exchangeInfo.Symbols {
+			if sym.Symbol == chain.Symbol {
+				pricePrecision = sym.PricePrecision
+				qtyPrecision = sym.QuantityPrecision
+				break
+			}
+		}
+	} else {
+		log.Printf("[REPLACE-ORDERS] Warning: could not get exchange info, using default precision: %v", err)
+	}
+
+	// Generate client order IDs using chain ID format
+	slClientOrderID := fmt.Sprintf("%s-SL-R", chainID)
+	tpClientOrderID := fmt.Sprintf("%s-TP-R", chainID)
+
+	var tpResp, slResp *binance.AlgoOrderResponse
+	var tpError, slError string
+
+	// Place TP algo order (TAKE_PROFIT type, LIMIT) if price available
+	if tpPrice > 0 {
+		tpParams := binance.AlgoOrderParams{
+			Symbol:            chain.Symbol,
+			Side:              closeSide,
+			PositionSide:      positionSide,
+			Type:              binance.FuturesOrderTypeTakeProfit,
+			Quantity:          quantity,
+			Price:             tpPrice,
+			TriggerPrice:      tpPrice,
+			TimeInForce:       binance.TimeInForceGTC,
+			ClosePosition:     false,
+			WorkingType:       binance.WorkingTypeMarkPrice,
+			ClientAlgoId:      tpClientOrderID,
+			PricePrecision:    pricePrecision,
+			QuantityPrecision: qtyPrecision,
+		}
+
+		log.Printf("[REPLACE-ORDERS] Placing TAKE_PROFIT (limit) for chain %s: symbol=%s, side=%s, price=%.6f, qty=%.6f",
+			chainID, chain.Symbol, closeSide, tpPrice, quantity)
+
+		tpResp, err = futuresClient.PlaceAlgoOrder(tpParams)
+		if err != nil {
+			tpError = err.Error()
+			log.Printf("[REPLACE-ORDERS] Failed to place TP order for chain %s: %v", chainID, err)
+		} else {
+			log.Printf("[REPLACE-ORDERS] TP order placed: chain=%s, algoID=%d, price=%.6f", chainID, tpResp.AlgoId, tpPrice)
+
+			// Update TP details in DB
+			if err := s.repo.GetDB().UpdateOrderChainTPDetails(ctx, chainID, tpResp.AlgoId, tpPrice, quantity); err != nil {
+				log.Printf("[REPLACE-ORDERS] Warning: failed to persist TP details: %v", err)
+			}
+		}
+	}
+
+	// Place SL algo order (STOP type, LIMIT) if price available
+	if slPrice > 0 {
+		slParams := binance.AlgoOrderParams{
+			Symbol:            chain.Symbol,
+			Side:              closeSide,
+			PositionSide:      positionSide,
+			Type:              binance.FuturesOrderTypeStop,
+			Quantity:          quantity,
+			Price:             slPrice,
+			TriggerPrice:      slPrice,
+			TimeInForce:       binance.TimeInForceGTC,
+			ClosePosition:     false,
+			WorkingType:       binance.WorkingTypeMarkPrice,
+			ClientAlgoId:      slClientOrderID,
+			PricePrecision:    pricePrecision,
+			QuantityPrecision: qtyPrecision,
+		}
+
+		log.Printf("[REPLACE-ORDERS] Placing STOP (limit) SL for chain %s: symbol=%s, side=%s, price=%.6f, qty=%.6f",
+			chainID, chain.Symbol, closeSide, slPrice, quantity)
+
+		slResp, err = futuresClient.PlaceAlgoOrder(slParams)
+		if err != nil {
+			slError = err.Error()
+			log.Printf("[REPLACE-ORDERS] Failed to place SL order for chain %s: %v", chainID, err)
+		} else {
+			log.Printf("[REPLACE-ORDERS] SL order placed: chain=%s, algoID=%d, price=%.6f", chainID, slResp.AlgoId, slPrice)
+
+			// Update SL details in DB and increment modification count
+			if err := s.repo.GetDB().UpdateOrderChainSLDetails(ctx, chainID, slResp.AlgoId, slPrice, quantity); err != nil {
+				log.Printf("[REPLACE-ORDERS] Warning: failed to persist SL details: %v", err)
+			}
+			// Update current_sl_price and increment sl_modification_count
+			if err := s.repo.GetDB().UpdateOrderChainSLPrice(ctx, chainID, slPrice); err != nil {
+				log.Printf("[REPLACE-ORDERS] Warning: failed to update SL price: %v", err)
+			}
+		}
+	}
+
+	// Update current TP price in DB if TP was placed successfully
+	if tpResp != nil && tpPrice > 0 {
+		if err := s.repo.GetDB().UpdateOrderChainTPPrice(ctx, chainID, tpPrice); err != nil {
+			log.Printf("[REPLACE-ORDERS] Warning: failed to update TP price: %v", err)
+		}
+	}
+
+	// Re-activate chain if it was closed (atomic: orders placed first, then status updated)
+	if wasClosedChain && (tpResp != nil || slResp != nil) {
+		if err := s.repo.GetDB().ReactivateOrderChain(ctx, chainID); err != nil {
+			log.Printf("[REPLACE-ORDERS] Warning: failed to re-activate chain %s: %v", chainID, err)
+		} else {
+			log.Printf("[REPLACE-ORDERS] Chain %s re-activated (was %s)", chainID, chain.Status)
+		}
+	}
+
+	// Build response
+	response := gin.H{
+		"success":  tpError == "" || slError == "",
+		"chain_id": chainID,
+		"symbol":   chain.Symbol,
+		"side":     chain.Side,
+		"quantity": quantity,
+	}
+
+	if tpResp != nil {
+		response["tp_order"] = gin.H{
+			"algo_id": tpResp.AlgoId,
+			"price":   tpPrice,
+			"status":  tpResp.AlgoStatus,
+		}
+	}
+	if tpError != "" {
+		response["tp_error"] = tpError
+	}
+
+	if slResp != nil {
+		response["sl_order"] = gin.H{
+			"algo_id": slResp.AlgoId,
+			"price":   slPrice,
+			"status":  slResp.AlgoStatus,
+		}
+	}
+	if slError != "" {
+		response["sl_error"] = slError
+	}
+
+	// Broadcast order update to WebSocket clients
+	events.BroadcastOrderUpdate(userID, map[string]interface{}{
+		"action":   "replace_orders",
+		"chain_id": chainID,
+		"symbol":   chain.Symbol,
+		"type":     "algo",
+	})
+
+	statusCode := http.StatusOK
+	if tpError != "" && slError != "" {
+		statusCode = http.StatusInternalServerError
+	}
+
+	c.JSON(statusCode, response)
 }

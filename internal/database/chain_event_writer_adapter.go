@@ -53,6 +53,11 @@ func (a *ChainEventWriterDBAdapter) CloseOrderChain(ctx context.Context, chainID
 	return a.db.CloseOrderChain(ctx, chainID, closeReason, realizedPnL, totalFees, closePrice)
 }
 
+// ReactivateOrderChain implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) ReactivateOrderChain(ctx context.Context, chainID string) error {
+	return a.db.ReactivateOrderChain(ctx, chainID)
+}
+
 // UpdateOrderChainSLPrice implements ChainEventWriterDB
 func (a *ChainEventWriterDBAdapter) UpdateOrderChainSLPrice(ctx context.Context, chainID string, newPrice float64) error {
 	return a.db.UpdateOrderChainSLPrice(ctx, chainID, newPrice)

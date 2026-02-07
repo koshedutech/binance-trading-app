@@ -1058,6 +1058,14 @@ func main() {
 		// When CoinProfiler stops, clears cached data and broadcasts clear signal to frontend
 		userAutopilotManager.SetEntryDecisionClearCallback(api.BroadcastEntryDecisionClear)
 
+		// Wire WebSocket market data cache for Ravindra position monitor price lookups.
+		// The !markPrice@arr stream updates all symbol prices every ~3s via WebSocket.
+		// This replaces REST API calls (GET /fapi/v1/premiumIndex) that caused rate limiting
+		// when the monitor checks prices every 5s per position.
+		if marketDataCache != nil {
+			userAutopilotManager.SetMarketDataCache(marketDataCache)
+		}
+
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
 

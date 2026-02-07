@@ -261,9 +261,13 @@ func (c *FuturesClientImpl) PlaceFuturesOrder(params FuturesOrderParams) (*Futur
 		reqParams["timeInForce"] = string(TimeInForceGTC)
 	}
 
-	// Add reduce only
+	// Add reduce only (not valid in hedge mode where positionSide determines direction)
 	if params.ReduceOnly {
-		reqParams["reduceOnly"] = "true"
+		// In hedge mode (positionSide = LONG or SHORT), reduceOnly is NOT valid
+		// The positionSide itself determines which position to reduce
+		if params.PositionSide == "" || params.PositionSide == PositionSideBoth {
+			reqParams["reduceOnly"] = "true"
+		}
 	}
 
 	// Add close position
@@ -445,9 +449,13 @@ func (c *FuturesClientImpl) PlaceAlgoOrder(params AlgoOrderParams) (*AlgoOrderRe
 		reqParams["closePosition"] = "true"
 	}
 
-	// Add reduce only (cannot be used with closePosition)
+	// Add reduce only (cannot be used with closePosition or hedge mode)
 	if params.ReduceOnly && !params.ClosePosition {
-		reqParams["reduceOnly"] = "true"
+		// In hedge mode (positionSide = LONG or SHORT), reduceOnly is NOT valid
+		// The positionSide itself determines which position to reduce
+		if params.PositionSide == "" || params.PositionSide == PositionSideBoth {
+			reqParams["reduceOnly"] = "true"
+		}
 	}
 
 	// Add price protect
@@ -1188,13 +1196,16 @@ func (c *FuturesClientImpl) publicGet(endpoint string, params map[string]string)
 
 // isRetryableError checks if an error is transient and should be retried
 func isRetryableError(statusCode int, body string) bool {
+	// NEVER retry on 418 (IP ban) - retrying extends the ban duration
+	if statusCode == 418 {
+		return false
+	}
 	// Retry on rate limits (429) and server errors (5xx)
 	if statusCode == http.StatusTooManyRequests || statusCode >= 500 {
 		return true
 	}
-	// Retry on specific Binance errors that are transient
+	// Retry on specific Binance errors that are transient (but not -1003 which is the ban code)
 	if strings.Contains(body, "-1001") || // DISCONNECTED
-		strings.Contains(body, "-1003") || // TOO_MANY_REQUESTS
 		strings.Contains(body, "-1015") || // TOO_MANY_ORDERS
 		strings.Contains(body, "-1016") { // SERVICE_SHUTTING_DOWN
 		return true

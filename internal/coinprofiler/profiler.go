@@ -467,6 +467,85 @@ func (cp *CoinProfiler) RemoveSubscription(symbol string) {
 	}
 }
 
+// UpdateSymbolToPosition instantly updates a symbol's source to "position" with the given timeframe.
+// This is called when an entry fills - provides instant coin profiler update without heavy re-initialization.
+// The timeframe should be the entry strategy's timeframe (e.g., "3m") not generic exit timeframes.
+func (cp *CoinProfiler) UpdateSymbolToPosition(symbol, timeframe, mode string) {
+	if symbol == "" {
+		return
+	}
+
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+
+	// Update subscription
+	if sub, exists := cp.subscriptions[symbol]; exists {
+		sub.Source = DataSourcePosition
+		if timeframe != "" {
+			// Replace timeframes with the entry timeframe (exact match for position monitoring)
+			sub.Timeframes = []string{timeframe}
+		}
+	} else {
+		// Create new subscription for this position symbol
+		timeframes := []string{timeframe}
+		if timeframe == "" {
+			timeframes = []string{"5m"} // Fallback
+		}
+		cp.subscriptions[symbol] = &SubscriptionRequest{
+			Symbol:     symbol,
+			Timeframes: timeframes,
+			Source:     DataSourcePosition,
+		}
+	}
+
+	// Update coinData source
+	if coinData, exists := cp.coinData[symbol]; exists {
+		coinData.Source = DataSourcePosition
+	}
+
+	// Update combinedReqs if it exists
+	if cp.combinedReqs != nil {
+		if symReq, exists := cp.combinedReqs.BySymbol[symbol]; exists {
+			symReq.Source = DataSourcePosition
+			if timeframe != "" {
+				symReq.Timeframes = []string{timeframe}
+			}
+		}
+	}
+
+	log.Printf("%s Updated symbol %s to position source (timeframe=%s, mode=%s)", LogPrefix, symbol, timeframe, mode)
+}
+
+// UpdateSymbolToStrategy reverts a symbol's source back to "strategy" when a position closes.
+// This is called when a chain closes - provides instant coin profiler update.
+func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
+	if symbol == "" {
+		return
+	}
+
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+
+	// Update subscription source
+	if sub, exists := cp.subscriptions[symbol]; exists {
+		sub.Source = DataSourceStrategy
+	}
+
+	// Update coinData source
+	if coinData, exists := cp.coinData[symbol]; exists {
+		coinData.Source = DataSourceStrategy
+	}
+
+	// Update combinedReqs if it exists
+	if cp.combinedReqs != nil {
+		if symReq, exists := cp.combinedReqs.BySymbol[symbol]; exists {
+			symReq.Source = DataSourceStrategy
+		}
+	}
+
+	log.Printf("%s Reverted symbol %s to strategy source (position closed)", LogPrefix, symbol)
+}
+
 // GetSubscriptions returns all current subscriptions.
 func (cp *CoinProfiler) GetSubscriptions() map[string]*SubscriptionRequest {
 	cp.mu.RLock()

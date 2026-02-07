@@ -12176,8 +12176,9 @@ func (ga *GinieAutopilot) placeSLTPOrders(pos *GiniePosition) {
 	}
 }
 
-// placeSLTPOrdersForSyncedPositions places SL/TP orders for all synced positions
-// This is called on startup after syncing positions from the exchange
+// placeSLTPOrdersForSyncedPositions checks SL/TP orders for all synced positions on startup.
+// It adopts existing orders from Binance instead of cancelling and re-placing them.
+// For missing orders, it loads correct SL/TP prices from the order chain DB.
 func (ga *GinieAutopilot) placeSLTPOrdersForSyncedPositions() {
 	ga.mu.RLock()
 	positions := make([]*GiniePosition, 0, len(ga.positions))
@@ -12190,37 +12191,177 @@ func (ga *GinieAutopilot) placeSLTPOrdersForSyncedPositions() {
 		return
 	}
 
-	ga.logger.Info("Placing SL/TP orders for synced positions", "count", len(positions))
+	ga.logger.Info("Checking SL/TP orders for synced positions", "count", len(positions))
+
+	// Pre-load active order chains from DB to get correct SL/TP prices
+	var activeChains []*orders.OrderChain
+	if ga.repo != nil && ga.userID != "" {
+		var err error
+		activeChains, err = ga.repo.GetDB().GetActiveOrderChains(context.Background(), ga.userID)
+		if err != nil {
+			ga.logger.Warn("Failed to load active chains from DB for SL/TP sync", "error", err)
+		}
+	}
+
+	// Build symbol -> chain map for quick lookup
+	chainBySymbol := make(map[string]*orders.OrderChain)
+	for _, chain := range activeChains {
+		if chain != nil {
+			chainBySymbol[chain.Symbol] = chain
+		}
+	}
 
 	for _, pos := range positions {
-		// ALWAYS cancel existing algo orders from Binance first (from previous sessions)
-		success, failed, err := ga.cancelAllAlgoOrdersForSymbol(pos.Symbol)
-		if err != nil {
-			ga.logger.Warn("Failed to fully cancel existing algo orders",
-				"symbol", pos.Symbol,
-				"successful", success,
-				"failed", failed,
-				"error", err)
-		} else if success > 0 {
-			ga.logger.Info("Cleaned up existing algo orders from previous session",
-				"symbol", pos.Symbol,
-				"cancelled_count", success)
+		// Load correct SL/TP prices from chain DB (overrides generic 2% defaults)
+		if chain, ok := chainBySymbol[pos.Symbol]; ok {
+			if chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
+				log.Printf("[GINIE] %s: Loading SL price from chain DB: %.6f (was: %.6f)",
+					pos.Symbol, *chain.CurrentSLPrice, pos.StopLoss)
+				pos.StopLoss = *chain.CurrentSLPrice
+				pos.OriginalSL = *chain.CurrentSLPrice
+			}
+			if chain.CurrentTPPrice != nil && *chain.CurrentTPPrice > 0 && len(pos.TakeProfits) > 0 {
+				log.Printf("[GINIE] %s: Loading TP price from chain DB: %.6f (was: %.6f)",
+					pos.Symbol, *chain.CurrentTPPrice, pos.TakeProfits[0].Price)
+				pos.TakeProfits[0].Price = *chain.CurrentTPPrice
+			}
 		}
 
-		// Ensure position has valid SL/TP levels
+		// Check existing algo orders on Binance FIRST before cancelling anything
+		existingAlgoOrders, err := ga.futuresClient.GetOpenAlgoOrders(pos.Symbol)
+		if err != nil {
+			ga.logger.Warn("Failed to fetch existing algo orders - skipping SL/TP placement to preserve existing orders",
+				"symbol", pos.Symbol,
+				"error", err)
+			continue // CRITICAL: Don't cancel orders if we can't check what exists
+		}
+
+		// Count existing SL and TP orders for this position's side
+		hasSL := false
+		hasTP := false
+		var slAlgoID, tpAlgoID int64
+		var existingSLPrice, existingTPPrice float64
+
+		expectedSide := pos.Side
+		for _, order := range existingAlgoOrders {
+			if order.PositionSide != expectedSide {
+				continue
+			}
+			if order.OrderType == "STOP" || order.OrderType == "STOP_MARKET" {
+				hasSL = true
+				slAlgoID = order.AlgoId
+				existingSLPrice = order.TriggerPrice
+			}
+			if order.OrderType == "TAKE_PROFIT" || order.OrderType == "TAKE_PROFIT_MARKET" {
+				hasTP = true
+				tpAlgoID = order.AlgoId
+				existingTPPrice = order.TriggerPrice
+			}
+		}
+
+		// Helper: check if two prices match within 0.5% tolerance
+		pricesMatch := func(binancePrice, chainPrice float64) bool {
+			if chainPrice <= 0 {
+				return true // No chain price to compare against, accept Binance price
+			}
+			return math.Abs(binancePrice-chainPrice)/chainPrice <= 0.005
+		}
+
+		if hasSL && hasTP {
+			// Both SL and TP exist on Binance - check if prices match chain DB before adopting
+			slOK := pricesMatch(existingSLPrice, pos.StopLoss)
+			tpOK := true
+			chainTPPrice := float64(0)
+			if len(pos.TakeProfits) > 0 {
+				chainTPPrice = pos.TakeProfits[0].Price
+				tpOK = pricesMatch(existingTPPrice, chainTPPrice)
+			}
+
+			if slOK && tpOK {
+				// Prices match - safe to adopt
+				log.Printf("[GINIE] %s: Adopting existing SL (id=%d, price=%.6f) and TP (id=%d, price=%.6f) from Binance - prices match chain DB",
+					pos.Symbol, slAlgoID, existingSLPrice, tpAlgoID, existingTPPrice)
+				pos.StopLossAlgoID = slAlgoID
+				pos.TakeProfitAlgoIDs = []int64{tpAlgoID}
+				if existingSLPrice > 0 {
+					pos.StopLoss = existingSLPrice
+					pos.OriginalSL = existingSLPrice
+				}
+				if existingTPPrice > 0 && len(pos.TakeProfits) > 0 {
+					pos.TakeProfits[0].Price = existingTPPrice
+				}
+				pos.Protection.SetState(StateFullyProtected)
+				continue
+			}
+
+			// Price mismatch - do NOT adopt, let protection guardian replace them
+			log.Printf("[GINIE] %s: SL/TP price mismatch detected - NOT adopting (SL: binance=%.6f chain=%.6f match=%v, TP: binance=%.6f chain=%.6f match=%v) - protection guardian will replace",
+				pos.Symbol, existingSLPrice, pos.StopLoss, slOK, existingTPPrice, chainTPPrice, tpOK)
+			// Leave StopLossAlgoID/TakeProfitAlgoIDs unset so guardian sees them as missing
+			// pos.StopLoss/TakeProfits already hold the correct chain DB prices from above
+			continue
+		}
+
+		if hasSL && !hasTP {
+			// SL exists but TP missing - check if SL price matches before adopting
+			if pricesMatch(existingSLPrice, pos.StopLoss) {
+				log.Printf("[GINIE] %s: Adopting existing SL (id=%d, price=%.6f) - price matches chain DB. TP missing - protection guardian will handle",
+					pos.Symbol, slAlgoID, existingSLPrice)
+				pos.StopLossAlgoID = slAlgoID
+				if existingSLPrice > 0 {
+					pos.StopLoss = existingSLPrice
+					pos.OriginalSL = existingSLPrice
+				}
+			} else {
+				log.Printf("[GINIE] %s: SL price mismatch - NOT adopting (binance=%.6f, chain=%.6f) - protection guardian will replace",
+					pos.Symbol, existingSLPrice, pos.StopLoss)
+				// Don't adopt - guardian will see missing SL and place at correct price
+			}
+			// Do NOT call placeSLTPOrders() - it would cancel any adopted orders
+			continue
+		}
+
+		if !hasSL && hasTP {
+			// TP exists but SL missing - check if TP price matches before adopting
+			chainTPPrice := float64(0)
+			if len(pos.TakeProfits) > 0 {
+				chainTPPrice = pos.TakeProfits[0].Price
+			}
+			if pricesMatch(existingTPPrice, chainTPPrice) {
+				log.Printf("[GINIE] %s: Adopting existing TP (id=%d, price=%.6f) - price matches chain DB. SL missing - protection guardian will handle",
+					pos.Symbol, tpAlgoID, existingTPPrice)
+				pos.TakeProfitAlgoIDs = []int64{tpAlgoID}
+				if existingTPPrice > 0 && len(pos.TakeProfits) > 0 {
+					pos.TakeProfits[0].Price = existingTPPrice
+				}
+			} else {
+				log.Printf("[GINIE] %s: TP price mismatch - NOT adopting (binance=%.6f, chain=%.6f) - protection guardian will replace",
+					pos.Symbol, existingTPPrice, chainTPPrice)
+				// Don't adopt - guardian will see missing TP and place at correct price
+			}
+			// Do NOT call placeSLTPOrders() - it would cancel any adopted orders
+			continue
+		}
+
+		// No orders exist - place both (only case where placeSLTPOrders is safe)
+		log.Printf("[GINIE] %s: No existing SL/TP orders found, placing new ones (SL=%.6f, TP=%.6f)",
+			pos.Symbol, pos.StopLoss, func() float64 {
+				if len(pos.TakeProfits) > 0 {
+					return pos.TakeProfits[0].Price
+				}
+				return 0
+			}())
+
 		if pos.StopLoss <= 0 {
-			ga.logger.Warn("Skipping position - no stop loss set",
-				"symbol", pos.Symbol)
+			ga.logger.Warn("Skipping position - no stop loss set", "symbol", pos.Symbol)
 			continue
 		}
 
 		ga.placeSLTPOrders(pos)
-
-		// Small delay between API calls to avoid rate limits
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	ga.logger.Info("Finished placing SL/TP orders for synced positions")
+	ga.logger.Info("Finished checking SL/TP orders for synced positions")
 }
 
 // ensureSLTPOrdersExist checks if SLTP orders exist on Binance for a position
@@ -15086,6 +15227,13 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 		qty := roundQuantity(posSymbol, pos.RemainingQty)
 		posSide := pos.Side
 
+		// Determine position side for hedge mode compatibility
+		psideBinance := binance.PositionSideLong
+		if posSide == "SHORT" {
+			psideBinance = binance.PositionSideShort
+		}
+		effectivePosSide := ga.getEffectivePositionSide(psideBinance)
+
 		go func() {
 			// Cancel existing orders with proper error logging
 			if pos.StopLossAlgoID > 0 {
@@ -15115,6 +15263,7 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 			slParams := binance.AlgoOrderParams{
 				Symbol:       posSymbol,
 				Side:         slSide,
+				PositionSide: effectivePosSide,
 				Type:         "STOP_MARKET",
 				TriggerPrice: slPrice,
 				Quantity:     qty,
@@ -15175,6 +15324,7 @@ func (ga *GinieAutopilot) RecalculateAdaptiveSLTP() (int, error) {
 				tpParams := binance.AlgoOrderParams{
 					Symbol:       posSymbol,
 					Side:         tpSide,
+					PositionSide: effectivePosSide,
 					Type:         "TAKE_PROFIT", // LIMIT order instead of MARKET
 					TriggerPrice: tpPrice,
 					Price:        limitPrice, // Limit execution price

@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,7 +41,7 @@ func DefaultRavindraPositionMonitorConfig() *RavindraPositionMonitorConfig {
 		PriceStaleThreshold: 30 * time.Second,
 		MaxRetries:          3,
 		RetryDelay:          time.Second,
-		DebugMode:           false,
+		DebugMode:           true,
 	}
 }
 
@@ -64,6 +66,10 @@ type RavindraPosition struct {
 
 	// Trailing stop state
 	TrailingStop *TrailingStopManager `json:"trailing_stop"`
+
+	// Precision for Binance API (prevents -1111 errors on SL replacement orders)
+	PricePrecision    int `json:"price_precision"`    // Price precision for the symbol
+	QuantityPrecision int `json:"quantity_precision"` // Quantity precision for the symbol
 
 	// Timestamps
 	EnteredAt time.Time `json:"entered_at"`
@@ -193,6 +199,90 @@ func (m *RavindraPositionMonitor) AddPosition(pos *RavindraPosition) error {
 		pos.ChainID, pos.Symbol, pos.EntryPrice, pos.CurrentSL, pos.CurrentTP)
 
 	return nil
+}
+
+// ReRegisterFromChain registers an existing position from an active order chain.
+// This is used on startup to re-register positions that were being tracked before restart.
+// It reconstructs the RavindraPosition from chain data and current market state.
+func (m *RavindraPositionMonitor) ReRegisterFromChain(chainID, symbol, userID, side string,
+	entryPrice, quantity, slPrice, tpPrice float64,
+	slAlgoID, tpAlgoID int64, timeframe string,
+	pricePrecision, quantityPrecision int) error {
+	if chainID == "" || symbol == "" {
+		return fmt.Errorf("chainID and symbol are required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Don't re-register if already tracked
+	if _, exists := m.positions[chainID]; exists {
+		return nil
+	}
+
+	direction := "LONG"
+	if side == "SHORT" || side == "SELL" {
+		direction = "SHORT"
+	}
+
+	riskAmount := math.Abs(entryPrice - slPrice)
+	if riskAmount <= 0 {
+		riskAmount = entryPrice * 0.01 // Fallback: 1% risk
+	}
+
+	pos := &RavindraPosition{
+		ChainID:           chainID,
+		Symbol:            symbol,
+		UserID:            userID,
+		Side:              direction,
+		EntryPrice:        entryPrice,
+		Quantity:          quantity,
+		CurrentSL:         slPrice,
+		InitialSL:         slPrice,
+		CurrentTP:         tpPrice,
+		InitialTP:         tpPrice,
+		SLOrderID:         slAlgoID,
+		TPOrderID:         tpAlgoID,
+		IsAlgoOrder:       true,
+		PricePrecision:    pricePrecision,
+		QuantityPrecision: quantityPrecision,
+		EnteredAt:         time.Now(),
+		UpdatedAt:         time.Now(),
+	}
+
+	// Create trailing stop manager with default config
+	pos.TrailingStop = NewTrailingStopManager(entryPrice, slPrice, tpPrice, nil)
+
+	// Check if breakeven was likely already hit based on current SL position
+	// If SL is at or above entry (LONG) or at or below entry (SHORT), mark breakeven as done
+	if direction == "LONG" && slPrice >= entryPrice {
+		pos.TrailingStop.MovedToBreakeven = true
+	} else if direction == "SHORT" && slPrice <= entryPrice {
+		pos.TrailingStop.MovedToBreakeven = true
+	}
+
+	m.positions[chainID] = pos
+	m.stats.ActivePositions = len(m.positions)
+	log.Printf("[RAVINDRA-MONITOR] Re-registered position from chain: chainID=%s, symbol=%s, direction=%s, entry=%.6f, SL=%.6f, TP=%.6f, pricePrecision=%d, qtyPrecision=%d",
+		chainID, symbol, direction, entryPrice, slPrice, tpPrice, pricePrecision, quantityPrecision)
+
+	return nil
+}
+
+// RemovePositionBySymbol removes a monitored position by symbol.
+// Used when chain closes and we don't have the chainID in the callback context.
+func (m *RavindraPositionMonitor) RemovePositionBySymbol(symbol string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for chainID, pos := range m.positions {
+		if pos.Symbol == symbol {
+			delete(m.positions, chainID)
+			m.stats.ActivePositions = len(m.positions)
+			log.Printf("[RAVINDRA-MONITOR] Removed position by symbol: chainID=%s, symbol=%s", chainID, symbol)
+			return
+		}
+	}
 }
 
 // RemovePosition removes a position from monitoring
@@ -330,8 +420,8 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 		}
 	}
 
-	// Place new SL order
-	newOrderID, err := m.placeStopLossOrder(ctx, pos.Symbol, pos.Side, pos.Quantity, newSLPrice)
+	// Place new SL order (passes pos for precision fields)
+	newOrderID, err := m.placeStopLossOrder(ctx, pos, newSLPrice)
 	if err != nil {
 		log.Printf("[RAVINDRA-MONITOR] Failed to place new SL for %s: %v", pos.Symbol, err)
 		m.stats.FailedUpdates++
@@ -385,7 +475,9 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 	})
 }
 
-// cancelOrderWithRetry cancels an order with retries
+// cancelOrderWithRetry cancels an order with retries.
+// If the order was already cancelled externally (not found on Binance), this returns nil
+// to treat it as a success -- the order is already gone which is what we wanted.
 // Note: ctx is kept for future use but current Binance client doesn't use it
 func (m *RavindraPositionMonitor) cancelOrderWithRetry(ctx context.Context, symbol string, orderID int64, isAlgoOrder bool) error {
 	_ = ctx // Reserved for future use
@@ -408,6 +500,17 @@ func (m *RavindraPositionMonitor) cancelOrderWithRetry(ctx context.Context, symb
 		}
 
 		lastErr = err
+
+		// Don't retry if order doesn't exist (already cancelled/filled externally)
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "unknown order") ||
+			strings.Contains(errMsg, "order not found") ||
+			strings.Contains(errMsg, "not found") ||
+			strings.Contains(errMsg, "-2011") { // Binance error code for unknown order
+			log.Printf("[RAVINDRA-MONITOR] Order %d for %s not found (likely cancelled externally), skipping cancel", orderID, symbol)
+			return nil // Treat as success - order is already gone
+		}
+
 		log.Printf("[RAVINDRA-MONITOR] Cancel order attempt %d failed for %s (order=%d): %v",
 			attempt+1, symbol, orderID, err)
 	}
@@ -415,28 +518,30 @@ func (m *RavindraPositionMonitor) cancelOrderWithRetry(ctx context.Context, symb
 	return fmt.Errorf("failed to cancel order after %d attempts: %v", m.config.MaxRetries, lastErr)
 }
 
-// placeStopLossOrder places a new stop loss order
+// placeStopLossOrder places a new stop loss order with proper precision
 // Note: ctx is kept for future use but current Binance client doesn't use it
-func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, symbol, side string, quantity, stopPrice float64) (int64, error) {
+func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *RavindraPosition, stopPrice float64) (int64, error) {
 	_ = ctx // Reserved for future use
 
 	// Determine close side (opposite of position side)
 	closeSide := "BUY"
 	positionSide := binance.PositionSideShort
-	if side == "LONG" {
+	if pos.Side == "LONG" {
 		closeSide = "SELL"
 		positionSide = binance.PositionSideLong
 	}
 
-	// Place STOP_MARKET algo order
+	// Place STOP_MARKET algo order with precision fields to avoid Binance -1111 errors
 	params := binance.AlgoOrderParams{
-		Symbol:       symbol,
-		Side:         closeSide,
-		PositionSide: positionSide,
-		Type:         binance.FuturesOrderTypeStopMarket,
-		Quantity:     quantity,
-		TriggerPrice: stopPrice,
-		WorkingType:  binance.WorkingTypeMarkPrice,
+		Symbol:            pos.Symbol,
+		Side:              closeSide,
+		PositionSide:      positionSide,
+		Type:              binance.FuturesOrderTypeStopMarket,
+		Quantity:          pos.Quantity,
+		TriggerPrice:      stopPrice,
+		WorkingType:       binance.WorkingTypeMarkPrice,
+		PricePrecision:    pos.PricePrecision,
+		QuantityPrecision: pos.QuantityPrecision,
 	}
 
 	resp, err := m.futuresClient.PlaceAlgoOrder(params)
@@ -468,23 +573,27 @@ func CreateRavindraPositionFromChainEntry(
 	slOrderID int64,
 	tpOrderID int64,
 	config *VolumeImbalanceConfig,
+	pricePrecision int,
+	quantityPrecision int,
 ) *RavindraPosition {
 	pos := &RavindraPosition{
-		ChainID:     chainID,
-		Symbol:      symbol,
-		UserID:      userID,
-		Side:        side,
-		EntryPrice:  entryPrice,
-		Quantity:    quantity,
-		InitialSL:   slPrice,
-		InitialTP:   tpPrice,
-		CurrentSL:   slPrice,
-		CurrentTP:   tpPrice,
-		SLOrderID:   slOrderID,
-		TPOrderID:   tpOrderID,
-		IsAlgoOrder: true, // Binance Dec 2024 requires algo orders for conditional
-		EnteredAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ChainID:           chainID,
+		Symbol:            symbol,
+		UserID:            userID,
+		Side:              side,
+		EntryPrice:        entryPrice,
+		Quantity:          quantity,
+		InitialSL:         slPrice,
+		InitialTP:         tpPrice,
+		CurrentSL:         slPrice,
+		CurrentTP:         tpPrice,
+		SLOrderID:         slOrderID,
+		TPOrderID:         tpOrderID,
+		IsAlgoOrder:       true, // Binance Dec 2024 requires algo orders for conditional
+		PricePrecision:    pricePrecision,
+		QuantityPrecision: quantityPrecision,
+		EnteredAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 
 	// Initialize trailing stop manager

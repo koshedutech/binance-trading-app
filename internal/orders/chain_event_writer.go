@@ -28,6 +28,7 @@ type ChainEventWriterDB interface {
 	GetActiveOrderChains(ctx context.Context, userID string) ([]*OrderChain, error)
 	GetOpenOrderChains(ctx context.Context, userID string) ([]*OrderChain, error) // Includes PENDING, ENTRY_PLACED, ACTIVE, PARTIAL
 	CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error
+	ReactivateOrderChain(ctx context.Context, chainID string) error
 	UpdateOrderChainSLPrice(ctx context.Context, chainID string, newPrice float64) error
 	UpdateOrderChainTPPrice(ctx context.Context, chainID string, newPrice float64) error
 	LinkHedgeChain(ctx context.Context, primaryChainID, hedgeChainID string) error

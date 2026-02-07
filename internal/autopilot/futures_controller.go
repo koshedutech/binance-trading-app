@@ -5141,6 +5141,13 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 					},
 				})
 			}
+
+			// Invalidate cached positions since state changed
+			if cachedClient, ok := fc.futuresClient.(*binance.CachedFuturesClient); ok {
+				if udc := cachedClient.GetUserDataCache(); udc != nil {
+					udc.InvalidatePositions()
+				}
+			}
 		}
 		return
 	}
@@ -5198,6 +5205,13 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 			},
 		})
 	}
+
+	// Invalidate cached positions since state changed
+	if cachedClient, ok := fc.futuresClient.(*binance.CachedFuturesClient); ok {
+		if udc := cachedClient.GetUserDataCache(); udc != nil {
+			udc.InvalidatePositions()
+		}
+	}
 }
 
 // HandleStreamOrderUpdate processes real-time order updates from User Data Stream
@@ -5230,6 +5244,13 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 				"status":         order.OrderStatus,
 				"execution_type": order.ExecutionType,
 			})
+		}
+
+		// Invalidate cached orders since state changed
+		if cachedClient, ok := fc.futuresClient.(*binance.CachedFuturesClient); ok {
+			if udc := cachedClient.GetUserDataCache(); udc != nil {
+				udc.UpdateOrderFromStream(order.Symbol, order.OrderId, order.OrderStatus)
+			}
 		}
 
 	case "TRADE":
@@ -5314,6 +5335,13 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			})
 		}
 
+		// Invalidate cached orders since state changed
+		if cachedClient, ok := fc.futuresClient.(*binance.CachedFuturesClient); ok {
+			if udc := cachedClient.GetUserDataCache(); udc != nil {
+				udc.UpdateOrderFromStream(order.Symbol, order.OrderId, order.OrderStatus)
+			}
+		}
+
 	case "CANCELED", "EXPIRED":
 		fc.logger.Debug("Stream: Order cancelled/expired",
 			"symbol", order.Symbol,
@@ -5330,6 +5358,38 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 				"status":         order.OrderStatus,
 				"execution_type": order.ExecutionType,
 			})
+		}
+
+		// Invalidate cached orders since state changed
+		if cachedClient, ok := fc.futuresClient.(*binance.CachedFuturesClient); ok {
+			if udc := cachedClient.GetUserDataCache(); udc != nil {
+				udc.UpdateOrderFromStream(order.Symbol, order.OrderId, order.OrderStatus)
+			}
+		}
+
+		// POSITION PROTECTION: Detect SL/TP order cancellations and auto-replace
+		clientOrderID := order.ClientOrderId
+		if clientOrderID != "" {
+			chainID := protectionParseChainID(clientOrderID)
+			if chainID != "" {
+				orderSuffix := protectionExtractSuffix(clientOrderID, chainID)
+				// Check if this is an SL or TP order (including replaced variants)
+				if orderSuffix == "SL" || orderSuffix == "TP" || orderSuffix == "SL-R" || orderSuffix == "TP-R" {
+					orderType := "SL"
+					if strings.HasPrefix(orderSuffix, "TP") {
+						orderType = "TP"
+					}
+					fc.logger.Info("[PROTECTION-WATCHDOG] SL/TP order cancelled/expired - checking for auto-replace",
+						"chain_id", chainID,
+						"order_type", orderType,
+						"symbol", order.Symbol,
+						"client_order_id", clientOrderID,
+						"execution_type", order.ExecutionType)
+
+					// Trigger auto-replacement in background goroutine
+					go fc.handleProtectionOrderCancelled(chainID, orderType, order.Symbol)
+				}
+			}
 		}
 	}
 }
@@ -5703,5 +5763,231 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 			"realized_pnl": realizedPnL,
 			"sync_reason":  "state_reconciliation",
 		})
+	}
+}
+
+// protectionParseChainID extracts the chain ID from a client order ID.
+// Client order ID format: "MODE-DATE-SEQ-SUFFIX" where SUFFIX is E, SL, TP, SL-R, TP-R
+// Example: "SCA-06JAN-00001-SL" -> "SCA-06JAN-00001"
+func protectionParseChainID(clientOrderID string) string {
+	if clientOrderID == "" {
+		return ""
+	}
+	parts := strings.Split(clientOrderID, "-")
+	if len(parts) < 4 {
+		return ""
+	}
+	// Chain ID is always the first 3 parts: MODE-DATE-SEQ
+	return strings.Join(parts[:3], "-")
+}
+
+// protectionExtractSuffix extracts the order type suffix from a client order ID.
+// Returns the suffix after the chain ID: "SL", "TP", "SL-R", "TP-R", "E", etc.
+func protectionExtractSuffix(clientOrderID, chainID string) string {
+	if chainID == "" || clientOrderID == "" {
+		return ""
+	}
+	suffix := strings.TrimPrefix(clientOrderID, chainID+"-")
+	if suffix == clientOrderID {
+		return "" // No prefix match
+	}
+	return suffix
+}
+
+// handleProtectionOrderCancelled auto-replaces cancelled SL/TP orders for active chains
+func (fc *FuturesController) handleProtectionOrderCancelled(chainID, orderType, symbol string) {
+	// Debounce: wait 2 seconds to avoid acting on intentional cancellations
+	// (e.g., user manually replacing orders, or system doing replace-orders)
+	time.Sleep(2 * time.Second)
+
+	ctx := context.Background()
+
+	// Check if we have DB access
+	if fc.repo == nil {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] No database access, cannot auto-replace orders")
+		return
+	}
+
+	// Look up chain from DB
+	chain, err := fc.repo.GetDB().GetOrderChainByID(ctx, fc.ownerUserID, chainID)
+	if err != nil || chain == nil {
+		fc.logger.Debug("[PROTECTION-WATCHDOG] Chain not found or error", "chain_id", chainID, "error", err)
+		return
+	}
+
+	// Only act on ACTIVE chains
+	if !chain.IsActive() {
+		fc.logger.Debug("[PROTECTION-WATCHDOG] Chain not active, skipping", "chain_id", chainID, "status", chain.Status)
+		return
+	}
+
+	// Check if position still exists (use activePositions map from WebSocket data)
+	// Position key can be just symbol or symbol_SIDE depending on how it was stored
+	fc.mu.RLock()
+	_, posExists := fc.activePositions[symbol]
+	if !posExists {
+		_, posExists = fc.activePositions[symbol+"_"+chain.Side]
+	}
+	fc.mu.RUnlock()
+
+	if !posExists {
+		fc.logger.Info("[PROTECTION-WATCHDOG] No active position for symbol, skipping auto-replace",
+			"chain_id", chainID, "symbol", symbol)
+		return
+	}
+
+	// Check if the order was already replaced (check if SL/TP orders exist for this chain)
+	client := fc.GetFuturesClient()
+	if client == nil {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] No futures client available")
+		return
+	}
+
+	// Check rate limiter - if IP banned, queue for later
+	banned, remaining := binance.GetRateLimiter().IsIPBanned()
+	if banned {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] IP banned, deferring auto-replace",
+			"chain_id", chainID, "ban_remaining", remaining)
+		// Schedule retry after ban expires + buffer
+		go func() {
+			time.Sleep(remaining + 5*time.Second)
+			fc.handleProtectionOrderCancelled(chainID, orderType, symbol)
+		}()
+		return
+	}
+
+	// Check if the specific order type still needs replacing
+	// by looking at currently open algo orders
+	algoOrders, err := client.GetOpenAlgoOrders(symbol)
+	if err != nil {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] Failed to check open algo orders", "error", err)
+		return
+	}
+
+	// Check if there's already an SL/TP for this chain
+	hasOrder := false
+	for _, ao := range algoOrders {
+		if strings.HasPrefix(ao.ClientAlgoId, chainID) {
+			suffix := strings.TrimPrefix(ao.ClientAlgoId, chainID+"-")
+			if (orderType == "SL" && (suffix == "SL" || suffix == "SL-R")) ||
+				(orderType == "TP" && (suffix == "TP" || suffix == "TP-R")) {
+				hasOrder = true
+				break
+			}
+		}
+	}
+
+	if hasOrder {
+		fc.logger.Info("[PROTECTION-WATCHDOG] Order already exists, no replacement needed",
+			"chain_id", chainID, "order_type", orderType)
+		return
+	}
+
+	// Need to replace! Determine price from chain data
+	var price float64
+	if orderType == "SL" && chain.CurrentSLPrice != nil {
+		price = *chain.CurrentSLPrice
+	} else if orderType == "TP" && chain.CurrentTPPrice != nil {
+		price = *chain.CurrentTPPrice
+	}
+
+	if price == 0 {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] No price available for replacement",
+			"chain_id", chainID, "order_type", orderType)
+		return
+	}
+
+	// Get precision from exchange info
+	pricePrecision := 8
+	qtyPrecision := 8
+	exchangeInfo, err := client.GetFuturesExchangeInfo()
+	if err == nil && exchangeInfo != nil {
+		for _, sym := range exchangeInfo.Symbols {
+			if sym.Symbol == chain.Symbol {
+				pricePrecision = sym.PricePrecision
+				qtyPrecision = sym.QuantityPrecision
+				break
+			}
+		}
+	}
+
+	// Determine order parameters
+	var closeSide string
+	var positionSide binance.PositionSide
+	if chain.Side == "SHORT" {
+		closeSide = "BUY"
+		positionSide = binance.PositionSideShort
+	} else {
+		closeSide = "SELL"
+		positionSide = binance.PositionSideLong
+	}
+
+	quantity := float64(0)
+	if chain.RemainingQuantity != nil && *chain.RemainingQuantity > 0 {
+		quantity = *chain.RemainingQuantity
+	} else if chain.EntryQuantity != nil {
+		quantity = *chain.EntryQuantity
+	}
+	if quantity == 0 {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] No quantity available for replacement",
+			"chain_id", chainID, "order_type", orderType)
+		return
+	}
+
+	clientOrderIDStr := fmt.Sprintf("%s-%s-R", chainID, orderType)
+
+	var algoType binance.FuturesOrderType
+	if orderType == "SL" {
+		algoType = binance.FuturesOrderTypeStop
+	} else {
+		algoType = binance.FuturesOrderTypeTakeProfit
+	}
+
+	params := binance.AlgoOrderParams{
+		Symbol:            chain.Symbol,
+		Side:              closeSide,
+		PositionSide:      positionSide,
+		Type:              algoType,
+		Quantity:          quantity,
+		Price:             price,
+		TriggerPrice:      price,
+		TimeInForce:       binance.TimeInForceGTC,
+		ClosePosition:     false,
+		WorkingType:       binance.WorkingTypeMarkPrice,
+		ClientAlgoId:      clientOrderIDStr,
+		PricePrecision:    pricePrecision,
+		QuantityPrecision: qtyPrecision,
+	}
+
+	fc.logger.Info("[PROTECTION-WATCHDOG] Auto-replacing cancelled order",
+		"chain_id", chainID,
+		"order_type", orderType,
+		"symbol", chain.Symbol,
+		"side", closeSide,
+		"price", price,
+		"quantity", quantity)
+
+	resp, err := client.PlaceAlgoOrder(params)
+	if err != nil {
+		fc.logger.Error("[PROTECTION-WATCHDOG] Failed to place replacement order",
+			"chain_id", chainID, "order_type", orderType, "error", err)
+		return
+	}
+
+	fc.logger.Info("[PROTECTION-WATCHDOG] Successfully replaced order",
+		"chain_id", chainID,
+		"order_type", orderType,
+		"algo_id", resp.AlgoId,
+		"price", price)
+
+	// Update DB with new order details
+	if orderType == "SL" {
+		if err := fc.repo.GetDB().UpdateOrderChainSLDetails(ctx, chainID, resp.AlgoId, price, quantity); err != nil {
+			fc.logger.Warn("[PROTECTION-WATCHDOG] Failed to update SL details in DB", "error", err)
+		}
+	} else {
+		if err := fc.repo.GetDB().UpdateOrderChainTPDetails(ctx, chainID, resp.AlgoId, price, quantity); err != nil {
+			fc.logger.Warn("[PROTECTION-WATCHDOG] Failed to update TP details in DB", "error", err)
+		}
 	}
 }

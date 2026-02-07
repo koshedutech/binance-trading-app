@@ -430,8 +430,8 @@ export function useCoinProfilerRealtime(wsConnected: boolean = false) {
             updated_at: update.data.updated_at,
           }
         },
-        source: 'strategy',
-        strategies: [],
+        source: existing?.source || 'strategy',
+        strategies: existing?.strategies || [],
         updated_at: new Date().toISOString(),
       };
 

@@ -678,6 +678,16 @@ func (pc *PositionController) healAllPositions() {
 	pc.logDebug("Heal: checking %d chain positions", len(positions))
 
 	for _, pos := range positions {
+		// Skip dust positions (quantity too small to place orders)
+		stepSize := getStepSizePC(pos.Symbol)
+		if stepSize > 0 {
+			roundedQty := math.Round(pos.Quantity/stepSize) * stepSize
+			if roundedQty <= 0 {
+				pc.logDebug("Heal: Skipping %s - dust position (qty=%.4f rounds to 0)", pos.Symbol, pos.Quantity)
+				continue
+			}
+		}
+
 		// Check if SL order exists
 		slExists := pos.SLOrderID > 0 && pc.orderExists(ctx, pos.Symbol, pos.SLOrderID, pos.IsAlgoOrder)
 		if !slExists {
@@ -952,14 +962,18 @@ func (pc *PositionController) getPosition(ctx context.Context, symbol string) (*
 	var isAlgoOrder bool
 
 	// Check algo orders first (new Binance API)
+	var slPrice, tpPrice float64
 	algoOrders, err := pc.futuresClient.GetOpenAlgoOrders(symbol)
 	if err == nil {
 		for _, order := range algoOrders {
 			if order.OrderType == string(binance.FuturesOrderTypeStopMarket) {
 				slOrderID = order.AlgoId
+				slPrice = order.TriggerPrice
 				isAlgoOrder = true
-			} else if order.OrderType == string(binance.FuturesOrderTypeTakeProfitMarket) {
+			} else if order.OrderType == string(binance.FuturesOrderTypeTakeProfitMarket) ||
+				order.OrderType == "TAKE_PROFIT" {
 				tpOrderID = order.AlgoId
+				tpPrice = order.TriggerPrice
 				isAlgoOrder = true
 			}
 		}
@@ -984,8 +998,8 @@ func (pc *PositionController) getPosition(ctx context.Context, symbol string) (*
 		Side:        side,
 		EntryPrice:  binancePos.EntryPrice,
 		Quantity:    math.Abs(binancePos.PositionAmt),
-		SLPrice:     0, // Would need to track or get from chain
-		TPPrice:     0,
+		SLPrice:     slPrice,
+		TPPrice:     tpPrice,
 		SLOrderID:   slOrderID,
 		TPOrderID:   tpOrderID,
 		ChainID:     chainID,
@@ -1142,6 +1156,28 @@ func roundToTickSize(price float64, tickSize float64) float64 {
 
 // getTickSizePC returns the tick size for a symbol.
 // In production, this should come from exchange info cache.
+func getStepSizePC(symbol string) float64 {
+	// Quantity step sizes (lot sizes) for common pairs
+	if len(symbol) >= 5 && symbol[len(symbol)-4:] == "USDT" {
+		baseSymbol := symbol[:len(symbol)-4]
+		switch baseSymbol {
+		case "BTC":
+			return 0.001
+		case "ETH":
+			return 0.001
+		case "SOL", "LINK", "AVAX", "DOT", "UNI", "AAVE", "ATOM":
+			return 1.0
+		case "DOGE", "SHIB", "PEPE":
+			return 1.0
+		case "XRP", "ADA", "MATIC":
+			return 0.1
+		default:
+			return 0.1
+		}
+	}
+	return 0.1
+}
+
 func getTickSizePC(symbol string) float64 {
 	// Default tick sizes for common pairs
 	// This is a simplification - real implementation would use exchange info

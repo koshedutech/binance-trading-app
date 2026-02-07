@@ -161,6 +161,9 @@ type UserAutopilotManager struct {
 	// Epic 14: Callback to clear entry decision UI when profiler stops
 	entryDecisionClearCallback func(string)
 
+	// WebSocket market data cache for mark prices (avoids REST API rate limiting)
+	marketDataCache *binance.MarketDataCache
+
 	mu sync.RWMutex
 }
 
@@ -265,11 +268,39 @@ func (m *UserAutopilotManager) SetChainEventWriter(cew *orders.ChainEventWriter)
 			return
 		}
 		instance := val.(*UserAutopilotInstance)
+
+		// Remove position from Ravindra monitor on chain close
+		if instance.RavindraPositionMonitor != nil {
+			instance.RavindraPositionMonitor.RemovePositionBySymbol(symbol)
+			m.logger.Info("Removed position from Ravindra monitor on chain close",
+				"symbol", symbol, "user_id", userID)
+		}
+
 		if instance.RealtimePatternMatcher != nil {
 			m.logger.Info("Chain closed - unsuppressing pattern detection",
 				"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
 			instance.RealtimePatternMatcher.UnsuppressSymbol(symbol, mode, timeframe)
 		}
+
+		// Instantly update coin profiler source back to strategy
+		if instance.CoinProfiler != nil {
+			instance.CoinProfiler.UpdateSymbolToStrategy(symbol)
+			m.logger.Info("Coin profiler instantly updated: symbol reverted to strategy source",
+				"symbol", symbol, "user_id", userID)
+		}
+
+		// Re-initialize coin profiler subscriptions in background for full consistency
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			val2, ok2 := m.instances.Load(userID)
+			if ok2 {
+				inst := val2.(*UserAutopilotInstance)
+				m.initializeCoinProfilerSubscriptions(ctx, userID, inst)
+				m.logger.Info("Coin profiler subscriptions re-initialized after chain closed",
+					"symbol", symbol, "user_id", userID)
+			}
+		}()
 	})
 	m.logger.Info("Chain closed symbol callback wired for pattern unsuppression")
 
@@ -388,6 +419,16 @@ func (m *UserAutopilotManager) SetEntryDecisionClearCallback(callback func(strin
 	defer m.mu.Unlock()
 	m.entryDecisionClearCallback = callback
 	m.logger.Info("EntryDecisionClearCallback set on UserAutopilotManager")
+}
+
+// SetMarketDataCache sets the WebSocket market data cache for mark prices.
+// This enables the Ravindra position monitor to use WebSocket-cached mark prices
+// instead of making REST API calls every 5 seconds per position.
+func (m *UserAutopilotManager) SetMarketDataCache(cache *binance.MarketDataCache) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.marketDataCache = cache
+	m.logger.Info("MarketDataCache set on UserAutopilotManager for WebSocket price provider")
 }
 
 // NotifySettingsChanged notifies the autopilot system that settings have changed.
@@ -811,9 +852,11 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// Epic 14: Wire entry placed callback for pattern cleanup
 	// When an entry order is placed, clear the pattern so coin profiler can look for new entries
 	chainEntryRunner.SetOnEntryPlacedCallback(func(symbol, mode, timeframe string) {
-		m.logger.Info("Entry placed - clearing pattern for new entries",
+		m.logger.Info("Entry placed - pattern will transition to position_running on fill",
 			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
-		realtimeMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
+		// NOTE: No longer clearing pattern here. The pattern transitions:
+		// filling (Step 3) -> position_running (Step 4) via onFillCompleted callback.
+		// Clearing here would remove the pattern before Step 4 can be set.
 	})
 	m.logger.Info("Entry placed callback wired for pattern cleanup", "user_id", userID)
 
@@ -850,9 +893,27 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// Wire fill completed callback - clears pattern after order fills so it stays cleared
 	// This prevents candle close from re-creating pattern while a position exists
 	chainEntryRunner.SetOnFillCompletedCallback(func(symbol, mode, timeframe string) {
-		m.logger.Info("Entry fill completed - clearing pattern to prevent re-creation",
+		m.logger.Info("Entry fill completed - setting pattern to position_running (Step 4)",
 			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
-		realtimeMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
+		realtimeMatcher.SetPatternPositionRunning(symbol, mode, timeframe)
+
+		// Instantly update coin profiler source for this symbol
+		// Uses lightweight method instead of heavy full re-initialization
+		if inst := m.GetInstance(userID); inst != nil && inst.CoinProfiler != nil {
+			inst.CoinProfiler.UpdateSymbolToPosition(symbol, timeframe, mode)
+			m.logger.Info("Coin profiler instantly updated: symbol to position source",
+				"symbol", symbol, "timeframe", timeframe, "mode", mode, "user_id", userID)
+		}
+
+		// Also re-initialize subscriptions in background for full consistency
+		// (handles capacity check, removes unnecessary strategy scanning)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if inst := m.GetInstance(userID); inst != nil {
+				m.initializeCoinProfilerSubscriptions(ctx, userID, inst)
+			}
+		}()
 	})
 	m.logger.Info("Fill completed callback wired for pattern cleanup", "user_id", userID)
 
@@ -875,7 +936,11 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// Create RavindraPositionMonitor for R:R-based trailing stop management
 	// This implements the Ravindra strategy: move SL to breakeven at 1:2 R:R, lock 1R profit at 1:3 R:R
 	// The monitor runs independently and checks positions periodically for milestone triggers
-	priceProvider := &futuresClientPriceProvider{client: futuresClient}
+	// Uses WebSocket-cached mark prices to avoid REST API rate limiting
+	m.mu.RLock()
+	cachedMarkPrices := m.marketDataCache
+	m.mu.RUnlock()
+	priceProvider := &webSocketPriceProvider{cache: cachedMarkPrices, client: futuresClient}
 	ravindraMonitor := NewRavindraPositionMonitor(
 		futuresClient,
 		m.chainEventWriter,
@@ -1054,6 +1119,82 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 		if instance.RavindraPositionMonitor != nil && !instance.RavindraPositionMonitor.IsRunning() {
 			m.logger.Info("Starting RavindraPositionMonitor for chain system", "user_id", userID)
 			instance.RavindraPositionMonitor.Start()
+		}
+
+		// Re-register existing positions with Ravindra monitor
+		// This handles the case where the container/autopilot was restarted while positions were open
+		if instance.RavindraPositionMonitor != nil && m.chainEventWriter != nil {
+			go func() {
+				reRegCtx, reRegCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer reRegCancel()
+
+				activeChains, err := m.chainEventWriter.GetActiveChains(reRegCtx, userID)
+				if err != nil {
+					m.logger.Error("Failed to get active chains for Ravindra re-registration", "error", err, "user_id", userID)
+					return
+				}
+
+				for _, chain := range activeChains {
+					if chain.Status != orders.OrderChainStatusActive || chain.Symbol == "" {
+						continue
+					}
+
+					// Get chain details for entry price, SL, TP
+					entryPrice := 0.0
+					if chain.EntryPrice != nil {
+						entryPrice = *chain.EntryPrice
+					}
+					quantity := 0.0
+					if chain.EntryQuantity != nil {
+						quantity = *chain.EntryQuantity
+					}
+					slPrice := 0.0
+					if chain.CurrentSLPrice != nil {
+						slPrice = *chain.CurrentSLPrice
+					}
+					tpPrice := 0.0
+					if chain.CurrentTPPrice != nil {
+						tpPrice = *chain.CurrentTPPrice
+					}
+
+					// Get algo order IDs
+					slAlgoID := int64(0)
+					if chain.SLBinanceOrderID != nil {
+						slAlgoID = *chain.SLBinanceOrderID
+					}
+					tpAlgoID := int64(0)
+					if chain.TPBinanceOrderID != nil {
+						tpAlgoID = *chain.TPBinanceOrderID
+					}
+
+					side := chain.Side
+					if side == "" {
+						side = "LONG" // Default
+					}
+
+					if entryPrice > 0 && slPrice > 0 {
+						err := instance.RavindraPositionMonitor.ReRegisterFromChain(
+							chain.ChainID, chain.Symbol, userID, side,
+							entryPrice, quantity, slPrice, tpPrice,
+							slAlgoID, tpAlgoID, chain.Timeframe,
+							0, 0, // Precision not stored in OrderChain; monitor will use defaults
+						)
+						if err != nil {
+							m.logger.Error("Failed to re-register position with Ravindra monitor",
+								"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", err)
+						} else {
+							m.logger.Info("Re-registered position with Ravindra monitor",
+								"chain_id", chain.ChainID, "symbol", chain.Symbol,
+								"entry", entryPrice, "sl", slPrice, "tp", tpPrice)
+						}
+					}
+				}
+
+				if len(activeChains) > 0 {
+					m.logger.Info("Ravindra monitor re-registration complete",
+						"user_id", userID, "chains_found", len(activeChains))
+				}
+			}()
 		}
 
 		m.logger.Info("Chain Trading System fully started",
@@ -1817,6 +1958,49 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 			"user_id", userID,
 			"strategies", aggregatedReqs.TotalStrategies,
 			"timeframes", aggregatedReqs.AllTimeframes)
+
+		// Step 4b: Check if strategy capacity is full - if so, skip strategy requirements
+		// When all positions are full, there's no point collecting data for entry scanning
+		if m.chainEventWriter != nil {
+			capCtx, capCancel := context.WithTimeout(ctx, 5*time.Second)
+			activeChains, capErr := m.chainEventWriter.GetActiveChains(capCtx, userID)
+			capCancel()
+			if capErr == nil && len(activeChains) > 0 {
+				// Get max concurrent trades from sub-strategy settings
+				maxConcurrent := 1 // Default
+				if m.repo != nil {
+					for _, strat := range dbStrategies {
+						subSettings, subErr := m.repo.GetSubStrategySettings(ctx, userID, strat.Mode, strat.StrategyGroup, strat.SubStrategy)
+						if subErr == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+							var settingsMap map[string]interface{}
+							if jsonErr := json.Unmarshal(subSettings.Settings, &settingsMap); jsonErr == nil {
+								if ba, ok := settingsMap["budget_allocation"]; ok {
+									if baMap, ok := ba.(map[string]interface{}); ok {
+										if mct, ok := baMap["max_concurrent_trades"]; ok {
+											switch v := mct.(type) {
+											case float64:
+												maxConcurrent = int(v)
+											case int:
+												maxConcurrent = v
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				if len(activeChains) >= maxConcurrent {
+					m.logger.Info("Strategy capacity FULL - skipping strategy requirements for entry scanning",
+						"user_id", userID, "active_chains", len(activeChains), "max_concurrent", maxConcurrent)
+					aggregatedReqs = &coinprofiler.AggregatedRequirements{
+						AllTimeframes: []string{},
+						AllDataFields: []string{},
+						ByStrategy:    []coinprofiler.StrategyRequirements{},
+					}
+				}
+			}
+		}
 	} else {
 		// Trading is OFF - skip strategy requirements, only monitor positions
 		m.logger.Info("Trading is OFF - skipping strategy requirements, only monitoring positions", "user_id", userID)
@@ -1828,12 +2012,33 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 	}
 
 	// Step 5: Get open positions for exit monitoring (always included)
+	// Also get active order chains to extract the actual entry timeframe
 	var positions []coinprofiler.Position
+	chainTimeframes := make(map[string]string) // symbol -> timeframe from OrderChain
+
+	// Get chain timeframes from database
+	if m.chainEventWriter != nil {
+		chainCtx, chainCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer chainCancel()
+		activeChains, err := m.chainEventWriter.GetActiveChains(chainCtx, userID)
+		if err == nil {
+			for _, chain := range activeChains {
+				if chain.Timeframe != "" {
+					chainTimeframes[chain.Symbol] = chain.Timeframe
+				}
+			}
+		}
+	}
+
 	if instance.Autopilot != nil {
 		giniePositions := instance.Autopilot.GetPositions()
 		for _, gp := range giniePositions {
-			// Create an adapter to convert GiniePosition to coinprofiler.Position interface
-			positions = append(positions, &giniePositionAdapter{pos: gp})
+			adapter := &giniePositionAdapter{pos: gp}
+			// Attach the entry timeframe from the OrderChain if available
+			if tf, ok := chainTimeframes[gp.Symbol]; ok {
+				adapter.timeframe = tf
+			}
+			positions = append(positions, adapter)
 		}
 	}
 	m.logger.Info("Found open positions", "user_id", userID, "count", len(positions))
@@ -1894,20 +2099,33 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 
 // giniePositionAdapter adapts GiniePosition to the coinprofiler.Position interface.
 type giniePositionAdapter struct {
-	pos *GiniePosition
+	pos       *GiniePosition
+	timeframe string // Entry timeframe from OrderChain (e.g., "3m")
 }
 
-// futuresClientPriceProvider adapts FuturesClient to the PriceProvider interface
-// required by RavindraPositionMonitor.
-type futuresClientPriceProvider struct {
-	client binance.FuturesClient
+// webSocketPriceProvider implements PriceProvider using WebSocket-cached mark prices.
+// The !markPrice@arr stream updates all symbol prices every ~3 seconds via WebSocket.
+// This avoids REST API calls (GET /fapi/v1/premiumIndex) which cause rate limiting
+// when the Ravindra position monitor checks prices every 5 seconds per position.
+// Falls back to REST API only if cache is nil or data is stale (>30s).
+type webSocketPriceProvider struct {
+	cache  *binance.MarketDataCache // WebSocket-populated cache (shared singleton)
+	client binance.FuturesClient    // REST fallback
 }
 
 // GetMarkPrice implements the PriceProvider interface.
-// It returns the mark price for a symbol from the Binance Futures API.
-func (p *futuresClientPriceProvider) GetMarkPrice(symbol string) (float64, error) {
+// Reads from WebSocket cache first, falls back to REST API if cache miss.
+func (p *webSocketPriceProvider) GetMarkPrice(symbol string) (float64, error) {
+	// Try WebSocket cache first (updated every ~3s by !markPrice@arr stream)
+	if p.cache != nil {
+		if price, ok := p.cache.GetCurrentPrice(symbol); ok {
+			return price, nil
+		}
+	}
+
+	// Cache miss or stale - fall back to REST API
 	if p.client == nil {
-		return 0, fmt.Errorf("futures client is nil")
+		return 0, fmt.Errorf("no price source available for %s (cache miss and no REST client)", symbol)
 	}
 
 	markPrice, err := p.client.GetMarkPrice(symbol)
@@ -1961,6 +2179,10 @@ func (a *giniePositionAdapter) IsTrailingActive() bool {
 		return false
 	}
 	return a.pos.TrailingActive
+}
+
+func (a *giniePositionAdapter) GetTimeframe() string {
+	return a.timeframe
 }
 
 // ==================== Epic 14: ExitDecisionService Management ====================

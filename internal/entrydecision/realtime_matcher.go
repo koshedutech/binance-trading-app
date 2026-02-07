@@ -824,6 +824,52 @@ func (r *RealtimePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe s
 	log.Printf("[REALTIME-PATTERN] Cleared and suppressed pattern for %s:%s:%s (position opened)", symbol, mode, timeframe)
 }
 
+// SetPatternPositionRunning transitions a pattern to "position_running" status and broadcasts Step 4.
+// This is called when an entry order fills successfully. Instead of clearing the pattern (which would
+// make the coin disappear from the UI), this keeps it visible as Step 4 with position_running status.
+// The symbol is also suppressed to prevent new pattern detection while the position is active.
+func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timeframe string) {
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Set position_running status on the underlying pattern matcher
+	r.patternMatcher.SetPatternPositionRunning(symbol, mode, timeframe)
+
+	// Suppress the symbol to prevent new pattern detection
+	r.mu.Lock()
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	r.suppressedSymbols[stateKey] = true
+	r.mu.Unlock()
+
+	// Save the position_running state to DB for persistence across restarts
+	r.savePatternStateAsync(symbol, mode, timeframe)
+
+	log.Printf("[REALTIME-PATTERN] Set position_running and suppressed pattern for %s:%s:%s", symbol, mode, timeframe)
+
+	// Broadcast Step 4 update to UI
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if callback != nil {
+		update := PatternUpdate{
+			UserID:      userID,
+			Symbol:      symbol,
+			Timeframe:   timeframe,
+			Mode:        mode,
+			Strategy:    "volume_imbalance",
+			SubStrategy: "ravindra_volume_imbalance",
+			CurrentStep: 4,
+			TotalSteps:  4,
+			Status:      PatternStatusPositionRunning,
+			UpdatedAt:   time.Now(),
+		}
+		callback(update)
+	}
+}
+
 // ResetPatternForSymbol clears the pattern for a specific symbol WITHOUT suppressing it.
 // This should be called when an entry order fails (timeout, rejected, etc.) to allow
 // the pattern matcher to immediately start looking for new patterns on this symbol.

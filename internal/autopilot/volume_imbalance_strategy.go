@@ -819,13 +819,24 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 		}
 	}
 
-	// At 1:2 R:R → Move SL to entry (breakeven, 0 risk)
+	// At 1:2 R:R → Move SL to entry + fee buffer (true breakeven after fees)
 	if t.CurrentRR >= t.BreakevenRRLevel && !t.MovedToBreakeven {
-		// For LONG: entry > current SL means moving up (tighter)
-		// For SHORT: entry < current SL means moving down (tighter)
-		shouldUpdate := (isLong && t.EntryPrice > t.StopLoss) || (!isLong && t.EntryPrice < t.StopLoss)
+		// Move SL to entry + small buffer to cover round-trip trading fees
+		// Maker fee: 0.02% each side = 0.04% round trip (with BNB discount)
+		// Taker fee: 0.05% each side = 0.10% round trip (without BNB)
+		// Use 0.10% as safe assumption (worst case taker both sides)
+		feeBuffer := t.EntryPrice * 0.001 // 0.1% round-trip fee buffer
+		var breakevenSL float64
+		if isLong {
+			breakevenSL = t.EntryPrice + feeBuffer
+		} else {
+			breakevenSL = t.EntryPrice - feeBuffer
+		}
+		// For LONG: breakevenSL > current SL means moving up (tighter)
+		// For SHORT: breakevenSL < current SL means moving down (tighter)
+		shouldUpdate := (isLong && breakevenSL > t.StopLoss) || (!isLong && breakevenSL < t.StopLoss)
 		if shouldUpdate {
-			t.StopLoss = t.EntryPrice
+			t.StopLoss = breakevenSL
 			newStopLoss = t.StopLoss
 			t.MovedToBreakeven = true
 			action = "MOVE_TO_BREAKEVEN"

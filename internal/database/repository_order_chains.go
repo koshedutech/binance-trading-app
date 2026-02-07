@@ -605,6 +605,28 @@ func (db *DB) CloseOrderChain(ctx context.Context, chainID string, closeReason s
 	return nil
 }
 
+// ReactivateOrderChain sets a chain's status back to ACTIVE and clears close_reason and closed_at
+func (db *DB) ReactivateOrderChain(ctx context.Context, chainID string) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			status = 'ACTIVE',
+			close_reason = NULL,
+			closed_at = NULL,
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID)
+	if err != nil {
+		return fmt.Errorf("failed to reactivate order chain: %w", err)
+	}
+
+	return nil
+}
+
 // IncrementOrderChainEventCount increments the event count and updates last_event_seq
 func (db *DB) IncrementOrderChainEventCount(ctx context.Context, chainID string, newSeq int) error {
 	if db.Pool == nil {

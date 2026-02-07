@@ -244,7 +244,8 @@ export default function ChainCard({
             const statusEquivalent =
               (chain.status === 'active' && positionStatus === 'ACTIVE') ||
               (chain.status === 'partial' && positionStatus === 'PARTIAL') ||
-              (chain.status === 'completed' && positionStatus === 'CLOSED');
+              (chain.status === 'completed' && positionStatus === 'CLOSED') ||
+              (chain.status === 'closed' && positionStatus === 'CLOSED');
             // Don't show duplicate badge
             if (statusEquivalent) return null;
             // Don't show CLOSED position status when chain is still active/partial

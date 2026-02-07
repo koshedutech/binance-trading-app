@@ -14,6 +14,7 @@ import (
 	"binance-trading-bot/internal/auth"
 	"binance-trading-bot/internal/autopilot"
 	"binance-trading-bot/internal/billing"
+	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/cache"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/decision"
@@ -69,6 +70,12 @@ func (r *RateLimiter) Allow(key string) bool {
 	return true
 }
 
+// userFuturesClientEntry caches a per-user CachedFuturesClient
+type userFuturesClientEntry struct {
+	client    binance.FuturesClient
+	createdAt time.Time
+}
+
 // Server represents the HTTP API server
 type Server struct {
 	router         *gin.Engine
@@ -84,6 +91,10 @@ type Server struct {
 	licenseInfo    *license.LicenseInfo
 	rateLimiter    *RateLimiter        // API rate limiter to prevent Binance bans
 	apiKeyService  *apikeys.Service    // Service to get user-specific API keys
+
+	// Cached user futures clients to avoid creating new clients per request
+	userFuturesClients   map[string]*userFuturesClientEntry
+	userFuturesClientsMu sync.RWMutex
 
 	// Multi-user autopilot manager (per-user autopilot instances)
 	userAutopilotManager *autopilot.UserAutopilotManager
@@ -292,6 +303,10 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/entry-decision/score/:symbol":                      true,
 		// Position Controller endpoints (internal state only - Story 10.4)
 		"/api/futures/position-controller/status":                        true,
+		// High-frequency polling endpoints (use cached data internally, safe to exempt)
+		"/api/futures/positions":                                         true,
+		"/api/futures/order-chains":                                      true,
+		"/api/futures/orders/all":                                        true,
 		// Research Infrastructure endpoints (internal state only - Epic 15)
 		"/api/research/download-data":                                    true,
 		"/api/research/download-status/:job_id":                          true,
@@ -577,6 +592,9 @@ func (s *Server) setupRoutes() {
 
 			// Order chain sync endpoint (reconciles with Binance state)
 			futures.POST("/order-chains/sync", s.handleSyncOrderState)
+
+			// Order chain replace SL/TP orders (re-place cancelled orders)
+			futures.POST("/order-chains/:chainId/replace-orders", s.handleReplaceChainOrders)
 
 			// Algo Order endpoints (TP/SL orders since 2025-12-09)
 			futures.DELETE("/algo-orders/:symbol/:id", s.handleCancelAlgoOrder)

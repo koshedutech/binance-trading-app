@@ -1024,6 +1024,41 @@ func (m *VolumeImbalancePatternMatcher) ClearPatternForSymbol(symbol, mode, time
 	log.Printf("[PATTERN] Cleared pattern for %s (position opened)", symbol)
 }
 
+// SetPatternPositionRunning transitions a pattern to "position_running" status.
+// Unlike ClearPatternForSymbol which removes the pattern, this KEEPS the pattern in the map
+// with position_running status so it continues to appear in GetCoinMatchesForStrategy() results
+// and renders as Step 4 in the UI.
+func (m *VolumeImbalancePatternMatcher) SetPatternPositionRunning(symbol, mode, timeframe string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := m.patternKey(symbol, mode, timeframe)
+	progress, exists := m.patterns[key]
+	if !exists {
+		// Pattern was already cleared - create a minimal one for Step 4 display
+		progress = &PatternProgress{
+			Symbol:      symbol,
+			Strategy:    "volume_imbalance",
+			SubStrategy: "ravindra_volume_imbalance",
+			Mode:        mode,
+			Timeframe:   timeframe,
+			CurrentStep: 4,
+			TotalSteps:  4,
+			Status:      PatternStatusPositionRunning,
+			StartedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		}
+		m.patterns[key] = progress
+	} else {
+		progress.Status = PatternStatusPositionRunning
+		progress.CurrentStep = 4
+		progress.TotalSteps = 4
+		progress.UpdatedAt = time.Now()
+	}
+
+	log.Printf("[PATTERN-MATCHER] Set pattern to position_running for %s (key=%s)", symbol, key)
+}
+
 // ============================================================================
 // PATTERN RETRIEVAL AND MANAGEMENT
 // ============================================================================

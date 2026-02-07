@@ -528,6 +528,7 @@ type Position interface {
 	GetSymbol() string
 	GetMode() string
 	GetSide() string
+	GetTimeframe() string // Entry timeframe from strategy (e.g., "3m", "1h")
 	HasTakeProfit() bool
 	HasStopLoss() bool
 	IsTrailingActive() bool
@@ -538,6 +539,7 @@ type SimplePosition struct {
 	Symbol         string `json:"symbol"`
 	Mode           string `json:"mode"`
 	Side           string `json:"side"`
+	Timeframe      string `json:"timeframe"`
 	TakeProfit     bool   `json:"take_profit"`
 	StopLoss       bool   `json:"stop_loss"`
 	TrailingActive bool   `json:"trailing_active"`
@@ -551,6 +553,9 @@ func (p *SimplePosition) GetMode() string { return p.Mode }
 
 // GetSide returns the position's direction.
 func (p *SimplePosition) GetSide() string { return p.Side }
+
+// GetTimeframe returns the position's entry timeframe.
+func (p *SimplePosition) GetTimeframe() string { return p.Timeframe }
 
 // HasTakeProfit returns whether the position has take profit orders.
 func (p *SimplePosition) HasTakeProfit() bool { return p.TakeProfit }
@@ -567,6 +572,7 @@ type GiniePositionSource interface {
 	GetSymbol() string
 	GetMode() string
 	GetSide() string
+	GetTimeframe() string
 	GetTakeProfitPrice() float64
 	GetStopLossPrice() float64
 	IsTrailingStopActive() bool
@@ -605,6 +611,14 @@ func (a *GiniePositionAdapter) GetSide() string {
 		return ""
 	}
 	return a.source.GetSide()
+}
+
+// GetTimeframe returns the position's entry timeframe.
+func (a *GiniePositionAdapter) GetTimeframe() string {
+	if a == nil || a.source == nil {
+		return ""
+	}
+	return a.source.GetTimeframe()
 }
 
 // HasTakeProfit returns whether the position has a take profit order.
@@ -710,9 +724,19 @@ func GetPositionRequirements(positions []Position) []PositionRequirements {
 			mode = "scalp" // Default to scalp for unknown modes
 		}
 
+		// Use entry timeframe from strategy if available (exact match for position monitoring)
+		// Fall back to mode-based exit timeframes only when entry timeframe is not known
+		entryTimeframe := pos.GetTimeframe()
+		var timeframes []string
+		if entryTimeframe != "" {
+			timeframes = []string{entryTimeframe}
+		} else {
+			timeframes = getExitTimeframesForMode(mode)
+		}
+
 		req := PositionRequirements{
 			Symbol:     symbol,
-			Timeframes: getExitTimeframesForMode(mode),
+			Timeframes: timeframes,
 			ExitMode:   detectExitMode(pos),
 			Mode:       mode,
 			Side:       pos.GetSide(),

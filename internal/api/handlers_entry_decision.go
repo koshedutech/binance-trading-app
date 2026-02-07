@@ -294,6 +294,34 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 			}
 		}
 
+		// Fallback: Add synthetic CoinMatch for positions not found in pattern matcher
+		// This ensures Step 4 always shows even if pattern state was lost (restart, edge case)
+		if profilerRunning && strategyType == entrydecision.StrategyTypePattern {
+			for posSymbol, posInfo := range activePositions {
+				// Check if this position's symbol is already in the strategy's coins
+				alreadyAdded := false
+				for _, existingCoin := range sm.Coins {
+					if existingCoin.Symbol == posSymbol {
+						alreadyAdded = true
+						break
+					}
+				}
+				if !alreadyAdded {
+					// Create a synthetic CoinMatch for this position
+					syntheticCM := &entrydecision.CoinMatch{
+						Symbol:     posSymbol,
+						Status:     entrydecision.PatternStatusPositionRunning,
+						Step:       4,
+						TotalSteps: 4,
+						UpdatedAt:  time.Now(),
+					}
+					enrichCoinMatchWithPosition(syntheticCM, posInfo)
+					enrichCoinMatchWithClosedPnL(syntheticCM)
+					sm.AddCoin(*syntheticCM)
+				}
+			}
+		}
+
 		response.AddStrategy(*sm)
 	}
 
@@ -720,6 +748,33 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 					}
 
 					sm.AddCoin(*cm)
+				}
+			}
+		}
+
+		// Fallback: Add synthetic CoinMatch for positions not found in pattern matcher
+		// This ensures Step 4 always shows even if pattern state was lost (restart, edge case)
+		if profilerRunning && strategyType == entrydecision.StrategyTypePattern {
+			for posSymbol, posInfo := range activePositions {
+				// Check if this position's symbol is already in the strategy's coins
+				alreadyAdded := false
+				for _, existingCoin := range sm.Coins {
+					if existingCoin.Symbol == posSymbol {
+						alreadyAdded = true
+						break
+					}
+				}
+				if !alreadyAdded {
+					// Create a synthetic CoinMatch for this position
+					syntheticCM := &entrydecision.CoinMatch{
+						Symbol:     posSymbol,
+						Status:     entrydecision.PatternStatusPositionRunning,
+						Step:       4,
+						TotalSteps: 4,
+						UpdatedAt:  time.Now(),
+					}
+					enrichCoinMatchWithPosition(syntheticCM, posInfo)
+					sm.AddCoin(*syntheticCM)
 				}
 			}
 		}

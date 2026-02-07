@@ -3,6 +3,8 @@ package binance
 import (
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -364,6 +366,15 @@ func (r *RateLimiter) GetCurrentUsage() (currentWeight, maxWeight int, usagePerc
 
 // WaitForSlot blocks until a request can be made (with timeout)
 func (r *RateLimiter) WaitForSlot(endpoint string, timeout time.Duration) bool {
+	// CRITICAL: Check for IP ban FIRST - return immediately without blocking
+	// Blocking here causes goroutine pile-up and DB connection pool exhaustion
+	r.mu.RLock()
+	if r.circuitOpen && time.Now().Before(r.banUntil) {
+		r.mu.RUnlock()
+		return false
+	}
+	r.mu.RUnlock()
+
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
@@ -371,18 +382,16 @@ func (r *RateLimiter) WaitForSlot(endpoint string, timeout time.Duration) bool {
 			return true
 		}
 
-		// Check how long to wait
+		// Re-check circuit breaker - may have opened during weight wait
 		r.mu.RLock()
-		var waitTime time.Duration
 		if r.circuitOpen && time.Now().Before(r.banUntil) {
-			waitTime = time.Until(r.banUntil)
-			log.Printf("[RATE-LIMITER] Circuit open, waiting %v for ban to expire", waitTime)
-		} else {
-			// Wait until next reset
-			waitTime = time.Until(r.weightResetAt)
-			if waitTime < 0 {
-				waitTime = 100 * time.Millisecond
-			}
+			r.mu.RUnlock()
+			return false
+		}
+		// Only wait for weight reset (brief)
+		waitTime := time.Until(r.weightResetAt)
+		if waitTime < 0 {
+			waitTime = 100 * time.Millisecond
 		}
 		r.mu.RUnlock()
 
@@ -440,12 +449,14 @@ func (r *RateLimiter) RecordRateLimitError(banUntilMs int64) {
 	// Calculate ban duration
 	var banUntil time.Time
 	if banUntilMs > 0 {
+		// Binance sent a specific ban-until timestamp (actual IP ban)
 		banUntil = time.UnixMilli(banUntilMs)
 	} else {
-		// Default: exponential backoff based on consecutive errors
-		backoff := time.Duration(1<<uint(r.consecutiveErrors)) * time.Minute
-		if backoff > 30*time.Minute {
-			backoff = 30 * time.Minute
+		// Internal rate limit detection (not a Binance ban) - use short backoff
+		// Cap at 60 seconds to avoid extended lockouts from internal weight tracking
+		backoff := time.Duration(15*(r.consecutiveErrors)) * time.Second
+		if backoff > 60*time.Second {
+			backoff = 60 * time.Second
 		}
 		banUntil = time.Now().Add(backoff)
 	}
@@ -457,6 +468,23 @@ func (r *RateLimiter) RecordRateLimitError(banUntilMs int64) {
 
 	log.Printf("[RATE-LIMITER] ⚠️ CIRCUIT BREAKER OPEN - IP banned until %v (consecutive errors: %d)",
 		banUntil.Format("15:04:05"), r.consecutiveErrors)
+}
+
+// IsIPBanned returns whether currently IP banned and the remaining ban duration
+func (r *RateLimiter) IsIPBanned() (bool, time.Duration) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if !r.circuitOpen {
+		return false, 0
+	}
+
+	remaining := time.Until(r.banUntil)
+	if remaining <= 0 {
+		return false, 0
+	}
+
+	return true, remaining
 }
 
 // IsCircuitOpen returns true if circuit breaker is open
@@ -562,9 +590,24 @@ func getEndpointWeight(endpoint string) int {
 
 // ParseBanUntilFromError extracts ban timestamp from Binance error message
 func ParseBanUntilFromError(errMsg string) int64 {
-	// Error format: "banned until 1766824120342"
-	var banUntil int64
-	_, err := fmt.Sscanf(errMsg, "%*[^0-9]%d", &banUntil)
+	// Error format: {"code":-1003,"msg":"Way too many requests; IP(...) banned until 1770461794405. ..."}
+	// Must look for "banned until <timestamp>" specifically, not just the first number
+	idx := strings.Index(errMsg, "banned until ")
+	if idx < 0 {
+		return 0
+	}
+
+	// Extract the number after "banned until "
+	numStr := errMsg[idx+len("banned until "):]
+	end := 0
+	for end < len(numStr) && numStr[end] >= '0' && numStr[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+
+	banUntil, err := strconv.ParseInt(numStr[:end], 10, 64)
 	if err != nil {
 		return 0
 	}

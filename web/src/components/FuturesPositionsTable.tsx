@@ -124,7 +124,14 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       const allChains = [
         ...(response.chains || []),
         ...(partialResponse.chains || []),
-      ].filter(chain => !CHAIN_RUNNER_MODE_CODES.includes(chain.mode_code || ''));
+      ]
+        .filter(chain => !CHAIN_RUNNER_MODE_CODES.includes(chain.mode_code || ''))
+        .sort((a, b) => {
+          // Sort by created_at descending (newest first) for stable display order
+          const dateA = a.created_at || '';
+          const dateB = b.created_at || '';
+          return dateB.localeCompare(dateA);
+        });
 
       setOrderChains(allChains);
       setLastRefreshTime(new Date());
