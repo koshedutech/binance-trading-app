@@ -393,6 +393,11 @@ func (m *VolumeImbalancePatternMatcher) MatchPattern(
 	case PatternStatusWatching:
 		// Looking for Step 1: Volume Spike (Reference Candle)
 		m.processStep1(patternKey, progress, state, candles)
+		// If Step 1 found a reference candle from historical data, immediately evaluate Step 2
+		// This handles startup/client data where consolidation candles are already in the buffer
+		if progress.Status == PatternStatusAccumulation {
+			m.processStep2(patternKey, progress, state, candles)
+		}
 
 	case PatternStatusAccumulation, PatternStatusConsolidating:
 		// Step 1 complete, now watching for Step 2: Breakout

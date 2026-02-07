@@ -484,6 +484,15 @@ export default function OrderTreeNode({
                           <span className={`font-mono text-sm font-medium ${(positionState.realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                             {(positionState.realizedPnl ?? 0) >= 0 ? '+' : ''}${(positionState.realizedPnl ?? 0).toFixed(2)}
                           </span>
+                          {(() => {
+                            const entryVal = (positionState.entryPrice || 0) * (positionState.entryQuantity || 0);
+                            const pnlPct = entryVal > 0 ? ((positionState.realizedPnl ?? 0) / entryVal) * 100 : 0;
+                            return entryVal > 0 ? (
+                              <span className={`text-xs ml-1 ${(positionState.realizedPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                              </span>
+                            ) : null;
+                          })()}
                           <span className="text-xs text-gray-500 ml-1">PnL</span>
                         </div>
                       )}
@@ -527,7 +536,8 @@ export default function OrderTreeNode({
                       {(() => {
                         const curPrice = livePrice || positionAnalytics?.current_price || 0;
                         const ePrice = positionState?.entryPrice || 0;
-                        const qty = positionState?.remainingQuantity || positionState?.entryQuantity || 0;
+                        const eQty = positionState?.entryQuantity || 0;
+                        const qty = positionState?.remainingQuantity || eQty;
                         const isLongPos = positionSide === 'LONG';
                         let pnl: number;
                         if (livePrice && ePrice > 0 && qty > 0) {
@@ -535,12 +545,19 @@ export default function OrderTreeNode({
                         } else {
                           pnl = positionAnalytics?.unrealized_pnl ?? 0;
                         }
+                        const eValue = ePrice * eQty;
+                        const pnlPct = eValue > 0 ? (pnl / eValue) * 100 : 0;
                         const hasPnl = curPrice > 0 && ePrice > 0;
                         return hasPnl ? (
                           <div className="text-right ml-3">
                             <span className={`font-mono text-sm ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                               {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
                             </span>
+                            {eValue > 0 && (
+                              <span className={`text-xs ml-1 ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
+                              </span>
+                            )}
                             <span className="text-xs text-gray-500 ml-1">PnL</span>
                           </div>
                         ) : null;

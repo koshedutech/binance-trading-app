@@ -277,9 +277,15 @@ func (m *UserAutopilotManager) SetChainEventWriter(cew *orders.ChainEventWriter)
 		}
 
 		if instance.RealtimePatternMatcher != nil {
-			m.logger.Info("Chain closed - unsuppressing pattern detection",
+			// Use ResetPatternForSymbol (not just UnsuppressSymbol) because:
+			// - UnsuppressSymbol only removes suppression but does NOT clear pattern state
+			//   or broadcast a "watching" update to the frontend
+			// - ResetPatternForSymbol clears pattern state + removes suppression + broadcasts
+			//   "watching" status to UI, so Entry Decision transitions from "position_running"
+			//   back to Step 1 (watching) for fresh pattern detection
+			m.logger.Info("Chain closed - resetting pattern for fresh detection",
 				"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
-			instance.RealtimePatternMatcher.UnsuppressSymbol(symbol, mode, timeframe)
+			instance.RealtimePatternMatcher.ResetPatternForSymbol(symbol, mode, timeframe)
 		}
 
 		// Instantly update coin profiler source back to strategy
@@ -786,6 +792,12 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		realtimeMatcher.RestorePatternStates()
 		m.logger.Info("Pattern state persistence wired and restored from DB", "user_id", userID)
 	}
+
+	// Auto-detect active positions from order chains and set Step 4 immediately on startup.
+	// This ensures Entry Decision shows "position running" for symbols with active positions
+	// without waiting for user interaction or API refresh.
+	m.autoDetectActivePositions(ctx, userID, realtimeMatcher, coinProfiler)
+
 	// Register with CoinProfiler to receive candle close events
 	realtimeMatcher.RegisterWithCoinProfiler(coinProfiler)
 	// Wire pattern update callback for real-time WebSocket broadcasting
@@ -1014,6 +1026,57 @@ func (m *UserAutopilotManager) GetInstance(userID string) *UserAutopilotInstance
 		return instance
 	}
 	return nil
+}
+
+// autoDetectActivePositions checks for active order chains on startup and sets Entry Decision
+// to Step 4 (position_running) for symbols with active positions. This ensures the UI immediately
+// shows the correct state after a container restart without waiting for user interaction.
+func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, userID string, realtimeMatcher *entrydecision.RealtimePatternMatcher, coinProfiler *coinprofiler.CoinProfiler) {
+	if m.chainEventWriter == nil {
+		m.logger.Warn("Cannot auto-detect positions: chainEventWriter is nil", "user_id", userID)
+		return
+	}
+
+	chains, err := m.chainEventWriter.GetOpenChains(ctx, userID)
+	if err != nil {
+		m.logger.Error("Failed to fetch open chains for position auto-detection", "error", err, "user_id", userID)
+		return
+	}
+
+	detectedCount := 0
+	for _, chain := range chains {
+		if chain.Status != orders.OrderChainStatusActive && chain.Status != orders.OrderChainStatusPartial {
+			continue // Only detect filled positions, not pending/entry_placed orders
+		}
+
+		symbol := chain.Symbol
+		mode := chain.Mode
+		timeframe := chain.Timeframe
+
+		if symbol == "" || mode == "" || timeframe == "" {
+			m.logger.Warn("Skipping chain with missing fields for position auto-detection",
+				"chain_id", chain.ChainID, "symbol", symbol, "mode", mode, "timeframe", timeframe)
+			continue
+		}
+
+		// Set Entry Decision to Step 4 (position_running)
+		realtimeMatcher.SetPatternPositionRunning(symbol, mode, timeframe)
+
+		// Update coin profiler source so it knows this symbol has a position
+		if coinProfiler != nil {
+			coinProfiler.UpdateSymbolToPosition(symbol, timeframe, mode)
+		}
+
+		detectedCount++
+		m.logger.Info("Auto-detected active position on startup",
+			"symbol", symbol, "mode", mode, "timeframe", timeframe,
+			"chain_id", chain.ChainID, "status", string(chain.Status), "user_id", userID)
+	}
+
+	if detectedCount > 0 {
+		m.logger.Info("Position auto-detection complete",
+			"detected_count", detectedCount, "total_open_chains", len(chains), "user_id", userID)
+	}
 }
 
 // StartAutopilot starts the autopilot for a specific user.

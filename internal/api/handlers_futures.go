@@ -923,6 +923,20 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		}
 	}
 
+	// Also build position map with side awareness for hedge mode
+	// In hedge mode, Binance returns separate LONG/SHORT positions per symbol
+	positionsBySymbolSide := make(map[string]float64) // "SYMBOL:SIDE" -> position amount
+	if posErr == nil {
+		for _, pos := range binancePositions {
+			if pos.PositionAmt != 0 {
+				if pos.PositionSide != "" && pos.PositionSide != "BOTH" {
+					key := pos.Symbol + ":" + pos.PositionSide
+					positionsBySymbolSide[key] = pos.PositionAmt
+				}
+			}
+		}
+	}
+
 	// Build map of chain IDs with open orders (for status verification)
 	chainsWithOpenOrders := make(map[string]bool)
 	for _, order := range regularOrders {
@@ -1530,7 +1544,29 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		for chainID, chain := range chains {
 			// Only verify chains that appear active/partial
 			if chain.Status == "active" || chain.Status == "partial" {
-				hasOpenPosition := positionsBySymbol[chain.Symbol] != 0
+				// Grace period: skip recently created/filled chains to avoid race with SL/TP placement
+				if chain.CreatedAt > 0 {
+					createdTime := time.UnixMilli(chain.CreatedAt)
+					if time.Since(createdTime) < 120*time.Second {
+						continue // Too new - don't inline-close
+					}
+				}
+
+				// Grace period: also check DB chain UpdatedAt (catches recently modified chains)
+				if dbChain, exists := dbOrderChainsMap[chainID]; exists && dbChain != nil {
+					if time.Since(dbChain.UpdatedAt) < 120*time.Second {
+						continue // Recently updated in DB - don't inline-close
+					}
+				}
+
+				// Check position with hedge mode side awareness
+				hasOpenPosition := false
+				if chain.PositionSide != "" && chain.PositionSide != "BOTH" {
+					sideKey := chain.Symbol + ":" + chain.PositionSide
+					hasOpenPosition = positionsBySymbolSide[sideKey] != 0
+				} else {
+					hasOpenPosition = positionsBySymbol[chain.Symbol] != 0
+				}
 				hasOpenOrders := chainsWithOpenOrders[chainID]
 
 				// If no position AND no open orders for this chain, it's actually closed
@@ -1919,12 +1955,7 @@ func extractOrderTypeFromClientOrderID(clientOrderID string) string {
 	}
 	parts := strings.Split(clientOrderID, "-")
 	if len(parts) >= 4 {
-		suffix := parts[len(parts)-1]
-		// For replaced orders (e.g., SCALP-20260207-004-SL-R), extract the actual order type
-		if suffix == "R" && len(parts) >= 5 {
-			return parts[len(parts)-2]
-		}
-		return suffix
+		return parts[len(parts)-1]
 	}
 	return ""
 }
@@ -4870,9 +4901,14 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 
 	// Use positions passed from caller (already fetched - avoid redundant REST API call)
 	positionsBySymbol := make(map[string]bool)
+	positionsBySymbolSide := make(map[string]bool) // "SYMBOL:SIDE" -> bool for hedge mode
 	for _, pos := range positions {
 		if pos.PositionAmt != 0 {
 			positionsBySymbol[pos.Symbol] = true
+			if pos.PositionSide != "" && pos.PositionSide != "BOTH" {
+				key := pos.Symbol + ":" + pos.PositionSide
+				positionsBySymbolSide[key] = true
+			}
 		}
 	}
 
@@ -4897,17 +4933,20 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 	for _, chain := range activeChains {
 		entryClientOrderID := chain.ChainID + "-E"
 
-		// Check if entry order is open OR position exists
-		if openClientOrderIDs[entryClientOrderID] || positionsBySymbol[chain.Symbol] {
+		// Check if entry order is open OR position exists (with hedge mode side awareness)
+		hasPosition := positionsBySymbol[chain.Symbol]
+		if chain.Side != "" && chain.Side != "BOTH" {
+			sideKey := chain.Symbol + ":" + chain.Side
+			hasPosition = positionsBySymbolSide[sideKey]
+		}
+		if openClientOrderIDs[entryClientOrderID] || hasPosition {
 			continue // Not stale
 		}
 
-		// Check if chain has active SL or TP algo orders (including replaced orders with -R suffix)
+		// Check if chain has active SL or TP algo orders
 		slClientID := chain.ChainID + "-SL"
 		tpClientID := chain.ChainID + "-TP"
-		slClientIDR := chain.ChainID + "-SL-R"
-		tpClientIDR := chain.ChainID + "-TP-R"
-		if openAlgoClientIDs[slClientID] || openAlgoClientIDs[tpClientID] || openAlgoClientIDs[slClientIDR] || openAlgoClientIDs[tpClientIDR] {
+		if openAlgoClientIDs[slClientID] || openAlgoClientIDs[tpClientID] {
 			// SL or TP algo order is still active - chain is NOT closed
 			continue
 		}
@@ -4916,11 +4955,11 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 		// This prevents race condition with WebSocket SL/TP fill processing
 		if chain.EntryFilledAt != nil {
 			timeSinceFill := time.Since(*chain.EntryFilledAt)
-			if timeSinceFill < 30*time.Second {
+			if timeSinceFill < 120*time.Second {
 				log.Printf("[AUTO-SYNC] Chain %s filled %.0fs ago - skipping reconciliation (grace period)", chain.ChainID, timeSinceFill.Seconds())
 				continue
 			}
-		} else if time.Since(chain.UpdatedAt) < 30*time.Second {
+		} else if time.Since(chain.UpdatedAt) < 120*time.Second {
 			log.Printf("[AUTO-SYNC] Chain %s updated %.0fs ago - skipping reconciliation (grace period)", chain.ChainID, time.Since(chain.UpdatedAt).Seconds())
 			continue
 		}
@@ -5070,8 +5109,8 @@ func (s *Server) handleReplaceChainOrders(c *gin.Context) {
 	}
 
 	// Generate client order IDs using chain ID format
-	slClientOrderID := fmt.Sprintf("%s-SL-R", chainID)
-	tpClientOrderID := fmt.Sprintf("%s-TP-R", chainID)
+	slClientOrderID := fmt.Sprintf("%s-SL", chainID)
+	tpClientOrderID := fmt.Sprintf("%s-TP", chainID)
 
 	var tpResp, slResp *binance.AlgoOrderResponse
 	var tpError, slError string

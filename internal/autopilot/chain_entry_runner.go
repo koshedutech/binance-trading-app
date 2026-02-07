@@ -985,7 +985,19 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			log.Printf("[CHAIN-ENTRY] Recorded entry filled: chainID=%s, price=%.6f, qty=%.6f",
 				chainID, filledPrice, filledQty)
 
-			// Broadcast POSITION_CREATED event to UI for instant update
+			// Notify that fill is completed FIRST - this triggers:
+			// 1. SetPatternPositionRunning (Step 4 in Entry Decision UI)
+			// 2. UpdateSymbolToPosition (coin profiler source update)
+			// Must happen BEFORE POSITION_CREATED broadcast because the frontend
+			// subscribes to POSITION_CREATED and refetches data. If we broadcast first,
+			// the refetched data still shows "strategy" source (race condition).
+			if r.onFillCompleted != nil {
+				r.onFillCompleted(symbol, modeStr, state.Timeframe)
+			}
+
+			// THEN broadcast POSITION_CREATED event to UI for instant update
+			// At this point, pattern state and coin profiler are already updated,
+			// so when frontend refetches it gets the correct data.
 			events.BroadcastPositionCreated(r.userID, map[string]interface{}{
 				"chain_id":       chainID,
 				"symbol":         symbol,
@@ -1002,11 +1014,6 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			})
 			log.Printf("[CHAIN-ENTRY] Broadcast POSITION_CREATED: chainID=%s, symbol=%s, side=%s",
 				chainID, symbol, direction)
-
-			// Notify that fill is completed - clear pattern so it stays cleared
-			if r.onFillCompleted != nil {
-				r.onFillCompleted(symbol, modeStr, state.Timeframe)
-			}
 		}
 	}
 
@@ -1631,6 +1638,9 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Failed to execute entry for %s: %v", symbol, err)
 		r.mu.Lock()
 		r.stats.FailedEntries++
+		// Set cooldown to prevent infinite retry loop from tick-level breakout re-detection
+		r.entryCooldowns[symbol] = time.Now().Add(r.config.EntryCooldown)
+		log.Printf("[CHAIN-ENTRY-IMMEDIATE] Set cooldown for %s until %v", symbol, r.entryCooldowns[symbol])
 		failedCallback := r.onEntryFailed
 		r.mu.Unlock()
 		// Reset pattern to watching so new entries can be detected

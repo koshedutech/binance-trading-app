@@ -632,25 +632,12 @@ func (pc *PositionController) executeEfficiencyExit(signal exitdecision.ExitSign
 // PROTECTION HEAL
 // ============================================================================
 
-// runProtectionHealLoop ensures SL/TP orders exist for all chain positions.
+// runProtectionHealLoop is disabled - WebSocket-driven protection watchdog
+// in futures_controller.go handles missing SL/TP detection via order stream events.
+// The heal functions (healAllPositions, HealNow) remain available for one-time manual use.
 func (pc *PositionController) runProtectionHealLoop() {
-	pc.log("Protection heal loop started")
-
-	ticker := time.NewTicker(pc.config.HealCheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-pc.ctx.Done():
-			pc.log("Protection heal loop stopped (context cancelled)")
-			return
-		case <-pc.stopChan:
-			pc.log("Protection heal loop stopped (stop signal)")
-			return
-		case <-ticker.C:
-			pc.healAllPositions()
-		}
-	}
+	pc.log("Protection heal loop disabled - using WebSocket-driven protection watchdog")
+	return
 }
 
 // healAllPositions checks and fixes missing SL/TP orders for all chain positions.

@@ -277,11 +277,32 @@ export default function ChainCard({
           {chain.status === 'completed' && (() => {
             const pnl = chain.positionState?.realizedPnl ?? chain.pnl ?? 0;
             if (pnl === 0 && !chain.positionState?.realizedPnl && !chain.pnl) return null;
+            const entryPrice = chain.positionState?.entryPrice || chain.entryOrder?.avgPrice || chain.entryOrder?.price || 0;
+            const entryQty = chain.positionState?.entryQuantity || chain.entryOrder?.executedQty || chain.entryOrder?.origQty || 0;
+            const entryValue = entryPrice * entryQty;
+            const pnlPercent = entryValue > 0 ? (pnl / entryValue) * 100 : 0;
             return (
               <span className={`font-mono font-medium text-sm ${
                 pnl >= 0 ? 'text-green-400' : 'text-red-400'
               }`}>
-                {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} <span className="text-xs">({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)</span>
+              </span>
+            );
+          })()}
+
+          {/* Live unrealized PNL for active chains */}
+          {chain.status === 'active' && chain.positionState && (() => {
+            const unrealizedPnl = chain.positionAnalytics?.unrealized_pnl ?? 0;
+            if (unrealizedPnl === 0 && !chain.positionAnalytics?.unrealized_pnl) return null;
+            const entryPrice = chain.positionState?.entryPrice || chain.entryOrder?.avgPrice || chain.entryOrder?.price || 0;
+            const entryQty = chain.positionState?.entryQuantity || chain.entryOrder?.executedQty || chain.entryOrder?.origQty || 0;
+            const entryValue = entryPrice * entryQty;
+            const pnlPercent = entryValue > 0 ? (unrealizedPnl / entryValue) * 100 : 0;
+            return (
+              <span className={`font-mono font-medium text-sm ${
+                unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'
+              }`}>
+                {unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(4)} <span className="text-xs">({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)</span>
               </span>
             );
           })()}

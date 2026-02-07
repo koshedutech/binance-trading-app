@@ -1939,11 +1939,13 @@ func (fc *FuturesController) syncWithActualPositions() {
 		positionValue := (absAmt * pos.EntryPrice) / float64(leverage)
 		actualAllocated += positionValue
 		activeCount++
-		actualPositionSymbols[pos.Symbol] = true
+		// Use consistent key format for hedge mode support
+		posKey := positionMapKey(pos.Symbol, pos.PositionSide)
+		actualPositionSymbols[posKey] = true
 
 		// Sync activePositions map - add or update position tracking
 		// This ensures autopilot knows about existing positions after restart
-		if _, exists := fc.activePositions[pos.Symbol]; !exists {
+		if _, exists := fc.activePositions[posKey]; !exists {
 			// Determine side based on position amount
 			side := "LONG"
 			if pos.PositionAmt < 0 {
@@ -1974,7 +1976,7 @@ func (fc *FuturesController) syncWithActualPositions() {
 				tp2 = pos.EntryPrice * (1 - fc.config.TakeProfitPercent2/100)
 			}
 
-			fc.activePositions[pos.Symbol] = &FuturesAutopilotPosition{
+			fc.activePositions[posKey] = &FuturesAutopilotPosition{
 				Symbol:       pos.Symbol,
 				Side:         side,
 				EntryPrice:   pos.EntryPrice,
@@ -2004,32 +2006,33 @@ func (fc *FuturesController) syncWithActualPositions() {
 			})
 		} else {
 			// Update existing tracked position with actual values
-			fc.activePositions[pos.Symbol].Quantity = absAmt
-			fc.activePositions[pos.Symbol].EntryPrice = pos.EntryPrice
+			fc.activePositions[posKey].Quantity = absAmt
+			fc.activePositions[posKey].EntryPrice = pos.EntryPrice
 		}
 	}
 
 	// Remove positions from activePositions that no longer exist on Binance
 	// CRITICAL: Also cancel any orphaned algo orders to prevent them from opening new positions
-	for symbol := range fc.activePositions {
-		if !actualPositionSymbols[symbol] {
-			pos := fc.activePositions[symbol]
+	for posKey := range fc.activePositions {
+		if !actualPositionSymbols[posKey] {
+			pos := fc.activePositions[posKey]
+			actualSymbol := pos.Symbol // Use actual symbol for API calls, not the map key
 			fc.logger.Info("Removing closed position from activePositions",
-				"symbol", symbol)
+				"key", posKey, "symbol", actualSymbol)
 
 			// Cancel all algo orders for this symbol to prevent orphan TP/SL from opening new positions
-			if err := fc.futuresClient.CancelAllAlgoOrders(symbol); err != nil {
+			if err := fc.futuresClient.CancelAllAlgoOrders(actualSymbol); err != nil {
 				fc.logger.Warn("Failed to cancel orphaned algo orders during sync",
-					"symbol", symbol,
+					"symbol", actualSymbol,
 					"error", err.Error())
 			} else {
-				fc.logger.Info("Cancelled orphaned algo orders for closed position", "symbol", symbol)
+				fc.logger.Info("Cancelled orphaned algo orders for closed position", "symbol", actualSymbol)
 			}
 
 			// Record trade result to circuit breaker based on TP/SL levels
 			// Since position was closed externally (Binance TP/SL), we need to determine outcome
 			if fc.circuitBreaker != nil && pos != nil {
-				currentPrice, err := fc.futuresClient.GetFuturesCurrentPrice(symbol)
+				currentPrice, err := fc.futuresClient.GetFuturesCurrentPrice(actualSymbol)
 				if err == nil && currentPrice > 0 {
 					var pnlPercent float64
 					if pos.EntryPrice <= 0 {
@@ -2043,7 +2046,7 @@ func (fc *FuturesController) syncWithActualPositions() {
 					// Record to circuit breaker - this will reset consecutive losses if profitable
 					fc.circuitBreaker.RecordTrade(pnlPercent)
 					fc.logger.Info("Recorded externally closed position to circuit breaker",
-						"symbol", symbol,
+						"symbol", actualSymbol,
 						"side", pos.Side,
 						"entry_price", pos.EntryPrice,
 						"current_price", currentPrice,
@@ -2051,7 +2054,7 @@ func (fc *FuturesController) syncWithActualPositions() {
 				}
 			}
 
-			delete(fc.activePositions, symbol)
+			delete(fc.activePositions, posKey)
 		}
 	}
 
@@ -2130,8 +2133,9 @@ func (fc *FuturesController) runLoop() {
 	// This loop only maintains position sync for compatibility.
 	fc.logger.Info("FuturesController loop started (trading disabled - use Ginie instead)")
 
-	// Sync positions every minute to prevent allocation drift
-	syncTicker := time.NewTicker(60 * time.Second)
+	// Safety reconciliation every 5 minutes - primary position tracking is via WebSocket
+	// (HandleStreamPositionUpdate). This loop is only a safety net to catch any missed events.
+	syncTicker := time.NewTicker(300 * time.Second)
 	defer syncTicker.Stop()
 
 	// Reset daily counters at midnight
@@ -2142,6 +2146,7 @@ func (fc *FuturesController) runLoop() {
 		case <-fc.stopChan:
 			return
 		case <-syncTicker.C:
+			fc.logger.Info("Running safety reconciliation (5-min interval) - primary tracking via WebSocket")
 			fc.syncWithActualPositions()
 		// NOTE: evaluateMarket() is intentionally disabled.
 		// Old AI trading has been moved to SpotController for Spot trading.
@@ -2226,7 +2231,7 @@ func (fc *FuturesController) evaluateMarket() {
 func (fc *FuturesController) evaluateSymbol(symbol string) {
 	// Check if we already have a position
 	fc.mu.RLock()
-	pos, hasPosition := fc.activePositions[symbol]
+	pos, hasPosition := fc.lookupPositionBySymbol(symbol)
 	fc.mu.RUnlock()
 
 	if hasPosition {
@@ -2847,7 +2852,7 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 			sl = currentPrice * (1 + slPercent/100)
 		}
 
-		fc.activePositions[symbol] = &FuturesAutopilotPosition{
+		fc.activePositions[positionMapKey(symbol, tradeSide)] = &FuturesAutopilotPosition{
 			Symbol:       symbol,
 			Side:         tradeSide,
 			EntryPrice:   currentPrice,
@@ -3005,7 +3010,7 @@ func (fc *FuturesController) executeDecision(symbol string, decision *FuturesAut
 		sl = currentPrice * (1 + slPercent/100)
 	}
 
-	fc.activePositions[symbol] = &FuturesAutopilotPosition{
+	fc.activePositions[positionMapKey(symbol, tradeSide)] = &FuturesAutopilotPosition{
 		Symbol:       symbol,
 		Side:         tradeSide,
 		EntryPrice:   currentPrice,
@@ -5103,6 +5108,32 @@ func (fc *FuturesController) formatNewsItems(news []sentiment.NewsItem) []map[st
 
 // HandleStreamPositionUpdate processes real-time position updates from User Data Stream
 // This avoids REST API polling for position changes
+// positionMapKey returns a consistent key for the activePositions map.
+// In hedge mode (LONG/SHORT), uses "SYMBOL_SIDE" to avoid key collisions.
+// In one-way mode (BOTH or empty), uses just "SYMBOL".
+func positionMapKey(symbol, positionSide string) string {
+	if positionSide == "LONG" || positionSide == "SHORT" {
+		return symbol + "_" + positionSide
+	}
+	return symbol
+}
+
+// lookupPositionBySymbol finds a position in activePositions by symbol,
+// checking all possible key formats (plain symbol, symbol_LONG, symbol_SHORT).
+// Caller must hold fc.mu lock.
+func (fc *FuturesController) lookupPositionBySymbol(symbol string) (*FuturesAutopilotPosition, bool) {
+	if pos, ok := fc.activePositions[symbol]; ok {
+		return pos, true
+	}
+	if pos, ok := fc.activePositions[symbol+"_LONG"]; ok {
+		return pos, true
+	}
+	if pos, ok := fc.activePositions[symbol+"_SHORT"]; ok {
+		return pos, true
+	}
+	return nil, false
+}
+
 func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.PositionUpdateEvent) {
 	if update == nil {
 		return
@@ -5112,7 +5143,7 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 	defer fc.mu.Unlock()
 
 	symbol := update.Symbol
-	positionKey := symbol
+	positionKey := positionMapKey(symbol, update.PositionSide)
 
 	// Position is closed when amount is 0
 	if update.PositionAmt == 0 {
@@ -5135,6 +5166,7 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 						"symbol":         symbol,
 						"position_amt":   0.0,
 						"side":           existingPos.Side,
+						"position_side":  update.PositionSide,
 						"entry_price":    existingPos.EntryPrice,
 						"unrealized_pnl": 0.0,
 						"status":         "CLOSED",
@@ -5198,6 +5230,7 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 				"symbol":         symbol,
 				"position_amt":   positionAmt,
 				"side":           side,
+				"position_side":  update.PositionSide,
 				"entry_price":    update.EntryPrice,
 				"unrealized_pnl": update.UnrealizedPnL,
 				"leverage":       fc.config.DefaultLeverage,
@@ -5282,7 +5315,7 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 					"order_status", order.OrderStatus,
 					"last_filled_qty", order.LastFilledQty)
 				fc.ginieAutopilot.HandleSLTPOrderFilled(order.Symbol, orderType, order.OrderId,
-				order.LastFilledPrice, order.RealizedProfit, order.Commission, order.OrderTradeTime)
+				order.LastFilledPrice, order.RealizedProfit, order.Commission, order.OrderTradeTime, order.PositionSide)
 			}
 		}
 
@@ -5373,8 +5406,8 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			chainID := protectionParseChainID(clientOrderID)
 			if chainID != "" {
 				orderSuffix := protectionExtractSuffix(clientOrderID, chainID)
-				// Check if this is an SL or TP order (including replaced variants)
-				if orderSuffix == "SL" || orderSuffix == "TP" || orderSuffix == "SL-R" || orderSuffix == "TP-R" {
+				// Check if this is an SL or TP order
+				if orderSuffix == "SL" || orderSuffix == "TP" {
 					orderType := "SL"
 					if strings.HasPrefix(orderSuffix, "TP") {
 						orderType = "TP"
@@ -5767,7 +5800,7 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 }
 
 // protectionParseChainID extracts the chain ID from a client order ID.
-// Client order ID format: "MODE-DATE-SEQ-SUFFIX" where SUFFIX is E, SL, TP, SL-R, TP-R
+// Client order ID format: "MODE-DATE-SEQ-SUFFIX" where SUFFIX is E, SL, TP
 // Example: "SCA-06JAN-00001-SL" -> "SCA-06JAN-00001"
 func protectionParseChainID(clientOrderID string) string {
 	if clientOrderID == "" {
@@ -5782,7 +5815,7 @@ func protectionParseChainID(clientOrderID string) string {
 }
 
 // protectionExtractSuffix extracts the order type suffix from a client order ID.
-// Returns the suffix after the chain ID: "SL", "TP", "SL-R", "TP-R", "E", etc.
+// Returns the suffix after the chain ID: "SL", "TP", "E", etc.
 func protectionExtractSuffix(clientOrderID, chainID string) string {
 	if chainID == "" || clientOrderID == "" {
 		return ""
@@ -5869,8 +5902,8 @@ func (fc *FuturesController) handleProtectionOrderCancelled(chainID, orderType, 
 	for _, ao := range algoOrders {
 		if strings.HasPrefix(ao.ClientAlgoId, chainID) {
 			suffix := strings.TrimPrefix(ao.ClientAlgoId, chainID+"-")
-			if (orderType == "SL" && (suffix == "SL" || suffix == "SL-R")) ||
-				(orderType == "TP" && (suffix == "TP" || suffix == "TP-R")) {
+			if (orderType == "SL" && suffix == "SL") ||
+				(orderType == "TP" && suffix == "TP") {
 				hasOrder = true
 				break
 			}
@@ -5934,7 +5967,7 @@ func (fc *FuturesController) handleProtectionOrderCancelled(chainID, orderType, 
 		return
 	}
 
-	clientOrderIDStr := fmt.Sprintf("%s-%s-R", chainID, orderType)
+	clientOrderIDStr := fmt.Sprintf("%s-%s", chainID, orderType)
 
 	var algoType binance.FuturesOrderType
 	if orderType == "SL" {

@@ -643,11 +643,17 @@ export default function TradeLifecycleTab({
 
         for (const pos of positions) {
           const symbol = pos.symbol;
-          const posAmt = parseFloat(pos.position_amount || pos.positionAmt || '0');
+          const posAmt = parseFloat(pos.position_amount || pos.position_amt || pos.positionAmt || '0');
+          const posSide = (pos.position_side || pos.positionSide || '').toUpperCase();
 
           // Find chains for this symbol
           for (let i = 0; i < updated.length; i++) {
             if (updated[i].symbol === symbol && updated[i].positionState) {
+              // In hedge mode, skip if position side doesn't match chain side
+              const chainSide = (updated[i].positionSide || '').toUpperCase();
+              if (posSide && chainSide && posSide !== chainSide) {
+                continue;
+              }
               hasChanges = true;
 
               // If position amount is 0, mark as closed
@@ -867,9 +873,9 @@ export default function TradeLifecycleTab({
       if (isActiveA && !isActiveB) return -1;
       if (!isActiveA && isActiveB) return 1;
 
-      // Within same group, sort by most recent first
-      const timeA = isActiveA ? (a.createdAt || 0) : (a.updatedAt || a.createdAt || 0);
-      const timeB = isActiveB ? (b.createdAt || 0) : (b.updatedAt || b.createdAt || 0);
+      // Within same group, sort by creation date (stable - doesn't change on updates)
+      const timeA = a.createdAt || 0;
+      const timeB = b.createdAt || 0;
       return timeB - timeA;
     });
   }, [chains, filters]);

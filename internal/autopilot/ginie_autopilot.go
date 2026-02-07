@@ -6749,16 +6749,16 @@ func (ga *GinieAutopilot) runPositionMonitor() {
 			}
 			ga.monitorAllPositions()
 
-			// Reconcile positions with Binance every 30 seconds (6 scans * 5 seconds)
-			// This catches positions closed manually or modified externally
-			if scanCount%6 == 0 {
-				go ga.reconcilePositions()
-			}
+			// Position reconciliation disabled - WebSocket HandleStreamPositionUpdate provides real-time position tracking
+			// Keeping stub for reference in case reconciliation is needed in the future
+			// if scanCount%60 == 0 {
+			// 	go ga.reconcilePositions()
+			// }
 
-			// Clean up orphan orders every 60 seconds (12 scans * 5 seconds)
-			if scanCount%12 == 0 {
-				go ga.cleanupOrphanAlgoOrders()
-			}
+			// Orphan order cleanup disabled - WebSocket ORDER_TRADE_UPDATE + protection watchdog handle SL/TP lifecycle
+			// if scanCount%60 == 0 {
+			// 	go ga.cleanupOrphanAlgoOrders()
+			// }
 		}
 	}
 }
@@ -9146,6 +9146,7 @@ func (ga *GinieAutopilot) broadcastPositionStatus() {
 		positions = append(positions, map[string]interface{}{
 			"symbol":           sym,
 			"side":             pos.Side,
+			"position_side":    pos.Side,
 			"mode":             pos.Mode,
 			"entry_price":      pos.EntryPrice,
 			"original_qty":     pos.OriginalQty,
@@ -12632,23 +12633,14 @@ func (ga *GinieAutopilot) emergencyClosePosition(pos *GiniePosition, reason stri
 	return ga.closePositionAtMarket(pos, "emergency_close")
 }
 
-// runProtectionGuardian runs a continuous loop that monitors and heals position protection
-// This is the core of the bulletproof SL/TP system
+// runProtectionGuardian is disabled - WebSocket-driven protection watchdog in futures_controller.go
+// handles CANCELED/EXPIRED SL/TP events in real-time, making this 5s polling loop redundant.
+// The verify functions (checkAllPositionsProtection, checkSinglePositionProtection, etc.) are
+// preserved for potential one-time startup checks.
 func (ga *GinieAutopilot) runProtectionGuardian() {
-	ticker := time.NewTicker(5 * time.Second) // Check every 5 seconds
-	defer ticker.Stop()
-
-	log.Printf("[PROTECTION-GUARDIAN] Starting position protection guardian (5s interval)")
-
-	for {
-		select {
-		case <-ga.stopChan:
-			log.Printf("[PROTECTION-GUARDIAN] Stopping protection guardian")
-			return
-		case <-ticker.C:
-			ga.checkAllPositionsProtection()
-		}
-	}
+	defer ga.wg.Done()
+	ga.logger.Info("[PROTECTION-GUARDIAN] Protection Guardian polling disabled - using WebSocket-driven protection watchdog in futures_controller.go")
+	return
 }
 
 // checkAllPositionsProtection verifies protection for all active positions
@@ -13732,7 +13724,7 @@ func (ga *GinieAutopilot) periodicOrphanOrderCleanup() {
 // This is called from the WebSocket stream when an order fills to cancel the counterpart order
 // orderType should be "STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", or "TAKE_PROFIT"
 func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string, orderID int64,
-	filledPrice float64, realizedProfit float64, commission float64, binanceTimestamp int64) {
+	filledPrice float64, realizedProfit float64, commission float64, binanceTimestamp int64, positionSide string) {
 	ga.mu.Lock()
 	defer ga.mu.Unlock()
 
@@ -13747,7 +13739,8 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 		"filled_price", filledPrice,
 		"realized_profit", realizedProfit,
 		"is_sl_fill", isSLFill,
-		"is_tp_fill", isTPFill)
+		"is_tp_fill", isTPFill,
+		"position_side", positionSide)
 
 	// CRITICAL FIX: Always cancel ALL algo orders for this symbol when SL or TP fills
 	// This handles both GinieAutopilot-tracked positions AND Chain Entry Runner positions
@@ -13778,10 +13771,16 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 				"symbol", symbol,
 				"error", err.Error())
 		} else {
-			// Find matching chain by symbol
+			// Find matching chain by symbol (and position side in hedge mode)
 			var matchedChainID string
 			for _, chain := range activeChains {
 				if chain.Symbol == symbol {
+					// In hedge mode, also match position side to avoid closing wrong chain
+					if positionSide != "" && positionSide != "BOTH" && chain.Side != "" {
+						if chain.Side != positionSide {
+							continue
+						}
+					}
 					matchedChainID = chain.ChainID
 					break
 				}
@@ -13847,7 +13846,78 @@ func (ga *GinieAutopilot) HandleSLTPOrderFilled(symbol string, orderType string,
 				}
 			} else {
 				ga.logger.Debug("No active chain found for SL/TP fill recording",
-					"symbol", symbol, "order_type", orderType)
+					"symbol", symbol, "order_type", orderType, "position_side", positionSide)
+
+				// RACE CONDITION RECOVERY: Reconciliation may have already closed this chain
+				// before the WebSocket SL/TP fill event was processed. If so, update the PnL
+				// on the already-closed chain so data isn't lost.
+				if ga.repo != nil {
+					closedChains, dbErr := ga.repo.GetDB().GetOrderChainsWithFilter(ctx, database.OrderChainFilter{
+						UserID: ga.userID,
+						Status: "closed",
+						Symbol: symbol,
+						Limit:  5,
+					})
+					if dbErr == nil {
+						for _, closedChain := range closedChains {
+							if closedChain == nil {
+								continue
+							}
+							// Only recover chains that were closed by reconciliation (no real PnL data)
+							if closedChain.CloseReason == nil || *closedChain.CloseReason != "CLOSED_EXTERNALLY" {
+								continue
+							}
+							// In hedge mode, match position side
+							if positionSide != "" && positionSide != "BOTH" && closedChain.Side != "" {
+								if closedChain.Side != positionSide {
+									continue
+								}
+							}
+							// Only recover chains closed recently (within last 5 minutes)
+							if closedChain.ClosedAt == nil || time.Since(*closedChain.ClosedAt) > 5*time.Minute {
+								continue
+							}
+
+							ga.logger.Info("RACE CONDITION RECOVERY: Updating PnL on chain closed by reconciliation",
+								"chain_id", closedChain.ChainID, "symbol", symbol,
+								"pnl", realizedProfit, "close_price", filledPrice)
+
+							fillTime := time.UnixMilli(binanceTimestamp)
+							closePriceVal := filledPrice
+							var recoveryCloseReason string
+							if isSLFill {
+								recoveryCloseReason = string(orders.CloseReasonSLHit)
+								_ = ga.chainEventWriter.RecordSLFilled(ctx, closedChain.ChainID, orders.ChainSLFilledEvent{
+									FilledPrice: filledPrice, PnL: realizedProfit,
+									Fees: commission, BinanceTimestamp: binanceTimestamp,
+								})
+								_ = ga.chainEventWriter.GetDB().UpdateOrderChainSLFilled(ctx, closedChain.ChainID, filledPrice, fillTime)
+							} else {
+								recoveryCloseReason = string(orders.CloseReasonTPHit)
+								_ = ga.chainEventWriter.RecordTPFilled(ctx, closedChain.ChainID, orders.ChainTPFilledEvent{
+									FilledPrice: filledPrice, PnL: realizedProfit,
+									Fees: commission, BinanceTimestamp: binanceTimestamp,
+								})
+								_ = ga.chainEventWriter.GetDB().UpdateOrderChainTPFilled(ctx, closedChain.ChainID, filledPrice, fillTime)
+							}
+
+							// Update close reason and PnL on the already-closed chain
+							_ = ga.repo.GetDB().CloseOrderChain(ctx, closedChain.ChainID, recoveryCloseReason, realizedProfit, commission, &closePriceVal)
+
+							// Broadcast corrected data to frontend
+							if ga.onOrderUpdate != nil && ga.userID != "" {
+								ga.onOrderUpdate(ga.userID, map[string]interface{}{
+									"type":         "CHAIN_CLOSED",
+									"chain_id":     closedChain.ChainID,
+									"symbol":       symbol,
+									"close_reason": recoveryCloseReason,
+									"realized_pnl": realizedProfit,
+								})
+							}
+							break
+						}
+					}
+				}
 			}
 		}
 	}
@@ -20484,32 +20554,13 @@ func (ga *GinieAutopilot) GetTradeHistoryCount() int {
 
 // === REVERSAL LIMIT ORDER MONITORING ===
 
-// monitorPendingLimitOrders monitors pending LIMIT orders from reversal entries
-// Orders that aren't filled within 120 seconds are cancelled
+// monitorPendingLimitOrders is disabled - WebSocket ORDER_TRADE_UPDATE events already
+// notify of fill/cancel events in real-time, making this 5s polling loop redundant.
+// The checkPendingLimitOrders() function is preserved for potential one-time checks.
 func (ga *GinieAutopilot) monitorPendingLimitOrders() {
 	defer ga.wg.Done()
-	defer func() {
-		if r := recover(); r != nil {
-			ga.logger.Error("PANIC in pending LIMIT order monitor - restarting", "panic", r)
-			log.Printf("[GINIE-PANIC] Pending LIMIT order monitor panic: %v", r)
-			time.Sleep(2 * time.Second)
-			ga.wg.Add(1)
-			go ga.monitorPendingLimitOrders()
-		}
-	}()
-
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ga.stopChan:
-			ga.logger.Info("Pending LIMIT order monitor stopping")
-			return
-		case <-ticker.C:
-			ga.checkPendingLimitOrders()
-		}
-	}
+	ga.logger.Info("[PENDING-LIMIT-MONITOR] Pending LIMIT order monitor disabled - using WebSocket ORDER_TRADE_UPDATE events")
+	return
 }
 
 // pendingOrderSnapshot holds a snapshot of a pending order for processing outside the lock

@@ -371,6 +371,61 @@ func (r *RealtimePatternMatcher) RestorePatternStates() {
 
 	log.Printf("[REALTIME-PATTERN] Restored %d/%d pattern states from DB for user %s",
 		restored, len(states), userID)
+
+	// After restoring, immediately broadcast all restored pattern states to UI
+	// This ensures Step 2 data is visible without waiting for next candle close
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID = r.userID
+	r.mu.RUnlock()
+
+	if callback != nil && restored > 0 {
+		for _, ps := range states {
+			progress := r.patternMatcher.GetPattern(ps.Symbol, ps.Mode, ps.Timeframe)
+			if progress == nil {
+				continue
+			}
+			update := PatternUpdate{
+				UserID:      userID,
+				Symbol:      ps.Symbol,
+				Timeframe:   ps.Timeframe,
+				Mode:        ps.Mode,
+				Strategy:    ps.Strategy,
+				SubStrategy: ps.SubStrategy,
+				CurrentStep: progress.CurrentStep,
+				TotalSteps:  progress.TotalSteps,
+				Status:      progress.Status,
+				StepDetails: progress.StepDetails,
+				LookingFor:  r.getLookingForDirection(),
+				UpdatedAt:   time.Now(),
+			}
+			// Include reference candle and entry levels if available
+			state := r.getPatternState(ps.Symbol, ps.Mode, ps.Timeframe)
+			if state != nil {
+				update.Direction = state.Direction
+				if state.ReferenceCandle != nil {
+					volumeMultiplier := 0.0
+					if state.AverageVolumeAtSpike > 0 {
+						volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+					}
+					update.ReferenceCandle = &ReferenceCandle{
+						OpenTime:         state.ReferenceCandle.OpenTime,
+						CloseTime:        state.ReferenceCandle.Time,
+						Open:             state.ReferenceCandle.Open,
+						High:             state.ReferenceCandle.High,
+						Low:              state.ReferenceCandle.Low,
+						Close:            state.ReferenceCandle.Close,
+						Volume:           state.ReferenceCandle.Volume,
+						VolumeMultiplier: volumeMultiplier,
+					}
+					update.EntryLevels = r.calculateEntryLevels(state, state.ReferenceCandle.Close)
+				}
+				r.addTimingFields(&update, state)
+			}
+			callback(update)
+		}
+		log.Printf("[REALTIME-PATTERN] Broadcast %d restored pattern states to UI", restored)
+	}
 }
 
 // restoreSinglePattern restores a single pattern state from a persisted record.
@@ -412,6 +467,40 @@ func (r *RealtimePatternMatcher) restoreSinglePattern(ps PersistedPatternState) 
 	// Restore ReferenceDetectedAt from persisted consolidation data
 	if consolidation.ReferenceDetectedAt != nil {
 		state.ReferenceDetectedAt = *consolidation.ReferenceDetectedAt
+	}
+
+	// Restore pattern data (breakout candle, entry price, filling info)
+	if len(ps.PatternData) > 0 {
+		var patternData map[string]interface{}
+		if err := json.Unmarshal(ps.PatternData, &patternData); err == nil {
+			if breakoutJSON, ok := patternData["breakout_candle"]; ok {
+				breakoutBytes, _ := json.Marshal(breakoutJSON)
+				var candle Candle
+				if err := json.Unmarshal(breakoutBytes, &candle); err == nil {
+					state.BreakoutCandle = &candle
+				}
+			}
+			if v, ok := patternData["entry_price"].(float64); ok {
+				state.EntryPrice = v
+			}
+			if v, ok := patternData["breakout_volume_multiplier"].(float64); ok {
+				state.BreakoutVolumeMultiplier = v
+			}
+			if readyAtStr, ok := patternData["ready_at"].(string); ok {
+				if t, err := time.Parse(time.RFC3339Nano, readyAtStr); err == nil {
+					state.ReadyAt = t
+				}
+			}
+			if v, ok := patternData["filling_order_price"].(float64); ok {
+				state.FillingOrderPrice = v
+			}
+			if v, ok := patternData["filling_order_quantity_usd"].(float64); ok {
+				state.FillingOrderQuantityUSD = v
+			}
+			if v, ok := patternData["filling_timeout_total"].(float64); ok {
+				state.FillingTimeoutTotal = int(v)
+			}
+		}
 	}
 
 	// Reconstruct PatternProgress
@@ -615,6 +704,43 @@ func (r *RealtimePatternMatcher) buildPersistedState(
 		return nil
 	}
 	ps.ConsolidationData = data
+
+	// Serialize entry levels (computed from current state)
+	if state.ReferenceCandle != nil {
+		entryLevels := r.calculateEntryLevels(state, state.ReferenceCandle.Close)
+		if entryLevels != nil {
+			entryLevelsJSON, err := json.Marshal(entryLevels)
+			if err == nil {
+				ps.EntryLevels = entryLevelsJSON
+			}
+		}
+	}
+
+	// Serialize pattern data (breakout candle, entry price, filling info)
+	patternExtra := map[string]interface{}{}
+	if state.BreakoutCandle != nil {
+		patternExtra["breakout_candle"] = state.BreakoutCandle
+	}
+	if state.EntryPrice > 0 {
+		patternExtra["entry_price"] = state.EntryPrice
+	}
+	if state.BreakoutVolumeMultiplier > 0 {
+		patternExtra["breakout_volume_multiplier"] = state.BreakoutVolumeMultiplier
+	}
+	if !state.ReadyAt.IsZero() {
+		patternExtra["ready_at"] = state.ReadyAt
+	}
+	if state.FillingOrderPrice > 0 {
+		patternExtra["filling_order_price"] = state.FillingOrderPrice
+		patternExtra["filling_order_quantity_usd"] = state.FillingOrderQuantityUSD
+		patternExtra["filling_timeout_total"] = state.FillingTimeoutTotal
+	}
+	if len(patternExtra) > 0 {
+		patternDataJSON, err := json.Marshal(patternExtra)
+		if err == nil {
+			ps.PatternData = patternDataJSON
+		}
+	}
 
 	return ps
 }

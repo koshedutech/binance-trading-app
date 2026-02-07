@@ -83,32 +83,39 @@ export default function CoinProfilerCard() {
   // Subscribe to position lifecycle WebSocket events
   const handlePositionCreated = useCallback((event: any) => {
     setWsPositionAdjustment(prev => prev + 1);
-    // Optimistically update source from event data
-    const data = event?.data;
+    // POSITION_CREATED event nests data under event.data.position (not event.data directly)
+    const data = event?.data?.position || event?.data;
     if (data?.symbol) {
       // Check if coin already exists as "strategy" source -> becomes "both"
       const existingCoin = coins.find(c => c.symbol === data.symbol);
       const newSource = existingCoin?.source === 'strategy' ? 'both' : 'position';
       updateCoinSource(data.symbol, newSource, data.timeframe);
     }
-    // Also refetch for full data sync
-    refetchCoins();
-    refetchReqs();
+    // Delay refetch slightly to ensure backend DB has committed all updates
+    // (chain status ACTIVE, coin profiler source updated)
+    setTimeout(() => {
+      refetchCoins();
+      refetchReqs();
+    }, 500);
   }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
 
   const handleChainClosed = useCallback((event: any) => {
     setWsPositionAdjustment(prev => Math.max(0, prev - 1));
-    // Optimistically update source: if coin was "both", revert to "strategy"; if "position", remove handled by refetch
+    // CHAIN_CLOSED event puts data directly in event.data (not nested)
     const data = event?.data;
     if (data?.symbol) {
       const existingCoin = coins.find(c => c.symbol === data.symbol);
       if (existingCoin?.source === 'both') {
         updateCoinSource(data.symbol, 'strategy');
+      } else if (existingCoin?.source === 'position') {
+        updateCoinSource(data.symbol, 'strategy');
       }
     }
-    // Refetch coin data for full sync
-    refetchCoins();
-    refetchReqs();
+    // Delay refetch slightly to ensure backend has completed all updates
+    setTimeout(() => {
+      refetchCoins();
+      refetchReqs();
+    }, 500);
   }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
 
   // Handle POSITION_UPDATE with status "CLOSED" (catches positions closing without a chain)

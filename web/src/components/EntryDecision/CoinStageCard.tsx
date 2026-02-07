@@ -13,6 +13,7 @@ import {
   Activity,
   DollarSign,
   Zap,
+  Loader2,
 } from 'lucide-react';
 import PatternProgress from './PatternProgress';
 import ReferenceCandleContext from './ReferenceCandleContext';
@@ -682,8 +683,82 @@ export default function CoinStageCard({
           />
         )}
 
-        {/* Step 3: Order Filling Section - Shows when order is placed waiting for fill */}
-        {!compact && isStepThree && (
+        {/* Step 3a: Breakout Detected - Order being placed */}
+        {!compact && isReady && (
+          <div className="mt-3 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-yellow-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-yellow-500"></span>
+              </span>
+              <span className="text-yellow-400 font-bold text-xs">BREAKOUT DETECTED</span>
+              {update.breakout_detected_at && (
+                <span className="text-[10px] text-gray-500 ml-auto flex items-center gap-1">
+                  <Clock className="w-2.5 h-2.5" />
+                  {new Date(update.breakout_detected_at).toISOString().slice(11, 19)} UTC
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 text-[10px] text-gray-400">
+              <Loader2 className="w-3 h-3 animate-spin text-yellow-400" />
+              <span>Placing order...</span>
+            </div>
+
+            {/* Entry Candle Info (breakout candle) - if available */}
+            {update.entry_candle && (
+              <div className="p-2 bg-gray-800/30 rounded border border-gray-700/30">
+                <div className="flex items-center gap-2 mb-1.5 text-[10px] text-gray-500">
+                  <Zap className="w-3 h-3 text-yellow-400" />
+                  <span>Breakout Candle</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-[10px]">
+                  <div>
+                    <span className="text-gray-500 block">High</span>
+                    <span className="text-white font-mono">
+                      ${update.entry_candle.high.toFixed(update.entry_candle.high > 100 ? 2 : 4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block">Low</span>
+                    <span className="text-white font-mono">
+                      ${update.entry_candle.low.toFixed(update.entry_candle.low > 100 ? 2 : 4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block">Entry</span>
+                    <span className="text-yellow-400 font-mono">
+                      ${update.entry_candle.entry_price.toFixed(update.entry_candle.entry_price > 100 ? 2 : 4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block">Volume</span>
+                    <span className="text-green-400 font-mono">
+                      {update.entry_candle.volume_multiplier
+                        ? `${update.entry_candle.volume_multiplier.toFixed(1)}x`
+                        : '-'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Ready Expiration Countdown */}
+            {timeUntilExpiry > 0 && (
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-500">Order placement timeout</span>
+                <span className={`font-mono font-medium ${
+                  timeUntilExpiry > 30 ? 'text-yellow-400' : 'text-red-400 animate-pulse'
+                }`}>
+                  {formatTimer(timeUntilExpiry)}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Step 3b: Order Placed - Waiting for fill */}
+        {!compact && isFilling && (
           <div className="mt-3 p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-lg space-y-2">
             <div className="flex items-center gap-2">
               <span className="relative flex h-2 w-2">
