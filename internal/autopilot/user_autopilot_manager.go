@@ -7,6 +7,7 @@ import (
 	"binance-trading-bot/internal/coinprofiler"
 	"binance-trading-bot/internal/database"
 	"binance-trading-bot/internal/entrydecision"
+	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/exitdecision"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
@@ -252,6 +253,54 @@ func (m *UserAutopilotManager) SetChainEventWriter(cew *orders.ChainEventWriter)
 	defer m.mu.Unlock()
 	m.chainEventWriter = cew
 	m.logger.Info("ChainEventWriter set on UserAutopilotManager for chain-based entry tracking")
+
+	// Wire chain closed callback to unsuppress pattern detection for the symbol
+	// When a chain closes (position exits), allow pattern detection to resume for that symbol
+	cew.SetOnChainClosedSymbol(func(userID, symbol, mode, timeframe string) {
+		if userID == "" || symbol == "" {
+			return
+		}
+		val, ok := m.instances.Load(userID)
+		if !ok {
+			return
+		}
+		instance := val.(*UserAutopilotInstance)
+		if instance.RealtimePatternMatcher != nil {
+			m.logger.Info("Chain closed - unsuppressing pattern detection",
+				"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
+			instance.RealtimePatternMatcher.UnsuppressSymbol(symbol, mode, timeframe)
+		}
+	})
+	m.logger.Info("Chain closed symbol callback wired for pattern unsuppression")
+
+	// Wire chain closed broadcast callback for frontend cascade notification
+	// When a chain closes, broadcast CHAIN_CLOSED event via events bus so the frontend can:
+	// 1. Remove the closed position from the positions table
+	// 2. Reset entry decision state (symbol back to "watching")
+	// 3. Switch coin profiler source from "position" to "strategy"
+	// 4. Remove position lock (decrement position count)
+	cew.SetOnChainClosedBroadcast(func(userID, chainID, symbol, mode, modeCode, timeframe, closeReason string, realizedPnL float64, closePrice *float64) {
+		if userID == "" {
+			return
+		}
+		chainClosedData := map[string]interface{}{
+			"chain_id":     chainID,
+			"symbol":       symbol,
+			"close_reason": closeReason,
+			"realized_pnl": realizedPnL,
+			"mode":         mode,
+			"mode_code":    modeCode,
+			"timeframe":    timeframe,
+		}
+		if closePrice != nil {
+			chainClosedData["close_price"] = *closePrice
+		}
+		events.BroadcastChainClosed(userID, chainClosedData)
+		m.logger.Info("Chain closed - broadcast CHAIN_CLOSED for frontend cascade",
+			"chain_id", chainID, "symbol", symbol, "mode", mode, "timeframe", timeframe,
+			"close_reason", closeReason, "pnl", realizedPnL, "user_id", userID)
+	})
+	m.logger.Info("Chain closed broadcast callback wired for frontend cascade")
 
 	// Propagate to existing ChainEntryRunners
 	m.instances.Range(func(key, value interface{}) bool {
@@ -787,12 +836,25 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	m.logger.Info("Fill progress callback wired for Step 3 countdown", "user_id", userID)
 
 	// Wire entry failed callback - resets pattern to watching so new entries can be detected
+	// CRITICAL: Use ResetPatternForSymbol (not ClearPatternForSymbol) because:
+	// - ClearPatternForSymbol SUPPRESSES the symbol (blocks new pattern detection)
+	// - ResetPatternForSymbol clears + unsuppresses (allows immediate new pattern detection)
+	// When an entry fails, there is no position, so the symbol should NOT be suppressed.
 	chainEntryRunner.SetOnEntryFailedCallback(func(symbol, mode, timeframe string) {
-		m.logger.Info("Entry failed - clearing pattern for fresh detection",
+		m.logger.Info("Entry failed - resetting pattern for fresh detection (not suppressing)",
+			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
+		realtimeMatcher.ResetPatternForSymbol(symbol, mode, timeframe)
+	})
+	m.logger.Info("Entry failed callback wired for pattern reset", "user_id", userID)
+
+	// Wire fill completed callback - clears pattern after order fills so it stays cleared
+	// This prevents candle close from re-creating pattern while a position exists
+	chainEntryRunner.SetOnFillCompletedCallback(func(symbol, mode, timeframe string) {
+		m.logger.Info("Entry fill completed - clearing pattern to prevent re-creation",
 			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
 		realtimeMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
 	})
-	m.logger.Info("Entry failed callback wired for pattern reset", "user_id", userID)
+	m.logger.Info("Fill completed callback wired for pattern cleanup", "user_id", userID)
 
 	// Epic 14: Create ExitDecisionService for position exit monitoring
 	// Uses CoinProfiler for prices (via adapter) and Autopilot for positions (via adapter)

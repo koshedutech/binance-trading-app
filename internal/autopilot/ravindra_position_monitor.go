@@ -9,6 +9,7 @@ package autopilot
 
 import (
 	"binance-trading-bot/internal/binance"
+	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/orders"
 	"context"
 	"fmt"
@@ -213,6 +214,17 @@ func (m *RavindraPositionMonitor) GetPosition(chainID string) *RavindraPosition 
 	return m.positions[chainID]
 }
 
+// GetAllPositions returns all monitored positions (thread-safe copy)
+func (m *RavindraPositionMonitor) GetAllPositions() map[string]*RavindraPosition {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[string]*RavindraPosition, len(m.positions))
+	for k, v := range m.positions {
+		result[k] = v
+	}
+	return result
+}
+
 // GetStats returns current statistics
 func (m *RavindraPositionMonitor) GetStats() RavindraMonitorStats {
 	m.mu.RLock()
@@ -354,6 +366,23 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 
 	log.Printf("[RAVINDRA-MONITOR] %s: SL updated successfully %.4f -> %.4f (order=%d, reason=%s)",
 		pos.Symbol, oldSL, newSLPrice, newOrderID, reason)
+
+	// Broadcast trailing SL update to frontend
+	trailingStatus := pos.TrailingStop.GetStatus()
+	events.BroadcastTrailingSLUpdate(pos.UserID, map[string]interface{}{
+		"chain_id":              pos.ChainID,
+		"symbol":                pos.Symbol,
+		"action":                string(source),
+		"reason":                reason,
+		"old_sl":                oldSL,
+		"new_sl":                newSLPrice,
+		"entry_price":           pos.EntryPrice,
+		"current_rr":            trailingStatus.CurrentRR,
+		"at_breakeven":          trailingStatus.AtBreakeven,
+		"at_1r":                 trailingStatus.At1R,
+		"trailing_stop_status":  trailingStatus,
+		"updated_at":            time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // cancelOrderWithRetry cancels an order with retries

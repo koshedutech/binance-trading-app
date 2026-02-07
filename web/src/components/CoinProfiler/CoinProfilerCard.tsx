@@ -55,7 +55,7 @@ export default function CoinProfilerCard() {
   const { start, stop, isStarting, isStopping, error: controlError, reset: resetControl } = useCoinProfilerControl();
 
   // Real-time coin data with WebSocket updates
-  const { coins, total, lastUpdate, updateCount, handleCoinUpdate, refetch: refetchCoins } = useCoinProfilerRealtime(wsConnected);
+  const { coins, total, lastUpdate, updateCount, handleCoinUpdate, updateCoinSource, refetch: refetchCoins } = useCoinProfilerRealtime(wsConnected);
 
   // Trading state - controls what can be started/stopped
   const { data: tradingState } = useTradingState();
@@ -81,18 +81,35 @@ export default function CoinProfilerCard() {
   }, [positionCoinsCount]);
 
   // Subscribe to position lifecycle WebSocket events
-  const handlePositionCreated = useCallback(() => {
+  const handlePositionCreated = useCallback((event: any) => {
     setWsPositionAdjustment(prev => prev + 1);
-    // Refetch to update source to "position" or "both"
-    refetchCoins();
-  }, [refetchCoins]);
-
-  const handleChainClosed = useCallback(() => {
-    setWsPositionAdjustment(prev => Math.max(0, prev - 1));
-    // Refetch coin data to update source field instantly
+    // Optimistically update source from event data
+    const data = event?.data;
+    if (data?.symbol) {
+      // Check if coin already exists as "strategy" source -> becomes "both"
+      const existingCoin = coins.find(c => c.symbol === data.symbol);
+      const newSource = existingCoin?.source === 'strategy' ? 'both' : 'position';
+      updateCoinSource(data.symbol, newSource, data.timeframe);
+    }
+    // Also refetch for full data sync
     refetchCoins();
     refetchReqs();
-  }, [refetchCoins, refetchReqs]);
+  }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
+
+  const handleChainClosed = useCallback((event: any) => {
+    setWsPositionAdjustment(prev => Math.max(0, prev - 1));
+    // Optimistically update source: if coin was "both", revert to "strategy"; if "position", remove handled by refetch
+    const data = event?.data;
+    if (data?.symbol) {
+      const existingCoin = coins.find(c => c.symbol === data.symbol);
+      if (existingCoin?.source === 'both') {
+        updateCoinSource(data.symbol, 'strategy');
+      }
+    }
+    // Refetch coin data for full sync
+    refetchCoins();
+    refetchReqs();
+  }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
 
   // Handle POSITION_UPDATE with status "CLOSED" (catches positions closing without a chain)
   const handlePositionUpdate = useCallback((event: any) => {

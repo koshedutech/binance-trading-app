@@ -697,17 +697,21 @@ func (v *VolumeImbalanceDetector) CalculateRiskReward(pattern *VolumeImbalancePa
 // - At 1:2 R:R → Move SL to entry (breakeven, 0 risk)
 // - At 1:3 R:R → Move SL to 1:1 level (lock profit)
 // - At 1:4 R:R → Take profit (target reached)
+// Supports both LONG and SHORT positions via the Side field.
 type TrailingStopManager struct {
 	EntryPrice float64 `json:"entry_price"`
 	StopLoss   float64 `json:"stop_loss"`
 	TakeProfit float64 `json:"take_profit"`
 
-	// Risk amount (entry - initial SL)
+	// Risk amount (absolute distance from entry to initial SL, always positive)
 	RiskAmount float64 `json:"risk_amount"`
+
+	// Position direction: "LONG" or "SHORT"
+	Side string `json:"side"`
 
 	// Current state
 	CurrentRR        float64 `json:"current_rr"`
-	HighestPrice     float64 `json:"highest_price"`
+	HighestPrice     float64 `json:"highest_price"` // Best price in favor (highest for LONG, lowest for SHORT)
 	MovedToBreakeven bool    `json:"moved_to_breakeven"` // At 1:2 R:R
 	MovedTo1R        bool    `json:"moved_to_1r"`        // At 1:3 R:R
 
@@ -716,9 +720,18 @@ type TrailingStopManager struct {
 	OneRRLevel       float64 `json:"one_rr_level"`       // Default: 3.0
 }
 
-// NewTrailingStopManager creates a new trailing stop manager
+// NewTrailingStopManager creates a new trailing stop manager.
+// It infers direction from the SL/TP relationship to entry price.
+// LONG: SL < entry < TP, SHORT: SL > entry > TP.
 func NewTrailingStopManager(entryPrice, stopLoss, takeProfit float64, config *VolumeImbalanceConfig) *TrailingStopManager {
-	riskAmount := entryPrice - stopLoss
+	// Infer direction from price levels
+	side := "LONG"
+	if stopLoss > entryPrice {
+		side = "SHORT"
+	}
+
+	// Risk amount is always positive (absolute distance entry<->SL)
+	riskAmount := math.Abs(entryPrice - stopLoss)
 	if riskAmount <= 0 {
 		riskAmount = entryPrice * 0.01 // 1% fallback
 	}
@@ -735,39 +748,68 @@ func NewTrailingStopManager(entryPrice, stopLoss, takeProfit float64, config *Vo
 		StopLoss:         stopLoss,
 		TakeProfit:       takeProfit,
 		RiskAmount:       riskAmount,
+		Side:             side,
 		HighestPrice:     entryPrice,
 		BreakevenRRLevel: breakevenLevel,
 		OneRRLevel:       oneRRLevel,
 	}
 }
 
-// Update checks current price and returns updated stop loss with action description
+// Update checks current price and returns updated stop loss with action description.
+// Handles both LONG and SHORT positions.
 // Returns: (newStopLoss, action)
 // Actions: "HOLD" (no change), "MOVE_TO_BREAKEVEN", "MOVE_TO_1R", "TAKE_PROFIT"
 func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64, action string) {
-	// Track highest price
-	if currentPrice > t.HighestPrice {
-		t.HighestPrice = currentPrice
+	isLong := t.Side != "SHORT"
+
+	// Track best price in favor
+	if isLong {
+		if currentPrice > t.HighestPrice {
+			t.HighestPrice = currentPrice
+		}
+	} else {
+		// For SHORT, track lowest price (most favorable)
+		if t.HighestPrice == 0 || currentPrice < t.HighestPrice {
+			t.HighestPrice = currentPrice
+		}
 	}
 
-	// Calculate current R:R achieved
-	profit := currentPrice - t.EntryPrice
+	// Calculate current R:R achieved (always positive when profitable)
+	var profit float64
+	if isLong {
+		profit = currentPrice - t.EntryPrice
+	} else {
+		profit = t.EntryPrice - currentPrice
+	}
 	t.CurrentRR = profit / t.RiskAmount
 
 	newStopLoss = t.StopLoss
 	action = "HOLD"
 
 	// Check for take profit (1:4 R:R target)
-	if currentPrice >= t.TakeProfit {
+	tpReached := false
+	if isLong {
+		tpReached = currentPrice >= t.TakeProfit
+	} else {
+		tpReached = currentPrice <= t.TakeProfit
+	}
+	if tpReached {
 		action = "TAKE_PROFIT"
 		return newStopLoss, action
 	}
 
 	// At 1:3 R:R → Move SL to 1:1 level (lock profit)
 	if t.CurrentRR >= t.OneRRLevel && !t.MovedTo1R {
-		// 1:1 level = entry + risk
-		oneRLevel := t.EntryPrice + t.RiskAmount
-		if oneRLevel > t.StopLoss {
+		var oneRLevel float64
+		if isLong {
+			oneRLevel = t.EntryPrice + t.RiskAmount // 1:1 level above entry
+		} else {
+			oneRLevel = t.EntryPrice - t.RiskAmount // 1:1 level below entry
+		}
+		// For LONG: new SL must be higher than current SL (tighter)
+		// For SHORT: new SL must be lower than current SL (tighter)
+		shouldUpdate := (isLong && oneRLevel > t.StopLoss) || (!isLong && oneRLevel < t.StopLoss)
+		if shouldUpdate {
 			t.StopLoss = oneRLevel
 			newStopLoss = t.StopLoss
 			t.MovedTo1R = true
@@ -779,7 +821,10 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 
 	// At 1:2 R:R → Move SL to entry (breakeven, 0 risk)
 	if t.CurrentRR >= t.BreakevenRRLevel && !t.MovedToBreakeven {
-		if t.EntryPrice > t.StopLoss {
+		// For LONG: entry > current SL means moving up (tighter)
+		// For SHORT: entry < current SL means moving down (tighter)
+		shouldUpdate := (isLong && t.EntryPrice > t.StopLoss) || (!isLong && t.EntryPrice < t.StopLoss)
+		if shouldUpdate {
 			t.StopLoss = t.EntryPrice
 			newStopLoss = t.StopLoss
 			t.MovedToBreakeven = true
@@ -793,6 +838,19 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 
 // GetStatus returns the current trailing stop status
 func (t *TrailingStopManager) GetStatus() TrailingStopStatus {
+	isLong := t.Side != "SHORT"
+
+	var oneRLevel, breakevenTrigger, oneRTrigger float64
+	if isLong {
+		oneRLevel = t.EntryPrice + t.RiskAmount
+		breakevenTrigger = t.EntryPrice + (t.RiskAmount * t.BreakevenRRLevel)
+		oneRTrigger = t.EntryPrice + (t.RiskAmount * t.OneRRLevel)
+	} else {
+		oneRLevel = t.EntryPrice - t.RiskAmount
+		breakevenTrigger = t.EntryPrice - (t.RiskAmount * t.BreakevenRRLevel)
+		oneRTrigger = t.EntryPrice - (t.RiskAmount * t.OneRRLevel)
+	}
+
 	return TrailingStopStatus{
 		EntryPrice:       t.EntryPrice,
 		CurrentStopLoss:  t.StopLoss,
@@ -803,9 +861,10 @@ func (t *TrailingStopManager) GetStatus() TrailingStopStatus {
 		AtBreakeven:      t.MovedToBreakeven,
 		At1R:             t.MovedTo1R,
 		BreakevenLevel:   t.EntryPrice,
-		OneRLevel:        t.EntryPrice + t.RiskAmount,
-		BreakevenTrigger: t.EntryPrice + (t.RiskAmount * t.BreakevenRRLevel),
-		OneRTrigger:      t.EntryPrice + (t.RiskAmount * t.OneRRLevel),
+		OneRLevel:        oneRLevel,
+		BreakevenTrigger: breakevenTrigger,
+		OneRTrigger:      oneRTrigger,
+		Side:             t.Side,
 	}
 }
 
@@ -819,10 +878,11 @@ type TrailingStopStatus struct {
 	HighestPrice     float64 `json:"highest_price"`
 	AtBreakeven      bool    `json:"at_breakeven"`
 	At1R             bool    `json:"at_1r"`
-	BreakevenLevel   float64 `json:"breakeven_level"`   // Price where SL moves to BE
+	BreakevenLevel   float64 `json:"breakeven_level"`   // Price where SL moves to BE (= entry)
 	OneRLevel        float64 `json:"one_r_level"`       // Price where SL moves to 1:1
 	BreakevenTrigger float64 `json:"breakeven_trigger"` // Trigger price for BE move
 	OneRTrigger      float64 `json:"one_r_trigger"`     // Trigger price for 1R move
+	Side             string  `json:"side"`              // LONG or SHORT
 }
 
 // ============================================================================

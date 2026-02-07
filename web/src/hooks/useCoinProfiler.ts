@@ -46,6 +46,7 @@ export interface CoinData {
   timeframes: Record<string, TimeframeData>;
   source: 'strategy' | 'position' | 'both';
   strategies: string[];
+  position_timeframe?: string; // Entry timeframe from active position's order chain
   updated_at: string;
 }
 
@@ -442,6 +443,58 @@ export function useCoinProfilerRealtime(wsConnected: boolean = false) {
     setUpdateCount(prev => prev + 1);
   }, []);
 
+  // Optimistically update a coin's source (e.g., when a position is created/closed)
+  const updateCoinSource = useCallback((symbol: string, source: 'strategy' | 'position' | 'both', timeframe?: string) => {
+    setCoins(prevCoins => {
+      const newCoins = new Map(prevCoins);
+      const existing = newCoins.get(symbol);
+      if (existing) {
+        const updatedCoin: CoinData = {
+          ...existing,
+          source,
+          updated_at: new Date().toISOString(),
+        };
+        // If a timeframe is provided and not already tracked, add a placeholder
+        if (timeframe && !existing.timeframes[timeframe]) {
+          updatedCoin.timeframes = {
+            ...existing.timeframes,
+            [timeframe]: {
+              timeframe,
+              open: 0, high: 0, low: 0, close: 0,
+              volume: 0, taker_buy_vol: 0, taker_sell_vol: 0,
+              quote_volume: 0, trade_count: 0,
+              is_closed_bar: false, open_time: '', close_time: '',
+              updated_at: new Date().toISOString(),
+            },
+          };
+        }
+        newCoins.set(symbol, updatedCoin);
+      } else {
+        // Coin not tracked yet - add it with position source
+        newCoins.set(symbol, {
+          symbol,
+          price: 0,
+          volume_24h: 0,
+          volatility: 0,
+          timeframes: timeframe ? {
+            [timeframe]: {
+              timeframe,
+              open: 0, high: 0, low: 0, close: 0,
+              volume: 0, taker_buy_vol: 0, taker_sell_vol: 0,
+              quote_volume: 0, trade_count: 0,
+              is_closed_bar: false, open_time: '', close_time: '',
+              updated_at: new Date().toISOString(),
+            },
+          } : {},
+          source,
+          strategies: [],
+          updated_at: new Date().toISOString(),
+        });
+      }
+      return newCoins;
+    });
+  }, []);
+
   // Convert Map to array for component consumption
   const coinsArray = Array.from(coins.values());
 
@@ -452,6 +505,7 @@ export function useCoinProfilerRealtime(wsConnected: boolean = false) {
     lastUpdate,
     updateCount,
     handleCoinUpdate,
+    updateCoinSource,
     refetch,
   };
 }

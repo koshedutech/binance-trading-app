@@ -536,6 +536,18 @@ func (m *MockChainEventWriterDB) GetActiveOrderChains(ctx context.Context, userI
 	return result, nil
 }
 
+func (m *MockChainEventWriterDB) GetOpenOrderChains(ctx context.Context, userID string) ([]*orders.OrderChain, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var result []*orders.OrderChain
+	for _, chain := range m.chains {
+		if chain.UserID == userID && chain.Status != orders.OrderChainStatusClosed && chain.Status != orders.OrderChainStatusCancelled {
+			result = append(result, chain)
+		}
+	}
+	return result, nil
+}
+
 func (m *MockChainEventWriterDB) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

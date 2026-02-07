@@ -333,6 +333,19 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
         </div>
       ) : null}
 
+      {/* Show warning when all strategies are at capacity */}
+      {Object.keys(byMode).length > 0 && (() => {
+        const allStrats = Object.values(byMode).flat();
+        const allAtLimit = allStrats.length > 0 && allStrats.every(s => s.capacity_status === 'at_limit');
+        if (!allAtLimit) return null;
+        return (
+          <div className="mt-2 p-2 bg-red-900/20 border border-red-500/30 rounded text-xs text-red-400 flex items-center gap-2">
+            <Lock className="w-4 h-4 flex-shrink-0" />
+            <span>All strategies at capacity. No new entries will be taken until a position closes.</span>
+          </div>
+        );
+      })()}
+
       {/* Show timeframes by mode summary */}
       {Object.keys(timeframesByMode).length > 0 && (
         <div className="mt-2 pt-2 border-t border-gray-700/50">

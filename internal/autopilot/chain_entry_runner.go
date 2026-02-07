@@ -136,6 +136,10 @@ type ChainEntryRunner struct {
 	// Parameters: symbol, mode, timeframe, remainingSeconds
 	onFillProgress func(symbol, mode, timeframe string, remainingSecs int)
 
+	// Callback for when entry order is filled successfully - clears pattern so it stays cleared
+	// Parameters: symbol, mode, timeframe
+	onFillCompleted func(symbol, mode, timeframe string)
+
 	// Runtime state
 	running        bool
 	stopChan       chan struct{}
@@ -271,6 +275,14 @@ func (r *ChainEntryRunner) SetOnFillProgressCallback(callback func(symbol, mode,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onFillProgress = callback
+}
+
+// SetOnFillCompletedCallback sets the callback for when an entry order fills successfully.
+// This clears the pattern so it stays cleared and doesn't get re-created by candle close.
+func (r *ChainEntryRunner) SetOnFillCompletedCallback(callback func(symbol, mode, timeframe string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onFillCompleted = callback
 }
 
 func (r *ChainEntryRunner) IsRunning() bool {
@@ -864,7 +876,15 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 
 	orderResp, err := r.futuresClient.PlaceFuturesOrder(orderParams)
 	if err != nil {
-		log.Printf("[CHAIN-ENTRY] FAILED to place LIMIT order for %s: %v", symbol, err)
+		log.Printf("[CHAIN-ENTRY] FAILED to place LIMIT order for %s: %v - cancelling chain", symbol, err)
+		// Cancel the chain that was already created in the database
+		if r.chainEventWriter != nil {
+			cancelCtx := context.Background()
+			_ = r.chainEventWriter.RecordEntryCancelled(cancelCtx, chainID, "order_rejected: "+err.Error())
+			if closeErr := r.chainEventWriter.CloseChain(cancelCtx, chainID, "entry_order_rejected", 0, 0, nil); closeErr != nil {
+				log.Printf("[CHAIN-ENTRY] Warning: Failed to close rejected chain %s: %v", chainID, closeErr)
+			}
+		}
 		return fmt.Errorf("failed to place entry order: %w", err)
 	}
 
@@ -918,7 +938,24 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		log.Printf("[CHAIN-ENTRY] Waiting for LIMIT order fill: timeout=%v (timeframe=%s)", fillTimeout, state.Timeframe)
 		filledOrder, fillErr := r.waitForLimitFill(symbol, modeStr, state.Timeframe, orderResp.OrderId, fillTimeout)
 		if fillErr != nil {
-			log.Printf("[CHAIN-ENTRY] LIMIT order not filled for %s: %v", symbol, fillErr)
+			log.Printf("[CHAIN-ENTRY] LIMIT order not filled for %s: %v - cancelling chain", symbol, fillErr)
+
+			// CRITICAL: Cancel the chain in the database to prevent orphaned active chains
+			// that would block future entries by counting toward max_concurrent_trades
+			cancelCtx := context.Background()
+			if r.chainEventWriter != nil {
+				// Record entry cancelled event
+				if recErr := r.chainEventWriter.RecordEntryCancelled(cancelCtx, chainID, fillErr.Error()); recErr != nil {
+					log.Printf("[CHAIN-ENTRY] Warning: Failed to record entry cancelled event for chain %s: %v", chainID, recErr)
+				}
+				// Close the chain as cancelled (0 PnL, 0 fees since no fill occurred)
+				if closeErr := r.chainEventWriter.CloseChain(cancelCtx, chainID, "entry_timeout_"+fillErr.Error(), 0, 0, nil); closeErr != nil {
+					log.Printf("[CHAIN-ENTRY] Warning: Failed to close cancelled chain %s: %v", chainID, closeErr)
+				} else {
+					log.Printf("[CHAIN-ENTRY] Chain %s cancelled after entry timeout for %s", chainID, symbol)
+				}
+			}
+
 			return fmt.Errorf("limit order not filled: %w", fillErr)
 		}
 		filledPrice = filledOrder.AvgPrice
@@ -965,6 +1002,11 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			})
 			log.Printf("[CHAIN-ENTRY] Broadcast POSITION_CREATED: chainID=%s, symbol=%s, side=%s",
 				chainID, symbol, direction)
+
+			// Notify that fill is completed - clear pattern so it stays cleared
+			if r.onFillCompleted != nil {
+				r.onFillCompleted(symbol, modeStr, state.Timeframe)
+			}
 		}
 	}
 

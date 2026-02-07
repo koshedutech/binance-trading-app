@@ -59,6 +59,9 @@ const (
 
 	// Position Created: Broadcast when a new position is opened (entry filled)
 	EventPositionCreated EventType = "POSITION_CREATED"
+
+	// Trailing SL Update: Broadcast when the trailing stop moves SL (R:R milestone)
+	EventTrailingSLUpdate EventType = "TRAILING_SL_UPDATE"
 )
 
 // Event represents a system event
@@ -258,6 +261,8 @@ var (
 	broadcastOrderUpdate        BroadcastFunc // Order status updates (placed/cancelled/filled)
 	broadcastSettingsChanged    BroadcastFunc // Epic 14: Settings change notifications
 	broadcastPositionCreated    BroadcastFunc // Position created broadcasts (new position opened)
+	broadcastTrailingSLUpdate   BroadcastFunc // Trailing SL milestone updates (R:R-based SL moves)
+	broadcastChainClosed        BroadcastFunc // Chain closed broadcasts (position closed - SL/TP hit or manual)
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -435,5 +440,34 @@ func SetBroadcastPositionCreated(fn BroadcastFunc) {
 func BroadcastPositionCreated(userID string, data interface{}) {
 	if broadcastPositionCreated != nil && userID != "" {
 		go broadcastPositionCreated(userID, data)
+	}
+}
+
+// SetBroadcastTrailingSLUpdate sets the callback for trailing SL update broadcasts
+func SetBroadcastTrailingSLUpdate(fn BroadcastFunc) {
+	broadcastTrailingSLUpdate = fn
+}
+
+// BroadcastTrailingSLUpdate broadcasts a trailing SL milestone update to a user
+// Called when the Ravindra monitor moves the SL (breakeven at 1:2, 1R lock at 1:3)
+// Data should include: chain_id, symbol, action, old_sl, new_sl, current_rr, trailing_stop_status
+func BroadcastTrailingSLUpdate(userID string, data interface{}) {
+	if broadcastTrailingSLUpdate != nil && userID != "" {
+		go broadcastTrailingSLUpdate(userID, data)
+	}
+}
+
+// SetBroadcastChainClosed sets the callback for chain closed broadcasts
+// Used to notify UI when a position is closed (SL/TP hit or manual close)
+func SetBroadcastChainClosed(fn BroadcastFunc) {
+	broadcastChainClosed = fn
+}
+
+// BroadcastChainClosed broadcasts a chain closed event to a user
+// Called when a position is fully closed (SL hit, TP hit, or manual close)
+// Data should include: chain_id, symbol, close_reason, realized_pnl, mode, timeframe, mode_code
+func BroadcastChainClosed(userID string, data interface{}) {
+	if broadcastChainClosed != nil && userID != "" {
+		go broadcastChainClosed(userID, data)
 	}
 }

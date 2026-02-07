@@ -4765,6 +4765,8 @@ export interface PositionStateInfo {
   created_at: string; // ISO 8601
   updated_at: string; // ISO 8601
   closed_at?: string; // ISO 8601
+  close_price?: number;
+  close_reason?: string; // SL_HIT, TP_HIT, MANUAL
 }
 
 // Story 11.40: Position Analytics from API
@@ -4828,6 +4830,22 @@ export interface OrderChainWithState {
     tp_price?: number;
     risk_amount?: number;
     breakout_at?: string;
+  };
+  // Trailing stop status from RavindraPositionMonitor
+  trailing_stop_status?: {
+    entry_price: number;
+    current_stop_loss: number;
+    take_profit: number;
+    risk_amount: number;
+    current_rr: number;
+    highest_price: number;
+    at_breakeven: boolean;
+    at_1r: boolean;
+    breakeven_level: number;
+    one_r_level: number;
+    breakeven_trigger: number;
+    one_r_trigger: number;
+    side: string;
   };
 }
 

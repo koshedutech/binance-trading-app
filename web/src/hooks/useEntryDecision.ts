@@ -493,6 +493,24 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
       setLastUpdated(new Date());
     };
 
+    // CHAIN_CLOSED: When a position closes (SL/TP hit), the backend unsuppresses the symbol
+    // for new pattern detection. Refresh strategies so the UI shows the symbol back in "watching" state.
+    const handleChainClosed = (event: WSEvent) => {
+      const data = event.data;
+      console.log('[useEntryDecisionStrategies] CHAIN_CLOSED - refreshing strategies', {
+        symbol: data?.symbol,
+        closeReason: data?.close_reason,
+      });
+      // Refresh after a short delay to allow backend to unsuppress and update state
+      setTimeout(() => fetchStrategies(), 1000);
+    };
+
+    // POSITION_CREATED: When entry fills, symbol is suppressed. Refresh to reflect new state.
+    const handlePositionCreated = () => {
+      console.log('[useEntryDecisionStrategies] POSITION_CREATED - refreshing strategies');
+      setTimeout(() => fetchStrategies(), 500);
+    };
+
     // Track WebSocket connection status
     const handleConnect = () => {
       setIsRealTime(true);
@@ -507,6 +525,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     // Subscribe to WebSocket events
     wsService.subscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
     wsService.subscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
+    wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+    wsService.subscribe('POSITION_CREATED', handlePositionCreated);
     wsService.onConnect(handleConnect);
     wsService.onDisconnect(handleDisconnect);
 
@@ -528,6 +548,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     return () => {
       wsService.unsubscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
       wsService.unsubscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
+      wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+      wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);
       if (fallbackTimerRef.current) {

@@ -12,6 +12,7 @@ import {
   Clock,
   Activity,
   DollarSign,
+  Zap,
 } from 'lucide-react';
 import PatternProgress from './PatternProgress';
 import ReferenceCandleContext from './ReferenceCandleContext';
@@ -20,6 +21,7 @@ import type {
   PatternUpdate,
   PatternStatus,
   EntryLevels,
+  EntryCandle,
   VolumeProgress,
   ReferenceCandle,
   PATTERN_STATUS_COLORS,
@@ -688,7 +690,16 @@ export default function CoinStageCard({
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
               </span>
-              <span className="text-cyan-400 font-bold text-xs">⚡ ORDER PLACED</span>
+              <span className="text-cyan-400 font-bold text-xs">ORDER PLACED</span>
+              {/* Time elapsed from Step 2 (consolidation start) to Step 3 (breakout) */}
+              {update.reference_detected_at && update.breakout_detected_at && (
+                <span className="text-[10px] text-gray-500 ml-auto flex items-center gap-1">
+                  <Clock className="w-2.5 h-2.5" />
+                  Took {formatTimer(Math.floor(
+                    (new Date(update.breakout_detected_at).getTime() - new Date(update.reference_detected_at).getTime()) / 1000
+                  ))}
+                </span>
+              )}
             </div>
 
             {/* Order Details */}
@@ -708,20 +719,63 @@ export default function CoinStageCard({
               )}
             </div>
 
-            {/* Fill Timeout Progress Bar */}
+            {/* Entry Candle Info - Similar to Reference Candle display */}
+            {update.entry_candle && (
+              <div className="p-2 bg-gray-800/30 rounded border border-gray-700/30">
+                <div className="flex items-center gap-2 mb-1.5 text-[10px] text-gray-500">
+                  <Zap className="w-3 h-3 text-cyan-400" />
+                  <span>Entry Candle</span>
+                  {update.entry_candle.detected_at && (
+                    <span className="ml-auto text-gray-600">
+                      {new Date(update.entry_candle.detected_at).toISOString().slice(5, 16).replace('T', ' ')} UTC
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-[10px]">
+                  <div>
+                    <span className="text-gray-500 block">High</span>
+                    <span className="text-white font-mono">
+                      ${update.entry_candle.high.toFixed(update.entry_candle.high > 100 ? 2 : 4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block">Low</span>
+                    <span className="text-white font-mono">
+                      ${update.entry_candle.low.toFixed(update.entry_candle.low > 100 ? 2 : 4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block">Entry</span>
+                    <span className="text-cyan-400 font-mono">
+                      ${update.entry_candle.entry_price.toFixed(update.entry_candle.entry_price > 100 ? 2 : 4)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500 block">Volume</span>
+                    <span className="text-green-400 font-mono">
+                      {update.entry_candle.volume_multiplier
+                        ? `${update.entry_candle.volume_multiplier.toFixed(1)}x`
+                        : '-'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Fill Timeout Countdown */}
             <div className="space-y-1">
               <div className="flex items-center justify-between text-[10px]">
                 <span className="text-gray-500">Waiting to fill...</span>
-                <span className={`font-mono ${
+                <span className={`font-mono font-medium ${
                   fillTimeoutRemaining > 60 ? 'text-cyan-400' :
                   fillTimeoutRemaining > 30 ? 'text-yellow-400' :
                   'text-red-400 animate-pulse'
                 }`}>
-                  Timeout: {formatTimer(fillTimeoutRemaining)}
+                  {formatTimer(fillTimeoutRemaining)}
                 </span>
               </div>
               {update.fill_timeout_total && update.fill_timeout_total > 0 && (
-                <div className="h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
+                <div className="h-2 bg-gray-700/50 rounded-full overflow-hidden">
                   <div
                     className={`h-full rounded-full transition-all duration-1000 ${
                       fillTimeoutRemaining > 60 ? 'bg-cyan-500' :

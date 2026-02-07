@@ -78,6 +78,8 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 	// Get active positions to dynamically update source
 	// Check BOTH Ginie positions AND Chain Entry order chains
 	activePositionSymbols := make(map[string]bool)
+	// Track timeframes from active chains (for position-source coins)
+	activeChainTimeframes := make(map[string]string) // symbol -> timeframe
 
 	// Source 1: Ginie Autopilot positions
 	if controller := s.getFuturesAutopilot(); controller != nil {
@@ -101,6 +103,9 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 				if err == nil {
 					for _, chain := range chains {
 						activePositionSymbols[chain.Symbol] = true
+						if chain.Timeframe != "" {
+							activeChainTimeframes[chain.Symbol] = chain.Timeframe
+						}
 					}
 				}
 			}
@@ -132,6 +137,10 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 			} else {
 				coinMap["source"] = "position"
 			}
+			// Include position's entry timeframe if available
+			if tf, ok := activeChainTimeframes[coin.Symbol]; ok {
+				coinMap["position_timeframe"] = tf
+			}
 		} else {
 			coinMap["source"] = string(coin.Source) // Keep original source (strategy)
 		}
@@ -153,6 +162,9 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 				"strategies": []interface{}{},
 				"source":     "position",
 				"updated_at": "",
+			}
+			if tf, ok := activeChainTimeframes[symbol]; ok {
+				coinMap["position_timeframe"] = tf
 			}
 			coins = append(coins, coinMap)
 		}
@@ -391,15 +403,16 @@ func (s *Server) getStrategyCapacityInfo(ctx context.Context, userID string) []S
 		return result
 	}
 
-	// Get active chains for counting current positions per strategy
-	// Access chain event writer through user autopilot manager
+	// Get all open chains for counting current positions per strategy
+	// Uses GetOpenChains which includes PENDING, ENTRY_PLACED, ACTIVE, and PARTIAL
+	// This ensures pending entries also count toward capacity limits
 	activeChains := []*orders.OrderChain{}
 	if s.userAutopilotManager != nil {
 		instance := s.userAutopilotManager.GetInstance(userID)
 		if instance != nil && instance.Autopilot != nil {
 			chainWriter := instance.Autopilot.GetChainEventWriter()
 			if chainWriter != nil {
-				chains, err := chainWriter.GetActiveChains(ctx, userID)
+				chains, err := chainWriter.GetOpenChains(ctx, userID)
 				if err == nil {
 					activeChains = chains
 				}

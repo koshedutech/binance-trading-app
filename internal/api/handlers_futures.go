@@ -795,6 +795,8 @@ type OrderChainWithState struct {
 	StrategyGroup string `json:"strategy_group,omitempty"` // e.g., breakout, trending
 	SubStrategy   string `json:"sub_strategy,omitempty"`   // e.g., ravindra_volume_imbalance
 	Timeframe     string `json:"timeframe,omitempty"`      // e.g., 3m, 5m, 15m from pattern detection
+	// Trailing stop status from RavindraPositionMonitor
+	TrailingStopStatus interface{} `json:"trailing_stop_status,omitempty"`
 }
 
 // ChainOrderInfo represents order info within a chain
@@ -835,6 +837,8 @@ type PositionStateInfo struct {
 	CreatedAt          string  `json:"created_at"` // ISO 8601
 	UpdatedAt          string  `json:"updated_at"` // ISO 8601
 	ClosedAt           string  `json:"closed_at,omitempty"` // ISO 8601
+	ClosePrice         float64 `json:"close_price,omitempty"`
+	CloseReason        string  `json:"close_reason,omitempty"` // SL_HIT, TP_HIT, MANUAL
 }
 
 // handleGetOrderChainsWithState returns order chains with position states and modification counts
@@ -1068,13 +1072,19 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 				continue
 			}
 
-			// Determine position side from entry side
+			// Determine position side from DB side field
+			// order_chains.side stores "LONG" or "SHORT" directly (not BUY/SELL)
 			positionSide := "LONG"
-			if strings.ToUpper(dbChain.Side) == "SELL" {
+			if strings.ToUpper(dbChain.Side) == "SHORT" || strings.ToUpper(dbChain.Side) == "SELL" {
 				positionSide = "SHORT"
 			}
 
 			// Create chain entry from database order_chains table
+			// Map PENDING/ENTRY_PLACED to "active" for frontend compatibility
+			chainStatus := strings.ToLower(string(dbChain.Status))
+			if chainStatus == "pending" || chainStatus == "entry_placed" {
+				chainStatus = "active"
+			}
 			chains[chainID] = &OrderChainWithState{
 				ChainID:            chainID,
 				ModeCode:           dbChain.ModeCode,
@@ -1082,7 +1092,7 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 				PositionSide:       positionSide,
 				Orders:             []ChainOrderInfo{},
 				ModificationCounts: make(map[string]int),
-				Status:             strings.ToLower(string(dbChain.Status)),
+				Status:             chainStatus,
 				CreatedAt:          dbChain.CreatedAt.UnixMilli(),
 				UpdatedAt:          dbChain.UpdatedAt.UnixMilli(),
 				Mode:               dbChain.Mode,
@@ -1109,8 +1119,7 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		// If no entry order, try to get it from DB order_chains
 		if !hasEntry {
 			if dbChain, exists := dbOrderChainsMap[chainID]; exists && dbChain != nil {
-				if dbChain.EntryFilledAt != nil && dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
-					entryTime := dbChain.EntryFilledAt.UnixMilli()
+				if dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
 					var entryOrderID int64
 					if dbChain.EntryBinanceOrderID != nil {
 						entryOrderID = *dbChain.EntryBinanceOrderID
@@ -1123,27 +1132,48 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 						entryQty = *dbChain.EntryQuantity
 					}
 
-					// Prepend entry order (should appear first in tree)
+					// Convert position side (LONG/SHORT) to entry side (BUY/SELL)
+					entrySide := "BUY"
+					if strings.ToUpper(dbChain.Side) == "SHORT" || strings.ToUpper(dbChain.Side) == "SELL" {
+						entrySide = "SELL"
+					}
+
+					// Determine entry status and time based on whether the entry has filled
+					entryStatus := "NEW" // Default: pending entry order
+					var entryTime int64
+					var avgPrice float64
+					var executedQty float64
+					if dbChain.EntryFilledAt != nil {
+						// Entry has filled
+						entryStatus = "FILLED"
+						entryTime = dbChain.EntryFilledAt.UnixMilli()
+						avgPrice = entryPrice
+						executedQty = entryQty
+					} else {
+						// Entry is still pending (ENTRY_PLACED status)
+						entryTime = dbChain.CreatedAt.UnixMilli()
+					}
+
 					entryOrder := ChainOrderInfo{
 						OrderID:       entryOrderID,
 						ClientOrderID: chainID + "-E",
 						OrderType:     "E",
 						Symbol:        dbChain.Symbol,
-						Side:          dbChain.Side,
-						Type:          "MARKET",
-						Status:        "FILLED",
+						Side:          entrySide,
+						Type:          "LIMIT",
+						Status:        entryStatus,
 						Price:         entryPrice,
-						AvgPrice:      entryPrice,
+						AvgPrice:      avgPrice,
 						Quantity:      entryQty,
-						ExecutedQty:   entryQty,
+						ExecutedQty:   executedQty,
 						Time:          entryTime,
 						UpdateTime:    entryTime,
 						IsAlgo:        false,
 					}
 					chain.Orders = append([]ChainOrderInfo{entryOrder}, chain.Orders...)
 
-					log.Printf("[ORDER-CHAINS] Added entry order from DB for chain %s: price=%.4f, qty=%.4f",
-						chainID, entryPrice, entryQty)
+					log.Printf("[ORDER-CHAINS] Added entry order from DB for chain %s: price=%.4f, qty=%.4f, status=%s",
+						chainID, entryPrice, entryQty, entryStatus)
 				}
 			}
 		}
@@ -1162,6 +1192,107 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 			}
 			if chain.Timeframe == "" && dbChain.Timeframe != "" {
 				chain.Timeframe = dbChain.Timeframe
+			}
+
+			// Reconstruct SL/TP orders from persisted DB columns if not already present
+			// This handles active chains from DB that have no open algo orders on Binance
+			hasSL := false
+			hasTP := false
+			for _, order := range chain.Orders {
+				if order.OrderType == "SL" {
+					hasSL = true
+				}
+				if order.OrderType == "TP" || strings.HasPrefix(order.OrderType, "TP") {
+					hasTP = true
+				}
+			}
+
+			positionSide := chain.PositionSide
+			closeSide := "SELL"
+			if positionSide == "SHORT" {
+				closeSide = "BUY"
+			}
+
+			if !hasSL && dbChain.SLLimitPrice != nil && *dbChain.SLLimitPrice > 0 {
+				slStatus := "NEW"
+				if dbChain.SLStatus != nil {
+					slStatus = *dbChain.SLStatus
+				}
+				var slOrderID int64
+				if dbChain.SLBinanceOrderID != nil {
+					slOrderID = *dbChain.SLBinanceOrderID
+				}
+				var slQty float64
+				if dbChain.SLQuantity != nil {
+					slQty = *dbChain.SLQuantity
+				}
+				slPrice := *dbChain.SLLimitPrice
+				var slAvgPrice, slExecQty float64
+				if dbChain.SLFillPrice != nil {
+					slAvgPrice = *dbChain.SLFillPrice
+				}
+				if slStatus == "FILLED" {
+					slExecQty = slQty
+				}
+
+				chain.Orders = append(chain.Orders, ChainOrderInfo{
+					OrderID:       slOrderID,
+					ClientOrderID: chainID + "-SL",
+					OrderType:     "SL",
+					Symbol:        dbChain.Symbol,
+					Side:          closeSide,
+					Type:          "STOP",
+					Status:        slStatus,
+					Price:         slPrice,
+					StopPrice:     slPrice,
+					Quantity:      slQty,
+					ExecutedQty:   slExecQty,
+					AvgPrice:      slAvgPrice,
+					Time:          dbChain.CreatedAt.UnixMilli(),
+					UpdateTime:    dbChain.UpdatedAt.UnixMilli(),
+					IsAlgo:        true,
+				})
+			}
+
+			if !hasTP && dbChain.TPLimitPrice != nil && *dbChain.TPLimitPrice > 0 {
+				tpStatus := "NEW"
+				if dbChain.TPStatus != nil {
+					tpStatus = *dbChain.TPStatus
+				}
+				var tpOrderID int64
+				if dbChain.TPBinanceOrderID != nil {
+					tpOrderID = *dbChain.TPBinanceOrderID
+				}
+				var tpQty float64
+				if dbChain.TPQuantity != nil {
+					tpQty = *dbChain.TPQuantity
+				}
+				tpPrice := *dbChain.TPLimitPrice
+				var tpAvgPrice, tpExecQty float64
+				if dbChain.TPFillPrice != nil {
+					tpAvgPrice = *dbChain.TPFillPrice
+				}
+				if tpStatus == "FILLED" {
+					tpExecQty = tpQty
+				}
+
+				chain.Orders = append(chain.Orders, ChainOrderInfo{
+					OrderID:       tpOrderID,
+					ClientOrderID: chainID + "-TP",
+					OrderType:     "TP",
+					Symbol:        dbChain.Symbol,
+					Side:          closeSide,
+					Type:          "TAKE_PROFIT",
+					Status:        tpStatus,
+					Price:         tpPrice,
+					StopPrice:     tpPrice,
+					Quantity:      tpQty,
+					ExecutedQty:   tpExecQty,
+					AvgPrice:      tpAvgPrice,
+					Time:          dbChain.CreatedAt.UnixMilli(),
+					UpdateTime:    dbChain.UpdatedAt.UnixMilli(),
+					IsAlgo:        true,
+				})
 			}
 		}
 	}
@@ -1595,6 +1726,15 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 						realizedPnL = *dbChain.RealizedPnL
 					}
 
+					var closePrice float64
+					if dbChain.ClosePrice != nil {
+						closePrice = *dbChain.ClosePrice
+					}
+					var closeReason string
+					if dbChain.CloseReason != nil {
+						closeReason = *dbChain.CloseReason
+					}
+
 					chainEntry.PositionState = &PositionStateInfo{
 						ChainID:            chainID,
 						Symbol:             dbChain.Symbol,
@@ -1610,6 +1750,8 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 						CreatedAt:          dbChain.CreatedAt.Format(time.RFC3339),
 						UpdatedAt:          dbChain.UpdatedAt.Format(time.RFC3339),
 						ClosedAt:           closedAt,
+						ClosePrice:         closePrice,
+						CloseReason:        closeReason,
 					}
 
 					chainEntry.FilledValue = entryPrice * entryQty
@@ -1642,7 +1784,22 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		chains = filteredChains
 	}
 
-	// 8. Convert map to slice for response
+	// 8. Enrich active chains with trailing stop status from RavindraPositionMonitor
+	if s.userAutopilotManager != nil {
+		instance := s.userAutopilotManager.GetInstance(userID)
+		if instance != nil && instance.RavindraPositionMonitor != nil {
+			ravPositions := instance.RavindraPositionMonitor.GetAllPositions()
+			for chainID, chain := range chains {
+				if chain.Status == "active" {
+					if ravPos, ok := ravPositions[chainID]; ok && ravPos.TrailingStop != nil {
+						chain.TrailingStopStatus = ravPos.TrailingStop.GetStatus()
+					}
+				}
+			}
+		}
+	}
+
+	// 9. Convert map to slice for response
 	result := make([]*OrderChainWithState, 0, len(chains))
 	for _, chain := range chains {
 		result = append(result, chain)

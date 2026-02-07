@@ -89,6 +89,15 @@ type PatternUpdate struct {
 	FillTimeoutSeconds int     `json:"fill_timeout_seconds,omitempty"` // Remaining seconds until fill timeout
 	FillTimeoutTotal   int     `json:"fill_timeout_total,omitempty"`   // Total fill timeout duration in seconds
 
+	// Entry candle data (the breakout candle that triggered Step 3)
+	EntryCandle *EntryCandle `json:"entry_candle,omitempty"`
+
+	// Timing fields for UI display
+	ReferenceDetectedAt string `json:"reference_detected_at,omitempty"` // ISO timestamp when reference candle was detected
+	BreakoutDetectedAt  string `json:"breakout_detected_at,omitempty"`  // ISO timestamp when breakout was detected (Step 2→3)
+	SecondsSinceReference int  `json:"seconds_since_reference,omitempty"` // Seconds elapsed since reference detection
+	SecondsUntilExpiry    int  `json:"seconds_until_expiry,omitempty"`   // Seconds until ready pattern expires
+
 	// Timestamp
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -230,6 +239,10 @@ type RealtimePatternMatcher struct {
 	// Database persistence for pattern state recovery after restart
 	persister PatternStatePersister
 
+	// Suppressed symbols - symbols with active positions that should NOT have new patterns created.
+	// Key: "symbol:mode:timeframe", set when fill completes, removed when position closes.
+	suppressedSymbols map[string]bool
+
 	mu sync.RWMutex
 }
 
@@ -260,11 +273,12 @@ func NewRealtimePatternMatcher(
 	}
 
 	return &RealtimePatternMatcher{
-		patternMatcher: patternMatcher,
-		defaultMode:    config.DefaultMode,
-		riskReward:     config.RiskRewardRatio,
-		lastStates:     make(map[string]*PatternProgress),
-		volumeProgress: make(map[string]*VolumeProgress),
+		patternMatcher:    patternMatcher,
+		defaultMode:       config.DefaultMode,
+		riskReward:        config.RiskRewardRatio,
+		lastStates:        make(map[string]*PatternProgress),
+		volumeProgress:    make(map[string]*VolumeProgress),
+		suppressedSymbols: make(map[string]bool),
 	}
 }
 
@@ -609,6 +623,15 @@ func (r *RealtimePatternMatcher) buildPersistedState(
 // It stores the latest volume progress and broadcasts it via WebSocket in real-time.
 // CRITICAL: Preserves existing pattern state (Step 2+) to prevent UI flicker.
 func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgressData) {
+	// Skip suppressed symbols (active position exists)
+	suppKey := fmt.Sprintf("%s:%s:%s", data.Symbol, r.defaultMode, data.Timeframe)
+	r.mu.RLock()
+	suppressed := r.suppressedSymbols[suppKey]
+	r.mu.RUnlock()
+	if suppressed {
+		return
+	}
+
 	// Convert CoinProfiler data to our VolumeProgress type
 	progress := &VolumeProgress{
 		CurrentVolume:      data.CurrentVolume,
@@ -712,6 +735,12 @@ func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgre
 			LookingFor:      r.getLookingForDirection(),
 			UpdatedAt:       time.Now(),
 		}
+
+		// Add timing fields for Step 2+ patterns
+		if existingState != nil {
+			r.addTimingFields(&update, existingState)
+		}
+
 		patternCallback(update)
 	}
 }
@@ -755,10 +784,11 @@ func (r *RealtimePatternMatcher) ClearAllPatterns() {
 		r.patternMatcher.ClearAllPatterns()
 	}
 
-	// Clear our cached states
+	// Clear our cached states and suppression list
 	r.mu.Lock()
 	r.lastStates = make(map[string]*PatternProgress)
 	r.volumeProgress = make(map[string]*VolumeProgress)
+	r.suppressedSymbols = make(map[string]bool)
 	r.mu.Unlock()
 
 	// Delete all persisted pattern states from DB (async)
@@ -769,7 +799,8 @@ func (r *RealtimePatternMatcher) ClearAllPatterns() {
 
 // ClearPatternForSymbol clears the pattern for a specific symbol when a position is opened.
 // This notifies the system to stop looking for new entry patterns on this symbol until
-// the position is closed. It should be called when an entry order is FILLED.
+// the position is closed. It also suppresses the symbol so OnCandleClose won't re-create
+// the pattern while a position exists.
 func (r *RealtimePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe string) {
 	if r.patternMatcher == nil {
 		return
@@ -778,18 +809,81 @@ func (r *RealtimePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe s
 	// Clear from underlying pattern matcher
 	r.patternMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
 
-	// Clear from our cached states
+	// Clear from our cached states and suppress re-creation
 	r.mu.Lock()
 	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
 	delete(r.lastStates, stateKey)
 	volKey := fmt.Sprintf("%s:%s", symbol, timeframe)
 	delete(r.volumeProgress, volKey)
+	r.suppressedSymbols[stateKey] = true
 	r.mu.Unlock()
 
 	// Delete persisted pattern state from DB (async)
 	r.deletePatternStateAsync(symbol, mode, timeframe)
 
-	log.Printf("[REALTIME-PATTERN] Cleared pattern for %s:%s:%s (position opened)", symbol, mode, timeframe)
+	log.Printf("[REALTIME-PATTERN] Cleared and suppressed pattern for %s:%s:%s (position opened)", symbol, mode, timeframe)
+}
+
+// ResetPatternForSymbol clears the pattern for a specific symbol WITHOUT suppressing it.
+// This should be called when an entry order fails (timeout, rejected, etc.) to allow
+// the pattern matcher to immediately start looking for new patterns on this symbol.
+// Unlike ClearPatternForSymbol, this does NOT add the symbol to suppressedSymbols.
+func (r *RealtimePatternMatcher) ResetPatternForSymbol(symbol, mode, timeframe string) {
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Clear from underlying pattern matcher
+	r.patternMatcher.ClearPatternForSymbol(symbol, mode, timeframe)
+
+	// Clear from our cached states but do NOT suppress re-creation
+	r.mu.Lock()
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	delete(r.lastStates, stateKey)
+	volKey := fmt.Sprintf("%s:%s", symbol, timeframe)
+	delete(r.volumeProgress, volKey)
+	// Explicitly remove any existing suppression (in case it was suppressed)
+	delete(r.suppressedSymbols, stateKey)
+	r.mu.Unlock()
+
+	// Delete persisted pattern state from DB (async)
+	r.deletePatternStateAsync(symbol, mode, timeframe)
+
+	log.Printf("[REALTIME-PATTERN] Reset pattern for %s:%s:%s (entry failed - ready for new detection)", symbol, mode, timeframe)
+
+	// Broadcast a "watching" status so the frontend resets to Step 1
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if callback != nil {
+		update := PatternUpdate{
+			UserID:      userID,
+			Symbol:      symbol,
+			Timeframe:   timeframe,
+			Mode:        mode,
+			Strategy:    "volume_imbalance",
+			SubStrategy: "ravindra_volume_imbalance",
+			CurrentStep: 1,
+			TotalSteps:  2,
+			Status:      PatternStatusWatching,
+			LookingFor:  r.getLookingForDirection(),
+			UpdatedAt:   time.Now(),
+		}
+		callback(update)
+	}
+}
+
+// UnsuppressSymbol removes the suppression for a symbol, allowing new pattern detection.
+// This should be called when a position is closed for a symbol.
+func (r *RealtimePatternMatcher) UnsuppressSymbol(symbol, mode, timeframe string) {
+	r.mu.Lock()
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	delete(r.suppressedSymbols, stateKey)
+	r.mu.Unlock()
+
+	log.Printf("[REALTIME-PATTERN] Unsuppressed pattern for %s:%s:%s (position closed)", symbol, mode, timeframe)
 }
 
 // SetPatternFillingStatus transitions a pattern to "filling" status and broadcasts Step 3 UI data.
@@ -892,6 +986,12 @@ func (r *RealtimePatternMatcher) SetPatternFillingStatus(symbol, mode, timeframe
 			UpdatedAt:          time.Now(),
 		}
 
+		// Include entry candle (breakout candle) and timing data
+		if state != nil {
+			update.EntryCandle = r.buildEntryCandle(state)
+			r.addTimingFields(&update, state)
+		}
+
 		callback(update)
 	}
 }
@@ -978,6 +1078,12 @@ func (r *RealtimePatternMatcher) UpdateFillProgress(symbol, mode, timeframe stri
 		UpdatedAt:          time.Now(),
 	}
 
+	// Include entry candle (breakout candle) and timing data
+	if state != nil {
+		update.EntryCandle = r.buildEntryCandle(state)
+		r.addTimingFields(&update, state)
+	}
+
 	callback(update)
 }
 
@@ -1019,6 +1125,18 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 		return
 	}
 
+	// Check if this symbol is suppressed (has active position, pattern should not be re-created)
+	mode := r.defaultMode
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	r.mu.RLock()
+	suppressed := r.suppressedSymbols[stateKey]
+	r.mu.RUnlock()
+
+	if suppressed {
+		log.Printf("[REALTIME-PATTERN] %s:%s - Suppressed (active position), skipping pattern evaluation", symbol, timeframe)
+		return
+	}
+
 	// Convert historical candles to pattern matcher format
 	matcherCandles := make([]Candle, len(candles))
 	for i, hc := range candles {
@@ -1035,7 +1153,6 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	}
 
 	// Evaluate pattern for default mode
-	mode := r.defaultMode
 	coinMatch := r.patternMatcher.MatchPattern(symbol, mode, timeframe, matcherCandles)
 
 	// Get full pattern progress (even if coinMatch is nil, we want current state)
@@ -1047,7 +1164,7 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	}
 
 	// Check if state has changed (for logging purposes)
-	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	// stateKey already defined above for suppression check
 	stateChanged := r.hasStateChanged(stateKey, progress)
 
 	if stateChanged && progress != nil {
@@ -1184,6 +1301,42 @@ func (r *RealtimePatternMatcher) hasStateChanged(stateKey string, current *Patte
 	return false
 }
 
+// buildEntryCandle creates an EntryCandle from the breakout candle in PatternState.
+// Returns nil if no breakout candle is available.
+func (r *RealtimePatternMatcher) buildEntryCandle(state *PatternState) *EntryCandle {
+	if state == nil || state.BreakoutCandle == nil {
+		return nil
+	}
+
+	return &EntryCandle{
+		OpenTime:         state.BreakoutCandle.OpenTime,
+		CloseTime:        state.BreakoutCandle.Time,
+		Open:             state.BreakoutCandle.Open,
+		High:             state.BreakoutCandle.High,
+		Low:              state.BreakoutCandle.Low,
+		Close:            state.BreakoutCandle.Close,
+		Volume:           state.BreakoutCandle.Volume,
+		VolumeMultiplier: state.BreakoutVolumeMultiplier,
+		EntryPrice:       state.EntryPrice,
+		DetectedAt:       state.ReadyAt,
+		Direction:        state.Direction,
+	}
+}
+
+// addTimingFields populates the timing fields on a PatternUpdate from PatternState.
+func (r *RealtimePatternMatcher) addTimingFields(update *PatternUpdate, state *PatternState) {
+	if state == nil {
+		return
+	}
+	if !state.ReferenceDetectedAt.IsZero() {
+		update.ReferenceDetectedAt = state.ReferenceDetectedAt.UTC().Format(time.RFC3339)
+		update.SecondsSinceReference = int(time.Since(state.ReferenceDetectedAt).Seconds())
+	}
+	if !state.ReadyAt.IsZero() {
+		update.BreakoutDetectedAt = state.ReadyAt.UTC().Format(time.RFC3339)
+	}
+}
+
 // buildPatternUpdate constructs a PatternUpdate from pattern progress.
 func (r *RealtimePatternMatcher) buildPatternUpdate(
 	symbol, timeframe string,
@@ -1262,6 +1415,12 @@ func (r *RealtimePatternMatcher) buildPatternUpdate(
 		if state.ReferenceCandle != nil && currentPrice > 0 {
 			update.EntryLevels = r.calculateEntryLevels(state, currentPrice)
 		}
+
+		// Include entry candle data (breakout candle) for Step 3+ display
+		update.EntryCandle = r.buildEntryCandle(state)
+
+		// Add timing fields
+		r.addTimingFields(&update, state)
 	}
 
 	// Attach latest volume progress if available
@@ -1459,8 +1618,17 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		return
 	}
 
-	// Get pattern state for this symbol
+	// Skip suppressed symbols (active position exists)
 	mode := r.defaultMode
+	suppKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	r.mu.RLock()
+	suppressed := r.suppressedSymbols[suppKey]
+	r.mu.RUnlock()
+	if suppressed {
+		return
+	}
+
+	// Get pattern state for this symbol
 	state := r.getPatternState(symbol, mode, timeframe)
 	if state == nil || state.ReferenceCandle == nil {
 		return // No reference candle yet, nothing to check
@@ -1531,6 +1699,7 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		r.patternMatcher.mu.Lock()
 		patternKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
 		internalProgress := r.patternMatcher.patterns[patternKey]
+		internalState := r.patternMatcher.states[patternKey]
 		if internalProgress != nil && internalProgress.Status != PatternStatusReady {
 			// Mark Step 2 as complete
 			statusDetail := fmt.Sprintf("Tick-level breakout! %s @ %.6f", state.Direction, price)
@@ -1547,6 +1716,27 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 			}
 			internalProgress.SetStatus(PatternStatusReady)
 			internalProgress.UpdatedAt = time.Now()
+
+			// Store breakout candle data on state for entry candle display
+			if internalState != nil {
+				now := time.Now().UTC()
+				internalState.ReadyAt = now
+				// Create a synthetic breakout candle from tick data
+				internalState.BreakoutCandle = &Candle{
+					OpenTime: now, // Approximate - tick-level breakout doesn't have candle boundaries
+					Time:     now,
+					Open:     price,
+					High:     currentHigh,
+					Low:      currentLow,
+					Close:    price,
+				}
+				// Entry price depends on direction
+				if state.Direction == "long" {
+					internalState.EntryPrice = state.ReferenceCandle.High
+				} else {
+					internalState.EntryPrice = state.ReferenceCandle.Low
+				}
+			}
 		}
 		r.patternMatcher.mu.Unlock()
 
@@ -1642,6 +1832,10 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		if update.EntryLevels != nil {
 			update.EntryLevels.CurrentPrice = price
 		}
+
+		// Include entry candle and timing fields
+		update.EntryCandle = r.buildEntryCandle(state)
+		r.addTimingFields(&update, state)
 
 		callback(update)
 	}

@@ -26,6 +26,7 @@ import { fallbackManager } from '../../services/fallbackPollingManager';
 import { ConnectionStatus } from '../ConnectionStatus';
 import ChainCard from './ChainCard';
 import ChainFilters from './ChainFilters';
+import PositionCard from './PositionCard';
 import EntryDecisionEngineCard from './EntryDecisionEngineCard';
 import { VolumeImbalanceCard } from '../EntryDecisionEngine';
 import { StrategyFirstView } from '../EntryDecision';
@@ -131,6 +132,8 @@ export default function TradeLifecycleTab({
     createdAt: state.created_at,
     updatedAt: state.updated_at,
     closedAt: state.closed_at,
+    closePrice: state.close_price,
+    closeReason: state.close_reason,
   });
 
   // Helper: Convert API OrderChainWithState to frontend OrderChain
@@ -182,7 +185,7 @@ export default function TradeLifecycleTab({
 
     // Group orders by type
     const entryOrder = chainOrders.find(o => o.orderType === 'E') || null;
-    const tpOrders = chainOrders.filter(o => o.orderType && ['TP1', 'TP2', 'TP3'].includes(o.orderType));
+    const tpOrders = chainOrders.filter(o => o.orderType && ['TP', 'TP1', 'TP2', 'TP3'].includes(o.orderType));
     const slOrder = chainOrders.find(o => o.orderType === 'SL') || null;
     const dcaOrders = chainOrders.filter(o => o.orderType && ['DCA1', 'DCA2', 'DCA3'].includes(o.orderType));
     const rebuyOrder = chainOrders.find(o => o.orderType === 'RB') || null;
@@ -234,6 +237,8 @@ export default function TradeLifecycleTab({
       } : undefined,
       // Entry decision context from pattern detection
       entryContext: apiChain.entry_context || undefined,
+      // Trailing stop status from RavindraPositionMonitor
+      trailingStopStatus: apiChain.trailing_stop_status || undefined,
     };
   };
 
@@ -844,14 +849,28 @@ export default function TradeLifecycleTab({
     return Array.from(symbolSet).sort();
   }, [chains]);
 
-  // Apply filters
+  // Apply filters and sort: active/partial first (newest first), then completed/cancelled (newest first)
   const filteredChains = useMemo(() => {
-    return chains.filter((chain) => {
+    const filtered = chains.filter((chain) => {
       if (filters.mode !== 'all' && chain.modeCode !== filters.mode) return false;
       if (filters.status !== 'all' && chain.status !== filters.status) return false;
       if (filters.symbol !== 'all' && chain.symbol !== filters.symbol) return false;
       if (filters.side !== 'all' && chain.positionSide !== filters.side) return false;
       return true;
+    });
+
+    return filtered.sort((a, b) => {
+      const isActiveA = a.status === 'active' || a.status === 'partial';
+      const isActiveB = b.status === 'active' || b.status === 'partial';
+
+      // Active/partial chains come first
+      if (isActiveA && !isActiveB) return -1;
+      if (!isActiveA && isActiveB) return 1;
+
+      // Within same group, sort by most recent first
+      const timeA = isActiveA ? (a.createdAt || 0) : (a.updatedAt || a.createdAt || 0);
+      const timeB = isActiveB ? (b.createdAt || 0) : (b.updatedAt || b.createdAt || 0);
+      return timeB - timeA;
     });
   }, [chains, filters]);
 
@@ -907,6 +926,11 @@ export default function TradeLifecycleTab({
   // 2. The chain status is active/partial AND the entry order is FILLED (position exists but no positionState record)
   const positionStats = useMemo(() => {
     const activePositions = chains.filter(c => {
+      // Entry must be filled for a position to exist
+      // Skip chains where entry order is still pending (NEW status)
+      const entryPending = c.entryOrder && c.entryOrder.status !== 'FILLED' && (c.entryOrder.executedQty || 0) === 0;
+      if (entryPending) return false;
+
       // Case 1: Has positionState with ACTIVE/PARTIAL status
       if (c.positionState) {
         const status = c.positionState.status?.toUpperCase();
@@ -1338,320 +1362,14 @@ export default function TradeLifecycleTab({
                     </div>
                   ) : (
                     <div className="space-y-3 max-h-[500px] overflow-y-auto">
-                      {positionStats.positions.map((chain) => {
-                        // Get price levels - support both positionState and fallback to entry order data
-                        // When positionState is missing (no DB record), derive from entry order
-                        const entryOrder = chain.entryOrder;
-                        const hasPositionState = !!chain.positionState;
-
-                        // Entry price: from positionState, or entry order's avgPrice (filled), or entry order's price
-                        const entryPrice = chain.positionState?.entryPrice ||
-                          (entryOrder?.avgPrice && entryOrder.avgPrice > 0 ? entryOrder.avgPrice : entryOrder?.price) || 0;
-
-                        // Current price: use live price from coin profiler, fallback to analytics, then entry price
-                        const currentPrice = livePrices.get(chain.symbol) || chain.positionAnalytics?.current_price || entryPrice;
-
-                        // SL price: from order or analytics
-                        const slPrice = chain.slOrder?.stopPrice || chain.slOrder?.price || chain.positionAnalytics?.stop_loss || 0;
-
-                        // TP price: from order or analytics
-                        const tp1Price = chain.tpOrders?.[0]?.stopPrice || chain.tpOrders?.[0]?.price || chain.positionAnalytics?.tp1_price || 0;
-
-                        const isLong = chain.positionSide === 'LONG';
-
-                        // Remaining quantity: from positionState, or entry order's executedQty (full position if no partial closes)
-                        const remainingQty = chain.positionState?.remainingQuantity ||
-                          (entryOrder?.executedQty || 0);
-
-                        // Entry quantity: from positionState, or entry order's executedQty
-                        const entryQty = chain.positionState?.entryQuantity ||
-                          (entryOrder?.executedQty || 0);
-
-                        // Calculate unrealized PnL
-                        const unrealizedPnl = isLong
-                          ? (currentPrice - entryPrice) * remainingQty
-                          : (entryPrice - currentPrice) * remainingQty;
-                        const pnlPercent = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 * (isLong ? 1 : -1) : 0;
-
-                        // Calculate progress to SL and TP
-                        const riskDistance = isLong ? entryPrice - slPrice : slPrice - entryPrice;
-                        const rewardDistance = isLong ? tp1Price - entryPrice : entryPrice - tp1Price;
-                        const currentFromEntry = isLong ? currentPrice - entryPrice : entryPrice - currentPrice;
-
-                        // Derive status when positionState is missing
-                        const positionStatus = chain.positionState?.status?.toUpperCase() ||
-                          (chain.status === 'partial' ? 'PARTIAL' : 'ACTIVE');
-
-                        // Progress: negative = towards SL, positive = towards TP
-                        const progressToTP = rewardDistance > 0 ? (currentFromEntry / rewardDistance) * 100 : 0;
-                        const progressToSL = riskDistance > 0 ? (-currentFromEntry / riskDistance) * 100 : 0;
-
-                        // Determine stage
-                        const stage = chain.positionAnalytics?.stage ||
-                          (currentFromEntry < 0 ? 'RISK_ZONE' :
-                           currentFromEntry >= rewardDistance ? 'TP1' :
-                           currentFromEntry >= 0 ? 'BREAKEVEN' : 'RISK_ZONE');
-
-                        // Stage display config
-                        const stageConfig: Record<string, { label: string; color: string; bgColor: string; icon: string }> = {
-                          'RISK_ZONE': { label: 'Risk Zone', color: 'text-red-400', bgColor: 'bg-red-500/20', icon: '⚠️' },
-                          'BREAKEVEN': { label: 'Breakeven', color: 'text-blue-400', bgColor: 'bg-blue-500/20', icon: '🛡️' },
-                          'TP1': { label: 'TP1 Zone', color: 'text-green-400', bgColor: 'bg-green-500/20', icon: '🎯' },
-                          'EFFICIENCY': { label: 'Efficiency', color: 'text-cyan-400', bgColor: 'bg-cyan-500/20', icon: '📈' },
-                        };
-                        const currentStage = stageConfig[stage] || stageConfig['RISK_ZONE'];
-
-                        return (
-                          <div
-                            key={chain.chainId}
-                            className="bg-gray-800/50 rounded-lg p-4 border border-gray-700/50"
-                          >
-                            {/* Position Header */}
-                            <div className="flex items-center justify-between mb-3">
-                              <div className="flex items-center gap-2">
-                                <span className="font-bold text-white text-lg">{chain.symbol}</span>
-                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
-                                  isLong ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                                }`}>
-                                  {isLong ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                                  {chain.positionSide}
-                                </span>
-                                {chain.modeCode && (
-                                  <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">
-                                    {chain.modeCode}
-                                  </span>
-                                )}
-                                {/* Stage Badge */}
-                                <span className={`px-2 py-0.5 rounded text-xs font-medium ${currentStage.bgColor} ${currentStage.color}`}>
-                                  {currentStage.icon} {currentStage.label}
-                                </span>
-                              </div>
-                              <div className="text-right">
-                                <div className={`text-sm font-bold ${unrealizedPnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                  {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(4)} USDT
-                                </div>
-                                <div className={`text-xs ${pnlPercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                  ({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)
-                                </div>
-                              </div>
-                            </div>
-
-                            {/* Price Levels Grid */}
-                            <div className="grid grid-cols-4 gap-3 text-sm mb-3">
-                              <div className="text-center p-2 bg-gray-700/30 rounded">
-                                <div className="text-xs text-gray-500">Entry</div>
-                                <div className="text-gray-200 font-mono">${entryPrice.toFixed(8)}</div>
-                              </div>
-                              <div className="text-center p-2 bg-gray-700/30 rounded">
-                                <div className="text-xs text-gray-500">Current</div>
-                                <div className={`font-mono font-bold ${
-                                  // For LONG: higher price = profit (green), lower = loss (red)
-                                  // For SHORT: lower price = profit (green), higher = loss (red)
-                                  (isLong ? currentPrice >= entryPrice : currentPrice <= entryPrice)
-                                    ? 'text-green-400' : 'text-red-400'
-                                }`}>
-                                  ${currentPrice.toFixed(8)}
-                                </div>
-                              </div>
-                              <div className="text-center p-2 bg-red-900/20 rounded border border-red-800/30">
-                                <div className="text-xs text-red-400">SL</div>
-                                <div className="text-red-300 font-mono">{slPrice > 0 ? `$${slPrice.toFixed(8)}` : '-'}</div>
-                              </div>
-                              <div className="text-center p-2 bg-green-900/20 rounded border border-green-800/30">
-                                <div className="text-xs text-green-400">TP</div>
-                                <div className="text-green-300 font-mono">{tp1Price > 0 ? `$${tp1Price.toFixed(8)}` : '-'}</div>
-                              </div>
-                            </div>
-
-                            {/* Price Progress Visualization - R:R based positioning */}
-                            {slPrice > 0 && tp1Price > 0 && (
-                              <div className="mb-3">
-                                {(() => {
-                                  // Calculate R:R ratio and entry position
-                                  // riskDistance and rewardDistance already calculated above
-                                  const totalRange = riskDistance + rewardDistance;
-                                  const rrRatio = rewardDistance > 0 && riskDistance > 0 ? rewardDistance / riskDistance : 4;
-
-                                  // Entry position on bar based on R:R
-                                  // For 1:4 R:R: entry = 1/(1+4) * 100 = 20% for LONG
-                                  // For SHORT: same calculation works because riskDistance/rewardDistance are already adjusted
-                                  const entryPositionPercent = totalRange > 0
-                                    ? (riskDistance / totalRange) * 100
-                                    : 20; // Default to 1:4 (20%)
-
-                                  // Current price position (0% = SL end, 100% = TP end)
-                                  // For LONG: 0% = SL (lower), 100% = TP (higher)
-                                  // For SHORT: 0% = SL end (higher price), 100% = TP end (lower price)
-                                  let currentPositionPercent: number;
-                                  if (isLong) {
-                                    // LONG: SL is lower, TP is higher
-                                    const priceRange = tp1Price - slPrice;
-                                    currentPositionPercent = priceRange > 0
-                                      ? ((currentPrice - slPrice) / priceRange) * 100
-                                      : 50;
-                                  } else {
-                                    // SHORT: TP is lower, SL is higher
-                                    // Normalize so bar always shows SL on left, TP on right
-                                    const priceRange = slPrice - tp1Price;
-                                    currentPositionPercent = priceRange > 0
-                                      ? ((slPrice - currentPrice) / priceRange) * 100
-                                      : 50;
-                                  }
-                                  currentPositionPercent = Math.max(-10, Math.min(110, currentPositionPercent));
-
-                                  // Check if SL has moved to breakeven (SL = Entry)
-                                  const breakevenPrice = chain.positionAnalytics?.breakeven_price || entryPrice;
-                                  const isAtBreakeven = Math.abs(slPrice - entryPrice) < (entryPrice * 0.001); // Within 0.1%
-
-                                  // Breakeven position on bar (if different from entry)
-                                  let breakevenPositionPercent: number | null = null;
-                                  if (chain.positionAnalytics?.breakeven_price && Math.abs(breakevenPrice - entryPrice) > (entryPrice * 0.001)) {
-                                    if (isLong) {
-                                      const priceRange = tp1Price - slPrice;
-                                      breakevenPositionPercent = priceRange > 0
-                                        ? ((breakevenPrice - slPrice) / priceRange) * 100
-                                        : null;
-                                    } else {
-                                      const priceRange = slPrice - tp1Price;
-                                      breakevenPositionPercent = priceRange > 0
-                                        ? ((slPrice - breakevenPrice) / priceRange) * 100
-                                        : null;
-                                    }
-                                  }
-
-                                  // Format price with 8 decimal precision (Binance standard)
-                                  const formatPrice = (price: number) => {
-                                    return price.toFixed(8);
-                                  };
-
-                                  return (
-                                    <>
-                                      {/* Labels row - positioned based on R:R */}
-                                      <div className="relative flex items-center text-xs text-gray-500 mb-1 h-4">
-                                        {/* SL label at left (0%) */}
-                                        <span className="absolute left-0 text-red-400" style={{ transform: 'translateX(0)' }}>
-                                          SL ${formatPrice(slPrice)}
-                                        </span>
-                                        {/* Entry label at calculated position */}
-                                        <span
-                                          className="absolute text-blue-400"
-                                          style={{
-                                            left: `${entryPositionPercent}%`,
-                                            transform: 'translateX(-50%)'
-                                          }}
-                                        >
-                                          Entry ${formatPrice(entryPrice)}
-                                        </span>
-                                        {/* TP label at right (100%) */}
-                                        <span className="absolute right-0 text-green-400" style={{ transform: 'translateX(0)' }}>
-                                          TP ${formatPrice(tp1Price)}
-                                        </span>
-                                      </div>
-
-                                      {/* Progress bar */}
-                                      <div className="relative h-3 bg-gray-700 rounded-full overflow-hidden">
-                                        {/* Risk zone (red) - from 0% to entry position */}
-                                        <div
-                                          className="absolute left-0 h-full bg-red-500/30"
-                                          style={{ width: `${entryPositionPercent}%` }}
-                                        />
-                                        {/* Profit zone (green) - from entry position to 100% */}
-                                        <div
-                                          className="absolute h-full bg-green-500/30"
-                                          style={{
-                                            left: `${entryPositionPercent}%`,
-                                            width: `${100 - entryPositionPercent}%`
-                                          }}
-                                        />
-                                        {/* Entry marker */}
-                                        <div
-                                          className="absolute top-0 bottom-0 w-0.5 bg-blue-400 z-10"
-                                          style={{ left: `${entryPositionPercent}%`, transform: 'translateX(-50%)' }}
-                                        />
-                                        {/* Breakeven marker (if different from entry) */}
-                                        {breakevenPositionPercent !== null && (
-                                          <div
-                                            className="absolute top-0 bottom-0 w-0.5 bg-yellow-400 z-10 opacity-70"
-                                            style={{ left: `${breakevenPositionPercent}%`, transform: 'translateX(-50%)' }}
-                                            title={`Breakeven: $${formatPrice(breakevenPrice)}`}
-                                          />
-                                        )}
-                                        {/* Current price marker */}
-                                        <div
-                                          className="absolute top-0 bottom-0 w-1.5 bg-white rounded shadow-lg shadow-white/50 transition-all duration-300 z-20"
-                                          style={{ left: `${currentPositionPercent}%`, transform: 'translateX(-50%)' }}
-                                          title={`Current: $${formatPrice(currentPrice)}`}
-                                        />
-                                      </div>
-
-                                      {/* Progress text with R:R info */}
-                                      <div className="flex justify-between mt-1 text-xs">
-                                        <span className={progressToSL > 0 ? 'text-red-400' : 'text-gray-500'}>
-                                          {progressToSL > 0 ? `${progressToSL.toFixed(0)}% to SL` : ''}
-                                          {isAtBreakeven && <span className="text-yellow-400 ml-1">(Break Even)</span>}
-                                        </span>
-                                        <span className="text-gray-500">
-                                          R:R 1:{rrRatio.toFixed(1)}
-                                        </span>
-                                        <span className={progressToTP > 0 ? 'text-green-400' : 'text-gray-500'}>
-                                          {progressToTP > 0 ? `${progressToTP.toFixed(0)}% to TP` : ''}
-                                        </span>
-                                      </div>
-                                    </>
-                                  );
-                                })()}
-                              </div>
-                            )}
-
-                            {/* Expected TP Profit & SL Loss */}
-                            {tp1Price > 0 && slPrice > 0 && entryPrice > 0 && remainingQty > 0 && (
-                              <div className="flex items-center justify-between text-xs mb-2 px-1">
-                                {(() => {
-                                  const feeRate = 0.0004; // 0.04% taker fee
-                                  const entryFee = entryPrice * remainingQty * feeRate;
-
-                                  // Expected TP Profit
-                                  const tpPriceChange = isLong ? tp1Price - entryPrice : entryPrice - tp1Price;
-                                  const tpGrossPnl = tpPriceChange * remainingQty;
-                                  const tpExitFee = tp1Price * remainingQty * feeRate;
-                                  const expectedTpProfit = tpGrossPnl - entryFee - tpExitFee;
-
-                                  // Expected SL Loss
-                                  const slPriceChange = isLong ? slPrice - entryPrice : entryPrice - slPrice;
-                                  const slGrossPnl = slPriceChange * remainingQty;
-                                  const slExitFee = slPrice * remainingQty * feeRate;
-                                  const expectedSlLoss = slGrossPnl - entryFee - slExitFee;
-
-                                  return (
-                                    <>
-                                      <span className="text-green-400">
-                                        TP: +${expectedTpProfit.toFixed(2)}
-                                      </span>
-                                      <span className="text-gray-600">|</span>
-                                      <span className="text-red-400">
-                                        SL: {expectedSlLoss >= 0 ? '+' : ''}${expectedSlLoss.toFixed(2)}
-                                      </span>
-                                    </>
-                                  );
-                                })()}
-                              </div>
-                            )}
-
-                            {/* Bottom Stats Row */}
-                            <div className="flex items-center justify-between text-xs text-gray-500 pt-2 border-t border-gray-700/50">
-                              <span>Qty: {remainingQty.toFixed(4)} / {entryQty.toFixed(4)}</span>
-                              <span>Chain: {chain.chainId}</span>
-                              <span className={`${
-                                positionStatus === 'ACTIVE' ? 'text-green-400' :
-                                positionStatus === 'PARTIAL' ? 'text-yellow-400' : 'text-gray-400'
-                              }`}>
-                                {positionStatus}
-                                {!hasPositionState && <span className="text-orange-400 ml-1">(derived)</span>}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {positionStats.positions.map((chain) => (
+                        <PositionCard
+                          key={chain.chainId}
+                          chain={chain}
+                          livePrice={livePrices.get(chain.symbol) || 0}
+                          onChainRefresh={fetchOrders}
+                        />
+                      ))}
                     </div>
                   )}
                 </div>

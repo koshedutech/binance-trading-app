@@ -133,6 +133,22 @@ export interface OrderChain {
     risk_amount?: number;
     breakout_at?: string;
   };
+  // Trailing stop status from RavindraPositionMonitor (R:R milestone tracking)
+  trailingStopStatus?: {
+    entry_price: number;
+    current_stop_loss: number;
+    take_profit: number;
+    risk_amount: number;
+    current_rr: number;
+    highest_price: number;
+    at_breakeven: boolean;
+    at_1r: boolean;
+    breakeven_level: number;
+    one_r_level: number;
+    breakeven_trigger: number;
+    one_r_trigger: number;
+    side: string;
+  };
 }
 
 // Story 11.40: Position Analytics for Chain View

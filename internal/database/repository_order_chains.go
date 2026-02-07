@@ -337,6 +337,27 @@ func (db *DB) GetActiveOrderChains(ctx context.Context, userID string) ([]*order
 	return scanOrderChains(rows)
 }
 
+// GetOpenOrderChains retrieves all non-closed order chains for a user.
+// Includes PENDING, ENTRY_PLACED, ACTIVE, and PARTIAL statuses.
+// Used for capacity counting where pending entries should also count.
+func (db *DB) GetOpenOrderChains(ctx context.Context, userID string) ([]*orders.OrderChain, error) {
+	if db.Pool == nil {
+		return nil, nil
+	}
+
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains
+		WHERE user_id = $1 AND status IN ('PENDING', 'ENTRY_PLACED', 'ACTIVE', 'PARTIAL')
+		ORDER BY created_at DESC`
+
+	rows, err := db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get open order chains: %w", err)
+	}
+	defer rows.Close()
+
+	return scanOrderChains(rows)
+}
+
 // GetOrderChainsByChainIDs retrieves order chains by their chain IDs (regardless of status)
 // This is used to enrich chains created from Binance orders with entry data from DB
 func (db *DB) GetOrderChainsByChainIDs(ctx context.Context, userID string, chainIDs []string) (map[string]*orders.OrderChain, error) {

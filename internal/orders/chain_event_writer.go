@@ -26,6 +26,7 @@ type ChainEventWriterDB interface {
 	GetOrderChainByID(ctx context.Context, userID, chainID string) (*OrderChain, error)
 	GetOrderChainByChainIDOnly(ctx context.Context, chainID string) (*OrderChain, error) // For lookups without userID
 	GetActiveOrderChains(ctx context.Context, userID string) ([]*OrderChain, error)
+	GetOpenOrderChains(ctx context.Context, userID string) ([]*OrderChain, error) // Includes PENDING, ENTRY_PLACED, ACTIVE, PARTIAL
 	CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error
 	UpdateOrderChainSLPrice(ctx context.Context, chainID string, newPrice float64) error
 	UpdateOrderChainTPPrice(ctx context.Context, chainID string, newPrice float64) error
@@ -133,13 +134,24 @@ type ChainCacheEventSummary struct {
 // Parameters: userID, mode, strategyGroup, subStrategy, realizedPnL
 type ChainClosedCallback func(ctx context.Context, userID, mode, strategyGroup, subStrategy string, realizedPnL float64)
 
+// ChainClosedSymbolCallback is called when a chain is closed, with full symbol info.
+// Parameters: userID, symbol, mode, timeframe
+type ChainClosedSymbolCallback func(userID, symbol, mode, timeframe string)
+
+// ChainClosedBroadcastCallback is called when a chain is closed, for frontend WebSocket broadcast.
+// This enables the full position close cascade on the frontend.
+// Parameters: userID, chainID, symbol, mode, modeCode, timeframe, closeReason, realizedPnL, closePrice
+type ChainClosedBroadcastCallback func(userID, chainID, symbol, mode, modeCode, timeframe, closeReason string, realizedPnL float64, closePrice *float64)
+
 // ChainEventWriter writes events to the order chain event store
 type ChainEventWriter struct {
 	db              ChainEventWriterDB
 	cache           ChainCacheInterface  // Optional: nil if caching disabled
 	logger          zerolog.Logger
 	mu              sync.Mutex           // Protects sequence number generation
-	onChainClosed   ChainClosedCallback  // Optional: callback for equity updates
+	onChainClosed          ChainClosedCallback          // Optional: callback for equity updates
+	onChainClosedSymbol    ChainClosedSymbolCallback    // Optional: callback for pattern unsuppression
+	onChainClosedBroadcast ChainClosedBroadcastCallback // Optional: callback for frontend WebSocket cascade
 }
 
 // NewChainEventWriter creates a new ChainEventWriter instance
@@ -174,6 +186,18 @@ func (w *ChainEventWriter) SetCache(cache ChainCacheInterface) {
 // This is used for updating sub-strategy equity (compounding).
 func (w *ChainEventWriter) SetOnChainClosed(callback ChainClosedCallback) {
 	w.onChainClosed = callback
+}
+
+// SetOnChainClosedSymbol sets the callback for when a chain is closed with symbol info.
+// This is used for unsuppressing pattern detection when a position closes.
+func (w *ChainEventWriter) SetOnChainClosedSymbol(callback ChainClosedSymbolCallback) {
+	w.onChainClosedSymbol = callback
+}
+
+// SetOnChainClosedBroadcast sets the callback for broadcasting chain closed events to frontend.
+// This enables the full position close cascade: positions table, entry decision, coin profiler.
+func (w *ChainEventWriter) SetOnChainClosedBroadcast(callback ChainClosedBroadcastCallback) {
+	w.onChainClosedBroadcast = callback
 }
 
 // === Chain Lifecycle Methods ===
@@ -290,6 +314,17 @@ func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reaso
 		w.onChainClosed(ctx, chain.UserID, chain.Mode, chain.StrategyGroup, chain.SubStrategy, totalPnL)
 	}
 
+	// Call the onChainClosedSymbol callback for pattern unsuppression
+	if w.onChainClosedSymbol != nil && chain != nil && chain.Symbol != "" {
+		w.onChainClosedSymbol(chain.UserID, chain.Symbol, chain.Mode, chain.Timeframe)
+	}
+
+	// Call the onChainClosedBroadcast callback for frontend cascade notification
+	// This is the canonical broadcast point - ALL chain close paths go through CloseChain()
+	if w.onChainClosedBroadcast != nil && chain != nil && chain.UserID != "" {
+		w.onChainClosedBroadcast(chain.UserID, chainID, chain.Symbol, chain.Mode, chain.ModeCode, chain.Timeframe, reason, totalPnL, closePrice)
+	}
+
 	return nil
 }
 
@@ -326,6 +361,22 @@ func (w *ChainEventWriter) RecordEntryPlaced(ctx context.Context, chainID string
 
 	if err := w.db.InsertChainEvent(ctx, event); err != nil {
 		return fmt.Errorf("failed to insert entry placed event: %w", err)
+	}
+
+	// Update order_chains with entry details and ENTRY_PLACED status
+	// This allows the API to reconstruct the pending entry order from DB
+	// even when the Binance API doesn't return the open order
+	chain, getErr := w.db.GetOrderChainByChainIDOnly(ctx, chainID)
+	if getErr == nil && chain != nil {
+		chain.Status = OrderChainStatusEntryPlaced
+		chain.EntryPrice = &req.Price
+		chain.EntryQuantity = &req.Quantity
+		chain.EntryBinanceOrderID = &req.BinanceOrderID
+		if err := w.db.UpdateOrderChain(ctx, chain); err != nil {
+			w.logger.Warn().Err(err).Msg("Failed to update chain with entry placed details")
+		}
+		// Update cache
+		w.updateCacheAfterWrite(ctx, chain.UserID, chainID)
 	}
 
 	w.logger.Debug().
@@ -955,6 +1006,12 @@ func (w *ChainEventWriter) GetChainEvents(ctx context.Context, chainID string) (
 // GetActiveChains retrieves all active chains for a user
 func (w *ChainEventWriter) GetActiveChains(ctx context.Context, userID string) ([]*OrderChain, error) {
 	return w.db.GetActiveOrderChains(ctx, userID)
+}
+
+// GetOpenChains retrieves all non-closed chains for a user (PENDING, ENTRY_PLACED, ACTIVE, PARTIAL).
+// Used for capacity counting where pending entries should also count toward position limits.
+func (w *ChainEventWriter) GetOpenChains(ctx context.Context, userID string) ([]*OrderChain, error) {
+	return w.db.GetOpenOrderChains(ctx, userID)
 }
 
 // === Helper Methods ===

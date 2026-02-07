@@ -300,8 +300,15 @@ function CoinRow({ coin, prevCoin, isExpanded, onToggleExpand }: CoinRowProps) {
     }
   };
 
-  // Get all timeframe names
-  const timeframeNames = Object.keys(coin.timeframes || {}).join(', ') || '-';
+  // Get all timeframe names, including position timeframe if available
+  const tfKeys = Object.keys(coin.timeframes || {});
+  const positionTf = coin.position_timeframe;
+  // Show position timeframe prominently if source is position/both
+  const timeframeNames = positionTf && (source === 'position' || source === 'both')
+    ? (tfKeys.length > 0 && !tfKeys.includes(positionTf)
+        ? `${positionTf}, ${tfKeys.join(', ')}`
+        : tfKeys.length > 0 ? tfKeys.join(', ') : positionTf)
+    : (tfKeys.join(', ') || '-');
 
   return (
     <div className={`border-b border-gray-700/50 last:border-b-0 transition-colors duration-300 ${

@@ -15,11 +15,7 @@ import {
   TrendingDown,
   X,
   RefreshCw,
-  Target,
-  Shield,
   Edit2,
-  Check,
-  XCircle,
   Zap,
   AlertCircle,
   Wifi,
@@ -27,13 +23,13 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle,
-  Activity,
   Clock,
   Hash,
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import { wsService } from '../services/websocket';
-import type { FuturesOrder, FuturesPosition } from '../types/futures';
+import type { FuturesOrder } from '../types/futures';
+import type { WSEvent } from '../types';
 
 interface PositionOrders {
   take_profit_orders: FuturesOrder[];
@@ -114,10 +110,10 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     e.target.select();
   };
 
-  // Fetch order chains from NEW system
-  // Note: Chain Runner positions (those with mode codes like SCA, SWI, ULT, POS) are
-  // displayed in the Trade Lifecycle tab's Positions section for detailed management.
-  // This table shows only non-Chain Runner positions (manual trades, etc.)
+  // Chain runner mode codes - these positions are shown in Trade Cycle, not here
+  const CHAIN_RUNNER_MODE_CODES = ['SCA', 'SWI', 'ULT', 'POS'];
+
+  // Fetch order chains - exclude chain runner positions (they appear in Trade Cycle)
   const fetchOrderChains = useCallback(async () => {
     try {
       setLoadingChains(true);
@@ -128,21 +124,9 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       const allChains = [
         ...(response.chains || []),
         ...(partialResponse.chains || []),
-      ];
+      ].filter(chain => !CHAIN_RUNNER_MODE_CODES.includes(chain.mode_code || ''));
 
-      // Filter OUT Chain Runner positions (those managed by the Chain Entry Runner)
-      // Chain Runner positions have mode codes (SCA, SWI, ULT, POS) and are displayed
-      // in the Trade Lifecycle tab's Positions section with detailed analytics
-      const CHAIN_RUNNER_MODE_CODES = ['SCA', 'SWI', 'ULT', 'POS'];
-      const nonChainRunnerChains = allChains.filter(chain => {
-        // Filter out chains with Chain Runner mode codes
-        if (chain.mode_code && CHAIN_RUNNER_MODE_CODES.includes(chain.mode_code)) {
-          return false;
-        }
-        return true;
-      });
-
-      setOrderChains(nonChainRunnerChains);
+      setOrderChains(allChains);
       setLastRefreshTime(new Date());
     } catch (err) {
       console.error('Error fetching order chains:', err);
@@ -164,23 +148,75 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
     fetchTradingMode();
   }, []);
 
-  // WebSocket-driven updates with real-time refresh
+  // Stable ref for orderChains to avoid re-subscribing WebSocket handlers on every chain change
+  const orderChainsRef = useRef<OrderChainWithState[]>([]);
+  orderChainsRef.current = orderChains;
+
+  // Real-time price updates from coin profiler - separate effect with NO dependencies
+  // to ensure subscription is stable and never torn down/recreated
+  useEffect(() => {
+    const handleCoinUpdate = (event: WSEvent) => {
+      const update = event.data as { symbol?: string; price?: number } | undefined;
+      if (update && update.symbol && update.price && update.price > 0) {
+        setLivePrices(prev => {
+          const newMap = new Map(prev);
+          newMap.set(update.symbol!, update.price!);
+          return newMap;
+        });
+      }
+    };
+
+    wsService.subscribe('COIN_DATA_UPDATE', handleCoinUpdate);
+
+    return () => {
+      wsService.unsubscribe('COIN_DATA_UPDATE', handleCoinUpdate);
+    };
+  }, []);
+
+  // Chain closed handler - separate effect with NO dependencies for instant removal
+  useEffect(() => {
+    const handleChainClosed = (event: WSEvent) => {
+      const data = event.data;
+      if (!data) return;
+
+      console.log('[FuturesPositions] CHAIN_CLOSED received - removing position', {
+        chainId: data.chain_id,
+        symbol: data.symbol,
+        closeReason: data.close_reason,
+        realizedPnl: data.realized_pnl,
+      });
+
+      // Immediately remove this chain from the displayed list
+      setOrderChains(prev => prev.filter(c => c.chain_id !== data.chain_id));
+
+      // Also refresh Binance positions and do a full chain refetch for consistency
+      fetchPositions();
+      setTimeout(() => fetchOrderChains(), 500);
+    };
+
+    wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+
+    return () => {
+      wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+    };
+  }, [fetchPositions, fetchOrderChains]);
+
+  // WebSocket-driven updates for position/order changes
   useEffect(() => {
     const handlePositionUpdate = () => {
-      // Refresh both Binance positions (for mark price) and order chains
       fetchPositions();
       fetchOrderChains();
     };
 
     const handleOrderUpdate = () => {
-      // ORDER_UPDATE triggers order chain refresh
       fetchOrderChains();
 
       // Also refresh position orders for TP/SL display
-      if (orderChains.length > 0) {
+      const chains = orderChainsRef.current;
+      if (chains.length > 0) {
         const fetchAllPositionOrders = async () => {
           const orders: Record<string, PositionOrders> = {};
-          for (const chain of orderChains) {
+          for (const chain of chains) {
             try {
               const data = await futuresApi.getPositionOrders(chain.symbol);
               orders[chain.symbol] = {
@@ -198,9 +234,13 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       }
     };
 
+    const handlePositionCreated = () => {
+      fetchOrderChains();
+      fetchPositions();
+    };
+
     const handleConnect = () => {
       setWsConnected(true);
-      // Full refresh on reconnect
       fetchOrderChains();
       fetchPositions();
     };
@@ -209,23 +249,11 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       setWsConnected(false);
     };
 
-    // Handle real-time price updates from coin profiler
-    const handleCoinUpdate = (event: { type: string; data?: { symbol: string; price: number } }) => {
-      if (event.data && event.data.symbol && event.data.price > 0) {
-        setLivePrices(prev => {
-          const newMap = new Map(prev);
-          newMap.set(event.data!.symbol, event.data!.price);
-          return newMap;
-        });
-      }
-    };
-
-    // Subscribe to WebSocket events
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
     wsService.subscribe('PNL_UPDATE', handlePositionUpdate);
     wsService.subscribe('ORDER_UPDATE', handleOrderUpdate);
     wsService.subscribe('CHAIN_UPDATE', handlePositionUpdate);
-    wsService.subscribe('COIN_DATA_UPDATE', handleCoinUpdate);
+    wsService.subscribe('POSITION_CREATED', handlePositionCreated);
     wsService.onConnect(handleConnect);
     wsService.onDisconnect(handleDisconnect);
 
@@ -236,7 +264,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
 
     // Set up 1-second refresh interval for real-time mark prices (fallback)
     refreshIntervalRef.current = setInterval(() => {
-      fetchPositions(); // Get latest mark prices from Binance
+      fetchPositions();
     }, 1000);
 
     return () => {
@@ -244,7 +272,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
       wsService.unsubscribe('PNL_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('ORDER_UPDATE', handleOrderUpdate);
       wsService.unsubscribe('CHAIN_UPDATE', handlePositionUpdate);
-      wsService.unsubscribe('COIN_DATA_UPDATE', handleCoinUpdate);
+      wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);
 
@@ -252,7 +280,7 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
         clearInterval(refreshIntervalRef.current);
       }
     };
-  }, [fetchPositions, fetchOrderChains, orderChains.length]);
+  }, [fetchPositions, fetchOrderChains]);
 
   // Fetch orders for each position
   useEffect(() => {
@@ -403,13 +431,24 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
             <WifiOff className="w-3 h-3 text-yellow-500" title="WebSocket disconnected - using polling" />
           )}
           <span className="text-sm text-gray-400">({orderChains.length})</span>
+          {tradingMode === 'live' ? (
+            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-green-500/20 border border-green-500 text-green-400">
+              <Zap className="w-3 h-3" />
+              LIVE
+            </div>
+          ) : tradingMode === 'paper' ? (
+            <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-yellow-500/20 border border-yellow-500 text-yellow-400">
+              <AlertCircle className="w-3 h-3" />
+              PAPER
+            </div>
+          ) : null}
           {loadingChains && (
             <RefreshCw className="w-3 h-3 text-blue-400 animate-spin" />
           )}
         </div>
         <div className="flex items-center gap-4">
-          <span className={`text-sm ${getPositionColor(totalPnL)}`}>
-            Total PnL: {formatUSD(totalPnL)}
+          <span className={`text-sm font-bold ${getPositionColor(totalPnL)}`}>
+            Total: {formatUSD(totalPnL)}
           </span>
           <button
             onClick={fetchOrderChains}
@@ -424,524 +463,413 @@ export default function FuturesPositionsTable({ onSymbolClick }: FuturesPosition
 
       {/* Positions List */}
       <div className="divide-y divide-gray-800">
-        {orderChains.map((chain) => {
-          const positionState = chain.position_state;
-          const realTimePrice = getRealTimePrice(chain.symbol);
-          const unrealizedPnl = calculateUnrealizedPnL(positionState, chain.position_side, realTimePrice);
-          const realizedPnl = positionState?.realized_pnl || 0;
-          const totalPnl = realizedPnl + unrealizedPnl;
+        {orderChains.map((chain) => (
+          <PositionCard
+            key={chain.chain_id}
+            chain={chain}
+            isExpanded={expandedPosition === chain.chain_id}
+            onToggleExpand={() => setExpandedPosition(expandedPosition === chain.chain_id ? null : chain.chain_id)}
+            getRealTimePrice={getRealTimePrice}
+            calculateUnrealizedPnL={calculateUnrealizedPnL}
+            positionOrders={positionOrders[chain.symbol]}
+            editingTPSL={editingTPSL}
+            tpValue={tpValue}
+            slValue={slValue}
+            savingTPSL={savingTPSL}
+            isLoading={isLoading}
+            onSymbolClick={onSymbolClick}
+            onStartEditTPSL={startEditTPSL}
+            onCancelEditTPSL={cancelEditTPSL}
+            onSaveTPSL={saveTPSL}
+            onSetTpValue={setTpValue}
+            onSetSlValue={setSlValue}
+            onClosePosition={handleClosePosition}
+            onInputFocus={handleInputFocus}
+          />
+        ))}
+      </div>
 
-          const entryPrice = positionState?.entry_price || 0;
-          const entryQty = positionState?.entry_quantity || 0;
-          const remainingQty = positionState?.remaining_quantity || 0;
+      {/* Footer */}
+      {lastRefreshTime && (
+        <div className="px-4 py-1.5 bg-gray-800/50 border-t border-gray-700 flex items-center gap-2 text-xs text-gray-500">
+          <Clock className="w-3 h-3" />
+          <span>Last refresh: {lastRefreshTime.toLocaleTimeString()}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
-          const pnlPercent = entryPrice > 0 && entryQty > 0
-            ? (unrealizedPnl / (entryPrice * entryQty)) * 100
-            : 0;
+// ==================== Position Card Component ====================
 
-          const isExpanded = expandedPosition === chain.chain_id;
-          const isLong = chain.position_side === 'LONG';
+interface PositionCardProps {
+  chain: OrderChainWithState;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
+  getRealTimePrice: (symbol: string) => number;
+  calculateUnrealizedPnL: (ps: PositionStateInfo | undefined, side: string, price: number) => number;
+  positionOrders?: PositionOrders;
+  editingTPSL: string | null;
+  tpValue: string;
+  slValue: string;
+  savingTPSL: boolean;
+  isLoading: boolean;
+  onSymbolClick?: (symbol: string) => void;
+  onStartEditTPSL: (symbol: string, tp?: number, sl?: number) => void;
+  onCancelEditTPSL: () => void;
+  onSaveTPSL: (symbol: string, side: string) => void;
+  onSetTpValue: (v: string) => void;
+  onSetSlValue: (v: string) => void;
+  onClosePosition: (symbol: string) => void;
+  onInputFocus: (e: React.FocusEvent<HTMLInputElement>) => void;
+}
 
-          // Get orders from chain
-          const slOrder = getOrderByType(chain.orders, 'SL');
-          const tpOrders = getTPOrders(chain.orders);
-          const currentTPLevel = getCurrentTPLevel(tpOrders);
-          const nextTP = tpOrders.find(tp => tp.status !== 'FILLED');
+function PositionCard({
+  chain,
+  isExpanded,
+  onToggleExpand,
+  getRealTimePrice,
+  calculateUnrealizedPnL,
+  positionOrders,
+  editingTPSL,
+  tpValue,
+  slValue,
+  savingTPSL,
+  isLoading,
+  onSymbolClick,
+  onStartEditTPSL,
+  onCancelEditTPSL,
+  onSaveTPSL,
+  onSetTpValue,
+  onSetSlValue,
+  onClosePosition,
+  onInputFocus,
+}: PositionCardProps) {
+  const positionState = chain.position_state;
+  const realTimePrice = getRealTimePrice(chain.symbol);
+  const unrealizedPnl = calculateUnrealizedPnL(positionState, chain.position_side, realTimePrice);
+  const realizedPnl = positionState?.realized_pnl || 0;
+  const totalPnl = realizedPnl + unrealizedPnl;
 
-          // Calculate expected profit/loss
-          const slPrice = slOrder?.stop_price || slOrder?.price || 0;
-          const nextTPPrice = nextTP?.stop_price || nextTP?.price || 0;
+  const entryPrice = positionState?.entry_price || 0;
+  const entryQty = positionState?.entry_quantity || 0;
+  const remainingQty = positionState?.remaining_quantity || 0;
 
-          const expectedProfit = nextTPPrice > 0 && remainingQty > 0
-            ? isLong
-              ? (nextTPPrice - entryPrice) * remainingQty
-              : (entryPrice - nextTPPrice) * remainingQty
-            : 0;
+  const pnlPercent = entryPrice > 0 && entryQty > 0
+    ? (unrealizedPnl / (entryPrice * entryQty)) * 100
+    : 0;
 
-          const expectedLoss = slPrice > 0 && remainingQty > 0
-            ? isLong
-              ? (entryPrice - slPrice) * remainingQty
-              : (slPrice - entryPrice) * remainingQty
-            : 0;
+  const isLong = chain.position_side === 'LONG';
 
-          const riskReward = expectedLoss > 0 ? expectedProfit / expectedLoss : 0;
+  // Get orders from chain
+  const slOrder = getOrderByType(chain.orders, 'SL');
+  const tpOrders = getTPOrders(chain.orders);
+  const currentTPLevel = getCurrentTPLevel(tpOrders);
+  const nextTP = tpOrders.find(tp => tp.status !== 'FILLED');
 
-          const orders = positionOrders[chain.symbol];
-          const binanceTPOrder = orders?.take_profit_orders?.[0];
-          const binanceSLOrder = orders?.stop_loss_orders?.[0];
-          const trailingOrder = orders?.trailing_stop_orders?.[0];
+  // Calculate expected profit/loss
+  const slPrice = slOrder?.stop_price || slOrder?.price || 0;
+  const nextTPPrice = nextTP?.stop_price || nextTP?.price || 0;
 
-          const isEditing = editingTPSL === chain.symbol;
-          const modeInfo = MODE_DISPLAY[chain.mode_code] || { label: chain.mode_code || 'UNK', color: 'text-gray-400 bg-gray-900/30' };
+  const expectedProfit = nextTPPrice > 0 && remainingQty > 0
+    ? isLong
+      ? (nextTPPrice - entryPrice) * remainingQty
+      : (entryPrice - nextTPPrice) * remainingQty
+    : 0;
 
-          // Modification counts
-          const slMods = chain.modification_counts?.SL || 0;
-          const totalTPMods = (chain.modification_counts?.TP1 || 0) +
-                             (chain.modification_counts?.TP2 || 0) +
-                             (chain.modification_counts?.TP3 || 0);
+  const expectedLoss = slPrice > 0 && remainingQty > 0
+    ? isLong
+      ? (entryPrice - slPrice) * remainingQty
+      : (slPrice - entryPrice) * remainingQty
+    : 0;
 
-          return (
-            <div key={chain.chain_id} className="hover:bg-gray-800/30">
-              {/* Main Row */}
-              <div
-                className="px-4 py-3 cursor-pointer"
-                onClick={() => setExpandedPosition(isExpanded ? null : chain.chain_id)}
+  const riskReward = expectedLoss > 0 ? expectedProfit / expectedLoss : 0;
+
+  const binanceTPOrder = positionOrders?.take_profit_orders?.[0];
+  const binanceSLOrder = positionOrders?.stop_loss_orders?.[0];
+  const trailingOrder = positionOrders?.trailing_stop_orders?.[0];
+
+  const isEditing = editingTPSL === chain.symbol;
+  const modeInfo = MODE_DISPLAY[chain.mode_code] || { label: chain.mode_code || 'MAN', color: 'text-gray-400 bg-gray-900/30' };
+
+  return (
+    <div className={`transition-colors ${isExpanded ? 'bg-gray-800/20' : 'hover:bg-gray-800/30'}`}>
+      {/* Collapsed Row - Compact Single Line */}
+      <div
+        className="px-4 py-2.5 cursor-pointer select-none"
+        onClick={onToggleExpand}
+      >
+        <div className="flex items-center justify-between gap-3">
+          {/* Left: Symbol + Direction */}
+          <div className="flex items-center gap-2 min-w-0 flex-shrink-0">
+            <div className={`w-1.5 h-8 rounded-full flex-shrink-0 ${isLong ? 'bg-green-500' : 'bg-red-500'}`} />
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSymbolClick?.(chain.symbol);
+                }}
+                className="font-bold text-white hover:text-yellow-400 transition-colors text-sm"
               >
-                <div className="flex items-center justify-between">
-                  {/* Left: Symbol and Info */}
-                  <div className="flex items-center gap-3">
-                    {isLong ? (
-                      <TrendingUp className="w-5 h-5 text-green-500" />
-                    ) : (
-                      <TrendingDown className="w-5 h-5 text-red-500" />
-                    )}
-
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onSymbolClick?.(chain.symbol);
-                          }}
-                          className="font-semibold text-white hover:text-yellow-400 transition-colors"
-                        >
-                          {chain.symbol.replace('USDT', '')}
-                        </button>
-
-                        <span className={`text-xs font-bold ${isLong ? 'text-green-400' : 'text-red-400'}`}>
-                          {chain.position_side}
-                        </span>
-
-                        {/* Mode Badge */}
-                        <span className={`text-xs uppercase font-bold px-1.5 py-0.5 rounded ${modeInfo.color}`}>
-                          {modeInfo.label}
-                        </span>
-
-                        {/* Chain ID Badge */}
-                        <span className="px-1.5 py-0.5 bg-gray-700/50 text-gray-400 rounded text-xs flex items-center gap-0.5">
-                          <Hash className="w-3 h-3" />
-                          {chain.chain_id.split('-').slice(-1)[0]}
-                        </span>
-
-                        {/* Trailing Badge - Story 11.46: Enhanced display */}
-                        {trailingOrder && (
-                          <span className="px-1.5 py-0.5 bg-cyan-900/50 text-cyan-400 rounded text-xs flex items-center gap-1" title={`Trailing SL @ $${formatPrice(trailingOrder.stopPrice)}`}>
-                            <Activity className="w-3 h-3" />
-                            TRAIL
-                            <span className="text-cyan-300">${formatPrice(trailingOrder.stopPrice)}</span>
-                          </span>
-                        )}
-
-                        {/* TP Progress Badge */}
-                        {currentTPLevel > 0 && (
-                          <span className="px-1.5 py-0.5 bg-green-900/50 text-green-400 rounded text-xs font-medium flex items-center gap-1">
-                            <Target className="w-3 h-3" />
-                            TP{currentTPLevel}
-                            {entryQty > 0 && remainingQty > 0 && (
-                              <span className="text-green-300">
-                                ({Math.round((1 - remainingQty / entryQty) * 100)}%)
-                              </span>
-                            )}
-                          </span>
-                        )}
-
-                        {/* Status Badge */}
-                        {chain.status === 'partial' && (
-                          <span className="px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 rounded text-xs">
-                            PARTIAL
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2 text-xs text-gray-400 mt-0.5">
-                        <span>{formatQuantity(remainingQty)}/{formatQuantity(entryQty)}</span>
-                        <span>•</span>
-                        <span>Entry: ${formatPrice(entryPrice)}</span>
-                        {realTimePrice > 0 && (
-                          <>
-                            <span>•</span>
-                            <span className="text-yellow-400">Now: ${formatPrice(realTimePrice)}</span>
-                          </>
-                        )}
-                        {(slMods > 0 || totalTPMods > 0) && (
-                          <>
-                            <span>•</span>
-                            <span className="text-gray-500">
-                              Mods: {slMods > 0 && `SL×${slMods}`} {totalTPMods > 0 && `TP×${totalTPMods}`}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Right: PnL and Expand */}
-                  <div className="flex items-center gap-4">
-                    {/* Trading Mode */}
-                    {tradingMode === 'live' ? (
-                      <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-green-500/20 border border-green-500 text-green-400">
-                        <Zap className="w-3 h-3" />
-                        LIVE
-                      </div>
-                    ) : tradingMode === 'paper' ? (
-                      <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-bold bg-yellow-500/20 border border-yellow-500 text-yellow-400">
-                        <AlertCircle className="w-3 h-3" />
-                        PAPER
-                      </div>
-                    ) : null}
-
-                    {/* PnL Display */}
-                    <div className="text-right">
-                      <div className={`font-bold ${getPositionColor(totalPnl)}`}>
-                        {formatUSD(totalPnl)}
-                      </div>
-                      <div className={`text-xs ${getPositionColor(pnlPercent)}`}>
-                        ({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)
-                      </div>
-                    </div>
-
-                    {/* Expand Icon */}
-                    {isExpanded ? (
-                      <ChevronUp className="w-5 h-5 text-gray-400" />
-                    ) : (
-                      <ChevronDown className="w-5 h-5 text-gray-400" />
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Expanded Details */}
-              {isExpanded && (
-                <div className="px-4 pb-4 space-y-3 border-t border-gray-700/50 bg-gray-800/20">
-                  {/* Price Info Grid */}
-                  <div className="grid grid-cols-6 gap-2 pt-3">
-                    <div className="bg-gray-700/50 p-2 rounded text-center">
-                      <div className="text-gray-500 text-xs">Entry</div>
-                      <div className="text-white font-mono">${formatPrice(entryPrice)}</div>
-                    </div>
-                    <div className="bg-gray-700/50 p-2 rounded text-center">
-                      <div className="text-gray-500 text-xs">Current</div>
-                      <div className="text-yellow-400 font-mono font-bold">${formatPrice(realTimePrice)}</div>
-                    </div>
-                    <div className="bg-gray-700/50 p-2 rounded text-center">
-                      <div className="text-gray-500 text-xs">SL</div>
-                      <div className="font-mono text-red-400">
-                        ${formatPrice(slPrice)}
-                        {slMods > 0 && <span className="text-xs text-gray-500 ml-1">(×{slMods})</span>}
-                      </div>
-                    </div>
-                    <div className="bg-gray-700/50 p-2 rounded text-center">
-                      <div className="text-gray-500 text-xs">Remaining Qty</div>
-                      <div className="text-white">{formatQuantity(remainingQty)}</div>
-                    </div>
-                    <div className="bg-gray-700/50 p-2 rounded text-center">
-                      <div className="text-gray-500 text-xs">Realized</div>
-                      <div className={getPositionColor(realizedPnl)}>
-                        {formatUSD(realizedPnl)}
-                      </div>
-                    </div>
-                    <div className="bg-gray-700/50 p-2 rounded text-center">
-                      <div className="text-gray-500 text-xs">Entry Fees</div>
-                      <div className="text-gray-400">
-                        {formatUSD(positionState?.entry_fees || 0)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Expected Profit/Loss Section */}
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="bg-green-900/30 p-2 rounded border border-green-800/50">
-                      <div className="text-gray-400 text-xs">Expected Profit (Next TP)</div>
-                      <div className="text-green-400 font-bold">+{formatUSD(expectedProfit)}</div>
-                      <div className="text-green-300/70 text-xs">@ ${formatPrice(nextTPPrice)}</div>
-                    </div>
-                    <div className="bg-red-900/30 p-2 rounded border border-red-800/50">
-                      <div className="text-gray-400 text-xs">Expected Loss (SL)</div>
-                      <div className="text-red-400 font-bold">-{formatUSD(Math.abs(expectedLoss))}</div>
-                      <div className="text-red-300/70 text-xs">@ ${formatPrice(slPrice)}</div>
-                    </div>
-                    <div className="bg-gray-700/50 p-2 rounded border border-gray-600/50">
-                      <div className="text-gray-400 text-xs">Risk/Reward</div>
-                      <div className={`font-bold ${riskReward >= 1 ? 'text-green-400' : 'text-yellow-400'}`}>
-                        1:{riskReward.toFixed(2)}
-                      </div>
-                      <div className="text-gray-500 text-xs">
-                        {riskReward >= 2 ? 'Excellent' : riskReward >= 1 ? 'Good' : 'Poor'}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Trailing Stop Status Section - Story 11.46 */}
-                  {trailingOrder && (
-                    <div className="bg-cyan-900/20 p-3 rounded border border-cyan-800/50">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Activity className="w-4 h-4 text-cyan-400" />
-                        <span className="text-cyan-400 font-medium text-sm">Trailing Stop Active</span>
-                      </div>
-                      <div className="grid grid-cols-4 gap-3 text-xs">
-                        <div>
-                          <div className="text-gray-500">Current SL</div>
-                          <div className="text-cyan-300 font-mono font-medium">${formatPrice(trailingOrder.stopPrice)}</div>
-                        </div>
-                        <div>
-                          <div className="text-gray-500">Original SL</div>
-                          <div className="text-gray-400 font-mono">${formatPrice(slPrice)}</div>
-                        </div>
-                        <div>
-                          <div className="text-gray-500">Distance</div>
-                          <div className="text-gray-300 font-mono">
-                            {realTimePrice > 0 && trailingOrder.stopPrice > 0 ? (
-                              `${(Math.abs(realTimePrice - trailingOrder.stopPrice) / realTimePrice * 100).toFixed(2)}%`
-                            ) : '-'}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-gray-500">SL Moved</div>
-                          <div className={`font-mono ${trailingOrder.stopPrice > slPrice ? 'text-green-400' : trailingOrder.stopPrice < slPrice ? 'text-red-400' : 'text-gray-400'}`}>
-                            {slPrice > 0 ? (
-                              isLong
-                                ? `${trailingOrder.stopPrice >= slPrice ? '+' : ''}${((trailingOrder.stopPrice - slPrice) / slPrice * 100).toFixed(2)}%`
-                                : `${slPrice >= trailingOrder.stopPrice ? '+' : ''}${((slPrice - trailingOrder.stopPrice) / slPrice * 100).toFixed(2)}%`
-                            ) : '-'}
-                          </div>
-                        </div>
-                      </div>
-                      {/* Visual progress indicator */}
-                      {entryPrice > 0 && realTimePrice > 0 && (
-                        <div className="mt-3">
-                          <div className="flex justify-between text-xs text-gray-500 mb-1">
-                            <span>Entry ${formatPrice(entryPrice)}</span>
-                            <span>Current ${formatPrice(realTimePrice)}</span>
-                            {nextTPPrice > 0 && <span>Target ${formatPrice(nextTPPrice)}</span>}
-                          </div>
-                          <div className="relative h-2 bg-gray-700 rounded-full overflow-hidden">
-                            {/* Progress bar showing position between entry and target */}
-                            {nextTPPrice > 0 && (
-                              <div
-                                className="absolute h-full bg-gradient-to-r from-cyan-500 to-green-500 rounded-full transition-all duration-300"
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, isLong
-                                    ? ((realTimePrice - entryPrice) / (nextTPPrice - entryPrice)) * 100
-                                    : ((entryPrice - realTimePrice) / (entryPrice - nextTPPrice)) * 100
-                                  ))}%`
-                                }}
-                              />
-                            )}
-                            {/* Trailing SL marker */}
-                            {nextTPPrice > 0 && (
-                              <div
-                                className="absolute w-1 h-full bg-cyan-400"
-                                style={{
-                                  left: `${Math.min(100, Math.max(0, isLong
-                                    ? ((trailingOrder.stopPrice - entryPrice) / (nextTPPrice - entryPrice)) * 100
-                                    : ((entryPrice - trailingOrder.stopPrice) / (entryPrice - nextTPPrice)) * 100
-                                  ))}%`
-                                }}
-                                title={`Trailing SL @ $${formatPrice(trailingOrder.stopPrice)}`}
-                              />
-                            )}
-                          </div>
-                          <div className="text-xs text-gray-500 mt-1 text-center">
-                            {isLong
-                              ? `Profit locked: $${formatPrice(Math.max(0, (trailingOrder.stopPrice - entryPrice) * remainingQty))}`
-                              : `Profit locked: $${formatPrice(Math.max(0, (entryPrice - trailingOrder.stopPrice) * remainingQty))}`
-                            }
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* TP Progression */}
-                  {tpOrders.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="text-gray-500 text-xs font-medium">Take Profit Progression</div>
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {tpOrders.map((tp, idx) => {
-                          const isHit = tp.status === 'FILLED';
-                          const tpLevel = parseInt(tp.order_type.replace('TP', '')) || idx + 1;
-                          const isNext = currentTPLevel + 1 === tpLevel;
-                          const tpMods = chain.modification_counts?.[tp.order_type] || 0;
-
-                          return (
-                            <div key={tp.order_type} className="flex items-center gap-1">
-                              <div
-                                className={`px-2 py-1 rounded text-xs font-bold flex items-center gap-1 ${
-                                  isHit
-                                    ? 'bg-green-900/60 text-green-300 ring-1 ring-green-600'
-                                    : isNext
-                                      ? 'bg-yellow-900/60 text-yellow-300 ring-1 ring-yellow-600 animate-pulse'
-                                      : 'bg-gray-700/40 text-gray-400'
-                                }`}
-                              >
-                                <span>{tp.order_type}</span>
-                                {isHit && <CheckCircle className="w-3 h-3" />}
-                                {isNext && !isHit && <AlertCircle className="w-3 h-3" />}
-                                {tpMods > 0 && <span className="text-gray-400">(×{tpMods})</span>}
-                              </div>
-                              {idx < tpOrders.length - 1 && (
-                                <span className={`text-xs font-bold ${
-                                  isHit ? 'text-green-400' : 'text-gray-600'
-                                }`}>→</span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-
-                      {/* TP Details */}
-                      <div className="grid grid-cols-4 gap-2">
-                        {tpOrders.map((tp) => {
-                          const isHit = tp.status === 'FILLED';
-                          const tpLevel = parseInt(tp.order_type.replace('TP', '')) || 1;
-                          const isNext = currentTPLevel + 1 === tpLevel;
-                          const tpPrice = tp.stop_price || tp.price || 0;
-
-                          return (
-                            <div
-                              key={tp.order_type}
-                              className={`text-xs p-1.5 rounded text-center ${
-                                isHit
-                                  ? 'bg-green-900/30 text-green-300'
-                                  : isNext
-                                    ? 'bg-yellow-900/30 text-yellow-300'
-                                    : 'bg-gray-700/30 text-gray-400'
-                              }`}
-                            >
-                              <div className="font-bold">{tp.order_type}</div>
-                              <div>${formatPrice(tpPrice)}</div>
-                              <div className="text-[10px]">Qty: {formatQuantity(tp.quantity)}</div>
-                              {isHit && <div className="text-green-400">✓ HIT</div>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Chain ID Info */}
-                  <div className="text-xs text-gray-500 bg-gray-700/30 p-2 rounded">
-                    <span className="font-medium">Chain ID:</span> {chain.chain_id}
-                    <span className="mx-2">•</span>
-                    <span className="font-medium">Created:</span> {new Date(chain.created_at).toLocaleString()}
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center justify-between pt-2 border-t border-gray-700/50">
-                    <div className="flex items-center gap-2">
-                      {/* Edit TP/SL */}
-                      {isEditing ? (
-                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                          <input
-                            type="number"
-                            value={tpValue}
-                            onChange={(e) => setTpValue(e.target.value)}
-                            onFocus={handleInputFocus}
-                            placeholder="TP"
-                            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs"
-                          />
-                          <input
-                            type="number"
-                            value={slValue}
-                            onChange={(e) => setSlValue(e.target.value)}
-                            onFocus={handleInputFocus}
-                            placeholder="SL"
-                            className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs"
-                          />
-                          <button
-                            onClick={() => saveTPSL(chain.symbol, chain.position_side)}
-                            disabled={savingTPSL}
-                            className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-xs"
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={cancelEditTPSL}
-                            className="px-2 py-1 bg-gray-600 hover:bg-gray-500 text-white rounded text-xs"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            startEditTPSL(chain.symbol, binanceTPOrder?.stopPrice, binanceSLOrder?.stopPrice);
-                          }}
-                          className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded text-xs flex items-center gap-1"
-                        >
-                          <Edit2 className="w-3 h-3" />
-                          Edit TP/SL
-                        </button>
-                      )}
-
-                      {/* Enhanced Trailing Stop Status - Story 11.46 */}
-                      {trailingOrder && (
-                        <div className="flex items-center gap-2 text-xs">
-                          <div className="flex items-center gap-1.5 px-2 py-1 bg-cyan-900/30 rounded border border-cyan-800/50">
-                            <Activity className="w-3 h-3 text-cyan-400" />
-                            <span className="text-cyan-400 font-medium">Trailing Active</span>
-                            <span className="text-gray-300">@ ${formatPrice(trailingOrder.stopPrice)}</span>
-                            {/* Calculate distance from current price */}
-                            {realTimePrice > 0 && trailingOrder.stopPrice > 0 && (
-                              <span className="text-gray-500">
-                                ({(((realTimePrice - trailingOrder.stopPrice) / realTimePrice) * 100 * (isLong ? 1 : -1)).toFixed(2)}% distance)
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Close Button */}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleClosePosition(chain.symbol);
-                      }}
-                      disabled={isLoading}
-                      className="px-3 py-1.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded text-xs flex items-center gap-1"
-                    >
-                      <X className="w-3 h-3" />
-                      Close Position
-                    </button>
-                  </div>
-                </div>
+                {chain.symbol.replace('USDT', '')}
+              </button>
+              <span className={`text-xs font-bold px-1 py-0.5 rounded ${isLong ? 'text-green-400 bg-green-900/40' : 'text-red-400 bg-red-900/40'}`}>
+                {isLong ? 'LONG' : 'SHORT'}
+              </span>
+              <span className={`text-[10px] uppercase font-bold px-1 py-0.5 rounded ${modeInfo.color}`}>
+                {modeInfo.label}
+              </span>
+              {/* TP Progress Badge */}
+              {currentTPLevel > 0 && (
+                <span className="px-1 py-0.5 bg-green-900/50 text-green-400 rounded text-[10px] font-bold">
+                  TP{currentTPLevel}
+                </span>
+              )}
+              {chain.status === 'partial' && (
+                <span className="px-1 py-0.5 bg-yellow-900/50 text-yellow-400 rounded text-[10px]">
+                  PARTIAL
+                </span>
               )}
             </div>
-          );
-        })}
+          </div>
+
+          {/* Center: Prices */}
+          <div className="flex items-center gap-4 text-xs flex-shrink-0">
+            <div className="text-center">
+              <span className="text-gray-500 block text-[10px] leading-tight">Mark</span>
+              <span className="text-yellow-400 font-mono font-bold">${formatPrice(realTimePrice)}</span>
+            </div>
+            <div className="text-center">
+              <span className="text-gray-500 block text-[10px] leading-tight">Entry</span>
+              <span className="text-gray-300 font-mono">${formatPrice(entryPrice)}</span>
+            </div>
+            <div className="text-center">
+              <span className="text-gray-500 block text-[10px] leading-tight">SL</span>
+              <span className="text-red-400 font-mono">${formatPrice(slPrice)}</span>
+            </div>
+          </div>
+
+          {/* Right: PnL + chevron */}
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {/* PnL */}
+            <div className="text-right min-w-[80px]">
+              <div className={`font-bold text-sm ${getPositionColor(totalPnl)}`}>
+                {formatUSD(totalPnl)}
+              </div>
+              <div className={`text-[10px] ${getPositionColor(pnlPercent)}`}>
+                {pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%
+              </div>
+            </div>
+
+            {/* Expand Icon */}
+            {isExpanded ? (
+              <ChevronUp className="w-4 h-4 text-gray-500 flex-shrink-0" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-gray-500 flex-shrink-0" />
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Legend */}
-      <div className="px-4 py-2 bg-gray-800/50 border-t border-gray-700 flex items-center flex-wrap gap-4 text-xs text-gray-500">
-        <div className="flex items-center gap-1">
-          <Target className="w-3 h-3 text-green-500" />
-          <span>Take Profit</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Shield className="w-3 h-3 text-red-500" />
-          <span>Stop Loss</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Activity className="w-3 h-3 text-cyan-400" />
-          <span>Trailing</span>
-        </div>
-        <span className="text-gray-600">|</span>
-        <div className="flex items-center gap-1">
-          <Hash className="w-3 h-3 text-gray-500" />
-          <span>Chain ID</span>
-        </div>
-        {lastRefreshTime && (
-          <>
-            <span className="text-gray-600">|</span>
-            <div className="flex items-center gap-1">
-              <Clock className="w-3 h-3 text-gray-500" />
-              <span>Refreshed: {lastRefreshTime.toLocaleTimeString()}</span>
+      {/* Expanded Details */}
+      {isExpanded && (
+        <div className="px-4 pb-4 space-y-3 border-t border-gray-700/50">
+          {/* Section A: Price & PnL Grid */}
+          <div className="grid grid-cols-6 gap-2 pt-3">
+            <div className="bg-gray-700/50 p-2 rounded text-center">
+              <div className="text-gray-500 text-xs">Entry</div>
+              <div className="text-white font-mono text-sm">${formatPrice(entryPrice)}</div>
             </div>
-          </>
-        )}
-      </div>
+            <div className="bg-gray-700/50 p-2 rounded text-center">
+              <div className="text-gray-500 text-xs">Mark Price</div>
+              <div className="text-yellow-400 font-mono font-bold text-sm">${formatPrice(realTimePrice)}</div>
+            </div>
+            <div className="bg-gray-700/50 p-2 rounded text-center">
+              <div className="text-gray-500 text-xs">SL</div>
+              <div className="font-mono text-red-400 text-sm">${formatPrice(slPrice)}</div>
+            </div>
+            <div className="bg-gray-700/50 p-2 rounded text-center">
+              <div className="text-gray-500 text-xs">Next TP</div>
+              <div className="font-mono text-green-400 text-sm">{nextTPPrice > 0 ? `$${formatPrice(nextTPPrice)}` : '-'}</div>
+            </div>
+            <div className="bg-gray-700/50 p-2 rounded text-center">
+              <div className="text-gray-500 text-xs">Qty</div>
+              <div className="text-white text-sm">{formatQuantity(remainingQty)}<span className="text-gray-500 text-xs">/{formatQuantity(entryQty)}</span></div>
+            </div>
+            <div className="bg-gray-700/50 p-2 rounded text-center">
+              <div className="text-gray-500 text-xs">Unrealized PnL</div>
+              <div className={`font-bold text-sm ${getPositionColor(unrealizedPnl)}`}>
+                {formatUSD(unrealizedPnl)}
+              </div>
+            </div>
+          </div>
+
+          {/* Expected Profit/Loss */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-green-900/30 p-2 rounded border border-green-800/50">
+              <div className="text-gray-400 text-xs">Expected Profit (Next TP)</div>
+              <div className="text-green-400 font-bold">+{formatUSD(expectedProfit)}</div>
+              <div className="text-green-300/70 text-xs">@ ${formatPrice(nextTPPrice)}</div>
+            </div>
+            <div className="bg-red-900/30 p-2 rounded border border-red-800/50">
+              <div className="text-gray-400 text-xs">Expected Loss (SL)</div>
+              <div className="text-red-400 font-bold">-{formatUSD(Math.abs(expectedLoss))}</div>
+              <div className="text-red-300/70 text-xs">@ ${formatPrice(slPrice)}</div>
+            </div>
+            <div className="bg-gray-700/50 p-2 rounded border border-gray-600/50">
+              <div className="text-gray-400 text-xs">Risk/Reward</div>
+              <div className={`font-bold ${riskReward >= 1 ? 'text-green-400' : 'text-yellow-400'}`}>
+                1:{riskReward.toFixed(2)}
+              </div>
+              <div className="text-gray-500 text-xs">
+                {riskReward >= 2 ? 'Excellent' : riskReward >= 1 ? 'Good' : 'Poor'}
+              </div>
+            </div>
+          </div>
+
+          {/* TP Progression */}
+          {tpOrders.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-gray-500 text-xs font-medium">Take Profit Progression</div>
+              <div className="flex items-center gap-1 flex-wrap">
+                {tpOrders.map((tp, idx) => {
+                  const isHit = tp.status === 'FILLED';
+                  const tpLevel = parseInt(tp.order_type.replace('TP', '')) || idx + 1;
+                  const isNext = currentTPLevel + 1 === tpLevel;
+                  const tpMods = chain.modification_counts?.[tp.order_type] || 0;
+
+                  return (
+                    <div key={tp.order_type} className="flex items-center gap-1">
+                      <div
+                        className={`px-2 py-1 rounded text-xs font-bold flex items-center gap-1 ${
+                          isHit
+                            ? 'bg-green-900/60 text-green-300 ring-1 ring-green-600'
+                            : isNext
+                              ? 'bg-yellow-900/60 text-yellow-300 ring-1 ring-yellow-600 animate-pulse'
+                              : 'bg-gray-700/40 text-gray-400'
+                        }`}
+                      >
+                        <span>{tp.order_type}</span>
+                        {isHit && <CheckCircle className="w-3 h-3" />}
+                        {isNext && !isHit && <AlertCircle className="w-3 h-3" />}
+                        {tpMods > 0 && <span className="text-gray-400">(x{tpMods})</span>}
+                      </div>
+                      {idx < tpOrders.length - 1 && (
+                        <span className={`text-xs font-bold ${
+                          isHit ? 'text-green-400' : 'text-gray-600'
+                        }`}>&rarr;</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* TP Details */}
+              <div className="grid grid-cols-4 gap-2">
+                {tpOrders.map((tp) => {
+                  const isHit = tp.status === 'FILLED';
+                  const tpLevel = parseInt(tp.order_type.replace('TP', '')) || 1;
+                  const isNext = currentTPLevel + 1 === tpLevel;
+                  const tpPrice = tp.stop_price || tp.price || 0;
+
+                  return (
+                    <div
+                      key={tp.order_type}
+                      className={`text-xs p-1.5 rounded text-center ${
+                        isHit
+                          ? 'bg-green-900/30 text-green-300'
+                          : isNext
+                            ? 'bg-yellow-900/30 text-yellow-300'
+                            : 'bg-gray-700/30 text-gray-400'
+                      }`}
+                    >
+                      <div className="font-bold">{tp.order_type}</div>
+                      <div>${formatPrice(tpPrice)}</div>
+                      <div className="text-[10px]">Qty: {formatQuantity(tp.quantity)}</div>
+                      {isHit && <div className="text-green-400">HIT</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Chain Info */}
+          <div className="text-xs text-gray-500 bg-gray-700/30 p-2 rounded flex items-center gap-3">
+            <span><span className="font-medium">Chain:</span> <Hash className="w-3 h-3 inline" />{chain.chain_id.split('-').slice(-1)[0]}</span>
+            <span>|</span>
+            <span><span className="font-medium">Realized:</span> <span className={getPositionColor(realizedPnl)}>{formatUSD(realizedPnl)}</span></span>
+            <span>|</span>
+            <span><span className="font-medium">Fees:</span> {formatUSD(positionState?.entry_fees || 0)}</span>
+            <span>|</span>
+            <span><span className="font-medium">Created:</span> {new Date(chain.created_at).toLocaleString()}</span>
+          </div>
+
+          {/* Section C: Actions */}
+          <div className="flex items-center justify-between pt-2 border-t border-gray-700/50">
+            <div className="flex items-center gap-2">
+              {/* Edit TP/SL */}
+              {isEditing ? (
+                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="number"
+                    value={tpValue}
+                    onChange={(e) => onSetTpValue(e.target.value)}
+                    onFocus={onInputFocus}
+                    placeholder="TP"
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs"
+                  />
+                  <input
+                    type="number"
+                    value={slValue}
+                    onChange={(e) => onSetSlValue(e.target.value)}
+                    onFocus={onInputFocus}
+                    placeholder="SL"
+                    className="w-20 px-2 py-1 bg-gray-700 border border-gray-600 rounded text-xs"
+                  />
+                  <button
+                    onClick={() => onSaveTPSL(chain.symbol, chain.position_side)}
+                    disabled={savingTPSL}
+                    className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-xs"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={onCancelEditTPSL}
+                    className="px-2 py-1 bg-gray-600 hover:bg-gray-500 text-white rounded text-xs"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onStartEditTPSL(chain.symbol, binanceTPOrder?.stopPrice, binanceSLOrder?.stopPrice);
+                  }}
+                  className="px-3 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded text-xs flex items-center gap-1"
+                >
+                  <Edit2 className="w-3 h-3" />
+                  Edit TP/SL
+                </button>
+              )}
+            </div>
+
+            {/* Close Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onClosePosition(chain.symbol);
+              }}
+              disabled={isLoading}
+              className="px-3 py-1.5 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded text-xs flex items-center gap-1"
+            >
+              <X className="w-3 h-3" />
+              Close Position
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

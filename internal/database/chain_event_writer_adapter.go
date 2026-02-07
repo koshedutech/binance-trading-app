@@ -43,6 +43,11 @@ func (a *ChainEventWriterDBAdapter) GetActiveOrderChains(ctx context.Context, us
 	return a.db.GetActiveOrderChains(ctx, userID)
 }
 
+// GetOpenOrderChains implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) GetOpenOrderChains(ctx context.Context, userID string) ([]*orders.OrderChain, error) {
+	return a.db.GetOpenOrderChains(ctx, userID)
+}
+
 // CloseOrderChain implements ChainEventWriterDB
 func (a *ChainEventWriterDBAdapter) CloseOrderChain(ctx context.Context, chainID string, closeReason string, realizedPnL, totalFees float64, closePrice *float64) error {
 	return a.db.CloseOrderChain(ctx, chainID, closeReason, realizedPnL, totalFees, closePrice)

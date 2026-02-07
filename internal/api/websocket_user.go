@@ -294,6 +294,14 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 		// Position created broadcasts (new position opened after entry fill)
 		BroadcastPositionCreated(userID, data)
 	})
+	events.SetBroadcastTrailingSLUpdate(func(userID string, data interface{}) {
+		// Trailing SL milestone broadcasts (R:R-based SL moves)
+		BroadcastTrailingSLUpdate(userID, data)
+	})
+	events.SetBroadcastChainClosed(func(userID string, data interface{}) {
+		// Chain closed broadcasts (position closed - SL/TP hit or manual close)
+		BroadcastChainClosedEvent(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -626,6 +634,53 @@ func BroadcastPositionCreated(userID string, positionData interface{}) {
 		Data: map[string]interface{}{
 			"position": positionData,
 		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastTrailingSLUpdate broadcasts a trailing SL milestone update to a specific user
+// Called when the Ravindra monitor moves the SL at a R:R milestone
+func BroadcastTrailingSLUpdate(userID string, trailingData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	event := events.Event{
+		Type:      events.EventTrailingSLUpdate,
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"trailing_sl": trailingData,
+		},
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastChainClosedEvent broadcasts a chain closed event to a specific user
+// Called when a position is fully closed (SL hit, TP hit, or manual close)
+// This triggers the full position close cascade on the frontend:
+// - Positions table removes the closed position
+// - Entry Decision shows symbol back in "watching" state
+// - Coin Profiler switches source from "position" to "strategy"
+func BroadcastChainClosedEvent(userID string, chainData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	// Convert chainData to map for direct field access on frontend
+	// This matches the existing CHAIN_CLOSED format used by BroadcastUserOrderUpdate
+	data, ok := chainData.(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{
+			"chain_closed": chainData,
+		}
+	}
+
+	event := events.Event{
+		Type:      events.EventChainClosed,
+		Timestamp: time.Now(),
+		Data:      data,
 	}
 
 	userWSHub.BroadcastToUser(userID, event)

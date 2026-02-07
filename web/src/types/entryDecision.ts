@@ -658,6 +658,18 @@ export interface PatternUpdate {
   fill_timeout_seconds?: number;
   /** Total fill timeout duration in seconds */
   fill_timeout_total?: number;
+  /** Entry candle data (breakout candle that triggered Step 3) */
+  entry_candle?: EntryCandle;
+
+  // Timing fields
+  /** When reference candle was detected (ISO timestamp) */
+  reference_detected_at?: string;
+  /** When breakout was detected - Step 2 to Step 3 transition (ISO timestamp) */
+  breakout_detected_at?: string;
+  /** Seconds elapsed since reference detection */
+  seconds_since_reference?: number;
+  /** Seconds until ready pattern expires */
+  seconds_until_expiry?: number;
 
   // Position info for Step 4
   /** Unrealized PnL for open position */
