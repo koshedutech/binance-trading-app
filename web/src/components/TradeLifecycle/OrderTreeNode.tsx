@@ -271,15 +271,21 @@ export default function OrderTreeNode({
   const [duration, setDuration] = useState<string>('');
   const [countdown, setCountdown] = useState<string>('');
 
+  // Derive effective lifecycle status: prefer explicit lifecycleStatus from WebSocket,
+  // fall back to order's own status for API-sourced closed orders
+  const effectiveLifecycleStatus = lifecycleStatus ||
+    (order && (order.status === 'FILLED' || order.status === 'CANCELED' || order.status === 'EXPIRED')
+      ? order.status : undefined);
+
   // Update duration counter every 10 seconds for pending orders (non-entry)
   // Update countdown every second for pending entry orders
   // Story 14.19: Show frozen duration for closed chain orders
   useEffect(() => {
     // For closed chain orders (SL/TP), show frozen duration
-    if (order && chainClosedAt && (lifecycleStatus === 'FILLED' || lifecycleStatus === 'CANCELED' || lifecycleStatus === 'EXPIRED')) {
-      const endTime = lifecycleStatus === 'FILLED'
-        ? (order.updateTime || new Date(chainClosedAt).getTime())
-        : new Date(chainClosedAt).getTime();
+    if (order && (chainClosedAt || effectiveLifecycleStatus) && (effectiveLifecycleStatus === 'FILLED' || effectiveLifecycleStatus === 'CANCELED' || effectiveLifecycleStatus === 'EXPIRED')) {
+      const endTime = effectiveLifecycleStatus === 'FILLED'
+        ? (order.updateTime || (chainClosedAt ? new Date(chainClosedAt).getTime() : Date.now()))
+        : (chainClosedAt ? new Date(chainClosedAt).getTime() : (order.updateTime || Date.now()));
       setDuration(formatStaticDuration(order.time, endTime));
       setCountdown('');
       return;
@@ -316,7 +322,7 @@ export default function OrderTreeNode({
       }, 10000);
       return () => clearInterval(interval);
     }
-  }, [order, type, lifecycleStatus, chainClosedAt]);
+  }, [order, type, effectiveLifecycleStatus, chainClosedAt]);
 
   // Get config for this order type
   const typeKey = type === 'ENTRY' ? 'E' : type;
@@ -329,16 +335,16 @@ export default function OrderTreeNode({
 
   const Icon = getNodeIcon(type);
 
-  // Determine status - prefer lifecycleStatus from composite event over order.status
+  // Determine status - prefer lifecycleStatus, then effectiveLifecycleStatus, then order.status
   let status = 'NEW';
   let statusIndicator = getStatusIndicator('NEW');
 
   if (type === 'POSITION' && positionState) {
     status = positionState.status;
     statusIndicator = getStatusIndicator(status);
-  } else if (lifecycleStatus) {
-    // Story 14.19: Use lifecycle coordinator status (authoritative for closed chains)
-    status = lifecycleStatus;
+  } else if (effectiveLifecycleStatus) {
+    // Story 14.19: Use lifecycle coordinator status or derived status from order
+    status = effectiveLifecycleStatus;
     statusIndicator = getStatusIndicator(status);
   } else if (order) {
     status = order.status;
@@ -346,6 +352,7 @@ export default function OrderTreeNode({
   }
 
   // Determine price to display
+  // For filled SL/TP orders, show actual fill price (avgPrice) instead of trigger price
   let displayPrice = 0;
   let priceLabel = 'Price';
 
@@ -353,8 +360,16 @@ export default function OrderTreeNode({
     displayPrice = positionState.entryPrice;
     priceLabel = 'Entry';
   } else if (order) {
-    displayPrice = order.stopPrice && order.stopPrice > 0 ? order.stopPrice : order.price;
-    priceLabel = order.stopPrice && order.stopPrice > 0 ? 'Stop' : 'Price';
+    const isFilled = status === 'FILLED' || effectiveLifecycleStatus === 'FILLED';
+    const hasAvgPrice = (order.avgPrice ?? 0) > 0;
+    if (isFilled && hasAvgPrice) {
+      // Show actual fill price for filled orders
+      displayPrice = order.avgPrice!;
+      priceLabel = 'Fill';
+    } else {
+      displayPrice = order.stopPrice && order.stopPrice > 0 ? order.stopPrice : order.price;
+      priceLabel = order.stopPrice && order.stopPrice > 0 ? 'Stop' : 'Price';
+    }
   }
 
   // Check if this order type can have modifications
@@ -656,8 +671,8 @@ export default function OrderTreeNode({
               {/* Duration counter for pending non-entry orders, or frozen duration for closed orders */}
               {duration && type !== 'ENTRY' && (
                 <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
-                  lifecycleStatus ? 'bg-gray-500/20 text-gray-400' : 'bg-amber-500/20 text-amber-400'
-                }`} title={lifecycleStatus ? 'Total order duration' : 'Time since order placed'}>
+                  effectiveLifecycleStatus ? 'bg-gray-500/20 text-gray-400' : 'bg-amber-500/20 text-amber-400'
+                }`} title={effectiveLifecycleStatus ? 'Total order duration' : 'Time since order placed'}>
                   <Timer className="w-3 h-3" />
                   {duration}
                 </span>

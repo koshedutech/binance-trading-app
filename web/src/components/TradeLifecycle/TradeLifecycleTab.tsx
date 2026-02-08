@@ -193,6 +193,18 @@ export default function TradeLifecycleTab({
     const hedgeSLOrder = chainOrders.find(o => o.orderType === 'HSL') || null;
     const hedgeTPOrder = chainOrders.find(o => o.orderType === 'HTP') || null;
 
+    // Extract SL/TP lifecycle status from order data (for API-sourced chains)
+    const slStatusFromOrder = slOrder?.status;
+    const tpStatusFromOrder = tpOrders.length > 0 ? tpOrders[0].status : undefined;
+    const slFillPriceFromOrder = slOrder && (slOrder.avgPrice ?? 0) > 0 ? slOrder.avgPrice : undefined;
+    const tpFillPriceFromOrder = tpOrders.length > 0 && (tpOrders[0].avgPrice ?? 0) > 0 ? tpOrders[0].avgPrice : undefined;
+
+    // Extract close price and reason from position state
+    const posState = apiChain.position_state;
+    const closePriceFromState = posState && posState.close_price > 0 ? posState.close_price : undefined;
+    const closedAtFromState = posState?.closed_at || undefined;
+    const closeReasonFromState = posState?.close_reason || undefined;
+
     return {
       chainId: apiChain.chain_id,
       modeCode: (apiChain.mode_code as TradingModeCode) || null,
@@ -239,6 +251,15 @@ export default function TradeLifecycleTab({
       entryContext: apiChain.entry_context || undefined,
       // Trailing stop status from RavindraPositionMonitor
       trailingStopStatus: apiChain.trailing_stop_status || undefined,
+      // SL/TP lifecycle status extracted from order data (for closed chains loaded from API)
+      slStatus: slStatusFromOrder,
+      tpStatus: tpStatusFromOrder,
+      slFillPrice: slFillPriceFromOrder,
+      tpFillPrice: tpFillPriceFromOrder,
+      // Close price/reason from position state
+      closePrice: closePriceFromState,
+      closedAt: closedAtFromState,
+      closeReason: closeReasonFromState,
     };
   };
 
