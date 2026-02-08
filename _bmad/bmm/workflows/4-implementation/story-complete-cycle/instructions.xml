@@ -402,27 +402,27 @@
 
     <output>--- Creating Expanded Story File: {{story_key}} ---</output>
 
-    <!-- Only reach here if epic has story but needs more detail -->
-    <check if="{{use_sub_agents}} == true">
-      <action>Spawn sub-agent with Task tool:
-        - Type: general-purpose
-        - Prompt: "Expand story {{story_key}} from epic {{epic_path}} into detailed story file.
-                   The epic has basic story info but needs:
-                   - Detailed task breakdown
-                   - Technical implementation notes
-                   - Test scenarios
-                   Output the created story file path when done."
-        - Wait for completion
-      </action>
-      <action>Capture {{story_path}} from sub-agent result</action>
-    </check>
+    <!-- Delegate story creation to agent team -->
+    <action>Create agent team using TeamCreate tool:
+      - team_name: "story-create-{{story_key}}"
+      - description: "Creating expanded story file for {{story_key}}"
+    </action>
 
-    <check if="{{use_sub_agents}} == false">
-      <invoke-workflow path="{{sub_workflows.create_story}}">
-        <param>story_key: {{story_key}}</param>
-        <param>epic_path: {{epic_path}}</param>
-      </invoke-workflow>
-    </check>
+    <action>Spawn story-creator agent using Task tool with team_name:
+      - subagent_type: general-purpose
+      - name: "story-creator"
+      - team_name: "story-create-{{story_key}}"
+      - Prompt: "Expand story {{story_key}} from epic {{epic_path}} into detailed story file.
+                 The epic has basic story info but needs:
+                 - Detailed task breakdown
+                 - Technical implementation notes
+                 - Test scenarios
+                 Output the created story file path when done."
+      - Wait for completion
+    </action>
+
+    <action>Capture {{story_path}} from agent result</action>
+    <action>Shutdown team and cleanup via SendMessage shutdown_request + TeamDelete</action>
 
     <!-- Update sprint status -->
     <action>Update sprint-status.yaml: {{story_key}} = "draft"</action>
@@ -436,19 +436,26 @@
 
     <output>--- Validating Story: {{story_key}} ---</output>
 
-    <!-- Delegate validation to sub-agent -->
-    <check if="{{use_sub_agents}} == true">
-      <action>Spawn sub-agent with Task tool:
-        - Type: general-purpose
-        - Prompt: "Validate story at {{story_path}} for implementation readiness.
-                   Check: required sections present, ACs testable, tasks clear.
-                   Return: PASS, PASS_WITH_NOTES, or FAIL with issues."
-        - Wait for completion
-      </action>
-      <action>Capture {{validation_result}} from sub-agent</action>
-    </check>
+    <!-- Delegate validation to agent team -->
+    <action>Create agent team using TeamCreate tool:
+      - team_name: "story-validate-{{story_key}}"
+      - description: "Validating story {{story_key}} for implementation readiness"
+    </action>
 
-    <check if="{{use_sub_agents}} == false">
+    <action>Spawn validator agent using Task tool with team_name:
+      - subagent_type: general-purpose
+      - name: "validator"
+      - team_name: "story-validate-{{story_key}}"
+      - Prompt: "Validate story at {{story_path}} for implementation readiness.
+                 Check: required sections present, ACs testable, tasks clear.
+                 Return: PASS, PASS_WITH_NOTES, or FAIL with issues."
+      - Wait for completion
+    </action>
+
+    <action>Capture {{validation_result}} from agent</action>
+    <action>Shutdown team and cleanup via SendMessage shutdown_request + TeamDelete</action>
+
+    <check if="{{use_agent_team}} == false">
       <invoke-workflow path="{{sub_workflows.check_readiness}}">
         <param>story_path: {{story_path}}</param>
         <param>scope: story</param>
@@ -486,26 +493,58 @@
     <goto step="10">Implement</goto>
   </step>
 
-  <step n="10" goal="Implement story - delegate to sub-agent">
+  <step n="10" goal="Implement story - delegate to agent team">
     <action>Set {{workflow_phase}} = "implementing"</action>
 
     <output>--- Implementing Story: {{story_key}} ---
 
-      **DELEGATING TO SUB-AGENT** (preserving orchestrator context)
+      **DELEGATING TO AGENT TEAM** (parallel execution with coordination)
     </output>
 
-    <!-- CRITICAL: Delegate heavy implementation work to sub-agent -->
-    <action>Spawn sub-agent with Task tool:
-      - Type: general-purpose
-      - Prompt: "Execute dev-story workflow for {{story_path}}.
-                 Implement all tasks, write tests, validate ACs.
-                 Follow red-green-refactor cycle.
-                 Update story file with progress.
-                 Return: 'completed' when story status is 'review', or 'HALT: reason' if blocked."
-      - Wait for completion
+    <!-- CRITICAL: Use agent team for parallel implementation -->
+    <!-- The orchestrator creates a team, creates tasks from the story's task list,
+         then spawns specialized teammates to work in parallel.
+         Team members are assigned tasks and coordinate via the shared task list. -->
+    <action>Create agent team using TeamCreate tool:
+      - team_name: "story-{{story_key}}"
+      - description: "Implementing story {{story_key}}"
     </action>
 
-    <action>Capture {{dev_result}} from sub-agent</action>
+    <action>Create tasks from story file using TaskCreate tool:
+      - Parse all tasks from the story's ## Tasks section
+      - Create one TaskCreate per task with clear description
+      - Set dependencies (addBlockedBy) where tasks depend on each other
+      - Backend tasks can run in parallel with frontend tasks
+    </action>
+
+    <action>Spawn agent team members using Task tool with team_name parameter:
+      - Analyze story tasks and group by domain (backend, frontend, migration, wiring)
+      - Spawn teammates in PARALLEL using multiple Task tool calls in a single message
+      - Each teammate: subagent_type="general-purpose", team_name="story-{{story_key}}"
+      - Assign tasks to teammates via TaskUpdate with owner parameter
+      - Example team structure:
+        * "backend-core" agent: Core coordinator + DB + events (independent backend work)
+        * "backend-wire" agent: Wiring + cleanup + integration (depends on core)
+        * "frontend" agent: All React/TypeScript changes (parallel with backend)
+      - Adjust team size based on story complexity:
+        * Small stories (1-2 tasks): 1 agent
+        * Medium stories (3-5 tasks): 2 agents
+        * Large stories (6+ tasks): 3-4 agents
+    </action>
+
+    <action>Monitor team progress:
+      - Teammates send messages when tasks complete or when blocked
+      - Messages are delivered automatically (no polling needed)
+      - Orchestrator resolves blockers, reassigns work, coordinates dependencies
+      - When all tasks complete, verify build passes
+    </action>
+
+    <action>After all teammates finish:
+      - Run build verification: backend build + frontend build
+      - Shutdown all teammates via SendMessage type="shutdown_request"
+      - Clean up team via TeamDelete
+      - Capture {{dev_result}} = "completed" or "HALT: reason"
+    </action>
 
     <check if="{{dev_result}} contains 'HALT'">
       <output>IMPLEMENTATION FAILED: {{story_key}}
@@ -522,9 +561,15 @@
     <goto step="11">Code review</goto>
   </step>
 
-  <step n="11" goal="Code review - delegate to sub-agent with retry loop">
+  <step n="11" goal="Code review - delegate to agent team with retry loop">
     <action>Set {{workflow_phase}} = "reviewing"</action>
     <action>Set {{review_attempt}} = 0</action>
+
+    <!-- Create review team - persists across retry loop -->
+    <action>Create agent team using TeamCreate tool:
+      - team_name: "review-{{story_key}}"
+      - description: "Code review and fix cycle for {{story_key}}"
+    </action>
 
     <anchor id="review_loop" />
 
@@ -532,37 +577,44 @@
 
     <output>--- Code Review: {{story_key}} (Attempt {{review_attempt}}/{{max_review_attempts}}) ---
 
-      **DELEGATING TO SUB-AGENT**
+      **DELEGATING TO AGENT TEAM**
     </output>
 
-    <!-- Delegate code review to sub-agent -->
-    <action>Spawn sub-agent with Task tool:
-      - Type: general-purpose
-      - Prompt: "Execute adversarial code-review workflow for {{story_path}}.
+    <!-- Delegate code review to agent team -->
+    <action>Spawn reviewer agent using Task tool with team_name:
+      - subagent_type: general-purpose
+      - name: "code-reviewer"
+      - team_name: "review-{{story_key}}"
+      - Prompt: "Execute adversarial code-review for story {{story_path}}.
+                 Read the story file to understand acceptance criteria.
                  Find 3-10 issues minimum. Auto-fix HIGH and MEDIUM issues.
+                 Run build verification after fixes.
                  Return: 'Approve' if all issues fixed,
                          'Changes Requested: [list]' if issues remain,
                          'Blocked: [reason]' if critical blocker."
       - Wait for completion
     </action>
 
-    <action>Capture {{review_outcome}} from sub-agent</action>
+    <action>Capture {{review_outcome}} from agent</action>
 
     <check if="{{review_outcome}} == 'Approve'">
       <output>Code review PASSED for {{story_key}}</output>
+      <action>Shutdown review team: SendMessage shutdown_request to all members + TeamDelete</action>
       <goto step="12">QA trace</goto>
     </check>
 
     <check if="{{review_outcome}} starts with 'Changes Requested'">
       <check if="{{review_attempt}} lt {{max_review_attempts}}">
-        <output>Issues found - spawning fix agent then re-reviewing...</output>
+        <output>Issues found - spawning fix agent in team then re-reviewing...</output>
 
-        <!-- Spawn agent to fix issues -->
-        <action>Spawn sub-agent with Task tool:
-          - Type: general-purpose
+        <!-- Spawn fixer agent in same team -->
+        <action>Spawn fixer agent using Task tool with team_name:
+          - subagent_type: general-purpose
+          - name: "code-fixer"
+          - team_name: "review-{{story_key}}"
           - Prompt: "Fix these code review issues for {{story_path}}:
                      {{review_issues}}
-                     Run tests after fixing. Return 'fixed' when done."
+                     Run build verification after fixing. Return 'fixed' when done."
           - Wait for completion
         </action>
 
@@ -576,6 +628,7 @@
 
           Marking as blocked and continuing to next story.
         </output>
+        <action>Shutdown review team: SendMessage shutdown_request to all members + TeamDelete</action>
         <action>Increment {{stories_failed}}</action>
         <goto step="14">Next story</goto>
       </check>
@@ -588,6 +641,7 @@
 
         Marking as blocked and continuing to next story.
       </output>
+      <action>Shutdown review team: SendMessage shutdown_request to all members + TeamDelete</action>
       <action>Increment {{stories_failed}}</action>
       <goto step="14">Next story</goto>
     </check>
@@ -598,13 +652,20 @@
 
     <output>--- QA Trace: {{story_key}} ---
 
-      **DELEGATING TO SUB-AGENT**
+      **DELEGATING TO AGENT TEAM**
       **STRICT GATE: Only PASS completes story**
     </output>
 
-    <!-- Delegate QA trace to sub-agent -->
-    <action>Spawn sub-agent with Task tool:
-      - Type: general-purpose
+    <!-- Delegate QA trace to agent team -->
+    <action>Create agent team using TeamCreate tool:
+      - team_name: "qa-{{story_key}}"
+      - description: "QA traceability for {{story_key}}"
+    </action>
+
+    <action>Spawn QA agent using Task tool with team_name:
+      - subagent_type: general-purpose
+      - name: "qa-tracer"
+      - team_name: "qa-{{story_key}}"
       - Prompt: "Execute testarch-trace workflow for {{story_path}}.
                  Generate traceability matrix.
                  Gate type: story, Decision mode: deterministic.
@@ -612,7 +673,8 @@
       - Wait for completion
     </action>
 
-    <action>Capture {{qa_result}} from sub-agent</action>
+    <action>Capture {{qa_result}} from agent</action>
+    <action>Shutdown QA team: SendMessage shutdown_request to all members + TeamDelete</action>
 
     <check if="{{qa_result}} == 'PASS'">
       <output>QA gate PASSED for {{story_key}}</output>

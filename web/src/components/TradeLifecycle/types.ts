@@ -133,6 +133,16 @@ export interface OrderChain {
     risk_amount?: number;
     breakout_at?: string;
   };
+  // Story 14.19: Lifecycle coordinator fields for closed chain display
+  slStatus?: string; // 'FILLED' | 'CANCELED' | 'NEW' etc.
+  tpStatus?: string;
+  slFillPrice?: number;
+  tpFillPrice?: number;
+  closePrice?: number;
+  closedAt?: string;
+  closeReason?: string;
+  realizedPnl?: number;
+  totalFees?: number;
   // Trailing stop status from RavindraPositionMonitor (R:R milestone tracking)
   trailingStopStatus?: {
     entry_price: number;

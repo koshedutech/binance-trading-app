@@ -302,6 +302,10 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 		// Chain closed broadcasts (position closed - SL/TP hit or manual close)
 		BroadcastChainClosedEvent(userID, data)
 	})
+	events.SetBroadcastChainLifecycleUpdate(func(userID string, data interface{}) {
+		// Composite chain lifecycle update (close + pattern reset + capacity)
+		BroadcastChainLifecycleUpdateEvent(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -679,6 +683,29 @@ func BroadcastChainClosedEvent(userID string, chainData interface{}) {
 
 	event := events.Event{
 		Type:      events.EventChainClosed,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastChainLifecycleUpdateEvent broadcasts a composite chain lifecycle update to a specific user
+// Story 14.19: Position Lifecycle Coordinator - single event containing chain close, pattern reset, and capacity update
+func BroadcastChainLifecycleUpdateEvent(userID string, lifecycleData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	data, ok := lifecycleData.(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{
+			"lifecycle_update": lifecycleData,
+		}
+	}
+
+	event := events.Event{
+		Type:      events.EventChainLifecycleUpdate,
 		Timestamp: time.Now(),
 		Data:      data,
 	}

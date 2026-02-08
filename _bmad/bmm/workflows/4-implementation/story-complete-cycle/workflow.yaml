@@ -35,9 +35,10 @@ variables:
   context_budget: "large"  # small (~3 stories) | medium (~5 stories) | large (~8 stories) | unlimited
   stories_per_batch: 0     # 0 = auto-estimate based on complexity
 
-  # Multi-Agent Settings
-  use_sub_agents: true     # Delegate heavy work to sub-agents
-  parallel_agents: false   # Run independent agents in parallel (experimental)
+  # Agent Team Settings (Opus 4.6+)
+  use_agent_team: true     # Use TeamCreate + parallel teammates for implementation
+  use_sub_agents: true     # Fallback: delegate heavy work to sub-agents
+  parallel_agents: true    # Run independent agents in parallel via agent team
 
 # Sub-workflow paths for orchestration (full lifecycle)
 sub_workflows:

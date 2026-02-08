@@ -62,6 +62,10 @@ const (
 
 	// Trailing SL Update: Broadcast when the trailing stop moves SL (R:R milestone)
 	EventTrailingSLUpdate EventType = "TRAILING_SL_UPDATE"
+
+	// Chain Lifecycle Update: Composite event for position close (SL/TP fill)
+	// Contains chain close data, pattern reset, and capacity update in one broadcast
+	EventChainLifecycleUpdate EventType = "CHAIN_LIFECYCLE_UPDATE"
 )
 
 // Event represents a system event
@@ -263,6 +267,7 @@ var (
 	broadcastPositionCreated    BroadcastFunc // Position created broadcasts (new position opened)
 	broadcastTrailingSLUpdate   BroadcastFunc // Trailing SL milestone updates (R:R-based SL moves)
 	broadcastChainClosed        BroadcastFunc // Chain closed broadcasts (position closed - SL/TP hit or manual)
+	broadcastChainLifecycleUpdate BroadcastFunc // Composite chain lifecycle update (close + pattern reset + capacity)
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -469,5 +474,20 @@ func SetBroadcastChainClosed(fn BroadcastFunc) {
 func BroadcastChainClosed(userID string, data interface{}) {
 	if broadcastChainClosed != nil && userID != "" {
 		go broadcastChainClosed(userID, data)
+	}
+}
+
+// SetBroadcastChainLifecycleUpdate sets the callback for chain lifecycle update broadcasts
+// Story 14.19: Position Lifecycle Coordinator - composite event
+func SetBroadcastChainLifecycleUpdate(fn BroadcastFunc) {
+	broadcastChainLifecycleUpdate = fn
+}
+
+// BroadcastChainLifecycleUpdate broadcasts a composite chain lifecycle update to a user
+// Called by the PositionLifecycleCoordinator after completing all close side-effects
+// Data should include: chain_close, pattern_reset, capacity_update sub-objects
+func BroadcastChainLifecycleUpdate(userID string, data interface{}) {
+	if broadcastChainLifecycleUpdate != nil && userID != "" {
+		go broadcastChainLifecycleUpdate(userID, data)
 	}
 }

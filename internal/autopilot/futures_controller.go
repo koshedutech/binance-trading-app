@@ -5304,18 +5304,61 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 		// This prevents orphaned conditional orders after position closes.
 		// NOTE: We trigger on TRADE execution type (not just FILLED status) because
 		// STOP_MARKET orders close the position when triggered, even if status shows as FILLED later.
-		if fc.ginieAutopilot != nil {
-			orderType := order.OrderType
-			if orderType == "STOP_MARKET" || orderType == "STOP" ||
-				orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
-				fc.logger.Info("SL/TP order TRADE event - triggering counterpart cancellation",
+		orderType := order.OrderType
+		if orderType == "STOP_MARKET" || orderType == "STOP" ||
+			orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+
+			// Story 14.19: Try Coordinator first for chain-based positions
+			// Look up the coordinator from the user's autopilot instance
+			coordinatorHandled := false
+			var activeCoordinator *PositionLifecycleCoordinator
+			if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
+				if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil {
+					activeCoordinator = inst.Coordinator
+				}
+			}
+			if activeCoordinator != nil && fc.ownerUserID != "" {
+				ctx := context.Background()
+				result, err := activeCoordinator.HandleOrderFill(ctx, OrderFillEvent{
+					UserID:          fc.ownerUserID,
+					Symbol:          order.Symbol,
+					OrderType:       orderType,
+					OrderID:         order.OrderId,
+					FilledPrice:     order.LastFilledPrice,
+					RealizedProfit:  order.RealizedProfit,
+					Commission:      order.Commission,
+					BinanceTimestamp: order.OrderTradeTime,
+					PositionSide:    order.PositionSide,
+				})
+				if err != nil {
+					fc.logger.Error("Coordinator error for SL/TP fill",
+						"symbol", order.Symbol,
+						"order_id", order.OrderId,
+						"error", err)
+				}
+				// Check Handled flag: coordinator returns Handled=true even on partial
+				// failure when it has already modified state (to prevent double-processing
+				// by GinieAutopilot). Only Handled=false means no chain was found.
+				if result != nil && result.Handled {
+					coordinatorHandled = true
+					fc.logger.Info("Chain position handled by Coordinator",
+						"symbol", order.Symbol,
+						"chain_id", result.ChainID,
+						"close_reason", result.CloseReason,
+						"pnl", result.RealizedPnL)
+				}
+			}
+
+			// Fallback to GinieAutopilot for legacy positions (non-chain)
+			if !coordinatorHandled && fc.ginieAutopilot != nil {
+				fc.logger.Info("SL/TP order TRADE event - triggering legacy counterpart cancellation",
 					"symbol", order.Symbol,
 					"order_type", orderType,
 					"order_id", order.OrderId,
 					"order_status", order.OrderStatus,
 					"last_filled_qty", order.LastFilledQty)
 				fc.ginieAutopilot.HandleSLTPOrderFilled(order.Symbol, orderType, order.OrderId,
-				order.LastFilledPrice, order.RealizedProfit, order.Commission, order.OrderTradeTime, order.PositionSide)
+					order.LastFilledPrice, order.RealizedProfit, order.Commission, order.OrderTradeTime, order.PositionSide)
 			}
 		}
 

@@ -91,12 +91,8 @@ export default function CoinProfilerCard() {
       const newSource = existingCoin?.source === 'strategy' ? 'both' : 'position';
       updateCoinSource(data.symbol, newSource, data.timeframe);
     }
-    // Delay refetch slightly to ensure backend DB has committed all updates
-    // (chain status ACTIVE, coin profiler source updated)
-    setTimeout(() => {
-      refetchCoins();
-      refetchReqs();
-    }, 500);
+    refetchCoins();
+    refetchReqs();
   }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
 
   const handleChainClosed = useCallback((event: any) => {
@@ -105,17 +101,28 @@ export default function CoinProfilerCard() {
     const data = event?.data;
     if (data?.symbol) {
       const existingCoin = coins.find(c => c.symbol === data.symbol);
-      if (existingCoin?.source === 'both') {
-        updateCoinSource(data.symbol, 'strategy');
-      } else if (existingCoin?.source === 'position') {
+      if (existingCoin?.source === 'both' || existingCoin?.source === 'position') {
         updateCoinSource(data.symbol, 'strategy');
       }
     }
-    // Delay refetch slightly to ensure backend has completed all updates
-    setTimeout(() => {
-      refetchCoins();
-      refetchReqs();
-    }, 500);
+    refetchCoins();
+    refetchReqs();
+  }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
+
+  // Story 14.19: CHAIN_LIFECYCLE_UPDATE composite event from PositionLifecycleCoordinator
+  const handleChainLifecycleUpdate = useCallback((event: any) => {
+    setWsPositionAdjustment(prev => Math.max(0, prev - 1));
+    const data = event?.data;
+    const symbol = data?.chain?.symbol || data?.pattern?.symbol;
+    if (symbol) {
+      const existingCoin = coins.find(c => c.symbol === symbol);
+      if (existingCoin?.source === 'both' || existingCoin?.source === 'position') {
+        updateCoinSource(symbol, 'strategy');
+      }
+    }
+    // Update capacity from composite event data; always refetch for latest state
+    refetchCoins();
+    refetchReqs();
   }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
 
   // Handle POSITION_UPDATE with status "CLOSED" (catches positions closing without a chain)
@@ -130,14 +137,16 @@ export default function CoinProfilerCard() {
   useEffect(() => {
     wsService.subscribe('POSITION_CREATED', handlePositionCreated);
     wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
 
     return () => {
       wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
       wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
     };
-  }, [handlePositionCreated, handleChainClosed, handlePositionUpdate]);
+  }, [handlePositionCreated, handleChainClosed, handleChainLifecycleUpdate, handlePositionUpdate]);
 
   const effectivePositionCount = positionCoinsCount + wsPositionAdjustment;
 

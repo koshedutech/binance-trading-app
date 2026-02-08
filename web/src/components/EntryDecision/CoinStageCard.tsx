@@ -2,7 +2,7 @@
 // Epic 14: Chain Trading System - Entry Decision Real-Time Monitoring
 // Displays live coin progress with entry levels and pattern stage tracking
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -18,6 +18,7 @@ import {
 import PatternProgress from './PatternProgress';
 import ReferenceCandleContext from './ReferenceCandleContext';
 import Step2ProgressBars from './Step2ProgressBars';
+import { wsService } from '../../services/websocket';
 import type {
   PatternUpdate,
   PatternStatus,
@@ -353,20 +354,22 @@ export default function CoinStageCard({
   onClick,
   compact = false,
 }: CoinStageCardProps) {
-  const colors = STATUS_COLORS[update.status] || STATUS_COLORS.watching;
-  const isReady = update.status === 'ready';
-  const isFilling = update.status === 'filling';
-  const isActive = update.status === 'accumulation' || update.status === 'consolidating';
+  // Story 14.19: When lifecycle reset is active, show as Step 1 (watching)
+  const effectiveStatus: PatternStatus = lifecycleReset ? 'watching' : update.status;
+  const colors = STATUS_COLORS[effectiveStatus] || STATUS_COLORS.watching;
+  const isReady = effectiveStatus === 'ready';
+  const isFilling = effectiveStatus === 'filling';
+  const isActive = effectiveStatus === 'accumulation' || effectiveStatus === 'consolidating';
   // Position running means Chain Runner has an active position
-  const isPositionRunning = update.status === 'position_running';
+  const isPositionRunning = effectiveStatus === 'position_running';
   // Step 3 = Ready or Filling (order placed, waiting for fill)
   const isStepThree = isReady || isFilling;
   // Step 4 = Position active
   const isStepFour = isPositionRunning;
   // Stage 2+ means we're past the initial volume spike detection (steps 2, 3, or 4)
-  const isStageTwo = update.current_step >= 2 || update.status === 'consolidating' || isStepThree || isStepFour;
+  const isStageTwo = update.current_step >= 2 || effectiveStatus === 'consolidating' || isStepThree || isStepFour;
   // Get the UI step number (1-4) based on status
-  const uiStep = getStepNumber(update.status);
+  const uiStep = getStepNumber(effectiveStatus);
   const price = currentPrice || update.entry_levels?.current_price;
 
   // ==================== Timer States ====================
@@ -483,6 +486,33 @@ export default function CoinStageCard({
     }
   }, [update.seconds_since_reference, update.seconds_until_expiry, update.fill_timeout_seconds]);
 
+  // Story 14.19: Local override status when CHAIN_LIFECYCLE_UPDATE matches this card's symbol
+  const [lifecycleReset, setLifecycleReset] = useState(false);
+
+  useEffect(() => {
+    const handleChainLifecycleUpdate = (event: any) => {
+      const data = event?.data;
+      const eventSymbol = data?.pattern?.symbol || data?.chain?.symbol;
+      if (eventSymbol && eventSymbol === update.symbol) {
+        // Position closed - this card should show Step 1 (watching) briefly
+        // The backend will send a PATTERN_UPDATE shortly after to set the real state
+        setLifecycleReset(true);
+      }
+    };
+
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
+    return () => {
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
+    };
+  }, [update.symbol]);
+
+  // Clear the lifecycle reset when we receive a new update from props
+  useEffect(() => {
+    if (lifecycleReset && update.status === 'watching') {
+      setLifecycleReset(false);
+    }
+  }, [lifecycleReset, update.status]);
+
   return (
     <div
       className={`
@@ -543,7 +573,7 @@ export default function CoinStageCard({
 
           {/* Status Badge */}
           <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors.bg} ${colors.text}`}>
-            {STATUS_LABELS[update.status] || update.status}
+            {STATUS_LABELS[effectiveStatus] || effectiveStatus}
           </span>
         </div>
 
@@ -595,11 +625,11 @@ export default function CoinStageCard({
 
         {/* 4-Step Progress Indicator */}
         {!compact && (
-          <FourStepProgressDisplay status={update.status} />
+          <FourStepProgressDisplay status={effectiveStatus} />
         )}
 
         {/* Requirements Section - Stage 1 only */}
-        {!compact && (update.current_step === 1 || update.status === 'watching') && (
+        {!compact && (update.current_step === 1 || effectiveStatus === 'watching') && (
           <div className="mb-3 p-2 bg-gray-800/30 rounded border border-gray-700/50">
             <div className="flex items-center gap-3 text-[10px]">
               <span className="text-gray-500 font-medium">Requirements:</span>
@@ -959,7 +989,7 @@ export default function CoinStageCard({
         )}
 
         {/* Position Closed PNL Display */}
-        {update.status === 'position_closed' && update.closed_pnl != null && (
+        {effectiveStatus === 'position_closed' && update.closed_pnl != null && (
           <div className={`mt-3 p-3 rounded-lg border ${
             update.closed_pnl >= 0
               ? 'bg-green-500/10 border-green-500/30'

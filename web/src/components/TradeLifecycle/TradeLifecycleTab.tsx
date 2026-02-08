@@ -633,8 +633,26 @@ export default function TradeLifecycleTab({
       // Direct position update from WebSocket
       const positions = event.data?.positions || [];
 
-      if (!Array.isArray(positions) || positions.length === 0) {
+      if (!Array.isArray(positions)) {
         return; // No data to update
+      }
+
+      // Empty positions array means all positions are closed
+      if (positions.length === 0) {
+        setChains(prev => prev.map(chain => {
+          if (chain.status === 'active' || chain.status === 'partial') {
+            return {
+              ...chain,
+              status: 'completed',
+              positionState: chain.positionState
+                ? { ...chain.positionState, status: 'CLOSED' as const }
+                : undefined,
+              updatedAt: Date.now(),
+            };
+          }
+          return chain;
+        }));
+        return;
       }
 
       setChains(prevChains => {
@@ -792,6 +810,45 @@ export default function TradeLifecycleTab({
       });
     };
 
+    // Story 14.19: CHAIN_LIFECYCLE_UPDATE - composite event from PositionLifecycleCoordinator
+    const handleChainLifecycleUpdate = (event: WSEvent) => {
+      const data = event.data;
+      if (!data?.chain?.chain_id) return;
+
+      console.log('[TradeLifecycle] Received CHAIN_LIFECYCLE_UPDATE', {
+        chainId: data.chain.chain_id,
+        closeReason: data.chain.close_reason,
+        realizedPnl: data.chain.realized_pnl,
+      });
+
+      setChains(prev => prev.map(chain => {
+        if (chain.chainId !== data.chain.chain_id) return chain;
+        return {
+          ...chain,
+          status: 'completed',
+          realizedPnl: data.chain.realized_pnl,
+          totalFees: data.chain.total_fees,
+          closePrice: data.chain.close_price,
+          closedAt: data.chain.closed_at,
+          closeReason: data.chain.close_reason,
+          pnl: data.chain.realized_pnl,
+          positionState: chain.positionState ? {
+            ...chain.positionState,
+            status: 'CLOSED' as const,
+            realizedPnl: data.chain.realized_pnl,
+            closedAt: data.chain.closed_at,
+            closePrice: data.chain.close_price,
+            closeReason: data.chain.close_reason,
+          } : undefined,
+          slStatus: data.orders?.sl_status,
+          tpStatus: data.orders?.tp_status,
+          slFillPrice: data.orders?.sl_fill_price,
+          tpFillPrice: data.orders?.tp_fill_price,
+          updatedAt: Date.now(),
+        };
+      }));
+    };
+
     const handlePositionCreated = (event: WSEvent) => {
       // POSITION_CREATED event from backend indicates a new position was opened
       // This happens when an entry order is filled
@@ -829,6 +886,7 @@ export default function TradeLifecycleTab({
     wsService.subscribe('PNL_UPDATE', handlePnlUpdate);
     wsService.subscribe('ORDER_SYNC', handleOrderSync);
     wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
     wsService.subscribe('POSITION_CREATED', handlePositionCreated); // For instant new position updates
     wsService.onConnect(handleConnect);
 
@@ -843,6 +901,7 @@ export default function TradeLifecycleTab({
       wsService.unsubscribe('PNL_UPDATE', handlePnlUpdate);
       wsService.unsubscribe('ORDER_SYNC', handleOrderSync);
       wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
       wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction(FALLBACK_KEY);

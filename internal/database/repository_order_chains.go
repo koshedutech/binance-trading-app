@@ -762,6 +762,100 @@ func (db *DB) UpdateOrderChainTPFilled(ctx context.Context, chainID string, fill
 	return nil
 }
 
+// FindChainByBinanceOrderID looks up a chain by SL or TP Binance order ID.
+// Returns the chain, an indicator of which order matched ("sl" or "tp"), and error.
+// Returns (nil, "", nil) if no match found.
+func (db *DB) FindChainByBinanceOrderID(ctx context.Context, userID string, binanceOrderID int64) (*orders.OrderChain, string, error) {
+	if db.Pool == nil {
+		return nil, "", nil
+	}
+
+	// Try SL first
+	query := `SELECT ` + orderChainSelectColumns + ` FROM order_chains
+		WHERE user_id = $1 AND sl_binance_order_id = $2 AND status IN ('ACTIVE', 'PARTIAL')
+		LIMIT 1`
+
+	chain, err := scanOrderChainRow(db.Pool.QueryRow(ctx, query, userID, binanceOrderID))
+	if err == nil {
+		return chain, "sl", nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, "", fmt.Errorf("failed to find chain by SL order ID: %w", err)
+	}
+
+	// Try TP
+	query = `SELECT ` + orderChainSelectColumns + ` FROM order_chains
+		WHERE user_id = $1 AND tp_binance_order_id = $2 AND status IN ('ACTIVE', 'PARTIAL')
+		LIMIT 1`
+
+	chain, err = scanOrderChainRow(db.Pool.QueryRow(ctx, query, userID, binanceOrderID))
+	if err == nil {
+		return chain, "tp", nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, "", fmt.Errorf("failed to find chain by TP order ID: %w", err)
+	}
+
+	return nil, "", nil
+}
+
+// UpdateOrderChainSLCanceled marks the SL order as CANCELED on a chain
+func (db *DB) UpdateOrderChainSLCanceled(ctx context.Context, chainID string, canceledAt time.Time) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			sl_status = 'CANCELED',
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID)
+	if err != nil {
+		return fmt.Errorf("failed to update order chain SL canceled: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateOrderChainTPCanceled marks the TP order as CANCELED on a chain
+func (db *DB) UpdateOrderChainTPCanceled(ctx context.Context, chainID string, canceledAt time.Time) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `
+		UPDATE order_chains SET
+			tp_status = 'CANCELED',
+			updated_at = NOW()
+		WHERE chain_id = $1`
+
+	_, err := db.Pool.Exec(ctx, query, chainID)
+	if err != nil {
+		return fmt.Errorf("failed to update order chain TP canceled: %w", err)
+	}
+
+	return nil
+}
+
+// CountActiveChains returns the number of active (ACTIVE or PARTIAL) chains for a user
+func (db *DB) CountActiveChains(ctx context.Context, userID string) (int, error) {
+	if db.Pool == nil {
+		return 0, nil
+	}
+
+	query := `SELECT COUNT(*) FROM order_chains WHERE user_id = $1 AND status IN ('PENDING', 'ENTRY_PLACED', 'ACTIVE', 'PARTIAL')`
+
+	var count int
+	err := db.Pool.QueryRow(ctx, query, userID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count active chains: %w", err)
+	}
+
+	return count, nil
+}
+
 // orderChainSelectColumns is the standard set of columns selected for order chain queries.
 // This must match the order in scanOrderChainRow.
 const orderChainSelectColumns = `id, user_id, chain_id, symbol, side, mode_code, status,

@@ -15,8 +15,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // UserAutopilotInstance holds a single user's autopilot session
@@ -41,6 +44,7 @@ type UserAutopilotInstance struct {
 	ExitDecisionService     *exitdecision.Service                   // Epic 14: Exit signal monitoring
 	PositionController      *PositionController                     // Story 10.4: Exit signal executor
 	RavindraPositionMonitor *RavindraPositionMonitor                // R:R-based trailing stop management
+	Coordinator             *PositionLifecycleCoordinator           // Story 14.19: Deterministic chain close handler
 	CreatedAt               time.Time
 	LastActive              time.Time
 
@@ -989,6 +993,32 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	chainEntryRunner.SetRavindraMonitor(ravindraMonitor)
 	m.logger.Info("RavindraPositionMonitor wired to ChainEntryRunner", "user_id", userID)
 
+	// Story 14.19: Create PositionLifecycleCoordinator for deterministic chain close handling
+	// This replaces the scattered close logic in GinieAutopilot.HandleSLTPOrderFilled
+	coordinatorLogger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "PositionLifecycleCoordinator").Str("user_id", userID).Logger()
+	coordinator := NewPositionLifecycleCoordinator(m.repo.GetDB(), m.chainEventWriter, coordinatorLogger)
+	coordinator.SetPatternResetter(realtimeMatcher)
+	coordinator.SetCapacityRebuilder(coinProfiler)
+	coordinator.SetFuturesCanceler(futuresClient)
+	// Load max_concurrent_trades from sub-strategy settings
+	coordinatorMaxConcurrent := 1
+	if m.repo != nil {
+		subSettings, subErr := m.repo.GetSubStrategySettings(ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance")
+		if subErr == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+			var settingsMap map[string]interface{}
+			if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+						coordinatorMaxConcurrent = int(maxTrades)
+					}
+				}
+			}
+		}
+	}
+	coordinator.SetMaxConcurrent(coordinatorMaxConcurrent)
+	m.logger.Info("PositionLifecycleCoordinator created for user",
+		"user_id", userID, "max_concurrent", coordinatorMaxConcurrent)
+
 	instance := &UserAutopilotInstance{
 		UserID:                  userID,
 		FuturesClient:           futuresClient,
@@ -1000,6 +1030,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		ExitDecisionService:     exitDecisionSvc,     // Epic 14: Exit signal monitoring
 		PositionController:      positionController,  // Story 10.4: Exit signal executor
 		RavindraPositionMonitor: ravindraMonitor,     // R:R-based trailing stop management
+		Coordinator:             coordinator,          // Story 14.19: Deterministic chain close handler
 		CreatedAt:               time.Now(),
 		LastActive:              time.Now(),
 	}

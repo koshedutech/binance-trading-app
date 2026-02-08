@@ -546,6 +546,18 @@ func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
 	log.Printf("%s Reverted symbol %s to strategy source (position closed)", LogPrefix, symbol)
 }
 
+// RebuildCapacity recalculates coin profiler capacity based on active chain count.
+// This is a synchronous method called by the PositionLifecycleCoordinator after a chain closes.
+// Returns (capacityUsed, scanningEnabled) where:
+//   - capacityUsed is the number of active chains (positions consuming capacity)
+//   - scanningEnabled is true if activeChainCount < maxConcurrent (room for new entries)
+func (cp *CoinProfiler) RebuildCapacity(activeChainCount, maxConcurrent int) (int, bool) {
+	scanningEnabled := activeChainCount < maxConcurrent
+	log.Printf("%s RebuildCapacity: active=%d, max=%d, scanning=%v",
+		LogPrefix, activeChainCount, maxConcurrent, scanningEnabled)
+	return activeChainCount, scanningEnabled
+}
+
 // GetSubscriptions returns all current subscriptions.
 func (cp *CoinProfiler) GetSubscriptions() map[string]*SubscriptionRequest {
 	cp.mu.RLock()

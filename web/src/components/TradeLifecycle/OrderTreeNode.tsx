@@ -123,6 +123,10 @@ interface OrderTreeNodeProps {
   isExitOrder?: boolean;
   // Reason for cancellation (for SL/TP that were cancelled when opposite hit)
   cancelReason?: string;
+  // Story 14.19: Lifecycle status from composite event ('FILLED'|'CANCELED' etc.)
+  lifecycleStatus?: string;
+  // Story 14.19: Chain closed timestamp for freezing timers
+  chainClosedAt?: string;
 }
 
 // Get icon for node type
@@ -258,6 +262,8 @@ export default function OrderTreeNode({
   livePrice,
   isExitOrder,
   cancelReason,
+  lifecycleStatus,
+  chainClosedAt,
 }: OrderTreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
@@ -267,7 +273,18 @@ export default function OrderTreeNode({
 
   // Update duration counter every 10 seconds for pending orders (non-entry)
   // Update countdown every second for pending entry orders
+  // Story 14.19: Show frozen duration for closed chain orders
   useEffect(() => {
+    // For closed chain orders (SL/TP), show frozen duration
+    if (order && chainClosedAt && (lifecycleStatus === 'FILLED' || lifecycleStatus === 'CANCELED' || lifecycleStatus === 'EXPIRED')) {
+      const endTime = lifecycleStatus === 'FILLED'
+        ? (order.updateTime || new Date(chainClosedAt).getTime())
+        : new Date(chainClosedAt).getTime();
+      setDuration(formatStaticDuration(order.time, endTime));
+      setCountdown('');
+      return;
+    }
+
     const isPending = order && ['NEW', 'PARTIALLY_FILLED'].includes(order.status);
     if (!isPending || !order) {
       setDuration('');
@@ -299,7 +316,7 @@ export default function OrderTreeNode({
       }, 10000);
       return () => clearInterval(interval);
     }
-  }, [order, type]);
+  }, [order, type, lifecycleStatus, chainClosedAt]);
 
   // Get config for this order type
   const typeKey = type === 'ENTRY' ? 'E' : type;
@@ -312,12 +329,16 @@ export default function OrderTreeNode({
 
   const Icon = getNodeIcon(type);
 
-  // Determine status
+  // Determine status - prefer lifecycleStatus from composite event over order.status
   let status = 'NEW';
   let statusIndicator = getStatusIndicator('NEW');
 
   if (type === 'POSITION' && positionState) {
     status = positionState.status;
+    statusIndicator = getStatusIndicator(status);
+  } else if (lifecycleStatus) {
+    // Story 14.19: Use lifecycle coordinator status (authoritative for closed chains)
+    status = lifecycleStatus;
     statusIndicator = getStatusIndicator(status);
   } else if (order) {
     status = order.status;
@@ -632,9 +653,11 @@ export default function OrderTreeNode({
                 </span>
               )}
 
-              {/* Duration counter for pending non-entry orders */}
+              {/* Duration counter for pending non-entry orders, or frozen duration for closed orders */}
               {duration && type !== 'ENTRY' && (
-                <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-500/20 text-amber-400" title="Time since order placed">
+                <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs ${
+                  lifecycleStatus ? 'bg-gray-500/20 text-gray-400' : 'bg-amber-500/20 text-amber-400'
+                }`} title={lifecycleStatus ? 'Total order duration' : 'Time since order placed'}>
                   <Timer className="w-3 h-3" />
                   {duration}
                 </span>

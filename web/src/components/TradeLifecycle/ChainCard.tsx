@@ -387,8 +387,17 @@ export default function ChainCard({
                         entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
                         entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
                         feeRate={takerFeeRate}
-                        isExitOrder={chain.tpOrders[0].status === 'FILLED' && chain.positionState?.status === 'CLOSED'}
-                        cancelReason={chain.tpOrders[0].status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - SL hit' : undefined}
+                        isExitOrder={
+                          (chain.tpStatus === 'FILLED') ||
+                          (chain.tpOrders[0].status === 'FILLED' && chain.positionState?.status === 'CLOSED')
+                        }
+                        cancelReason={
+                          (chain.tpStatus === 'CANCELED' || chain.tpStatus === 'EXPIRED')
+                            ? 'Cancelled - SL hit'
+                            : (chain.tpOrders[0].status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - SL hit' : undefined)
+                        }
+                        lifecycleStatus={chain.tpStatus}
+                        chainClosedAt={chain.closedAt}
                       />
                     ) : chain.tpOrders.length > 0 ? (
                       // Multiple TP orders - show each at depth 2 with their specific type
@@ -407,8 +416,17 @@ export default function ChainCard({
                           entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
                           entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
                           feeRate={takerFeeRate}
-                          isExitOrder={tp.status === 'FILLED' && chain.positionState?.status === 'CLOSED'}
-                          cancelReason={tp.status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - SL hit' : undefined}
+                          isExitOrder={
+                            (chain.tpStatus === 'FILLED') ||
+                            (tp.status === 'FILLED' && chain.positionState?.status === 'CLOSED')
+                          }
+                          cancelReason={
+                            (chain.tpStatus === 'CANCELED' || chain.tpStatus === 'EXPIRED')
+                              ? 'Cancelled - SL hit'
+                              : (tp.status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - SL hit' : undefined)
+                          }
+                          lifecycleStatus={chain.tpStatus}
+                          chainClosedAt={chain.closedAt}
                         />
                       ))
                     ) : null}
@@ -426,8 +444,17 @@ export default function ChainCard({
                         entryPrice={chain.positionState?.entryPrice || entryOrder?.avgPrice || entryOrder?.price}
                         entryQuantity={chain.positionState?.entryQuantity || entryOrder?.executedQty || entryOrder?.origQty}
                         feeRate={takerFeeRate}
-                        isExitOrder={chain.slOrder.status === 'FILLED' && chain.positionState?.status === 'CLOSED'}
-                        cancelReason={chain.slOrder.status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - TP hit' : undefined}
+                        isExitOrder={
+                          (chain.slStatus === 'FILLED') ||
+                          (chain.slOrder.status === 'FILLED' && chain.positionState?.status === 'CLOSED')
+                        }
+                        cancelReason={
+                          (chain.slStatus === 'CANCELED' || chain.slStatus === 'EXPIRED')
+                            ? 'Cancelled - TP hit'
+                            : (chain.slOrder.status === 'CANCELED' && chain.positionState?.status === 'CLOSED' ? 'Cancelled - TP hit' : undefined)
+                        }
+                        lifecycleStatus={chain.slStatus}
+                        chainClosedAt={chain.closedAt}
                       />
                     )}
                   </div>
@@ -601,19 +628,23 @@ export default function ChainCard({
               </span>
             </div>
             <div>
-              <span className="text-gray-500">Close Value:</span>
-              <span className="ml-2 text-gray-300 font-mono">
+              <span className="text-gray-500">Realized PnL:</span>
+              <span className="ml-2 font-mono">
                 {(() => {
-                  // Find filled SL or TP order
-                  const filledExit = chain.slOrder?.status === 'FILLED'
-                    ? chain.slOrder
-                    : chain.tpOrders.find(tp => tp.status === 'FILLED');
-                  if (filledExit) {
-                    const exitPrice = filledExit.avgPrice || filledExit.stopPrice || filledExit.price || 0;
-                    const exitQty = filledExit.executedQty || filledExit.origQty || 0;
-                    return `$${(exitPrice * exitQty).toFixed(2)}`;
+                  const pnl = chain.realizedPnl ?? chain.positionState?.realizedPnl ?? chain.pnl;
+                  if (pnl == null || (pnl === 0 && !chain.realizedPnl && !chain.positionState?.realizedPnl && !chain.pnl)) {
+                    return <span className="text-gray-500">N/A</span>;
                   }
-                  return <span className="text-gray-500">N/A</span>;
+                  const entryVal = (chain.positionState?.entryPrice || 0) * (chain.positionState?.entryQuantity || 0);
+                  const pnlPct = entryVal > 0 ? (pnl / entryVal) * 100 : 0;
+                  return (
+                    <span className={pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                      {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                      {entryVal > 0 && (
+                        <span className="text-xs ml-1">({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)</span>
+                      )}
+                    </span>
+                  );
                 })()}
               </span>
             </div>
@@ -622,9 +653,11 @@ export default function ChainCard({
               <span className="ml-2 text-gray-300 font-mono">
                 {(() => {
                   const start = chain.createdAt;
-                  const end = chain.positionState?.closedAt
-                    ? new Date(chain.positionState.closedAt).getTime()
-                    : chain.updatedAt;
+                  const end = chain.closedAt
+                    ? new Date(chain.closedAt).getTime()
+                    : chain.positionState?.closedAt
+                      ? new Date(chain.positionState.closedAt).getTime()
+                      : chain.updatedAt;
                   const diffMs = end - start;
                   if (diffMs <= 0) return 'N/A';
                   const hours = Math.floor(diffMs / (1000 * 60 * 60));
