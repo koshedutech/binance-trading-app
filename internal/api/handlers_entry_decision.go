@@ -575,7 +575,12 @@ func enrichCoinMatchWithClosedPnL(cm *entrydecision.CoinMatch) {
 }
 
 // resetStalePatterns resets patterns for symbols that had position_running status
-// but no longer have active positions (position was closed)
+// but no longer have active positions (position was closed).
+//
+// SAFETY: If activePositions is empty, we verify against the DB (order_chains)
+// before resetting. An empty activePositions map can result from Binance API
+// failures (rate limit, IP ban, network error), NOT from actual position closure.
+// Without this check, every API failure would destroy position_running state.
 func (s *Server) resetStalePatterns(userID string, patternMatcher *entrydecision.VolumeImbalancePatternMatcher, activePositions map[string]*ActivePositionInfo) {
 	if patternMatcher == nil {
 		return
@@ -591,6 +596,33 @@ func (s *Server) resetStalePatterns(userID string, patternMatcher *entrydecision
 		// If pattern is position_running but no active position, position was closed
 		if pattern.Status == entrydecision.PatternStatusPositionRunning {
 			if _, hasPosition := activePositions[pattern.Symbol]; !hasPosition {
+				// SAFETY CHECK: If activePositions is empty (possible API failure),
+				// verify against DB order chains before destroying position_running state.
+				// This prevents false resets when Binance API is rate-limited or down.
+				if len(activePositions) == 0 && s.repo != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					activeChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+					cancel()
+					if err != nil {
+						// DB error - don't reset, keep position_running to be safe
+						log.Printf("[ENTRY-DECISION] Skipping stale pattern reset for %s: DB error %v (keeping position_running)", pattern.Symbol, err)
+						continue
+					}
+					// Check if this symbol has an active chain in DB
+					hasActiveChain := false
+					for _, chain := range activeChains {
+						if chain.Symbol == pattern.Symbol {
+							hasActiveChain = true
+							break
+						}
+					}
+					if hasActiveChain {
+						// DB confirms position is still active - API just failed
+						log.Printf("[ENTRY-DECISION] Keeping position_running for %s: active chain confirmed in DB (API positions empty)", pattern.Symbol)
+						continue
+					}
+				}
+
 				// Try to get closed chain data for PNL display
 				if s.repo != nil {
 					ctx := context.Background()
@@ -625,7 +657,7 @@ func (s *Server) resetStalePatterns(userID string, patternMatcher *entrydecision
 					}
 				}
 				// Reset pattern to watching state (closed PNL will be enriched from map during broadcast)
-				log.Printf("[ENTRY-DECISION] Resetting stale pattern for %s (position closed)", pattern.Symbol)
+				log.Printf("[ENTRY-DECISION] Resetting stale pattern for %s (position closed, confirmed no active position)", pattern.Symbol)
 				patternMatcher.ResetPattern(pattern.Symbol, pattern.Mode, pattern.Timeframe)
 			}
 		}

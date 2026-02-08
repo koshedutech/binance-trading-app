@@ -203,6 +203,8 @@ type PatternStatePersister interface {
 	DeletePatternStateFromDB(ctx context.Context, userID, symbol, mode, timeframe string) error
 	// DeleteAllPatternStatesFromDB removes all pattern states for a user.
 	DeleteAllPatternStatesFromDB(ctx context.Context, userID string) error
+	// DeleteStalePatternStatesFromDB removes all non-position_running pattern states for a user.
+	DeleteStalePatternStatesFromDB(ctx context.Context, userID string) error
 }
 
 // RealtimePatternMatcher handles real-time pattern evaluation on candle close events.
@@ -623,6 +625,27 @@ func (r *RealtimePatternMatcher) deletePatternStateAsync(symbol, mode, timeframe
 	}()
 }
 
+// deleteStalePatternStatesAsync deletes non-position_running pattern states from the database asynchronously.
+func (r *RealtimePatternMatcher) deleteStalePatternStatesAsync() {
+	r.mu.RLock()
+	persister := r.persister
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if persister == nil || userID == "" {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := persister.DeleteStalePatternStatesFromDB(ctx, userID); err != nil {
+			log.Printf("[REALTIME-PATTERN] Error deleting stale pattern states: %v", err)
+		}
+	}()
+}
+
 // deleteAllPatternStatesAsync deletes all pattern states from the database asynchronously.
 func (r *RealtimePatternMatcher) deleteAllPatternStatesAsync() {
 	r.mu.RLock()
@@ -923,6 +946,31 @@ func (r *RealtimePatternMatcher) ClearAllPatterns() {
 	log.Printf("[REALTIME-PATTERN] Cleared all pattern states for fresh start")
 }
 
+// ClearStalePatterns clears expired/stale patterns but preserves position_running patterns.
+// Used on coin profiler start to avoid destroying active position tracking.
+func (r *RealtimePatternMatcher) ClearStalePatterns() {
+	// Clear stale patterns in underlying matcher (preserves position_running)
+	if r.patternMatcher != nil {
+		r.patternMatcher.ClearStalePatterns()
+	}
+
+	// Clear cached states and volume progress for non-position patterns only
+	r.mu.Lock()
+	for key, state := range r.lastStates {
+		if state.Status != PatternStatusPositionRunning {
+			delete(r.lastStates, key)
+			delete(r.volumeProgress, key)
+		}
+	}
+	// Keep suppressedSymbols intact - position symbols should stay suppressed
+	r.mu.Unlock()
+
+	// Delete non-position pattern states from DB
+	r.deleteStalePatternStatesAsync()
+
+	log.Printf("[REALTIME-PATTERN] Cleared stale patterns (preserved position_running)")
+}
+
 // ClearPatternForSymbol clears the pattern for a specific symbol when a position is opened.
 // This notifies the system to stop looking for new entry patterns on this symbol until
 // the position is closed. It also suppresses the symbol so OnCandleClose won't re-create
@@ -971,8 +1019,6 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 	// Save the position_running state to DB for persistence across restarts
 	r.savePatternStateAsync(symbol, mode, timeframe)
 
-	log.Printf("[REALTIME-PATTERN] Set position_running and suppressed pattern for %s:%s:%s", symbol, mode, timeframe)
-
 	// Broadcast Step 4 update to UI
 	r.mu.RLock()
 	callback := r.onPatternUpdate
@@ -993,6 +1039,9 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 			UpdatedAt:   time.Now(),
 		}
 		callback(update)
+		log.Printf("[REALTIME-PATTERN] Set position_running and broadcast Step 4 for %s:%s:%s (callback wired)", symbol, mode, timeframe)
+	} else {
+		log.Printf("[REALTIME-PATTERN] Set position_running for %s:%s:%s (NO callback - broadcast skipped, will appear in periodic broadcast)", symbol, mode, timeframe)
 	}
 }
 

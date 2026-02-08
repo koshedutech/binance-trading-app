@@ -88,8 +88,7 @@ function PositionLimitBadge({ strat }: { strat: StrategyRef }) {
   return (
     <div className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded ${styles.bgColor} ${styles.textColor} text-[10px] border ${styles.borderColor}`}>
       <Icon className="w-3 h-3" />
-      <span>{current}/{max}</span>
-      {status === 'at_limit' && <span className="font-medium">[PAUSED]</span>}
+      <span>{current} of {max}</span>
     </div>
   );
 }
@@ -102,9 +101,11 @@ function CapacitySummary({ capacitySummary }: { capacitySummary?: StrategyCapaci
     return null;
   }
 
-  // Check if any strategy is at limit
-  const atLimitCount = capacitySummary.filter(c => c.capacity_status === 'at_limit').length;
-  const limitedCount = capacitySummary.filter(c => c.capacity_status === 'limited').length;
+  // Compute totals across all strategies
+  const totalCurrent = capacitySummary.reduce((sum, c) => sum + c.current_positions, 0);
+  const totalMax = capacitySummary.reduce((sum, c) => sum + c.max_positions, 0);
+  const allAtLimit = capacitySummary.length > 0 && capacitySummary.every(c => c.capacity_status === 'at_limit');
+  const someAtLimit = capacitySummary.some(c => c.capacity_status === 'at_limit');
 
   return (
     <div className="p-3 bg-gray-800/30 rounded-lg">
@@ -113,16 +114,13 @@ function CapacitySummary({ capacitySummary }: { capacitySummary?: StrategyCapaci
           <Target className="w-4 h-4 text-cyan-400" />
           <span className="text-sm font-medium text-gray-300">POSITION CAPACITY</span>
         </div>
-        {atLimitCount > 0 && (
-          <span className="px-1.5 py-0.5 rounded text-xs bg-red-500/20 text-red-400">
-            {atLimitCount} at limit
-          </span>
-        )}
-        {limitedCount > 0 && atLimitCount === 0 && (
-          <span className="px-1.5 py-0.5 rounded text-xs bg-yellow-500/20 text-yellow-400">
-            {limitedCount} limited
-          </span>
-        )}
+        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
+          allAtLimit ? 'bg-red-500/20 text-red-400' :
+          someAtLimit ? 'bg-yellow-500/20 text-yellow-400' :
+          'bg-green-500/20 text-green-400'
+        }`}>
+          {totalCurrent} of {totalMax} used
+        </span>
       </div>
 
       <div className="space-y-1.5">
@@ -147,16 +145,26 @@ function CapacitySummary({ capacitySummary }: { capacitySummary?: StrategyCapaci
               </div>
               <div className="flex items-center gap-2">
                 <span className={`font-medium ${statusStyles.text}`}>
-                  {cap.current_positions}/{cap.max_positions}
+                  {cap.current_positions} of {cap.max_positions}
                 </span>
                 {cap.capacity_status === 'at_limit' && (
                   <span className="text-red-400 font-medium">PAUSED</span>
+                )}
+                {cap.capacity_status === 'available' && (
+                  <span className="text-green-400/70 text-[10px]">scanning</span>
                 )}
               </div>
             </div>
           );
         })}
       </div>
+
+      {/* Message when only one strategy exists and it's at capacity */}
+      {capacitySummary.length === 1 && allAtLimit && (
+        <div className="mt-2 p-2 bg-gray-800/50 rounded text-xs text-gray-400 border border-gray-700/50">
+          No other strategies defined. Go to <span className="text-cyan-400">Settings</span> to add more strategies.
+        </div>
+      )}
     </div>
   );
 }
@@ -267,13 +275,14 @@ function AggregatedInfo({ requirements }: { requirements: CoinProfilerRequiremen
 function StrategySources({ requirements }: { requirements: CoinProfilerRequirements }) {
   const strategies = requirements.from_strategies || [];
   const timeframesByMode = requirements.timeframes_by_mode || {};
+  const capacitySummary = requirements.capacity_summary || [];
 
   if (strategies.length === 0 && requirements.strategy_count === 0) {
     return (
       <div className="p-3 bg-gray-800/30 rounded-lg">
-        <SectionHeader icon={TrendingUp} title="FROM ENABLED STRATEGIES" count={0} color="text-purple-400" />
+        <SectionHeader icon={TrendingUp} title="ENABLED STRATEGIES" count={0} color="text-purple-400" />
         <div className="text-xs text-gray-500 italic">
-          No strategies enabled. Enable strategies in Mode Strategy Settings to start scanning for entries.
+          No strategies enabled. Go to Settings to enable strategies and start scanning for entries.
         </div>
       </div>
     );
@@ -293,9 +302,12 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
     });
   });
 
+  // Count total unique strategies across all modes
+  const totalUniqueStrategies = Object.values(byMode).reduce((sum, arr) => sum + arr.length, 0);
+
   return (
     <div className="p-3 bg-gray-800/30 rounded-lg">
-      <SectionHeader icon={TrendingUp} title="FROM ENABLED STRATEGIES" count={requirements.strategy_count || 0} color="text-purple-400" />
+      <SectionHeader icon={TrendingUp} title="ENABLED STRATEGIES" count={requirements.strategy_count || totalUniqueStrategies} color="text-purple-400" />
 
       {Object.keys(byMode).length > 0 ? (
         <div className="space-y-2">
@@ -315,14 +327,27 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
                     </span>
                   )}
                 </div>
-                {modeStrategies.map((strat, sidx) => (
-                  <div key={sidx} className="flex items-center justify-between text-xs mb-1.5 bg-gray-800/30 rounded px-2 py-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-gray-300">{formatStrategyName(strat.sub_strategy)}</span>
+                {modeStrategies.map((strat, sidx) => {
+                  const isAtLimit = strat.capacity_status === 'at_limit';
+                  const statusLabel = isAtLimit ? 'Paused (at capacity)' :
+                    strat.capacity_status === 'limited' ? 'Active (limited)' : 'Active';
+
+                  return (
+                    <div key={sidx} className="flex items-center justify-between text-xs mb-1.5 bg-gray-800/30 rounded px-2 py-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-300">{formatStrategyName(strat.sub_strategy)}</span>
+                        <span className={`text-[10px] ${
+                          isAtLimit ? 'text-red-400' :
+                          strat.capacity_status === 'limited' ? 'text-yellow-400' :
+                          'text-green-400'
+                        }`}>
+                          - {statusLabel}
+                        </span>
+                      </div>
+                      <PositionLimitBadge strat={strat} />
                     </div>
-                    <PositionLimitBadge strat={strat} />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })}
@@ -345,6 +370,13 @@ function StrategySources({ requirements }: { requirements: CoinProfilerRequireme
           </div>
         );
       })()}
+
+      {/* Show suggestion to add more strategies when only one exists */}
+      {totalUniqueStrategies === 1 && (
+        <div className="mt-2 p-2 bg-gray-800/50 rounded text-xs text-gray-400 border border-gray-700/50">
+          No other strategies defined. Go to <span className="text-cyan-400">Settings</span> to add more strategies.
+        </div>
+      )}
 
       {/* Show timeframes by mode summary */}
       {Object.keys(timeframesByMode).length > 0 && (

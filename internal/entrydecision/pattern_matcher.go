@@ -1165,6 +1165,29 @@ func (m *VolumeImbalancePatternMatcher) CleanupExpiredPatterns() int {
 	return removed
 }
 
+// ClearStalePatterns clears all patterns EXCEPT those in position_running status.
+// This preserves active position tracking while clearing expired/stale patterns.
+// Returns the count of patterns that were cleared.
+func (m *VolumeImbalancePatternMatcher) ClearStalePatterns() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cleared := 0
+	for key, p := range m.patterns {
+		if p.Status == PatternStatusPositionRunning {
+			continue // Keep position patterns
+		}
+		delete(m.patterns, key)
+		delete(m.states, key)
+		cleared++
+	}
+
+	if cleared > 0 {
+		log.Printf("[PATTERN] Cleared %d stale patterns (preserved position_running)", cleared)
+	}
+	return cleared
+}
+
 // ClearAllPatterns removes all tracked patterns and resets internal state.
 // This should be called when the CoinProfiler restarts to ensure fresh pattern
 // detection without stale expiration timestamps from previous sessions.

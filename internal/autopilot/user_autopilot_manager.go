@@ -339,14 +339,27 @@ func (m *UserAutopilotManager) SetChainEventWriter(cew *orders.ChainEventWriter)
 	})
 	m.logger.Info("Chain closed broadcast callback wired for frontend cascade")
 
-	// Propagate to existing ChainEntryRunners
+	// Propagate to existing instances (ChainEntryRunners AND GinieAutopilots)
 	m.instances.Range(func(key, value interface{}) bool {
 		instance := value.(*UserAutopilotInstance)
 		if instance.ChainEntryRunner != nil {
 			instance.ChainEntryRunner.SetChainEventWriter(cew)
 		}
+		if instance.Autopilot != nil {
+			instance.Autopilot.SetChainEventWriter(cew)
+		}
 		return true
 	})
+}
+
+// GetChainEventWriter returns the shared chain event writer.
+// This is the authoritative source for chain queries - use this instead of
+// instance.Autopilot.GetChainEventWriter() which may be nil if the GinieAutopilot
+// was created before the chain event writer was initialized.
+func (m *UserAutopilotManager) GetChainEventWriter() *orders.ChainEventWriter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.chainEventWriter
 }
 
 // SetChainStateProvider sets the chain state provider for ChainEntryRunner (Epic 11)
@@ -720,6 +733,12 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.logger.Info("PositionStateIntegration set on user autopilot for trade lifecycle", "user_id", userID)
 	}
 
+	// Set ChainEventWriter on the GinieAutopilot for chain queries (coins API, capacity, etc.)
+	if m.chainEventWriter != nil {
+		autopilot.SetChainEventWriter(m.chainEventWriter)
+		m.logger.Info("ChainEventWriter set on user GinieAutopilot", "user_id", userID)
+	}
+
 	// Epic 11/14: Create ChainEntryRunner for automatic chain-based entries
 	// This runs independently of GinieAutopilot when entry_decision_system = "chain"
 	// NOTE: StateProvider is wired after RealtimePatternMatcher is created (see below)
@@ -793,19 +812,22 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.logger.Info("Pattern state persistence wired and restored from DB", "user_id", userID)
 	}
 
-	// Auto-detect active positions from order chains and set Step 4 immediately on startup.
-	// This ensures Entry Decision shows "position running" for symbols with active positions
-	// without waiting for user interaction or API refresh.
-	m.autoDetectActivePositions(ctx, userID, realtimeMatcher, coinProfiler)
-
 	// Register with CoinProfiler to receive candle close events
 	realtimeMatcher.RegisterWithCoinProfiler(coinProfiler)
 	// Wire pattern update callback for real-time WebSocket broadcasting
+	// IMPORTANT: Must be wired BEFORE autoDetectActivePositions so that
+	// SetPatternPositionRunning can broadcast Step 4 to the frontend.
 	if m.patternUpdateCallback != nil {
 		realtimeMatcher.SetPatternUpdateCallback(m.patternUpdateCallback)
 		m.logger.Info("PatternUpdateCallback wired to RealtimePatternMatcher", "user_id", userID)
 	}
 	m.logger.Info("RealtimePatternMatcher created and registered with CoinProfiler", "user_id", userID)
+
+	// Auto-detect active positions from order chains and set Step 4 immediately on startup.
+	// This ensures Entry Decision shows "position running" for symbols with active positions
+	// without waiting for user interaction or API refresh.
+	// NOTE: This runs AFTER callback wiring so broadcasts reach the frontend.
+	m.autoDetectActivePositions(ctx, userID, realtimeMatcher, coinProfiler)
 
 	// Epic 14: Wire PatternStateProvider to ChainEntryRunner
 	// This is the critical bridge between pattern detection and order execution.
@@ -1138,12 +1160,11 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 	if isChainMode {
 		// 1. Start CoinProfiler (real-time WebSocket data collection)
 		if instance.CoinProfiler != nil && !instance.CoinProfiler.IsRunning() {
-			// CRITICAL: Clear all pattern state before starting to prevent "pattern timeout" issues.
-			// When the profiler restarts (e.g., after browser refresh), old patterns with stale
-			// ExpiresAt timestamps would appear as "expired" when new candle data arrives.
+			// Clear stale patterns before starting, but preserve position_running patterns
+			// so active position tracking survives profiler restarts (e.g., browser refresh).
 			if instance.RealtimePatternMatcher != nil {
-				instance.RealtimePatternMatcher.ClearAllPatterns()
-				m.logger.Info("Cleared stale pattern state before CoinProfiler start (chain mode)", "user_id", userID)
+				instance.RealtimePatternMatcher.ClearStalePatterns()
+				m.logger.Info("Cleared stale pattern state before CoinProfiler start (preserved position_running)", "user_id", userID)
 			}
 
 			m.logger.Info("Starting CoinProfiler for chain system", "user_id", userID)
@@ -1152,6 +1173,11 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 			} else {
 				// Initialize WebSocket subscriptions based on enabled strategies
 				m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
+
+				// Re-detect active positions that may have been cleared
+				if instance.RealtimePatternMatcher != nil {
+					m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler)
+				}
 			}
 		}
 
@@ -1800,18 +1826,24 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 	}
 
 	if instance.CoinProfiler.IsRunning() {
-		return nil // Already running
+		// Already running - but still re-detect active positions.
+		// This handles page refresh: the frontend reconnects and calls StartCoinProfiler,
+		// but the profiler is already running. We need to re-broadcast Step 4 for any
+		// symbols with active positions so the UI shows the correct state immediately.
+		if instance.RealtimePatternMatcher != nil {
+			m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler)
+			m.logger.Info("CoinProfiler already running - re-detected active positions for UI refresh", "user_id", userID)
+		}
+		return nil
 	}
 
 	m.logger.Info("Starting coin profiler for user", "user_id", userID)
 
-	// CRITICAL: Clear all pattern state before starting to prevent "pattern timeout" issues.
-	// When the profiler restarts (e.g., after browser refresh), old patterns with stale
-	// ExpiresAt timestamps would appear as "expired" when new candle data arrives.
-	// Clearing patterns ensures fresh detection with new timestamps.
+	// Clear stale patterns before starting, but preserve position_running patterns
+	// so active position tracking survives profiler restarts (e.g., browser refresh).
 	if instance.RealtimePatternMatcher != nil {
-		instance.RealtimePatternMatcher.ClearAllPatterns()
-		m.logger.Info("Cleared stale pattern state before CoinProfiler start", "user_id", userID)
+		instance.RealtimePatternMatcher.ClearStalePatterns()
+		m.logger.Info("Cleared stale pattern state before CoinProfiler start (preserved position_running)", "user_id", userID)
 	}
 
 	if err := instance.CoinProfiler.Start(); err != nil {
@@ -1820,6 +1852,11 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 
 	// Initialize WebSocket subscriptions based on enabled strategies and positions
 	m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
+
+	// Re-detect active positions after clearing stale patterns
+	if instance.RealtimePatternMatcher != nil {
+		m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler)
+	}
 
 	instance.TouchLastActive()
 	return nil
@@ -2093,6 +2130,9 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 		}
 	}
 
+	// Track which symbols already have positions (to avoid duplicates)
+	positionSymbols := make(map[string]bool)
+
 	if instance.Autopilot != nil {
 		giniePositions := instance.Autopilot.GetPositions()
 		for _, gp := range giniePositions {
@@ -2102,9 +2142,29 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 				adapter.timeframe = tf
 			}
 			positions = append(positions, adapter)
+			positionSymbols[gp.Symbol] = true
 		}
 	}
-	m.logger.Info("Found open positions", "user_id", userID, "count", len(positions))
+
+	// In chain mode, Ginie doesn't track positions. Add positions from active order chains
+	// so that CombineRequirements correctly marks these symbols as position sources.
+	if m.chainEventWriter != nil {
+		chainCtx2, chainCancel2 := context.WithTimeout(ctx, 5*time.Second)
+		defer chainCancel2()
+		activeChains, err := m.chainEventWriter.GetActiveChains(chainCtx2, userID)
+		if err == nil {
+			for _, chain := range activeChains {
+				if chain.Symbol == "" || positionSymbols[chain.Symbol] {
+					continue // Skip empty or already-added symbols
+				}
+				adapter := &chainPositionAdapter{chain: chain}
+				positions = append(positions, adapter)
+				positionSymbols[chain.Symbol] = true
+			}
+		}
+	}
+
+	m.logger.Info("Found open positions", "user_id", userID, "count", len(positions), "from_ginie", len(positionSymbols))
 
 	// Step 6: Combine strategy and position requirements
 	positionReqs := coinprofiler.GetPositionRequirements(positions)
@@ -2246,6 +2306,58 @@ func (a *giniePositionAdapter) IsTrailingActive() bool {
 
 func (a *giniePositionAdapter) GetTimeframe() string {
 	return a.timeframe
+}
+
+// chainPositionAdapter adapts an OrderChain to the coinprofiler.Position interface.
+// Used in chain mode where Ginie doesn't track positions but active order chains exist.
+type chainPositionAdapter struct {
+	chain *orders.OrderChain
+}
+
+func (a *chainPositionAdapter) GetSymbol() string {
+	if a.chain == nil {
+		return ""
+	}
+	return a.chain.Symbol
+}
+
+func (a *chainPositionAdapter) GetMode() string {
+	if a.chain == nil {
+		return ""
+	}
+	return a.chain.Mode
+}
+
+func (a *chainPositionAdapter) GetSide() string {
+	if a.chain == nil {
+		return ""
+	}
+	return a.chain.Side
+}
+
+func (a *chainPositionAdapter) GetTimeframe() string {
+	if a.chain == nil {
+		return ""
+	}
+	return a.chain.Timeframe
+}
+
+func (a *chainPositionAdapter) HasTakeProfit() bool {
+	if a.chain == nil {
+		return false
+	}
+	return a.chain.CurrentTPPrice != nil && *a.chain.CurrentTPPrice > 0
+}
+
+func (a *chainPositionAdapter) HasStopLoss() bool {
+	if a.chain == nil {
+		return false
+	}
+	return a.chain.CurrentSLPrice != nil && *a.chain.CurrentSLPrice > 0
+}
+
+func (a *chainPositionAdapter) IsTrailingActive() bool {
+	return false // Chain positions don't have Ginie trailing
 }
 
 // ==================== Epic 14: ExitDecisionService Management ====================

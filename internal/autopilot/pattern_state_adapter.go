@@ -83,3 +83,8 @@ func (a *PatternStatePersisterAdapter) DeletePatternStateFromDB(ctx context.Cont
 func (a *PatternStatePersisterAdapter) DeleteAllPatternStatesFromDB(ctx context.Context, userID string) error {
 	return a.repo.DeleteAllPatternStates(ctx, userID)
 }
+
+// DeleteStalePatternStatesFromDB removes all non-position_running pattern states for a user.
+func (a *PatternStatePersisterAdapter) DeleteStalePatternStatesFromDB(ctx context.Context, userID string) error {
+	return a.repo.DeleteNonPositionPatternStates(ctx, userID)
+}

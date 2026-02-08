@@ -93,19 +93,18 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 	}
 
 	// Source 2: Chain Entry order chains (from database)
+	// Use the manager's chain event writer directly - the per-instance GinieAutopilot
+	// may not have it set if it was created before the chain event writer was initialized.
 	if s.userAutopilotManager != nil {
-		instance := s.userAutopilotManager.GetInstance(userID)
-		if instance != nil && instance.Autopilot != nil {
-			chainWriter := instance.Autopilot.GetChainEventWriter()
-			if chainWriter != nil {
-				ctx := c.Request.Context()
-				chains, err := chainWriter.GetActiveChains(ctx, userID)
-				if err == nil {
-					for _, chain := range chains {
-						activePositionSymbols[chain.Symbol] = true
-						if chain.Timeframe != "" {
-							activeChainTimeframes[chain.Symbol] = chain.Timeframe
-						}
+		chainWriter := s.userAutopilotManager.GetChainEventWriter()
+		if chainWriter != nil {
+			ctx := c.Request.Context()
+			chains, err := chainWriter.GetActiveChains(ctx, userID)
+			if err == nil {
+				for _, chain := range chains {
+					activePositionSymbols[chain.Symbol] = true
+					if chain.Timeframe != "" {
+						activeChainTimeframes[chain.Symbol] = chain.Timeframe
 					}
 				}
 			}
@@ -403,19 +402,18 @@ func (s *Server) getStrategyCapacityInfo(ctx context.Context, userID string) []S
 		return result
 	}
 
-	// Get all open chains for counting current positions per strategy
-	// Uses GetOpenChains which includes PENDING, ENTRY_PLACED, ACTIVE, and PARTIAL
-	// This ensures pending entries also count toward capacity limits
+	// Get active chains (ACTIVE + PARTIAL) for counting current positions per strategy.
+	// Only count chains with actual positions - not PENDING or ENTRY_PLACED which are
+	// pre-fill states that may be stale/abandoned and inflate the capacity count.
+	// Use the manager's chain event writer directly - the per-instance GinieAutopilot
+	// may not have it set if it was created before the chain event writer was initialized.
 	activeChains := []*orders.OrderChain{}
 	if s.userAutopilotManager != nil {
-		instance := s.userAutopilotManager.GetInstance(userID)
-		if instance != nil && instance.Autopilot != nil {
-			chainWriter := instance.Autopilot.GetChainEventWriter()
-			if chainWriter != nil {
-				chains, err := chainWriter.GetOpenChains(ctx, userID)
-				if err == nil {
-					activeChains = chains
-				}
+		chainWriter := s.userAutopilotManager.GetChainEventWriter()
+		if chainWriter != nil {
+			chains, err := chainWriter.GetActiveChains(ctx, userID)
+			if err == nil {
+				activeChains = chains
 			}
 		}
 	}

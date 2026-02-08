@@ -158,6 +158,27 @@ func (db *DB) DeleteAllPatternStates(ctx context.Context, userID string) error {
 	return nil
 }
 
+// DeleteNonPositionPatternStates removes all pattern states for a user EXCEPT those
+// with position_running status. This preserves active position tracking while clearing stale patterns.
+func (db *DB) DeleteNonPositionPatternStates(ctx context.Context, userID string) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	query := `DELETE FROM pattern_states WHERE user_id = $1 AND status != 'position_running'`
+	result, err := db.Pool.Exec(ctx, query, userID)
+	if err != nil {
+		return fmt.Errorf("failed to delete non-position pattern states: %w", err)
+	}
+
+	count := result.RowsAffected()
+	if count > 0 {
+		log.Printf("[PATTERN-DB] Deleted %d non-position pattern states for user %s (preserved position_running)", count, userID)
+	}
+
+	return nil
+}
+
 // CleanupExpiredPatternStates removes expired pattern states from all users.
 // This can be called periodically to clean up stale data.
 func (db *DB) CleanupExpiredPatternStates(ctx context.Context) (int64, error) {
@@ -233,4 +254,9 @@ func (r *Repository) DeletePatternState(ctx context.Context, userID, symbol, mod
 // DeleteAllPatternStates removes all pattern states for a user via the repository.
 func (r *Repository) DeleteAllPatternStates(ctx context.Context, userID string) error {
 	return r.db.DeleteAllPatternStates(ctx, userID)
+}
+
+// DeleteNonPositionPatternStates removes non-position_running pattern states via the repository.
+func (r *Repository) DeleteNonPositionPatternStates(ctx context.Context, userID string) error {
+	return r.db.DeleteNonPositionPatternStates(ctx, userID)
 }
