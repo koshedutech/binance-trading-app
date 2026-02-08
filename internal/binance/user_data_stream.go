@@ -412,6 +412,7 @@ func (s *UserDataStream) handleMessage(message []byte) {
 	// Parse event type first
 	var baseEvent struct {
 		EventType string `json:"e"`
+		EventTime int64  `json:"E"` // Explicit field prevents case-insensitive collision with "e"
 	}
 	if err := json.Unmarshal(message, &baseEvent); err != nil {
 		log.Printf("[USER-DATA-STREAM] Failed to parse event type: %v", err)
