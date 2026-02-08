@@ -281,11 +281,15 @@ export default function ChainCard({
             const entryQty = chain.positionState?.entryQuantity || chain.entryOrder?.executedQty || chain.entryOrder?.origQty || 0;
             const entryValue = entryPrice * entryQty;
             const pnlPercent = entryValue > 0 ? (pnl / entryValue) * 100 : 0;
+            const fees = chain.totalFees ?? chain.positionState?.entryFees ?? 0;
             return (
-              <span className={`font-mono font-medium text-sm ${
-                pnl >= 0 ? 'text-green-400' : 'text-red-400'
-              }`}>
-                {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} <span className="text-xs">({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)</span>
+              <span className="font-mono font-medium text-sm">
+                <span className={pnl >= 0 ? 'text-green-400' : 'text-red-400'}>
+                  {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} <span className="text-xs">({pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%)</span>
+                </span>
+                {fees > 0 && (
+                  <span className="text-gray-500 text-xs ml-2">${fees.toFixed(2)} fees</span>
+                )}
               </span>
             );
           })()}
@@ -455,6 +459,7 @@ export default function ChainCard({
                         }
                         lifecycleStatus={chain.slStatus}
                         chainClosedAt={chain.closedAt}
+                        slModifications={chain.slModifications}
                       />
                     )}
                   </div>
@@ -515,6 +520,7 @@ export default function ChainCard({
                     entryPrice={entryOrder?.avgPrice || entryOrder?.price}
                     entryQuantity={entryOrder?.executedQty || entryOrder?.origQty}
                     feeRate={takerFeeRate}
+                    slModifications={chain.slModifications}
                   />
                 )}
               </div>
@@ -596,7 +602,7 @@ export default function ChainCard({
           </div>
 
           {/* Chain info footer - Show ENTRY values only, not sum of all orders */}
-          <div className="pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+          <div className="pt-3 border-t border-gray-700 grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
             <div>
               <span className="text-gray-500">Created:</span>
               <span className="ml-2 text-gray-300">
@@ -643,6 +649,22 @@ export default function ChainCard({
                       {entryVal > 0 && (
                         <span className="text-xs ml-1">({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)</span>
                       )}
+                    </span>
+                  );
+                })()}
+              </span>
+            </div>
+            <div>
+              <span className="text-gray-500">Fees:</span>
+              <span className="ml-2 font-mono">
+                {(() => {
+                  const fees = chain.totalFees ?? chain.positionState?.entryFees;
+                  if (fees == null || fees === 0) {
+                    return <span className="text-gray-500">N/A</span>;
+                  }
+                  return (
+                    <span className="text-red-400">
+                      -${fees.toFixed(4)}
                     </span>
                   );
                 })()}

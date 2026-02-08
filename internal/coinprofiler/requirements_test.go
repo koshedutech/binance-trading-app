@@ -1287,7 +1287,7 @@ func TestAddSymbolFromStrategy(t *testing.T) {
 		}
 	})
 
-	t.Run("updates source to both when symbol exists from position", func(t *testing.T) {
+	t.Run("keeps position source when symbol already has active position", func(t *testing.T) {
 		combined := &CombinedRequirements{
 			AllSymbols: []string{"BTCUSDT"},
 			BySymbol: map[string]*SymbolRequirements{
@@ -1306,12 +1306,21 @@ func TestAddSymbolFromStrategy(t *testing.T) {
 		combined.AddSymbolFromStrategy("BTCUSDT", strategies, []string{"15m"}, []string{"ohlc"})
 
 		symReq := combined.BySymbol["BTCUSDT"]
-		if symReq.Source != DataSourceBoth {
-			t.Errorf("expected source %s, got %s", DataSourceBoth, symReq.Source)
+		// Source should remain "position" - strategy scanning should NOT override
+		if symReq.Source != DataSourcePosition {
+			t.Errorf("expected source %s, got %s", DataSourcePosition, symReq.Source)
+		}
+		// Timeframes should NOT be merged (early return)
+		if len(symReq.Timeframes) != 1 || symReq.Timeframes[0] != "5m" {
+			t.Errorf("expected original timeframes [5m], got %v", symReq.Timeframes)
+		}
+		// Strategies should NOT be added
+		if len(symReq.Strategies) != 0 {
+			t.Errorf("expected 0 strategies, got %d", len(symReq.Strategies))
 		}
 	})
 
-	t.Run("merges timeframes when adding to existing symbol", func(t *testing.T) {
+	t.Run("skips merge when adding strategy to position symbol", func(t *testing.T) {
 		combined := &CombinedRequirements{
 			AllSymbols: []string{"BTCUSDT"},
 			BySymbol: map[string]*SymbolRequirements{
@@ -1327,7 +1336,33 @@ func TestAddSymbolFromStrategy(t *testing.T) {
 		combined.AddSymbolFromStrategy("BTCUSDT", []StrategyRef{}, []string{"15m", "1h"}, []string{"volume"})
 
 		symReq := combined.BySymbol["BTCUSDT"]
-		// Should have 5m, 15m, 1h (3 unique)
+		// Should keep original timeframes only (early return, no merge)
+		if len(symReq.Timeframes) != 2 {
+			t.Errorf("expected 2 timeframes (unchanged), got %d: %v", len(symReq.Timeframes), symReq.Timeframes)
+		}
+		// Should keep original data fields only
+		if len(symReq.DataFields) != 1 {
+			t.Errorf("expected 1 data field (unchanged), got %d: %v", len(symReq.DataFields), symReq.DataFields)
+		}
+	})
+
+	t.Run("merges timeframes when adding to existing strategy symbol", func(t *testing.T) {
+		combined := &CombinedRequirements{
+			AllSymbols: []string{"BTCUSDT"},
+			BySymbol: map[string]*SymbolRequirements{
+				"BTCUSDT": {
+					Symbol:     "BTCUSDT",
+					Timeframes: []string{"5m", "15m"},
+					DataFields: []string{"ohlc"},
+					Source:     DataSourceStrategy,
+				},
+			},
+		}
+
+		combined.AddSymbolFromStrategy("BTCUSDT", []StrategyRef{}, []string{"15m", "1h"}, []string{"volume"})
+
+		symReq := combined.BySymbol["BTCUSDT"]
+		// Should have 5m, 15m, 1h (3 unique) since source is strategy
 		if len(symReq.Timeframes) != 3 {
 			t.Errorf("expected 3 timeframes, got %d: %v", len(symReq.Timeframes), symReq.Timeframes)
 		}
@@ -1531,6 +1566,7 @@ type mockGiniePositionSource struct {
 	symbol       string
 	mode         string
 	side         string
+	timeframe    string
 	tpPrice      float64
 	slPrice      float64
 	trailingStop bool
@@ -1539,6 +1575,7 @@ type mockGiniePositionSource struct {
 func (m *mockGiniePositionSource) GetSymbol() string           { return m.symbol }
 func (m *mockGiniePositionSource) GetMode() string             { return m.mode }
 func (m *mockGiniePositionSource) GetSide() string             { return m.side }
+func (m *mockGiniePositionSource) GetTimeframe() string        { return m.timeframe }
 func (m *mockGiniePositionSource) GetTakeProfitPrice() float64 { return m.tpPrice }
 func (m *mockGiniePositionSource) GetStopLossPrice() float64   { return m.slPrice }
 func (m *mockGiniePositionSource) IsTrailingStopActive() bool  { return m.trailingStop }

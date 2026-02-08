@@ -251,6 +251,16 @@ export default function TradeLifecycleTab({
       entryContext: apiChain.entry_context || undefined,
       // Trailing stop status from RavindraPositionMonitor
       trailingStopStatus: apiChain.trailing_stop_status || undefined,
+      // SL modification history from chain events
+      slModifications: apiChain.sl_modifications?.map(mod => ({
+        sequence: mod.sequence,
+        oldPrice: mod.old_price,
+        newPrice: mod.new_price,
+        reason: mod.reason,
+        source: mod.source,
+        binanceOrderId: mod.binance_order_id,
+        timestamp: mod.timestamp,
+      })) || undefined,
       // SL/TP lifecycle status extracted from order data (for closed chains loaded from API)
       slStatus: slStatusFromOrder,
       tpStatus: tpStatusFromOrder,
@@ -520,7 +530,48 @@ export default function TradeLifecycleTab({
         ...historicalChains.filter(h => !activeChainIds.has(h.chainId))
       ];
 
-      setChains(mergedChains);
+      // Merge protection: preserve WebSocket-derived close state that API cache might overwrite.
+      // When CHAIN_LIFECYCLE_UPDATE has already updated a chain to 'completed' with SL/TP status,
+      // the API's stale cache (up to 5s) can return the chain as still 'active' with SL/TP 'NEW'.
+      // Preserve the authoritative close state from WebSocket.
+      setChains(prev => {
+        // Build map of chains that have WebSocket-derived close data
+        const closedChainState = new Map<string, OrderChain>();
+        for (const chain of prev) {
+          if (chain.status === 'completed' && (chain.slStatus || chain.tpStatus || chain.closedAt)) {
+            closedChainState.set(chain.chainId, chain);
+          }
+        }
+
+        // If no closed chains to protect, just use merged chains as-is
+        if (closedChainState.size === 0) return mergedChains;
+
+        // Merge: for chains that we know are closed (from WebSocket), preserve close state
+        return mergedChains.map(chain => {
+          const closedData = closedChainState.get(chain.chainId);
+          if (!closedData) return chain;
+
+          // API returned potentially stale data for a chain we know is closed
+          // Preserve the authoritative close state
+          return {
+            ...chain,
+            status: 'completed' as const,
+            slStatus: closedData.slStatus || chain.slStatus,
+            tpStatus: closedData.tpStatus || chain.tpStatus,
+            slFillPrice: closedData.slFillPrice || chain.slFillPrice,
+            tpFillPrice: closedData.tpFillPrice || chain.tpFillPrice,
+            closedAt: closedData.closedAt || chain.closedAt,
+            closeReason: closedData.closeReason || chain.closeReason,
+            closePrice: closedData.closePrice || chain.closePrice,
+            realizedPnl: closedData.realizedPnl ?? chain.realizedPnl,
+            pnl: closedData.pnl ?? chain.pnl,
+            totalFees: closedData.totalFees ?? chain.totalFees,
+            slOrder: closedData.slOrder || chain.slOrder,
+            tpOrders: closedData.tpOrders?.length ? closedData.tpOrders : chain.tpOrders,
+            positionState: closedData.positionState || chain.positionState,
+          };
+        });
+      });
       setError(null);
     } catch (err) {
       console.error('Failed to fetch orders:', err);
@@ -752,19 +803,19 @@ export default function TradeLifecycleTab({
     };
 
     const handleTradeUpdate = (event: WSEvent) => {
-      // TRADE_UPDATE event from backend indicates an order was filled
-      // This is critical for real-time updates when SL/TP orders are triggered
       const tradeData = event.data;
       if (!tradeData) return;
 
-      console.log('[TradeLifecycle] Received TRADE_UPDATE - refreshing state', {
+      console.log('[TradeLifecycle] Received TRADE_UPDATE', {
         symbol: tradeData.symbol,
         orderId: tradeData.order_id || tradeData.orderId,
         executionType: tradeData.execution_type || tradeData.executionType,
       });
 
-      // Refresh to get updated order states
-      fetchOrders();
+      // TRADE_UPDATE is informational only - position close state is handled
+      // authoritatively by CHAIN_LIFECYCLE_UPDATE from PositionLifecycleCoordinator.
+      // DO NOT call fetchOrders() here - it races with WebSocket state updates
+      // and the 5s API cache can serve stale data that overwrites correct close status.
     };
 
     const handleConnect = () => {
@@ -834,6 +885,19 @@ export default function TradeLifecycleTab({
 
       setChains(prev => prev.map(chain => {
         if (chain.chainId !== data.chain.chain_id) return chain;
+
+        // Update individual SL order object status
+        const updatedSlOrder = chain.slOrder ? {
+          ...chain.slOrder,
+          status: data.orders?.sl_status || chain.slOrder.status,
+        } : undefined;
+
+        // Update individual TP order objects status
+        const updatedTpOrders = chain.tpOrders?.map(tp => ({
+          ...tp,
+          status: data.orders?.tp_status || tp.status,
+        }));
+
         return {
           ...chain,
           status: 'completed',
@@ -851,6 +915,8 @@ export default function TradeLifecycleTab({
             closePrice: data.chain.close_price,
             closeReason: data.chain.close_reason,
           } : undefined,
+          slOrder: updatedSlOrder,
+          tpOrders: updatedTpOrders,
           slStatus: data.orders?.sl_status,
           tpStatus: data.orders?.tp_status,
           slFillPrice: data.orders?.sl_fill_price,
@@ -878,8 +944,7 @@ export default function TradeLifecycleTab({
         quantity: positionData.quantity,
       });
 
-      // Full refresh to get the complete chain data from API
-      // The position was just created, so we need all the order details
+      // Initial fetch for entry order data (SL/TP will arrive via SL_TP_PLACED event)
       fetchOrders();
 
       // Auto-expand positions section when a new position is created
@@ -887,6 +952,49 @@ export default function TradeLifecycleTab({
         setPositionsExpanded(true);
         positionsAutoExpandedRef.current = true;
       }
+    };
+
+    // Handler for SL/TP orders placed after position creation
+    const handleSLTPPlaced = (event: any) => {
+      const data = event.data;
+      if (!data) return;
+
+      console.log('[TradeLifecycle] SL/TP orders placed', {
+        chainId: data.chain_id,
+        slPrice: data.sl_price,
+        tpPrice: data.tp_price,
+      });
+
+      // Refetch orders to pick up the newly placed SL/TP
+      fetchOrders();
+    };
+
+    // Handler for PnL correction from real trade data
+    const handlePnLCorrected = (event: any) => {
+      const data = event.data;
+      if (!data?.chain_id) return;
+
+      console.log('[TradeLifecycle] PnL corrected from real trade data', {
+        chainId: data.chain_id,
+        realizedPnl: data.realized_pnl,
+        commission: data.commission,
+      });
+
+      // Direct state update - don't use fetchOrders which can overwrite close status
+      setChains(prev => prev.map(chain => {
+        if (chain.chainId !== data.chain_id) return chain;
+        return {
+          ...chain,
+          pnl: data.realized_pnl ?? chain.pnl,
+          totalFees: data.commission ?? chain.totalFees,
+          realizedPnl: data.realized_pnl ?? chain.realizedPnl,
+          positionState: chain.positionState ? {
+            ...chain.positionState,
+            realizedPnl: data.realized_pnl ?? chain.positionState.realizedPnl,
+          } : undefined,
+          updatedAt: Date.now(),
+        };
+      }));
     };
 
     // Subscribe to WebSocket events
@@ -899,6 +1007,8 @@ export default function TradeLifecycleTab({
     wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
     wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
     wsService.subscribe('POSITION_CREATED', handlePositionCreated); // For instant new position updates
+    wsService.subscribe('SL_TP_PLACED', handleSLTPPlaced); // For SL/TP placed after position creation
+    wsService.subscribe('PNL_CORRECTED', handlePnLCorrected); // For real PnL from trade data
     wsService.onConnect(handleConnect);
 
     // Register with fallbackManager for centralized fallback polling
@@ -914,6 +1024,8 @@ export default function TradeLifecycleTab({
       wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
       wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
       wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
+      wsService.unsubscribe('SL_TP_PLACED', handleSLTPPlaced);
+      wsService.unsubscribe('PNL_CORRECTED', handlePnLCorrected);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction(FALLBACK_KEY);
     };

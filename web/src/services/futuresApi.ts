@@ -4847,6 +4847,19 @@ export interface OrderChainWithState {
     one_r_trigger: number;
     side: string;
   };
+  // SL modification history from chain events (SL_PLACED + SL_MODIFIED)
+  sl_modifications?: SLModificationInfo[];
+}
+
+// SL modification event from chain events
+export interface SLModificationInfo {
+  sequence: number;
+  old_price?: number;
+  new_price: number;
+  reason?: string;
+  source?: string;
+  binance_order_id?: number;
+  timestamp: string; // ISO 8601
 }
 
 export interface OrderChainsWithStateResponse {

@@ -5,6 +5,30 @@ import (
 	"time"
 )
 
+// Chain lifecycle hooks - called when chain lifecycle updates are broadcast.
+// Used by the API layer to invalidate response caches without import cycles.
+var chainLifecycleHooks []func(userID string)
+var chainLifecycleHooksMu sync.Mutex
+
+// RegisterChainLifecycleHook registers a function to be called when a chain lifecycle update is broadcast.
+// Used by the API layer to invalidate response caches.
+func RegisterChainLifecycleHook(fn func(userID string)) {
+	chainLifecycleHooksMu.Lock()
+	chainLifecycleHooks = append(chainLifecycleHooks, fn)
+	chainLifecycleHooksMu.Unlock()
+}
+
+// fireChainLifecycleHooks fires all registered chain lifecycle hooks for a user.
+func fireChainLifecycleHooks(userID string) {
+	chainLifecycleHooksMu.Lock()
+	hooks := make([]func(string), len(chainLifecycleHooks))
+	copy(hooks, chainLifecycleHooks)
+	chainLifecycleHooksMu.Unlock()
+	for _, fn := range hooks {
+		fn(userID)
+	}
+}
+
 // EventType represents different types of events in the system
 type EventType string
 
@@ -66,6 +90,12 @@ const (
 	// Chain Lifecycle Update: Composite event for position close (SL/TP fill)
 	// Contains chain close data, pattern reset, and capacity update in one broadcast
 	EventChainLifecycleUpdate EventType = "CHAIN_LIFECYCLE_UPDATE"
+
+	// SL/TP Placed: Broadcast when SL and TP orders are placed after entry fill
+	EventSLTPPlaced EventType = "SL_TP_PLACED"
+
+	// PnL Corrected: Broadcast when real PnL from ORDER_TRADE_UPDATE replaces calculated PnL
+	EventPnLCorrected EventType = "PNL_CORRECTED"
 )
 
 // Event represents a system event
@@ -268,6 +298,8 @@ var (
 	broadcastTrailingSLUpdate   BroadcastFunc // Trailing SL milestone updates (R:R-based SL moves)
 	broadcastChainClosed        BroadcastFunc // Chain closed broadcasts (position closed - SL/TP hit or manual)
 	broadcastChainLifecycleUpdate BroadcastFunc // Composite chain lifecycle update (close + pattern reset + capacity)
+	broadcastSLTPPlaced           BroadcastFunc // SL/TP orders placed after entry fill
+	broadcastPnLCorrected         BroadcastFunc // PnL corrected from ORDER_TRADE_UPDATE real data
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -475,6 +507,10 @@ func BroadcastChainClosed(userID string, data interface{}) {
 	if broadcastChainClosed != nil && userID != "" {
 		go broadcastChainClosed(userID, data)
 	}
+	// Fire lifecycle hooks (e.g., cache invalidation)
+	if userID != "" {
+		fireChainLifecycleHooks(userID)
+	}
 }
 
 // SetBroadcastChainLifecycleUpdate sets the callback for chain lifecycle update broadcasts
@@ -489,5 +525,39 @@ func SetBroadcastChainLifecycleUpdate(fn BroadcastFunc) {
 func BroadcastChainLifecycleUpdate(userID string, data interface{}) {
 	if broadcastChainLifecycleUpdate != nil && userID != "" {
 		go broadcastChainLifecycleUpdate(userID, data)
+	}
+	// Fire lifecycle hooks (e.g., cache invalidation)
+	if userID != "" {
+		fireChainLifecycleHooks(userID)
+	}
+}
+
+// SetBroadcastSLTPPlaced sets the callback for SL/TP placed broadcasts
+// Called when SL and TP orders are placed after an entry order is filled
+func SetBroadcastSLTPPlaced(fn BroadcastFunc) {
+	broadcastSLTPPlaced = fn
+}
+
+// BroadcastSLTPPlaced broadcasts a SL/TP placed event to a user
+// Called after both SL and TP orders are placed for a new position
+// Data should include: chain_id, symbol, side, sl_order_id, sl_price, tp_order_id, tp_price
+func BroadcastSLTPPlaced(userID string, data interface{}) {
+	if broadcastSLTPPlaced != nil && userID != "" {
+		go broadcastSLTPPlaced(userID, data)
+	}
+}
+
+// SetBroadcastPnLCorrected sets the callback for PnL corrected broadcasts
+// Called when ORDER_TRADE_UPDATE arrives with real PnL after ALGO_UPDATE
+func SetBroadcastPnLCorrected(fn BroadcastFunc) {
+	broadcastPnLCorrected = fn
+}
+
+// BroadcastPnLCorrected broadcasts a PnL correction event to a user
+// Called when real PnL/commission data from ORDER_TRADE_UPDATE replaces the calculated values
+// Data should include: chain_id, symbol, realized_pnl, commission
+func BroadcastPnLCorrected(userID string, data interface{}) {
+	if broadcastPnLCorrected != nil && userID != "" {
+		go broadcastPnLCorrected(userID, data)
 	}
 }

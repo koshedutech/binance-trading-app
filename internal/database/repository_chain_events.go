@@ -385,6 +385,70 @@ func (db *DB) GetEventsForChains(ctx context.Context, chainIDs []string) (map[st
 	return result, nil
 }
 
+// GetSLModificationEventsByChainIDs retrieves SL_MODIFIED events for multiple chains in one query.
+// Also includes the initial SL_PLACED event for complete history display.
+// Returns map[chainID] -> []*ChainEvent sorted by event_sequence ASC.
+func (db *DB) GetSLModificationEventsByChainIDs(ctx context.Context, chainIDs []string) (map[string][]*orders.ChainEvent, error) {
+	if db.Pool == nil || len(chainIDs) == 0 {
+		return make(map[string][]*orders.ChainEvent), nil
+	}
+
+	query := `
+		SELECT id, chain_id, event_sequence, event_type, order_type,
+			binance_order_id, binance_client_order_id,
+			price, old_price, quantity, filled_quantity,
+			order_status, order_side,
+			modification_source, modification_reason,
+			market_price, pnl, fees,
+			binance_timestamp, created_at
+		FROM order_chain_events
+		WHERE chain_id = ANY($1) AND event_type IN ('SL_PLACED', 'SL_MODIFIED')
+		ORDER BY chain_id, event_sequence ASC`
+
+	rows, err := db.Pool.Query(ctx, query, chainIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SL modification events for chains: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]*orders.ChainEvent)
+	for rows.Next() {
+		event := &orders.ChainEvent{}
+		err := rows.Scan(
+			&event.ID,
+			&event.ChainID,
+			&event.EventSequence,
+			&event.EventType,
+			&event.OrderType,
+			&event.BinanceOrderID,
+			&event.BinanceClientOrderID,
+			&event.Price,
+			&event.OldPrice,
+			&event.Quantity,
+			&event.FilledQuantity,
+			&event.OrderStatus,
+			&event.OrderSide,
+			&event.ModificationSource,
+			&event.ModificationReason,
+			&event.MarketPrice,
+			&event.PnL,
+			&event.Fees,
+			&event.BinanceTimestamp,
+			&event.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan SL modification event row: %w", err)
+		}
+		result[event.ChainID] = append(result[event.ChainID], event)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating SL modification event rows: %w", err)
+	}
+
+	return result, nil
+}
+
 // scanChainEvents scans rows into chain event slice
 func scanChainEvents(rows pgx.Rows) ([]*orders.ChainEvent, error) {
 	var events []*orders.ChainEvent

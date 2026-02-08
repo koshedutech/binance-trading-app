@@ -1343,6 +1343,14 @@ func (b *PatternUpdateBroadcaster) BroadcastPatternUpdate(update entrydecision.P
 			"order_quantity_usd":   update.OrderQuantityUSD,
 			"fill_timeout_seconds": update.FillTimeoutSeconds,
 			"fill_timeout_total":   update.FillTimeoutTotal,
+			// Step 4: Position tracking fields
+			"entry_candle":          update.EntryCandle,
+			"has_active_position":   update.HasActivePosition,
+			"position_entry_price":  update.PositionEntryPrice,
+			"chain_id":              update.ChainID,
+			"reference_detected_at": update.ReferenceDetectedAt,
+			"breakout_detected_at":  update.BreakoutDetectedAt,
+			"position_opened_at":    update.PositionOpenedAt,
 		},
 	}
 
@@ -1433,6 +1441,14 @@ func BroadcastPatternUpdateFunc(update entrydecision.PatternUpdate) {
 			"order_quantity_usd":   update.OrderQuantityUSD,
 			"fill_timeout_seconds": update.FillTimeoutSeconds,
 			"fill_timeout_total":   update.FillTimeoutTotal,
+			// Step 4: Position tracking fields
+			"entry_candle":          update.EntryCandle,
+			"has_active_position":   update.HasActivePosition,
+			"position_entry_price":  update.PositionEntryPrice,
+			"chain_id":              update.ChainID,
+			"reference_detected_at": update.ReferenceDetectedAt,
+			"breakout_detected_at":  update.BreakoutDetectedAt,
+			"position_opened_at":    update.PositionOpenedAt,
 		},
 	}
 	userWSHub.BroadcastToAll(patternEvent)

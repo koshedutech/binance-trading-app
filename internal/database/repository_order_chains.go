@@ -856,6 +856,20 @@ func (db *DB) CountActiveChains(ctx context.Context, userID string) (int, error)
 	return count, nil
 }
 
+// UpdateClosedChainPnL updates the realized_pnl and total_fees for an already-closed chain.
+// This is called when ORDER_TRADE_UPDATE arrives after ALGO_UPDATE with real trade data
+// (ALGO_UPDATE has no RealizedProfit/Commission, so calculated values need correction).
+func (db *DB) UpdateClosedChainPnL(ctx context.Context, chainID string, realizedPnL float64, totalFees float64) error {
+	if db.Pool == nil {
+		return nil
+	}
+
+	_, err := db.Pool.Exec(ctx,
+		`UPDATE order_chains SET realized_pnl = $1, total_fees = $2, updated_at = NOW() WHERE chain_id = $3 AND status = 'CLOSED'`,
+		realizedPnL, totalFees, chainID)
+	return err
+}
+
 // orderChainSelectColumns is the standard set of columns selected for order chain queries.
 // This must match the order in scanOrderChainRow.
 const orderChainSelectColumns = `id, user_id, chain_id, symbol, side, mode_code, status,

@@ -1186,6 +1186,27 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			}
 		}
 
+		// Broadcast SL/TP placement to frontend for real-time display
+		if slResp != nil || tpResp != nil {
+			slTPData := map[string]interface{}{
+				"chain_id": chainID,
+				"symbol":   symbol,
+				"side":     direction,
+			}
+			if slResp != nil {
+				slTPData["sl_order_id"] = slResp.AlgoId
+				slTPData["sl_price"] = slPrice
+				slTPData["sl_status"] = "NEW"
+			}
+			if tpResp != nil {
+				slTPData["tp_order_id"] = tpResp.AlgoId
+				slTPData["tp_price"] = tpPrice
+				slTPData["tp_status"] = "NEW"
+			}
+			events.BroadcastSLTPPlaced(r.userID, slTPData)
+			log.Printf("[CHAIN-ENTRY] Broadcast SL_TP_PLACED: chainID=%s, SL=%.6f, TP=%.6f", chainID, slPrice, tpPrice)
+		}
+
 		// Step 11b: Register position with Ravindra Position Monitor for trailing stop management
 		// This enables automatic SL updates at 1:2 (breakeven) and 1:3 (1:1 profit lock) milestones
 		// Placed OUTSIDE the TP success/failure blocks so registration happens regardless of TP placement result

@@ -264,6 +264,10 @@ type PatternState struct {
 	DayLow            float64   `json:"day_low"`              // Day's lowest price
 	DayHighLowFetched bool      `json:"day_high_low_fetched"` // Flag: was initial 24h data fetched?
 	AvgPrice5         float64   `json:"avg_price_5"`          // 5-candle average price (for progress bar)
+
+	// Position tracking (set when transitioning to position_running, for broadcast enrichment)
+	PositionChainID    string    `json:"position_chain_id,omitempty"`
+	PositionOpenedAt   time.Time `json:"position_opened_at"`
 }
 
 // VolumeImbalancePatternMatcher tracks and matches Volume Imbalance patterns.
@@ -1385,8 +1389,8 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 			}
 		}
 
-		// Add entry candle data when pattern is ready
-		if state.BreakoutCandle != nil && progress.Status == PatternStatusReady {
+		// Add entry candle data when pattern is ready or position is running
+		if state.BreakoutCandle != nil && (progress.Status == PatternStatusReady || progress.Status == PatternStatusFilling || progress.Status == PatternStatusPositionRunning) {
 			readyAt := state.ReadyAt
 			cm.ReadyAt = &readyAt
 

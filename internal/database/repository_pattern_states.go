@@ -98,7 +98,8 @@ func (db *DB) SavePatternState(ctx context.Context, record *PatternStateRecord) 
 }
 
 // GetPatternStates retrieves all active pattern states for a user.
-// Only returns patterns that haven't expired yet.
+// Returns patterns that haven't expired yet, PLUS all position_running patterns
+// regardless of expiry (position_running patterns must persist until the position closes).
 func (db *DB) GetPatternStates(ctx context.Context, userID string) ([]PatternStateRecord, error) {
 	if db.Pool == nil {
 		return nil, nil
@@ -111,7 +112,7 @@ func (db *DB) GetPatternStates(ctx context.Context, userID string) ([]PatternSta
 			started_at, updated_at, expires_at
 		FROM pattern_states
 		WHERE user_id = $1
-			AND (expires_at IS NULL OR expires_at > NOW())
+			AND (status = 'position_running' OR expires_at IS NULL OR expires_at > NOW())
 		ORDER BY updated_at DESC`
 
 	rows, err := db.Pool.Query(ctx, query, userID)

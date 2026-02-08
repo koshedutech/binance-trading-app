@@ -117,6 +117,8 @@ export interface CoinMatch {
   // Entry/Breakout candle (when pattern is ready)
   /** Entry candle data when breakout detected */
   entry_candle?: EntryCandle;
+  /** Calculated entry, stop-loss, and take-profit levels */
+  entry_levels?: EntryLevels;
   /** When pattern became ready (UTC) */
   ready_at?: string;
   /** Seconds until ready pattern expires */

@@ -41,6 +41,22 @@ type orderChainsCacheEntry struct {
 	timestamp time.Time
 }
 
+func init() {
+	events.RegisterChainLifecycleHook(InvalidateOrderChainsCacheForUser)
+}
+
+// InvalidateOrderChainsCacheForUser removes all cached order chain responses for a specific user.
+// Called when chain lifecycle events occur (SL/TP fill, chain close) to prevent stale data.
+func InvalidateOrderChainsCacheForUser(userID string) {
+	orderChainsCacheMu.Lock()
+	for key := range orderChainsCacheData {
+		if strings.HasPrefix(key, userID+":") {
+			delete(orderChainsCacheData, key)
+		}
+	}
+	orderChainsCacheMu.Unlock()
+}
+
 // validateSymbol validates a trading symbol for security and format
 func validateSymbol(symbol string) (string, error) {
 	// Normalize to uppercase
@@ -807,6 +823,19 @@ type OrderChainWithState struct {
 	Timeframe     string `json:"timeframe,omitempty"`      // e.g., 3m, 5m, 15m from pattern detection
 	// Trailing stop status from RavindraPositionMonitor
 	TrailingStopStatus interface{} `json:"trailing_stop_status,omitempty"`
+	// SL modification history from chain events (SL_PLACED + SL_MODIFIED)
+	SLModifications []SLModificationInfo `json:"sl_modifications,omitempty"`
+}
+
+// SLModificationInfo represents a single SL modification event for API response
+type SLModificationInfo struct {
+	Sequence       int      `json:"sequence"`
+	OldPrice       *float64 `json:"old_price,omitempty"`
+	NewPrice       float64  `json:"new_price"`
+	Reason         string   `json:"reason,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	BinanceOrderID *int64   `json:"binance_order_id,omitempty"`
+	Timestamp      string   `json:"timestamp"` // ISO 8601
 }
 
 // ChainOrderInfo represents order info within a chain
@@ -1602,6 +1631,48 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 					if ravPos, ok := ravPositions[chainID]; ok && ravPos.TrailingStop != nil {
 						chain.TrailingStopStatus = ravPos.TrailingStop.GetStatus()
 					}
+				}
+			}
+		}
+	}
+
+	// 8b. Enrich chains with SL modification history from chain events
+	// Only fetch for chains that have SL modifications (modificationCounts > 0)
+	slModChainIDs := make([]string, 0)
+	for chainID, chain := range chains {
+		if slCount, ok := chain.ModificationCounts["SL"]; ok && slCount > 0 {
+			slModChainIDs = append(slModChainIDs, chainID)
+		}
+	}
+	if len(slModChainIDs) > 0 {
+		slEvents, err := s.repo.GetDB().GetSLModificationEventsByChainIDs(ctx, slModChainIDs)
+		if err != nil {
+			log.Printf("[ORDER-CHAINS] Error fetching SL modification events: %v", err)
+		} else {
+			for chainID, events := range slEvents {
+				if chain, ok := chains[chainID]; ok && len(events) > 0 {
+					mods := make([]SLModificationInfo, 0, len(events))
+					for _, evt := range events {
+						mod := SLModificationInfo{
+							Sequence:       evt.EventSequence,
+							BinanceOrderID: evt.BinanceOrderID,
+							Timestamp:      evt.CreatedAt.Format(time.RFC3339),
+						}
+						if evt.Price != nil {
+							mod.NewPrice = *evt.Price
+						}
+						if evt.OldPrice != nil {
+							mod.OldPrice = evt.OldPrice
+						}
+						if evt.ModificationReason != nil {
+							mod.Reason = *evt.ModificationReason
+						}
+						if evt.ModificationSource != nil {
+							mod.Source = string(*evt.ModificationSource)
+						}
+						mods = append(mods, mod)
+					}
+					chain.SLModifications = mods
 				}
 			}
 		}

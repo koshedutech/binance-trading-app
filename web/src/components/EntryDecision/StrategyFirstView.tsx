@@ -119,6 +119,15 @@ function countModeTotalCoins(modeData: ModeStrategies): number {
   }, 0);
 }
 
+/**
+ * Count coins with active positions across all strategies in a mode
+ */
+function countModePositionCoins(modeData: ModeStrategies): number {
+  return modeData.strategies.reduce((total, strategy) => {
+    return total + strategy.coins.filter(c => c.status === 'position_running').length;
+  }, 0);
+}
+
 // Sort throttle interval - only re-sort every 10 seconds to prevent rapid reordering
 const STRATEGY_SORT_THROTTLE_MS = 10000;
 
@@ -162,6 +171,7 @@ function ModeSection({
 
   const readyCoins = countModeReadyCoins(modeData);
   const totalCoins = countModeTotalCoins(modeData);
+  const positionCoins = countModePositionCoins(modeData);
   const hasReady = readyCoins > 0;
 
   // Generate unique key for a strategy
@@ -264,9 +274,15 @@ function ModeSection({
               {readyCoins} ready
             </span>
           )}
-          {totalCoins > readyCoins && (
+          {positionCoins > 0 && (
+            <span className="flex items-center gap-1 px-2 py-0.5 bg-orange-500/20 text-orange-400 text-xs rounded-full border border-orange-500/30">
+              <Activity className="w-3 h-3" />
+              {positionCoins} position{positionCoins !== 1 ? 's' : ''}
+            </span>
+          )}
+          {totalCoins - readyCoins - positionCoins > 0 && (
             <span className="text-xs text-gray-500">
-              {totalCoins - readyCoins} watching
+              {totalCoins - readyCoins - positionCoins} watching
             </span>
           )}
         </div>
@@ -428,13 +444,28 @@ export default function StrategyFirstView({
 
         <div className="flex items-center gap-3">
           {isLoading && <RefreshCw className="w-4 h-4 text-blue-400 animate-spin" />}
-          {!isLoading && (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-green-400">{stats.totalCoinsReady} ready</span>
-              <span className="text-gray-500">|</span>
-              <span className="text-gray-400">{stats.totalCoinsWatching} watching</span>
-            </div>
-          )}
+          {!isLoading && (() => {
+            const totalPositionCoins = strategies.reduce((sum, s) =>
+              sum + s.coins.filter(c => c.status === 'position_running').length, 0);
+            const adjustedWatching = stats.totalCoinsWatching - totalPositionCoins;
+            return (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-green-400">{stats.totalCoinsReady} ready</span>
+                {totalPositionCoins > 0 && (
+                  <>
+                    <span className="text-gray-500">|</span>
+                    <span className="text-orange-400">{totalPositionCoins} position{totalPositionCoins !== 1 ? 's' : ''}</span>
+                  </>
+                )}
+                {adjustedWatching > 0 && (
+                  <>
+                    <span className="text-gray-500">|</span>
+                    <span className="text-gray-400">{adjustedWatching} watching</span>
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </button>
 

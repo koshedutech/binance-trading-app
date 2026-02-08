@@ -170,7 +170,7 @@ type UserAutopilotManager struct {
 
 	// Callback when a real Binance client is created for a user
 	// Used to update the global FuturesController and restart the User Data Stream
-	onRealClientCreated func(binance.FuturesClient)
+	onRealClientCreated func(binance.FuturesClient, string)
 
 	mu sync.RWMutex
 }
@@ -393,7 +393,7 @@ func (m *UserAutopilotManager) SetChainStateProvider(sp ChainStateProvider) {
 // SetOnRealClientCreated sets a callback that fires when a real Binance client is created
 // for a user. Used to update the global FuturesController and restart the User Data Stream
 // so WebSocket receives real fill events instead of mock data.
-func (m *UserAutopilotManager) SetOnRealClientCreated(callback func(binance.FuturesClient)) {
+func (m *UserAutopilotManager) SetOnRealClientCreated(callback func(binance.FuturesClient, string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onRealClientCreated = callback
@@ -511,6 +511,17 @@ func (m *UserAutopilotManager) NotifySettingsChanged(ctx context.Context, userID
 		}
 	}
 
+	// Reload coordinator maxConcurrent from database
+	// This ensures CoinProfiler.RebuildCapacity() and CHAIN_LIFECYCLE_UPDATE events
+	// use the latest max_concurrent_trades value after settings change
+	if instance.Coordinator != nil {
+		newMax := m.loadMaxConcurrentForUser(ctx, userID)
+		instance.Coordinator.SetMaxConcurrent(newMax)
+		m.logger.Info("Coordinator maxConcurrent reloaded",
+			"user_id", userID,
+			"max_concurrent", newMax)
+	}
+
 	// Refresh CoinProfiler subscriptions if running
 	// This handles strategy enable/disable affecting which symbols to monitor
 	if instance.CoinProfiler != nil && instance.CoinProfiler.IsRunning() {
@@ -542,6 +553,28 @@ func (m *UserAutopilotManager) NotifySettingsChanged(ctx context.Context, userID
 	m.logger.Info("Settings change notification processed",
 		"user_id", userID,
 		"change_type", changeType)
+}
+
+// loadMaxConcurrentForUser loads the max_concurrent_trades setting from the user's
+// sub-strategy settings in the database. Returns 1 as default if not found.
+func (m *UserAutopilotManager) loadMaxConcurrentForUser(ctx context.Context, userID string) int {
+	if m.repo == nil {
+		return 1
+	}
+	subSettings, err := m.repo.GetSubStrategySettings(ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance")
+	if err != nil || subSettings == nil || len(subSettings.Settings) == 0 {
+		return 1
+	}
+	var settingsMap map[string]interface{}
+	if err := json.Unmarshal(subSettings.Settings, &settingsMap); err != nil {
+		return 1
+	}
+	if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+		if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+			return int(maxTrades)
+		}
+	}
+	return 1
 }
 
 // ReloadPatternMatcherConfig reloads the pattern matcher configuration from database settings.
@@ -671,7 +704,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	if onClientCreated != nil {
 		m.logger.Info("Firing onRealClientCreated callback to update User Data Stream",
 			"user_id", userID)
-		onClientCreated(futuresClient)
+		onClientCreated(futuresClient, userID)
 	}
 
 	// Get user's AI API key and create LLM analyzer
@@ -884,6 +917,9 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	// When max_concurrent_trades is reached, breakouts are detected but orders are NOT placed.
 	// Pattern matching continues (for UI display) but entry is blocked at source.
 	realtimeMatcher.SetCapacityChecker(func() (bool, int, int) {
+		if m.chainEventWriter == nil {
+			return true, 0, 1 // Allow entry if writer not yet set
+		}
 		ctx := context.Background()
 		activeChains, err := m.chainEventWriter.GetActiveChains(ctx, userID)
 		if err != nil {
@@ -1019,6 +1055,12 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	chainEntryRunner.SetRavindraMonitor(ravindraMonitor)
 	m.logger.Info("RavindraPositionMonitor wired to ChainEntryRunner", "user_id", userID)
 
+	// Re-register existing active positions with the Ravindra monitor NOW, during instance creation.
+	// This MUST happen before StartAutopilot triggers Ginie reconciliation which can close chains.
+	// autoDetectActivePositions at line 893 already found active chains but couldn't register them
+	// because the monitor didn't exist yet. Now we register them with the newly created monitor.
+	m.reRegisterActivePositionsWithRavindra(ctx, userID, ravindraMonitor)
+
 	// Story 14.19: Create PositionLifecycleCoordinator for deterministic chain close handling
 	// This replaces the scattered close logic in GinieAutopilot.HandleSLTPOrderFilled
 	coordinatorLogger := zerolog.New(os.Stdout).With().Timestamp().Str("component", "PositionLifecycleCoordinator").Str("user_id", userID).Logger()
@@ -1027,20 +1069,7 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	coordinator.SetCapacityRebuilder(coinProfiler)
 	coordinator.SetFuturesCanceler(futuresClient)
 	// Load max_concurrent_trades from sub-strategy settings
-	coordinatorMaxConcurrent := 1
-	if m.repo != nil {
-		subSettings, subErr := m.repo.GetSubStrategySettings(ctx, userID, "scalp", "breakout", "ravindra_volume_imbalance")
-		if subErr == nil && subSettings != nil && len(subSettings.Settings) > 0 {
-			var settingsMap map[string]interface{}
-			if err := json.Unmarshal(subSettings.Settings, &settingsMap); err == nil {
-				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
-					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
-						coordinatorMaxConcurrent = int(maxTrades)
-					}
-				}
-			}
-		}
-	}
+	coordinatorMaxConcurrent := m.loadMaxConcurrentForUser(ctx, userID)
 	coordinator.SetMaxConcurrent(coordinatorMaxConcurrent)
 	m.logger.Info("PositionLifecycleCoordinator created for user",
 		"user_id", userID, "max_concurrent", coordinatorMaxConcurrent)
@@ -1110,7 +1139,9 @@ func (m *UserAutopilotManager) GetInstance(userID string) *UserAutopilotInstance
 // autoDetectActivePositions checks for active order chains on startup and sets Entry Decision
 // to Step 4 (position_running) for symbols with active positions. This ensures the UI immediately
 // shows the correct state after a container restart without waiting for user interaction.
-func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, userID string, realtimeMatcher *entrydecision.RealtimePatternMatcher, coinProfiler *coinprofiler.CoinProfiler) {
+// When ravindraMonitor is non-nil, also re-registers active positions with the Ravindra Position
+// Monitor for trailing stop management (1:2 breakeven, 1:3 profit lock milestones).
+func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, userID string, realtimeMatcher *entrydecision.RealtimePatternMatcher, coinProfiler *coinprofiler.CoinProfiler, ravindraMonitor ...*RavindraPositionMonitor) {
 	if m.chainEventWriter == nil {
 		m.logger.Warn("Cannot auto-detect positions: chainEventWriter is nil", "user_id", userID)
 		return
@@ -1138,8 +1169,16 @@ func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, us
 			continue
 		}
 
-		// Set Entry Decision to Step 4 (position_running)
-		realtimeMatcher.SetPatternPositionRunning(symbol, mode, timeframe)
+		// Set Entry Decision to Step 4 (position_running) with chain data for enriched broadcast
+		chainInfo := &entrydecision.PositionRunningChainInfo{
+			ChainID:  chain.ChainID,
+			Side:     chain.Side,
+			OpenedAt: chain.EntryFilledAt,
+		}
+		if chain.EntryPrice != nil {
+			chainInfo.EntryPrice = *chain.EntryPrice
+		}
+		realtimeMatcher.SetPatternPositionRunningWithChainInfo(symbol, mode, timeframe, chainInfo)
 
 		// Update coin profiler source so it knows this symbol has a position
 		if coinProfiler != nil {
@@ -1150,11 +1189,140 @@ func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, us
 		m.logger.Info("Auto-detected active position on startup",
 			"symbol", symbol, "mode", mode, "timeframe", timeframe,
 			"chain_id", chain.ChainID, "status", string(chain.Status), "user_id", userID)
+
+		// Re-register with Ravindra Position Monitor if available
+		// This handles restart recovery: the monitor was recreated and lost all position registrations
+		var monitor *RavindraPositionMonitor
+		if len(ravindraMonitor) > 0 && ravindraMonitor[0] != nil {
+			monitor = ravindraMonitor[0]
+		}
+		if monitor != nil {
+			entryPrice := 0.0
+			if chain.EntryPrice != nil {
+				entryPrice = *chain.EntryPrice
+			}
+			quantity := 0.0
+			if chain.EntryQuantity != nil {
+				quantity = *chain.EntryQuantity
+			}
+			slPrice := 0.0
+			if chain.CurrentSLPrice != nil {
+				slPrice = *chain.CurrentSLPrice
+			}
+			tpPrice := 0.0
+			if chain.CurrentTPPrice != nil {
+				tpPrice = *chain.CurrentTPPrice
+			}
+			slAlgoID := int64(0)
+			if chain.SLBinanceOrderID != nil {
+				slAlgoID = *chain.SLBinanceOrderID
+			}
+			tpAlgoID := int64(0)
+			if chain.TPBinanceOrderID != nil {
+				tpAlgoID = *chain.TPBinanceOrderID
+			}
+			side := chain.Side
+			if side == "" {
+				side = "LONG"
+			}
+
+			if entryPrice > 0 && slPrice > 0 {
+				err := monitor.ReRegisterFromChain(
+					chain.ChainID, chain.Symbol, userID, side,
+					entryPrice, quantity, slPrice, tpPrice,
+					slAlgoID, tpAlgoID, chain.Timeframe,
+					0, 0, // Precision not stored in OrderChain; monitor will use defaults
+				)
+				if err != nil {
+					m.logger.Error("Failed to re-register position with Ravindra monitor during auto-detect",
+						"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", err)
+				} else {
+					m.logger.Info("Re-registered position with Ravindra monitor during auto-detect",
+						"chain_id", chain.ChainID, "symbol", chain.Symbol,
+						"entry", entryPrice, "sl", slPrice, "tp", tpPrice)
+				}
+			}
+		}
 	}
 
 	if detectedCount > 0 {
 		m.logger.Info("Position auto-detection complete",
 			"detected_count", detectedCount, "total_open_chains", len(chains), "user_id", userID)
+	}
+}
+
+// reRegisterActivePositionsWithRavindra registers all active/partial chains with the Ravindra
+// Position Monitor. This is called synchronously during instance creation (before Ginie starts)
+// to ensure positions are registered before reconciliation can close chains.
+func (m *UserAutopilotManager) reRegisterActivePositionsWithRavindra(ctx context.Context, userID string, monitor *RavindraPositionMonitor) {
+	if monitor == nil || m.chainEventWriter == nil {
+		return
+	}
+
+	activeChains, err := m.chainEventWriter.GetActiveChains(ctx, userID)
+	if err != nil {
+		m.logger.Error("Failed to get active chains for Ravindra re-registration", "error", err, "user_id", userID)
+		return
+	}
+
+	registered := 0
+	for _, chain := range activeChains {
+		// Include both ACTIVE and PARTIAL chains (GetActiveChains returns both from DB)
+		if chain.Symbol == "" {
+			continue
+		}
+
+		entryPrice := 0.0
+		if chain.EntryPrice != nil {
+			entryPrice = *chain.EntryPrice
+		}
+		quantity := 0.0
+		if chain.EntryQuantity != nil {
+			quantity = *chain.EntryQuantity
+		}
+		slPrice := 0.0
+		if chain.CurrentSLPrice != nil {
+			slPrice = *chain.CurrentSLPrice
+		}
+		tpPrice := 0.0
+		if chain.CurrentTPPrice != nil {
+			tpPrice = *chain.CurrentTPPrice
+		}
+		slAlgoID := int64(0)
+		if chain.SLBinanceOrderID != nil {
+			slAlgoID = *chain.SLBinanceOrderID
+		}
+		tpAlgoID := int64(0)
+		if chain.TPBinanceOrderID != nil {
+			tpAlgoID = *chain.TPBinanceOrderID
+		}
+		side := chain.Side
+		if side == "" {
+			side = "LONG"
+		}
+
+		if entryPrice > 0 && slPrice > 0 {
+			err := monitor.ReRegisterFromChain(
+				chain.ChainID, chain.Symbol, userID, side,
+				entryPrice, quantity, slPrice, tpPrice,
+				slAlgoID, tpAlgoID, chain.Timeframe,
+				0, 0, // Precision not stored in OrderChain; monitor will use defaults
+			)
+			if err != nil {
+				m.logger.Error("Failed to re-register position with Ravindra monitor",
+					"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", err)
+			} else {
+				registered++
+				m.logger.Info("Re-registered position with Ravindra monitor",
+					"chain_id", chain.ChainID, "symbol", chain.Symbol,
+					"entry", entryPrice, "sl", slPrice, "tp", tpPrice)
+			}
+		}
+	}
+
+	if registered > 0 {
+		m.logger.Info("Ravindra monitor initial re-registration complete",
+			"user_id", userID, "registered", registered, "chains_found", len(activeChains))
 	}
 }
 
@@ -1232,8 +1400,9 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 				m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
 
 				// Re-detect active positions that may have been cleared
+				// Also pass Ravindra monitor for position re-registration on restart
 				if instance.RealtimePatternMatcher != nil {
-					m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler)
+					m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.RavindraPositionMonitor)
 				}
 			}
 		}
@@ -1267,81 +1436,9 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 			instance.RavindraPositionMonitor.Start()
 		}
 
-		// Re-register existing positions with Ravindra monitor
-		// This handles the case where the container/autopilot was restarted while positions were open
-		if instance.RavindraPositionMonitor != nil && m.chainEventWriter != nil {
-			go func() {
-				reRegCtx, reRegCancel := context.WithTimeout(context.Background(), 15*time.Second)
-				defer reRegCancel()
-
-				activeChains, err := m.chainEventWriter.GetActiveChains(reRegCtx, userID)
-				if err != nil {
-					m.logger.Error("Failed to get active chains for Ravindra re-registration", "error", err, "user_id", userID)
-					return
-				}
-
-				for _, chain := range activeChains {
-					if chain.Status != orders.OrderChainStatusActive || chain.Symbol == "" {
-						continue
-					}
-
-					// Get chain details for entry price, SL, TP
-					entryPrice := 0.0
-					if chain.EntryPrice != nil {
-						entryPrice = *chain.EntryPrice
-					}
-					quantity := 0.0
-					if chain.EntryQuantity != nil {
-						quantity = *chain.EntryQuantity
-					}
-					slPrice := 0.0
-					if chain.CurrentSLPrice != nil {
-						slPrice = *chain.CurrentSLPrice
-					}
-					tpPrice := 0.0
-					if chain.CurrentTPPrice != nil {
-						tpPrice = *chain.CurrentTPPrice
-					}
-
-					// Get algo order IDs
-					slAlgoID := int64(0)
-					if chain.SLBinanceOrderID != nil {
-						slAlgoID = *chain.SLBinanceOrderID
-					}
-					tpAlgoID := int64(0)
-					if chain.TPBinanceOrderID != nil {
-						tpAlgoID = *chain.TPBinanceOrderID
-					}
-
-					side := chain.Side
-					if side == "" {
-						side = "LONG" // Default
-					}
-
-					if entryPrice > 0 && slPrice > 0 {
-						err := instance.RavindraPositionMonitor.ReRegisterFromChain(
-							chain.ChainID, chain.Symbol, userID, side,
-							entryPrice, quantity, slPrice, tpPrice,
-							slAlgoID, tpAlgoID, chain.Timeframe,
-							0, 0, // Precision not stored in OrderChain; monitor will use defaults
-						)
-						if err != nil {
-							m.logger.Error("Failed to re-register position with Ravindra monitor",
-								"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", err)
-						} else {
-							m.logger.Info("Re-registered position with Ravindra monitor",
-								"chain_id", chain.ChainID, "symbol", chain.Symbol,
-								"entry", entryPrice, "sl", slPrice, "tp", tpPrice)
-						}
-					}
-				}
-
-				if len(activeChains) > 0 {
-					m.logger.Info("Ravindra monitor re-registration complete",
-						"user_id", userID, "chains_found", len(activeChains))
-				}
-			}()
-		}
+		// Ravindra re-registration is now handled by autoDetectActivePositions above (step 1).
+		// Previously this was a separate async goroutine that raced with Ginie reconciliation,
+		// causing positions to be closed before re-registration could find them.
 
 		m.logger.Info("Chain Trading System fully started",
 			"user_id", userID,
@@ -1887,8 +1984,9 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 		// This handles page refresh: the frontend reconnects and calls StartCoinProfiler,
 		// but the profiler is already running. We need to re-broadcast Step 4 for any
 		// symbols with active positions so the UI shows the correct state immediately.
+		// Also pass Ravindra monitor so positions are re-registered if monitor was restarted.
 		if instance.RealtimePatternMatcher != nil {
-			m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler)
+			m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.RavindraPositionMonitor)
 			m.logger.Info("CoinProfiler already running - re-detected active positions for UI refresh", "user_id", userID)
 		}
 		return nil
@@ -1911,8 +2009,9 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 	m.initializeCoinProfilerSubscriptions(ctx, userID, instance)
 
 	// Re-detect active positions after clearing stale patterns
+	// Pass Ravindra monitor so positions are re-registered after profiler restart
 	if instance.RealtimePatternMatcher != nil {
-		m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler)
+		m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.RavindraPositionMonitor)
 	}
 
 	instance.TouchLastActive()
@@ -2227,16 +2326,19 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 	positionReqs := coinprofiler.GetPositionRequirements(positions)
 	combinedReqs := coinprofiler.CombineRequirements(aggregatedReqs, positionReqs)
 
-	// Step 6b: If trading is ON and we have timeframes but no symbols, add default watchlist
-	// Only add default watchlist when trading is enabled (for entry scanning)
-	if tradingEnabled && len(aggregatedReqs.AllTimeframes) > 0 && len(combinedReqs.AllSymbols) == 0 {
+	// Step 6b: Add default watchlist when trading is enabled and we have strategy timeframes.
+	// CRITICAL: Must add even when position symbols exist - position symbols only cover
+	// coins with active positions; we need the full watchlist for scanning new entries.
+	// AddSymbolFromStrategy handles deduplication (position symbols get Source: "both").
+	if tradingEnabled && len(aggregatedReqs.AllTimeframes) > 0 {
 		defaultSymbols := []string{
 			"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
 			"ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "MATICUSDT",
 		}
-		m.logger.Info("No symbols from positions, using default watchlist",
+		m.logger.Info("Adding default watchlist for entry scanning",
 			"user_id", userID,
-			"default_symbols", len(defaultSymbols))
+			"default_symbols", len(defaultSymbols),
+			"existing_symbols", len(combinedReqs.AllSymbols))
 
 		// Add default symbols with strategy timeframes
 		for _, symbol := range defaultSymbols {

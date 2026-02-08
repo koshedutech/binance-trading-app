@@ -179,10 +179,17 @@ function countReady(coins: CoinMatch[]): number {
 }
 
 /**
- * Count watching coins
+ * Count coins with active positions (position_running status)
+ */
+function countPositionRunning(coins: CoinMatch[]): number {
+  return coins.filter(c => c.status === 'position_running').length;
+}
+
+/**
+ * Count watching coins (excludes ready and position_running)
  */
 function countWatching(coins: CoinMatch[]): number {
-  return coins.length - countReady(coins);
+  return coins.length - countReady(coins) - countPositionRunning(coins);
 }
 
 /**
@@ -669,24 +676,92 @@ function CoinRow({
                   <span className="text-orange-400 font-mono text-[10px]">{coin.chain_id}</span>
                 )}
               </div>
-              {/* Row 2: Timers */}
-              <div className="flex items-center gap-4 text-xs">
-                {coin.seconds_ref_to_entry !== undefined && coin.seconds_ref_to_entry > 0 && (
-                  <span className="flex items-center gap-1">
-                    <span className="text-gray-500">Ref→Entry:</span>
-                    <span className="text-orange-300 font-mono">{formatTimeElapsed(coin.seconds_ref_to_entry)}</span>
+              {/* Row 2: Reference candle details */}
+              {coin.reference_candle && (
+                <div className="flex items-center gap-2 text-[10px]">
+                  <span className="text-green-400 font-medium">Ref:</span>
+                  <span className="text-gray-400 font-mono">
+                    {new Date(coin.reference_candle.open_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                   </span>
-                )}
-                {coin.position_opened_at && (
-                  <PositionRunningTimer
-                    positionOpenedAt={coin.position_opened_at}
-                    entryPrice={coin.position_entry_price}
-                    currentPrice={coin.current_price}
-                  />
-                )}
-                {!coin.position_opened_at && (
-                  <span className="text-gray-500 text-xs">See Trade Lifecycle for details</span>
-                )}
+                  <span className="text-gray-500">H:</span>
+                  <span className="text-white font-mono">{coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}</span>
+                  <span className="text-gray-500">L:</span>
+                  <span className="text-white font-mono">{coin.reference_candle.low.toFixed(coin.reference_candle.low > 100 ? 2 : 4)}</span>
+                  <span className="text-green-400 font-mono ml-auto">{coin.reference_candle.volume_multiplier.toFixed(1)}x vol</span>
+                </div>
+              )}
+              {/* Row 3: Entry candle details */}
+              {coin.entry_candle && (
+                <div className="flex items-center gap-2 text-[10px]">
+                  <span className="text-yellow-400 font-medium">Entry:</span>
+                  <span className="text-gray-400 font-mono">
+                    {new Date(coin.entry_candle.detected_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                  <span className="text-gray-500">Price:</span>
+                  <span className="text-white font-mono">{coin.entry_candle.entry_price?.toFixed(coin.entry_candle.entry_price > 100 ? 2 : 4)}</span>
+                  {coin.entry_candle.direction && (
+                    <span className={`ml-auto px-1 py-0.5 rounded text-[9px] font-medium ${
+                      coin.entry_candle.direction === 'long' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                    }`}>{coin.entry_candle.direction.toUpperCase()}</span>
+                  )}
+                </div>
+              )}
+              {/* Row 3: Entry Levels (SL / TP / R:R) */}
+              {coin.entry_levels && (
+                <div className="flex items-center gap-3 text-[10px]">
+                  <span className="text-gray-500">SL:</span>
+                  <span className="text-red-400 font-mono">
+                    {coin.entry_levels.stop_loss.toFixed(coin.entry_levels.stop_loss > 100 ? 2 : 4)}
+                  </span>
+                  <span className="text-gray-500">TP:</span>
+                  <span className="text-green-400 font-mono">
+                    {coin.entry_levels.take_profit.toFixed(coin.entry_levels.take_profit > 100 ? 2 : 4)}
+                  </span>
+                  <span className="text-gray-500 ml-auto">
+                    R:R <span className="text-yellow-400 font-mono">{coin.entry_levels.risk_reward_ratio.toFixed(1)}</span>
+                  </span>
+                </div>
+              )}
+              {/* Row 5: Timers + PnL */}
+              <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center gap-3">
+                  {coin.seconds_ref_to_entry !== undefined && coin.seconds_ref_to_entry > 0 && (
+                    <span className="flex items-center gap-1">
+                      <span className="text-gray-500">Ref→Entry:</span>
+                      <span className="text-orange-300 font-mono">{formatTimeElapsed(coin.seconds_ref_to_entry)}</span>
+                    </span>
+                  )}
+                  {coin.position_opened_at && (
+                    <PositionRunningTimer
+                      positionOpenedAt={coin.position_opened_at}
+                      entryPrice={coin.position_entry_price}
+                      currentPrice={coin.current_price}
+                    />
+                  )}
+                </div>
+                {/* PnL with amount + percentage */}
+                {coin.position_entry_price && coin.current_price ? (() => {
+                  const isShort = coin.direction === 'short';
+                  const pnlPercent = isShort
+                    ? (coin.position_entry_price - coin.current_price) / coin.position_entry_price * 100
+                    : (coin.current_price - coin.position_entry_price) / coin.position_entry_price * 100;
+                  const qty = coin.position_quantity || 0;
+                  const pnlAmount = isShort
+                    ? (coin.position_entry_price - coin.current_price) * qty
+                    : (coin.current_price - coin.position_entry_price) * qty;
+                  const isPositive = pnlPercent >= 0;
+                  return (
+                    <div className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-mono font-medium ${
+                      isPositive ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                    }`}>
+                      <span>PnL:</span>
+                      {qty > 0 && (
+                        <span>{isPositive ? '+' : ''}{pnlAmount.toFixed(2)}</span>
+                      )}
+                      <span>({isPositive ? '+' : ''}{pnlPercent.toFixed(2)}%)</span>
+                    </div>
+                  );
+                })() : null}
               </div>
             </div>
           ) : (
@@ -1325,8 +1400,10 @@ export default function StrategyCard({
   const [sortedSymbolOrder, setSortedSymbolOrder] = useState<string[]>([]);
   const lastSortTimeRef = useRef<number>(0);
 
+  // Note: readyCount and positionCount use full list (these are always meaningful)
+  // watchingCount is derived after filtering phantom coins (see activeCoinsList below)
   const readyCount = countReady(strategy.coins);
-  const watchingCount = countWatching(strategy.coins);
+  const positionCount = countPositionRunning(strategy.coins);
 
   // Parse countdown timer from strategy
   const nextCandleClose = strategy.next_candle_close
@@ -1352,26 +1429,66 @@ export default function StrategyCard({
     }
   }, [strategy.coins]);
 
+  // Helper: derive step number from status string
+  const getStepFromStatus = (status?: string): number => {
+    switch (status) {
+      case 'position_running':
+      case 'position_closed':
+        return 4;
+      case 'ready':
+      case 'filling':
+        return 3;
+      case 'consolidating':
+        return 2;
+      case 'watching':
+      case 'accumulation':
+      default:
+        return 1;
+    }
+  };
+
   // Compute sorted order function (used by both initial and interval updates)
+  // Priority: Step 4 (position) > Step 3 (filling/ready) > Step 2 (consolidating) > Step 1 (watching)
+  // Within each step: by proximity/profit relevance
   const computeSortOrder = (coins: CoinMatch[]): string[] => {
     return [...coins].sort((a, b) => {
-      const aReady = checkCoinReady(a);
-      const bReady = checkCoinReady(b);
-      if (aReady && !bReady) return -1;
-      if (!aReady && bReady) return 1;
-
-      // For pattern-based, sort by step first (higher = closer to ready)
-      if (strategy.type === 'pattern') {
-        const stepDiff = (b.step || 0) - (a.step || 0);
-        if (stepDiff !== 0) return stepDiff;
-
-        // Within same step, sort by volume multiplier (higher = more likely to spike)
-        const aVol = a.volume_multiplier || 0;
-        const bVol = b.volume_multiplier || 0;
-        return bVol - aVol;
+      // For score-based strategies, keep simple score sort
+      if (strategy.type !== 'pattern') {
+        return (b.score || 0) - (a.score || 0);
       }
-      // For score-based, sort by score (higher = closer to ready)
-      return (b.score || 0) - (a.score || 0);
+
+      // Step 1: Sort by step number descending (4 -> 3 -> 2 -> 1)
+      const stepA = a.step || getStepFromStatus(a.status);
+      const stepB = b.step || getStepFromStatus(b.status);
+      if (stepB !== stepA) return stepB - stepA;
+
+      // Step 2: Within same step, sort by relevance
+      if (stepA === 4) {
+        // Position running: sort by entry price proximity (as proxy for profit)
+        // Higher current_price relative to entry = more profit for longs
+        const profitA = (a.current_price && a.position_entry_price)
+          ? (a.current_price - a.position_entry_price) / a.position_entry_price
+          : 0;
+        const profitB = (b.current_price && b.position_entry_price)
+          ? (b.current_price - b.position_entry_price) / b.position_entry_price
+          : 0;
+        return profitB - profitA;
+      } else if (stepA === 3) {
+        // Filling/ready: sort by proximity to breakout (closest first)
+        const proxA = a.proximity_to_breakout || 100;
+        const proxB = b.proximity_to_breakout || 100;
+        return proxA - proxB;
+      } else if (stepA === 2) {
+        // Consolidating: sort by proximity to breakout (closest first)
+        const proxA = a.proximity_to_breakout || 100;
+        const proxB = b.proximity_to_breakout || 100;
+        return proxA - proxB;
+      } else {
+        // Watching: sort by volume multiplier (higher = more interesting)
+        const volA = a.volume_multiplier || 0;
+        const volB = b.volume_multiplier || 0;
+        return volB - volA;
+      }
     }).map(c => c.symbol);
   };
 
@@ -1403,23 +1520,37 @@ export default function StrategyCard({
     return () => clearInterval(interval);
   }, [strategy.coins, strategy.type]);
 
+  // Filter out phantom "watching" coins that have no useful data
+  // These are coins that were once tracked but are no longer in the active coin profiler list
+  const activeCoinsList = useMemo(() => {
+    return strategy.coins.filter(coin =>
+      coin.status !== 'watching' || coin.reference_candle || coin.has_active_position || (coin.step !== undefined && coin.step > 1)
+    );
+  }, [strategy.coins]);
+
+  // Watching count from filtered list (excludes phantom coins)
+  const watchingCount = countWatching(activeCoinsList);
+
   // Get coins in the throttled sort order, but with fresh data
   // This ensures visual order stays stable while data updates in real-time
+  // Uses activeCoinsList to exclude phantom "watching" coins with no useful data
   const sortedCoins = useMemo(() => {
     if (sortedSymbolOrder.length === 0) {
       // Fallback: if no stored order yet, compute directly
-      return computeSortOrder(strategy.coins).map(symbol =>
-        strategy.coins.find(c => c.symbol === symbol)
+      return computeSortOrder(activeCoinsList).map(symbol =>
+        activeCoinsList.find(c => c.symbol === symbol)
       ).filter((c): c is CoinMatch => c !== undefined);
     }
 
-    // Use stored order but get fresh coin data
+    // Use stored order but get fresh coin data from filtered list
     const orderedCoins: CoinMatch[] = [];
     const usedSymbols = new Set<string>();
+    const activeSymbols = new Set(activeCoinsList.map(c => c.symbol));
 
-    // First, add coins in the stored order
+    // First, add coins in the stored order (only if they pass the filter)
     for (const symbol of sortedSymbolOrder) {
-      const coin = strategy.coins.find(c => c.symbol === symbol);
+      if (!activeSymbols.has(symbol)) continue;
+      const coin = activeCoinsList.find(c => c.symbol === symbol);
       if (coin) {
         orderedCoins.push(coin);
         usedSymbols.add(symbol);
@@ -1427,14 +1558,14 @@ export default function StrategyCard({
     }
 
     // Then, add any new coins that weren't in the stored order (at the end)
-    for (const coin of strategy.coins) {
+    for (const coin of activeCoinsList) {
       if (!usedSymbols.has(coin.symbol)) {
         orderedCoins.push(coin);
       }
     }
 
     return orderedCoins;
-  }, [strategy.coins, sortedSymbolOrder]);
+  }, [activeCoinsList, sortedSymbolOrder]);
 
   return (
     <div className={`
@@ -1510,6 +1641,12 @@ export default function StrategyCard({
               {readyCount} ready
             </span>
           )}
+          {positionCount > 0 && (
+            <span className="flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-400 text-xs rounded-full">
+              <Activity className="w-3 h-3" />
+              {positionCount} position{positionCount !== 1 ? 's' : ''}
+            </span>
+          )}
           {watchingCount > 0 && (
             <span className="flex items-center gap-1 text-xs text-gray-400">
               <AlertCircle className="w-3 h-3" />
@@ -1520,7 +1657,7 @@ export default function StrategyCard({
       </button>
 
       {/* Expanded content: Coin list */}
-      {expanded && strategy.coins.length > 0 && (
+      {expanded && sortedCoins.length > 0 && (
         <div className="border-t border-gray-700/50 p-4 space-y-2">
           {/* Requirements toggle button */}
           <div className="flex justify-end mb-2">
@@ -1573,7 +1710,7 @@ export default function StrategyCard({
       )}
 
       {/* Empty state */}
-      {expanded && strategy.coins.length === 0 && (
+      {expanded && sortedCoins.length === 0 && (
         <div className="border-t border-gray-700/50 p-4">
           {/* Requirements toggle for empty state too */}
           <div className="flex justify-end mb-2">

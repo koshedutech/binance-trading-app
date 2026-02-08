@@ -834,9 +834,11 @@ func CombineRequirements(strategyReqs *AggregatedRequirements, positionReqs []Po
 			}
 			combined.BySymbol[posReq.Symbol] = symReq
 		} else {
-			// Symbol already exists (from another position) - update source
+			// Symbol already exists (from strategy scanning) - position takes priority.
+			// Override to position source so entry decision engine stops scanning for
+			// new entries on this symbol (prevents duplicate orders).
 			if symReq.Source == DataSourceStrategy {
-				symReq.Source = DataSourceBoth
+				symReq.Source = DataSourcePosition
 			}
 		}
 
@@ -899,9 +901,12 @@ func (cr *CombinedRequirements) AddSymbolFromStrategy(symbol string, strategies 
 			sort.Strings(cr.AllSymbols)
 		}
 	} else {
-		// Symbol already exists (from position) - update source
+		// Symbol already exists from position - keep as position source only.
+		// Do NOT merge to "both" - this prevents the entry decision engine from
+		// trying to place a second entry on a symbol that already has an active position.
+		// Hedging/averaging will be handled by a separate strategy in the future.
 		if symReq.Source == DataSourcePosition {
-			symReq.Source = DataSourceBoth
+			return // Skip - position symbols should not also scan for new entries
 		}
 	}
 

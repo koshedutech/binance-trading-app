@@ -231,9 +231,9 @@ func TestCoinProfiler_Subscriptions(t *testing.T) {
 			t.Errorf("expected 3 timeframes, got %d", len(btcSub.Timeframes))
 		}
 
-		// Source should be "both"
-		if btcSub.Source != DataSourceBoth {
-			t.Errorf("expected source to be 'both', got %s", btcSub.Source)
+		// Source should be "position" (position takes priority over strategy)
+		if btcSub.Source != DataSourcePosition {
+			t.Errorf("expected source to be 'position', got %s", btcSub.Source)
 		}
 	})
 

@@ -81,7 +81,8 @@ type PatternUpdate struct {
 	// Position tracking (when position is actually open on Binance)
 	HasActivePosition  bool    `json:"has_active_position,omitempty"`  // Whether there's an active position for this coin
 	PositionEntryPrice float64 `json:"position_entry_price,omitempty"` // Position entry price (actual fill price from Binance)
-	ChainID            string  `json:"chain_id,omitempty"`             // Chain ID for the position
+	ChainID            string     `json:"chain_id,omitempty"`                // Chain ID for the position
+	PositionOpenedAt   *time.Time `json:"position_opened_at,omitempty"`      // When position was opened (for timer)
 
 	// Step 3: Order filling fields (when order is placed, waiting for fill)
 	OrderPrice         float64 `json:"order_price,omitempty"`          // Limit order price
@@ -692,11 +693,12 @@ func (r *RealtimePatternMatcher) buildPersistedState(
 		ps.StartedAt = &startedAt
 	}
 
-	// Set expires_at
-	if !progress.ExpiresAt.IsZero() {
+	// Set expires_at (but NOT for position_running - those persist until position closes)
+	if progress.Status != PatternStatusPositionRunning && !progress.ExpiresAt.IsZero() {
 		expiresAt := progress.ExpiresAt
 		ps.ExpiresAt = &expiresAt
 	}
+	// position_running patterns explicitly have nil expires_at so they survive DB queries
 
 	// Serialize reference candle
 	if state.ReferenceCandle != nil {
@@ -772,12 +774,14 @@ func (r *RealtimePatternMatcher) buildPersistedState(
 // It stores the latest volume progress and broadcasts it via WebSocket in real-time.
 // CRITICAL: Preserves existing pattern state (Step 2+) to prevent UI flicker.
 func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgressData) {
-	// Skip suppressed symbols (active position exists)
+	// Check if symbol is suppressed (active position exists)
 	suppKey := fmt.Sprintf("%s:%s:%s", data.Symbol, r.defaultMode, data.Timeframe)
 	r.mu.RLock()
 	suppressed := r.suppressedSymbols[suppKey]
 	r.mu.RUnlock()
 	if suppressed {
+		// Still broadcast current_price for position_running coins so Step 4 can calculate PnL
+		r.broadcastSuppressedPriceUpdate(data.Symbol, data.Timeframe, data.CurrentPrice)
 		return
 	}
 
@@ -1019,7 +1023,108 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 	// Save the position_running state to DB for persistence across restarts
 	r.savePatternStateAsync(symbol, mode, timeframe)
 
-	// Broadcast Step 4 update to UI
+	// Broadcast Step 4 update to UI with full context (reference candle, entry candle, entry levels)
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if callback != nil {
+		update := PatternUpdate{
+			UserID:            userID,
+			Symbol:            symbol,
+			Timeframe:         timeframe,
+			Mode:              mode,
+			Strategy:          "volume_imbalance",
+			SubStrategy:       "ravindra_volume_imbalance",
+			CurrentStep:       4,
+			TotalSteps:        4,
+			Status:            PatternStatusPositionRunning,
+			HasActivePosition: true,
+			UpdatedAt:         time.Now(),
+		}
+
+		// Set position opened at to now (this is called when entry fill just completed)
+		now := time.Now()
+		update.PositionOpenedAt = &now
+
+		// Store position opened time in state for enriching future suppressed broadcasts
+		stateForWrite := r.getPatternState(symbol, mode, timeframe)
+		if stateForWrite != nil {
+			stateForWrite.PositionOpenedAt = time.Now()
+		}
+
+		// Enrich with reference candle, entry candle, entry levels from pattern state
+		state := r.getPatternState(symbol, mode, timeframe)
+		if state != nil {
+			update.Direction = state.Direction
+
+			if state.ReferenceCandle != nil {
+				volumeMultiplier := 0.0
+				if state.AverageVolumeAtSpike > 0 {
+					volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+				}
+				update.ReferenceCandle = &ReferenceCandle{
+					OpenTime:         state.ReferenceCandle.OpenTime,
+					CloseTime:        state.ReferenceCandle.Time,
+					Open:             state.ReferenceCandle.Open,
+					High:             state.ReferenceCandle.High,
+					Low:              state.ReferenceCandle.Low,
+					Close:            state.ReferenceCandle.Close,
+					Volume:           state.ReferenceCandle.Volume,
+					VolumeMultiplier: volumeMultiplier,
+				}
+
+				// Calculate entry levels using reference candle close as current price
+				update.EntryLevels = r.calculateEntryLevels(state, state.ReferenceCandle.Close)
+			}
+
+			// Include entry candle (breakout candle) data
+			update.EntryCandle = r.buildEntryCandle(state)
+
+			// Add timing fields
+			r.addTimingFields(&update, state)
+		}
+
+		callback(update)
+		log.Printf("[REALTIME-PATTERN] Set position_running and broadcast Step 4 for %s:%s:%s (callback wired, ref_candle=%v, entry_candle=%v)",
+			symbol, mode, timeframe, update.ReferenceCandle != nil, update.EntryCandle != nil)
+	} else {
+		log.Printf("[REALTIME-PATTERN] Set position_running for %s:%s:%s (NO callback - broadcast skipped, will appear in periodic broadcast)", symbol, mode, timeframe)
+	}
+}
+
+// PositionRunningChainInfo holds chain-specific data for enriching Step 4 broadcasts on startup.
+// This data comes from the order_chains table and provides position context that the
+// pattern state alone may not have.
+type PositionRunningChainInfo struct {
+	EntryPrice float64 // Actual fill price from Binance
+	ChainID    string     // Chain ID (e.g., "SCA-08FEB-00001")
+	Side       string     // "LONG" or "SHORT"
+	OpenedAt   *time.Time // When the entry was filled (for position timer)
+}
+
+// SetPatternPositionRunningWithChainInfo is like SetPatternPositionRunning but also includes
+// chain-specific data in the broadcast (entry price, chain ID, direction from chain).
+// This is used during startup auto-detection where chain data is available.
+func (r *RealtimePatternMatcher) SetPatternPositionRunningWithChainInfo(symbol, mode, timeframe string, chainInfo *PositionRunningChainInfo) {
+	if r.patternMatcher == nil {
+		return
+	}
+
+	// Set position_running status on the underlying pattern matcher
+	r.patternMatcher.SetPatternPositionRunning(symbol, mode, timeframe)
+
+	// Suppress the symbol to prevent new pattern detection
+	r.mu.Lock()
+	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+	r.suppressedSymbols[stateKey] = true
+	r.mu.Unlock()
+
+	// Save the position_running state to DB for persistence across restarts
+	r.savePatternStateAsync(symbol, mode, timeframe)
+
+	// Broadcast Step 4 update to UI with full context
 	r.mu.RLock()
 	callback := r.onPatternUpdate
 	userID := r.userID
@@ -1038,10 +1143,99 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 			Status:      PatternStatusPositionRunning,
 			UpdatedAt:   time.Now(),
 		}
+
+		// Enrich with chain-specific data
+		if chainInfo != nil {
+			update.HasActivePosition = true
+			update.PositionEntryPrice = chainInfo.EntryPrice
+			update.ChainID = chainInfo.ChainID
+			// Derive direction from chain side
+			if chainInfo.Side == "LONG" {
+				update.Direction = "long"
+			} else if chainInfo.Side == "SHORT" {
+				update.Direction = "short"
+			}
+		}
+
+		// Set position opened time from chain data or default to now
+		if chainInfo != nil && chainInfo.OpenedAt != nil {
+			update.PositionOpenedAt = chainInfo.OpenedAt
+		} else {
+			now := time.Now()
+			update.PositionOpenedAt = &now
+		}
+
+		// Enrich with reference candle, entry candle, entry levels from pattern state
+		state := r.getPatternState(symbol, mode, timeframe)
+		if state != nil {
+			// Only set direction from state if not already set from chain
+			if update.Direction == "" {
+				update.Direction = state.Direction
+			}
+
+			if state.ReferenceCandle != nil {
+				volumeMultiplier := 0.0
+				if state.AverageVolumeAtSpike > 0 {
+					volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+				}
+				update.ReferenceCandle = &ReferenceCandle{
+					OpenTime:         state.ReferenceCandle.OpenTime,
+					CloseTime:        state.ReferenceCandle.Time,
+					Open:             state.ReferenceCandle.Open,
+					High:             state.ReferenceCandle.High,
+					Low:              state.ReferenceCandle.Low,
+					Close:            state.ReferenceCandle.Close,
+					Volume:           state.ReferenceCandle.Volume,
+					VolumeMultiplier: volumeMultiplier,
+				}
+
+				// Calculate entry levels using position entry price if available, else reference close
+				priceForLevels := state.ReferenceCandle.Close
+				if chainInfo != nil && chainInfo.EntryPrice > 0 {
+					priceForLevels = chainInfo.EntryPrice
+				}
+				update.EntryLevels = r.calculateEntryLevels(state, priceForLevels)
+			}
+
+			// Include entry candle (breakout candle) data
+			update.EntryCandle = r.buildEntryCandle(state)
+
+			// Add timing fields
+			r.addTimingFields(&update, state)
+		}
+
+		// Store chain data in pattern state for enriching future suppressed broadcasts
+		stateForWrite := r.getPatternState(symbol, mode, timeframe)
+		if stateForWrite != nil {
+			if chainInfo != nil {
+				stateForWrite.PositionChainID = chainInfo.ChainID
+				if chainInfo.OpenedAt != nil {
+					stateForWrite.PositionOpenedAt = *chainInfo.OpenedAt
+				} else {
+					stateForWrite.PositionOpenedAt = time.Now()
+				}
+				if chainInfo.EntryPrice > 0 {
+					stateForWrite.EntryPrice = chainInfo.EntryPrice
+				}
+			}
+		}
+
 		callback(update)
-		log.Printf("[REALTIME-PATTERN] Set position_running and broadcast Step 4 for %s:%s:%s (callback wired)", symbol, mode, timeframe)
-	} else {
-		log.Printf("[REALTIME-PATTERN] Set position_running for %s:%s:%s (NO callback - broadcast skipped, will appear in periodic broadcast)", symbol, mode, timeframe)
+		log.Printf("[REALTIME-PATTERN] Set position_running (with chain info) for %s:%s:%s chain=%s entry=%.6f ref_candle=%v entry_candle=%v",
+			symbol, mode, timeframe,
+			func() string {
+				if chainInfo != nil {
+					return chainInfo.ChainID
+				}
+				return "n/a"
+			}(),
+			func() float64 {
+				if chainInfo != nil {
+					return chainInfo.EntryPrice
+				}
+				return 0
+			}(),
+			update.ReferenceCandle != nil, update.EntryCandle != nil)
 	}
 }
 
@@ -1094,6 +1288,90 @@ func (r *RealtimePatternMatcher) ResetPatternForSymbol(symbol, mode, timeframe s
 		}
 		callback(update)
 	}
+}
+
+// broadcastSuppressedPriceUpdate sends a minimal pattern update with just the current price
+// for suppressed (position_running) symbols. This enables the Step 4 card to calculate
+// live PnL without re-evaluating patterns.
+func (r *RealtimePatternMatcher) broadcastSuppressedPriceUpdate(symbol, timeframe string, currentPrice float64) {
+	r.mu.RLock()
+	callback := r.onPatternUpdate
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if callback == nil {
+		return
+	}
+
+	mode := r.defaultMode
+
+	// Build a position_running update with current price
+	update := PatternUpdate{
+		UserID:       userID,
+		Symbol:       symbol,
+		Timeframe:    timeframe,
+		Mode:         mode,
+		Strategy:     "volume_imbalance",
+		SubStrategy:  "ravindra_volume_imbalance",
+		CurrentStep:  4,
+		TotalSteps:   4,
+		Status:       PatternStatusPositionRunning,
+		CurrentPrice: currentPrice,
+		UpdatedAt:    time.Now(),
+	}
+
+	// Enrich with reference candle, entry candle, entry levels from pattern state
+	state := r.getPatternState(symbol, mode, timeframe)
+	if state != nil {
+		update.Direction = state.Direction
+		update.HasActivePosition = true
+
+		// Include position entry price from pattern state
+		if state.EntryPrice > 0 {
+			update.PositionEntryPrice = state.EntryPrice
+		}
+
+		// Include chain ID and position opened time (stored during SetPatternPositionRunning)
+		if state.PositionChainID != "" {
+			update.ChainID = state.PositionChainID
+		}
+		if !state.PositionOpenedAt.IsZero() {
+			openedAt := state.PositionOpenedAt
+			update.PositionOpenedAt = &openedAt
+		}
+
+		if state.ReferenceCandle != nil {
+			volumeMultiplier := 0.0
+			if state.AverageVolumeAtSpike > 0 {
+				volumeMultiplier = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+			}
+			update.ReferenceCandle = &ReferenceCandle{
+				OpenTime:         state.ReferenceCandle.OpenTime,
+				CloseTime:        state.ReferenceCandle.Time,
+				Open:             state.ReferenceCandle.Open,
+				High:             state.ReferenceCandle.High,
+				Low:              state.ReferenceCandle.Low,
+				Close:            state.ReferenceCandle.Close,
+				Volume:           state.ReferenceCandle.Volume,
+				VolumeMultiplier: volumeMultiplier,
+			}
+
+			// Use stored entry price for entry levels (not current price which causes flickering)
+			levelPrice := state.EntryPrice
+			if levelPrice <= 0 {
+				levelPrice = state.ReferenceCandle.Close
+			}
+			update.EntryLevels = r.calculateEntryLevels(state, levelPrice)
+		}
+
+		// Include entry candle (breakout candle) data
+		update.EntryCandle = r.buildEntryCandle(state)
+
+		// Add timing fields
+		r.addTimingFields(&update, state)
+	}
+
+	callback(update)
 }
 
 // UnsuppressSymbol removes the suppression for a symbol, allowing new pattern detection.
@@ -1354,7 +1632,11 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	r.mu.RUnlock()
 
 	if suppressed {
-		log.Printf("[REALTIME-PATTERN] %s:%s - Suppressed (active position), skipping pattern evaluation", symbol, timeframe)
+		// Still broadcast current_price for position_running coins so Step 4 can calculate PnL
+		if len(candles) > 0 {
+			lastPrice := candles[len(candles)-1].Close
+			r.broadcastSuppressedPriceUpdate(symbol, timeframe, lastPrice)
+		}
 		return
 	}
 
@@ -1839,13 +2121,14 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		return
 	}
 
-	// Skip suppressed symbols (active position exists)
+	// Check if symbol is suppressed (active position exists)
 	mode := r.defaultMode
 	suppKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
 	r.mu.RLock()
 	suppressed := r.suppressedSymbols[suppKey]
 	r.mu.RUnlock()
 	if suppressed {
+		// Price update for suppressed symbols is handled by OnVolumeProgress
 		return
 	}
 

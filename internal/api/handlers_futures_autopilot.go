@@ -151,6 +151,11 @@ func (s *Server) handleToggleFuturesAutopilot(c *gin.Context) {
 
 			log.Printf("[MULTI-USER] User %s stopped their personal autopilot", userID)
 
+			// Clear owner on the global FuturesController so WebSocket handlers stop processing
+			if controller := s.getFuturesAutopilot(); controller != nil {
+				controller.SetOwnerUserID("")
+			}
+
 			status := s.userAutopilotManager.GetStatus(userID)
 			c.JSON(http.StatusOK, gin.H{
 				"success":         true,

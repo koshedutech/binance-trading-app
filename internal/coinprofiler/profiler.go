@@ -436,9 +436,13 @@ func (cp *CoinProfiler) AddSubscription(req *SubscriptionRequest) error {
 		}
 		existing.Timeframes = merged
 
-		// Update source to "both" if needed
+		// When sources differ, position takes priority over strategy.
+		// This prevents the entry decision engine from scanning for new entries
+		// on symbols that already have an active position (prevents duplicate orders).
 		if existing.Source != req.Source {
-			existing.Source = DataSourceBoth
+			if existing.Source == DataSourcePosition || req.Source == DataSourcePosition {
+				existing.Source = DataSourcePosition
+			}
 		}
 
 		// Update existing coinData source if it exists

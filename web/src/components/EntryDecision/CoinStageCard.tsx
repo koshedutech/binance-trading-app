@@ -928,54 +928,97 @@ export default function CoinStageCard({
               )}
             </div>
 
-            {/* Unrealized P&L */}
-            {update.unrealized_pnl !== undefined && (
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-400">Unrealized P&L:</span>
-                <span className={`font-mono font-bold ${
-                  update.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'
-                }`}>
-                  {update.unrealized_pnl >= 0 ? '+' : ''}${update.unrealized_pnl.toFixed(2)}
-                </span>
+            {/* Reference & Entry Candle Context (compact) */}
+            {(update.reference_candle || update.entry_candle) && (
+              <div className="p-2 bg-gray-800/40 rounded border border-gray-700/30 space-y-1.5">
+                {/* Reference Candle Row */}
+                {update.reference_candle && (
+                  <div className="flex items-center gap-2 text-[10px]">
+                    <Activity className="w-3 h-3 text-green-400 flex-shrink-0" />
+                    <span className="text-gray-500">Ref:</span>
+                    <span className="text-gray-400 font-mono">
+                      {new Date(update.reference_candle.open_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    <span className="text-gray-600">|</span>
+                    <span className="text-gray-400">H:</span>
+                    <span className="text-white font-mono">
+                      {update.reference_candle.high.toFixed(update.reference_candle.high > 100 ? 2 : 4)}
+                    </span>
+                    <span className="text-gray-400">L:</span>
+                    <span className="text-white font-mono">
+                      {update.reference_candle.low.toFixed(update.reference_candle.low > 100 ? 2 : 4)}
+                    </span>
+                    <span className="text-green-400 font-mono ml-auto">
+                      {update.reference_candle.volume_multiplier.toFixed(1)}x
+                    </span>
+                  </div>
+                )}
+                {/* Entry Candle Row */}
+                {update.entry_candle && (
+                  <div className="flex items-center gap-2 text-[10px]">
+                    <Zap className="w-3 h-3 text-yellow-400 flex-shrink-0" />
+                    <span className="text-gray-500">Entry:</span>
+                    <span className="text-gray-400 font-mono">
+                      {new Date(update.entry_candle.detected_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    <span className="text-gray-600">|</span>
+                    <span className="text-gray-400">Price:</span>
+                    <span className="text-white font-mono">
+                      {update.entry_candle.entry_price.toFixed(update.entry_candle.entry_price > 100 ? 2 : 4)}
+                    </span>
+                    <span className={`ml-auto px-1 py-0.5 rounded text-[9px] font-medium ${
+                      update.entry_candle.direction === 'long'
+                        ? 'bg-green-500/20 text-green-400'
+                        : 'bg-red-500/20 text-red-400'
+                    }`}>
+                      {update.entry_candle.direction?.toUpperCase()}
+                    </span>
+                  </div>
+                )}
+                {/* Entry Levels Summary */}
+                {update.entry_levels && (
+                  <div className="flex items-center gap-3 text-[10px] pt-1 border-t border-gray-700/20">
+                    <div className="flex items-center gap-1">
+                      <Target className="w-3 h-3 text-blue-400" />
+                      <span className="text-gray-500">SL:</span>
+                      <span className="text-red-400 font-mono">
+                        {update.entry_levels.stop_loss.toFixed(update.entry_levels.stop_loss > 100 ? 2 : 4)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="text-gray-500">TP:</span>
+                      <span className="text-green-400 font-mono">
+                        {update.entry_levels.take_profit.toFixed(update.entry_levels.take_profit > 100 ? 2 : 4)}
+                      </span>
+                    </div>
+                    <span className="text-gray-500 ml-auto">
+                      R:R <span className="text-yellow-400 font-mono">{update.entry_levels.risk_reward_ratio.toFixed(1)}</span>
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* R:R Progress */}
-            {update.current_rr !== undefined && update.target_rr !== undefined && (
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-gray-500">R:R Progress:</span>
-                  <span className={`font-mono ${
-                    update.current_rr >= update.target_rr ? 'text-green-400' :
-                    update.current_rr >= 1 ? 'text-yellow-400' :
-                    'text-gray-400'
-                  }`}>
-                    {update.current_rr.toFixed(2)}R / {update.target_rr}R
-                  </span>
-                </div>
-                <div className="h-1.5 bg-gray-700/50 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      update.current_rr >= update.target_rr ? 'bg-green-500' :
-                      update.current_rr >= 1 ? 'bg-yellow-500' :
-                      update.current_rr >= 0 ? 'bg-blue-500' :
-                      'bg-red-500'
-                    }`}
-                    style={{
-                      width: `${Math.min(100, Math.max(0, (update.current_rr / update.target_rr) * 100))}%`
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Next Milestone */}
-            {update.next_milestone && (
-              <div className="text-xs">
-                <span className="text-gray-500">Next Milestone: </span>
-                <span className="text-yellow-400">{update.next_milestone}</span>
-              </div>
-            )}
+            {/* Unrealized P&L - calculated from entry price and current price */}
+            {(() => {
+              const entryPrice = update.position_entry_price || update.entry_levels?.entry_price || 0;
+              const curPrice = update.current_price || 0;
+              const isLong = update.direction === 'long';
+              if (entryPrice > 0 && curPrice > 0) {
+                const pnlPercent = isLong
+                  ? ((curPrice - entryPrice) / entryPrice) * 100
+                  : ((entryPrice - curPrice) / entryPrice) * 100;
+                return (
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400">PnL:</span>
+                    <span className={`font-mono font-bold ${pnlPercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {pnlPercent >= 0 ? '+' : ''}{pnlPercent.toFixed(2)}%
+                    </span>
+                  </div>
+                );
+              }
+              return null;
+            })()}
 
             {/* Position Timer */}
             {update.position_opened_at && (
@@ -1084,7 +1127,14 @@ interface CoinStageGridProps {
 }
 
 export function CoinStageGrid({ updates, onSelect }: CoinStageGridProps) {
-  if (updates.length === 0) {
+  // Filter out position_running and position_closed entries from the grid.
+  // Step 4 (position) info is displayed separately in the StrategyCard coin row,
+  // so showing it here would be redundant/stale.
+  const gridUpdates = updates.filter(u =>
+    u.status !== 'position_running' && u.status !== 'position_closed'
+  );
+
+  if (gridUpdates.length === 0) {
     return (
       <div className="text-center py-8">
         <Activity className="w-8 h-8 mx-auto mb-2 text-gray-600" />
@@ -1096,11 +1146,49 @@ export function CoinStageGrid({ updates, onSelect }: CoinStageGridProps) {
     );
   }
 
-  // Sort: ready first, then by step progress
-  const sortedUpdates = [...updates].sort((a, b) => {
-    if (a.status === 'ready' && b.status !== 'ready') return -1;
-    if (b.status === 'ready' && a.status !== 'ready') return 1;
-    return b.current_step - a.current_step;
+  // Helper: derive UI step from status
+  const getStepFromStatus = (status: string): number => {
+    switch (status) {
+      case 'position_running':
+      case 'position_closed':
+        return 4;
+      case 'ready':
+      case 'filling':
+        return 3;
+      case 'consolidating':
+        return 2;
+      case 'watching':
+      case 'accumulation':
+      default:
+        return 1;
+    }
+  };
+
+  // Sort: Step 4 first, then 3, 2, 1. Within same step, by relevance.
+  const sortedUpdates = [...gridUpdates].sort((a, b) => {
+    // Primary: step number descending (4 -> 3 -> 2 -> 1)
+    const stepA = getStepFromStatus(a.status);
+    const stepB = getStepFromStatus(b.status);
+    if (stepB !== stepA) return stepB - stepA;
+
+    // Secondary: within same step, sort by relevance
+    if (stepA === 3) {
+      // Ready/filling: sort by current_step descending, then by fill timeout
+      if (b.current_step !== a.current_step) return b.current_step - a.current_step;
+      return (a.fill_timeout_seconds || 999) - (b.fill_timeout_seconds || 999);
+    } else if (stepA === 2) {
+      // Consolidating: sort by current_step descending (progress within step 2)
+      if (b.current_step !== a.current_step) return b.current_step - a.current_step;
+      // Then by volume progress (higher = closer to breakout)
+      const volA = a.volume_progress?.progress_percent || 0;
+      const volB = b.volume_progress?.progress_percent || 0;
+      return volB - volA;
+    } else {
+      // Watching: sort by volume progress (higher = more likely to spike)
+      const volA = a.volume_progress?.progress_percent || 0;
+      const volB = b.volume_progress?.progress_percent || 0;
+      return volB - volA;
+    }
   });
 
   return (

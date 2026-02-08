@@ -183,6 +183,70 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
   }, [fetchStrategies]);
 
   useEffect(() => {
+    // Force-clear stale state for a specific symbol.
+    // Called when a position closes (CHAIN_LIFECYCLE_UPDATE / CHAIN_CLOSED) to ensure
+    // the coin transitions cleanly back to "watching" without stale reference_candle
+    // or position_running status being preserved by the merge logic.
+    const forceClearSymbolState = (symbol: string) => {
+      setStrategies(prev => prev.map(strategy => ({
+        ...strategy,
+        coins: strategy.coins.map(coin => {
+          if (coin.symbol !== symbol) return coin;
+          // Reset to clean watching state - clear all step 2+ fields
+          return {
+            ...coin,
+            status: 'watching',
+            step: 0,
+            step_details: undefined,
+            reference_candle: undefined,
+            entry_candle: undefined,
+            has_active_position: false,
+            position_entry_price: undefined,
+            position_opened_at: undefined,
+            chain_id: undefined,
+            closed_pnl: undefined,
+            closed_reason: undefined,
+            proximity_to_breakout: undefined,
+            seconds_since_reference: undefined,
+            seconds_until_expiry: undefined,
+            seconds_ref_to_entry: undefined,
+            potential_breakout: false,
+            candles_since_reference: undefined,
+          };
+        }),
+      })));
+
+      setByMode(prev => prev.map(modeGroup => ({
+        ...modeGroup,
+        strategies: modeGroup.strategies.map(strategy => ({
+          ...strategy,
+          coins: strategy.coins.map(coin => {
+            if (coin.symbol !== symbol) return coin;
+            return {
+              ...coin,
+              status: 'watching',
+              step: 0,
+              step_details: undefined,
+              reference_candle: undefined,
+              entry_candle: undefined,
+              has_active_position: false,
+              position_entry_price: undefined,
+              position_opened_at: undefined,
+              chain_id: undefined,
+              closed_pnl: undefined,
+              closed_reason: undefined,
+              proximity_to_breakout: undefined,
+              seconds_since_reference: undefined,
+              seconds_until_expiry: undefined,
+              seconds_ref_to_entry: undefined,
+              potential_breakout: false,
+              candles_since_reference: undefined,
+            };
+          }),
+        })),
+      })));
+    };
+
     // WebSocket message handler - IMMEDIATE updates, no throttling
     // CRITICAL: Merge strategy data to preserve reference_candle and other state that may not be in every update
     const handleStrategyUpdate = (event: WSEvent) => {
@@ -249,28 +313,41 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
               // Smart status preservation: If we were in Step 2 (have reference_candle) and the new status
               // would regress to 'watching', preserve the previous status to prevent flicker.
               // This handles partial WebSocket updates that don't include all fields.
+              // EXCEPTION: If previous state was position_running/position_closed, ALWAYS allow
+              // regression to watching (this is the legitimate lifecycle transition).
               const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+              const step4Statuses = ['position_running', 'position_closed'];
               const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+              const prevWasStep4 = step4Statuses.includes(prevCoin.status || '');
               const hasReferenceCandle = newCoin.reference_candle || prevCoin.reference_candle;
               const newStatusIsRegression = newCoin.status === 'watching' || !newCoin.status;
 
+              // Only preserve Step 2 status when it would regress AND we're not coming from Step 4
+              const shouldPreserve = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
+
               // Determine the status to use
-              const mergedStatus = (prevWasStep2 && hasReferenceCandle && newStatusIsRegression)
+              const mergedStatus = shouldPreserve
                 ? prevCoin.status  // Preserve Step 2 status when it would regress
                 : (newCoin.status || prevCoin.status);
 
+              // When transitioning back to watching (from step4 or explicit reset),
+              // do NOT preserve stale step 2+ data (reference_candle, entry_candle, etc.)
+              const isResettingToWatching = newCoin.status === 'watching' && (prevWasStep4 || !newCoin.reference_candle);
+              const cleanReset = prevWasStep4 && newStatusIsRegression;
+
               return {
                 ...newCoin,
-                // Preserve step if not in new data (prevents section from hiding)
-                step: newCoin.step !== undefined && newCoin.step > 0 ? newCoin.step : prevCoin.step,
+                // Preserve step if not in new data (prevents section from hiding) - unless resetting
+                step: cleanReset ? (newCoin.step || 0)
+                  : (newCoin.step !== undefined && newCoin.step > 0 ? newCoin.step : prevCoin.step),
                 // Use smart status preservation (see above)
                 status: mergedStatus,
-                // Preserve step_details if not in new data
-                step_details: newCoin.step_details || prevCoin.step_details,
-                // Preserve reference_candle if not in new data
-                reference_candle: newCoin.reference_candle || prevCoin.reference_candle,
-                // Preserve entry_candle if not in new data
-                entry_candle: newCoin.entry_candle || prevCoin.entry_candle,
+                // Preserve step_details if not in new data - unless resetting
+                step_details: cleanReset ? newCoin.step_details : (newCoin.step_details || prevCoin.step_details),
+                // Preserve reference_candle if not in new data - unless resetting to watching
+                reference_candle: isResettingToWatching ? newCoin.reference_candle : (newCoin.reference_candle || prevCoin.reference_candle),
+                // Preserve entry_candle if not in new data - unless resetting
+                entry_candle: isResettingToWatching ? newCoin.entry_candle : (newCoin.entry_candle || prevCoin.entry_candle),
                 // Preserve current_price if not in new data (prevents price flickering)
                 current_price: newCoin.current_price || prevCoin.current_price,
                 // Preserve volume data if not in new data
@@ -303,22 +380,31 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
                   // CRITICAL: Preserve step and status to prevent UI flicker
                   // Smart status preservation (same logic as strategies merge above)
+                  // EXCEPTION: Allow regression from position_running/position_closed to watching
                   const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+                  const step4Statuses = ['position_running', 'position_closed'];
                   const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+                  const prevWasStep4 = step4Statuses.includes(prevCoin.status || '');
                   const hasReferenceCandle = newCoin.reference_candle || prevCoin.reference_candle;
                   const newStatusIsRegression = newCoin.status === 'watching' || !newCoin.status;
 
-                  const mergedStatus = (prevWasStep2 && hasReferenceCandle && newStatusIsRegression)
+                  const shouldPreserve = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
+
+                  const mergedStatus = shouldPreserve
                     ? prevCoin.status
                     : (newCoin.status || prevCoin.status);
 
+                  const isResettingToWatching = newCoin.status === 'watching' && (prevWasStep4 || !newCoin.reference_candle);
+                  const cleanReset = prevWasStep4 && newStatusIsRegression;
+
                   return {
                     ...newCoin,
-                    step: newCoin.step !== undefined && newCoin.step > 0 ? newCoin.step : prevCoin.step,
+                    step: cleanReset ? (newCoin.step || 0)
+                      : (newCoin.step !== undefined && newCoin.step > 0 ? newCoin.step : prevCoin.step),
                     status: mergedStatus,
-                    step_details: newCoin.step_details || prevCoin.step_details,
-                    reference_candle: newCoin.reference_candle || prevCoin.reference_candle,
-                    entry_candle: newCoin.entry_candle || prevCoin.entry_candle,
+                    step_details: cleanReset ? newCoin.step_details : (newCoin.step_details || prevCoin.step_details),
+                    reference_candle: isResettingToWatching ? newCoin.reference_candle : (newCoin.reference_candle || prevCoin.reference_candle),
+                    entry_candle: isResettingToWatching ? newCoin.entry_candle : (newCoin.entry_candle || prevCoin.entry_candle),
                     current_price: newCoin.current_price || prevCoin.current_price,
                     volume_multiplier: newCoin.volume_multiplier ?? prevCoin.volume_multiplier,
                     volume_threshold: newCoin.volume_threshold ?? prevCoin.volume_threshold,
@@ -375,20 +461,29 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
           // CRITICAL: Smart status preservation to prevent UI flicker
           // If we were in Step 2 (have reference_candle) and the new update would regress
-          // to 'watching', preserve the previous status unless it's a legitimate state change
+          // to 'watching', preserve the previous status unless it's a legitimate state change.
+          // EXCEPTION: Allow regression from position_running/position_closed to watching.
           const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+          const step4Statuses = ['position_running', 'position_closed'];
           const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+          const prevWasStep4 = step4Statuses.includes(prevCoin.status || '');
           const hasReferenceCandle = update.reference_candle || prevCoin.reference_candle;
           const newStatusIsRegression = update.status === 'watching' || !update.status;
 
-          // Determine if this is a legitimate step change or a regressive update
-          const shouldPreserveStep2 = prevWasStep2 && hasReferenceCandle && newStatusIsRegression;
+          // Only preserve Step 2 when NOT coming from Step 4
+          const shouldPreserveStep2 = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
+          // Clean reset: transitioning from position back to watching
+          const cleanReset = prevWasStep4 && newStatusIsRegression;
+          const isResettingToWatching = update.status === 'watching' && (prevWasStep4 || !update.reference_candle);
 
           // Update status with smart preservation
           coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
 
           // Update step - never regress from Step 2+ to Step 1 if we have reference_candle
-          if (update.current_step !== undefined && update.current_step > 0) {
+          // BUT allow regression from Step 4 (position) back to Step 1
+          if (cleanReset) {
+            coin.step = update.current_step || 0;
+          } else if (update.current_step !== undefined && update.current_step > 0) {
             // If update has a valid step, use it unless it's a regression with reference_candle
             if (shouldPreserveStep2 && update.current_step < (prevCoin.step || 1)) {
               coin.step = prevCoin.step; // Preserve higher step
@@ -401,12 +496,16 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
           // Preserve or update other fields
           coin.total_steps = update.total_steps || prevCoin.total_steps;
-          coin.step_details = update.step_details || prevCoin.step_details;
+          coin.step_details = cleanReset ? update.step_details : (update.step_details || prevCoin.step_details);
           coin.direction = (update.direction as 'long' | 'short' | 'neutral' | undefined) || prevCoin.direction;
           coin.updated_at = update.updated_at;
 
           // Preserve reference_candle - critical for Step 2 display
-          coin.reference_candle = update.reference_candle || prevCoin.reference_candle;
+          // BUT clear it when resetting to watching (position closed lifecycle)
+          coin.reference_candle = isResettingToWatching ? update.reference_candle : (update.reference_candle || prevCoin.reference_candle);
+
+          // Preserve entry_candle - critical for Step 3/4 display
+          coin.entry_candle = isResettingToWatching ? update.entry_candle : (update.entry_candle || prevCoin.entry_candle);
 
           // Update entry levels with real-time price data
           if (update.entry_levels) {
@@ -421,6 +520,16 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             // Preserve existing current_price if not in update
             coin.current_price = prevCoin.current_price;
           }
+
+          // Preserve full entry_levels object
+          coin.entry_levels = update.entry_levels || prevCoin.entry_levels;
+
+          // Position tracking fields - critical for Step 4 display
+          coin.has_active_position = update.has_active_position ?? prevCoin.has_active_position;
+          coin.position_entry_price = update.position_entry_price || prevCoin.position_entry_price;
+          coin.chain_id = update.chain_id || prevCoin.chain_id;
+          coin.position_opened_at = update.position_opened_at || prevCoin.position_opened_at;
+          coin.seconds_ref_to_entry = update.seconds_ref_to_entry ?? prevCoin.seconds_ref_to_entry;
 
           // Update volume progress if available
           if (update.volume_progress) {
@@ -448,15 +557,22 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             const coin = { ...prevCoin };
 
             // CRITICAL: Same smart preservation logic as above
+            // EXCEPTION: Allow regression from position_running/position_closed to watching
             const step2Statuses = ['accumulation', 'consolidating', 'ready'];
+            const step4Statuses = ['position_running', 'position_closed'];
             const prevWasStep2 = step2Statuses.includes(prevCoin.status || '');
+            const prevWasStep4 = step4Statuses.includes(prevCoin.status || '');
             const hasReferenceCandle = update.reference_candle || prevCoin.reference_candle;
             const newStatusIsRegression = update.status === 'watching' || !update.status;
-            const shouldPreserveStep2 = prevWasStep2 && hasReferenceCandle && newStatusIsRegression;
+            const shouldPreserveStep2 = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
+            const cleanReset = prevWasStep4 && newStatusIsRegression;
+            const isResettingToWatching = update.status === 'watching' && (prevWasStep4 || !update.reference_candle);
 
             coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
 
-            if (update.current_step !== undefined && update.current_step > 0) {
+            if (cleanReset) {
+              coin.step = update.current_step || 0;
+            } else if (update.current_step !== undefined && update.current_step > 0) {
               if (shouldPreserveStep2 && update.current_step < (prevCoin.step || 1)) {
                 coin.step = prevCoin.step;
               } else {
@@ -467,7 +583,10 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             }
 
             coin.direction = (update.direction as 'long' | 'short' | 'neutral' | undefined) || prevCoin.direction;
-            coin.reference_candle = update.reference_candle || prevCoin.reference_candle;
+            coin.reference_candle = isResettingToWatching ? update.reference_candle : (update.reference_candle || prevCoin.reference_candle);
+
+            // Preserve entry_candle - critical for Step 3/4 display
+            coin.entry_candle = isResettingToWatching ? update.entry_candle : (update.entry_candle || prevCoin.entry_candle);
 
             if (update.entry_levels) {
               coin.current_price = update.entry_levels.current_price || prevCoin.current_price;
@@ -477,6 +596,16 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
                     update.entry_levels.entry_price) * 100;
               }
             }
+
+            // Preserve full entry_levels object
+            coin.entry_levels = update.entry_levels || prevCoin.entry_levels;
+
+            // Position tracking fields - critical for Step 4 display
+            coin.has_active_position = update.has_active_position ?? prevCoin.has_active_position;
+            coin.position_entry_price = update.position_entry_price || prevCoin.position_entry_price;
+            coin.chain_id = update.chain_id || prevCoin.chain_id;
+            coin.position_opened_at = update.position_opened_at || prevCoin.position_opened_at;
+            coin.seconds_ref_to_entry = update.seconds_ref_to_entry ?? prevCoin.seconds_ref_to_entry;
 
             if (update.volume_progress) {
               coin.volume_multiplier = update.volume_progress.current_ratio;
@@ -501,8 +630,30 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
         symbol: data?.symbol,
         closeReason: data?.close_reason,
       });
+      // Force-clear stale state for this symbol immediately (before refetch)
+      if (data?.symbol) {
+        forceClearSymbolState(data.symbol);
+      }
       // Refresh after a short delay to allow backend to unsuppress and update state
       setTimeout(() => fetchStrategies(), 1000);
+    };
+
+    // CHAIN_LIFECYCLE_UPDATE: Composite event from PositionLifecycleCoordinator.
+    // Contains chain close + pattern reset + capacity update in one event.
+    // This is the primary event for position close - force-clear stale coin state.
+    const handleChainLifecycleUpdate = (event: WSEvent) => {
+      const data = event.data;
+      const symbol = data?.chain?.symbol || data?.pattern?.symbol;
+      console.log('[useEntryDecisionStrategies] CHAIN_LIFECYCLE_UPDATE - clearing stale state', {
+        symbol,
+        patternStatus: data?.pattern?.status,
+        closeReason: data?.chain?.close_reason,
+      });
+      if (symbol) {
+        forceClearSymbolState(symbol);
+      }
+      // Refresh to get fresh data from backend
+      setTimeout(() => fetchStrategies(), 500);
     };
 
     // POSITION_CREATED: When entry fills, symbol is suppressed. Refresh to reflect new state.
@@ -526,6 +677,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
     wsService.subscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
     wsService.subscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
     wsService.subscribe('CHAIN_CLOSED', handleChainClosed);
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
     wsService.subscribe('POSITION_CREATED', handlePositionCreated);
     wsService.onConnect(handleConnect);
     wsService.onDisconnect(handleDisconnect);
@@ -549,6 +701,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
       wsService.unsubscribe('ENTRY_DECISION_UPDATE', handleStrategyUpdate);
       wsService.unsubscribe('ENTRY_DECISION_PATTERN_UPDATE', handlePatternUpdate);
       wsService.unsubscribe('CHAIN_CLOSED', handleChainClosed);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
       wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.offConnect(handleConnect);
       wsService.offDisconnect(handleDisconnect);

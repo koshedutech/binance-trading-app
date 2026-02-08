@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"binance-trading-bot/internal/database"
@@ -232,20 +233,38 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		closeReason = string(orders.CloseReasonTPHit)
 	}
 
+	// Calculate realized PnL - ALGO_UPDATE events have RealizedProfit=0,
+	// so we compute from entry vs close price when needed
+	realizedPnL := event.RealizedProfit
+	if realizedPnL == 0 && chain.EntryPrice != nil && *chain.EntryPrice > 0 &&
+		chain.EntryQuantity != nil && *chain.EntryQuantity > 0 && event.FilledPrice > 0 {
+		if strings.ToUpper(chain.Side) == "LONG" {
+			realizedPnL = (event.FilledPrice - *chain.EntryPrice) * *chain.EntryQuantity
+		} else {
+			realizedPnL = (*chain.EntryPrice - event.FilledPrice) * *chain.EntryQuantity
+		}
+		realizedPnL = math.Round(realizedPnL*10000) / 10000
+		plc.logger.Info().
+			Float64("calculated_pnl", realizedPnL).
+			Float64("entry_price", *chain.EntryPrice).
+			Float64("close_price", event.FilledPrice).
+			Float64("quantity", *chain.EntryQuantity).
+			Str("side", chain.Side).
+			Msg("PnL calculated from entry/close prices (ALGO_UPDATE lacks RealizedProfit)")
+	}
+
 	pnlPercent := 0.0
 	if chain.EntryPrice != nil && *chain.EntryPrice > 0 && chain.EntryQuantity != nil && *chain.EntryQuantity > 0 {
-		// PnL percentage = realized profit / (entry price * quantity) * 100
 		notionalValue := *chain.EntryPrice * *chain.EntryQuantity
 		if notionalValue > 0 {
-			pnlPercent = (event.RealizedProfit / notionalValue) * 100
-			// Round to 2 decimal places
+			pnlPercent = (realizedPnL / notionalValue) * 100
 			pnlPercent = math.Round(pnlPercent*100) / 100
 		}
 	}
 
 	// Step 6: Close chain in DB
 	closePrice := event.FilledPrice
-	if err := plc.db.CloseOrderChain(ctx, chain.ChainID, closeReason, event.RealizedProfit, event.Commission, &closePrice); err != nil {
+	if err := plc.db.CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, event.Commission, &closePrice); err != nil {
 		plc.logger.Error().Err(err).Str("chain_id", chain.ChainID).Msg("Failed to close order chain")
 		// Return Handled=true because we already modified state in steps 2-4 (SL/TP status,
 		// algo order cancellation). Returning Handled=false would cause GinieAutopilot to
@@ -255,14 +274,14 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 			ChainID:     chain.ChainID,
 			Symbol:      chain.Symbol,
 			CloseReason: closeReason,
-			RealizedPnL: event.RealizedProfit,
+			RealizedPnL: realizedPnL,
 		}, fmt.Errorf("failed to close order chain: %w", err)
 	}
 
 	plc.logger.Info().
 		Str("chain_id", chain.ChainID).
 		Str("close_reason", closeReason).
-		Float64("pnl", event.RealizedProfit).
+		Float64("pnl", realizedPnL).
 		Float64("pnl_percent", pnlPercent).
 		Msg("Chain closed")
 
@@ -316,7 +335,7 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 			"side":         chain.Side,
 			"close_reason": closeReason,
 			"close_price":  event.FilledPrice,
-			"realized_pnl": event.RealizedProfit,
+			"realized_pnl": realizedPnL,
 			"pnl_percent":  pnlPercent,
 			"total_fees":   event.Commission,
 			"mode":         chain.Mode,
@@ -350,7 +369,7 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		"chain_id":     chain.ChainID,
 		"symbol":       chain.Symbol,
 		"close_reason": closeReason,
-		"realized_pnl": event.RealizedProfit,
+		"realized_pnl": realizedPnL,
 		"mode":         chain.Mode,
 		"mode_code":    chain.ModeCode,
 		"timeframe":    chain.Timeframe,
@@ -361,7 +380,7 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		ChainID:      chain.ChainID,
 		Symbol:       chain.Symbol,
 		CloseReason:  closeReason,
-		RealizedPnL:  event.RealizedProfit,
+		RealizedPnL:  realizedPnL,
 		PnLPercent:   pnlPercent,
 		CapacityUsed: capacityUsed,
 		ScanEnabled:  scanEnabled,

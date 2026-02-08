@@ -26,6 +26,7 @@ type UserDataStream struct {
 	onOrderUpdate    func(*OrderUpdateEvent)
 	onPositionUpdate func(*PositionUpdateEvent)
 	onConnect        func() // Called after successful WebSocket connection/reconnection
+	onAlgoUpdate     func(*AlgoUpdateEvent)
 
 	// Cached data from stream
 	positions      map[string]*StreamPosition
@@ -112,6 +113,35 @@ type OrderUpdateData struct {
 	RealizedProfit      float64 `json:"rp,string"`
 }
 
+// AlgoUpdateEvent represents an ALGO_UPDATE event from the user data stream
+// This is sent when algo/conditional orders (SL/TP) change status
+type AlgoUpdateEvent struct {
+	EventType       string         `json:"e"`
+	EventTime       int64          `json:"E"`
+	TransactionTime int64          `json:"T"`
+	Order           AlgoUpdateData `json:"o"`
+}
+
+type AlgoUpdateData struct {
+	ClientAlgoId string  `json:"caid"`
+	AlgoId       int64   `json:"aid"`
+	AlgoType     string  `json:"at"`       // CONDITIONAL
+	OrderType    string  `json:"o"`        // STOP, TAKE_PROFIT, etc.
+	Symbol       string  `json:"s"`
+	Side         string  `json:"S"`        // BUY, SELL
+	PositionSide string  `json:"ps"`       // BOTH, LONG, SHORT
+	TimeInForce  string  `json:"f"`
+	Quantity     float64 `json:"q,string"`
+	AlgoStatus   string  `json:"X"`        // NEW, TRIGGERED, FINISHED, CANCELED, REJECTED, EXPIRED
+	ActualOrderId string `json:"ai"`       // Sub-order ID in matching engine (empty until triggered)
+	AvgFillPrice float64 `json:"ap,string"` // Average fill price from matching engine
+	ExecutedQty  float64 `json:"aq,string"` // Executed quantity from matching engine
+	TriggerPrice float64 `json:"tp,string"`
+	OrderPrice   float64 `json:"p,string"`
+	WorkingType  string  `json:"wt"`
+	ClosePosition bool   `json:"cp"`
+}
+
 // PositionUpdateEvent is a simplified position update for callbacks
 type PositionUpdateEvent struct {
 	Symbol        string
@@ -184,6 +214,13 @@ func (s *UserDataStream) SetPositionUpdateCallback(cb func(*PositionUpdateEvent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onPositionUpdate = cb
+}
+
+// SetAlgoUpdateCallback sets the callback for algo order updates (SL/TP status changes)
+func (s *UserDataStream) SetAlgoUpdateCallback(cb func(*AlgoUpdateEvent)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onAlgoUpdate = cb
 }
 
 // SetOnConnectCallback sets the callback for when WebSocket connects/reconnects.
@@ -392,8 +429,16 @@ func (s *UserDataStream) handleMessage(message []byte) {
 		log.Printf("[USER-DATA-STREAM] Listen key expired, refreshing...")
 		s.refreshListenKey()
 
+	case "ALGO_UPDATE":
+		s.handleAlgoUpdate(message)
+
+	case "CONDITIONAL_ORDER_TRIGGER_REJECT":
+		log.Printf("[USER-DATA-STREAM] Conditional order trigger REJECTED! Raw: %s", string(message))
+		// Treat as algo update with rejected status
+		s.handleAlgoUpdate(message)
+
 	case "MARGIN_CALL":
-		log.Printf("[USER-DATA-STREAM] ⚠️ MARGIN CALL received!")
+		log.Printf("[USER-DATA-STREAM] MARGIN CALL received!")
 
 	default:
 		log.Printf("[USER-DATA-STREAM] Unknown event type: %s", baseEvent.EventType)
@@ -500,6 +545,32 @@ func (s *UserDataStream) handleOrderUpdate(message []byte) {
 	// Call order callback
 	if s.onOrderUpdate != nil {
 		go s.onOrderUpdate(&event)
+	}
+}
+
+// handleAlgoUpdate processes ALGO_UPDATE events for algo/conditional orders (SL/TP)
+func (s *UserDataStream) handleAlgoUpdate(message []byte) {
+	var event AlgoUpdateEvent
+	if err := json.Unmarshal(message, &event); err != nil {
+		log.Printf("[USER-DATA-STREAM] Failed to parse ALGO_UPDATE: %v", err)
+		return
+	}
+
+	s.mu.Lock()
+	s.lastUpdateTime = time.Now()
+	s.mu.Unlock()
+
+	log.Printf("[USER-DATA-STREAM] Algo %s: %s %s %s algoId=%d status=%s triggerPrice=%.4f avgPrice=%.4f",
+		event.Order.AlgoStatus, event.Order.Symbol, event.Order.Side,
+		event.Order.OrderType, event.Order.AlgoId,
+		event.Order.AlgoStatus, event.Order.TriggerPrice, event.Order.AvgFillPrice)
+
+	// Call algo update callback
+	s.mu.RLock()
+	cb := s.onAlgoUpdate
+	s.mu.RUnlock()
+	if cb != nil {
+		go cb(&event)
 	}
 }
 

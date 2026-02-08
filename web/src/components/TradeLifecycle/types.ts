@@ -159,6 +159,19 @@ export interface OrderChain {
     one_r_trigger: number;
     side: string;
   };
+  // SL modification history from Ravindra monitor (breakeven, profit lock)
+  slModifications?: SLModification[];
+}
+
+// SL modification event for order tree display
+export interface SLModification {
+  sequence: number;
+  oldPrice?: number;
+  newPrice: number;
+  reason?: string;
+  source?: string;
+  binanceOrderId?: number;
+  timestamp: string; // ISO 8601
 }
 
 // Story 11.40: Position Analytics for Chain View

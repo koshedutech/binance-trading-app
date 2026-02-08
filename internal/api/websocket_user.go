@@ -306,6 +306,14 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 		// Composite chain lifecycle update (close + pattern reset + capacity)
 		BroadcastChainLifecycleUpdateEvent(userID, data)
 	})
+	events.SetBroadcastSLTPPlaced(func(userID string, data interface{}) {
+		// SL/TP placed broadcasts (orders placed after entry fill)
+		BroadcastSLTPPlacedEvent(userID, data)
+	})
+	events.SetBroadcastPnLCorrected(func(userID string, data interface{}) {
+		// PnL corrected broadcasts (real PnL from ORDER_TRADE_UPDATE)
+		BroadcastPnLCorrectedEvent(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -706,6 +714,52 @@ func BroadcastChainLifecycleUpdateEvent(userID string, lifecycleData interface{}
 
 	event := events.Event{
 		Type:      events.EventChainLifecycleUpdate,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastSLTPPlacedEvent broadcasts a SL/TP placed event to a specific user
+// Called after SL and TP orders are placed for a new position
+func BroadcastSLTPPlacedEvent(userID string, slTPData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	data, ok := slTPData.(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{
+			"sl_tp_placed": slTPData,
+		}
+	}
+
+	event := events.Event{
+		Type:      events.EventSLTPPlaced,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastPnLCorrectedEvent broadcasts a PnL correction event to a specific user
+// Called when real PnL from ORDER_TRADE_UPDATE replaces calculated values from ALGO_UPDATE
+func BroadcastPnLCorrectedEvent(userID string, pnlData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	data, ok := pnlData.(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{
+			"pnl_corrected": pnlData,
+		}
+	}
+
+	event := events.Event{
+		Type:      events.EventPnLCorrected,
 		Timestamp: time.Now(),
 		Data:      data,
 	}

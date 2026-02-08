@@ -823,6 +823,10 @@ func main() {
 				futuresAutopilotController.HandleStreamAccountUpdate(update)
 			})
 
+			stream.SetAlgoUpdateCallback(func(update *binance.AlgoUpdateEvent) {
+				futuresAutopilotController.HandleStreamAlgoUpdate(update)
+			})
+
 			// CRITICAL: Set onConnect callback to sync state from Binance REST API.
 			// This fixes stale data issues where orders/positions closed while
 			// WebSocket was disconnected would show as "active" indefinitely.
@@ -1043,10 +1047,11 @@ func main() {
 		// Wire real client callback: when a user's real Binance client is created,
 		// update the global FuturesController so the User Data Stream receives
 		// real WebSocket fill events instead of mock data
-		userAutopilotManager.SetOnRealClientCreated(func(realClient binance.FuturesClient) {
+		userAutopilotManager.SetOnRealClientCreated(func(realClient binance.FuturesClient, userID string) {
 			if futuresAutopilotController != nil {
-				logger.Info("Real Binance client created - updating FuturesController and User Data Stream")
+				logger.Info("Real Binance client created - updating FuturesController and User Data Stream", "user_id", userID)
 				futuresAutopilotController.SetFuturesClient(realClient)
+				futuresAutopilotController.SetOwnerUserID(userID)
 			}
 		})
 

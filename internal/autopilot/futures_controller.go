@@ -592,6 +592,23 @@ type FuturesController struct {
 
 	// Callback when futures client is updated (for re-initializing UserDataStream)
 	onClientUpdate func(client binance.FuturesClient)
+
+	// pendingAlgoSubOrders maps sub-order IDs from algo triggers to chain info
+	// Key: sub-order ID (from ALGO_UPDATE ActualOrderId), Value: chain details
+	// Used to correlate ORDER_TRADE_UPDATE (has real PnL) with ALGO_UPDATE (has chain lookup)
+	pendingAlgoSubOrders   map[int64]pendingAlgoInfo
+	pendingAlgoSubOrdersMu sync.Mutex
+}
+
+// pendingAlgoInfo stores chain details for mapping algo sub-orders to their chains.
+// When ALGO_UPDATE fires (TRIGGERED/FINISHED), we store the sub-order ID so that when
+// ORDER_TRADE_UPDATE arrives with real PnL/Commission, we can update the chain's DB record.
+type pendingAlgoInfo struct {
+	ChainID   string
+	AlgoID    int64
+	OrderType string // "SL" or "TP"
+	Symbol    string
+	StoredAt  time.Time
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -771,6 +788,8 @@ func NewFuturesController(
 		ginieAnalyzer:       ginieAn,
 		// Ginie autopilot
 		ginieAutopilot:      ginieAuto,
+		// Algo sub-order tracking for PnL correction
+		pendingAlgoSubOrders: make(map[int64]pendingAlgoInfo),
 	}
 }
 
@@ -2121,6 +2140,55 @@ func (fc *FuturesController) syncWithActualPositions() {
 		} else {
 			fc.logger.Debug("TP/SL orders already exist for synced position",
 				"symbol", pos.symbol)
+		}
+	}
+
+	// Step: Reconcile DB chains that have no matching Binance position.
+	// This catches missed ALGO_UPDATE events (e.g. SL/TP filled while app was down).
+	// Only close chains that have been ACTIVE for at least 2 minutes to avoid
+	// closing newly-placed entries that haven't appeared in API yet.
+	if fc.repo != nil && fc.ownerUserID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		activeChains, err := fc.repo.GetDB().GetActiveOrderChains(ctx, fc.ownerUserID)
+		if err != nil {
+			fc.logger.Warn("Failed to get active chains for reconciliation", "error", err)
+		} else if len(activeChains) > 0 {
+			// Build set of actual position symbols (with side) from Binance
+			// actualPositionSymbols already built above
+
+			for _, chain := range activeChains {
+				// Grace period: skip chains created/updated less than 2 minutes ago
+				gracePeriod := 2 * time.Minute
+				chainAge := time.Since(chain.CreatedAt)
+				if chainAge < gracePeriod {
+					continue
+				}
+				if !chain.UpdatedAt.IsZero() && time.Since(chain.UpdatedAt) < gracePeriod {
+					continue
+				}
+
+				// Check if there's a matching position on Binance
+				posKey := positionMapKey(chain.Symbol, chain.Side)
+				if actualPositionSymbols[posKey] {
+					continue // Position exists on Binance, chain is valid
+				}
+
+				// Also check "BOTH" side for one-way mode
+				bothKey := positionMapKey(chain.Symbol, "BOTH")
+				if actualPositionSymbols[bothKey] {
+					continue
+				}
+
+				fc.logger.Warn("Reconciliation: ACTIVE chain has no matching Binance position - closing",
+					"chain_id", chain.ChainID,
+					"symbol", chain.Symbol,
+					"side", chain.Side,
+					"chain_age", chainAge.String())
+
+				fc.closeStaleChain(ctx, chain, "CLOSED_EXTERNALLY", 0.0)
+			}
 		}
 	}
 }
@@ -5300,6 +5368,54 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			"is_maker", order.IsMakerSide,
 			"order_status", order.OrderStatus)
 
+		// Check if this is a sub-order from an algo trigger (SL/TP)
+		// ALGO_UPDATE fires first with no PnL, ORDER_TRADE_UPDATE follows with real PnL
+		fc.pendingAlgoSubOrdersMu.Lock()
+		if algoInfo, exists := fc.pendingAlgoSubOrders[order.OrderId]; exists {
+			delete(fc.pendingAlgoSubOrders, order.OrderId)
+			fc.pendingAlgoSubOrdersMu.Unlock()
+
+			fc.logger.Info("Matched ORDER_TRADE_UPDATE to algo sub-order - updating real PnL",
+				"order_id", order.OrderId,
+				"chain_id", algoInfo.ChainID,
+				"algo_id", algoInfo.AlgoID,
+				"order_type", algoInfo.OrderType,
+				"realized_profit", order.RealizedProfit,
+				"commission", order.Commission,
+				"commission_asset", order.CommissionAsset)
+
+			// Update the chain in DB with real PnL and commission from Binance
+			if fc.ownerUserID != "" && order.RealizedProfit != 0 {
+				ctx := context.Background()
+				if fc.repo != nil {
+					// The chain is already closed by HandleStreamAlgoUpdate
+					// Now update with real PnL values from the actual trade
+					err := fc.repo.GetDB().UpdateClosedChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
+					if err != nil {
+						fc.logger.Error("Failed to update chain PnL from trade data",
+							"chain_id", algoInfo.ChainID,
+							"error", err)
+					} else {
+						fc.logger.Info("Updated chain with real PnL from ORDER_TRADE_UPDATE",
+							"chain_id", algoInfo.ChainID,
+							"realized_pnl", order.RealizedProfit,
+							"commission", order.Commission)
+
+						// Broadcast corrected PnL to frontend
+						events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
+							"chain_id":     algoInfo.ChainID,
+							"symbol":       algoInfo.Symbol,
+							"realized_pnl": order.RealizedProfit,
+							"commission":   order.Commission,
+						})
+					}
+				}
+			}
+			// Don't return - still let the normal TRADE processing continue for fee tracking etc.
+		} else {
+			fc.pendingAlgoSubOrdersMu.Unlock()
+		}
+
 		// CRITICAL: Handle SL/TP order fills - cancel counterpart orders
 		// When SL fills, cancel all TP orders. When TP fills, cancel SL order.
 		// This prevents orphaned conditional orders after position closes.
@@ -5468,6 +5584,187 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 				}
 			}
 		}
+	}
+}
+
+// HandleStreamAlgoUpdate processes real-time algo order updates from User Data Stream
+// This handles ALGO_UPDATE events which are sent for algo/conditional orders (SL/TP)
+// placed via /fapi/v1/algoOrder. The key difference from ORDER_TRADE_UPDATE is that
+// ALGO_UPDATE contains the algoId (which matches our stored sl_binance_order_id/tp_binance_order_id)
+// while ORDER_TRADE_UPDATE contains a sub-order orderId (which does NOT match).
+func (fc *FuturesController) HandleStreamAlgoUpdate(update *binance.AlgoUpdateEvent) {
+	if update == nil {
+		return
+	}
+
+	order := update.Order
+	fc.logger.Info("Stream: Algo order update",
+		"symbol", order.Symbol,
+		"algo_id", order.AlgoId,
+		"client_algo_id", order.ClientAlgoId,
+		"order_type", order.OrderType,
+		"algo_status", order.AlgoStatus,
+		"side", order.Side,
+		"position_side", order.PositionSide,
+		"avg_fill_price", order.AvgFillPrice,
+		"executed_qty", order.ExecutedQty,
+		"trigger_price", order.TriggerPrice)
+
+	switch order.AlgoStatus {
+	case "TRIGGERED", "FINISHED":
+		// Algo order has been triggered or fully finished - process as SL/TP fill
+		orderType := order.OrderType
+		if orderType == "STOP_MARKET" || orderType == "STOP" ||
+			orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+
+			fc.logger.Info("Algo SL/TP order triggered/finished - processing position close",
+				"symbol", order.Symbol,
+				"algo_id", order.AlgoId,
+				"order_type", orderType,
+				"algo_status", order.AlgoStatus,
+				"avg_fill_price", order.AvgFillPrice)
+
+			// Try Coordinator first for chain-based positions
+			coordinatorHandled := false
+			var result *HandleOrderFillResult
+			var activeCoordinator *PositionLifecycleCoordinator
+			if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
+				if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil {
+					activeCoordinator = inst.Coordinator
+				}
+			}
+			if activeCoordinator != nil && fc.ownerUserID != "" {
+				ctx := context.Background()
+				// Use AlgoId for lookup - this matches sl_binance_order_id/tp_binance_order_id in DB
+				fillPrice := order.AvgFillPrice
+				if fillPrice == 0 {
+					fillPrice = order.TriggerPrice // Fallback to trigger price
+				}
+				var err error
+				result, err = activeCoordinator.HandleOrderFill(ctx, OrderFillEvent{
+					UserID:          fc.ownerUserID,
+					Symbol:          order.Symbol,
+					OrderType:       orderType,
+					OrderID:         order.AlgoId, // KEY: Use algoId, not sub-order orderId
+					FilledPrice:     fillPrice,
+					RealizedProfit:  0, // Not available in ALGO_UPDATE - will be calculated from position
+					Commission:      0, // Not available in ALGO_UPDATE
+					BinanceTimestamp: update.TransactionTime,
+					PositionSide:    order.PositionSide,
+				})
+				if err != nil {
+					fc.logger.Error("Coordinator error for algo SL/TP fill",
+						"symbol", order.Symbol,
+						"algo_id", order.AlgoId,
+						"error", err)
+				}
+				if result != nil && result.Handled {
+					coordinatorHandled = true
+					fc.logger.Info("Algo chain position handled by Coordinator",
+						"symbol", order.Symbol,
+						"chain_id", result.ChainID,
+						"close_reason", result.CloseReason,
+						"pnl", result.RealizedPnL)
+				}
+			}
+
+			// Fallback to GinieAutopilot for legacy positions (non-chain)
+			if !coordinatorHandled && fc.ginieAutopilot != nil {
+				fc.logger.Info("Algo SL/TP - triggering legacy counterpart cancellation",
+					"symbol", order.Symbol,
+					"order_type", orderType,
+					"algo_id", order.AlgoId,
+					"algo_status", order.AlgoStatus)
+				fillPrice := order.AvgFillPrice
+				if fillPrice == 0 {
+					fillPrice = order.TriggerPrice
+				}
+				fc.ginieAutopilot.HandleSLTPOrderFilled(order.Symbol, orderType, order.AlgoId,
+					fillPrice, 0, 0, update.TransactionTime, order.PositionSide)
+			}
+
+			// Store sub-order ID mapping for ORDER_TRADE_UPDATE PnL correction
+			// ALGO_UPDATE has no RealizedProfit/Commission, but ORDER_TRADE_UPDATE does
+			if coordinatorHandled && result != nil && order.ActualOrderId != "" {
+				subOrderID, parseErr := strconv.ParseInt(order.ActualOrderId, 10, 64)
+				if parseErr == nil && subOrderID > 0 {
+					slOrTP := "SL"
+					if orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+						slOrTP = "TP"
+					}
+					fc.pendingAlgoSubOrdersMu.Lock()
+					fc.pendingAlgoSubOrders[subOrderID] = pendingAlgoInfo{
+						ChainID:   result.ChainID,
+						AlgoID:    order.AlgoId,
+						OrderType: slOrTP,
+						Symbol:    order.Symbol,
+						StoredAt:  time.Now(),
+					}
+					// Inline cleanup: remove stale entries older than 60 seconds
+					for id, info := range fc.pendingAlgoSubOrders {
+						if time.Since(info.StoredAt) > 60*time.Second {
+							delete(fc.pendingAlgoSubOrders, id)
+						}
+					}
+					fc.pendingAlgoSubOrdersMu.Unlock()
+					fc.logger.Info("Stored algo sub-order mapping for PnL correction",
+						"sub_order_id", subOrderID,
+						"chain_id", result.ChainID,
+						"algo_id", order.AlgoId,
+						"order_type", slOrTP)
+				}
+			}
+		}
+
+	case "NEW":
+		fc.logger.Debug("Algo order created",
+			"symbol", order.Symbol,
+			"algo_id", order.AlgoId,
+			"order_type", order.OrderType)
+
+	case "CANCELED", "EXPIRED":
+		fc.logger.Warn("Algo order canceled/expired",
+			"symbol", order.Symbol,
+			"algo_id", order.AlgoId,
+			"order_type", order.OrderType,
+			"algo_status", order.AlgoStatus,
+			"client_algo_id", order.ClientAlgoId)
+
+		// Trigger protection watchdog for canceled/expired SL/TP
+		orderType := order.OrderType
+		if orderType == "STOP_MARKET" || orderType == "STOP" ||
+			orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+			fc.logger.Warn("SL/TP algo order canceled/expired - protection may be needed",
+				"symbol", order.Symbol,
+				"algo_id", order.AlgoId,
+				"order_type", orderType)
+		}
+
+	case "REJECTED":
+		fc.logger.Error("Algo order REJECTED by matching engine",
+			"symbol", order.Symbol,
+			"algo_id", order.AlgoId,
+			"order_type", order.OrderType,
+			"client_algo_id", order.ClientAlgoId)
+	}
+
+	// Broadcast to frontend
+	if fc.ownerUserID != "" && fc.onOrderUpdate != nil {
+		fc.onOrderUpdate(fc.ownerUserID, map[string]interface{}{
+			"symbol":         order.Symbol,
+			"order_id":       order.AlgoId,
+			"client_id":      order.ClientAlgoId,
+			"type":           order.OrderType,
+			"side":           order.Side,
+			"quantity":       order.Quantity,
+			"price":          order.OrderPrice,
+			"trigger_price":  order.TriggerPrice,
+			"status":         order.AlgoStatus,
+			"execution_type": "ALGO_" + order.AlgoStatus,
+			"position_side":  order.PositionSide,
+			"avg_fill_price": order.AvgFillPrice,
+			"is_algo":        true,
+		})
 	}
 }
 
@@ -5757,6 +6054,24 @@ func (fc *FuturesController) reconcileFromHistoricalOrders(ctx context.Context, 
 // checkAndClosePositionIfNeeded checks if the position for a chain still exists on Binance
 // If not, closes the chain and position state in database
 func (fc *FuturesController) checkAndClosePositionIfNeeded(ctx context.Context, chain *orders.OrderChain) {
+	// Safety check: if SL/TP orders are still active (NEW status in DB), the position
+	// is still running with protection orders on Binance. Do NOT close based on cache alone.
+	// The handler-level reconciliation (reconcileStaleOrderChains) with proper Binance API
+	// checks will handle chains where SL/TP have actually been filled/canceled externally.
+	slActive := chain.SLBinanceOrderID != nil && *chain.SLBinanceOrderID > 0 &&
+		(chain.SLStatus == nil || *chain.SLStatus == "NEW")
+	tpActive := chain.TPBinanceOrderID != nil && *chain.TPBinanceOrderID > 0 &&
+		(chain.TPStatus == nil || *chain.TPStatus == "NEW")
+
+	if slActive || tpActive {
+		fc.logger.Info("SL/TP orders still active in DB - skipping cache-based close",
+			"chain_id", chain.ChainID,
+			"symbol", chain.Symbol,
+			"sl_active", slActive,
+			"tp_active", tpActive)
+		return
+	}
+
 	// Check if this position still exists in our activePositions cache
 	// chain.Side is "LONG" or "SHORT"
 	fc.mu.RLock()
@@ -5772,7 +6087,7 @@ func (fc *FuturesController) checkAndClosePositionIfNeeded(ctx context.Context, 
 		return
 	}
 
-	// Position no longer exists - close the chain
+	// Position no longer exists and no active SL/TP orders - close the chain
 	fc.logger.Info("Position no longer exists for filled entry - closing chain",
 		"chain_id", chain.ChainID,
 		"symbol", chain.Symbol)

@@ -19,7 +19,7 @@ import {
   Edit3,
   Timer,
 } from 'lucide-react';
-import { ChainOrder, PositionState, ORDER_TYPE_CONFIG, OrderTypeSuffix, PositionAnalyticsData } from './types';
+import { ChainOrder, PositionState, ORDER_TYPE_CONFIG, OrderTypeSuffix, PositionAnalyticsData, SLModification } from './types';
 import { formatDollarImpact } from './ModificationHistory';
 import type { ModificationEvent, ModifiableOrderType } from './ModificationHistory/types';
 
@@ -127,6 +127,8 @@ interface OrderTreeNodeProps {
   lifecycleStatus?: string;
   // Story 14.19: Chain closed timestamp for freezing timers
   chainClosedAt?: string;
+  // SL modification history from Ravindra monitor (breakeven, profit lock)
+  slModifications?: SLModification[];
 }
 
 // Get icon for node type
@@ -264,8 +266,11 @@ export default function OrderTreeNode({
   cancelReason,
   lifecycleStatus,
   chainClosedAt,
+  slModifications,
 }: OrderTreeNodeProps) {
-  const [expanded, setExpanded] = useState(false);
+  // Auto-expand SL node when modifications exist (at least 1 actual modification beyond initial placement)
+  const hasSLModifications = type === 'SL' && slModifications && slModifications.length > 1;
+  const [expanded, setExpanded] = useState(!!hasSLModifications);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
   const [loadingMods, setLoadingMods] = useState(false);
   const [duration, setDuration] = useState<string>('');
@@ -376,9 +381,12 @@ export default function OrderTreeNode({
   // Note: TP4 is included for future compatibility with ModifiableOrderType
   const isModifiable = ['SL', 'TP', 'TP1', 'TP2', 'TP3'].includes(type);
 
+  // Determine if this node has expandable content (legacy modifications OR SL modification history)
+  const hasExpandableContent = (isModifiable && modificationCount > 0) || hasSLModifications;
+
   // Handle expansion and lazy load modifications
   const handleToggleExpand = useCallback(async () => {
-    if (isModifiable && modificationCount > 0 && localModifications.length === 0 && onLoadModifications) {
+    if (isModifiable && modificationCount > 0 && localModifications.length === 0 && onLoadModifications && !hasSLModifications) {
       setLoadingMods(true);
       try {
         const mods = await onLoadModifications(type as ModifiableOrderType);
@@ -390,7 +398,7 @@ export default function OrderTreeNode({
       }
     }
     setExpanded(prev => !prev);
-  }, [isModifiable, modificationCount, localModifications.length, onLoadModifications, type]);
+  }, [isModifiable, modificationCount, localModifications.length, onLoadModifications, type, hasSLModifications]);
 
   // Tree connector characters
   const getConnector = () => {
@@ -412,22 +420,22 @@ export default function OrderTreeNode({
         {/* Node content */}
         <div
           className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-lg ${config.bgColor} border ${
-            isModifiable && modificationCount > 0 ? 'cursor-pointer hover:opacity-80' : ''
+            hasExpandableContent ? 'cursor-pointer hover:opacity-80' : ''
           } transition-opacity`}
-          onClick={isModifiable && modificationCount > 0 ? handleToggleExpand : undefined}
-          onKeyDown={isModifiable && modificationCount > 0 ? (e) => {
+          onClick={hasExpandableContent ? handleToggleExpand : undefined}
+          onKeyDown={hasExpandableContent ? (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               handleToggleExpand();
             }
           } : undefined}
-          role={isModifiable && modificationCount > 0 ? 'button' : undefined}
-          tabIndex={isModifiable && modificationCount > 0 ? 0 : undefined}
-          aria-expanded={isModifiable && modificationCount > 0 ? expanded : undefined}
-          aria-label={isModifiable && modificationCount > 0 ? `${config.label} order with ${modificationCount} modifications. ${expanded ? 'Click to collapse' : 'Click to expand'}` : undefined}
+          role={hasExpandableContent ? 'button' : undefined}
+          tabIndex={hasExpandableContent ? 0 : undefined}
+          aria-expanded={hasExpandableContent ? expanded : undefined}
+          aria-label={hasExpandableContent ? `${config.label} order with ${hasSLModifications ? (slModifications?.length || 0) - 1 : modificationCount} modifications. ${expanded ? 'Click to collapse' : 'Click to expand'}` : undefined}
         >
           {/* Expand/collapse icon for modifiable orders */}
-          {isModifiable && modificationCount > 0 && (
+          {hasExpandableContent && (
             <div className="flex-shrink-0">
               {expanded ? (
                 <ChevronDown className="w-4 h-4 text-gray-400" />
@@ -759,8 +767,33 @@ export default function OrderTreeNode({
         </div>
       </div>
 
-      {/* Expanded modification history - Rendered as child tree nodes */}
-      {expanded && isModifiable && (
+      {/* Expanded SL modification history - Tree structure from chain events */}
+      {expanded && hasSLModifications && slModifications && (
+        <div className="mt-1 space-y-1">
+          {slModifications
+            .sort((a, b) => a.sequence - b.sequence)
+            .map((mod, idx) => (
+              <SLModificationTreeNode
+                key={mod.sequence}
+                modification={mod}
+                index={idx}
+                total={slModifications.length}
+                depth={depth + 1}
+                isLast={idx === slModifications.length - 1}
+                isCurrent={idx === slModifications.length - 1}
+                formatTime={formatTime}
+                entryPrice={entryPrice}
+                entryQuantity={entryQuantity}
+                positionSide={positionSide}
+                feeRate={feeRate}
+              />
+            ))
+          }
+        </div>
+      )}
+
+      {/* Expanded legacy modification history - Rendered as child tree nodes */}
+      {expanded && isModifiable && !hasSLModifications && (
         <div className="mt-1 space-y-1">
           {loadingMods ? (
             <div className="text-sm text-gray-500 animate-pulse py-2" style={{ marginLeft: `${(depth + 1) * 24}px` }}>
@@ -916,6 +949,181 @@ function ModificationTreeNode({
         {/* Timestamp */}
         <span className="text-gray-500">
           {formatTime(modification.createdAt)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// Sub-component for rendering a single SL modification from chain events
+interface SLModificationTreeNodeProps {
+  modification: SLModification;
+  index: number;
+  total: number;
+  depth: number;
+  isLast: boolean;
+  isCurrent: boolean;
+  formatTime?: (timestamp: string | number) => string;
+  entryPrice?: number;
+  entryQuantity?: number;
+  positionSide: 'LONG' | 'SHORT';
+  feeRate?: number;
+}
+
+function SLModificationTreeNode({
+  modification,
+  index,
+  total,
+  depth,
+  isLast,
+  isCurrent,
+  formatTime = defaultFormatTime,
+  entryPrice,
+  entryQuantity,
+  positionSide,
+  feeRate = 0.0005,
+}: SLModificationTreeNodeProps) {
+  const getConnector = () => {
+    if (depth === 0) return '';
+    return isLast ? '\u2514\u2500\u2500 ' : '\u251C\u2500\u2500 '; // -- or ---
+  };
+
+  const isInitial = index === 0;
+  const isModification = !isInitial && modification.oldPrice != null;
+
+  // Determine if this is a favorable SL move (closer to entry = locking profit)
+  // For LONG: SL moving up = good (locking profit), SL moving down = bad (more risk)
+  // For SHORT: SL moving down = good (locking profit), SL moving up = bad (more risk)
+  let isFavorable = false;
+  if (isModification && modification.oldPrice != null) {
+    const priceDiff = modification.newPrice - modification.oldPrice;
+    isFavorable = positionSide === 'LONG' ? priceDiff > 0 : priceDiff < 0;
+  }
+
+  // Calculate P&L impact if SL hit at this level
+  let pnlAtLevel: { pnl: number; pnlPercent: number } | null = null;
+  if (entryPrice && entryPrice > 0 && entryQuantity && entryQuantity > 0) {
+    let grossPnL: number;
+    if (positionSide === 'LONG') {
+      grossPnL = (modification.newPrice - entryPrice) * entryQuantity;
+    } else {
+      grossPnL = (entryPrice - modification.newPrice) * entryQuantity;
+    }
+    const entryValue = entryPrice * entryQuantity;
+    const exitValue = modification.newPrice * entryQuantity;
+    const totalFees = (entryValue + exitValue) * feeRate;
+    const netPnL = grossPnL - totalFees;
+    const pnlPercent = entryValue > 0 ? (netPnL / entryValue) * 100 : 0;
+    pnlAtLevel = { pnl: netPnL, pnlPercent };
+  }
+
+  // Get source display
+  const getSourceDisplay = () => {
+    switch (modification.source) {
+      case 'TRAILING_STOP':
+        return { label: 'Ravindra', color: 'text-yellow-400', bg: 'bg-yellow-500/20' };
+      case 'LLM_AUTO':
+        return { label: 'AI', color: 'text-purple-400', bg: 'bg-purple-500/20' };
+      case 'USER_MANUAL':
+        return { label: 'Manual', color: 'text-blue-400', bg: 'bg-blue-500/20' };
+      default:
+        return { label: 'System', color: 'text-gray-400', bg: 'bg-gray-500/20' };
+    }
+  };
+
+  const sourceDisplay = getSourceDisplay();
+
+  // Background color based on favorability
+  const bgColor = isInitial
+    ? 'bg-gray-800/30'
+    : isFavorable
+    ? 'bg-green-900/20'
+    : 'bg-red-900/20';
+
+  // Border color for current active SL
+  const borderClass = isCurrent
+    ? 'border-yellow-500/50'
+    : 'border-gray-700/30';
+
+  // Format short reason for display
+  const shortReason = modification.reason
+    ? modification.reason
+        .replace('Move to breakeven at ', 'BE @ ')
+        .replace('Move to ', '')
+        .replace(' level at ', ' @ ')
+    : '';
+
+  return (
+    <div className="flex items-start">
+      {/* Tree connector */}
+      <span className="font-mono text-gray-600 select-none whitespace-pre" style={{ minWidth: `${depth * 24}px` }}>
+        {getConnector()}
+      </span>
+
+      {/* Modification content */}
+      <div className={`flex-1 flex items-center gap-2 px-2 py-1.5 rounded-lg ${bgColor} border ${borderClass} text-xs`}>
+        {/* Version/sequence indicator */}
+        <span className={`flex items-center justify-center w-5 h-5 rounded-full font-mono text-[10px] ${
+          isInitial ? 'bg-gray-700 text-gray-300' : isFavorable ? 'bg-green-700 text-green-300' : 'bg-red-700 text-red-300'
+        }`}>
+          {isInitial ? '#' : index}
+        </span>
+
+        {/* Event label */}
+        {isInitial ? (
+          <span className="text-gray-400">Original</span>
+        ) : (
+          <span className={isFavorable ? 'text-green-400' : 'text-red-400'}>
+            {isFavorable ? 'Tightened' : 'Widened'}
+          </span>
+        )}
+
+        {/* Source badge */}
+        {!isInitial && (
+          <span className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${sourceDisplay.bg} ${sourceDisplay.color}`}>
+            <span>{sourceDisplay.label}</span>
+          </span>
+        )}
+
+        {/* Price change display */}
+        {isModification && modification.oldPrice != null ? (
+          <span className="text-gray-400 font-mono">
+            ${modification.oldPrice.toFixed(4)} <span className="text-gray-600">-&gt;</span> <span className={isFavorable ? 'text-green-400' : 'text-red-400'}>${modification.newPrice.toFixed(4)}</span>
+          </span>
+        ) : (
+          <span className="text-gray-400 font-mono">
+            ${modification.newPrice.toFixed(4)}
+          </span>
+        )}
+
+        {/* P&L if SL hit at this level */}
+        {pnlAtLevel && (
+          <span className={`font-medium font-mono ${pnlAtLevel.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+            {pnlAtLevel.pnl >= 0 ? '+' : ''}${pnlAtLevel.pnl.toFixed(2)}
+            <span className="text-[10px] ml-0.5">({pnlAtLevel.pnlPercent >= 0 ? '+' : ''}{pnlAtLevel.pnlPercent.toFixed(1)}%)</span>
+          </span>
+        )}
+
+        {/* Current indicator */}
+        {isCurrent && !isInitial && (
+          <span className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 font-medium">
+            Current
+          </span>
+        )}
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Reason */}
+        {shortReason && !isInitial && (
+          <span className="text-gray-500 truncate max-w-[180px]" title={modification.reason}>
+            {shortReason}
+          </span>
+        )}
+
+        {/* Timestamp */}
+        <span className="text-gray-500">
+          {formatTime(modification.timestamp)}
         </span>
       </div>
     </div>
