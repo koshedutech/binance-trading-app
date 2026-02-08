@@ -168,6 +168,10 @@ type UserAutopilotManager struct {
 	// WebSocket market data cache for mark prices (avoids REST API rate limiting)
 	marketDataCache *binance.MarketDataCache
 
+	// Callback when a real Binance client is created for a user
+	// Used to update the global FuturesController and restart the User Data Stream
+	onRealClientCreated func(binance.FuturesClient)
+
 	mu sync.RWMutex
 }
 
@@ -386,6 +390,16 @@ func (m *UserAutopilotManager) SetChainStateProvider(sp ChainStateProvider) {
 
 // SetCoinUpdateCallback sets the callback for real-time coin data updates (Epic 14)
 // This is called from the API server to enable WebSocket broadcasting of coin updates.
+// SetOnRealClientCreated sets a callback that fires when a real Binance client is created
+// for a user. Used to update the global FuturesController and restart the User Data Stream
+// so WebSocket receives real fill events instead of mock data.
+func (m *UserAutopilotManager) SetOnRealClientCreated(callback func(binance.FuturesClient)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onRealClientCreated = callback
+	m.logger.Info("OnRealClientCreated callback set on UserAutopilotManager")
+}
+
 func (m *UserAutopilotManager) SetCoinUpdateCallback(callback coinprofiler.CoinUpdateCallback) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -646,6 +660,18 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	if futuresClient == nil {
 		return nil, fmt.Errorf("user %s has no Binance API keys configured", userID)
+	}
+
+	// Notify the global system that a real Binance client was created
+	// This triggers FuturesController.SetFuturesClient() → restarts User Data Stream
+	// so WebSocket receives real fill events (not mock data)
+	m.mu.RLock()
+	onClientCreated := m.onRealClientCreated
+	m.mu.RUnlock()
+	if onClientCreated != nil {
+		m.logger.Info("Firing onRealClientCreated callback to update User Data Stream",
+			"user_id", userID)
+		onClientCreated(futuresClient)
 	}
 
 	// Get user's AI API key and create LLM analyzer

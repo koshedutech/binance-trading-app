@@ -637,21 +637,11 @@ export default function TradeLifecycleTab({
         return; // No data to update
       }
 
-      // Empty positions array means all positions are closed
+      // Empty positions array is ignored - it does NOT mean all positions are closed.
+      // Position closes are handled authoritatively by CHAIN_LIFECYCLE_UPDATE events
+      // from the PositionLifecycleCoordinator. The backend's periodic broadcastPositionStatus()
+      // can send empty arrays when the internal position map hasn't been populated yet.
       if (positions.length === 0) {
-        setChains(prev => prev.map(chain => {
-          if (chain.status === 'active' || chain.status === 'partial') {
-            return {
-              ...chain,
-              status: 'completed',
-              positionState: chain.positionState
-                ? { ...chain.positionState, status: 'CLOSED' as const }
-                : undefined,
-              updatedAt: Date.now(),
-            };
-          }
-          return chain;
-        }));
         return;
       }
 

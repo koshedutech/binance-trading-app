@@ -8,6 +8,7 @@ import (
 	"binance-trading-bot/internal/binance"
 	"binance-trading-bot/internal/circuit"
 	"binance-trading-bot/internal/database"
+	"binance-trading-bot/internal/events"
 	"binance-trading-bot/internal/logging"
 	"binance-trading-bot/internal/orders"
 	"context"
@@ -5788,14 +5789,16 @@ func (fc *FuturesController) checkAndClosePositionIfNeeded(ctx context.Context, 
 	fc.closeStaleChain(ctx, chain, "CLOSED", realizedPnL)
 }
 
-// closeStaleChain closes a stale order chain in the database and broadcasts the closure
+// closeStaleChain closes a stale order chain in the database, resets entry decision
+// pattern state, rebuilds capacity, and broadcasts the CHAIN_LIFECYCLE_UPDATE event.
+// This mirrors the coordinator's full lifecycle but for reconciliation (missed events).
 func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.OrderChain, closeReason string, realizedPnL float64) {
 	if fc.repo == nil {
 		fc.logger.Warn("Cannot close stale chain - no database repository")
 		return
 	}
 
-	// Close the order chain in database
+	// Step 1: Close the order chain in database
 	err := fc.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, 0.0, nil)
 	if err != nil {
 		fc.logger.Error("Failed to close stale order chain",
@@ -5808,7 +5811,7 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 			"realized_pnl", realizedPnL)
 	}
 
-	// Also close the position state if it exists
+	// Step 2: Close the position state if it exists
 	posState, err := fc.repo.GetDB().GetPositionByChainID(ctx, fc.ownerUserID, chain.ChainID)
 	if err == nil && posState != nil && posState.Status != "CLOSED" {
 		posState.Status = "CLOSED"
@@ -5829,15 +5832,88 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 		}
 	}
 
-	// Broadcast chain closure to frontend
-	if fc.ownerUserID != "" && fc.onOrderUpdate != nil {
-		fc.onOrderUpdate(fc.ownerUserID, map[string]interface{}{
-			"type":         "CHAIN_CLOSED",
+	// Step 3: Reset entry decision pattern for this symbol
+	// This allows the Entry Decision engine to start fresh pattern detection (Step 1)
+	if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
+		if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil {
+			if inst.RealtimePatternMatcher != nil && chain.Mode != "" && chain.Timeframe != "" {
+				fc.logger.Info("Reconciliation: resetting pattern for fresh detection",
+					"chain_id", chain.ChainID,
+					"symbol", chain.Symbol,
+					"mode", chain.Mode,
+					"timeframe", chain.Timeframe)
+				inst.RealtimePatternMatcher.ResetPatternForSymbol(chain.Symbol, chain.Mode, chain.Timeframe)
+			}
+		}
+	}
+
+	// Step 4: Rebuild CoinProfiler capacity
+	capacityUsed := 0
+	scanEnabled := true
+	if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
+		if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil && inst.CoinProfiler != nil {
+			inst.CoinProfiler.UpdateSymbolToStrategy(chain.Symbol)
+			activeCount, countErr := fc.repo.GetDB().CountActiveChains(ctx, fc.ownerUserID)
+			if countErr != nil {
+				fc.logger.Warn("Failed to count active chains for capacity rebuild", "error", countErr)
+			} else {
+				// Get max concurrent from coordinator if available, default to 10
+				maxConcurrent := 10
+				if inst.Coordinator != nil {
+					maxConcurrent = inst.Coordinator.maxConcurrent
+				}
+				capacityUsed, scanEnabled = inst.CoinProfiler.RebuildCapacity(activeCount, maxConcurrent)
+				fc.logger.Info("Reconciliation: capacity rebuilt",
+					"chain_id", chain.ChainID,
+					"capacity_used", capacityUsed,
+					"scan_enabled", scanEnabled)
+			}
+		}
+	}
+
+	// Step 5: Broadcast CHAIN_LIFECYCLE_UPDATE composite event
+	// Same format as coordinator so frontend handles it identically
+	if fc.ownerUserID != "" {
+		compositeEvent := map[string]interface{}{
+			"chain": map[string]interface{}{
+				"chain_id":     chain.ChainID,
+				"symbol":       chain.Symbol,
+				"side":         chain.Side,
+				"close_reason": closeReason,
+				"realized_pnl": realizedPnL,
+				"mode":         chain.Mode,
+				"mode_code":    chain.ModeCode,
+				"timeframe":    chain.Timeframe,
+				"closed_at":    time.Now().Format("2006-01-02T15:04:05Z07:00"),
+			},
+			"pattern": map[string]interface{}{
+				"symbol":    chain.Symbol,
+				"mode":      chain.Mode,
+				"timeframe": chain.Timeframe,
+				"status":    "watching",
+			},
+			"orders": map[string]interface{}{
+				"sl_status": "UNKNOWN",
+				"tp_status": "UNKNOWN",
+			},
+			"capacity": map[string]interface{}{
+				"capacity_used":    capacityUsed,
+				"max_concurrent":   10,
+				"scanning_enabled": scanEnabled,
+			},
+		}
+
+		events.BroadcastChainLifecycleUpdate(fc.ownerUserID, compositeEvent)
+
+		// Also broadcast legacy CHAIN_CLOSED for backward compatibility
+		events.BroadcastChainClosed(fc.ownerUserID, map[string]interface{}{
 			"chain_id":     chain.ChainID,
 			"symbol":       chain.Symbol,
 			"close_reason": closeReason,
 			"realized_pnl": realizedPnL,
-			"sync_reason":  "state_reconciliation",
+			"mode":         chain.Mode,
+			"mode_code":    chain.ModeCode,
+			"timeframe":    chain.Timeframe,
 		})
 	}
 }

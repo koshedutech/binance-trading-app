@@ -862,242 +862,43 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		return
 	}
 
-	futuresClient := s.getFuturesClientForUser(c)
-	if futuresClient == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Futures trading not enabled"})
-		return
-	}
-
 	// Parse query filters
 	symbolFilter := c.Query("symbol")
 	modeFilter := c.Query("mode")
 	statusFilter := c.Query("status") // active, partial, closed
 
-	// Handler-level response cache: serve cached response if within 15s to reduce Binance REST API calls
+	// Handler-level response cache (5s to reduce DB load)
 	cacheKey := userID + ":" + statusFilter + ":" + symbolFilter + ":" + modeFilter
 	orderChainsCacheMu.Lock()
-	if entry, ok := orderChainsCacheData[cacheKey]; ok && time.Since(entry.timestamp) < 15*time.Second {
+	if entry, ok := orderChainsCacheData[cacheKey]; ok && time.Since(entry.timestamp) < 5*time.Second {
 		orderChainsCacheMu.Unlock()
 		c.JSON(http.StatusOK, entry.data)
 		return
 	}
 	orderChainsCacheMu.Unlock()
 
-	// 1. Get regular open orders from Binance
-	regularOrders, ordersErr := futuresClient.GetOpenOrders(symbolFilter)
-	if ordersErr != nil {
-		regularOrders = []binance.FuturesOrder{}
-	}
-
-	// 2. Get algo/conditional orders (TP/SL orders)
-	algoOrders, algoErr := futuresClient.GetOpenAlgoOrders(symbolFilter)
-	if algoErr != nil {
-		algoOrders = []binance.AlgoOrder{}
-	}
-
-	// Get Binance positions synchronously for inline status verification AND synthetic positionState
-	// This ensures the current response reflects accurate position state from Binance live data
-	binancePositions, posErr := futuresClient.GetPositions()
-
-	// AUTOMATIC STALE ORDER RECONCILIATION
-	// Run in background goroutine to update database for future requests
-	// Pass already-fetched positions to avoid redundant REST API call
-	// ONLY run when ALL THREE API calls succeeded - incomplete data causes false closes
-	// (e.g., if algo orders fetch failed but positions succeeded, reconciliation would see
-	// empty algo orders → think no SL/TP exists → incorrectly close active chains)
-	if posErr == nil && ordersErr == nil && algoErr == nil {
-		go s.reconcileStaleOrderChains(userID, regularOrders, algoOrders, binancePositions, futuresClient)
-	}
-
-	// Track whether ALL API data is reliable for inline status verification
-	apiDataReliable := posErr == nil && ordersErr == nil && algoErr == nil
-
-	positionsBySymbol := make(map[string]float64)             // symbol -> position amount (for status verification)
-	binancePositionsBySymbol := make(map[string]binance.FuturesPosition) // symbol -> full position data (for synthetic positionState)
-	if posErr == nil {
-		for _, pos := range binancePositions {
-			if pos.PositionAmt != 0 {
-				positionsBySymbol[pos.Symbol] = pos.PositionAmt
-				binancePositionsBySymbol[pos.Symbol] = pos
-			}
-		}
-	}
-
-	// Also build position map with side awareness for hedge mode
-	// In hedge mode, Binance returns separate LONG/SHORT positions per symbol
-	positionsBySymbolSide := make(map[string]float64) // "SYMBOL:SIDE" -> position amount
-	if posErr == nil {
-		for _, pos := range binancePositions {
-			if pos.PositionAmt != 0 {
-				if pos.PositionSide != "" && pos.PositionSide != "BOTH" {
-					key := pos.Symbol + ":" + pos.PositionSide
-					positionsBySymbolSide[key] = pos.PositionAmt
-				}
-			}
-		}
-	}
-
-	// Build map of chain IDs with open orders (for status verification)
-	chainsWithOpenOrders := make(map[string]bool)
-	for _, order := range regularOrders {
-		chainID := parseChainIDFromClientOrderID(order.ClientOrderId)
-		if chainID != "" {
-			chainsWithOpenOrders[chainID] = true
-		}
-	}
-	for _, order := range algoOrders {
-		chainID := parseChainIDFromClientOrderID(order.ClientAlgoId)
-		if chainID != "" {
-			chainsWithOpenOrders[chainID] = true
-		}
-	}
-
-	// 3. Group orders by chain ID
+	// DB-ONLY chain building (no Binance REST API calls)
+	// Chain status is authoritative from DB, updated by PositionLifecycleCoordinator via WebSocket.
+	// Live position data (unrealized PnL, mark price) comes from WebSocket cache via getPositionAnalyticsForChain.
 	chains := make(map[string]*OrderChainWithState)
 	chainIDs := make([]string, 0)
 
-	// Process regular orders
-	for _, order := range regularOrders {
-		chainID := parseChainIDFromClientOrderID(order.ClientOrderId)
-		if chainID == "" {
-			continue // Skip orders without our format
-		}
-
-		// Apply mode filter
-		if modeFilter != "" {
-			modeCode := extractModeCodeFromChainID(chainID)
-			if modeCode != strings.ToUpper(modeFilter) {
-				continue
-			}
-		}
-
-		if chains[chainID] == nil {
-			chains[chainID] = &OrderChainWithState{
-				ChainID:            chainID,
-				ModeCode:           extractModeCodeFromChainID(chainID),
-				Symbol:             order.Symbol,
-				PositionSide:       order.PositionSide,
-				Orders:             []ChainOrderInfo{},
-				ModificationCounts: make(map[string]int),
-				Status:             "active",
-				CreatedAt:          order.Time,
-				UpdatedAt:          order.UpdateTime,
-			}
-			chainIDs = append(chainIDs, chainID)
-		}
-
-		orderType := extractOrderTypeFromClientOrderID(order.ClientOrderId)
-		chains[chainID].Orders = append(chains[chainID].Orders, ChainOrderInfo{
-			OrderID:       order.OrderId,
-			ClientOrderID: order.ClientOrderId,
-			OrderType:     orderType,
-			Symbol:        order.Symbol,
-			Side:          order.Side,
-			Type:          order.Type,
-			Status:        order.Status,
-			Price:         order.Price,
-			StopPrice:     order.StopPrice,
-			Quantity:      order.OrigQty,
-			ExecutedQty:   order.ExecutedQty,
-			AvgPrice:      order.AvgPrice,
-			Time:          order.Time,
-			UpdateTime:    order.UpdateTime,
-			IsAlgo:        false,
-		})
-
-		// Update timestamps
-		if order.UpdateTime > chains[chainID].UpdatedAt {
-			chains[chainID].UpdatedAt = order.UpdateTime
-		}
-		if order.Time < chains[chainID].CreatedAt || chains[chainID].CreatedAt == 0 {
-			chains[chainID].CreatedAt = order.Time
-		}
-	}
-
-	// Process algo orders (TP/SL orders)
-	for _, order := range algoOrders {
-		chainID := parseChainIDFromClientOrderID(order.ClientAlgoId)
-		if chainID == "" {
-			continue
-		}
-
-		// Apply mode filter
-		if modeFilter != "" {
-			modeCode := extractModeCodeFromChainID(chainID)
-			if modeCode != strings.ToUpper(modeFilter) {
-				continue
-			}
-		}
-
-		if chains[chainID] == nil {
-			chains[chainID] = &OrderChainWithState{
-				ChainID:            chainID,
-				ModeCode:           extractModeCodeFromChainID(chainID),
-				Symbol:             order.Symbol,
-				PositionSide:       order.PositionSide,
-				Orders:             []ChainOrderInfo{},
-				ModificationCounts: make(map[string]int),
-				Status:             "active",
-				CreatedAt:          order.CreateTime,
-				UpdatedAt:          order.UpdateTime,
-			}
-			chainIDs = append(chainIDs, chainID)
-		}
-
-		orderType := extractOrderTypeFromClientOrderID(order.ClientAlgoId)
-		chains[chainID].Orders = append(chains[chainID].Orders, ChainOrderInfo{
-			OrderID:       order.AlgoId,
-			ClientOrderID: order.ClientAlgoId,
-			OrderType:     orderType,
-			Symbol:        order.Symbol,
-			Side:          order.Side,
-			Type:          order.OrderType,
-			Status:        order.AlgoStatus,
-			Price:         order.TriggerPrice,
-			StopPrice:     order.TriggerPrice,
-			Quantity:      order.Quantity,
-			ExecutedQty:   order.ExecutedQty,
-			Time:          order.CreateTime,
-			UpdateTime:    order.UpdateTime,
-			IsAlgo:        true,
-		})
-
-		// Update timestamps
-		if order.UpdateTime > chains[chainID].UpdatedAt {
-			chains[chainID].UpdatedAt = order.UpdateTime
-		}
-		if order.CreateTime < chains[chainID].CreatedAt || chains[chainID].CreatedAt == 0 {
-			chains[chainID].CreatedAt = order.CreateTime
-		}
-	}
-
-	// 4a. Fetch order chain data by chain IDs (regardless of status)
-	// This fetches entry data for chains that were created from Binance TP/SL orders
-	// The chain may be marked CLOSED in DB but still have open orders on Binance
-	dbOrderChainsMap, err := s.repo.GetDB().GetOrderChainsByChainIDs(ctx, userID, chainIDs)
-	if err != nil {
-		log.Printf("[ORDER-CHAINS] Error fetching order chains by IDs: %v", err)
-		dbOrderChainsMap = make(map[string]*orders.OrderChain)
-	}
-
-	// 4a-1. Also fetch active order chains to include chains that have no Binance orders
-	// (e.g., positions with filled entries but no pending TP/SL orders yet)
+	// Fetch active order chains from DB (PENDING, ENTRY_PLACED, ACTIVE, PARTIAL)
 	activeOrderChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
 	if err != nil {
 		log.Printf("[ORDER-CHAINS] Error fetching active order chains: %v", err)
 		activeOrderChains = []*orders.OrderChain{}
 	}
 
-	// Merge active chains into dbOrderChainsMap
+	// Build dbOrderChainsMap from active chains
+	dbOrderChainsMap := make(map[string]*orders.OrderChain)
 	for _, dbChain := range activeOrderChains {
 		if dbChain != nil {
-			if _, exists := dbOrderChainsMap[dbChain.ChainID]; !exists {
-				dbOrderChainsMap[dbChain.ChainID] = dbChain
-			}
+			dbOrderChainsMap[dbChain.ChainID] = dbChain
 		}
 	}
 
-	// Add chains for active positions that don't have open orders on Binance
+	// Build chain objects from DB active chains
 	for _, dbChain := range activeOrderChains {
 		if dbChain == nil {
 			continue
@@ -1402,8 +1203,8 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 				chain.PositionState.ClosedAt = posState.ClosedAt.Format(time.RFC3339)
 			}
 
-			// Update chain status based on position state
-			chain.Status = strings.ToLower(posState.Status)
+			// Chain status comes from DB order_chains.status (set by PositionLifecycleCoordinator)
+			// Do NOT override with position_states.status — it can be stale and cause race conditions
 
 			// Use position state entry value for more accurate total/filled values
 			// Entry value is calculated at fill time with actual prices
@@ -1427,52 +1228,11 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 			chain.ModificationCounts = counts
 		}
 
-		// 6a. BUILD SYNTHETIC POSITION STATE
-		// When DB has no position_state record, try to build from:
-		// 1. First: Binance live position data (most accurate)
-		// 2. Fallback: order_chains entry data from DB (when position closed but orders still pending)
+		// 6a. BUILD SYNTHETIC POSITION STATE from DB order_chains data
+		// When DB has no position_state record, build from order_chains entry data
+		// Status comes from DB chain status (set by PositionLifecycleCoordinator)
 		if chain.PositionState == nil {
-			if binancePos, hasBinancePos := binancePositionsBySymbol[chain.Symbol]; hasBinancePos {
-				// Option 1: Build from Binance live position
-				entrySide := "BUY"
-				if binancePos.PositionSide == "SHORT" || (binancePos.PositionSide == "BOTH" && binancePos.PositionAmt < 0) {
-					entrySide = "SELL"
-				}
-
-				posQty := math.Abs(binancePos.PositionAmt)
-				posValue := math.Abs(binancePos.Notional)
-
-				chain.PositionState = &PositionStateInfo{
-					ID:                 0,
-					ChainID:            chainID,
-					Symbol:             chain.Symbol,
-					EntryOrderID:       0,
-					EntryClientOrderID: chainID + "-E",
-					EntrySide:          entrySide,
-					EntryPrice:         binancePos.EntryPrice,
-					EntryQuantity:      posQty,
-					EntryValue:         posValue,
-					EntryFees:          0,
-					EntryFilledAt:      time.UnixMilli(binancePos.UpdateTime).Format(time.RFC3339),
-					Status:             "ACTIVE",
-					RemainingQuantity:  posQty,
-					RealizedPnL:        0,
-					CreatedAt:          time.UnixMilli(binancePos.UpdateTime).Format(time.RFC3339),
-					UpdatedAt:          time.UnixMilli(binancePos.UpdateTime).Format(time.RFC3339),
-				}
-
-				chain.Status = "active"
-				chain.FilledValue = posValue
-				if chain.TotalValue < posValue {
-					chain.TotalValue = posValue
-				}
-
-				log.Printf("[ORDER-CHAINS] Built synthetic positionState for chain %s from Binance: qty=%.4f, entry=%.4f",
-					chainID, posQty, binancePos.EntryPrice)
-
-			} else if dbChain, hasDBChain := dbOrderChainsMap[chainID]; hasDBChain && dbChain != nil {
-				// Option 2: Build from order_chains entry data (fallback when no Binance position)
-				// This happens when entry filled but position closed (SL/TP hit) but orders still pending
+			if dbChain, hasDBChain := dbOrderChainsMap[chainID]; hasDBChain && dbChain != nil {
 				if dbChain.EntryFilledAt != nil && dbChain.EntryPrice != nil && *dbChain.EntryPrice > 0 {
 					var entryPrice, entryQty float64
 					if dbChain.EntryPrice != nil {
@@ -1489,10 +1249,11 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 						entrySide = "SELL"
 					}
 
-					// Determine status based on whether there are open orders
-					posStatus := "ACTIVE"
-					if chainsWithOpenOrders[chainID] && positionsBySymbol[chain.Symbol] == 0 {
-						// Has open orders but no position = position was closed, waiting for order cleanup
+					// Status from DB chain status (authoritative, set by coordinator)
+					posStatus := strings.ToUpper(string(dbChain.Status))
+					if posStatus == "ACTIVE" || posStatus == "PARTIAL" || posStatus == "ENTRY_PLACED" || posStatus == "PENDING" {
+						posStatus = "ACTIVE"
+					} else {
 						posStatus = "CLOSED"
 					}
 
@@ -1520,7 +1281,7 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 						chain.TotalValue = entryValue
 					}
 
-					log.Printf("[ORDER-CHAINS] Built synthetic positionState for chain %s from DB order_chains: qty=%.4f, entry=%.4f, status=%s",
+					log.Printf("[ORDER-CHAINS] Built synthetic positionState for chain %s from DB: qty=%.4f, entry=%.4f, status=%s",
 						chainID, entryQty, entryPrice, posStatus)
 				}
 			}
@@ -1535,52 +1296,15 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 		}
 	}
 
-	// 6b. INLINE STATUS VERIFICATION against actual Binance state
-	// This fixes the issue where DB has stale "active" status but position is actually closed
-	// Without this, closed positions would still appear as "active" until background reconciliation runs
-	// Only verify when ALL API data is reliable - incomplete data causes false status changes
-	// (e.g., if orders API failed, chainsWithOpenOrders would be empty → falsely marks chains as closed)
-	if apiDataReliable {
-		for chainID, chain := range chains {
-			// Only verify chains that appear active/partial
-			if chain.Status == "active" || chain.Status == "partial" {
-				// Grace period: skip recently created/filled chains to avoid race with SL/TP placement
-				if chain.CreatedAt > 0 {
-					createdTime := time.UnixMilli(chain.CreatedAt)
-					if time.Since(createdTime) < 120*time.Second {
-						continue // Too new - don't inline-close
-					}
-				}
-
-				// Grace period: also check DB chain UpdatedAt (catches recently modified chains)
-				if dbChain, exists := dbOrderChainsMap[chainID]; exists && dbChain != nil {
-					if time.Since(dbChain.UpdatedAt) < 120*time.Second {
-						continue // Recently updated in DB - don't inline-close
-					}
-				}
-
-				// Check position with hedge mode side awareness
-				hasOpenPosition := false
-				if chain.PositionSide != "" && chain.PositionSide != "BOTH" {
-					sideKey := chain.Symbol + ":" + chain.PositionSide
-					hasOpenPosition = positionsBySymbolSide[sideKey] != 0
-				} else {
-					hasOpenPosition = positionsBySymbol[chain.Symbol] != 0
-				}
-				hasOpenOrders := chainsWithOpenOrders[chainID]
-
-				// If no position AND no open orders for this chain, it's actually closed
-				if !hasOpenPosition && !hasOpenOrders {
-					log.Printf("[ORDER-CHAINS] Inline status fix: chain %s marked closed (no position/orders on Binance)", chainID)
-					chain.Status = "closed"
-					// Also update position state status if present
-					if chain.PositionState != nil && chain.PositionState.Status != "CLOSED" {
-						chain.PositionState.Status = "CLOSED"
-					}
-				}
-			}
-		}
-	}
+	// 6b. INLINE STATUS VERIFICATION - DISABLED
+	// PositionLifecycleCoordinator now handles chain closes via WebSocket events.
+	// Inline verification was racing with WebSocket position cache updates:
+	// position created → frontend fetchOrders() → inline check sees no cached position yet → falsely marks closed.
+	// The coordinator provides authoritative close via WebSocket SL/TP fill events.
+	// The 5-minute FuturesController sync loop remains as a safety net for missed events.
+	// if apiDataReliable {
+	// 	for chainID, chain := range chains { ... }
+	// }
 
 	// 6c. FETCH CLOSED CHAINS FROM DB when status filter requests them
 	// Closed chains have no Binance orders, so they must be loaded from the database

@@ -320,27 +320,43 @@ export default function StrategyFirstView({
     // Note: nextCandleClose and lookingFor are now passed per-strategy to StrategyCard
   } = useEntryDecisionStrategies();
 
-  // When trading is OFF, filter to show only coins with active positions
+  // Always filter out position_running coins from strategy display
   const strategies = useMemo(() => {
-    if (tradingEnabled) return rawStrategies;
-
-    // Filter strategies to only include coins with active positions
-    return rawStrategies.map(strategy => ({
+    // Always filter out position_running coins from strategy display
+    // When a position is open, the strategy is paused - don't show its coins here
+    // Position data is shown in TradeLifecycle and CoinProfiler position sections
+    const filtered = rawStrategies.map(strategy => ({
       ...strategy,
-      coins: strategy.coins.filter(coin => coin.has_active_position === true),
-    })).filter(strategy => strategy.coins.length > 0);
+      coins: strategy.coins.filter(coin => coin.status !== 'position_running'),
+    }));
+
+    if (tradingEnabled) {
+      // When trading is ON, show all non-position strategies (even if empty)
+      return filtered;
+    }
+
+    // When trading is OFF, only show strategies that still have coins
+    return filtered.filter(strategy => strategy.coins.length > 0);
   }, [rawStrategies, tradingEnabled]);
 
   const byMode = useMemo(() => {
-    if (tradingEnabled) return rawByMode;
-
-    // Filter by_mode to only include coins with active positions
-    return rawByMode.map(modeGroup => ({
+    // Always filter out position_running coins from strategy display
+    const filtered = rawByMode.map(modeGroup => ({
       ...modeGroup,
       strategies: modeGroup.strategies.map(strategy => ({
         ...strategy,
-        coins: strategy.coins.filter(coin => coin.has_active_position === true),
-      })).filter(strategy => strategy.coins.length > 0),
+        coins: strategy.coins.filter(coin => coin.status !== 'position_running'),
+      })),
+    }));
+
+    if (tradingEnabled) {
+      return filtered;
+    }
+
+    // When trading is OFF, also filter out empty strategies and modes
+    return filtered.map(modeGroup => ({
+      ...modeGroup,
+      strategies: modeGroup.strategies.filter(strategy => strategy.coins.length > 0),
     })).filter(modeGroup => modeGroup.strategies.length > 0);
   }, [rawByMode, tradingEnabled]);
 

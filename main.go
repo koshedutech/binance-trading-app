@@ -1040,6 +1040,16 @@ func main() {
 		// This enables entry order tracking for per-user autopilot instances
 		userAutopilotManager.SetPositionStateIntegration(positionStateInt)
 
+		// Wire real client callback: when a user's real Binance client is created,
+		// update the global FuturesController so the User Data Stream receives
+		// real WebSocket fill events instead of mock data
+		userAutopilotManager.SetOnRealClientCreated(func(realClient binance.FuturesClient) {
+			if futuresAutopilotController != nil {
+				logger.Info("Real Binance client created - updating FuturesController and User Data Stream")
+				futuresAutopilotController.SetFuturesClient(realClient)
+			}
+		})
+
 		// Epic 14: Wire coin update callback for real-time WebSocket broadcasting
 		// This enables the CoinProfiler to push updates directly to frontend clients
 		userAutopilotManager.SetCoinUpdateCallback(api.BroadcastCoinDataUpdate)
