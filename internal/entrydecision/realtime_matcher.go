@@ -1993,6 +1993,16 @@ func (r *RealtimePatternMatcher) calculateEntryLevels(state *PatternState, curre
 	riskPercent := (risk / entryPrice) * 100
 	rewardPercent := (risk * r.riskReward / entryPrice) * 100
 
+	// Enforce max SL percentage limit from pattern matcher config
+	// If SL exceeds the configured maximum, reject entry levels as too risky
+	// No log here - this is called on every tick. Breakout rejection is logged in OnPriceUpdate/processStep2.
+	if r.patternMatcher != nil && r.patternMatcher.config != nil {
+		maxSLPercent := r.patternMatcher.config.MaxSLPercent
+		if maxSLPercent > 0 && riskPercent > maxSLPercent {
+			return nil // Entry levels invalid - SL too wide
+		}
+	}
+
 	return &EntryLevels{
 		EntryPrice:      entryPrice,
 		StopLoss:        stopLoss,
@@ -2179,6 +2189,19 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 	capacityChecker := r.capacityChecker
 	userID := r.userID
 	r.mu.RUnlock()
+
+	if isBreakout {
+		// VALIDATE SL BEFORE PROCEEDING: Check if entry levels pass max_sl_percent
+		// This prevents entries where the SL distance exceeds the configured limit
+		entryLevelsCheck := r.calculateEntryLevels(state, price)
+		if entryLevelsCheck == nil {
+			log.Printf("[REALTIME-BREAKOUT] %s:%s - BREAKOUT REJECTED: SL too wide (exceeds max_sl_percent limit), direction=%s, price=%.6f",
+				symbol, timeframe, state.Direction, price)
+			// Don't proceed - SL exceeds limit. Pattern stays in consolidation.
+			// The pattern will continue to monitor and may trigger again if consolidation tightens.
+			isBreakout = false
+		}
+	}
 
 	if isBreakout {
 		// Breakout detected! Log and trigger update

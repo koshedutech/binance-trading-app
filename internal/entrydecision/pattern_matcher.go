@@ -89,6 +89,11 @@ type PatternMatcherConfig struct {
 	// Time Filter: Pattern works best during US market hours (14 UTC = 9 AM EST)
 	// Set to -1 to disable time filtering
 	PreferredHourUTC int `json:"preferred_hour_utc"` // Default: -1 (disabled, 14 = US open)
+
+	// Risk Management: Maximum allowed SL percentage from entry price.
+	// If the calculated SL exceeds this percentage, the entry is rejected.
+	// Set to 0 to disable the check.
+	MaxSLPercent float64 `json:"max_sl_percent"` // Default: 1.5% - from sub-strategy settings
 }
 
 // DefaultPatternMatcherConfig returns the default configuration.
@@ -118,6 +123,9 @@ func DefaultPatternMatcherConfig() *PatternMatcherConfig {
 		MinReferenceBodyRatio: 0.0,  // Disabled by default (0.5 for strict mode)
 		RequireEntryBreakout:  true, // Entry must break consolidation high
 		PreferredHourUTC:      -1,   // Disabled (-1), set to 14 for US market hours
+
+		// Risk management
+		MaxSLPercent: 1.5, // Default: reject entries with SL > 1.5% from entry price
 	}
 }
 
@@ -202,6 +210,11 @@ func NewPatternMatcherConfigFromSettings(settings map[string]interface{}) *Patte
 
 	if val, ok := patternDetection["preferred_hour_utc"].(float64); ok {
 		config.PreferredHourUTC = int(val)
+	}
+
+	// Risk management: max SL percentage
+	if maxSL, ok := patternDetection["max_sl_percent"].(float64); ok && maxSL > 0 {
+		config.MaxSLPercent = maxSL
 	}
 
 	return config
@@ -323,11 +336,12 @@ func (m *VolumeImbalancePatternMatcher) ReloadConfig(newConfig *PatternMatcherCo
 
 	m.config = newConfig
 
-	log.Printf("[PATTERN] Config reloaded: direction=%s (was %s), volume_spike=%.1fx, lookback=%d, breakout_surge=%.1fx",
+	log.Printf("[PATTERN] Config reloaded: direction=%s (was %s), volume_spike=%.1fx, lookback=%d, breakout_surge=%.1fx, max_sl=%.2f%%",
 		newConfig.Direction, oldDirection,
 		newConfig.MinVolumeSpikeMultiplier,
 		newConfig.LookbackPeriod,
-		newConfig.BreakoutVolumeSurge)
+		newConfig.BreakoutVolumeSurge,
+		newConfig.MaxSLPercent)
 }
 
 // ============================================================================
@@ -738,6 +752,38 @@ func (m *VolumeImbalancePatternMatcher) processStep2(
 			state.EntryPrice = state.ReferenceCandle.Low
 		} else {
 			state.EntryPrice = breakoutCandle.Close
+		}
+
+		// VALIDATE SL PERCENTAGE: Check if the calculated risk exceeds max_sl_percent
+		// This prevents entries where the stop loss distance is too wide
+		if m.config.MaxSLPercent > 0 && state.EntryPrice > 0 {
+			var slPrice, riskAmt float64
+			if direction == "long" {
+				slBase := state.ConsolidationLow
+				if slBase <= 0 {
+					slBase = state.ReferenceCandle.Low
+				}
+				slPrice = slBase * 0.999 // 0.1% buffer below support
+				riskAmt = state.EntryPrice - slPrice
+			} else {
+				slBase := state.ConsolidationHigh
+				if slBase <= 0 {
+					slBase = state.ReferenceCandle.High
+				}
+				slPrice = slBase * 1.001 // 0.1% buffer above resistance
+				riskAmt = slPrice - state.EntryPrice
+			}
+			if riskAmt > 0 {
+				slPercent := (riskAmt / state.EntryPrice) * 100
+				if slPercent > m.config.MaxSLPercent {
+					log.Printf("[PATTERN] SL_REJECTED: %s %s breakout SL=%.2f%% exceeds max_sl_percent=%.2f%% (entry=%.6f, sl=%.6f, risk=%.6f) - staying in consolidation",
+						progress.Symbol, direction, slPercent, m.config.MaxSLPercent, state.EntryPrice, slPrice, riskAmt)
+					// Do NOT mark as ready - stay in consolidation
+					// The pattern will continue to monitor and may trigger again if consolidation tightens
+					progress.SetStatus(PatternStatusConsolidating)
+					return
+				}
+			}
 		}
 
 		// Mark Step 2 as complete (we're already on Step 2, just mark it done)

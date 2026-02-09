@@ -1077,6 +1077,34 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	slPrice = roundToTickSizeFromSymbol(slPrice, symbolInfo)
 	tpPrice = roundToTickSizeFromSymbol(tpPrice, symbolInfo)
 
+	// SAFETY NET: Final max_sl_percent validation before placing SL/TP orders
+	// This is the last line of defense - if the calculated SL exceeds the configured max,
+	// log a warning. The primary enforcement happens in pattern_matcher.go and realtime_matcher.go.
+	if state.SLPercent > 0 && entryPrice > 0 && slPrice > 0 {
+		var actualSLPercent float64
+		if direction == "LONG" {
+			actualSLPercent = ((entryPrice - slPrice) / entryPrice) * 100
+		} else {
+			actualSLPercent = ((slPrice - entryPrice) / entryPrice) * 100
+		}
+		if actualSLPercent > state.SLPercent {
+			log.Printf("[CHAIN-ENTRY] SL_REJECTED: %s %s actual SL=%.2f%% exceeds max_sl_percent=%.2f%% (entry=%.6f, sl=%.6f) - ABORTING ENTRY",
+				symbol, direction, actualSLPercent, state.SLPercent, entryPrice, slPrice)
+			// Cancel the chain that was already created
+			if r.chainEventWriter != nil {
+				cancelCtx := context.Background()
+				reason := fmt.Sprintf("sl_too_wide: %.2f%% > max %.2f%%", actualSLPercent, state.SLPercent)
+				_ = r.chainEventWriter.RecordEntryCancelled(cancelCtx, chainID, reason)
+				if closeErr := r.chainEventWriter.CloseChain(cancelCtx, chainID, "sl_exceeds_max_percent", 0, 0, nil); closeErr != nil {
+					log.Printf("[CHAIN-ENTRY] Warning: Failed to close rejected chain %s: %v", chainID, closeErr)
+				}
+			}
+			return fmt.Errorf("SL %.2f%% exceeds max_sl_percent %.2f%%", actualSLPercent, state.SLPercent)
+		}
+		log.Printf("[CHAIN-ENTRY] SL validation passed: %s %s actual_sl=%.2f%% <= max=%.2f%%",
+			symbol, direction, actualSLPercent, state.SLPercent)
+	}
+
 	// Step 11: Place SL/TP orders immediately to protect the position
 	// CRITICAL: Position must have SL/TP orders placed within seconds of entry
 	// For MARKET orders, we place SL/TP immediately after entry - don't wait for status

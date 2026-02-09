@@ -598,6 +598,12 @@ type FuturesController struct {
 	// Used to correlate ORDER_TRADE_UPDATE (has real PnL) with ALGO_UPDATE (has chain lookup)
 	pendingAlgoSubOrders   map[int64]pendingAlgoInfo
 	pendingAlgoSubOrdersMu sync.Mutex
+
+	// pendingProtectionOrders tracks MARKET orders placed by proactive protection
+	// so we can recover real PnL and fees from the ORDER_TRADE_UPDATE event.
+	// Key: order ID from PlaceFuturesOrder response, Value: chain ID
+	pendingProtectionOrders   map[int64]pendingProtectionInfo
+	pendingProtectionOrdersMu sync.Mutex
 }
 
 // pendingAlgoInfo stores chain details for mapping algo sub-orders to their chains.
@@ -609,6 +615,15 @@ type pendingAlgoInfo struct {
 	OrderType string // "SL" or "TP"
 	Symbol    string
 	StoredAt  time.Time
+}
+
+// pendingProtectionInfo stores chain details for mapping proactive protection MARKET orders.
+// When placeMarketCloseForProtection places a MARKET order and immediately closes the chain
+// with calculated PnL, the real PnL/fees arrive later via ORDER_TRADE_UPDATE.
+type pendingProtectionInfo struct {
+	ChainID  string
+	Symbol   string
+	StoredAt time.Time
 }
 
 // RecentDecisionEvent tracks a decision event for display in UI
@@ -790,6 +805,8 @@ func NewFuturesController(
 		ginieAutopilot:      ginieAuto,
 		// Algo sub-order tracking for PnL correction
 		pendingAlgoSubOrders: make(map[int64]pendingAlgoInfo),
+		// Protection market order tracking for PnL recovery
+		pendingProtectionOrders: make(map[int64]pendingProtectionInfo),
 	}
 }
 
@@ -5422,6 +5439,57 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			fc.pendingAlgoSubOrdersMu.Unlock()
 		}
 
+		// Check if this is a protection market order fill (proactive SL/TP protection)
+		// The chain is already closed with calculated PnL; this recovers real PnL and fees
+		fc.pendingProtectionOrdersMu.Lock()
+		if protInfo, exists := fc.pendingProtectionOrders[order.OrderId]; exists {
+			delete(fc.pendingProtectionOrders, order.OrderId)
+			fc.pendingProtectionOrdersMu.Unlock()
+
+			if order.OrderStatus == "FILLED" {
+				realPnL := order.RealizedProfit
+				fees := order.Commission
+				closePrice := order.AveragePrice
+				if closePrice == 0 {
+					closePrice = order.LastFilledPrice
+				}
+
+				fc.logger.Info("[PROACTIVE-PROTECTION] Real PnL recovered from ORDER_TRADE_UPDATE",
+					"chain_id", protInfo.ChainID,
+					"symbol", protInfo.Symbol,
+					"realized_pnl", fmt.Sprintf("%.4f", realPnL),
+					"fees", fmt.Sprintf("%.6f", fees),
+					"close_price", fmt.Sprintf("%.4f", closePrice))
+
+				// Update closed chain with real values
+				if fc.ownerUserID != "" && fc.repo != nil {
+					ctx := context.Background()
+					if err := fc.repo.GetDB().UpdateClosedChainPnL(ctx, protInfo.ChainID, realPnL, fees); err != nil {
+						fc.logger.Error("[PROACTIVE-PROTECTION] Failed to update PnL",
+							"chain_id", protInfo.ChainID, "error", err)
+					} else {
+						fc.logger.Info("[PROACTIVE-PROTECTION] Updated chain with real PnL and fees",
+							"chain_id", protInfo.ChainID,
+							"realized_pnl", realPnL,
+							"fees", fees)
+
+						// Broadcast corrected PnL to frontend
+						events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
+							"chain_id":     protInfo.ChainID,
+							"symbol":       protInfo.Symbol,
+							"realized_pnl": realPnL,
+							"commission":   fees,
+							"close_price":  closePrice,
+							"source":       "proactive_protection",
+						})
+					}
+				}
+			}
+			// Don't return - still let the normal TRADE processing continue for fee tracking etc.
+		} else {
+			fc.pendingProtectionOrdersMu.Unlock()
+		}
+
 		// CRITICAL: Handle SL/TP order fills - cancel counterpart orders
 		// When SL fills, cancel all TP orders. When TP fills, cancel SL order.
 		// This prevents orphaned conditional orders after position closes.
@@ -6788,6 +6856,21 @@ func (fc *FuturesController) placeMarketCloseForProtection(ctx context.Context, 
 		"order_id", resp.OrderId,
 		"reason", reason,
 		"status", resp.Status)
+
+	// Track this order so ORDER_TRADE_UPDATE can recover real PnL and fees
+	fc.pendingProtectionOrdersMu.Lock()
+	fc.pendingProtectionOrders[resp.OrderId] = pendingProtectionInfo{
+		ChainID:  chain.ChainID,
+		Symbol:   chain.Symbol,
+		StoredAt: time.Now(),
+	}
+	// Inline cleanup: remove stale entries older than 60 seconds
+	for id, info := range fc.pendingProtectionOrders {
+		if time.Since(info.StoredAt) > 60*time.Second {
+			delete(fc.pendingProtectionOrders, id)
+		}
+	}
+	fc.pendingProtectionOrdersMu.Unlock()
 
 	// Calculate PnL from entry vs close price
 	closePrice := resp.AvgPrice
