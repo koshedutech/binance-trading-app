@@ -1637,10 +1637,17 @@ func (s *Server) handleGetOrderChainsWithState(c *gin.Context) {
 	}
 
 	// 8b. Enrich chains with SL modification history from chain events
-	// Only fetch for chains that have SL modifications (modificationCounts > 0)
+	// Fetch for any chain that has an SL order (initial SL_PLACED event should always be shown)
 	slModChainIDs := make([]string, 0)
 	for chainID, chain := range chains {
-		if slCount, ok := chain.ModificationCounts["SL"]; ok && slCount > 0 {
+		hasSLOrder := false
+		for _, order := range chain.Orders {
+			if order.OrderType == "SL" {
+				hasSLOrder = true
+				break
+			}
+		}
+		if hasSLOrder {
 			slModChainIDs = append(slModChainIDs, chainID)
 		}
 	}

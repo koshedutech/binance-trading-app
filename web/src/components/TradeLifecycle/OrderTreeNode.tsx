@@ -268,8 +268,8 @@ export default function OrderTreeNode({
   chainClosedAt,
   slModifications,
 }: OrderTreeNodeProps) {
-  // Auto-expand SL node when modifications exist (at least 1 actual modification beyond initial placement)
-  const hasSLModifications = type === 'SL' && slModifications && slModifications.length > 1;
+  // Show SL sub-tree when any SL events exist (including initial placement)
+  const hasSLModifications = type === 'SL' && slModifications && slModifications.length > 0;
   const [expanded, setExpanded] = useState(!!hasSLModifications);
   const [localModifications, setLocalModifications] = useState<ModificationEvent[]>(modifications || []);
   const [loadingMods, setLoadingMods] = useState(false);

@@ -2207,6 +2207,10 @@ func (fc *FuturesController) runLoop() {
 	syncTicker := time.NewTicker(300 * time.Second)
 	defer syncTicker.Stop()
 
+	// Proactive protection check every 60 seconds - ensures SL/TP orders exist for active chains
+	protectionTicker := time.NewTicker(60 * time.Second)
+	defer protectionTicker.Stop()
+
 	// Reset daily counters at midnight
 	go fc.resetDailyCounters()
 
@@ -2217,6 +2221,8 @@ func (fc *FuturesController) runLoop() {
 		case <-syncTicker.C:
 			fc.logger.Info("Running safety reconciliation (5-min interval) - primary tracking via WebSocket")
 			fc.syncWithActualPositions()
+		case <-protectionTicker.C:
+			fc.ProactiveProtectionCheck()
 		// NOTE: evaluateMarket() is intentionally disabled.
 		// Old AI trading has been moved to SpotController for Spot trading.
 		// Futures trading is now exclusively handled by GinieAutopilot.
@@ -5834,6 +5840,9 @@ func (fc *FuturesController) SyncStateFromBinance() {
 	fc.syncOpenOrdersFromBinance(client)
 
 	fc.logger.Info("State sync from Binance completed")
+
+	// Run proactive protection check async to not block startup
+	go fc.ProactiveProtectionCheck()
 }
 
 // syncPositionsFromBinance fetches current positions and updates internal state
@@ -6163,8 +6172,7 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 		}
 	}
 
-	// Step 3: Reset entry decision pattern for this symbol
-	// This allows the Entry Decision engine to start fresh pattern detection (Step 1)
+	// Step 3: Reset entry decision pattern and remove from Ravindra monitor
 	if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
 		if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil {
 			if inst.RealtimePatternMatcher != nil && chain.Mode != "" && chain.Timeframe != "" {
@@ -6174,6 +6182,9 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 					"mode", chain.Mode,
 					"timeframe", chain.Timeframe)
 				inst.RealtimePatternMatcher.ResetPatternForSymbol(chain.Symbol, chain.Mode, chain.Timeframe)
+			}
+			if inst.RavindraPositionMonitor != nil {
+				inst.RavindraPositionMonitor.RemovePositionBySymbol(chain.Symbol)
 			}
 		}
 	}
@@ -6304,25 +6315,27 @@ func (fc *FuturesController) handleProtectionOrderCancelled(chainID, orderType, 
 		return
 	}
 
-	// Check if position still exists (use activePositions map from WebSocket data)
-	// Position key can be just symbol or symbol_SIDE depending on how it was stored
-	fc.mu.RLock()
-	_, posExists := fc.activePositions[symbol]
-	if !posExists {
-		_, posExists = fc.activePositions[symbol+"_"+chain.Side]
-	}
-	fc.mu.RUnlock()
-
-	if !posExists {
-		fc.logger.Info("[PROTECTION-WATCHDOG] No active position for symbol, skipping auto-replace",
-			"chain_id", chainID, "symbol", symbol)
-		return
-	}
-
-	// Check if the order was already replaced (check if SL/TP orders exist for this chain)
+	// Check if position still exists on Binance via API (not cache which may be empty)
 	client := fc.GetFuturesClient()
 	if client == nil {
 		fc.logger.Warn("[PROTECTION-WATCHDOG] No futures client available")
+		return
+	}
+
+	posData, err := client.GetPositionBySymbol(symbol)
+	if err != nil {
+		fc.logger.Warn("[PROTECTION-WATCHDOG] Failed to check position on Binance",
+			"chain_id", chainID, "symbol", symbol, "error", err)
+		return
+	}
+	posExists := false
+	if posData != nil && posData.PositionAmt != 0 {
+		posExists = true
+	}
+
+	if !posExists {
+		fc.logger.Info("[PROTECTION-WATCHDOG] No active position on Binance, skipping auto-replace",
+			"chain_id", chainID, "symbol", symbol)
 		return
 	}
 
@@ -6486,4 +6499,317 @@ func (fc *FuturesController) handleProtectionOrderCancelled(chainID, orderType, 
 			fc.logger.Warn("[PROTECTION-WATCHDOG] Failed to update TP details in DB", "error", err)
 		}
 	}
+}
+
+// ProactiveProtectionCheck verifies that all active chain positions have SL/TP orders on Binance
+// and places them if missing. If the mark price has already crossed the SL/TP level, a MARKET
+// close order is placed instead. Runs on startup and every 60 seconds as a safety net.
+func (fc *FuturesController) ProactiveProtectionCheck() {
+	// Need ownerUserID and repo for DB access
+	fc.mu.RLock()
+	ownerUserID := fc.ownerUserID
+	fc.mu.RUnlock()
+
+	if ownerUserID == "" || fc.repo == nil {
+		return
+	}
+
+	// Check rate limiter - skip entirely if IP banned
+	banned, remaining := binance.GetRateLimiter().IsIPBanned()
+	if banned {
+		fc.logger.Debug("[PROACTIVE-PROTECTION] Skipping check - IP banned",
+			"ban_remaining", remaining)
+		return
+	}
+
+	client := fc.GetFuturesClient()
+	if client == nil {
+		fc.logger.Debug("[PROACTIVE-PROTECTION] Skipping check - no futures client")
+		return
+	}
+
+	ctx := context.Background()
+
+	// Get all ACTIVE chains from DB
+	activeChains, err := fc.repo.GetDB().GetActiveOrderChains(ctx, ownerUserID)
+	if err != nil {
+		fc.logger.Error("[PROACTIVE-PROTECTION] Failed to get active order chains", "error", err)
+		return
+	}
+
+	if len(activeChains) == 0 {
+		return
+	}
+
+	// Query actual positions from Binance API (don't rely on activePositions cache which may be empty)
+	binancePositions, err := client.GetPositions()
+	if err != nil {
+		fc.logger.Warn("[PROACTIVE-PROTECTION] Failed to get positions from Binance API", "error", err)
+		return
+	}
+
+	// Build local map of active Binance positions keyed by symbol and symbol_side
+	activeOnBinance := make(map[string]bool)
+	for _, pos := range binancePositions {
+		if pos.PositionAmt == 0 {
+			continue
+		}
+		activeOnBinance[pos.Symbol] = true
+		if pos.PositionSide != "" {
+			activeOnBinance[pos.Symbol+"_"+pos.PositionSide] = true
+		}
+		// Also add derived side from amount
+		if pos.PositionAmt > 0 {
+			activeOnBinance[pos.Symbol+"_LONG"] = true
+		} else {
+			activeOnBinance[pos.Symbol+"_SHORT"] = true
+		}
+	}
+
+	fc.logger.Info("[PROACTIVE-PROTECTION] Checking protection orders for active chains",
+		"chain_count", len(activeChains), "positions_on_binance", len(activeOnBinance)/2)
+
+	for _, chain := range activeChains {
+		// Skip chains without entry price or symbol
+		if chain.EntryPrice == nil || chain.Symbol == "" {
+			continue
+		}
+
+		// Check if position actually exists on Binance (from fresh API query)
+		posExists := activeOnBinance[chain.Symbol] || activeOnBinance[chain.Symbol+"_"+chain.Side]
+
+		if !posExists {
+			// Position not on Binance but chain is still active - close the stale chain
+			fc.logger.Warn("[PROACTIVE-PROTECTION] Position gone from Binance but chain still active - closing stale chain",
+				"chain_id", chain.ChainID, "symbol", chain.Symbol, "side", chain.Side)
+			fc.closeStaleChain(ctx, chain, "CLOSED_EXTERNALLY", 0)
+			continue
+		}
+
+		// Re-check rate limiter before each API call
+		banned, _ = binance.GetRateLimiter().IsIPBanned()
+		if banned {
+			fc.logger.Debug("[PROACTIVE-PROTECTION] IP banned mid-check, stopping")
+			return
+		}
+
+		// Get open algo orders for this symbol from Binance API
+		algoOrders, err := client.GetOpenAlgoOrders(chain.Symbol)
+		if err != nil {
+			fc.logger.Warn("[PROACTIVE-PROTECTION] Failed to get algo orders",
+				"symbol", chain.Symbol, "error", err)
+			continue
+		}
+
+		// Check if SL and TP exist
+		hasSL := false
+		hasTP := false
+		for _, ao := range algoOrders {
+			// Match by Binance order ID stored in chain
+			if chain.SLBinanceOrderID != nil && ao.AlgoId == *chain.SLBinanceOrderID {
+				hasSL = true
+			}
+			if chain.TPBinanceOrderID != nil && ao.AlgoId == *chain.TPBinanceOrderID {
+				hasTP = true
+			}
+			// Match by ClientAlgoId containing chain ID (covers both CHAINID-SL and legacy CHAINID-SL-R)
+			if strings.Contains(ao.ClientAlgoId, chain.ChainID+"-SL") {
+				hasSL = true
+			}
+			if strings.Contains(ao.ClientAlgoId, chain.ChainID+"-TP") {
+				hasTP = true
+			}
+		}
+
+		// If both exist, nothing to do
+		if hasSL && hasTP {
+			continue
+		}
+
+		// Get mark price for this symbol to determine if SL/TP has been crossed
+		var markPrice float64
+		markPriceData, err := client.GetMarkPrice(chain.Symbol)
+		if err != nil {
+			fc.logger.Warn("[PROACTIVE-PROTECTION] Failed to get mark price",
+				"symbol", chain.Symbol, "error", err)
+			// Can't determine if crossed, try to place the order anyway via watchdog
+			if !hasSL && chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
+				fc.logger.Info("[PROACTIVE-PROTECTION] SL missing (mark price unavailable) - attempting replacement via watchdog",
+					"chain_id", chain.ChainID, "symbol", chain.Symbol, "sl_price", *chain.CurrentSLPrice)
+				go fc.handleProtectionOrderCancelled(chain.ChainID, "SL", chain.Symbol)
+			}
+			if !hasTP && chain.CurrentTPPrice != nil && *chain.CurrentTPPrice > 0 {
+				fc.logger.Info("[PROACTIVE-PROTECTION] TP missing (mark price unavailable) - attempting replacement via watchdog",
+					"chain_id", chain.ChainID, "symbol", chain.Symbol, "tp_price", *chain.CurrentTPPrice)
+				go fc.handleProtectionOrderCancelled(chain.ChainID, "TP", chain.Symbol)
+			}
+			continue
+		}
+		markPrice = markPriceData.MarkPrice
+
+		// --- Handle missing SL ---
+		if !hasSL && chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
+			slPrice := *chain.CurrentSLPrice
+
+			slCrossed := false
+			if chain.Side == "LONG" {
+				slCrossed = markPrice > 0 && markPrice <= slPrice
+			} else { // SHORT
+				slCrossed = markPrice > 0 && markPrice >= slPrice
+			}
+
+			if slCrossed && markPrice > 0 {
+				// SL already crossed - place MARKET order for immediate close
+				fc.logger.Warn("[PROACTIVE-PROTECTION] SL CROSSED - placing market close",
+					"chain_id", chain.ChainID,
+					"symbol", chain.Symbol,
+					"side", chain.Side,
+					"mark_price", fmt.Sprintf("%.4f", markPrice),
+					"sl_price", fmt.Sprintf("%.4f", slPrice))
+				fc.placeMarketCloseForProtection(ctx, client, chain, "SL_CROSSED")
+			} else {
+				// SL not crossed - place normal STOP order at SL price via watchdog
+				fc.logger.Info("[PROACTIVE-PROTECTION] SL missing - placing replacement",
+					"chain_id", chain.ChainID,
+					"symbol", chain.Symbol,
+					"sl_price", fmt.Sprintf("%.4f", slPrice),
+					"mark_price", fmt.Sprintf("%.4f", markPrice))
+				go fc.handleProtectionOrderCancelled(chain.ChainID, "SL", chain.Symbol)
+			}
+		}
+
+		// --- Handle missing TP ---
+		if !hasTP && chain.CurrentTPPrice != nil && *chain.CurrentTPPrice > 0 {
+			tpPrice := *chain.CurrentTPPrice
+
+			tpCrossed := false
+			if chain.Side == "LONG" {
+				tpCrossed = markPrice > 0 && markPrice >= tpPrice
+			} else { // SHORT
+				tpCrossed = markPrice > 0 && markPrice <= tpPrice
+			}
+
+			if tpCrossed && markPrice > 0 {
+				// TP already crossed - place MARKET order to take profit
+				fc.logger.Warn("[PROACTIVE-PROTECTION] TP CROSSED - placing market close",
+					"chain_id", chain.ChainID,
+					"symbol", chain.Symbol,
+					"side", chain.Side,
+					"mark_price", fmt.Sprintf("%.4f", markPrice),
+					"tp_price", fmt.Sprintf("%.4f", tpPrice))
+				fc.placeMarketCloseForProtection(ctx, client, chain, "TP_CROSSED")
+			} else {
+				// TP not crossed - place normal TAKE_PROFIT order via watchdog
+				fc.logger.Info("[PROACTIVE-PROTECTION] TP missing - placing replacement",
+					"chain_id", chain.ChainID,
+					"symbol", chain.Symbol,
+					"tp_price", fmt.Sprintf("%.4f", tpPrice),
+					"mark_price", fmt.Sprintf("%.4f", markPrice))
+				go fc.handleProtectionOrderCancelled(chain.ChainID, "TP", chain.Symbol)
+			}
+		}
+	}
+}
+
+// placeMarketCloseForProtection places a MARKET order to close a position when SL/TP has been crossed
+// but the protection order was missing. After the order fills, closes the chain in DB using the full
+// lifecycle (pattern reset, capacity rebuild, broadcast).
+func (fc *FuturesController) placeMarketCloseForProtection(ctx context.Context, client binance.FuturesClient, chain *orders.OrderChain, reason string) {
+	// Determine close side and position side
+	var closeSide string
+	var positionSide binance.PositionSide
+	if chain.Side == "SHORT" {
+		closeSide = "BUY"
+		positionSide = binance.PositionSideShort
+	} else {
+		closeSide = "SELL"
+		positionSide = binance.PositionSideLong
+	}
+
+	// Get quantity from chain
+	quantity := float64(0)
+	if chain.RemainingQuantity != nil && *chain.RemainingQuantity > 0 {
+		quantity = *chain.RemainingQuantity
+	} else if chain.EntryQuantity != nil {
+		quantity = *chain.EntryQuantity
+	}
+	if quantity == 0 {
+		fc.logger.Warn("[PROACTIVE-PROTECTION] No quantity available for market close",
+			"chain_id", chain.ChainID, "reason", reason)
+		return
+	}
+
+	// Round quantity to proper precision
+	quantity = roundQuantity(chain.Symbol, quantity)
+	if quantity == 0 {
+		fc.logger.Warn("[PROACTIVE-PROTECTION] Quantity rounds to 0 (dust position), skipping",
+			"chain_id", chain.ChainID, "symbol", chain.Symbol)
+		return
+	}
+
+	// Place MARKET close order
+	closeParams := binance.FuturesOrderParams{
+		Symbol:       chain.Symbol,
+		Side:         closeSide,
+		PositionSide: positionSide,
+		Type:         binance.FuturesOrderTypeMarket,
+		Quantity:     quantity,
+		ReduceOnly:   true,
+	}
+
+	fc.logger.Info("[PROACTIVE-PROTECTION] Placing market close order",
+		"chain_id", chain.ChainID,
+		"symbol", chain.Symbol,
+		"side", closeSide,
+		"position_side", positionSide,
+		"quantity", quantity,
+		"reason", reason)
+
+	resp, err := client.PlaceFuturesOrder(closeParams)
+	if err != nil {
+		errStr := err.Error()
+		// Check for reduceOnly order rejection (position may have already been closed)
+		if strings.Contains(errStr, "-2022") || strings.Contains(errStr, "ReduceOnly") {
+			fc.logger.Info("[PROACTIVE-PROTECTION] Position already closed (ReduceOnly rejected)",
+				"chain_id", chain.ChainID, "symbol", chain.Symbol)
+			return
+		}
+		fc.logger.Error("[PROACTIVE-PROTECTION] Failed to place market close order",
+			"chain_id", chain.ChainID,
+			"symbol", chain.Symbol,
+			"reason", reason,
+			"error", err)
+		return
+	}
+
+	fc.logger.Info("[PROACTIVE-PROTECTION] Market close order placed successfully",
+		"chain_id", chain.ChainID,
+		"symbol", chain.Symbol,
+		"order_id", resp.OrderId,
+		"reason", reason,
+		"status", resp.Status)
+
+	// Calculate PnL from entry vs close price
+	closePrice := resp.AvgPrice
+	if closePrice == 0 {
+		closePrice = resp.Price
+	}
+	var realizedPnL float64
+	if chain.EntryPrice != nil && closePrice > 0 {
+		entryPrice := *chain.EntryPrice
+		if chain.Side == "LONG" {
+			realizedPnL = (closePrice - entryPrice) * quantity
+		} else {
+			realizedPnL = (entryPrice - closePrice) * quantity
+		}
+	}
+
+	// Cancel any remaining algo orders (SL/TP) for this symbol
+	if cancelErr := client.CancelAllAlgoOrders(chain.Symbol); cancelErr != nil {
+		fc.logger.Debug("[PROACTIVE-PROTECTION] Failed to cancel remaining algo orders (may not exist)",
+			"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", cancelErr)
+	}
+
+	// Close chain using full lifecycle (DB close, pattern reset, capacity rebuild, broadcast)
+	fc.closeStaleChain(ctx, chain, reason, realizedPnL)
 }
