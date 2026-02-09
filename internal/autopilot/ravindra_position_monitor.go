@@ -192,6 +192,16 @@ func (m *RavindraPositionMonitor) AddPosition(pos *RavindraPosition) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Deduplication: Check if a position with the same symbol+side already exists under a different chainID.
+	// If so, remove the old entry to prevent duplicate monitoring of the same position.
+	for existingChainID, existingPos := range m.positions {
+		if existingChainID != pos.ChainID && existingPos.Symbol == pos.Symbol && existingPos.Side == pos.Side {
+			log.Printf("[RAVINDRA-MONITOR] Removing duplicate position %s for %s/%s (replaced by %s)",
+				existingChainID, existingPos.Symbol, existingPos.Side, pos.ChainID)
+			delete(m.positions, existingChainID)
+		}
+	}
+
 	m.positions[pos.ChainID] = pos
 	m.stats.ActivePositions = len(m.positions)
 
@@ -215,7 +225,7 @@ func (m *RavindraPositionMonitor) ReRegisterFromChain(chainID, symbol, userID, s
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Don't re-register if already tracked
+	// Don't re-register if already tracked with this exact chainID
 	if _, exists := m.positions[chainID]; exists {
 		return nil
 	}
@@ -223,6 +233,16 @@ func (m *RavindraPositionMonitor) ReRegisterFromChain(chainID, symbol, userID, s
 	direction := "LONG"
 	if side == "SHORT" || side == "SELL" {
 		direction = "SHORT"
+	}
+
+	// Deduplication: Remove any existing position with the same symbol+side but different chainID.
+	// This prevents double-monitoring if startup paths register the same position twice under different chains.
+	for existingChainID, existingPos := range m.positions {
+		if existingChainID != chainID && existingPos.Symbol == symbol && existingPos.Side == direction {
+			log.Printf("[RAVINDRA-MONITOR] ReRegister: removing stale position %s for %s/%s (replaced by %s)",
+				existingChainID, existingPos.Symbol, existingPos.Side, chainID)
+			delete(m.positions, existingChainID)
+		}
 	}
 
 	riskAmount := math.Abs(entryPrice - slPrice)
@@ -433,7 +453,7 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 	pos.CurrentSL = newSLPrice
 	pos.UpdatedAt = time.Now()
 
-	// Record modification event
+	// Record modification event and update SL binance order ID in DB
 	if m.chainEventWriter != nil && pos.ChainID != "" {
 		m.chainEventWriter.RecordSLModified(ctx, pos.ChainID, orders.ChainSLModifiedEvent{
 			BinanceOrderID:     newOrderID,
@@ -444,6 +464,14 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 			MarketPrice:        pos.TrailingStop.HighestPrice,
 			BinanceTimestamp:   time.Now().UnixMilli(),
 		})
+
+		// Update sl_binance_order_id in order_chains table so protection watchdog
+		// can match this order when it receives ALGO_UPDATE events
+		if err := m.chainEventWriter.GetDB().UpdateOrderChainSLDetails(
+			ctx, pos.ChainID, newOrderID, newSLPrice, pos.Quantity,
+		); err != nil {
+			log.Printf("[RAVINDRA-MONITOR] Warning: failed to update SL details in DB for chain %s: %v", pos.ChainID, err)
+		}
 	}
 
 	// Update statistics
@@ -531,6 +559,13 @@ func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *R
 		positionSide = binance.PositionSideLong
 	}
 
+	// Build ClientAlgoId for chain-linked identification
+	// Format: CHAINID-SL-R where -R indicates a Ravindra replacement
+	clientAlgoId := ""
+	if pos.ChainID != "" {
+		clientAlgoId = fmt.Sprintf("%s-SL-R", pos.ChainID)
+	}
+
 	// Place STOP_MARKET algo order with precision fields to avoid Binance -1111 errors
 	params := binance.AlgoOrderParams{
 		Symbol:            pos.Symbol,
@@ -542,6 +577,7 @@ func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *R
 		WorkingType:       binance.WorkingTypeMarkPrice,
 		PricePrecision:    pos.PricePrecision,
 		QuantityPrecision: pos.QuantityPrecision,
+		ClientAlgoId:      clientAlgoId,
 	}
 
 	resp, err := m.futuresClient.PlaceAlgoOrder(params)

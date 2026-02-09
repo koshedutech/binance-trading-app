@@ -676,9 +676,9 @@ function CoinRow({
                   <span className="text-orange-400 font-mono text-[10px]">{coin.chain_id}</span>
                 )}
               </div>
-              {/* Row 2: Reference candle details */}
+              {/* Row 2: Reference candle details + SL/TP inline */}
               {coin.reference_candle && (
-                <div className="flex items-center gap-2 text-[10px]">
+                <div className="flex items-center gap-2 text-[10px] flex-wrap">
                   <span className="text-green-400 font-medium">Ref:</span>
                   <span className="text-gray-400 font-mono">
                     {new Date(coin.reference_candle.open_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -687,7 +687,23 @@ function CoinRow({
                   <span className="text-white font-mono">{coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}</span>
                   <span className="text-gray-500">L:</span>
                   <span className="text-white font-mono">{coin.reference_candle.low.toFixed(coin.reference_candle.low > 100 ? 2 : 4)}</span>
-                  <span className="text-green-400 font-mono ml-auto">{coin.reference_candle.volume_multiplier.toFixed(1)}x vol</span>
+                  <span className="text-green-400 font-mono">{coin.reference_candle.volume_multiplier.toFixed(1)}x vol</span>
+                  {coin.entry_levels && (
+                    <>
+                      <span className="text-gray-600">|</span>
+                      <span className="text-gray-500">SL:</span>
+                      <span className="text-red-400 font-mono">
+                        {coin.entry_levels.stop_loss.toFixed(coin.entry_levels.stop_loss > 100 ? 2 : 4)}
+                      </span>
+                      <span className="text-gray-500">TP:</span>
+                      <span className="text-green-400 font-mono">
+                        {coin.entry_levels.take_profit.toFixed(coin.entry_levels.take_profit > 100 ? 2 : 4)}
+                      </span>
+                      <span className="text-gray-500">
+                        R:R <span className="text-yellow-400 font-mono">{coin.entry_levels.risk_reward_ratio.toFixed(1)}</span>
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
               {/* Row 3: Entry candle details */}
@@ -704,22 +720,6 @@ function CoinRow({
                       coin.entry_candle.direction === 'long' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                     }`}>{coin.entry_candle.direction.toUpperCase()}</span>
                   )}
-                </div>
-              )}
-              {/* Row 3: Entry Levels (SL / TP / R:R) */}
-              {coin.entry_levels && (
-                <div className="flex items-center gap-3 text-[10px]">
-                  <span className="text-gray-500">SL:</span>
-                  <span className="text-red-400 font-mono">
-                    {coin.entry_levels.stop_loss.toFixed(coin.entry_levels.stop_loss > 100 ? 2 : 4)}
-                  </span>
-                  <span className="text-gray-500">TP:</span>
-                  <span className="text-green-400 font-mono">
-                    {coin.entry_levels.take_profit.toFixed(coin.entry_levels.take_profit > 100 ? 2 : 4)}
-                  </span>
-                  <span className="text-gray-500 ml-auto">
-                    R:R <span className="text-yellow-400 font-mono">{coin.entry_levels.risk_reward_ratio.toFixed(1)}</span>
-                  </span>
                 </div>
               )}
               {/* Row 5: Timers + PnL */}

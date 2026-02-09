@@ -5730,14 +5730,30 @@ func (fc *FuturesController) HandleStreamAlgoUpdate(update *binance.AlgoUpdateEv
 			"algo_status", order.AlgoStatus,
 			"client_algo_id", order.ClientAlgoId)
 
-		// Trigger protection watchdog for canceled/expired SL/TP
-		orderType := order.OrderType
-		if orderType == "STOP_MARKET" || orderType == "STOP" ||
-			orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
-			fc.logger.Warn("SL/TP algo order canceled/expired - protection may be needed",
-				"symbol", order.Symbol,
-				"algo_id", order.AlgoId,
-				"order_type", orderType)
+		// POSITION PROTECTION: Detect SL/TP algo order cancellations and auto-replace
+		// Similar to HandleStreamOrderUpdate CANCELED case, but uses ClientAlgoId
+		clientAlgoID := order.ClientAlgoId
+		if clientAlgoID != "" {
+			chainID := protectionParseChainID(clientAlgoID)
+			if chainID != "" {
+				orderSuffix := protectionExtractSuffix(clientAlgoID, chainID)
+				// Check if this is an SL or TP order (including Ravindra replacements with -R suffix)
+				if orderSuffix == "SL" || orderSuffix == "TP" || orderSuffix == "SL-R" || orderSuffix == "TP-R" {
+					protOrderType := "SL"
+					if strings.HasPrefix(orderSuffix, "TP") {
+						protOrderType = "TP"
+					}
+					fc.logger.Info("[PROTECTION-WATCHDOG] Algo SL/TP order cancelled/expired - checking for auto-replace",
+						"chain_id", chainID,
+						"order_type", protOrderType,
+						"symbol", order.Symbol,
+						"client_algo_id", clientAlgoID,
+						"algo_status", order.AlgoStatus)
+
+					// Trigger auto-replacement in background goroutine
+					go fc.handleProtectionOrderCancelled(chainID, protOrderType, order.Symbol)
+				}
+			}
 		}
 
 	case "REJECTED":

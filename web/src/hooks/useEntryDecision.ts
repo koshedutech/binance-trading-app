@@ -353,6 +353,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
                 // Preserve volume data if not in new data
                 volume_multiplier: newCoin.volume_multiplier ?? prevCoin.volume_multiplier,
                 volume_threshold: newCoin.volume_threshold ?? prevCoin.volume_threshold,
+                // Preserve entry_levels (SL/TP/R:R) - critical for Step 4 display stability
+                entry_levels: isResettingToWatching ? newCoin.entry_levels : (newCoin.entry_levels || prevCoin.entry_levels),
               };
             });
 
@@ -408,6 +410,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
                     current_price: newCoin.current_price || prevCoin.current_price,
                     volume_multiplier: newCoin.volume_multiplier ?? prevCoin.volume_multiplier,
                     volume_threshold: newCoin.volume_threshold ?? prevCoin.volume_threshold,
+                    // Preserve entry_levels (SL/TP/R:R) - critical for Step 4 display stability
+                    entry_levels: isResettingToWatching ? newCoin.entry_levels : (newCoin.entry_levels || prevCoin.entry_levels),
                   };
                 });
 

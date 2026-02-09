@@ -13540,6 +13540,36 @@ func (ga *GinieAutopilot) cleanupOrphanAlgoOrders() {
 	}
 }
 
+// isChainLinkedAlgoOrder checks if a ClientAlgoId belongs to a chain-managed order.
+// Chain-linked orders have ClientAlgoId in the format: CHAINID-SL, CHAINID-TP, CHAINID-SL-R, CHAINID-TP-R
+// where CHAINID is MODE-DATE-SEQ (e.g., SCA-09FEB-00005-SL).
+// These orders should NOT be cancelled by Ginie cleanup - the chain protection system handles them.
+func isChainLinkedAlgoOrder(clientAlgoId string) bool {
+	if clientAlgoId == "" {
+		return false
+	}
+	// Chain IDs have at least 3 dash-separated parts: MODE-DATE-SEQ
+	// Followed by -SL, -TP, -SL-R, or -TP-R
+	parts := strings.Split(clientAlgoId, "-")
+	if len(parts) < 4 {
+		return false
+	}
+	// Check if it ends with SL or TP suffix (with optional -R for Ravindra replacements)
+	// Rejoin the suffix after the first 3 parts (the chain ID)
+	suffix := strings.Join(parts[3:], "-")
+	return suffix == "SL" || suffix == "TP" || suffix == "SL-R" || suffix == "TP-R" || suffix == "E"
+}
+
+// hasChainLinkedOrders checks if any order in a list is chain-linked
+func hasChainLinkedOrders(orders []binance.AlgoOrder) bool {
+	for _, order := range orders {
+		if isChainLinkedAlgoOrder(order.ClientAlgoId) {
+			return true
+		}
+	}
+	return false
+}
+
 // cleanupAllOrphanOrders does a comprehensive cleanup of ALL orphan orders at startup
 // It checks every position on exchange and cancels orders for symbols without positions
 func (ga *GinieAutopilot) cleanupAllOrphanOrders() {
@@ -13575,16 +13605,21 @@ func (ga *GinieAutopilot) cleanupAllOrphanOrders() {
 		orderCount += len(orders)
 
 		// If more than 2 orders for a position, cancel all and let the system re-create them
+		// BUT skip symbols with chain-linked orders - the chain protection system handles those
 		if len(orders) > 2 {
-			log.Printf("[GINIE-CLEANUP] %s has %d orders (expected max 2), cancelling all to reset", symbol, len(orders))
-			success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
-			if err != nil {
-				log.Printf("[GINIE-CLEANUP] WARNING: Failed to fully cancel orders for %s: %v (success=%d, failed=%d)", symbol, err, success, failed)
+			if hasChainLinkedOrders(orders) {
+				log.Printf("[GINIE-CLEANUP] %s has %d orders (>2) but has chain-linked orders, skipping (chain protection handles it)", symbol, len(orders))
 			} else {
-				log.Printf("[GINIE-CLEANUP] Successfully cancelled %d orders for %s", success, symbol)
+				log.Printf("[GINIE-CLEANUP] %s has %d orders (expected max 2), cancelling all to reset", symbol, len(orders))
+				success, failed, err := ga.cancelAllAlgoOrdersForSymbol(symbol)
+				if err != nil {
+					log.Printf("[GINIE-CLEANUP] WARNING: Failed to fully cancel orders for %s: %v (success=%d, failed=%d)", symbol, err, success, failed)
+				} else {
+					log.Printf("[GINIE-CLEANUP] Successfully cancelled %d orders for %s", success, symbol)
+				}
+				cancelledCount += success
+				time.Sleep(100 * time.Millisecond) // Rate limit protection
 			}
-			cancelledCount += success
-			time.Sleep(100 * time.Millisecond) // Rate limit protection
 		}
 	}
 
@@ -13602,6 +13637,12 @@ func (ga *GinieAutopilot) cleanupAllOrphanOrders() {
 
 		// Check each symbol with orders
 		for symbol, orders := range ordersMap {
+			// Skip symbols with chain-linked orders entirely - chain protection system handles those
+			if hasChainLinkedOrders(orders) {
+				log.Printf("[GINIE-CLEANUP] %s has %d orders with chain-linked IDs, skipping (chain protection handles it)", symbol, len(orders))
+				continue
+			}
+
 			if symbolsWithPositions[symbol] {
 				// Symbol has a position - check if too many orders
 				if len(orders) > 4 {
