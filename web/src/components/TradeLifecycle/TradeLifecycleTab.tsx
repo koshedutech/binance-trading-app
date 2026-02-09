@@ -965,8 +965,83 @@ export default function TradeLifecycleTab({
         tpPrice: data.tp_price,
       });
 
-      // Refetch orders to pick up the newly placed SL/TP
-      fetchOrders();
+      // Update chain state directly from event data to avoid 5s API cache delay.
+      // This ensures SL/TP orders appear immediately in the order tree.
+      setChains(prev => prev.map(chain => {
+        if (chain.chainId !== data.chain_id) return chain;
+
+        // Determine the close side from chain's position side
+        const closeSide: 'BUY' | 'SELL' = chain.positionSide === 'LONG' ? 'SELL' : 'BUY';
+        const now = Date.now();
+
+        // Build synthetic SL order from event data
+        const newOrders: ChainOrder[] = [...chain.orders];
+        let newSlOrder = chain.slOrder;
+        let newTpOrders = [...chain.tpOrders];
+
+        if (data.sl_order_id && data.sl_price) {
+          const slClientOrderId = chain.chainId + '-SL';
+          const slOrder: ChainOrder = {
+            orderId: data.sl_order_id,
+            clientOrderId: slClientOrderId,
+            symbol: data.symbol || chain.symbol || '',
+            side: closeSide,
+            positionSide: chain.positionSide || 'BOTH',
+            type: 'STOP_MARKET',
+            status: data.sl_status || 'NEW',
+            price: 0,
+            origQty: chain.positionState?.entryQuantity || 0,
+            executedQty: 0,
+            stopPrice: data.sl_price,
+            time: now,
+            updateTime: now,
+            orderType: 'SL' as const,
+            parsed: parseClientOrderId(slClientOrderId),
+          };
+          // Only add if not already present (deduplicate by orderId)
+          if (!newOrders.some(o => o.orderId === data.sl_order_id)) {
+            newOrders.push(slOrder);
+          }
+          newSlOrder = slOrder;
+        }
+
+        if (data.tp_order_id && data.tp_price) {
+          const tpClientOrderId = chain.chainId + '-TP1';
+          const tpOrder: ChainOrder = {
+            orderId: data.tp_order_id,
+            clientOrderId: tpClientOrderId,
+            symbol: data.symbol || chain.symbol || '',
+            side: closeSide,
+            positionSide: chain.positionSide || 'BOTH',
+            type: 'TAKE_PROFIT_MARKET',
+            status: data.tp_status || 'NEW',
+            price: 0,
+            origQty: chain.positionState?.entryQuantity || 0,
+            executedQty: 0,
+            stopPrice: data.tp_price,
+            time: now,
+            updateTime: now,
+            orderType: 'TP1' as const,
+            parsed: parseClientOrderId(tpClientOrderId),
+          };
+          // Only add if not already present (deduplicate by orderId)
+          if (!newOrders.some(o => o.orderId === data.tp_order_id)) {
+            newOrders.push(tpOrder);
+          }
+          newTpOrders = [tpOrder];
+        }
+
+        return {
+          ...chain,
+          orders: newOrders,
+          slOrder: newSlOrder,
+          tpOrders: newTpOrders.length > 0 ? newTpOrders : chain.tpOrders,
+          updatedAt: now,
+        };
+      }));
+
+      // Also fetch after cache expires to get full accurate data from API
+      setTimeout(() => fetchOrders(), 6000);
     };
 
     // Handler for PnL correction from real trade data

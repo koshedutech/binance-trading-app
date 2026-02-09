@@ -1048,10 +1048,14 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 		now := time.Now()
 		update.PositionOpenedAt = &now
 
-		// Store position opened time in state for enriching future suppressed broadcasts
+		// Store position opened time and freeze direction in state for enriching future suppressed broadcasts
 		stateForWrite := r.getPatternState(symbol, mode, timeframe)
 		if stateForWrite != nil {
 			stateForWrite.PositionOpenedAt = time.Now()
+			// Freeze the direction at position open time so future broadcasts use the original direction
+			if stateForWrite.Direction != "" {
+				stateForWrite.PositionDirection = stateForWrite.Direction
+			}
 		}
 
 		// Enrich with reference candle, entry candle, entry levels from pattern state
@@ -1217,6 +1221,15 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunningWithChainInfo(symbol, 
 				if chainInfo.EntryPrice > 0 {
 					stateForWrite.EntryPrice = chainInfo.EntryPrice
 				}
+				// Freeze the position direction from chain side so future broadcasts
+				// use the original direction, not whatever new pattern detection finds
+				if chainInfo.Side == "LONG" {
+					stateForWrite.PositionDirection = "long"
+				} else if chainInfo.Side == "SHORT" {
+					stateForWrite.PositionDirection = "short"
+				} else if stateForWrite.Direction != "" {
+					stateForWrite.PositionDirection = stateForWrite.Direction
+				}
 			}
 		}
 
@@ -1323,7 +1336,13 @@ func (r *RealtimePatternMatcher) broadcastSuppressedPriceUpdate(symbol, timefram
 	// Enrich with reference candle, entry candle, entry levels from pattern state
 	state := r.getPatternState(symbol, mode, timeframe)
 	if state != nil {
-		update.Direction = state.Direction
+		// Use frozen PositionDirection (set at position open) to prevent direction flipping
+		// when new pattern detection changes state.Direction
+		if state.PositionDirection != "" {
+			update.Direction = state.PositionDirection
+		} else {
+			update.Direction = state.Direction
+		}
 		update.HasActivePosition = true
 
 		// Include position entry price from pattern state

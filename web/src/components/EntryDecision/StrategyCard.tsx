@@ -334,9 +334,11 @@ interface PositionRunningTimerProps {
   currentPrice?: number;
   /** Chain ID for reference */
   chainId?: string;
+  /** Trade direction (long/short) */
+  direction?: string;
 }
 
-function PositionRunningTimer({ positionOpenedAt, entryPrice, currentPrice, chainId }: PositionRunningTimerProps) {
+function PositionRunningTimer({ positionOpenedAt, entryPrice, currentPrice, chainId, direction }: PositionRunningTimerProps) {
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
 
   useEffect(() => {
@@ -357,9 +359,12 @@ function PositionRunningTimer({ positionOpenedAt, entryPrice, currentPrice, chai
     return () => clearInterval(timer);
   }, [positionOpenedAt]);
 
-  // Calculate P&L if prices available
+  // Calculate P&L if prices available (direction-aware)
+  const isShort = direction === 'short';
   const pnlPercent = entryPrice && currentPrice
-    ? ((currentPrice - entryPrice) / entryPrice) * 100
+    ? isShort
+      ? ((entryPrice - currentPrice) / entryPrice) * 100
+      : ((currentPrice - entryPrice) / entryPrice) * 100
     : null;
 
   return (
@@ -736,6 +741,7 @@ function CoinRow({
                       positionOpenedAt={coin.position_opened_at}
                       entryPrice={coin.position_entry_price}
                       currentPrice={coin.current_price}
+                      direction={coin.direction}
                     />
                   )}
                 </div>

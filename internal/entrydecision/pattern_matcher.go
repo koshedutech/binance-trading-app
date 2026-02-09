@@ -281,6 +281,12 @@ type PatternState struct {
 	// Position tracking (set when transitioning to position_running, for broadcast enrichment)
 	PositionChainID    string    `json:"position_chain_id,omitempty"`
 	PositionOpenedAt   time.Time `json:"position_opened_at"`
+
+	// PositionDirection is the direction frozen at position open time.
+	// Unlike Direction (which can change if new pattern detection runs),
+	// this field is set once when the position opens and never changes.
+	// Used by broadcastSuppressedPriceUpdate to show the correct direction for Step 4.
+	PositionDirection string `json:"position_direction,omitempty"`
 }
 
 // VolumeImbalancePatternMatcher tracks and matches Volume Imbalance patterns.
