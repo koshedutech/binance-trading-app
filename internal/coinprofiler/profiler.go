@@ -522,6 +522,8 @@ func (cp *CoinProfiler) UpdateSymbolToPosition(symbol, timeframe, mode string) {
 
 // UpdateSymbolToStrategy reverts a symbol's source back to "strategy" when a position closes.
 // This is called when a chain closes - provides instant coin profiler update.
+// If the symbol was only tracked because of a position (no strategy requirements),
+// it is removed entirely from subscriptions, coinData, and combinedReqs.
 func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
 	if symbol == "" {
 		return
@@ -530,24 +532,51 @@ func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
 
-	// Update subscription source
-	if sub, exists := cp.subscriptions[symbol]; exists {
-		sub.Source = DataSourceStrategy
-	}
-
-	// Update coinData source
-	if coinData, exists := cp.coinData[symbol]; exists {
-		coinData.Source = DataSourceStrategy
-	}
-
-	// Update combinedReqs if it exists
+	// Check if this symbol has strategy-based requirements in combinedReqs.
+	// If the symbol was only added because of a position (e.g., auto-detected from Binance
+	// without a DB chain), it won't have any strategy references and should be removed entirely.
+	hasStrategyBacking := false
 	if cp.combinedReqs != nil {
 		if symReq, exists := cp.combinedReqs.BySymbol[symbol]; exists {
-			symReq.Source = DataSourceStrategy
+			hasStrategyBacking = len(symReq.Strategies) > 0
 		}
 	}
 
-	log.Printf("%s Reverted symbol %s to strategy source (position closed)", LogPrefix, symbol)
+	if hasStrategyBacking {
+		// Symbol is part of the strategy watchlist - revert source to "strategy"
+		if sub, exists := cp.subscriptions[symbol]; exists {
+			sub.Source = DataSourceStrategy
+		}
+		if coinData, exists := cp.coinData[symbol]; exists {
+			coinData.Source = DataSourceStrategy
+		}
+		if cp.combinedReqs != nil {
+			if symReq, exists := cp.combinedReqs.BySymbol[symbol]; exists {
+				symReq.Source = DataSourceStrategy
+				symReq.Positions = nil // Clear position references
+			}
+		}
+		log.Printf("%s Reverted symbol %s to strategy source (position closed, still in watchlist)", LogPrefix, symbol)
+	} else {
+		// Symbol was tracked ONLY for a position - remove it entirely
+		delete(cp.subscriptions, symbol)
+		delete(cp.coinData, symbol)
+		if cp.combinedReqs != nil {
+			delete(cp.combinedReqs.BySymbol, symbol)
+			// Remove from AllSymbols list
+			newAllSymbols := make([]string, 0, len(cp.combinedReqs.AllSymbols))
+			for _, s := range cp.combinedReqs.AllSymbols {
+				if s != symbol {
+					newAllSymbols = append(newAllSymbols, s)
+				}
+			}
+			cp.combinedReqs.AllSymbols = newAllSymbols
+			if cp.combinedReqs.PositionCount > 0 {
+				cp.combinedReqs.PositionCount--
+			}
+		}
+		log.Printf("%s Removed symbol %s entirely (position closed, not in any watchlist)", LogPrefix, symbol)
+	}
 }
 
 // RebuildCapacity recalculates coin profiler capacity based on active chain count.
@@ -928,8 +957,22 @@ func (cp *CoinProfiler) SetSubscriptionsFromCombined(combined *CombinedRequireme
 		len(combined.AllSymbols), len(combined.AllTimeframes))
 
 	// Update internal subscriptions map and store combined requirements
+	// CRITICAL: Remove stale subscriptions that are no longer in the new combined set.
+	// Without this cleanup, symbols that were tracked only for positions would remain
+	// with source "position" even after the position closes.
 	cp.mu.Lock()
 	cp.combinedReqs = combined // Store for API access
+
+	// Remove subscriptions that are no longer in the new combined requirements
+	for symbol := range cp.subscriptions {
+		if _, exists := combined.BySymbol[symbol]; !exists {
+			delete(cp.subscriptions, symbol)
+			delete(cp.coinData, symbol)
+			cp.logDebug("Removed stale subscription for %s (not in new requirements)", symbol)
+		}
+	}
+
+	// Add/update subscriptions from new combined requirements
 	for symbol, symReq := range combined.BySymbol {
 		cp.subscriptions[symbol] = &SubscriptionRequest{
 			Symbol:     symbol,

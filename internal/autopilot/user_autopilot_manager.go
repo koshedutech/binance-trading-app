@@ -172,6 +172,9 @@ type UserAutopilotManager struct {
 	// Used to update the global FuturesController and restart the User Data Stream
 	onRealClientCreated func(binance.FuturesClient, string)
 
+	// positionExistsChecker is wired from main.go to check FuturesController.HasActivePosition
+	positionExistsChecker func(symbol string) bool
+
 	mu sync.RWMutex
 }
 
@@ -466,6 +469,14 @@ func (m *UserAutopilotManager) SetMarketDataCache(cache *binance.MarketDataCache
 	defer m.mu.Unlock()
 	m.marketDataCache = cache
 	m.logger.Info("MarketDataCache set on UserAutopilotManager for WebSocket price provider")
+}
+
+// SetPositionExistsChecker sets the callback for checking if a position exists on Binance.
+// This is wired to FuturesController.HasActivePosition in main.go.
+func (m *UserAutopilotManager) SetPositionExistsChecker(checker func(symbol string) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.positionExistsChecker = checker
 }
 
 // NotifySettingsChanged notifies the autopilot system that settings have changed.
@@ -884,13 +895,21 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		realtimeMatcher.SetPatternUpdateCallback(m.patternUpdateCallback)
 		m.logger.Info("PatternUpdateCallback wired to RealtimePatternMatcher", "user_id", userID)
 	}
+	// Wire position exists checker for runtime safety net
+	m.mu.RLock()
+	posChecker := m.positionExistsChecker
+	m.mu.RUnlock()
+	if posChecker != nil {
+		realtimeMatcher.SetPositionExistsChecker(posChecker)
+		m.logger.Info("PositionExistsChecker wired to RealtimePatternMatcher", "user_id", userID)
+	}
 	m.logger.Info("RealtimePatternMatcher created and registered with CoinProfiler", "user_id", userID)
 
 	// Auto-detect active positions from order chains and set Step 4 immediately on startup.
 	// This ensures Entry Decision shows "position running" for symbols with active positions
 	// without waiting for user interaction or API refresh.
 	// NOTE: This runs AFTER callback wiring so broadcasts reach the frontend.
-	m.autoDetectActivePositions(ctx, userID, realtimeMatcher, coinProfiler)
+	m.autoDetectActivePositions(ctx, userID, realtimeMatcher, coinProfiler, futuresClient)
 
 	// Epic 14: Wire PatternStateProvider to ChainEntryRunner
 	// This is the critical bridge between pattern detection and order execution.
@@ -1141,7 +1160,7 @@ func (m *UserAutopilotManager) GetInstance(userID string) *UserAutopilotInstance
 // shows the correct state after a container restart without waiting for user interaction.
 // When ravindraMonitor is non-nil, also re-registers active positions with the Ravindra Position
 // Monitor for trailing stop management (1:2 breakeven, 1:3 profit lock milestones).
-func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, userID string, realtimeMatcher *entrydecision.RealtimePatternMatcher, coinProfiler *coinprofiler.CoinProfiler, ravindraMonitor ...*RavindraPositionMonitor) {
+func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, userID string, realtimeMatcher *entrydecision.RealtimePatternMatcher, coinProfiler *coinprofiler.CoinProfiler, futuresClient binance.FuturesClient, ravindraMonitor ...*RavindraPositionMonitor) {
 	if m.chainEventWriter == nil {
 		m.logger.Warn("Cannot auto-detect positions: chainEventWriter is nil", "user_id", userID)
 		return
@@ -1248,6 +1267,51 @@ func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, us
 	if detectedCount > 0 {
 		m.logger.Info("Position auto-detection complete",
 			"detected_count", detectedCount, "total_open_chains", len(chains), "user_id", userID)
+	}
+
+	// Phase 2: Check Binance API for real positions that may not have DB chains.
+	// This catches: manually opened positions, positions from other bots, positions
+	// whose chains were incorrectly closed, or any DB-Binance desync.
+	if futuresClient != nil {
+		positions, err := futuresClient.GetPositions()
+		if err != nil {
+			m.logger.Warn("Failed to query Binance positions for startup detection",
+				"error", err, "user_id", userID)
+		} else {
+			binancePositionCount := 0
+			for _, pos := range positions {
+				posAmt := pos.PositionAmt
+				if posAmt == 0 {
+					continue
+				}
+				binancePositionCount++
+				symbol := pos.Symbol
+
+				// Check if already suppressed from DB chain detection
+				if realtimeMatcher.IsSymbolSuppressedAnyTimeframe(symbol) {
+					continue // Already handled by DB chain detection
+				}
+
+				// Position exists on Binance but NOT tracked by any DB chain
+				side := "LONG"
+				if posAmt < 0 {
+					side = "SHORT"
+					posAmt = -posAmt
+				}
+				realtimeMatcher.SuppressSymbolByName(symbol)
+				if coinProfiler != nil {
+					// Use first available timeframe from strategies, or default
+					coinProfiler.UpdateSymbolToPosition(symbol, "", "")
+				}
+				m.logger.Warn("Binance position detected WITHOUT DB chain - suppressing Entry Decision",
+					"symbol", symbol, "side", side, "position_amt", posAmt, "user_id", userID)
+			}
+			if binancePositionCount > 0 {
+				m.logger.Info("Binance API position check complete",
+					"total_binance_positions", binancePositionCount,
+					"db_detected", detectedCount, "user_id", userID)
+			}
+		}
 	}
 }
 
@@ -1402,7 +1466,7 @@ func (m *UserAutopilotManager) StartAutopilot(ctx context.Context, userID string
 				// Re-detect active positions that may have been cleared
 				// Also pass Ravindra monitor for position re-registration on restart
 				if instance.RealtimePatternMatcher != nil {
-					m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.RavindraPositionMonitor)
+					m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.FuturesClient, instance.RavindraPositionMonitor)
 				}
 			}
 		}
@@ -1986,7 +2050,7 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 		// symbols with active positions so the UI shows the correct state immediately.
 		// Also pass Ravindra monitor so positions are re-registered if monitor was restarted.
 		if instance.RealtimePatternMatcher != nil {
-			m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.RavindraPositionMonitor)
+			m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.FuturesClient, instance.RavindraPositionMonitor)
 			m.logger.Info("CoinProfiler already running - re-detected active positions for UI refresh", "user_id", userID)
 		}
 		return nil
@@ -2011,7 +2075,7 @@ func (m *UserAutopilotManager) StartCoinProfiler(ctx context.Context, userID str
 	// Re-detect active positions after clearing stale patterns
 	// Pass Ravindra monitor so positions are re-registered after profiler restart
 	if instance.RealtimePatternMatcher != nil {
-		m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.RavindraPositionMonitor)
+		m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.FuturesClient, instance.RavindraPositionMonitor)
 	}
 
 	instance.TouchLastActive()
@@ -2132,6 +2196,14 @@ func (m *UserAutopilotManager) RefreshCoinProfilerSubscriptions(ctx context.Cont
 		if instance.RealtimePatternMatcher != nil {
 			m.logger.Info("Trade Cycle OFF - clearing all Entry Decision strategy patterns", "user_id", userID)
 			instance.RealtimePatternMatcher.ClearAllPatterns()
+		}
+	} else {
+		// Trading is ON - re-detect active positions to restore suppressions.
+		// This handles the case where trading was toggled OFF→ON:
+		// ClearAllPatterns() wiped suppressions, now we need to re-establish them.
+		if instance.RealtimePatternMatcher != nil {
+			m.autoDetectActivePositions(ctx, userID, instance.RealtimePatternMatcher, instance.CoinProfiler, instance.FuturesClient, instance.RavindraPositionMonitor)
+			m.logger.Info("Re-detected active positions after subscription refresh", "user_id", userID)
 		}
 	}
 

@@ -1526,20 +1526,17 @@ export default function StrategyCard({
     return () => clearInterval(interval);
   }, [strategy.coins, strategy.type]);
 
-  // Filter out phantom "watching" coins that have no useful data
-  // These are coins that were once tracked but are no longer in the active coin profiler list
+  // All coins from the CoinProfiler are real scanning coins - show them all
+  // including Step 1 "watching" coins with their volume progress bars
   const activeCoinsList = useMemo(() => {
-    return strategy.coins.filter(coin =>
-      coin.status !== 'watching' || coin.reference_candle || coin.has_active_position || (coin.step !== undefined && coin.step > 1)
-    );
+    return strategy.coins;
   }, [strategy.coins]);
 
-  // Watching count from filtered list (excludes phantom coins)
+  // Watching count from all coins
   const watchingCount = countWatching(activeCoinsList);
 
   // Get coins in the throttled sort order, but with fresh data
   // This ensures visual order stays stable while data updates in real-time
-  // Uses activeCoinsList to exclude phantom "watching" coins with no useful data
   const sortedCoins = useMemo(() => {
     if (sortedSymbolOrder.length === 0) {
       // Fallback: if no stored order yet, compute directly
@@ -1553,7 +1550,7 @@ export default function StrategyCard({
     const usedSymbols = new Set<string>();
     const activeSymbols = new Set(activeCoinsList.map(c => c.symbol));
 
-    // First, add coins in the stored order (only if they pass the filter)
+    // First, add coins in the stored order (only if they still exist)
     for (const symbol of sortedSymbolOrder) {
       if (!activeSymbols.has(symbol)) continue;
       const coin = activeCoinsList.find(c => c.symbol === symbol);

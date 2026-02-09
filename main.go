@@ -1081,6 +1081,15 @@ func main() {
 			userAutopilotManager.SetMarketDataCache(marketDataCache)
 		}
 
+		// Wire position exists checker for Entry Decision safety net.
+		// When the pattern matcher evaluates a symbol, it calls this to verify
+		// no active position exists on Binance (via FuturesController's WebSocket-updated cache).
+		if futuresAutopilotController != nil {
+			userAutopilotManager.SetPositionExistsChecker(func(symbol string) bool {
+				return futuresAutopilotController.HasActivePosition(symbol)
+			})
+		}
+
 		logger.Info("UserAutopilotManager initialized for multi-user trading")
 	}
 

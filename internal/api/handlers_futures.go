@@ -4917,17 +4917,15 @@ func (s *Server) handleReplaceChainOrders(c *gin.Context) {
 	var tpResp, slResp *binance.AlgoOrderResponse
 	var tpError, slError string
 
-	// Place TP algo order (TAKE_PROFIT type, LIMIT) if price available
+	// Place TP algo order (TAKE_PROFIT_MARKET - executes as MARKET order when trigger hits, always fills)
 	if tpPrice > 0 {
 		tpParams := binance.AlgoOrderParams{
 			Symbol:            chain.Symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeTakeProfit,
+			Type:              binance.FuturesOrderTypeTakeProfitMarket,
 			Quantity:          quantity,
-			Price:             tpPrice,
 			TriggerPrice:      tpPrice,
-			TimeInForce:       binance.TimeInForceGTC,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      tpClientOrderID,
@@ -4935,7 +4933,7 @@ func (s *Server) handleReplaceChainOrders(c *gin.Context) {
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[REPLACE-ORDERS] Placing TAKE_PROFIT (limit) for chain %s: symbol=%s, side=%s, price=%.6f, qty=%.6f",
+		log.Printf("[REPLACE-ORDERS] Placing TAKE_PROFIT_MARKET for chain %s: symbol=%s, side=%s, triggerPrice=%.6f, qty=%.6f",
 			chainID, chain.Symbol, closeSide, tpPrice, quantity)
 
 		tpResp, err = futuresClient.PlaceAlgoOrder(tpParams)
@@ -4952,17 +4950,15 @@ func (s *Server) handleReplaceChainOrders(c *gin.Context) {
 		}
 	}
 
-	// Place SL algo order (STOP type, LIMIT) if price available
+	// Place SL algo order (STOP_MARKET - executes as MARKET order when trigger hits, always fills)
 	if slPrice > 0 {
 		slParams := binance.AlgoOrderParams{
 			Symbol:            chain.Symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeStop,
+			Type:              binance.FuturesOrderTypeStopMarket,
 			Quantity:          quantity,
-			Price:             slPrice,
 			TriggerPrice:      slPrice,
-			TimeInForce:       binance.TimeInForceGTC,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      slClientOrderID,
@@ -4970,7 +4966,7 @@ func (s *Server) handleReplaceChainOrders(c *gin.Context) {
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[REPLACE-ORDERS] Placing STOP (limit) SL for chain %s: symbol=%s, side=%s, price=%.6f, qty=%.6f",
+		log.Printf("[REPLACE-ORDERS] Placing STOP_MARKET SL for chain %s: symbol=%s, side=%s, triggerPrice=%.6f, qty=%.6f",
 			chainID, chain.Symbol, closeSide, slPrice, quantity)
 
 		slResp, err = futuresClient.PlaceAlgoOrder(slParams)

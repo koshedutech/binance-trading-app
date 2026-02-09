@@ -1132,16 +1132,14 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		pricePrecision, qtyPrecision := getPrecisionFromSymbol(symbolInfo)
 		log.Printf("[CHAIN-ENTRY] Using precision: price=%d, qty=%d for %s", pricePrecision, qtyPrecision, symbol)
 
-		// Place Stop Loss order (STOP limit - executes at exact price when trigger hits)
+		// Place Stop Loss order (STOP_MARKET - executes as MARKET order when trigger hits, always fills)
 		slParams := binance.AlgoOrderParams{
 			Symbol:            symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeStop,
+			Type:              binance.FuturesOrderTypeStopMarket,
 			Quantity:          filledQuantity,
-			Price:             slPrice, // Limit execution price = trigger price for exact fill
 			TriggerPrice:      slPrice,
-			TimeInForce:       binance.TimeInForceGTC,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      slClientOrderID,
@@ -1149,7 +1147,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[CHAIN-ENTRY] Placing STOP (limit) SL order for %s: price=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Placing STOP_MARKET SL order for %s: triggerPrice=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
 
 		slResp, err := r.futuresClient.PlaceAlgoOrder(slParams)
 		if err != nil {
@@ -1173,16 +1171,14 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			}
 		}
 
-		// Place Take Profit order (TAKE_PROFIT limit - executes at exact price when trigger hits)
+		// Place Take Profit order (TAKE_PROFIT_MARKET - executes as MARKET order when trigger hits, always fills)
 		tpParams := binance.AlgoOrderParams{
 			Symbol:            symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeTakeProfit,
+			Type:              binance.FuturesOrderTypeTakeProfitMarket,
 			Quantity:          filledQuantity,
-			Price:             tpPrice, // Limit execution price = trigger price for exact fill
 			TriggerPrice:      tpPrice,
-			TimeInForce:       binance.TimeInForceGTC,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      tpClientOrderID,
@@ -1190,7 +1186,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT (limit) TP order for %s: price=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT_MARKET TP order for %s: triggerPrice=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
 
 		tpResp, err := r.futuresClient.PlaceAlgoOrder(tpParams)
 		if err != nil {

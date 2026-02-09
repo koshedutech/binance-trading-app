@@ -599,9 +599,10 @@ type FuturesController struct {
 	pendingAlgoSubOrders   map[int64]pendingAlgoInfo
 	pendingAlgoSubOrdersMu sync.Mutex
 
-	// pendingProtectionOrders tracks MARKET orders placed by proactive protection
-	// so we can recover real PnL and fees from the ORDER_TRADE_UPDATE event.
-	// Key: order ID from PlaceFuturesOrder response, Value: chain ID
+	// pendingProtectionOrders tracks MARKET orders placed by proactive protection.
+	// Chain close is deferred until ORDER_TRADE_UPDATE fill event arrives with real PnL.
+	// A 30-second safety timeout closes the chain if no fill event arrives.
+	// Key: order ID from PlaceFuturesOrder response, Value: chain details
 	pendingProtectionOrders   map[int64]pendingProtectionInfo
 	pendingProtectionOrdersMu sync.Mutex
 }
@@ -618,11 +619,19 @@ type pendingAlgoInfo struct {
 }
 
 // pendingProtectionInfo stores chain details for mapping proactive protection MARKET orders.
-// When placeMarketCloseForProtection places a MARKET order and immediately closes the chain
-// with calculated PnL, the real PnL/fees arrive later via ORDER_TRADE_UPDATE.
+// The chain is NOT closed immediately - we wait for the ORDER_TRADE_UPDATE fill event to close
+// with real PnL/fees. A 30-second safety timeout closes the chain if no fill event arrives.
 type pendingProtectionInfo struct {
 	ChainID  string
 	Symbol   string
+	Side     string
+	Mode     string
+	ModeCode string
+	Timeframe string
+	Reason   string
+	EntryPrice      *float64
+	EntryQuantity   *float64
+	RemainingQty    *float64
 	StoredAt time.Time
 }
 
@@ -5226,6 +5235,23 @@ func (fc *FuturesController) lookupPositionBySymbol(symbol string) (*FuturesAuto
 	return nil, false
 }
 
+// HasActivePosition checks if any active position exists for the given symbol.
+// This is used by the Entry Decision engine as a runtime safety net to prevent
+// pattern detection on symbols that already have open positions.
+func (fc *FuturesController) HasActivePosition(symbol string) bool {
+	fc.mu.RLock()
+	defer fc.mu.RUnlock()
+
+	// Check all position keys for this symbol (handles both hedge mode sides)
+	for key := range fc.activePositions {
+		// positionMapKey format is "SYMBOL_SIDE" (e.g., "ADAUSDT_LONG")
+		if strings.HasPrefix(key, symbol+"_") || key == symbol {
+			return true
+		}
+	}
+	return false
+}
+
 func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.PositionUpdateEvent) {
 	if update == nil {
 		return
@@ -5312,6 +5338,19 @@ func (fc *FuturesController) HandleStreamPositionUpdate(update *binance.Position
 			Leverage:   fc.config.DefaultLeverage,
 			EntryTime:  time.Now(),
 			EntryCount: 1,
+		}
+	}
+
+	// Notify Entry Decision engine to suppress pattern detection for this symbol.
+	// This handles positions opened manually on Binance or detected via WebSocket
+	// that don't have corresponding DB chains yet.
+	if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
+		if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil {
+			if inst.RealtimePatternMatcher != nil {
+				inst.RealtimePatternMatcher.SuppressSymbolByName(symbol)
+				fc.logger.Info("Entry Decision: suppressed pattern detection for new WebSocket position",
+					"symbol", symbol, "side", side, "user_id", fc.ownerUserID)
+			}
 		}
 	}
 
@@ -5440,7 +5479,7 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 		}
 
 		// Check if this is a protection market order fill (proactive SL/TP protection)
-		// The chain is already closed with calculated PnL; this recovers real PnL and fees
+		// Chain close was deferred - now close with real PnL from the fill event
 		fc.pendingProtectionOrdersMu.Lock()
 		if protInfo, exists := fc.pendingProtectionOrders[order.OrderId]; exists {
 			delete(fc.pendingProtectionOrders, order.OrderId)
@@ -5454,36 +5493,35 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 					closePrice = order.LastFilledPrice
 				}
 
-				fc.logger.Info("[PROACTIVE-PROTECTION] Real PnL recovered from ORDER_TRADE_UPDATE",
+				fc.logger.Info("[PROACTIVE-PROTECTION] Fill confirmed via ORDER_TRADE_UPDATE - closing chain",
 					"chain_id", protInfo.ChainID,
 					"symbol", protInfo.Symbol,
 					"realized_pnl", fmt.Sprintf("%.4f", realPnL),
 					"fees", fmt.Sprintf("%.6f", fees),
-					"close_price", fmt.Sprintf("%.4f", closePrice))
+					"close_price", fmt.Sprintf("%.4f", closePrice),
+					"reason", protInfo.Reason)
 
-				// Update closed chain with real values
-				if fc.ownerUserID != "" && fc.repo != nil {
-					ctx := context.Background()
-					if err := fc.repo.GetDB().UpdateClosedChainPnL(ctx, protInfo.ChainID, realPnL, fees); err != nil {
-						fc.logger.Error("[PROACTIVE-PROTECTION] Failed to update PnL",
-							"chain_id", protInfo.ChainID, "error", err)
-					} else {
-						fc.logger.Info("[PROACTIVE-PROTECTION] Updated chain with real PnL and fees",
-							"chain_id", protInfo.ChainID,
-							"realized_pnl", realPnL,
-							"fees", fees)
-
-						// Broadcast corrected PnL to frontend
-						events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
-							"chain_id":     protInfo.ChainID,
-							"symbol":       protInfo.Symbol,
-							"realized_pnl": realPnL,
-							"commission":   fees,
-							"close_price":  closePrice,
-							"source":       "proactive_protection",
-						})
-					}
+				// Build a minimal OrderChain for closeStaleChain
+				protChain := &orders.OrderChain{
+					ChainID:           protInfo.ChainID,
+					Symbol:            protInfo.Symbol,
+					Side:              protInfo.Side,
+					Mode:              protInfo.Mode,
+					ModeCode:          protInfo.ModeCode,
+					Timeframe:         protInfo.Timeframe,
+					EntryPrice:        protInfo.EntryPrice,
+					EntryQuantity:     protInfo.EntryQuantity,
+					RemainingQuantity: protInfo.RemainingQty,
 				}
+
+				// Use real PnL from Binance fill event (includes fees naturally)
+				ctx := context.Background()
+				fc.closeStaleChain(ctx, protChain, protInfo.Reason, realPnL)
+
+				fc.logger.Info("[PROACTIVE-PROTECTION] Chain closed with real PnL from fill event",
+					"chain_id", protInfo.ChainID,
+					"realized_pnl", realPnL,
+					"fees", fees)
 			}
 			// Don't return - still let the normal TRADE processing continue for fee tracking etc.
 		} else {
@@ -6780,8 +6818,9 @@ func (fc *FuturesController) ProactiveProtectionCheck() {
 }
 
 // placeMarketCloseForProtection places a MARKET order to close a position when SL/TP has been crossed
-// but the protection order was missing. After the order fills, closes the chain in DB using the full
-// lifecycle (pattern reset, capacity rebuild, broadcast).
+// but the protection order was missing. The chain close is DEFERRED until the ORDER_TRADE_UPDATE fill
+// event arrives via WebSocket, which provides real PnL and fees from Binance. A 30-second safety
+// timeout closes the chain if no fill event arrives (MARKET orders typically fill instantly).
 func (fc *FuturesController) placeMarketCloseForProtection(ctx context.Context, client binance.FuturesClient, chain *orders.OrderChain, reason string) {
 	// Determine close side and position side
 	var closeSide string
@@ -6857,35 +6896,36 @@ func (fc *FuturesController) placeMarketCloseForProtection(ctx context.Context, 
 		"reason", reason,
 		"status", resp.Status)
 
-	// Track this order so ORDER_TRADE_UPDATE can recover real PnL and fees
-	fc.pendingProtectionOrdersMu.Lock()
-	fc.pendingProtectionOrders[resp.OrderId] = pendingProtectionInfo{
-		ChainID:  chain.ChainID,
-		Symbol:   chain.Symbol,
-		StoredAt: time.Now(),
+	// Track this order so ORDER_TRADE_UPDATE fill event can close the chain with real PnL
+	orderID := resp.OrderId
+	protInfo := pendingProtectionInfo{
+		ChainID:       chain.ChainID,
+		Symbol:        chain.Symbol,
+		Side:          chain.Side,
+		Mode:          chain.Mode,
+		ModeCode:      chain.ModeCode,
+		Timeframe:     chain.Timeframe,
+		Reason:        reason,
+		EntryPrice:    chain.EntryPrice,
+		EntryQuantity: chain.EntryQuantity,
+		RemainingQty:  chain.RemainingQuantity,
+		StoredAt:      time.Now(),
 	}
-	// Inline cleanup: remove stale entries older than 60 seconds
+
+	fc.pendingProtectionOrdersMu.Lock()
+	fc.pendingProtectionOrders[orderID] = protInfo
+	// Inline cleanup: remove stale entries older than 120 seconds
 	for id, info := range fc.pendingProtectionOrders {
-		if time.Since(info.StoredAt) > 60*time.Second {
+		if time.Since(info.StoredAt) > 120*time.Second {
 			delete(fc.pendingProtectionOrders, id)
 		}
 	}
 	fc.pendingProtectionOrdersMu.Unlock()
 
-	// Calculate PnL from entry vs close price
-	closePrice := resp.AvgPrice
-	if closePrice == 0 {
-		closePrice = resp.Price
-	}
-	var realizedPnL float64
-	if chain.EntryPrice != nil && closePrice > 0 {
-		entryPrice := *chain.EntryPrice
-		if chain.Side == "LONG" {
-			realizedPnL = (closePrice - entryPrice) * quantity
-		} else {
-			realizedPnL = (entryPrice - closePrice) * quantity
-		}
-	}
+	fc.logger.Info("[PROACTIVE-PROTECTION] Chain close deferred - waiting for fill confirmation via WebSocket",
+		"chain_id", chain.ChainID,
+		"order_id", orderID,
+		"reason", reason)
 
 	// Cancel any remaining algo orders (SL/TP) for this symbol
 	if cancelErr := client.CancelAllAlgoOrders(chain.Symbol); cancelErr != nil {
@@ -6893,6 +6933,48 @@ func (fc *FuturesController) placeMarketCloseForProtection(ctx context.Context, 
 			"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", cancelErr)
 	}
 
-	// Close chain using full lifecycle (DB close, pattern reset, capacity rebuild, broadcast)
-	fc.closeStaleChain(ctx, chain, reason, realizedPnL)
+	// Safety timeout: if no fill event arrives within 30 seconds, close the chain anyway.
+	// MARKET orders on Binance fill near-instantly, so 30s is very generous.
+	go func() {
+		time.Sleep(30 * time.Second)
+
+		fc.pendingProtectionOrdersMu.Lock()
+		_, stillPending := fc.pendingProtectionOrders[orderID]
+		if stillPending {
+			delete(fc.pendingProtectionOrders, orderID)
+		}
+		fc.pendingProtectionOrdersMu.Unlock()
+
+		if !stillPending {
+			// Fill event already handled it - nothing to do
+			return
+		}
+
+		fc.logger.Warn("[PROACTIVE-PROTECTION] Safety timeout: no fill event in 30s, closing chain now",
+			"chain_id", protInfo.ChainID,
+			"order_id", orderID,
+			"reason", protInfo.Reason)
+
+		// Calculate PnL from entry vs response price (best effort)
+		closePrice := resp.AvgPrice
+		if closePrice == 0 {
+			closePrice = resp.Price
+		}
+		var realizedPnL float64
+		if protInfo.EntryPrice != nil && closePrice > 0 {
+			entryPrice := *protInfo.EntryPrice
+			if protInfo.Side == "LONG" {
+				realizedPnL = (closePrice - entryPrice) * quantity
+			} else {
+				realizedPnL = (entryPrice - closePrice) * quantity
+			}
+		}
+
+		timeoutCtx := context.Background()
+		fc.closeStaleChain(timeoutCtx, chain, protInfo.Reason, realizedPnL)
+
+		fc.logger.Info("[PROACTIVE-PROTECTION] Chain closed via safety timeout",
+			"chain_id", protInfo.ChainID,
+			"realized_pnl", realizedPnL)
+	}()
 }

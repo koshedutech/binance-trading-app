@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -246,6 +247,15 @@ type RealtimePatternMatcher struct {
 	// Key: "symbol:mode:timeframe", set when fill completes, removed when position closes.
 	suppressedSymbols map[string]bool
 
+	// Suppression by symbol name only - used when a Binance position exists but no DB chain is found.
+	// This catches positions opened manually on Binance or when DB is out of sync.
+	suppressedBySymbolOnly map[string]bool
+
+	// positionExistsChecker is a callback that checks if an active position exists for a symbol.
+	// Used as a safety net in OnCandleClose/OnVolumeProgress to catch positions that were
+	// detected via WebSocket but not yet suppressed.
+	positionExistsChecker func(symbol string) bool
+
 	mu sync.RWMutex
 }
 
@@ -281,7 +291,8 @@ func NewRealtimePatternMatcher(
 		riskReward:        config.RiskRewardRatio,
 		lastStates:        make(map[string]*PatternProgress),
 		volumeProgress:    make(map[string]*VolumeProgress),
-		suppressedSymbols: make(map[string]bool),
+		suppressedSymbols:      make(map[string]bool),
+		suppressedBySymbolOnly: make(map[string]bool),
 	}
 }
 
@@ -290,6 +301,15 @@ func (r *RealtimePatternMatcher) SetPatternUpdateCallback(callback PatternUpdate
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onPatternUpdate = callback
+}
+
+// SetPositionExistsChecker sets a callback that checks if a position exists for a symbol.
+// This is used as a runtime safety net: if a position is detected by FuturesController
+// via WebSocket but hasn't been suppressed yet, the pattern matcher will catch it.
+func (r *RealtimePatternMatcher) SetPositionExistsChecker(checker func(symbol string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.positionExistsChecker = checker
 }
 
 // SetUserID sets the user ID for this matcher (used in pattern update broadcasts).
@@ -777,10 +797,21 @@ func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgre
 	// Check if symbol is suppressed (active position exists)
 	suppKey := fmt.Sprintf("%s:%s:%s", data.Symbol, r.defaultMode, data.Timeframe)
 	r.mu.RLock()
-	suppressed := r.suppressedSymbols[suppKey]
+	suppressed := r.suppressedSymbols[suppKey] || r.suppressedBySymbolOnly[data.Symbol]
+	posChecker := r.positionExistsChecker
 	r.mu.RUnlock()
 	if suppressed {
 		// Still broadcast current_price for position_running coins so Step 4 can calculate PnL
+		r.broadcastSuppressedPriceUpdate(data.Symbol, data.Timeframe, data.CurrentPrice)
+		return
+	}
+
+	// Safety net: check if position exists via live callback (catches WebSocket-detected positions)
+	if posChecker != nil && posChecker(data.Symbol) {
+		r.mu.Lock()
+		r.suppressedBySymbolOnly[data.Symbol] = true
+		r.mu.Unlock()
+		log.Printf("[REALTIME-PATTERN] Position detected via live check for %s - suppressing pattern detection", data.Symbol)
 		r.broadcastSuppressedPriceUpdate(data.Symbol, data.Timeframe, data.CurrentPrice)
 		return
 	}
@@ -942,6 +973,7 @@ func (r *RealtimePatternMatcher) ClearAllPatterns() {
 	r.lastStates = make(map[string]*PatternProgress)
 	r.volumeProgress = make(map[string]*VolumeProgress)
 	r.suppressedSymbols = make(map[string]bool)
+	r.suppressedBySymbolOnly = make(map[string]bool)
 	r.mu.Unlock()
 
 	// Delete all persisted pattern states from DB (async)
@@ -1272,6 +1304,7 @@ func (r *RealtimePatternMatcher) ResetPatternForSymbol(symbol, mode, timeframe s
 	delete(r.volumeProgress, volKey)
 	// Explicitly remove any existing suppression (in case it was suppressed)
 	delete(r.suppressedSymbols, stateKey)
+	delete(r.suppressedBySymbolOnly, symbol)
 	r.mu.Unlock()
 
 	// Delete persisted pattern state from DB (async)
@@ -1402,6 +1435,40 @@ func (r *RealtimePatternMatcher) UnsuppressSymbol(symbol, mode, timeframe string
 	r.mu.Unlock()
 
 	log.Printf("[REALTIME-PATTERN] Unsuppressed pattern for %s:%s:%s (position closed)", symbol, mode, timeframe)
+}
+
+// SuppressSymbolByName suppresses a symbol regardless of mode/timeframe.
+// Used when a Binance position is detected but the exact mode/timeframe is unknown
+// (e.g., positions opened manually on Binance, or positions without DB chains).
+func (r *RealtimePatternMatcher) SuppressSymbolByName(symbol string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.suppressedBySymbolOnly[symbol] = true
+	log.Printf("[REALTIME-PATTERN] Suppressed %s by symbol name (Binance position detected without DB chain)", symbol)
+}
+
+// UnsuppressSymbolByName removes the symbol-level suppression.
+func (r *RealtimePatternMatcher) UnsuppressSymbolByName(symbol string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.suppressedBySymbolOnly, symbol)
+	log.Printf("[REALTIME-PATTERN] Unsuppressed %s by symbol name", symbol)
+}
+
+// IsSymbolSuppressedAnyTimeframe checks if a symbol is suppressed by either
+// the specific mode:timeframe key or by symbol name alone.
+func (r *RealtimePatternMatcher) IsSymbolSuppressedAnyTimeframe(symbol string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.suppressedBySymbolOnly[symbol] {
+		return true
+	}
+	for key := range r.suppressedSymbols {
+		if strings.HasPrefix(key, symbol+":") {
+			return true
+		}
+	}
+	return false
 }
 
 // SetPatternFillingStatus transitions a pattern to "filling" status and broadcasts Step 3 UI data.
@@ -1647,11 +1714,25 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	mode := r.defaultMode
 	stateKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
 	r.mu.RLock()
-	suppressed := r.suppressedSymbols[stateKey]
+	suppressed := r.suppressedSymbols[stateKey] || r.suppressedBySymbolOnly[symbol]
+	posChecker := r.positionExistsChecker
 	r.mu.RUnlock()
 
 	if suppressed {
 		// Still broadcast current_price for position_running coins so Step 4 can calculate PnL
+		if len(candles) > 0 {
+			lastPrice := candles[len(candles)-1].Close
+			r.broadcastSuppressedPriceUpdate(symbol, timeframe, lastPrice)
+		}
+		return
+	}
+
+	// Safety net: check if position exists via live callback (catches WebSocket-detected positions)
+	if posChecker != nil && posChecker(symbol) {
+		r.mu.Lock()
+		r.suppressedBySymbolOnly[symbol] = true
+		r.mu.Unlock()
+		log.Printf("[REALTIME-PATTERN] Position detected via live check for %s - suppressing pattern detection", symbol)
 		if len(candles) > 0 {
 			lastPrice := candles[len(candles)-1].Close
 			r.broadcastSuppressedPriceUpdate(symbol, timeframe, lastPrice)
@@ -2154,7 +2235,7 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 	mode := r.defaultMode
 	suppKey := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
 	r.mu.RLock()
-	suppressed := r.suppressedSymbols[suppKey]
+	suppressed := r.suppressedSymbols[suppKey] || r.suppressedBySymbolOnly[symbol]
 	r.mu.RUnlock()
 	if suppressed {
 		// Price update for suppressed symbols is handled by OnVolumeProgress
