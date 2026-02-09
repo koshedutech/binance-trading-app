@@ -5737,10 +5737,10 @@ func (fc *FuturesController) HandleStreamAlgoUpdate(update *binance.AlgoUpdateEv
 			chainID := protectionParseChainID(clientAlgoID)
 			if chainID != "" {
 				orderSuffix := protectionExtractSuffix(clientAlgoID, chainID)
-				// Check if this is an SL or TP order (including Ravindra replacements with -R suffix)
-				if orderSuffix == "SL" || orderSuffix == "TP" || orderSuffix == "SL-R" || orderSuffix == "TP-R" {
+				// Check if this is an SL or TP order
+				if orderSuffix == "SL" || orderSuffix == "TP" {
 					protOrderType := "SL"
-					if strings.HasPrefix(orderSuffix, "TP") {
+					if orderSuffix == "TP" {
 						protOrderType = "TP"
 					}
 					fc.logger.Info("[PROTECTION-WATCHDOG] Algo SL/TP order cancelled/expired - checking for auto-replace",
@@ -6452,6 +6452,19 @@ func (fc *FuturesController) handleProtectionOrderCancelled(chainID, orderType, 
 
 	resp, err := client.PlaceAlgoOrder(params)
 	if err != nil {
+		// Check for "Order would immediately trigger" error (-2021)
+		// This means price has already moved past the protection level.
+		// The position close will be detected via WebSocket if SL/TP was already triggered,
+		// or the position is in a state where the order cannot be placed.
+		errStr := err.Error()
+		if strings.Contains(errStr, "-2021") || strings.Contains(errStr, "immediately trigger") {
+			fc.logger.Warn("[PROTECTION-WATCHDOG] Order would immediately trigger - price has moved past protection level, monitoring via WebSocket",
+				"chain_id", chainID,
+				"order_type", orderType,
+				"symbol", chain.Symbol,
+				"price", price)
+			return
+		}
 		fc.logger.Error("[PROTECTION-WATCHDOG] Failed to place replacement order",
 			"chain_id", chainID, "order_type", orderType, "error", err)
 		return

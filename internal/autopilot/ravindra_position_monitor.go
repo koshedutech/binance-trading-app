@@ -560,10 +560,10 @@ func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *R
 	}
 
 	// Build ClientAlgoId for chain-linked identification
-	// Format: CHAINID-SL-R where -R indicates a Ravindra replacement
+	// Format: CHAINID-SL (same as original - replacement uses identical identifier)
 	clientAlgoId := ""
 	if pos.ChainID != "" {
-		clientAlgoId = fmt.Sprintf("%s-SL-R", pos.ChainID)
+		clientAlgoId = fmt.Sprintf("%s-SL", pos.ChainID)
 	}
 
 	// Place STOP_MARKET algo order with precision fields to avoid Binance -1111 errors

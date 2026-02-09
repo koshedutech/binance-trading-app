@@ -12212,20 +12212,19 @@ func (ga *GinieAutopilot) placeSLTPOrdersForSyncedPositions() {
 		}
 	}
 
+	// Build set of symbols managed by the chain trading system
+	chainManagedSymbols := make(map[string]string) // symbol -> chainID
+	for _, chain := range activeChains {
+		if chain != nil {
+			chainManagedSymbols[chain.Symbol] = chain.ChainID
+		}
+	}
+
 	for _, pos := range positions {
-		// Load correct SL/TP prices from chain DB (overrides generic 2% defaults)
-		if chain, ok := chainBySymbol[pos.Symbol]; ok {
-			if chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
-				log.Printf("[GINIE] %s: Loading SL price from chain DB: %.6f (was: %.6f)",
-					pos.Symbol, *chain.CurrentSLPrice, pos.StopLoss)
-				pos.StopLoss = *chain.CurrentSLPrice
-				pos.OriginalSL = *chain.CurrentSLPrice
-			}
-			if chain.CurrentTPPrice != nil && *chain.CurrentTPPrice > 0 && len(pos.TakeProfits) > 0 {
-				log.Printf("[GINIE] %s: Loading TP price from chain DB: %.6f (was: %.6f)",
-					pos.Symbol, *chain.CurrentTPPrice, pos.TakeProfits[0].Price)
-				pos.TakeProfits[0].Price = *chain.CurrentTPPrice
-			}
+		// Skip positions managed by the chain trading system - chain manages its own SL/TP
+		if chainID, managed := chainManagedSymbols[pos.Symbol]; managed {
+			log.Printf("[GINIE] %s: Skipping SL/TP placement - managed by chain trading system (chain: %s)", pos.Symbol, chainID)
+			continue
 		}
 
 		// Check existing algo orders on Binance FIRST before cancelling anything
@@ -12370,6 +12369,19 @@ func (ga *GinieAutopilot) placeSLTPOrdersForSyncedPositions() {
 func (ga *GinieAutopilot) ensureSLTPOrdersExist(symbol string, pos *GiniePosition) {
 	if pos == nil || pos.StopLoss <= 0 {
 		return
+	}
+
+	// Skip positions managed by the chain trading system
+	if ga.repo != nil && ga.userID != "" {
+		activeChains, err := ga.repo.GetDB().GetActiveOrderChains(context.Background(), ga.userID)
+		if err == nil {
+			for _, chain := range activeChains {
+				if chain != nil && chain.Symbol == symbol {
+					log.Printf("[GINIE] %s: Skipping SL/TP placement - managed by chain trading system (chain: %s)", symbol, chain.ChainID)
+					return
+				}
+			}
+		}
 	}
 
 	// Get all algo orders for this symbol from Binance
@@ -12561,6 +12573,19 @@ func (ga *GinieAutopilot) healPosition(pos *GiniePosition) {
 	if pos.IsDustPosition {
 		log.Printf("[PROTECTION-HEAL] %s: Skipping heal - DUST POSITION (qty too small for SL/TP orders)", pos.Symbol)
 		return
+	}
+
+	// Skip positions managed by the chain trading system
+	if ga.repo != nil && ga.userID != "" {
+		activeChains, err := ga.repo.GetDB().GetActiveOrderChains(context.Background(), ga.userID)
+		if err == nil {
+			for _, chain := range activeChains {
+				if chain != nil && chain.Symbol == pos.Symbol {
+					log.Printf("[GINIE] %s: Skipping SL/TP placement - managed by chain trading system (chain: %s)", pos.Symbol, chain.ChainID)
+					return
+				}
+			}
+		}
 	}
 
 	pos.Protection.SetState(StateHealing)
@@ -13541,7 +13566,7 @@ func (ga *GinieAutopilot) cleanupOrphanAlgoOrders() {
 }
 
 // isChainLinkedAlgoOrder checks if a ClientAlgoId belongs to a chain-managed order.
-// Chain-linked orders have ClientAlgoId in the format: CHAINID-SL, CHAINID-TP, CHAINID-SL-R, CHAINID-TP-R
+// Chain-linked orders have ClientAlgoId in the format: CHAINID-SL, CHAINID-TP, CHAINID-E
 // where CHAINID is MODE-DATE-SEQ (e.g., SCA-09FEB-00005-SL).
 // These orders should NOT be cancelled by Ginie cleanup - the chain protection system handles them.
 func isChainLinkedAlgoOrder(clientAlgoId string) bool {
@@ -13549,15 +13574,15 @@ func isChainLinkedAlgoOrder(clientAlgoId string) bool {
 		return false
 	}
 	// Chain IDs have at least 3 dash-separated parts: MODE-DATE-SEQ
-	// Followed by -SL, -TP, -SL-R, or -TP-R
+	// Followed by -SL, -TP, or -E
 	parts := strings.Split(clientAlgoId, "-")
 	if len(parts) < 4 {
 		return false
 	}
-	// Check if it ends with SL or TP suffix (with optional -R for Ravindra replacements)
+	// Check if it ends with SL, TP, or E suffix
 	// Rejoin the suffix after the first 3 parts (the chain ID)
 	suffix := strings.Join(parts[3:], "-")
-	return suffix == "SL" || suffix == "TP" || suffix == "SL-R" || suffix == "TP-R" || suffix == "E"
+	return suffix == "SL" || suffix == "TP" || suffix == "E"
 }
 
 // hasChainLinkedOrders checks if any order in a list is chain-linked
