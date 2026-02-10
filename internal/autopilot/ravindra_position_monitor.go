@@ -71,6 +71,9 @@ type RavindraPosition struct {
 	PricePrecision    int `json:"price_precision"`    // Price precision for the symbol
 	QuantityPrecision int `json:"quantity_precision"` // Quantity precision for the symbol
 
+	// Modification tracking
+	ModificationCount int `json:"modification_count"`
+
 	// Timestamps
 	EnteredAt time.Time `json:"entered_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -433,6 +436,9 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 
 	oldSL := pos.CurrentSL
 
+	log.Printf("[RAVINDRA-MONITOR] === SL MODIFICATION START === Symbol=%s ChainID=%s OldSL=%.4f NewSL=%.4f Reason=%s OldOrderID=%d IsAlgo=%v Precision=%d",
+		pos.Symbol, pos.ChainID, oldSL, newSLPrice, reason, pos.SLOrderID, pos.IsAlgoOrder, pos.PricePrecision)
+
 	// Resolve precision from exchange info if not set on the position.
 	// Positions re-registered on startup have precision=0, which causes PlaceAlgoOrder
 	// to default to 8 decimal places. For symbols like BNBUSDT (precision=2), Binance
@@ -445,10 +451,12 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 	tickSize := getTickSizePC(pos.Symbol)
 	newSLPrice = roundToTickSize(newSLPrice, tickSize)
 
-	// Cancel existing SL order
+	// Cancel existing SL order - ABORT if cancel fails to prevent duplicate orders
 	if pos.SLOrderID > 0 {
 		if err := m.cancelOrderWithRetry(ctx, pos.Symbol, pos.SLOrderID, pos.IsAlgoOrder); err != nil {
-			log.Printf("[RAVINDRA-MONITOR] Warning: failed to cancel old SL for %s: %v", pos.Symbol, err)
+			log.Printf("[RAVINDRA-MONITOR] CRITICAL: Failed to cancel old SL for %s (order=%d): %v - ABORTING modification to prevent duplicates", pos.Symbol, pos.SLOrderID, err)
+			m.stats.FailedUpdates++
+			return
 		}
 	}
 
@@ -464,6 +472,7 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 	pos.SLOrderID = newOrderID
 	pos.CurrentSL = newSLPrice
 	pos.UpdatedAt = time.Now()
+	pos.ModificationCount++
 
 	// Record modification event and update SL binance order ID in DB
 	if m.chainEventWriter != nil && pos.ChainID != "" {
@@ -494,8 +503,7 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 		m.stats.BreakevenMoves++
 	}
 
-	log.Printf("[RAVINDRA-MONITOR] %s: SL updated successfully %.4f -> %.4f (order=%d, reason=%s)",
-		pos.Symbol, oldSL, newSLPrice, newOrderID, reason)
+	log.Printf("[RAVINDRA-MONITOR] === SL MODIFICATION SUCCESS === Symbol=%s NewSL=%.4f NewOrderID=%d ModCount=%d", pos.Symbol, newSLPrice, newOrderID, pos.ModificationCount)
 
 	// Broadcast trailing SL update to frontend
 	trailingStatus := pos.TrailingStop.GetStatus()
@@ -504,8 +512,11 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 		"symbol":                pos.Symbol,
 		"action":                string(source),
 		"reason":                reason,
-		"old_sl":                oldSL,
-		"new_sl":                newSLPrice,
+		"old_sl_price":          oldSL,
+		"new_sl_price":          newSLPrice,
+		"modification_source":   string(source),
+		"new_order_id":          newOrderID,
+		"modification_count":    pos.ModificationCount,
 		"entry_price":           pos.EntryPrice,
 		"current_rr":            trailingStatus.CurrentRR,
 		"at_breakeven":          trailingStatus.AtBreakeven,
@@ -572,10 +583,10 @@ func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *R
 	}
 
 	// Build ClientAlgoId for chain-linked identification
-	// Format: CHAINID-SL (same as original - replacement uses identical identifier)
+	// Format: CHAINID-SL-M<timestamp> to avoid Binance rejecting duplicate clientAlgoId
 	clientAlgoId := ""
 	if pos.ChainID != "" {
-		clientAlgoId = fmt.Sprintf("%s-SL", pos.ChainID)
+		clientAlgoId = fmt.Sprintf("%s-SL-M%d", pos.ChainID, time.Now().UnixMilli())
 	}
 
 	// Place STOP_MARKET algo order with precision fields to avoid Binance -1111 errors

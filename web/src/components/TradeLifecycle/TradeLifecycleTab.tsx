@@ -1188,6 +1188,10 @@ export default function TradeLifecycleTab({
           updatedAt: Date.now(),
         };
       }));
+
+      // Debounced refetch to pick up the new sl_modifications from the API
+      // (the SL modification tree is populated from API data, not WebSocket)
+      setTimeout(() => fetchOrders(), 3000);
     };
 
     // Handler for PnL correction from real trade data
