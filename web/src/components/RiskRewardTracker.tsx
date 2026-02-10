@@ -286,8 +286,11 @@ export default function RiskRewardTracker({ position, compact = false }: RiskRew
     trailingStatus?.moved_to_1r
   );
 
-  // Calculate current R:R
-  const currentRR = trailingStatus?.current_rr ?? calculateCurrentRR(
+  // Calculate current R:R from live price (always recompute for real-time updates).
+  // The backend's trailingStatus.current_rr is a stale snapshot from the API fetch
+  // and doesn't update with every price tick. Use calculateCurrentRR with the live
+  // current_price to ensure the display updates in real-time on every WebSocket tick.
+  const currentRR = calculateCurrentRR(
     position.entry_price,
     initialSL,
     position.current_price,

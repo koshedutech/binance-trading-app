@@ -963,12 +963,12 @@ func (m *VolumeImbalancePatternMatcher) isBreakoutReady(
 		}
 	}
 
-	// Check for SHORT breakout (price breaks below consolidation low)
+	// Check for SHORT breakout (price breaks below reference low)
 	// Only if direction is "short" or "both"
 	if m.config.Direction == "short" || m.config.Direction == "both" {
-		if currentCandle.Low <= state.ConsolidationLow {
+		if currentCandle.Low <= state.ReferenceCandle.Low {
 			// Confirm close is also below (not just a wick)
-			if currentCandle.Close <= state.ConsolidationLow*1.002 {
+			if currentCandle.Close <= state.ReferenceCandle.Low*1.002 {
 				candleCopy := *currentCandle
 				return true, "short", &candleCopy
 			}

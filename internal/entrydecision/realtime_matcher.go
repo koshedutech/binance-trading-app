@@ -2383,12 +2383,40 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 			isBreakout = true
 		}
 	case "short":
-		// For SHORT: Check distance to consolidation low
-		if state.ConsolidationLow > 0 {
-			proximityPercent = ((state.ConsolidationLow - price) / state.ConsolidationLow) * 100
+		// For SHORT: Check distance to reference low (breakout below ref candle low)
+		if state.ReferenceCandle.Low > 0 {
+			proximityPercent = ((state.ReferenceCandle.Low - price) / state.ReferenceCandle.Low) * 100
 		}
-		if state.ConsolidationLow > 0 && currentLow <= state.ConsolidationLow {
+		if state.ReferenceCandle.Low > 0 && currentLow <= state.ReferenceCandle.Low {
 			isBreakout = true
+		}
+	}
+
+	// Volume confirmation check - Volume Imbalance strategy requires volume buildup
+	// before confirming a breakout. Price breaking the level alone is not enough.
+	if isBreakout {
+		volKey := fmt.Sprintf("%s:%s", symbol, timeframe)
+		r.mu.RLock()
+		volProgress := r.volumeProgress[volKey]
+		r.mu.RUnlock()
+
+		volumeConfirmed := false
+		if volProgress != nil && volProgress.CurrentVolume > 0 {
+			// Volume must be at least 1x average (building toward reference candle level)
+			if volProgress.CurrentRatio >= 1.0 {
+				volumeConfirmed = true
+			}
+		}
+
+		if !volumeConfirmed {
+			log.Printf("[REALTIME-BREAKOUT] %s:%s - Price broke level but VOLUME NOT CONFIRMED (ratio=%.2f, required>=1.0), direction=%s, price=%.6f",
+				symbol, timeframe, func() float64 {
+					if volProgress != nil {
+						return volProgress.CurrentRatio
+					}
+					return 0
+				}(), state.Direction, price)
+			isBreakout = false
 		}
 	}
 

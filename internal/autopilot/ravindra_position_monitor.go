@@ -400,8 +400,12 @@ func (m *RavindraPositionMonitor) checkPosition(pos *RavindraPosition) {
 	case "HOLD":
 		// No action needed
 		if m.config.DebugMode {
-			log.Printf("[RAVINDRA-MONITOR] %s: price=%.4f, RR=%.2f, SL=%.4f - HOLD",
-				pos.Symbol, currentPrice, pos.TrailingStop.CurrentRR, pos.CurrentSL)
+			// Include milestone state for diagnosis when R:R is approaching thresholds
+			log.Printf("[RAVINDRA-MONITOR] %s: price=%.4f, RR=%.2f, SL=%.4f, entry=%.4f, risk=%.4f, BE=%v, 1R=%v, BElvl=%.1f, 1Rlvl=%.1f - HOLD",
+				pos.Symbol, currentPrice, pos.TrailingStop.CurrentRR, pos.CurrentSL,
+				pos.TrailingStop.EntryPrice, pos.TrailingStop.RiskAmount,
+				pos.TrailingStop.MovedToBreakeven, pos.TrailingStop.MovedTo1R,
+				pos.TrailingStop.BreakevenRRLevel, pos.TrailingStop.OneRRLevel)
 		}
 
 	case "MOVE_TO_BREAKEVEN":
@@ -428,6 +432,14 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 	defer cancel()
 
 	oldSL := pos.CurrentSL
+
+	// Resolve precision from exchange info if not set on the position.
+	// Positions re-registered on startup have precision=0, which causes PlaceAlgoOrder
+	// to default to 8 decimal places. For symbols like BNBUSDT (precision=2), Binance
+	// rejects orders with -1111 "Precision is over the maximum".
+	if pos.PricePrecision == 0 || pos.QuantityPrecision == 0 {
+		m.resolvePrecision(pos)
+	}
 
 	// Round to tick size
 	tickSize := getTickSizePC(pos.Symbol)
@@ -586,6 +598,40 @@ func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *R
 	}
 
 	return resp.AlgoId, nil
+}
+
+// resolvePrecision looks up price and quantity precision from exchange info.
+// This is called lazily (only when needed for order placement) to avoid
+// unnecessary API calls during position registration.
+func (m *RavindraPositionMonitor) resolvePrecision(pos *RavindraPosition) {
+	if m.futuresClient == nil {
+		return
+	}
+
+	info, err := m.futuresClient.GetFuturesExchangeInfo()
+	if err != nil {
+		log.Printf("[RAVINDRA-MONITOR] Warning: failed to get exchange info for precision lookup: %v", err)
+		return
+	}
+
+	for _, sym := range info.Symbols {
+		if sym.Symbol == pos.Symbol {
+			if sym.PricePrecision > 0 {
+				pos.PricePrecision = sym.PricePrecision
+			}
+			if sym.QuantityPrecision > 0 {
+				pos.QuantityPrecision = sym.QuantityPrecision
+			}
+			log.Printf("[RAVINDRA-MONITOR] Resolved precision for %s: price=%d, qty=%d",
+				pos.Symbol, pos.PricePrecision, pos.QuantityPrecision)
+			return
+		}
+	}
+
+	// If not found, use safe defaults based on common pairs
+	log.Printf("[RAVINDRA-MONITOR] Symbol %s not found in exchange info, using default precision=2", pos.Symbol)
+	pos.PricePrecision = 2
+	pos.QuantityPrecision = 3
 }
 
 // getTickSizeForSymbol returns the tick size for a symbol

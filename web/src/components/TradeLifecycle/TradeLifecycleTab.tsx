@@ -1133,6 +1133,63 @@ export default function TradeLifecycleTab({
       setTimeout(() => fetchOrders(), 6000);
     };
 
+    // Handler for trailing SL updates from Ravindra Position Monitor
+    // This fires when the monitor moves the SL at a R:R milestone (1:2 breakeven, 1:3 profit lock)
+    const handleTrailingSLUpdate = (event: WSEvent) => {
+      const data = event.data?.trailing_sl;
+      if (!data?.chain_id) return;
+
+      console.log('[TradeLifecycle] Received TRAILING_SL_UPDATE', {
+        chainId: data.chain_id,
+        action: data.action,
+        oldSL: data.old_sl,
+        newSL: data.new_sl,
+        currentRR: data.current_rr,
+      });
+
+      setChains(prev => prev.map(chain => {
+        if (chain.chainId !== data.chain_id) return chain;
+
+        // Update SL order price to reflect the new SL
+        const updatedSlOrder = chain.slOrder ? {
+          ...chain.slOrder,
+          stopPrice: data.new_sl || chain.slOrder.stopPrice,
+          price: data.new_sl || chain.slOrder.price,
+        } : chain.slOrder;
+
+        // Update trailing stop status with the new data from backend
+        const updatedTrailingStopStatus = chain.trailingStopStatus ? {
+          ...chain.trailingStopStatus,
+          current_stop_loss: data.new_sl ?? chain.trailingStopStatus.current_stop_loss,
+          current_rr: data.current_rr ?? chain.trailingStopStatus.current_rr,
+          at_breakeven: data.at_breakeven ?? chain.trailingStopStatus.at_breakeven,
+          at_1r: data.at_1r ?? chain.trailingStopStatus.at_1r,
+          highest_price: data.trailing_stop_status?.highest_price ?? chain.trailingStopStatus.highest_price,
+        } : data.trailing_stop_status ? {
+          entry_price: data.entry_price || 0,
+          current_stop_loss: data.new_sl || 0,
+          take_profit: data.trailing_stop_status?.take_profit || 0,
+          risk_amount: data.trailing_stop_status?.risk_amount || 0,
+          current_rr: data.current_rr || 0,
+          highest_price: data.trailing_stop_status?.highest_price || 0,
+          at_breakeven: data.at_breakeven || false,
+          at_1r: data.at_1r || false,
+          breakeven_level: data.trailing_stop_status?.breakeven_level || 0,
+          one_r_level: data.trailing_stop_status?.one_r_level || 0,
+          breakeven_trigger: data.trailing_stop_status?.breakeven_trigger || 0,
+          one_r_trigger: data.trailing_stop_status?.one_r_trigger || 0,
+          side: data.trailing_stop_status?.side || '',
+        } : chain.trailingStopStatus;
+
+        return {
+          ...chain,
+          slOrder: updatedSlOrder,
+          trailingStopStatus: updatedTrailingStopStatus,
+          updatedAt: Date.now(),
+        };
+      }));
+    };
+
     // Handler for PnL correction from real trade data
     const handlePnLCorrected = (event: any) => {
       const data = event.data;
@@ -1173,6 +1230,7 @@ export default function TradeLifecycleTab({
     wsService.subscribe('POSITION_CREATED', handlePositionCreated); // For instant new position updates
     wsService.subscribe('SL_TP_PLACED', handleSLTPPlaced); // For SL/TP placed after position creation
     wsService.subscribe('PNL_CORRECTED', handlePnLCorrected); // For real PnL from trade data
+    wsService.subscribe('TRAILING_SL_UPDATE', handleTrailingSLUpdate); // For R:R-based SL moves
     wsService.onConnect(handleConnect);
 
     // Register with fallbackManager for centralized fallback polling
@@ -1190,6 +1248,7 @@ export default function TradeLifecycleTab({
       wsService.unsubscribe('POSITION_CREATED', handlePositionCreated);
       wsService.unsubscribe('SL_TP_PLACED', handleSLTPPlaced);
       wsService.unsubscribe('PNL_CORRECTED', handlePnLCorrected);
+      wsService.unsubscribe('TRAILING_SL_UPDATE', handleTrailingSLUpdate);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction(FALLBACK_KEY);
     };

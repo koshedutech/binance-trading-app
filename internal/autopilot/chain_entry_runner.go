@@ -851,12 +851,24 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	// - Price capped at slightly above/below breakout level
 	limitPriceOffset := 0.001 // 0.1% offset to increase fill probability while controlling price
 	var limitPrice float64
-	if direction == "LONG" {
-		// For LONG: buy slightly above current price to increase fill chance
-		limitPrice = currentPrice * (1 + limitPriceOffset)
+	if state.EntryPrice > 0 {
+		// Use the breakout level from pattern detection (reference candle HIGH for LONG, LOW for SHORT)
+		// This ensures the LIMIT order is placed at the correct entry level, not wherever
+		// the market price happens to be when the API call is made
+		if direction == "LONG" {
+			limitPrice = state.EntryPrice * (1 + limitPriceOffset)
+		} else {
+			limitPrice = state.EntryPrice * (1 - limitPriceOffset)
+		}
+		log.Printf("[CHAIN-ENTRY] Using pattern entry level %.6f for LIMIT price (current market: %.6f)", state.EntryPrice, currentPrice)
 	} else {
-		// For SHORT: sell slightly below current price to increase fill chance
-		limitPrice = currentPrice * (1 - limitPriceOffset)
+		// Fallback: use current market price when pattern entry level not available
+		if direction == "LONG" {
+			limitPrice = currentPrice * (1 + limitPriceOffset)
+		} else {
+			limitPrice = currentPrice * (1 - limitPriceOffset)
+		}
+		log.Printf("[CHAIN-ENTRY] No pattern entry level, using current market price %.6f for LIMIT price", currentPrice)
 	}
 	limitPrice = roundToTickSizeFromSymbol(limitPrice, symbolInfo)
 
