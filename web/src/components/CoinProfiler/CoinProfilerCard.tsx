@@ -93,6 +93,10 @@ export default function CoinProfilerCard() {
     }
     refetchCoins();
     refetchReqs();
+    // Delayed refetch to pick up backend subscription cleanup
+    // (backend removes strategy-only symbols when at capacity, but WebSocket
+    // unsubscription takes a moment to propagate)
+    setTimeout(() => { refetchCoins(); refetchReqs(); }, 5000);
   }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
 
   const handleChainClosed = useCallback((event: any) => {

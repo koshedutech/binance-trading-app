@@ -580,7 +580,11 @@ func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
 }
 
 // RebuildCapacity recalculates coin profiler capacity based on active chain count.
-// This is a synchronous method called by the PositionLifecycleCoordinator after a chain closes.
+// This is a synchronous method called by the PositionLifecycleCoordinator after a chain closes
+// or by the ChainEntryRunner after a new position is opened.
+// When capacity is full, strategy-only symbols are removed from subscriptions
+// to stop scanning for new entries. When capacity frees up, strategy symbols
+// remain removed until the next subscription refresh (e.g., page reload).
 // Returns (capacityUsed, scanningEnabled) where:
 //   - capacityUsed is the number of active chains (positions consuming capacity)
 //   - scanningEnabled is true if activeChainCount < maxConcurrent (room for new entries)
@@ -588,7 +592,59 @@ func (cp *CoinProfiler) RebuildCapacity(activeChainCount, maxConcurrent int) (in
 	scanningEnabled := activeChainCount < maxConcurrent
 	log.Printf("%s RebuildCapacity: active=%d, max=%d, scanning=%v",
 		LogPrefix, activeChainCount, maxConcurrent, scanningEnabled)
+
+	// When at capacity, remove strategy-only symbols to stop scanning
+	if !scanningEnabled {
+		cp.removeStrategyOnlySymbols()
+	}
+
 	return activeChainCount, scanningEnabled
+}
+
+// removeStrategyOnlySymbols removes symbols that are tracked only for strategy scanning
+// (not for active positions). Called when capacity is full to stop unnecessary data collection.
+func (cp *CoinProfiler) removeStrategyOnlySymbols() {
+	cp.mu.Lock()
+
+	var removed []string
+	for symbol, sub := range cp.subscriptions {
+		if sub.Source == DataSourceStrategy {
+			delete(cp.subscriptions, symbol)
+			delete(cp.coinData, symbol)
+			removed = append(removed, symbol)
+		}
+	}
+
+	// Update combinedReqs to match
+	if cp.combinedReqs != nil && len(removed) > 0 {
+		for _, symbol := range removed {
+			delete(cp.combinedReqs.BySymbol, symbol)
+		}
+		// Rebuild AllSymbols from remaining BySymbol
+		newAllSymbols := make([]string, 0, len(cp.combinedReqs.BySymbol))
+		for s := range cp.combinedReqs.BySymbol {
+			newAllSymbols = append(newAllSymbols, s)
+		}
+		cp.combinedReqs.AllSymbols = newAllSymbols
+	}
+
+	cp.mu.Unlock()
+
+	if len(removed) > 0 {
+		log.Printf("%s Capacity full - removed %d strategy-only symbols: %v",
+			LogPrefix, len(removed), removed)
+
+		// Update WebSocket to unsubscribe from removed streams
+		if cp.wsManager != nil && cp.combinedReqs != nil {
+			cp.mu.RLock()
+			combined := cp.combinedReqs
+			cp.mu.RUnlock()
+			if err := cp.wsManager.UpdateSubscriptions(combined); err != nil {
+				log.Printf("%s Warning: failed to update WebSocket after removing strategy symbols: %v",
+					LogPrefix, err)
+			}
+		}
+	}
 }
 
 // GetSubscriptions returns all current subscriptions.

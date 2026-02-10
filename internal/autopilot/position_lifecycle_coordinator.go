@@ -91,6 +91,11 @@ func (plc *PositionLifecycleCoordinator) SetMaxConcurrent(max int) {
 	plc.maxConcurrent = max
 }
 
+// GetMaxConcurrent returns the maximum concurrent trades for capacity calculations.
+func (plc *PositionLifecycleCoordinator) GetMaxConcurrent() int {
+	return plc.maxConcurrent
+}
+
 // OrderFillEvent contains data from a Binance WebSocket order fill event.
 type OrderFillEvent struct {
 	UserID          string

@@ -1025,6 +1025,19 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 				"symbol", symbol, "timeframe", timeframe, "mode", mode, "user_id", userID)
 		}
 
+		// Synchronously check capacity and remove strategy-only symbols if full.
+		// This MUST happen before POSITION_CREATED broadcast so the frontend
+		// refetch gets the correct (reduced) coin list immediately.
+		if inst := m.GetInstance(userID); inst != nil && inst.CoinProfiler != nil && inst.Coordinator != nil {
+			countCtx, countCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			activeChains, countErr := m.chainEventWriter.GetActiveChains(countCtx, userID)
+			countCancel()
+			if countErr == nil {
+				maxConcurrent := inst.Coordinator.GetMaxConcurrent()
+				inst.CoinProfiler.RebuildCapacity(len(activeChains), maxConcurrent)
+			}
+		}
+
 		// Also re-initialize subscriptions in background for full consistency
 		// (handles capacity check, removes unnecessary strategy scanning)
 		go func() {
