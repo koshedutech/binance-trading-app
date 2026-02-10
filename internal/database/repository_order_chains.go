@@ -30,7 +30,8 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			sl_binance_order_id, sl_limit_price, sl_fill_price, sl_fill_time, sl_status, sl_quantity,
 			tp_binance_order_id, tp_limit_price, tp_fill_price, tp_fill_time, tp_status, tp_quantity,
 			mode, strategy_group, sub_strategy, timeframe,
-			entry_context
+			entry_context,
+			budget_capital_used
 		) VALUES (
 			$1, $2, $3, $4, $5, $6,
 			$7, $8, $9, $10,
@@ -44,7 +45,8 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			$32, $33, $34, $35, $36, $37,
 			$38, $39, $40, $41, $42, $43,
 			$44, $45, $46, $47,
-			$48
+			$48,
+			$49
 		)
 		ON CONFLICT (user_id, chain_id) DO UPDATE SET
 			status = EXCLUDED.status,
@@ -86,7 +88,8 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 			strategy_group = COALESCE(EXCLUDED.strategy_group, order_chains.strategy_group),
 			sub_strategy = COALESCE(EXCLUDED.sub_strategy, order_chains.sub_strategy),
 			timeframe = COALESCE(EXCLUDED.timeframe, order_chains.timeframe),
-			entry_context = COALESCE(EXCLUDED.entry_context, order_chains.entry_context)
+			entry_context = COALESCE(EXCLUDED.entry_context, order_chains.entry_context),
+			budget_capital_used = COALESCE(EXCLUDED.budget_capital_used, order_chains.budget_capital_used)
 		RETURNING id, created_at`
 
 	now := time.Now()
@@ -146,6 +149,7 @@ func (db *DB) CreateOrderChain(ctx context.Context, chain *orders.OrderChain) er
 		chain.SubStrategy,
 		chain.Timeframe,
 		chain.EntryContext,
+		chain.BudgetCapitalUsed,
 	).Scan(&chain.ID, &chain.CreatedAt)
 
 	if err != nil {
@@ -856,6 +860,24 @@ func (db *DB) CountActiveChains(ctx context.Context, userID string) (int, error)
 	return count, nil
 }
 
+// GetCapitalInUseForSubStrategy returns the total budget capital in use and count of active chains
+// for a specific sub-strategy. Used for incremental equity position sizing.
+func (db *DB) GetCapitalInUseForSubStrategy(ctx context.Context, userID, mode, strategyGroup, subStrategy string) (float64, int, error) {
+	if db.Pool == nil {
+		return 0, 0, nil
+	}
+	query := `SELECT COALESCE(SUM(budget_capital_used), 0), COUNT(*) FROM order_chains
+              WHERE user_id = $1 AND status IN ('ACTIVE', 'PARTIAL')
+              AND mode = $2 AND strategy_group = $3 AND sub_strategy = $4`
+	var capitalInUse float64
+	var activeCount int
+	err := db.Pool.QueryRow(ctx, query, userID, mode, strategyGroup, subStrategy).Scan(&capitalInUse, &activeCount)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get capital in use for sub-strategy: %w", err)
+	}
+	return capitalInUse, activeCount, nil
+}
+
 // UpdateClosedChainPnL updates the realized_pnl and total_fees for an already-closed chain.
 // This is called when ORDER_TRADE_UPDATE arrives after ALGO_UPDATE with real trade data
 // (ALGO_UPDATE has no RealizedProfit/Commission, so calculated values need correction).
@@ -883,7 +905,8 @@ const orderChainSelectColumns = `id, user_id, chain_id, symbol, side, mode_code,
 			realized_pnl, total_fees,
 			sl_binance_order_id, sl_limit_price, sl_fill_price, sl_fill_time, sl_status, sl_quantity,
 			tp_binance_order_id, tp_limit_price, tp_fill_price, tp_fill_time, tp_status, tp_quantity,
-			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context`
+			COALESCE(mode, '') as mode, COALESCE(strategy_group, '') as strategy_group, COALESCE(sub_strategy, '') as sub_strategy, COALESCE(timeframe, '') as timeframe, entry_context,
+			COALESCE(budget_capital_used, 0) as budget_capital_used`
 
 // scanOrderChainRow scans a single row into an OrderChain. Column order must match orderChainSelectColumns.
 func scanOrderChainRow(scanner interface{ Scan(dest ...interface{}) error }) (*orders.OrderChain, error) {
@@ -938,6 +961,7 @@ func scanOrderChainRow(scanner interface{ Scan(dest ...interface{}) error }) (*o
 		&chain.SubStrategy,
 		&chain.Timeframe,
 		&chain.EntryContext,
+		&chain.BudgetCapitalUsed,
 	)
 	return chain, err
 }

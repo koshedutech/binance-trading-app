@@ -54,6 +54,11 @@ type ChainCoinState struct {
 	SLPercent        float64 // Stop loss percentage (max_sl_percent) - used as GATE during pattern detection
 	TPPercent        float64 // R:R ratio for TP calculation (e.g., 4.0 for 1:4)
 
+	// Incremental equity / position sizing fields
+	UseIncrementalEquity bool    // Whether to use current equity for sizing
+	MaxConcurrentTrades  int     // Max concurrent trades for this sub-strategy
+	TradeCapital1x       float64 // 1x capital allocated for this trade (before leverage)
+
 	// Absolute price levels from pattern detection (preferred over percentages)
 	// These are calculated from Support Price (Consolidation Low) at runtime
 	EntryPrice float64 // Entry price from pattern (reference high for long)
@@ -721,6 +726,57 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		positionSizeUSD = state.BudgetUSD
 		log.Printf("[CHAIN-ENTRY] Using strategy budget: %.2f USD (from sub-strategy settings)", positionSizeUSD)
 	}
+
+	// === Incremental Equity Position Sizing ===
+	effectiveBudget := positionSizeUSD
+	if state.UseIncrementalEquity && r.repo != nil {
+		equity, err := r.repo.GetSubStrategyEquity(ctx, r.userID, modeStr, state.StrategyGroup, state.SubStrategy)
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] Warning: failed to get equity, using assigned budget: %v", err)
+		} else {
+			effectiveBudget = equity
+			log.Printf("[CHAIN-ENTRY] Incremental equity enabled: current=$%.2f (assigned=$%.2f)", equity, positionSizeUSD)
+		}
+	}
+
+	// Stop trading if equity depleted (threshold: $1)
+	if effectiveBudget <= 1.0 {
+		return fmt.Errorf("equity depleted: $%.2f <= $1.00 threshold, trading stopped for %s", effectiveBudget, symbol)
+	}
+
+	// Calculate per-trade capital based on available budget and concurrent slots
+	maxConcurrent := state.MaxConcurrentTrades
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+
+	capitalInUse := 0.0
+	activeForStrategy := 0
+	if r.repo != nil {
+		var err error
+		capitalInUse, activeForStrategy, err = r.repo.GetDB().GetCapitalInUseForSubStrategy(ctx, r.userID, modeStr, state.StrategyGroup, state.SubStrategy)
+		if err != nil {
+			log.Printf("[CHAIN-ENTRY] Warning: failed to get capital in use: %v", err)
+		}
+	}
+
+	availableCapital := effectiveBudget - capitalInUse
+	if availableCapital <= 0 {
+		return fmt.Errorf("no available capital: effective=$%.2f, in_use=$%.2f for %s", effectiveBudget, capitalInUse, symbol)
+	}
+
+	remainingSlots := maxConcurrent - activeForStrategy
+	if remainingSlots <= 0 {
+		remainingSlots = 1 // Fallback: shouldn't happen (position limit check should catch this)
+	}
+
+	tradeCapital := availableCapital / float64(remainingSlots)
+	positionSizeUSD = tradeCapital
+	state.TradeCapital1x = tradeCapital // Store for recording in chain
+
+	log.Printf("[CHAIN-ENTRY] Position sizing: effective=$%.2f, in_use=$%.2f, available=$%.2f, slots=%d/%d, per_trade=$%.2f",
+		effectiveBudget, capitalInUse, availableCapital, remainingSlots, maxConcurrent, tradeCapital)
+
 	if state.SLPercent > 0 {
 		slPercent = state.SLPercent
 	}
@@ -811,21 +867,29 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		entryContextJSON = entryCtxBytes
 	}
 
+	// Record budget capital used for incremental equity tracking
+	var budgetCapUsed *float64
+	if state.TradeCapital1x > 0 {
+		cap := state.TradeCapital1x
+		budgetCapUsed = &cap
+	}
+
 	// Step 8: Create order chain - MANDATORY for chain system integrity
 	// If database write fails, abort entry to prevent orphaned positions that Ginie picks up
 	if r.chainEventWriter != nil {
 		_, err := r.chainEventWriter.CreateChain(ctx, orders.CreateChainRequest{
-			UserID:        r.userID,
-			ChainID:       chainID,
-			Symbol:        symbol,
-			Side:          direction,
-			ModeCode:      modeCode,
-			IsHedge:       false,
-			Mode:          state.ActiveStrategy,  // scalp, swing, position, ultra_fast
-			StrategyGroup: state.StrategyGroup,   // e.g., breakout
-			SubStrategy:   state.SubStrategy,     // e.g., ravindra_volume_imbalance
-			Timeframe:     state.Timeframe,       // e.g., 3m, 5m, 15m from pattern detection
-			EntryContext:  entryContextJSON,
+			UserID:            r.userID,
+			ChainID:           chainID,
+			Symbol:            symbol,
+			Side:              direction,
+			ModeCode:          modeCode,
+			IsHedge:           false,
+			Mode:              state.ActiveStrategy,  // scalp, swing, position, ultra_fast
+			StrategyGroup:     state.StrategyGroup,   // e.g., breakout
+			SubStrategy:       state.SubStrategy,     // e.g., ravindra_volume_imbalance
+			Timeframe:         state.Timeframe,       // e.g., 3m, 5m, 15m from pattern detection
+			EntryContext:      entryContextJSON,
+			BudgetCapitalUsed: budgetCapUsed,
 		})
 		if err != nil {
 			log.Printf("[CHAIN-ENTRY] ABORTED: Failed to create order chain in database - cannot place order without chain record: %v", err)
@@ -1674,6 +1738,14 @@ func (r *ChainEntryRunner) ExecuteImmediateEntry(symbol, direction, mode, strate
 					if budgetUSD, ok := budgetAlloc["assigned_budget_usd"].(float64); ok && budgetUSD > 0 {
 						state.BudgetUSD = budgetUSD
 						log.Printf("[CHAIN-ENTRY-IMMEDIATE] Loaded budget from sub-strategy: $%.2f", budgetUSD)
+					}
+					if useIncremental, ok := budgetAlloc["use_incremental_equity"].(bool); ok {
+						state.UseIncrementalEquity = useIncremental
+						log.Printf("[CHAIN-ENTRY-IMMEDIATE] Incremental equity: %v", useIncremental)
+					}
+					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+						state.MaxConcurrentTrades = int(maxTrades)
+						log.Printf("[CHAIN-ENTRY-IMMEDIATE] Max concurrent trades: %d", state.MaxConcurrentTrades)
 					}
 				}
 				// Check for pattern_detection.max_sl_percent

@@ -290,6 +290,10 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		Float64("pnl_percent", pnlPercent).
 		Msg("Chain closed")
 
+	// NOTE: Equity update is handled by the ChainEventWriter.onChainClosed callback
+	// (set in main.go) which fires inside CloseChain() above. Do NOT call
+	// updateStrategyEquity here to avoid double-counting.
+
 	// Step 7: Reset pattern via patternMatcher
 	if plc.patternResetter != nil && chain.Mode != "" && chain.Timeframe != "" {
 		plc.patternResetter.ResetPatternForSymbol(chain.Symbol, chain.Mode, chain.Timeframe)
@@ -333,20 +337,32 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		tpFillPrice = &event.FilledPrice
 	}
 
+	// Get updated equity for broadcast (if equity was updated)
+	var newEquity *float64
+	if chain.Mode != "" && chain.StrategyGroup != "" && chain.SubStrategy != "" {
+		repo := database.NewRepository(plc.db)
+		if eq, err := repo.GetSubStrategyEquity(ctx, event.UserID, chain.Mode, chain.StrategyGroup, chain.SubStrategy); err == nil {
+			newEquity = &eq
+		}
+	}
+
 	compositeEvent := map[string]interface{}{
 		"chain": map[string]interface{}{
-			"chain_id":     chain.ChainID,
-			"symbol":       chain.Symbol,
-			"side":         chain.Side,
-			"close_reason": closeReason,
-			"close_price":  event.FilledPrice,
-			"realized_pnl": realizedPnL,
-			"pnl_percent":  pnlPercent,
-			"total_fees":   event.Commission,
-			"mode":         chain.Mode,
-			"mode_code":    chain.ModeCode,
-			"timeframe":    chain.Timeframe,
-			"closed_at":    fillTime.Format("2006-01-02T15:04:05Z07:00"),
+			"chain_id":       chain.ChainID,
+			"symbol":         chain.Symbol,
+			"side":           chain.Side,
+			"close_reason":   closeReason,
+			"close_price":    event.FilledPrice,
+			"realized_pnl":   realizedPnL,
+			"pnl_percent":    pnlPercent,
+			"total_fees":     event.Commission,
+			"mode":           chain.Mode,
+			"mode_code":      chain.ModeCode,
+			"timeframe":      chain.Timeframe,
+			"closed_at":      fillTime.Format("2006-01-02T15:04:05Z07:00"),
+			"new_equity":     newEquity,
+			"strategy_group": chain.StrategyGroup,
+			"sub_strategy":   chain.SubStrategy,
 		},
 		"pattern": map[string]interface{}{
 			"symbol":    chain.Symbol,
@@ -391,3 +407,4 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		ScanEnabled:  scanEnabled,
 	}, nil
 }
+

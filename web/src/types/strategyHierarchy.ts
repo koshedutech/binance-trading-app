@@ -111,6 +111,8 @@ export interface BudgetAllocationConfig {
   position_sizing: string;
   /** Use incremental equity (profits compound into position sizing) */
   use_incremental_equity: boolean;
+  /** Current equity value (running balance after trade P&L) - read-only, set by backend */
+  current_equity?: number;
 }
 
 // ==================== Risk/Reward Configuration ====================

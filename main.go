@@ -1318,14 +1318,34 @@ func main() {
 
 				// Set up equity compounding callback for chain close events
 				// When a chain closes with P&L, update the sub-strategy's current_equity
+				// Only updates when use_incremental_equity is enabled in the sub-strategy settings
 				chainEventWriter.SetOnChainClosed(func(ctx context.Context, userID, mode, strategyGroup, subStrategy string, realizedPnL float64) {
-					if subStrategy != "" && realizedPnL != 0 {
-						err := repo.UpdateSubStrategyEquity(ctx, userID, mode, strategyGroup, subStrategy, realizedPnL)
-						if err != nil {
-							log.Printf("[EQUITY-UPDATE] Failed to update equity for %s/%s/%s: %v", mode, strategyGroup, subStrategy, err)
-						} else {
-							log.Printf("[EQUITY-UPDATE] Updated equity for %s/%s/%s: PnL=%.2f", mode, strategyGroup, subStrategy, realizedPnL)
-						}
+					if subStrategy == "" || realizedPnL == 0 {
+						return
+					}
+					// Check if use_incremental_equity is enabled for this sub-strategy
+					subSettings, err := repo.GetSubStrategySettings(ctx, userID, mode, strategyGroup, subStrategy)
+					if err != nil || subSettings == nil || len(subSettings.Settings) == 0 {
+						return
+					}
+					var settingsMap map[string]interface{}
+					if err := json.Unmarshal(subSettings.Settings, &settingsMap); err != nil {
+						return
+					}
+					budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{})
+					if !ok {
+						return
+					}
+					useIncremental, ok := budgetAlloc["use_incremental_equity"].(bool)
+					if !ok || !useIncremental {
+						return
+					}
+					// Update equity with realized PnL
+					if err := repo.UpdateSubStrategyEquity(ctx, userID, mode, strategyGroup, subStrategy, realizedPnL); err != nil {
+						log.Printf("[EQUITY-UPDATE] Failed to update equity for %s/%s/%s: %v", mode, strategyGroup, subStrategy, err)
+					} else {
+						newEquity, _ := repo.GetSubStrategyEquity(ctx, userID, mode, strategyGroup, subStrategy)
+						log.Printf("[EQUITY-UPDATE] Updated equity for %s/%s/%s: PnL=%.2f, new_equity=%.2f", mode, strategyGroup, subStrategy, realizedPnL, newEquity)
 					}
 				})
 				logger.Info("Equity compounding callback set on ChainEventWriter")

@@ -1177,6 +1177,25 @@ function SubStrategyCollapsibleSection({
                 </div>
                 <p className="text-xs text-gray-500">Initial budget for this strategy</p>
               </div>
+              {/* Current Equity - read-only display (only when incremental equity is on) */}
+              {(localSettings.budget_allocation?.use_incremental_equity ?? true) && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Current Value</label>
+                    <div className="flex items-center gap-1">
+                      <span className={`text-sm font-mono font-semibold ${
+                        (localSettings.budget_allocation?.current_equity ?? localSettings.budget_allocation?.assigned_budget_usd ?? 100) >=
+                        (localSettings.budget_allocation?.assigned_budget_usd ?? 100)
+                          ? 'text-green-400' : 'text-red-400'
+                      }`}>
+                        ${(localSettings.budget_allocation?.current_equity ?? localSettings.budget_allocation?.assigned_budget_usd ?? 100).toFixed(2)}
+                      </span>
+                      <span className="text-xs text-gray-500 w-8">USD</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500">Running balance after trade P&L</p>
+                </div>
+              )}
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
                   <label className="text-sm font-medium text-gray-300">Max Concurrent Trades</label>

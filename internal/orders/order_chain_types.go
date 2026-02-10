@@ -146,6 +146,9 @@ type OrderChain struct {
 	RealizedPnL *float64 `json:"realized_pnl,omitempty"`
 	TotalFees   *float64 `json:"total_fees,omitempty"`
 
+	// Budget capital tracking (for incremental equity position sizing)
+	BudgetCapitalUsed *float64 `json:"budget_capital_used,omitempty"`
+
 	// SL order persistence (for closed chain reconstruction)
 	SLBinanceOrderID *int64     `json:"sl_binance_order_id,omitempty"`
 	SLLimitPrice     *float64   `json:"sl_limit_price,omitempty"`

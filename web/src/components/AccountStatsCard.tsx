@@ -114,10 +114,18 @@ export default function AccountStatsCard() {
       fetchAutopilotStatus();
     };
 
+    // Handle settings changes (budget, concurrent trades, etc.)
+    const handleSettingsChanged = () => {
+      fetchAutopilotStatus();
+      fetchChainEntryStatus();
+    };
+
     wsService.subscribe('GINIE_STATUS_UPDATE', handleGinieUpdate);
     wsService.subscribe('POSITION_UPDATE', handlePositionUpdate);
     wsService.subscribe('BALANCE_UPDATE', handleBalanceUpdate);
     wsService.subscribe('PNL_UPDATE', handlePositionUpdate); // PnL update means position closed
+    wsService.subscribe('SETTINGS_CHANGED', handleSettingsChanged);
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handlePositionUpdate); // Chain close updates positions
     window.addEventListener('mode-config-updated', handleModeConfigUpdate);
 
     // Fallback polling when WebSocket disconnected
@@ -159,6 +167,8 @@ export default function AccountStatsCard() {
       wsService.unsubscribe('POSITION_UPDATE', handlePositionUpdate);
       wsService.unsubscribe('BALANCE_UPDATE', handleBalanceUpdate);
       wsService.unsubscribe('PNL_UPDATE', handlePositionUpdate);
+      wsService.unsubscribe('SETTINGS_CHANGED', handleSettingsChanged);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handlePositionUpdate);
       window.removeEventListener('mode-config-updated', handleModeConfigUpdate);
       if (fallbackRef.current) {
         clearInterval(fallbackRef.current);

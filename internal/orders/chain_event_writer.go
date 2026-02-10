@@ -221,23 +221,27 @@ type CreateChainRequest struct {
 
 	// Entry decision context (reference candle data, volume multiplier, etc.)
 	EntryContext json.RawMessage
+
+	// Position sizing
+	BudgetCapitalUsed *float64 // 1x capital allocated for this trade (before leverage)
 }
 
 // CreateChain creates a new order chain when an entry order is about to be placed
 func (w *ChainEventWriter) CreateChain(ctx context.Context, req CreateChainRequest) (*OrderChain, error) {
 	chain := &OrderChain{
-		UserID:        req.UserID,
-		ChainID:       req.ChainID,
-		Symbol:        req.Symbol,
-		Side:          req.Side,
-		ModeCode:      req.ModeCode,
-		Status:        OrderChainStatusPending,
-		IsHedge:       req.IsHedge,
-		Mode:          req.Mode,
-		StrategyGroup: req.StrategyGroup,
-		SubStrategy:   req.SubStrategy,
-		Timeframe:     req.Timeframe,
-		EntryContext:  req.EntryContext,
+		UserID:            req.UserID,
+		ChainID:           req.ChainID,
+		Symbol:            req.Symbol,
+		Side:              req.Side,
+		ModeCode:          req.ModeCode,
+		Status:            OrderChainStatusPending,
+		IsHedge:           req.IsHedge,
+		Mode:              req.Mode,
+		StrategyGroup:     req.StrategyGroup,
+		SubStrategy:       req.SubStrategy,
+		Timeframe:         req.Timeframe,
+		EntryContext:      req.EntryContext,
+		BudgetCapitalUsed: req.BudgetCapitalUsed,
 	}
 
 	if req.ParentChainID != "" {
