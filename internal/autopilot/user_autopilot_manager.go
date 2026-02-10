@@ -1011,10 +1011,11 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 
 	// Wire fill completed callback - clears pattern after order fills so it stays cleared
 	// This prevents candle close from re-creating pattern while a position exists
-	chainEntryRunner.SetOnFillCompletedCallback(func(symbol, mode, timeframe string) {
+	chainEntryRunner.SetOnFillCompletedCallback(func(symbol, mode, timeframe string, filledQty, filledPrice float64) {
 		m.logger.Info("Entry fill completed - setting pattern to position_running (Step 4)",
-			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID)
-		realtimeMatcher.SetPatternPositionRunning(symbol, mode, timeframe)
+			"symbol", symbol, "mode", mode, "timeframe", timeframe, "user_id", userID,
+			"filled_qty", filledQty, "filled_price", filledPrice)
+		realtimeMatcher.SetPatternPositionRunningWithFilledData(symbol, mode, timeframe, filledQty, filledPrice)
 
 		// Instantly update coin profiler source for this symbol
 		// Uses lightweight method instead of heavy full re-initialization
@@ -1196,6 +1197,9 @@ func (m *UserAutopilotManager) autoDetectActivePositions(ctx context.Context, us
 		}
 		if chain.EntryPrice != nil {
 			chainInfo.EntryPrice = *chain.EntryPrice
+		}
+		if chain.EntryQuantity != nil {
+			chainInfo.Quantity = *chain.EntryQuantity
 		}
 		realtimeMatcher.SetPatternPositionRunningWithChainInfo(symbol, mode, timeframe, chainInfo)
 
@@ -2322,9 +2326,10 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 					m.logger.Info("Strategy capacity FULL - skipping strategy requirements for entry scanning",
 						"user_id", userID, "active_chains", len(activeChains), "max_concurrent", maxConcurrent)
 					aggregatedReqs = &coinprofiler.AggregatedRequirements{
-						AllTimeframes: []string{},
-						AllDataFields: []string{},
-						ByStrategy:    []coinprofiler.StrategyRequirements{},
+						AllTimeframes:   []string{},
+						AllDataFields:   []string{},
+						ByStrategy:      []coinprofiler.StrategyRequirements{},
+						TotalStrategies: len(dbStrategies),
 					}
 				}
 			}
@@ -2450,6 +2455,7 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 	// callback fires immediately, enabling pattern evaluation without waiting.
 	m.logger.Info("CoinProfiler subscriptions complete - pattern evaluation will trigger as historical data loads", "user_id", userID)
 }
+
 
 // giniePositionAdapter adapts GiniePosition to the coinprofiler.Position interface.
 type giniePositionAdapter struct {

@@ -68,6 +68,7 @@ export default function TradeLifecycleTab({
     symbol: 'all',
     side: 'all',
   });
+  const [activeOnly, setActiveOnly] = useState(false);
 
   // Section expansion states (must be declared before any early returns)
   // All collapsed by default - will auto-expand when data is received
@@ -275,22 +276,99 @@ export default function TradeLifecycleTab({
 
   // Helper: Convert historical API response to frontend OrderChain
   const mapHistoricalOrderChain = (histChain: HistoricalOrderChain): OrderChain => {
-    // Historical chains from DB don't include individual orders
-    // They have summary data about the chain
-    const parsed = parseClientOrderId(histChain.chainId + '-E');
+    // Historical chains from DB don't include individual orders from Binance,
+    // but we create synthetic order objects from summary data so ChainCard/OrderTreeNode
+    // can display entry, SL, TP information.
+    const parsedEntry = parseClientOrderId(histChain.chainId + '-E');
+    const parsedSL = parseClientOrderId(histChain.chainId + '-SL');
+    const parsedTP = parseClientOrderId(histChain.chainId + '-TP');
+
+    const createdAtMs = histChain.createdAt ? new Date(histChain.createdAt).getTime() || Date.now() : Date.now();
+    const updatedAtMs = histChain.updatedAt ? new Date(histChain.updatedAt).getTime() || Date.now() : Date.now();
+    const closedAtMs = histChain.closedAt ? new Date(histChain.closedAt).getTime() || undefined : undefined;
+    const positionSide = (histChain.side === 'BUY' ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT' | 'BOTH';
+    const closeSide = (histChain.side === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL';
+
+    const isSLFilled = histChain.closeReason === 'SL_HIT' || histChain.closeReason === 'PROTECTION_CLOSE';
+    const isTPFilled = histChain.closeReason === 'TP_HIT';
+
+    // Synthetic entry order
+    const entryOrder: ChainOrder = {
+      orderId: 0,
+      clientOrderId: histChain.chainId + '-E',
+      symbol: histChain.symbol,
+      side: histChain.side as 'BUY' | 'SELL',
+      positionSide,
+      type: 'LIMIT',
+      status: 'FILLED',
+      price: histChain.entryPrice,
+      avgPrice: histChain.entryPrice,
+      origQty: histChain.entryQuantity,
+      executedQty: histChain.entryQuantity,
+      stopPrice: 0,
+      time: createdAtMs,
+      updateTime: updatedAtMs,
+      orderType: 'E',
+      parsed: parsedEntry,
+    };
+
+    // Synthetic SL order (only if SL price exists)
+    const slOrder: ChainOrder | null = histChain.currentSlPrice > 0 ? {
+      orderId: 0,
+      clientOrderId: histChain.chainId + '-SL',
+      symbol: histChain.symbol,
+      side: closeSide,
+      positionSide,
+      type: 'STOP_MARKET',
+      status: isSLFilled ? 'FILLED' : (histChain.status === 'ACTIVE' ? 'NEW' : 'CANCELED'),
+      price: histChain.currentSlPrice,
+      avgPrice: isSLFilled ? histChain.currentSlPrice : 0,
+      origQty: histChain.entryQuantity,
+      executedQty: isSLFilled ? histChain.entryQuantity : 0,
+      stopPrice: histChain.currentSlPrice,
+      time: createdAtMs,
+      updateTime: closedAtMs || updatedAtMs,
+      orderType: 'SL',
+      parsed: parsedSL,
+    } : null;
+
+    // Synthetic TP order (only if TP price exists)
+    const tpOrder: ChainOrder | null = histChain.currentTpPrice > 0 ? {
+      orderId: 0,
+      clientOrderId: histChain.chainId + '-TP',
+      symbol: histChain.symbol,
+      side: closeSide,
+      positionSide,
+      type: 'TAKE_PROFIT_MARKET',
+      status: isTPFilled ? 'FILLED' : (histChain.status === 'ACTIVE' ? 'NEW' : 'CANCELED'),
+      price: histChain.currentTpPrice,
+      avgPrice: isTPFilled ? histChain.currentTpPrice : 0,
+      origQty: histChain.entryQuantity,
+      executedQty: isTPFilled ? histChain.entryQuantity : 0,
+      stopPrice: histChain.currentTpPrice,
+      time: createdAtMs,
+      updateTime: closedAtMs || updatedAtMs,
+      orderType: 'TP',
+      parsed: parsedTP,
+    } : null;
+
+    // Build orders array
+    const orders: ChainOrder[] = [entryOrder];
+    if (slOrder) orders.push(slOrder);
+    if (tpOrder) orders.push(tpOrder);
 
     return {
       chainId: histChain.chainId,
       modeCode: (histChain.modeCode as TradingModeCode) || null,
-      dateStr: parsed?.dateStr || null,
-      sequence: parsed?.sequence || null,
+      dateStr: parsedEntry?.dateStr || null,
+      sequence: parsedEntry?.sequence || null,
       symbol: histChain.symbol,
       side: histChain.side as 'BUY' | 'SELL' || null,
-      positionSide: histChain.side === 'BUY' ? 'LONG' : 'SHORT' as 'LONG' | 'SHORT' | 'BOTH',
-      orders: [], // Historical chains don't have order details from Binance
-      entryOrder: null,
-      tpOrders: [],
-      slOrder: null,
+      positionSide,
+      orders,
+      entryOrder,
+      tpOrders: tpOrder ? [tpOrder] : [],
+      slOrder,
       dcaOrders: [],
       rebuyOrder: null,
       hedgeOrder: null,
@@ -308,9 +386,8 @@ export default function TradeLifecycleTab({
       totalValue: histChain.entryPrice * histChain.entryQuantity,
       filledValue: histChain.entryPrice * histChain.entryQuantity,
       pnl: histChain.realizedPnl,
-      // Story 7.21 fix: Handle invalid/missing date strings to prevent NaN timestamps
-      createdAt: histChain.createdAt ? new Date(histChain.createdAt).getTime() || Date.now() : Date.now(),
-      updatedAt: histChain.updatedAt ? new Date(histChain.updatedAt).getTime() || Date.now() : Date.now(),
+      createdAt: createdAtMs,
+      updatedAt: updatedAtMs,
       isFallback: histChain.chainId.includes('FALLBACK'),
       positionState: {
         id: 0,
@@ -336,11 +413,23 @@ export default function TradeLifecycleTab({
         createdAt: histChain.createdAt,
         updatedAt: histChain.updatedAt,
         closedAt: histChain.closedAt,
+        closePrice: isSLFilled ? histChain.currentSlPrice : (isTPFilled ? histChain.currentTpPrice : undefined),
+        closeReason: histChain.closeReason,
       },
       modificationCounts: {
         SL: histChain.slModificationCount || 0,
         TP1: histChain.tpModificationCount || 0,
       },
+      // Close-related fields for ChainCard display
+      closeReason: histChain.closeReason,
+      closePrice: isSLFilled ? histChain.currentSlPrice : (isTPFilled ? histChain.currentTpPrice : undefined),
+      closedAt: histChain.closedAt,
+      realizedPnl: histChain.realizedPnl,
+      totalFees: histChain.totalFees,
+      slStatus: isSLFilled ? 'FILLED' : (histChain.currentSlPrice > 0 ? 'CANCELED' : undefined),
+      tpStatus: isTPFilled ? 'FILLED' : (histChain.currentTpPrice > 0 ? 'CANCELED' : undefined),
+      slFillPrice: isSLFilled ? histChain.currentSlPrice : undefined,
+      tpFillPrice: isTPFilled ? histChain.currentTpPrice : undefined,
     };
   };
 
@@ -1115,6 +1204,8 @@ export default function TradeLifecycleTab({
   // Apply filters and sort: active/partial first (newest first), then completed/cancelled (newest first)
   const filteredChains = useMemo(() => {
     const filtered = chains.filter((chain) => {
+      // Active-only toggle filter
+      if (activeOnly && chain.status !== 'active' && chain.status !== 'partial') return false;
       if (filters.mode !== 'all' && chain.modeCode !== filters.mode) return false;
       if (filters.status !== 'all' && chain.status !== filters.status) return false;
       if (filters.symbol !== 'all' && chain.symbol !== filters.symbol) return false;
@@ -1135,7 +1226,7 @@ export default function TradeLifecycleTab({
       const timeB = b.createdAt || 0;
       return timeB - timeA;
     });
-  }, [chains, filters]);
+  }, [chains, filters, activeOnly]);
 
   // Calculate summary stats
   const stats = useMemo(() => {
@@ -1169,7 +1260,7 @@ export default function TradeLifecycleTab({
     };
   }, [chains]);
 
-  // Reset filters (including date filters)
+  // Reset filters (including date filters and active-only toggle)
   const resetFilters = () => {
     setFilters({
       mode: 'all',
@@ -1179,6 +1270,7 @@ export default function TradeLifecycleTab({
       dateFrom: undefined,
       dateTo: undefined,
     });
+    setActiveOnly(false);
   };
 
   // Calculate position stats from chains that have active positions
@@ -1499,6 +1591,8 @@ export default function TradeLifecycleTab({
                       onFilterChange={setFilters}
                       symbols={symbols}
                       onReset={resetFilters}
+                      activeOnly={activeOnly}
+                      onActiveOnlyChange={setActiveOnly}
                     />
                   </div>
 

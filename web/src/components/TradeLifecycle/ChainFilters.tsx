@@ -7,6 +7,8 @@ interface ChainFiltersProps {
   onFilterChange: (filters: FilterType) => void;
   symbols: string[];
   onReset: () => void;
+  activeOnly?: boolean;
+  onActiveOnlyChange?: (value: boolean) => void;
 }
 
 // Get today's date in YYYY-MM-DD format
@@ -25,14 +27,15 @@ function getYesterdayDate(): string {
 // Quick date presets
 type DatePreset = 'today' | 'yesterday' | 'last7days' | 'last30days' | 'custom';
 
-export default function ChainFilters({ filters, onFilterChange, symbols, onReset }: ChainFiltersProps) {
+export default function ChainFilters({ filters, onFilterChange, symbols, onReset, activeOnly, onActiveOnlyChange }: ChainFiltersProps) {
   const hasActiveFilters =
     filters.mode !== 'all' ||
     filters.status !== 'all' ||
     filters.symbol !== 'all' ||
     filters.side !== 'all' ||
     filters.dateFrom ||
-    filters.dateTo;
+    filters.dateTo ||
+    activeOnly;
 
   // Determine current date preset based on filter values
   const getActivePreset = (): DatePreset | null => {
@@ -91,6 +94,31 @@ export default function ChainFilters({ filters, onFilterChange, symbols, onReset
         <Filter className="w-4 h-4" />
         <span className="text-sm">Filters:</span>
       </div>
+
+      {/* Active Only toggle */}
+      {onActiveOnlyChange && (
+        <button
+          onClick={() => onActiveOnlyChange(!activeOnly)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full transition-colors ${
+            activeOnly
+              ? 'bg-green-500/20 text-green-400 border border-green-500/50'
+              : 'bg-gray-700 text-gray-400 hover:bg-gray-600 border border-transparent'
+          }`}
+          title="Show only active and partial orders"
+        >
+          <div className={`w-7 h-4 rounded-full relative transition-colors ${
+            activeOnly ? 'bg-green-500/40' : 'bg-gray-600'
+          }`}>
+            <div className={`absolute top-0.5 w-3 h-3 rounded-full transition-all ${
+              activeOnly ? 'right-0.5 bg-green-400' : 'left-0.5 bg-gray-400'
+            }`} />
+          </div>
+          Active Only
+        </button>
+      )}
+
+      {/* Separator before dropdowns */}
+      <div className="w-px h-6 bg-gray-600" />
 
       {/* Mode filter */}
       <select

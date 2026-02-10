@@ -845,7 +845,7 @@ func (db *DB) CountActiveChains(ctx context.Context, userID string) (int, error)
 		return 0, nil
 	}
 
-	query := `SELECT COUNT(*) FROM order_chains WHERE user_id = $1 AND status IN ('PENDING', 'ENTRY_PLACED', 'ACTIVE', 'PARTIAL')`
+	query := `SELECT COUNT(*) FROM order_chains WHERE user_id = $1 AND status IN ('ACTIVE', 'PARTIAL')`
 
 	var count int
 	err := db.Pool.QueryRow(ctx, query, userID).Scan(&count)

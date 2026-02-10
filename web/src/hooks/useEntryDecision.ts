@@ -291,6 +291,8 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
         // Merge with existing strategies to preserve fields that may not be in the update
         // This prevents UI flicker when reference_candle or other fields are temporarily missing
+        // IMPORTANT: Backend is the source of truth for WHICH symbols appear.
+        // Only merge state for symbols that ARE in the new backend data.
         setStrategies(prevStrategies => {
           return newStrategies.map(newStrategy => {
             // Find the previous strategy with the same identity
@@ -303,6 +305,9 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             if (!prevStrategy) return newStrategy;
 
             // Merge coins: preserve reference_candle and entry_candle from previous state
+            // NOTE: We only iterate over newStrategy.coins (backend source of truth).
+            // Coins in prevStrategy but NOT in newStrategy are intentionally dropped -
+            // they are stale symbols no longer monitored by CoinProfiler.
             const mergedCoins = newStrategy.coins.map(newCoin => {
               const prevCoin = prevStrategy.coins.find(c => c.symbol === newCoin.symbol);
               if (!prevCoin) return newCoin;
@@ -364,6 +369,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
         if (event.data.by_mode) {
           // Also merge by_mode data to preserve reference_candle
+          // Same as strategies: backend is source of truth for which symbols appear
           setByMode(prevByMode => {
             return event.data.by_mode!.map(newModeGroup => {
               const prevModeGroup = prevByMode.find(m => m.mode === newModeGroup.mode);
@@ -511,18 +517,23 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
           // Preserve entry_candle - critical for Step 3/4 display
           coin.entry_candle = isResettingToWatching ? update.entry_candle : (update.entry_candle || prevCoin.entry_candle);
 
-          // Update entry levels with real-time price data
+          // Update current_price from top-level (suppressed broadcasts) OR from entry_levels
+          if (update.current_price) {
+            coin.current_price = update.current_price;
+          } else if (update.entry_levels?.current_price) {
+            coin.current_price = update.entry_levels.current_price;
+          } else {
+            coin.current_price = prevCoin.current_price;
+          }
+
+          // Calculate proximity to breakout from entry levels
           if (update.entry_levels) {
-            coin.current_price = update.entry_levels.current_price || prevCoin.current_price;
-            // Calculate proximity to breakout from entry levels
-            if (update.entry_levels.entry_price && update.entry_levels.current_price) {
+            const entryCurrentPrice = update.current_price || update.entry_levels.current_price;
+            if (update.entry_levels.entry_price && entryCurrentPrice) {
               coin.proximity_to_breakout =
-                ((update.entry_levels.current_price - update.entry_levels.entry_price) /
+                ((entryCurrentPrice - update.entry_levels.entry_price) /
                   update.entry_levels.entry_price) * 100;
             }
-          } else {
-            // Preserve existing current_price if not in update
-            coin.current_price = prevCoin.current_price;
           }
 
           // Preserve full entry_levels object
@@ -531,6 +542,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
           // Position tracking fields - critical for Step 4 display
           coin.has_active_position = update.has_active_position ?? prevCoin.has_active_position;
           coin.position_entry_price = update.position_entry_price || prevCoin.position_entry_price;
+          coin.position_quantity = update.position_quantity || prevCoin.position_quantity;
           coin.chain_id = update.chain_id || prevCoin.chain_id;
           coin.position_opened_at = update.position_opened_at || prevCoin.position_opened_at;
           coin.seconds_ref_to_entry = update.seconds_ref_to_entry ?? prevCoin.seconds_ref_to_entry;
@@ -592,11 +604,21 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             // Preserve entry_candle - critical for Step 3/4 display
             coin.entry_candle = isResettingToWatching ? update.entry_candle : (update.entry_candle || prevCoin.entry_candle);
 
+            // Update current_price from top-level (suppressed broadcasts) OR from entry_levels
+            if (update.current_price) {
+              coin.current_price = update.current_price;
+            } else if (update.entry_levels?.current_price) {
+              coin.current_price = update.entry_levels.current_price;
+            } else {
+              coin.current_price = prevCoin.current_price;
+            }
+
+            // Calculate proximity to breakout from entry levels
             if (update.entry_levels) {
-              coin.current_price = update.entry_levels.current_price || prevCoin.current_price;
-              if (update.entry_levels.entry_price && update.entry_levels.current_price) {
+              const entryCurrentPrice = update.current_price || update.entry_levels.current_price;
+              if (update.entry_levels.entry_price && entryCurrentPrice) {
                 coin.proximity_to_breakout =
-                  ((update.entry_levels.current_price - update.entry_levels.entry_price) /
+                  ((entryCurrentPrice - update.entry_levels.entry_price) /
                     update.entry_levels.entry_price) * 100;
               }
             }
@@ -607,6 +629,7 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             // Position tracking fields - critical for Step 4 display
             coin.has_active_position = update.has_active_position ?? prevCoin.has_active_position;
             coin.position_entry_price = update.position_entry_price || prevCoin.position_entry_price;
+            coin.position_quantity = update.position_quantity || prevCoin.position_quantity;
             coin.chain_id = update.chain_id || prevCoin.chain_id;
             coin.position_opened_at = update.position_opened_at || prevCoin.position_opened_at;
             coin.seconds_ref_to_entry = update.seconds_ref_to_entry ?? prevCoin.seconds_ref_to_entry;

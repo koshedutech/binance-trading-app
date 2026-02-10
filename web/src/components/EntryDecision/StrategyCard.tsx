@@ -686,7 +686,7 @@ function CoinRow({
                 <div className="flex items-center gap-2 text-[10px] flex-wrap">
                   <span className="text-green-400 font-medium">Ref:</span>
                   <span className="text-gray-400 font-mono">
-                    {new Date(coin.reference_candle.open_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    {new Date(coin.reference_candle.open_time).toISOString().slice(5, 16).replace('T', ' ')} UTC
                   </span>
                   <span className="text-gray-500">H:</span>
                   <span className="text-white font-mono">{coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}</span>
@@ -716,7 +716,7 @@ function CoinRow({
                 <div className="flex items-center gap-2 text-[10px]">
                   <span className="text-yellow-400 font-medium">Entry:</span>
                   <span className="text-gray-400 font-mono">
-                    {new Date(coin.entry_candle.detected_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                    {new Date(coin.entry_candle.detected_at).toISOString().slice(5, 16).replace('T', ' ')} UTC
                   </span>
                   <span className="text-gray-500">Price:</span>
                   <span className="text-white font-mono">{coin.entry_candle.entry_price?.toFixed(coin.entry_candle.entry_price > 100 ? 2 : 4)}</span>

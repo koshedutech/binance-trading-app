@@ -984,6 +984,18 @@ func (cp *CoinProfiler) SetSubscriptionsFromCombined(combined *CombinedRequireme
 			coinData.Source = symReq.Source
 		}
 	}
+
+	// Clean up coinData entries that are no longer in any subscription.
+	// The stale subscription removal loop above only iterates cp.subscriptions,
+	// so coinData entries created by WebSocket (updateCoinData) without a
+	// corresponding subscription entry would survive. This pass ensures
+	// coinData stays in sync with the new combined requirements.
+	for symbol := range cp.coinData {
+		if _, exists := combined.BySymbol[symbol]; !exists {
+			delete(cp.coinData, symbol)
+			cp.logDebug("Removed stale coinData for %s (not in new requirements)", symbol)
+		}
+	}
 	cp.mu.Unlock()
 
 	// Subscribe via WebSocket manager

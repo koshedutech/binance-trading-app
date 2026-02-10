@@ -937,7 +937,7 @@ export default function CoinStageCard({
                     <Activity className="w-3 h-3 text-green-400 flex-shrink-0" />
                     <span className="text-gray-500">Ref:</span>
                     <span className="text-gray-400 font-mono">
-                      {new Date(update.reference_candle.open_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(update.reference_candle.open_time).toISOString().slice(11, 16)} UTC
                     </span>
                     <span className="text-gray-600">|</span>
                     <span className="text-gray-400">H:</span>
@@ -959,7 +959,7 @@ export default function CoinStageCard({
                     <Zap className="w-3 h-3 text-yellow-400 flex-shrink-0" />
                     <span className="text-gray-500">Entry:</span>
                     <span className="text-gray-400 font-mono">
-                      {new Date(update.entry_candle.detected_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(update.entry_candle.detected_at).toISOString().slice(11, 16)} UTC
                     </span>
                     <span className="text-gray-600">|</span>
                     <span className="text-gray-400">Price:</span>
@@ -1061,7 +1061,7 @@ export default function CoinStageCard({
         {/* Last Update */}
         <div className="flex items-center gap-1 mt-2 text-[10px] text-gray-600">
           <Clock className="w-3 h-3" />
-          <span>Updated {new Date(update.updated_at).toLocaleTimeString()}</span>
+          <span>Updated {new Date(update.updated_at).toISOString().slice(11, 19)} UTC</span>
         </div>
       </div>
     </div>

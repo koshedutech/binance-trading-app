@@ -97,17 +97,14 @@ export default function CoinProfilerCard() {
 
   const handleChainClosed = useCallback((event: any) => {
     setWsPositionAdjustment(prev => Math.max(0, prev - 1));
-    // CHAIN_CLOSED event puts data directly in event.data (not nested)
     const data = event?.data;
     if (data?.symbol) {
-      const existingCoin = coins.find(c => c.symbol === data.symbol);
-      if (existingCoin?.source === 'both' || existingCoin?.source === 'position') {
-        updateCoinSource(data.symbol, 'strategy');
-      }
+      // Always revert to strategy on chain close
+      updateCoinSource(data.symbol, 'strategy');
     }
     refetchCoins();
     refetchReqs();
-  }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
+  }, [updateCoinSource, refetchCoins, refetchReqs]);
 
   // Story 14.19: CHAIN_LIFECYCLE_UPDATE composite event from PositionLifecycleCoordinator
   const handleChainLifecycleUpdate = useCallback((event: any) => {
@@ -115,15 +112,14 @@ export default function CoinProfilerCard() {
     const data = event?.data;
     const symbol = data?.chain?.symbol || data?.pattern?.symbol;
     if (symbol) {
-      const existingCoin = coins.find(c => c.symbol === symbol);
-      if (existingCoin?.source === 'both' || existingCoin?.source === 'position') {
-        updateCoinSource(symbol, 'strategy');
-      }
+      // Always revert to strategy on chain close - no need to check current source
+      // (avoids stale closure issues with coins array)
+      updateCoinSource(symbol, 'strategy');
     }
     // Update capacity from composite event data; always refetch for latest state
     refetchCoins();
     refetchReqs();
-  }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
+  }, [updateCoinSource, refetchCoins, refetchReqs]);
 
   // Handle POSITION_UPDATE with status "CLOSED" (catches positions closing without a chain)
   const handlePositionUpdate = useCallback((event: any) => {
@@ -388,7 +384,7 @@ export default function CoinProfilerCard() {
       {/* Expanded Content */}
       <div
         className={`transition-all duration-200 ease-in-out overflow-hidden ${
-          isExpanded ? 'max-h-[600px] opacity-100' : 'max-h-0 opacity-0'
+          isExpanded ? 'max-h-[2000px] opacity-100 overflow-y-auto' : 'max-h-0 opacity-0'
         }`}
       >
         <div className="px-3 pb-3">

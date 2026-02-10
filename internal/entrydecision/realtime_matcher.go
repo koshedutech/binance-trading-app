@@ -82,6 +82,7 @@ type PatternUpdate struct {
 	// Position tracking (when position is actually open on Binance)
 	HasActivePosition  bool    `json:"has_active_position,omitempty"`  // Whether there's an active position for this coin
 	PositionEntryPrice float64 `json:"position_entry_price,omitempty"` // Position entry price (actual fill price from Binance)
+	PositionQuantity   float64 `json:"position_quantity,omitempty"`    // Position quantity (for PnL calculation)
 	ChainID            string     `json:"chain_id,omitempty"`                // Chain ID for the position
 	PositionOpenedAt   *time.Time `json:"position_opened_at,omitempty"`      // When position was opened (for timer)
 
@@ -251,6 +252,12 @@ type RealtimePatternMatcher struct {
 	// This catches positions opened manually on Binance or when DB is out of sync.
 	suppressedBySymbolOnly map[string]bool
 
+	// recentlyResetSymbols tracks symbols that were recently reset via ResetPatternForSymbol.
+	// During the window between position close (fill event) and Binance position update (qty=0),
+	// the positionExistsChecker safety net would incorrectly re-suppress these symbols.
+	// Key: symbol name, Value: time when reset occurred. Entries expire after 60 seconds.
+	recentlyResetSymbols map[string]time.Time
+
 	// positionExistsChecker is a callback that checks if an active position exists for a symbol.
 	// Used as a safety net in OnCandleClose/OnVolumeProgress to catch positions that were
 	// detected via WebSocket but not yet suppressed.
@@ -293,6 +300,7 @@ func NewRealtimePatternMatcher(
 		volumeProgress:    make(map[string]*VolumeProgress),
 		suppressedSymbols:      make(map[string]bool),
 		suppressedBySymbolOnly: make(map[string]bool),
+		recentlyResetSymbols:   make(map[string]time.Time),
 	}
 }
 
@@ -807,7 +815,11 @@ func (r *RealtimePatternMatcher) OnVolumeProgress(data coinprofiler.VolumeProgre
 	}
 
 	// Safety net: check if position exists via live callback (catches WebSocket-detected positions)
-	if posChecker != nil && posChecker(data.Symbol) {
+	// Skip if symbol was recently reset - activePositions may be stale until Binance position update arrives
+	r.mu.RLock()
+	recentlyReset := r.isRecentlyReset(data.Symbol)
+	r.mu.RUnlock()
+	if posChecker != nil && !recentlyReset && posChecker(data.Symbol) {
 		r.mu.Lock()
 		r.suppressedBySymbolOnly[data.Symbol] = true
 		r.mu.Unlock()
@@ -1035,6 +1047,26 @@ func (r *RealtimePatternMatcher) ClearPatternForSymbol(symbol, mode, timeframe s
 }
 
 // SetPatternPositionRunning transitions a pattern to "position_running" status and broadcasts Step 4.
+// SetPatternPositionRunningWithFilledData is like SetPatternPositionRunning but also stores the
+// filled quantity and price in the pattern state for PnL calculation in Step 4 broadcasts.
+// Called from the fill completed callback which has access to the actual fill data.
+func (r *RealtimePatternMatcher) SetPatternPositionRunningWithFilledData(symbol, mode, timeframe string, filledQty, filledPrice float64) {
+	if r.patternMatcher == nil {
+		return
+	}
+	// Pre-store filled data in pattern state so SetPatternPositionRunning broadcast includes it
+	state := r.getPatternState(symbol, mode, timeframe)
+	if state != nil {
+		if filledQty > 0 {
+			state.EntryQuantity = filledQty
+		}
+		if filledPrice > 0 {
+			state.EntryPrice = filledPrice
+		}
+	}
+	r.SetPatternPositionRunning(symbol, mode, timeframe)
+}
+
 // This is called when an entry order fills successfully. Instead of clearing the pattern (which would
 // make the coin disappear from the UI), this keeps it visible as Step 4 with position_running status.
 // The symbol is also suppressed to prevent new pattern detection while the position is active.
@@ -1095,6 +1127,14 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 		if state != nil {
 			update.Direction = state.Direction
 
+			// Include position entry price and quantity from pattern state (for PnL)
+			if state.EntryPrice > 0 {
+				update.PositionEntryPrice = state.EntryPrice
+			}
+			if state.EntryQuantity > 0 {
+				update.PositionQuantity = state.EntryQuantity
+			}
+
 			if state.ReferenceCandle != nil {
 				volumeMultiplier := 0.0
 				if state.AverageVolumeAtSpike > 0 {
@@ -1134,7 +1174,8 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunning(symbol, mode, timefra
 // This data comes from the order_chains table and provides position context that the
 // pattern state alone may not have.
 type PositionRunningChainInfo struct {
-	EntryPrice float64 // Actual fill price from Binance
+	EntryPrice float64    // Actual fill price from Binance
+	Quantity   float64    // Position quantity (for PnL calculation)
 	ChainID    string     // Chain ID (e.g., "SCA-08FEB-00001")
 	Side       string     // "LONG" or "SHORT"
 	OpenedAt   *time.Time // When the entry was filled (for position timer)
@@ -1184,6 +1225,7 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunningWithChainInfo(symbol, 
 		if chainInfo != nil {
 			update.HasActivePosition = true
 			update.PositionEntryPrice = chainInfo.EntryPrice
+			update.PositionQuantity = chainInfo.Quantity
 			update.ChainID = chainInfo.ChainID
 			// Derive direction from chain side
 			if chainInfo.Side == "LONG" {
@@ -1253,6 +1295,9 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunningWithChainInfo(symbol, 
 				if chainInfo.EntryPrice > 0 {
 					stateForWrite.EntryPrice = chainInfo.EntryPrice
 				}
+				if chainInfo.Quantity > 0 {
+					stateForWrite.EntryQuantity = chainInfo.Quantity
+				}
 				// Freeze the position direction from chain side so future broadcasts
 				// use the original direction, not whatever new pattern detection finds
 				if chainInfo.Side == "LONG" {
@@ -1284,6 +1329,23 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunningWithChainInfo(symbol, 
 	}
 }
 
+// isRecentlyReset checks if a symbol was recently reset (position closed) and should not be
+// re-suppressed by the positionExistsChecker safety net.
+// IMPORTANT: Caller must hold r.mu (at least RLock). This method does NOT mutate the map
+// so it is safe to call under RLock. Expired entries are cleaned up lazily when
+// ResetPatternForSymbol writes a new entry (under write lock).
+func (r *RealtimePatternMatcher) isRecentlyReset(symbol string) bool {
+	resetTime, exists := r.recentlyResetSymbols[symbol]
+	if !exists {
+		return false
+	}
+	// 60-second grace period for Binance position update to arrive
+	if time.Since(resetTime) > 60*time.Second {
+		return false
+	}
+	return true
+}
+
 // ResetPatternForSymbol clears the pattern for a specific symbol WITHOUT suppressing it.
 // This should be called when an entry order fails (timeout, rejected, etc.) to allow
 // the pattern matcher to immediately start looking for new patterns on this symbol.
@@ -1305,6 +1367,9 @@ func (r *RealtimePatternMatcher) ResetPatternForSymbol(symbol, mode, timeframe s
 	// Explicitly remove any existing suppression (in case it was suppressed)
 	delete(r.suppressedSymbols, stateKey)
 	delete(r.suppressedBySymbolOnly, symbol)
+	// Mark as recently reset to prevent positionExistsChecker from re-suppressing
+	// during the window before Binance position update (qty=0) arrives
+	r.recentlyResetSymbols[symbol] = time.Now()
 	r.mu.Unlock()
 
 	// Delete persisted pattern state from DB (async)
@@ -1381,6 +1446,11 @@ func (r *RealtimePatternMatcher) broadcastSuppressedPriceUpdate(symbol, timefram
 		// Include position entry price from pattern state
 		if state.EntryPrice > 0 {
 			update.PositionEntryPrice = state.EntryPrice
+		}
+
+		// Include position quantity from pattern state (for PnL calculation)
+		if state.EntryQuantity > 0 {
+			update.PositionQuantity = state.EntryQuantity
 		}
 
 		// Include chain ID and position opened time (stored during SetPatternPositionRunning)
@@ -1728,7 +1798,11 @@ func (r *RealtimePatternMatcher) OnCandleClose(symbol, timeframe string, candles
 	}
 
 	// Safety net: check if position exists via live callback (catches WebSocket-detected positions)
-	if posChecker != nil && posChecker(symbol) {
+	// Skip if symbol was recently reset - activePositions may be stale until Binance position update arrives
+	r.mu.RLock()
+	recentlyReset := r.isRecentlyReset(symbol)
+	r.mu.RUnlock()
+	if posChecker != nil && !recentlyReset && posChecker(symbol) {
 		r.mu.Lock()
 		r.suppressedBySymbolOnly[symbol] = true
 		r.mu.Unlock()

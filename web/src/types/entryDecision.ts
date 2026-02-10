@@ -628,6 +628,8 @@ export interface PatternUpdate {
   has_active_position?: boolean;
   /** Position entry price (actual fill price from Binance) */
   position_entry_price?: number;
+  /** Position quantity (for PnL calculation) */
+  position_quantity?: number;
   /** Chain ID for the position */
   chain_id?: string;
   /** When position was opened (entry filled) - ISO timestamp */

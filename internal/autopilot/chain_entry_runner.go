@@ -137,8 +137,8 @@ type ChainEntryRunner struct {
 	onFillProgress func(symbol, mode, timeframe string, remainingSecs int)
 
 	// Callback for when entry order is filled successfully - clears pattern so it stays cleared
-	// Parameters: symbol, mode, timeframe
-	onFillCompleted func(symbol, mode, timeframe string)
+	// Parameters: symbol, mode, timeframe, filledQty, filledPrice
+	onFillCompleted func(symbol, mode, timeframe string, filledQty, filledPrice float64)
 
 	// Runtime state
 	running        bool
@@ -279,7 +279,7 @@ func (r *ChainEntryRunner) SetOnFillProgressCallback(callback func(symbol, mode,
 
 // SetOnFillCompletedCallback sets the callback for when an entry order fills successfully.
 // This clears the pattern so it stays cleared and doesn't get re-created by candle close.
-func (r *ChainEntryRunner) SetOnFillCompletedCallback(callback func(symbol, mode, timeframe string)) {
+func (r *ChainEntryRunner) SetOnFillCompletedCallback(callback func(symbol, mode, timeframe string, filledQty, filledPrice float64)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onFillCompleted = callback
@@ -992,7 +992,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			// subscribes to POSITION_CREATED and refetches data. If we broadcast first,
 			// the refetched data still shows "strategy" source (race condition).
 			if r.onFillCompleted != nil {
-				r.onFillCompleted(symbol, modeStr, state.Timeframe)
+				r.onFillCompleted(symbol, modeStr, state.Timeframe, filledQty, filledPrice)
 			}
 
 			// THEN broadcast POSITION_CREATED event to UI for instant update
@@ -1798,8 +1798,14 @@ func (r *ChainEntryRunner) CalculateMaxPositionsFromSubStrategies(ctx context.Co
 		totalMaxPositions = 1
 	}
 
-	// TODO: Get current active positions from order chains
+	// Get current active positions from order chains (ACTIVE/PARTIAL only - actual open positions)
 	currentPositions := 0
+	activeCount, err := r.repo.GetDB().CountActiveChains(ctx, r.userID)
+	if err != nil {
+		log.Printf("[CHAIN-ENTRY] Warning: Failed to count active chains: %v", err)
+	} else {
+		currentPositions = activeCount
+	}
 
 	return currentPositions, totalMaxPositions
 }

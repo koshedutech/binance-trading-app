@@ -294,12 +294,16 @@ export default function ChainCard({
             );
           })()}
 
-          {/* Live unrealized PNL for active chains */}
+          {/* Live unrealized PNL for active chains - calculated from livePrice for real-time updates */}
           {chain.status === 'active' && chain.positionState && (() => {
-            const unrealizedPnl = chain.positionAnalytics?.unrealized_pnl ?? 0;
-            if (unrealizedPnl === 0 && !chain.positionAnalytics?.unrealized_pnl) return null;
             const entryPrice = chain.positionState?.entryPrice || chain.entryOrder?.avgPrice || chain.entryOrder?.price || 0;
             const entryQty = chain.positionState?.entryQuantity || chain.entryOrder?.executedQty || chain.entryOrder?.origQty || 0;
+            const currentPrice = livePrice || chain.positionAnalytics?.current_price || 0;
+            const isLong = chain.positionSide?.toUpperCase() === 'LONG' || chain.side?.toUpperCase() === 'BUY';
+            const unrealizedPnl = currentPrice > 0 && entryPrice > 0 && entryQty > 0
+              ? (isLong ? (currentPrice - entryPrice) * entryQty : (entryPrice - currentPrice) * entryQty)
+              : (chain.positionAnalytics?.unrealized_pnl ?? 0);
+            if (unrealizedPnl === 0 && currentPrice === 0) return null;
             const entryValue = entryPrice * entryQty;
             const pnlPercent = entryValue > 0 ? (unrealizedPnl / entryValue) * 100 : 0;
             return (
@@ -658,15 +662,23 @@ export default function ChainCard({
               <span className="text-gray-500">Fees:</span>
               <span className="ml-2 font-mono">
                 {(() => {
-                  const fees = chain.totalFees ?? chain.positionState?.entryFees;
-                  if (fees == null || fees === 0) {
-                    return <span className="text-gray-500">N/A</span>;
+                  // Sum entry fees + close fees (totalFees = close commission from SL/TP fill)
+                  const closeFees = chain.totalFees ?? 0;
+                  const entryFees = chain.positionState?.entryFees ?? 0;
+                  const totalFees = closeFees + entryFees;
+                  if (totalFees > 0) {
+                    return (
+                      <span className="text-red-400">
+                        -${totalFees.toFixed(4)}
+                      </span>
+                    );
                   }
-                  return (
-                    <span className="text-red-400">
-                      -${fees.toFixed(4)}
-                    </span>
-                  );
+                  // For closed chains, show "pending..." (fees arrive via PNL_CORRECTED)
+                  const isClosed = chain.status === 'completed' || chain.status === 'cancelled';
+                  if (isClosed) {
+                    return <span className="text-gray-500 text-xs">pending...</span>;
+                  }
+                  return <span className="text-gray-500">-</span>;
                 })()}
               </span>
             </div>

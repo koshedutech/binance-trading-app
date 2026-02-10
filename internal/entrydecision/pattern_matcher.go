@@ -281,6 +281,7 @@ type PatternState struct {
 	// Position tracking (set when transitioning to position_running, for broadcast enrichment)
 	PositionChainID    string    `json:"position_chain_id,omitempty"`
 	PositionOpenedAt   time.Time `json:"position_opened_at"`
+	EntryQuantity      float64   `json:"entry_quantity,omitempty"` // Position quantity for PnL calculation
 
 	// PositionDirection is the direction frozen at position open time.
 	// Unlike Direction (which can change if new pattern detection runs),

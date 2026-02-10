@@ -522,6 +522,16 @@ export default function OrderTreeNode({
                         </div>
                       )}
 
+                      {/* Value (entry price * quantity) */}
+                      {(positionState.entryPrice ?? 0) > 0 && (positionState.entryQuantity ?? 0) > 0 && (
+                        <div className="text-right ml-3">
+                          <span className="text-gray-300 font-mono text-sm">
+                            ${((positionState.entryPrice ?? 0) * (positionState.entryQuantity ?? 0)).toFixed(2)}
+                          </span>
+                          <span className="text-xs text-gray-500 ml-1">Value</span>
+                        </div>
+                      )}
+
                       {/* Realized PnL */}
                       {positionState.realizedPnl != null && (
                         <div className="text-right ml-3">
@@ -564,12 +574,14 @@ export default function OrderTreeNode({
                       )}
 
                       {/* Notional Value (recalculated with live price if available) */}
-                      {positionState && positionState.entryValue > 0 && (
+                      {positionState && (positionState.entryPrice ?? 0) > 0 && (positionState.entryQuantity ?? 0) > 0 && (
                         <div className="text-right ml-3">
                           <span className="text-gray-300 font-mono text-sm">
                             ${livePrice && positionState.entryQuantity > 0
                               ? (livePrice * positionState.entryQuantity).toFixed(2)
-                              : positionState.entryValue.toFixed(2)
+                              : (positionState.entryValue > 0
+                                ? positionState.entryValue.toFixed(2)
+                                : (positionState.entryPrice * positionState.entryQuantity).toFixed(2))
                             }
                           </span>
                           <span className="text-xs text-gray-500 ml-1">Value</span>

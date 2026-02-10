@@ -120,6 +120,9 @@ export default function PositionCard({ chain, livePrice, onChainRefresh }: Posit
   // R:R calculation
   const riskDistance = isLong ? entryPrice - slPrice : slPrice - entryPrice;
   const rewardDistance = isLong ? tp1Price - entryPrice : entryPrice - tp1Price;
+  const currentRR = riskDistance > 0
+    ? (isLong ? (currentPrice - entryPrice) / riskDistance : (entryPrice - currentPrice) / riskDistance)
+    : 0;
 
   // Build expanded position data for RiskRewardTracker
   const expandedPositionData = useMemo(
@@ -294,7 +297,7 @@ export default function PositionCard({ chain, livePrice, onChainRefresh }: Posit
                   {!isLong && currentPrice > entryPrice ? `${((currentPrice - entryPrice) / riskDistance * 100).toFixed(0)}% to SL` : ''}
                 </span>
                 <span className="text-gray-500">
-                  R:R 1:{rewardDistance > 0 && riskDistance > 0 ? (rewardDistance / riskDistance).toFixed(1) : '-'}
+                  R:R {riskDistance > 0 ? `1:${currentRR.toFixed(1)}` : '-'}
                 </span>
                 <span className="text-gray-500">
                   {isLong && currentPrice > entryPrice ? `${((currentPrice - entryPrice) / rewardDistance * 100).toFixed(0)}% to TP` : ''}

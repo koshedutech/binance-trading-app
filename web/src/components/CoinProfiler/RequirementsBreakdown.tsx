@@ -249,7 +249,7 @@ function AggregatedInfo({ requirements }: { requirements: CoinProfilerRequiremen
         </div>
         <div>
           <div className="text-[10px] text-gray-500 mb-1">Symbols</div>
-          <div className="flex flex-wrap gap-1 max-h-20 overflow-y-auto">
+          <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
             {requirements.all_symbols?.length ? (
               requirements.all_symbols.slice(0, 10).map(symbol => (
                 <span key={symbol} className="px-1.5 py-0.5 bg-cyan-500/20 text-cyan-400 rounded text-xs">

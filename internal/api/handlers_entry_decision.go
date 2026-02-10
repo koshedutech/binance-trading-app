@@ -254,11 +254,21 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 
 		// Only populate coins when CoinProfiler is running
 		if profilerRunning && patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
+			// Get CoinProfiler's currently monitored symbols to filter out stale patterns
+			monitoredSymbols := entryDecisionBroadcastServer.getCoinProfilerMonitoredSymbols(userID)
+
 			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
 			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
 			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
+					// Filter: only include symbols currently monitored by CoinProfiler
+					// Allow position_running symbols through (they have active positions)
+					if len(monitoredSymbols) > 0 && !monitoredSymbols[cm.Symbol] &&
+						cm.Status != entrydecision.PatternStatusPositionRunning {
+						continue
+					}
+
 					// Enrich with real-time data from volume progress
 					// This enables the volume progress bar and price context bar in the UI
 					if realtimeMatcher != nil {
@@ -746,11 +756,23 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 		// Only populate coins when CoinProfiler is running
 		// Exception: coins with active positions still appear
 		if profilerRunning && patternMatcher != nil && strategyType == entrydecision.StrategyTypePattern {
+			// Get CoinProfiler's currently monitored symbols to filter out stale patterns
+			// When CoinProfiler switches from strategies+positions to positions-only,
+			// the pattern matcher may still hold old patterns for symbols no longer monitored.
+			monitoredSymbols := s.getCoinProfilerMonitoredSymbols(userID)
+
 			// Use GetCoinMatchesForStrategy to filter by mode/timeframe - prevents duplicate coins
 			// when the same coin is tracked across multiple strategies (e.g., scalp/3m and swing/1h)
 			strategyMatches := patternMatcher.GetCoinMatchesForStrategy(strategy.Mode, strategy.Timeframe)
 			for _, cm := range strategyMatches {
 				if cm != nil && cm.Status != "" {
+					// Filter: only include symbols currently monitored by CoinProfiler
+					// Allow position_running symbols through (they have active positions)
+					if len(monitoredSymbols) > 0 && !monitoredSymbols[cm.Symbol] &&
+						cm.Status != entrydecision.PatternStatusPositionRunning {
+						continue
+					}
+
 					// Enrich with real-time data from volume progress
 					// This enables the volume progress bar and price context bar in the UI
 					if realtimeMatcher != nil {
@@ -1223,6 +1245,26 @@ func (s *Server) getCoinDataForSymbol(userID string, symbol string) *coinprofile
 	// For now, return nil - the score calculator handles nil gracefully
 	// In a future story, this will integrate with the Coin Profiler service
 	return nil
+}
+
+// getCoinProfilerMonitoredSymbols returns a set of symbols currently monitored by the CoinProfiler.
+// This is used to filter out stale patterns from the pattern matcher that belong to symbols
+// the CoinProfiler is no longer watching (e.g., when it switches from strategies+positions to
+// positions-only monitoring). Returns an empty map if CoinProfiler is not available.
+func (s *Server) getCoinProfilerMonitoredSymbols(userID string) map[string]bool {
+	monitoredSymbols := make(map[string]bool)
+	if s.userAutopilotManager == nil {
+		return monitoredSymbols
+	}
+	instance := s.userAutopilotManager.GetInstance(userID)
+	if instance == nil || instance.CoinProfiler == nil {
+		return monitoredSymbols
+	}
+	subs := instance.CoinProfiler.GetSubscriptions()
+	for symbol := range subs {
+		monitoredSymbols[symbol] = true
+	}
+	return monitoredSymbols
 }
 
 // getDefaultTimeframeForMode returns the default timeframe for a trading mode.

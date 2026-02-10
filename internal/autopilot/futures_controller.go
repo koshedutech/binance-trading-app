@@ -6319,6 +6319,11 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 		}
 	}
 
+	// Step 4b: Refresh CoinProfiler subscriptions so strategy_count and symbols are correct
+	if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
+		fc.userAutopilotManager.RefreshCoinProfilerSubscriptions(ctx, fc.ownerUserID)
+	}
+
 	// Step 5: Broadcast CHAIN_LIFECYCLE_UPDATE composite event
 	// Same format as coordinator so frontend handles it identically
 	if fc.ownerUserID != "" {

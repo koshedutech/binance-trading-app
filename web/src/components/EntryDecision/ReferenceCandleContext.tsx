@@ -286,7 +286,7 @@ export default function ReferenceCandleContext({
         <CheckCircle className="w-3.5 h-3.5 text-green-400" />
         <span>Stage 1 Reference (Completed)</span>
         <span className="ml-auto text-gray-600">
-          Candle: {new Date(referenceCandle.open_time).toLocaleTimeString()}
+          Candle: {new Date(referenceCandle.open_time).toISOString().slice(11, 19)} UTC
         </span>
       </div>
 

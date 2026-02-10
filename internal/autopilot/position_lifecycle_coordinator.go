@@ -264,7 +264,7 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 
 	// Step 6: Close chain in DB
 	closePrice := event.FilledPrice
-	if err := plc.db.CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, event.Commission, &closePrice); err != nil {
+	if err := plc.chainEventWriter.CloseChain(ctx, chain.ChainID, closeReason, realizedPnL, event.Commission, &closePrice); err != nil {
 		plc.logger.Error().Err(err).Str("chain_id", chain.ChainID).Msg("Failed to close order chain")
 		// Return Handled=true because we already modified state in steps 2-4 (SL/TP status,
 		// algo order cancellation). Returning Handled=false would cause GinieAutopilot to
