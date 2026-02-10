@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2000,6 +2001,40 @@ func (r *RealtimePatternMatcher) buildEntryCandle(state *PatternState) *EntryCan
 	}
 }
 
+// parseTimeframeDuration converts a timeframe string (e.g., "3m", "15m", "1h") to a time.Duration.
+func parseTimeframeDuration(timeframe string) time.Duration {
+	if len(timeframe) < 2 {
+		return time.Minute
+	}
+	numStr := timeframe[:len(timeframe)-1]
+	unit := timeframe[len(timeframe)-1:]
+	num, err := strconv.Atoi(numStr)
+	if err != nil || num <= 0 {
+		return time.Minute
+	}
+	switch unit {
+	case "m":
+		return time.Duration(num) * time.Minute
+	case "h":
+		return time.Duration(num) * time.Hour
+	case "d":
+		return time.Duration(num) * 24 * time.Hour
+	default:
+		return time.Minute
+	}
+}
+
+// floorToCandleOpen floors a time to the nearest candle boundary for the given timeframe.
+// E.g., for "3m": 09:58 → 09:57, for "5m": 09:58 → 09:55, for "15m": 09:58 → 09:45.
+// This ensures entry candle times match Binance chart candle times (UTC).
+func floorToCandleOpen(t time.Time, timeframe string) time.Time {
+	dur := parseTimeframeDuration(timeframe)
+	if dur <= 0 {
+		return t
+	}
+	return t.Truncate(dur)
+}
+
 // addTimingFields populates the timing fields on a PatternUpdate from PatternState.
 func (r *RealtimePatternMatcher) addTimingFields(update *PatternUpdate, state *PatternState) {
 	if state == nil {
@@ -2423,9 +2458,13 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 				now := time.Now().UTC()
 				internalState.ReadyAt = now
 				// Create a synthetic breakout candle from tick data
+				// Floor to candle boundary so the time matches Binance chart candles
+				candleOpen := floorToCandleOpen(now, timeframe)
+				candleDur := parseTimeframeDuration(timeframe)
+				candleClose := candleOpen.Add(candleDur)
 				internalState.BreakoutCandle = &Candle{
-					OpenTime: now, // Approximate - tick-level breakout doesn't have candle boundaries
-					Time:     now,
+					OpenTime: candleOpen,
+					Time:     candleClose,
 					Open:     price,
 					High:     currentHigh,
 					Low:      currentLow,
