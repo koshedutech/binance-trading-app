@@ -716,7 +716,7 @@ function CoinRow({
                 <div className="flex items-center gap-2 text-[10px]">
                   <span className="text-yellow-400 font-medium">Entry:</span>
                   <span className="text-gray-400 font-mono">
-                    {new Date(coin.entry_candle.detected_at).toISOString().slice(5, 16).replace('T', ' ')} UTC
+                    {new Date(coin.entry_candle.open_time).toISOString().slice(5, 16).replace('T', ' ')} UTC
                   </span>
                   <span className="text-gray-500">Price:</span>
                   <span className="text-white font-mono">{coin.entry_candle.entry_price?.toFixed(coin.entry_candle.entry_price > 100 ? 2 : 4)}</span>

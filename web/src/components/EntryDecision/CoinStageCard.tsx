@@ -830,9 +830,9 @@ export default function CoinStageCard({
                 <div className="flex items-center gap-2 mb-1.5 text-[10px] text-gray-500">
                   <Zap className="w-3 h-3 text-cyan-400" />
                   <span>Entry Candle</span>
-                  {update.entry_candle.detected_at && (
+                  {update.entry_candle.open_time && (
                     <span className="ml-auto text-gray-600">
-                      {new Date(update.entry_candle.detected_at).toISOString().slice(5, 16).replace('T', ' ')} UTC
+                      {new Date(update.entry_candle.open_time).toISOString().slice(5, 16).replace('T', ' ')} UTC
                     </span>
                   )}
                 </div>
@@ -959,7 +959,7 @@ export default function CoinStageCard({
                     <Zap className="w-3 h-3 text-yellow-400 flex-shrink-0" />
                     <span className="text-gray-500">Entry:</span>
                     <span className="text-gray-400 font-mono">
-                      {new Date(update.entry_candle.detected_at).toISOString().slice(11, 16)} UTC
+                      {new Date(update.entry_candle.open_time).toISOString().slice(11, 16)} UTC
                     </span>
                     <span className="text-gray-600">|</span>
                     <span className="text-gray-400">Price:</span>
