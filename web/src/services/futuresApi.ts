@@ -1683,7 +1683,7 @@ class FuturesAPIService {
         close_time: string;
         updated_at: string;
       }>;
-      source: 'strategy' | 'position' | 'both';
+      source: 'strategy' | 'position';
       strategies: string[];
       updated_at: string;
     }>;
@@ -1714,7 +1714,7 @@ class FuturesAPIService {
       close_time: string;
       updated_at: string;
     }>;
-    source: 'strategy' | 'position' | 'both';
+    source: 'strategy' | 'position';
     strategies: string[];
     updated_at: string;
   }> {

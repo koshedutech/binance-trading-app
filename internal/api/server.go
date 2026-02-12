@@ -285,6 +285,7 @@ func (s *Server) rateLimitMiddleware() gin.HandlerFunc {
 		"/api/futures/sub-strategies/:mode/:group":                       true,
 		"/api/futures/sub-strategies/:mode/:group/:strategy":             true,
 		"/api/futures/sub-strategies/:mode/:group/:strategy/compare":     true,
+		"/api/futures/sub-strategies/:mode/:group/:strategy/equity":      true,
 		"/api/futures/patterns/volume-imbalance":                         true,
 		"/api/futures/patterns/volume-imbalance/:symbol":                 true,
 		"/api/futures/enabled-strategies":                                true,
@@ -1039,6 +1040,7 @@ func (s *Server) setupRoutes() {
 			futures.GET("/sub-strategies/:mode/:group", s.handleGetSubStrategiesForGroup)
 			futures.PUT("/sub-strategies/:mode/:group/:strategy", s.handleUpdateSubStrategy)
 			futures.GET("/sub-strategies/:mode/:group/:strategy/compare", s.handleCompareSubStrategy)
+			futures.GET("/sub-strategies/:mode/:group/:strategy/equity", s.handleGetSubStrategyEquity)
 
 			// Pattern State endpoints (Volume Imbalance detector states)
 			futures.GET("/patterns/volume-imbalance", s.handleGetVolumeImbalancePatterns)

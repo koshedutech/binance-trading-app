@@ -44,7 +44,7 @@ export interface CoinData {
   volume_24h: number;
   volatility: number;
   timeframes: Record<string, TimeframeData>;
-  source: 'strategy' | 'position' | 'both';
+  source: 'strategy' | 'position';
   strategies: string[];
   position_timeframe?: string; // Entry timeframe from active position's order chain
   updated_at: string;
@@ -444,7 +444,7 @@ export function useCoinProfilerRealtime(wsConnected: boolean = false) {
   }, []);
 
   // Optimistically update a coin's source (e.g., when a position is created/closed)
-  const updateCoinSource = useCallback((symbol: string, source: 'strategy' | 'position' | 'both', timeframe?: string) => {
+  const updateCoinSource = useCallback((symbol: string, source: 'strategy' | 'position', timeframe?: string) => {
     setCoins(prevCoins => {
       const newCoins = new Map(prevCoins);
       const existing = newCoins.get(symbol);

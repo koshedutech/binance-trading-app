@@ -5447,30 +5447,47 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 				"commission_asset", order.CommissionAsset)
 
 			// Update the chain in DB with real PnL and commission from Binance
+			// Use ChainEventWriter.CorrectChainPnL to also fire the equity callback with the PnL delta
 			if fc.ownerUserID != "" && order.RealizedProfit != 0 {
 				ctx := context.Background()
-				if fc.repo != nil {
-					// The chain is already closed by HandleStreamAlgoUpdate
-					// Now update with real PnL values from the actual trade
+				var corrected bool
+				// Try to use ChainEventWriter for PnL correction (fires equity callback)
+				if fc.userAutopilotManager != nil {
+					if cew := fc.userAutopilotManager.GetChainEventWriter(); cew != nil {
+						err := cew.CorrectChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
+						if err != nil {
+							fc.logger.Error("Failed to correct chain PnL via ChainEventWriter",
+								"chain_id", algoInfo.ChainID,
+								"error", err)
+						} else {
+							corrected = true
+						}
+					}
+				}
+				// Fallback: direct DB update (no equity callback)
+				if !corrected && fc.repo != nil {
 					err := fc.repo.GetDB().UpdateClosedChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
 					if err != nil {
-						fc.logger.Error("Failed to update chain PnL from trade data",
+						fc.logger.Error("Failed to update chain PnL from trade data (fallback)",
 							"chain_id", algoInfo.ChainID,
 							"error", err)
 					} else {
-						fc.logger.Info("Updated chain with real PnL from ORDER_TRADE_UPDATE",
-							"chain_id", algoInfo.ChainID,
-							"realized_pnl", order.RealizedProfit,
-							"commission", order.Commission)
-
-						// Broadcast corrected PnL to frontend
-						events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
-							"chain_id":     algoInfo.ChainID,
-							"symbol":       algoInfo.Symbol,
-							"realized_pnl": order.RealizedProfit,
-							"commission":   order.Commission,
-						})
+						corrected = true
 					}
+				}
+				if corrected {
+					fc.logger.Info("Updated chain with real PnL from ORDER_TRADE_UPDATE",
+						"chain_id", algoInfo.ChainID,
+						"realized_pnl", order.RealizedProfit,
+						"commission", order.Commission)
+
+					// Broadcast corrected PnL to frontend
+					events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
+						"chain_id":     algoInfo.ChainID,
+						"symbol":       algoInfo.Symbol,
+						"realized_pnl": order.RealizedProfit,
+						"commission":   order.Commission,
+					})
 				}
 			}
 			// Don't return - still let the normal TRADE processing continue for fee tracking etc.

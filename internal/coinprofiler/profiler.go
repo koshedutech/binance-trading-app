@@ -53,6 +53,9 @@ type CoinProfiler struct {
 	// Callback for volume progress updates (used for real-time volume ratio display)
 	onVolumeProgress VolumeProgressCallback
 
+	// Callback when capacity transitions from full to available (strategy symbols need re-adding)
+	onCapacityFreed func()
+
 	// Volume progress configuration (set by pattern matcher)
 	volumeProgressConfig struct {
 		RequiredRatio   float64 // e.g., 3.0 for 3x volume spike
@@ -596,6 +599,25 @@ func (cp *CoinProfiler) RebuildCapacity(activeChainCount, maxConcurrent int) (in
 	// When at capacity, remove strategy-only symbols to stop scanning
 	if !scanningEnabled {
 		cp.removeStrategyOnlySymbols()
+	} else {
+		// Capacity freed up - check if strategy symbols need to be re-added.
+		// This happens when a position closes and capacity drops below max.
+		// The removeStrategyOnlySymbols() call (when capacity was full) deleted all
+		// strategy subscriptions, so we need to re-initialize them.
+		cp.mu.RLock()
+		hasStrategySymbols := false
+		for _, sub := range cp.subscriptions {
+			if sub.Source == DataSourceStrategy {
+				hasStrategySymbols = true
+				break
+			}
+		}
+		cp.mu.RUnlock()
+
+		if !hasStrategySymbols && cp.onCapacityFreed != nil {
+			log.Printf("%s Capacity freed up but no strategy symbols - triggering re-initialization", LogPrefix)
+			go cp.onCapacityFreed()
+		}
 	}
 
 	return activeChainCount, scanningEnabled
@@ -991,6 +1013,13 @@ func (cp *CoinProfiler) SetCoinUpdateCallback(callback CoinUpdateCallback) {
 	if cp.wsManager != nil {
 		cp.wsManager.SetCoinUpdateCallback(callback)
 	}
+}
+
+// SetOnCapacityFreed sets a callback that is called when capacity transitions from full to available.
+// This allows the caller (e.g., UserAutopilotManager) to re-add strategy symbols to the CoinProfiler
+// without creating a circular dependency.
+func (cp *CoinProfiler) SetOnCapacityFreed(callback func()) {
+	cp.onCapacityFreed = callback
 }
 
 // SetSubscriptionsFromCombined updates subscriptions from pre-computed combined requirements.

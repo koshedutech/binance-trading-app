@@ -391,7 +391,6 @@ func TestCoinProfilerDataSourceJSON(t *testing.T) {
 	}{
 		{coinprofiler.DataSourceStrategy, "strategy"},
 		{coinprofiler.DataSourcePosition, "position"},
-		{coinprofiler.DataSourceBoth, "both"},
 	}
 
 	for _, tt := range tests {

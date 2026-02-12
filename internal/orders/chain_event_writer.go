@@ -40,6 +40,9 @@ type ChainEventWriterDB interface {
 	UpdateOrderChainSLFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error
 	UpdateOrderChainTPFilled(ctx context.Context, chainID string, fillPrice float64, fillTime time.Time) error
 
+	// PnL correction
+	UpdateClosedChainPnL(ctx context.Context, chainID string, realizedPnL float64, totalFees float64) error
+
 	// Chain event operations
 	InsertChainEvent(ctx context.Context, event *ChainEvent) error
 	GetChainEvents(ctx context.Context, chainID string) ([]*ChainEvent, error)
@@ -269,7 +272,9 @@ func (w *ChainEventWriter) CreateChain(ctx context.Context, req CreateChainReque
 // CloseChain marks a chain as closed when the position is fully exited
 func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reason string, totalPnL, totalFees float64, closePrice *float64) error {
 	// Get the chain first to get userID for cache operations
-	chain, _ := w.db.GetOrderChainByID(ctx, "", chainID)
+	// FIXED: Use GetOrderChainByChainIDOnly instead of GetOrderChainByID with empty userID
+	// GetOrderChainByID queries WHERE user_id=$1 AND chain_id=$2, so empty userID always returns nil
+	chain, _ := w.db.GetOrderChainByChainIDOnly(ctx, chainID)
 	userID := ""
 	if chain != nil {
 		userID = chain.UserID
@@ -328,6 +333,48 @@ func (w *ChainEventWriter) CloseChain(ctx context.Context, chainID string, reaso
 	// This is the canonical broadcast point - ALL chain close paths go through CloseChain()
 	if w.onChainClosedBroadcast != nil && chain != nil && chain.UserID != "" {
 		w.onChainClosedBroadcast(chain.UserID, chainID, chain.Symbol, chain.Mode, chain.ModeCode, chain.Timeframe, reason, totalPnL, closePrice)
+	}
+
+	return nil
+}
+
+// CorrectChainPnL updates the PnL of an already-closed chain with real values from ORDER_TRADE_UPDATE.
+// It also fires the equity callback with the PnL DELTA (newPnL - oldPnL) to correctly adjust equity.
+// This is called when algo sub-order trade data arrives after the chain was initially closed with calculated PnL.
+func (w *ChainEventWriter) CorrectChainPnL(ctx context.Context, chainID string, newPnL, newFees float64) error {
+	// Get the chain to read the old PnL and user info
+	chain, err := w.db.GetOrderChainByChainIDOnly(ctx, chainID)
+	if err != nil {
+		return fmt.Errorf("failed to get chain for PnL correction: %w", err)
+	}
+	if chain == nil {
+		w.logger.Warn().Str("chain_id", chainID).Msg("Chain not found for PnL correction")
+		return nil
+	}
+
+	// Read old PnL (may be nil if never set)
+	oldPnL := 0.0
+	if chain.RealizedPnL != nil {
+		oldPnL = *chain.RealizedPnL
+	}
+
+	// Update the DB with the corrected PnL
+	if err := w.db.UpdateClosedChainPnL(ctx, chainID, newPnL, newFees); err != nil {
+		return fmt.Errorf("failed to update closed chain PnL: %w", err)
+	}
+
+	w.logger.Info().
+		Str("chain_id", chainID).
+		Float64("old_pnl", oldPnL).
+		Float64("new_pnl", newPnL).
+		Float64("pnl_delta", newPnL-oldPnL).
+		Msg("Corrected closed chain PnL")
+
+	// Fire equity callback with the DELTA to adjust equity correctly
+	// (initial PnL was already applied via CloseChain; now apply the difference)
+	pnlDelta := newPnL - oldPnL
+	if w.onChainClosed != nil && pnlDelta != 0 && chain.Mode != "" && chain.SubStrategy != "" {
+		w.onChainClosed(ctx, chain.UserID, chain.Mode, chain.StrategyGroup, chain.SubStrategy, pnlDelta)
 	}
 
 	return nil
@@ -578,7 +625,8 @@ type ChainSLModifiedEvent struct {
 // RecordSLModified records when a stop loss price is modified
 func (w *ChainEventWriter) RecordSLModified(ctx context.Context, chainID string, req ChainSLModifiedEvent) error {
 	// Get userID for cache updates
-	chain, _ := w.db.GetOrderChainByID(ctx, "", chainID)
+	// FIXED: Use GetOrderChainByChainIDOnly instead of GetOrderChainByID with empty userID
+	chain, _ := w.db.GetOrderChainByChainIDOnly(ctx, chainID)
 	userID := ""
 	if chain != nil {
 		userID = chain.UserID
@@ -730,7 +778,8 @@ type ChainTPModifiedEvent struct {
 // RecordTPModified records when a take profit price is modified (normal mode only)
 func (w *ChainEventWriter) RecordTPModified(ctx context.Context, chainID string, req ChainTPModifiedEvent) error {
 	// Get userID for cache updates
-	chain, _ := w.db.GetOrderChainByID(ctx, "", chainID)
+	// FIXED: Use GetOrderChainByChainIDOnly instead of GetOrderChainByID with empty userID
+	chain, _ := w.db.GetOrderChainByChainIDOnly(ctx, chainID)
 	userID := ""
 	if chain != nil {
 		userID = chain.UserID

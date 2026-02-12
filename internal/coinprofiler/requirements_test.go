@@ -1391,54 +1391,52 @@ func TestAddSymbolFromStrategy(t *testing.T) {
 // ============================================================================
 
 func TestGetSymbolsForSource(t *testing.T) {
-	t.Run("returns symbols for position source", func(t *testing.T) {
+	t.Run("returns symbols for position source only", func(t *testing.T) {
 		combined := &CombinedRequirements{
 			BySymbol: map[string]*SymbolRequirements{
 				"BTCUSDT": {Symbol: "BTCUSDT", Source: DataSourcePosition},
 				"ETHUSDT": {Symbol: "ETHUSDT", Source: DataSourceStrategy},
-				"SOLUSDT": {Symbol: "SOLUSDT", Source: DataSourceBoth},
+				"SOLUSDT": {Symbol: "SOLUSDT", Source: DataSourcePosition},
 			},
 		}
 
 		symbols := combined.GetSymbolsForSource(DataSourcePosition)
 
-		// Should return BTCUSDT (position) and SOLUSDT (both)
+		// Should return only position-source symbols
 		if len(symbols) != 2 {
 			t.Errorf("expected 2 symbols for position source, got %d: %v", len(symbols), symbols)
 		}
 	})
 
-	t.Run("returns symbols for strategy source", func(t *testing.T) {
+	t.Run("returns symbols for strategy source only", func(t *testing.T) {
 		combined := &CombinedRequirements{
 			BySymbol: map[string]*SymbolRequirements{
 				"BTCUSDT": {Symbol: "BTCUSDT", Source: DataSourcePosition},
 				"ETHUSDT": {Symbol: "ETHUSDT", Source: DataSourceStrategy},
-				"SOLUSDT": {Symbol: "SOLUSDT", Source: DataSourceBoth},
+				"SOLUSDT": {Symbol: "SOLUSDT", Source: DataSourceStrategy},
 			},
 		}
 
 		symbols := combined.GetSymbolsForSource(DataSourceStrategy)
 
-		// Should return ETHUSDT (strategy) and SOLUSDT (both)
+		// Should return only strategy-source symbols
 		if len(symbols) != 2 {
 			t.Errorf("expected 2 symbols for strategy source, got %d: %v", len(symbols), symbols)
 		}
 	})
 
-	t.Run("returns all symbols for both source", func(t *testing.T) {
+	t.Run("returns empty for unknown source", func(t *testing.T) {
 		combined := &CombinedRequirements{
 			BySymbol: map[string]*SymbolRequirements{
 				"BTCUSDT": {Symbol: "BTCUSDT", Source: DataSourcePosition},
 				"ETHUSDT": {Symbol: "ETHUSDT", Source: DataSourceStrategy},
-				"SOLUSDT": {Symbol: "SOLUSDT", Source: DataSourceBoth},
 			},
 		}
 
-		symbols := combined.GetSymbolsForSource(DataSourceBoth)
+		symbols := combined.GetSymbolsForSource(DataSource("unknown"))
 
-		// Should return all 3 symbols
-		if len(symbols) != 3 {
-			t.Errorf("expected 3 symbols for both source, got %d: %v", len(symbols), symbols)
+		if len(symbols) != 0 {
+			t.Errorf("expected 0 symbols for unknown source, got %d: %v", len(symbols), symbols)
 		}
 	})
 

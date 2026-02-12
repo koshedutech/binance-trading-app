@@ -2164,10 +2164,12 @@ func (r *RealtimePatternMatcher) calculateEntryLevels(state *PatternState, curre
 
 	var entryPrice, stopLoss, risk, takeProfit float64
 
-	if state.Direction == "short" {
-		// SHORT: Entry at/below reference candle low, SL above consolidation high
-		entryPrice = state.ReferenceCandle.Low
+	// Entry price = current market price (will be tick price at breakout)
+	// NOT reference high/low - volume match determines entry point
+	entryPrice = currentPrice
 
+	if state.Direction == "short" {
+		// SHORT: SL above consolidation high, TP below entry
 		stopLossBase := state.ConsolidationHigh
 		if stopLossBase <= 0 {
 			stopLossBase = state.ReferenceCandle.High
@@ -2181,9 +2183,7 @@ func (r *RealtimePatternMatcher) calculateEntryLevels(state *PatternState, curre
 
 		takeProfit = entryPrice - (risk * r.riskReward)
 	} else {
-		// LONG: Entry at/above reference candle high, SL below consolidation low
-		entryPrice = state.ReferenceCandle.High
-
+		// LONG: SL below consolidation low, TP above entry
 		stopLossBase := state.ConsolidationLow
 		if stopLossBase <= 0 {
 			stopLossBase = state.ReferenceCandle.Low
@@ -2369,54 +2369,40 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 	}
 
 	// Calculate proximity to breakout for real-time display
+	// Show volume progress toward reference candle volume (not price distance)
 	var proximityPercent float64
 	var isBreakout bool
 
-	switch state.Direction {
-	case "long":
-		// For LONG: Check distance to reference high
-		if state.ReferenceCandle.High > 0 {
-			proximityPercent = ((price - state.ReferenceCandle.High) / state.ReferenceCandle.High) * 100
-		}
-		// Check if current high breaks reference high
-		if currentHigh >= state.ReferenceCandle.High {
-			isBreakout = true
-		}
-	case "short":
-		// For SHORT: Check distance to reference low (breakout below ref candle low)
-		if state.ReferenceCandle.Low > 0 {
-			proximityPercent = ((state.ReferenceCandle.Low - price) / state.ReferenceCandle.Low) * 100
-		}
-		if state.ReferenceCandle.Low > 0 && currentLow <= state.ReferenceCandle.Low {
-			isBreakout = true
-		}
-	}
+	// Volume-based breakout detection: entry triggers when current candle volume
+	// reaches reference candle volume × breakout_volume_surge
+	// Price breakout is NOT required - volume match is the entry signal
+	volKey := fmt.Sprintf("%s:%s", symbol, timeframe)
+	r.mu.RLock()
+	volProgress := r.volumeProgress[volKey]
+	r.mu.RUnlock()
 
-	// Volume confirmation check - Volume Imbalance strategy requires volume buildup
-	// before confirming a breakout. Price breaking the level alone is not enough.
-	if isBreakout {
-		volKey := fmt.Sprintf("%s:%s", symbol, timeframe)
-		r.mu.RLock()
-		volProgress := r.volumeProgress[volKey]
-		r.mu.RUnlock()
+	if volProgress != nil && volProgress.CurrentVolume > 0 && state.ReferenceCandle != nil && state.ReferenceCandle.Volume > 0 {
+		breakoutVolumeSurge := 1.0
+		if r.patternMatcher != nil && r.patternMatcher.config != nil {
+			breakoutVolumeSurge = r.patternMatcher.config.BreakoutVolumeSurge
+		}
+		volumeRatio := volProgress.CurrentVolume / state.ReferenceCandle.Volume
+		proximityPercent = (volumeRatio / breakoutVolumeSurge) * 100 // 100% = breakout
 
-		volumeConfirmed := false
-		if volProgress != nil && volProgress.CurrentVolume > 0 {
-			// Volume must be at least 1x average (building toward reference candle level)
-			if volProgress.CurrentRatio >= 1.0 {
-				volumeConfirmed = true
+		if volumeRatio >= breakoutVolumeSurge {
+			// Directional price guard: entry must be on correct side of support/resistance
+			priceValid := true
+			if state.Direction == "long" && state.ConsolidationLow > 0 && price < state.ConsolidationLow {
+				priceValid = false // Price below support - not a valid long breakout
+			} else if state.Direction == "short" && state.ConsolidationHigh > 0 && price > state.ConsolidationHigh {
+				priceValid = false // Price above resistance - not a valid short breakout
 			}
-		}
 
-		if !volumeConfirmed {
-			log.Printf("[REALTIME-BREAKOUT] %s:%s - Price broke level but VOLUME NOT CONFIRMED (ratio=%.2f, required>=1.0), direction=%s, price=%.6f",
-				symbol, timeframe, func() float64 {
-					if volProgress != nil {
-						return volProgress.CurrentRatio
-					}
-					return 0
-				}(), state.Direction, price)
-			isBreakout = false
+			if priceValid {
+				isBreakout = true
+				log.Printf("[REALTIME-BREAKOUT] %s:%s - VOLUME MATCHED reference candle! ratio=%.2f (required>=%.2f), direction=%s, price=%.6f",
+					symbol, timeframe, volumeRatio, breakoutVolumeSurge, state.Direction, price)
+			}
 		}
 	}
 
@@ -2498,12 +2484,9 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 					Low:      currentLow,
 					Close:    price,
 				}
-				// Entry price depends on direction
-				if state.Direction == "long" {
-					internalState.EntryPrice = state.ReferenceCandle.High
-				} else {
-					internalState.EntryPrice = state.ReferenceCandle.Low
-				}
+				// Entry price = current tick price at volume match moment
+				// NOT reference high/low - the tick price where volume matches is the actual entry
+				internalState.EntryPrice = price
 			}
 		}
 		r.patternMatcher.mu.Unlock()
@@ -2541,14 +2524,18 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 		stepDetails := make([]StepDetail, len(progress.StepDetails))
 		copy(stepDetails, progress.StepDetails)
 
-		// Update Step 2 details with real-time proximity
+		// Update Step 2 details with real-time volume progress
 		if len(stepDetails) >= 2 && !isBreakout {
+			volDetail := "Waiting for volume match"
+			if volProgress != nil && state.ReferenceCandle != nil && state.ReferenceCandle.Volume > 0 {
+				volDetail = fmt.Sprintf("Vol: %.0f / %.0f (%.1f%%)", volProgress.CurrentVolume, state.ReferenceCandle.Volume, proximityPercent)
+			}
 			stepDetails[1] = StepDetail{
 				StepNumber: 2,
 				Name:       "Breakout",
 				Completed:  false,
-				Progress:   fmt.Sprintf("%.2f%%", proximityPercent),
-				Details:    fmt.Sprintf("Price: %.4f → Entry: %.4f", price, state.ReferenceCandle.High),
+				Progress:   fmt.Sprintf("%.1f%%", proximityPercent),
+				Details:    volDetail,
 			}
 		}
 

@@ -716,6 +716,76 @@ func (s *Server) handleGetEnabledStrategies(c *gin.Context) {
 	})
 }
 
+// ==================== SUB-STRATEGY EQUITY ENDPOINT ====================
+
+// handleGetSubStrategyEquity handles GET /api/futures/sub-strategies/:mode/:group/:strategy/equity
+// Returns the effective budget, capital in use, and available capital for a sub-strategy
+func (s *Server) handleGetSubStrategyEquity(c *gin.Context) {
+	userID := s.getUserID(c)
+	if userID == "" {
+		errorResponse(c, http.StatusUnauthorized, "User authentication required")
+		return
+	}
+
+	mode := c.Param("mode")
+	group := c.Param("group")
+	strategy := c.Param("strategy")
+
+	if !validateMode(mode) {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid mode: %s", mode))
+		return
+	}
+
+	if !validateStrategyGroup(group) {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid strategy group: %s", group))
+		return
+	}
+
+	if !validateSubStrategy(strategy) {
+		errorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid sub-strategy: %s", strategy))
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Get effective budget (current_equity or assigned_budget_usd)
+	var effectiveBudget float64
+	if s.repo != nil {
+		equity, err := s.repo.GetSubStrategyEquity(ctx, userID, mode, group, strategy)
+		if err != nil {
+			log.Printf("[STRATEGY-EQUITY] Failed to get equity for %s/%s/%s: %v", mode, group, strategy, err)
+			errorResponse(c, http.StatusInternalServerError, "Failed to get equity: "+err.Error())
+			return
+		}
+		effectiveBudget = equity
+	}
+
+	// Get capital in use from active chains
+	var capitalInUse float64
+	var activeChains int
+	if s.repo != nil {
+		var err error
+		capitalInUse, activeChains, err = s.repo.GetDB().GetCapitalInUseForSubStrategy(ctx, userID, mode, group, strategy)
+		if err != nil {
+			log.Printf("[STRATEGY-EQUITY] Failed to get capital in use for %s/%s/%s: %v", mode, group, strategy, err)
+			// Non-fatal - continue with 0
+		}
+	}
+
+	available := effectiveBudget - capitalInUse
+	if available < 0 {
+		available = 0
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":          true,
+		"effective_budget": effectiveBudget,
+		"capital_in_use":   capitalInUse,
+		"available":        available,
+		"active_chains":    activeChains,
+	})
+}
+
 // ==================== HELPER FUNCTIONS ====================
 
 // convertStrategyGroupToResponse converts database model to API response

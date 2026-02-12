@@ -98,6 +98,13 @@ func (a *ChainEventWriterDBAdapter) UpdateOrderChainTPFilled(ctx context.Context
 	return a.db.UpdateOrderChainTPFilled(ctx, chainID, fillPrice, fillTime)
 }
 
+// ========== PnL Correction Operations ==========
+
+// UpdateClosedChainPnL implements ChainEventWriterDB
+func (a *ChainEventWriterDBAdapter) UpdateClosedChainPnL(ctx context.Context, chainID string, realizedPnL float64, totalFees float64) error {
+	return a.db.UpdateClosedChainPnL(ctx, chainID, realizedPnL, totalFees)
+}
+
 // ========== Chain Event Operations ==========
 
 // InsertChainEvent implements ChainEventWriterDB

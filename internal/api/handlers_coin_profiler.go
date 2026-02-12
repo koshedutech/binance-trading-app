@@ -129,19 +129,15 @@ func (s *Server) handleGetCoinProfilerCoins(c *gin.Context) {
 			"updated_at": coin.UpdatedAt,
 		}
 
-		// Dynamically determine source based on active positions
+		// Use the internal CoinProfiler source directly
+		// Source is either "strategy" or "position" - never "both"
+		coinMap["source"] = string(coin.Source)
+
+		// Include position's entry timeframe if available
 		if activePositionSymbols[coin.Symbol] {
-			if coin.Source == coinprofiler.DataSourceStrategy {
-				coinMap["source"] = "both" // Has both strategy and position
-			} else {
-				coinMap["source"] = "position"
-			}
-			// Include position's entry timeframe if available
 			if tf, ok := activeChainTimeframes[coin.Symbol]; ok {
 				coinMap["position_timeframe"] = tf
 			}
-		} else {
-			coinMap["source"] = string(coin.Source) // Keep original source (strategy)
 		}
 
 		coins = append(coins, coinMap)
@@ -308,7 +304,7 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 		fromPositions := []interface{}{}
 
 		for _, symReq := range combined.BySymbol {
-			if symReq.Source == "strategy" || symReq.Source == "both" {
+			if symReq.Source == "strategy" {
 				// Build strategy info with capacity
 				stratInfo := map[string]interface{}{
 					"symbol":     symReq.Symbol,
@@ -318,7 +314,7 @@ func (s *Server) handleGetCoinProfilerRequirements(c *gin.Context) {
 				fromStrategies = append(fromStrategies, stratInfo)
 			}
 
-			if symReq.Source == "position" || symReq.Source == "both" {
+			if symReq.Source == "position" {
 				// Build position info
 				for _, pos := range symReq.Positions {
 					posInfo := map[string]interface{}{

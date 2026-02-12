@@ -902,9 +902,8 @@ func (cr *CombinedRequirements) AddSymbolFromStrategy(symbol string, strategies 
 		}
 	} else {
 		// Symbol already exists from position - keep as position source only.
-		// Do NOT merge to "both" - this prevents the entry decision engine from
-		// trying to place a second entry on a symbol that already has an active position.
-		// Hedging/averaging will be handled by a separate strategy in the future.
+		// This prevents the entry decision engine from trying to place a second entry
+		// on a symbol that already has an active position.
 		if symReq.Source == DataSourcePosition {
 			return // Skip - position symbols should not also scan for new entries
 		}
@@ -938,7 +937,7 @@ func (cr *CombinedRequirements) AddSymbolFromStrategy(symbol string, strategies 
 func (cr *CombinedRequirements) GetSymbolsForSource(source DataSource) []string {
 	symbols := []string{}
 	for symbol, req := range cr.BySymbol {
-		if source == DataSourceBoth || req.Source == source || req.Source == DataSourceBoth {
+		if req.Source == source {
 			symbols = append(symbols, symbol)
 		}
 	}

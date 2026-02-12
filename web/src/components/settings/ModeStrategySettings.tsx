@@ -35,6 +35,7 @@ import {
   STRATEGY_DESCRIPTIONS,
 } from '../../types/modeStrategy';
 import modeStrategyApi from '../../api/modeStrategy';
+import { apiService } from '../../services/api';
 import StrategySettingsForm from './StrategySettingsForm';
 // Story 11.43-11.46: Import sub-strategies hook and types for Ravindra Volume Imbalance
 import { useSubStrategies, useUpdateSubStrategy } from '../../hooks/useStrategyHierarchy';
@@ -801,6 +802,38 @@ function SubStrategyCollapsibleSection({
   const [toggleError, setToggleError] = useState<string | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
 
+  // Available capital state - fetched from backend
+  const [equityData, setEquityData] = useState<{
+    effective_budget: number;
+    capital_in_use: number;
+    available: number;
+    active_chains: number;
+  } | null>(null);
+
+  // Fetch available capital when section is expanded
+  useEffect(() => {
+    if (!expanded || !isVolumeImbalance) return;
+    let cancelled = false;
+    const fetchEquity = async () => {
+      try {
+        const response = await apiService.get<{
+          success: boolean;
+          effective_budget: number;
+          capital_in_use: number;
+          available: number;
+          active_chains: number;
+        }>(`/futures/sub-strategies/${mode}/breakout/${subStrategyName}/equity`);
+        if (!cancelled) {
+          setEquityData(response.data);
+        }
+      } catch {
+        // Non-fatal - just don't show available
+      }
+    };
+    fetchEquity();
+    return () => { cancelled = true; };
+  }, [expanded, isVolumeImbalance, mode, subStrategyName]);
+
   // Default settings based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
   const defaultSettings: VolumeImbalanceSettings = {
     enabled: true,
@@ -1194,6 +1227,27 @@ function SubStrategyCollapsibleSection({
                     </div>
                   </div>
                   <p className="text-xs text-gray-500">Running balance after trade P&L</p>
+                </div>
+              )}
+              {/* Available Capital - shows effective budget minus capital in active trades */}
+              {equityData && (
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-sm font-medium text-gray-300">Available</label>
+                    <div className="flex items-center gap-1">
+                      <span className={`text-sm font-mono font-semibold ${
+                        equityData.available > 0 ? 'text-blue-400' : 'text-orange-400'
+                      }`}>
+                        ${equityData.available.toFixed(2)}
+                      </span>
+                      <span className="text-xs text-gray-500 w-8">USD</span>
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    {equityData.capital_in_use > 0
+                      ? `$${equityData.capital_in_use.toFixed(2)} in ${equityData.active_chains} active trade${equityData.active_chains !== 1 ? 's' : ''}`
+                      : 'No active trades'}
+                  </p>
                 </div>
               )}
               <div className="space-y-1">

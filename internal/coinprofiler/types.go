@@ -111,8 +111,6 @@ const (
 	DataSourceStrategy DataSource = "strategy"
 	// DataSourcePosition indicates data is needed for exit decision (open positions).
 	DataSourcePosition DataSource = "position"
-	// DataSourceBoth indicates data is needed for both strategies and positions.
-	DataSourceBoth DataSource = "both"
 )
 
 // TimeframeData holds OHLCV data for a specific timeframe.

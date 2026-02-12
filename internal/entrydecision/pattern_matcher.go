@@ -111,7 +111,7 @@ func DefaultPatternMatcherConfig() *PatternMatcherConfig {
 		// Core pattern detection - BACKTESTED VALUES
 		MinVolumeSpikeMultiplier:    3.0,  // Was 2.0 - higher threshold filters noise (BACKTESTED)
 		LookbackPeriod:              5,    // Was 20 - shorter lookback for faster patterns (BACKTESTED)
-		MinConsolidationCandles:     1,    // Was 2 - allow immediate breakout (BACKTESTED)
+		MinConsolidationCandles:     10,   // Minimum 10 candles of consolidation required
 		MaxConsolidationCandles:     999,  // Was 6 - no upper limit (BACKTESTED)
 		ConsolidationRangeTolerance: 0.01,
 		BreakoutVolumeSurge:         1.0,  // Was 1.5 - equal to consolidation avg is sufficient (BACKTESTED)
@@ -745,21 +745,16 @@ func (m *VolumeImbalancePatternMatcher) processStep2(
 		state.Direction = direction
 		state.ReadyAt = time.Now().UTC() // Track when pattern became ready (UTC)
 
-		// Calculate volume surge for display
+		// Calculate volume surge for display (vs reference candle volume)
 		volSurge := 1.0
-		if state.ConsolidationAvgVol > 0 {
-			volSurge = breakoutCandle.Volume / state.ConsolidationAvgVol
+		if state.ReferenceCandle != nil && state.ReferenceCandle.Volume > 0 {
+			volSurge = breakoutCandle.Volume / state.ReferenceCandle.Volume
 		}
 		state.BreakoutVolumeMultiplier = volSurge
 
-		// Calculate entry price (reference high for long, reference low for short)
-		if direction == "long" && state.ReferenceCandle != nil {
-			state.EntryPrice = state.ReferenceCandle.High
-		} else if direction == "short" && state.ReferenceCandle != nil {
-			state.EntryPrice = state.ReferenceCandle.Low
-		} else {
-			state.EntryPrice = breakoutCandle.Close
-		}
+		// Entry price = breakout candle close (where volume matched reference energy)
+		// NOT reference high/low - the tick price at volume match is the actual entry
+		state.EntryPrice = breakoutCandle.Close
 
 		// VALIDATE SL PERCENTAGE: Check if the calculated risk exceeds max_sl_percent
 		// This prevents entries where the stop loss distance is too wide
@@ -780,16 +775,20 @@ func (m *VolumeImbalancePatternMatcher) processStep2(
 				slPrice = slBase * 1.001 // 0.1% buffer above resistance
 				riskAmt = slPrice - state.EntryPrice
 			}
-			if riskAmt > 0 {
-				slPercent := (riskAmt / state.EntryPrice) * 100
-				if slPercent > m.config.MaxSLPercent {
-					log.Printf("[PATTERN] SL_REJECTED: %s %s breakout SL=%.2f%% exceeds max_sl_percent=%.2f%% (entry=%.6f, sl=%.6f, risk=%.6f) - staying in consolidation",
-						progress.Symbol, direction, slPercent, m.config.MaxSLPercent, state.EntryPrice, slPrice, riskAmt)
-					// Do NOT mark as ready - stay in consolidation
-					// The pattern will continue to monitor and may trigger again if consolidation tightens
-					progress.SetStatus(PatternStatusConsolidating)
-					return
-				}
+			if riskAmt <= 0 {
+				// Negative risk means entry is on wrong side of SL (should have been caught by directional guard)
+				log.Printf("[PATTERN] SL_REJECTED: %s %s breakout has negative risk (entry=%.6f, sl=%.6f) - staying in consolidation",
+					progress.Symbol, direction, state.EntryPrice, slPrice)
+				progress.SetStatus(PatternStatusConsolidating)
+				return
+			}
+			slPercent := (riskAmt / state.EntryPrice) * 100
+			if slPercent > m.config.MaxSLPercent {
+				log.Printf("[PATTERN] SL_REJECTED: %s %s breakout SL=%.2f%% exceeds max_sl_percent=%.2f%% (entry=%.6f, sl=%.6f, risk=%.6f) - staying in consolidation",
+					progress.Symbol, direction, slPercent, m.config.MaxSLPercent, state.EntryPrice, slPrice, riskAmt)
+				// Do NOT mark as ready - stay in consolidation
+				progress.SetStatus(PatternStatusConsolidating)
+				return
 			}
 		}
 
@@ -909,12 +908,9 @@ func (m *VolumeImbalancePatternMatcher) isInConsolidation(
 // into processStep2 for the simplified 2-step pattern model.
 // Step 1: Reference Candle (Volume Spike) → Step 2: Breakout Entry
 
-// isBreakoutReady checks if current candle shows breakout with volume surge.
-// Returns (true, direction, candle) if breakout is detected.
-//
-// OPTIMIZED FILTER: Entry Breakout Confirmation
-// Backtesting shows entries that break consolidation high have ~24% win rate
-// vs ~18% for entries that don't break. This filter is enabled by default.
+// isBreakoutReady checks if current candle volume matches reference candle volume.
+// Returns (true, direction, candle) if volume-based breakout is detected.
+// No price breakout requirement - entry price = candle close at volume match.
 func (m *VolumeImbalancePatternMatcher) isBreakoutReady(
 	state *PatternState,
 	candles []Candle,
@@ -925,57 +921,42 @@ func (m *VolumeImbalancePatternMatcher) isBreakoutReady(
 
 	currentCandle := &candles[len(candles)-1]
 
-	// Check volume surge (50%+ above consolidation average)
-	if state.ConsolidationAvgVol <= 0 {
+	// Volume-based breakout: compare current candle volume to reference candle volume
+	// breakout_volume_surge of 1.0 = must match 100% of reference candle's absolute volume
+	// This matches the "energy" of the reference candle, not a statistical average
+	if state.ReferenceCandle == nil || state.ReferenceCandle.Volume <= 0 {
 		return false, "", nil
 	}
 
-	volumeSurge := currentCandle.Volume / state.ConsolidationAvgVol
+	volumeSurge := currentCandle.Volume / state.ReferenceCandle.Volume
 	if volumeSurge < m.config.BreakoutVolumeSurge {
 		return false, "", nil
 	}
 
-	// ============================================================
-	// OPTIMIZED FILTER: Entry Breakout Confirmation
-	// Entry must break above consolidation high (not just reference high)
-	// This confirms continuation momentum, not just a retest
-	// ============================================================
-	if m.config.RequireEntryBreakout && state.ConsolidationHigh > 0 {
-		if currentCandle.High <= state.ConsolidationHigh {
-			return false, "", nil // Entry doesn't break consolidation high
+	// Volume matched! Direction was determined in Step 1 from reference candle color
+	direction := state.Direction
+	if direction == "" {
+		return false, "", nil
+	}
+
+	// Directional price guard: entry must be on the correct side of support/resistance
+	// Prevents entries where volume spiked but price went the WRONG direction
+	// (e.g., bearish volume crash during a LONG setup)
+	if direction == "long" && state.ConsolidationLow > 0 {
+		if currentCandle.Close < state.ConsolidationLow {
+			return false, "", nil // Price below support - not a valid long breakout
+		}
+	} else if direction == "short" && state.ConsolidationHigh > 0 {
+		if currentCandle.Close > state.ConsolidationHigh {
+			return false, "", nil // Price above resistance - not a valid short breakout
 		}
 	}
 
-	// ============================================================
-	// DIRECTION-BASED BREAKOUT DETECTION
-	// Only check for breakout in the configured direction
-	// ============================================================
-
-	// Check for LONG breakout (price breaks above reference high)
-	// Only if direction is "long" or "both"
-	if m.config.Direction == "long" || m.config.Direction == "both" || m.config.Direction == "" {
-		if currentCandle.High >= state.ReferenceCandle.High {
-			// Confirm close is also above (not just a wick)
-			if currentCandle.Close >= state.ReferenceCandle.High*0.998 {
-				candleCopy := *currentCandle
-				return true, "long", &candleCopy
-			}
-		}
-	}
-
-	// Check for SHORT breakout (price breaks below reference low)
-	// Only if direction is "short" or "both"
-	if m.config.Direction == "short" || m.config.Direction == "both" {
-		if currentCandle.Low <= state.ReferenceCandle.Low {
-			// Confirm close is also below (not just a wick)
-			if currentCandle.Close <= state.ReferenceCandle.Low*1.002 {
-				candleCopy := *currentCandle
-				return true, "short", &candleCopy
-			}
-		}
-	}
-
-	return false, "", nil
+	// Entry price = current candle close (not reference high/low)
+	// At volume match, the price represents where the market has equal conviction
+	// This may be lower than reference high (for LONG) - that's the intended behavior
+	candleCopy := *currentCandle
+	return true, direction, &candleCopy
 }
 
 // ============================================================================
@@ -1428,16 +1409,11 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 					cm.ProximityToBreakout = (currentCandle.Close - state.ReferenceCandle.High) / state.ReferenceCandle.High * 100
 				}
 
-				// Potential breakout: price approaching or exceeding reference high with volume
-				if currentCandle.High >= state.ReferenceCandle.High*0.99 {
-					// Check for volume surge (at least 1.3x consolidation avg or 1.5x reference volume)
-					isVolumeSurge := false
-					if state.ConsolidationAvgVol > 0 {
-						isVolumeSurge = currentCandle.Volume >= state.ConsolidationAvgVol*1.3
-					} else if state.AverageVolumeAtSpike > 0 {
-						isVolumeSurge = currentCandle.Volume >= state.AverageVolumeAtSpike*1.0
-					}
-					cm.PotentialBreakout = isVolumeSurge
+				// Potential breakout: volume approaching reference candle volume
+				if state.ReferenceCandle.Volume > 0 {
+					volumeRatio := currentCandle.Volume / state.ReferenceCandle.Volume
+					// Show as potential breakout when volume reaches 70% of reference
+					cm.PotentialBreakout = volumeRatio >= m.config.BreakoutVolumeSurge*0.7
 				}
 			}
 		}

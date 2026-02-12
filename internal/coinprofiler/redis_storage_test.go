@@ -915,7 +915,6 @@ func TestDataSourceConstants(t *testing.T) {
 	}{
 		{DataSourceStrategy, "strategy"},
 		{DataSourcePosition, "position"},
-		{DataSourceBoth, "both"},
 	}
 
 	for _, tt := range tests {

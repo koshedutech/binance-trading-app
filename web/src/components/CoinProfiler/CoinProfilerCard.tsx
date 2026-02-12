@@ -61,10 +61,10 @@ export default function CoinProfilerCard() {
   const { data: tradingState } = useTradingState();
   const tradingEnabled = tradingState?.enabled ?? true;
 
-  // Count active positions (coins with source "position" or "both")
+  // Count active positions (coins with source "position")
   const positionCoinsCount = useMemo(() => {
     if (!coins) return 0;
-    return coins.filter(c => c.source === 'position' || c.source === 'both').length;
+    return coins.filter(c => c.source === 'position').length;
   }, [coins]);
 
   // WebSocket-driven position adjustment for instant Stop button locking
@@ -86,10 +86,7 @@ export default function CoinProfilerCard() {
     // POSITION_CREATED event nests data under event.data.position (not event.data directly)
     const data = event?.data?.position || event?.data;
     if (data?.symbol) {
-      // Check if coin already exists as "strategy" source -> becomes "both"
-      const existingCoin = coins.find(c => c.symbol === data.symbol);
-      const newSource = existingCoin?.source === 'strategy' ? 'both' : 'position';
-      updateCoinSource(data.symbol, newSource, data.timeframe);
+      updateCoinSource(data.symbol, 'position', data.timeframe);
     }
     refetchCoins();
     refetchReqs();
@@ -97,7 +94,7 @@ export default function CoinProfilerCard() {
     // (backend removes strategy-only symbols when at capacity, but WebSocket
     // unsubscription takes a moment to propagate)
     setTimeout(() => { refetchCoins(); refetchReqs(); }, 5000);
-  }, [coins, updateCoinSource, refetchCoins, refetchReqs]);
+  }, [updateCoinSource, refetchCoins, refetchReqs]);
 
   const handleChainClosed = useCallback((event: any) => {
     setWsPositionAdjustment(prev => Math.max(0, prev - 1));

@@ -865,6 +865,20 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 		m.logger.Info("Historical data provider set on CoinProfiler", "user_id", userID)
 	}
 
+	// Wire capacity-freed callback: when capacity transitions from full to available,
+	// re-initialize CoinProfiler subscriptions to re-add strategy symbols that were removed.
+	// This uses a closure over userID to avoid circular dependencies.
+	coinProfiler.SetOnCapacityFreed(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		val, ok := m.instances.Load(userID)
+		if ok {
+			inst := val.(*UserAutopilotInstance)
+			m.logger.Info("Capacity freed - re-initializing CoinProfiler subscriptions", "user_id", userID)
+			m.initializeCoinProfilerSubscriptions(ctx, userID, inst)
+		}
+	})
+
 	m.logger.Info("CoinProfiler created for user", "user_id", userID)
 
 	// Epic 14: Create RealtimePatternMatcher for Entry Decision pattern evaluation
@@ -2382,11 +2396,16 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 	if instance.Autopilot != nil {
 		giniePositions := instance.Autopilot.GetPositions()
 		for _, gp := range giniePositions {
-			adapter := &giniePositionAdapter{pos: gp}
-			// Attach the entry timeframe from the OrderChain if available
-			if tf, ok := chainTimeframes[gp.Symbol]; ok {
-				adapter.timeframe = tf
+			// Only include Ginie positions that have corresponding active chains in DB.
+			// This prevents recently-closed positions (still in Ginie's WebSocket cache
+			// but chain already closed) from being re-added as "position" source.
+			if _, hasActiveChain := chainTimeframes[gp.Symbol]; !hasActiveChain {
+				m.logger.Debug("Skipping Ginie position without active chain (may be recently closed)",
+					"symbol", gp.Symbol, "user_id", userID)
+				continue
 			}
+			adapter := &giniePositionAdapter{pos: gp}
+			adapter.timeframe = chainTimeframes[gp.Symbol]
 			positions = append(positions, adapter)
 			positionSymbols[gp.Symbol] = true
 		}
@@ -2419,7 +2438,7 @@ func (m *UserAutopilotManager) initializeCoinProfilerSubscriptions(ctx context.C
 	// Step 6b: Add default watchlist when trading is enabled and we have strategy timeframes.
 	// CRITICAL: Must add even when position symbols exist - position symbols only cover
 	// coins with active positions; we need the full watchlist for scanning new entries.
-	// AddSymbolFromStrategy handles deduplication (position symbols get Source: "both").
+	// AddSymbolFromStrategy handles deduplication (position symbols are skipped).
 	if tradingEnabled && len(aggregatedReqs.AllTimeframes) > 0 {
 		defaultSymbols := []string{
 			"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",

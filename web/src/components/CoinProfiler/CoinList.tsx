@@ -164,8 +164,6 @@ function getSourceStyle(source: string): { bg: string; text: string; label: stri
       return { bg: 'bg-purple-500/20', text: 'text-purple-400', label: 'Strategy' };
     case 'position':
       return { bg: 'bg-blue-500/20', text: 'text-blue-400', label: 'Position' };
-    case 'both':
-      return { bg: 'bg-cyan-500/20', text: 'text-cyan-400', label: 'Both' };
     case 'scan':
       return { bg: 'bg-gray-500/20', text: 'text-gray-400', label: 'Scan' };
     default:
@@ -303,8 +301,8 @@ function CoinRow({ coin, prevCoin, isExpanded, onToggleExpand }: CoinRowProps) {
   // Get all timeframe names, including position timeframe if available
   const tfKeys = Object.keys(coin.timeframes || {});
   const positionTf = coin.position_timeframe;
-  // Show position timeframe prominently if source is position/both
-  const timeframeNames = positionTf && (source === 'position' || source === 'both')
+  // Show position timeframe prominently if source is position
+  const timeframeNames = positionTf && source === 'position'
     ? (tfKeys.length > 0 && !tfKeys.includes(positionTf)
         ? `${positionTf}, ${tfKeys.join(', ')}`
         : tfKeys.length > 0 ? tfKeys.join(', ') : positionTf)

@@ -1320,6 +1320,7 @@ func main() {
 				// When a chain closes with P&L, update the sub-strategy's current_equity
 				// Only updates when use_incremental_equity is enabled in the sub-strategy settings
 				chainEventWriter.SetOnChainClosed(func(ctx context.Context, userID, mode, strategyGroup, subStrategy string, realizedPnL float64) {
+					log.Printf("[EQUITY-UPDATE] Callback fired: userID=%s, mode=%s, group=%s, sub=%s, pnl=%.4f", userID, mode, strategyGroup, subStrategy, realizedPnL)
 					if subStrategy == "" || realizedPnL == 0 {
 						return
 					}

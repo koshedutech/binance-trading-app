@@ -799,18 +799,60 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	multiplier := math.Pow(10, float64(quantityPrecision))
 	quantity = math.Floor(quantity*multiplier) / multiplier
 
-	// Parse MinQty from filters
+	// Parse MinQty and MinNotional from filters
 	var minQty float64 = 0.001
+	var minNotional float64 = 5.0 // Safe default for most Binance futures pairs
 	for _, filter := range symbolInfo.Filters {
 		if filter.FilterType == "LOT_SIZE" && filter.MinQty != "" {
 			if parsedMinQty, parseErr := parseFloatStr(filter.MinQty); parseErr == nil {
 				minQty = parsedMinQty
 			}
-			break
+		}
+		if filter.FilterType == "MIN_NOTIONAL" && filter.Notional != "" {
+			if parsedNotional, parseErr := parseFloatStr(filter.Notional); parseErr == nil && parsedNotional > 0 {
+				minNotional = parsedNotional
+			}
 		}
 	}
+
+	// Check minimum notional value BEFORE rounding quantity
+	// This prevents precision errors on high-priced coins like BTC where small budgets
+	// produce quantities that round to 0 or below the exchange minimum
+	notionalValue := quantity * currentPrice
+	if notionalValue < minNotional {
+		log.Printf("[CHAIN-ENTRY] Skipping %s: notional value $%.2f below minimum $%.2f (qty=%.8f, price=%.2f, budget=$%.2f)",
+			symbol, notionalValue, minNotional, quantity, currentPrice, positionSizeUSD)
+		// Call onEntryFailed to reset the pattern back to Step 1 scanning
+		if r.onEntryFailed != nil {
+			r.onEntryFailed(symbol, modeStr, state.Timeframe)
+		}
+		return fmt.Errorf("position notional $%.2f below minimum $%.2f for %s", notionalValue, minNotional, symbol)
+	}
+
+	// Check if rounded quantity meets minimum
 	if quantity < minQty {
-		quantity = minQty
+		// Try setting to minQty and check if that meets notional
+		if minQty*currentPrice >= minNotional {
+			quantity = minQty
+		} else {
+			log.Printf("[CHAIN-ENTRY] Skipping %s: min qty %.8f * price %.2f = $%.2f still below min notional $%.2f",
+				symbol, minQty, currentPrice, minQty*currentPrice, minNotional)
+			if r.onEntryFailed != nil {
+				r.onEntryFailed(symbol, modeStr, state.Timeframe)
+			}
+			return fmt.Errorf("position size too small for %s: even min qty $%.2f below minimum notional $%.2f",
+				symbol, minQty*currentPrice, minNotional)
+		}
+	}
+
+	// Final check: quantity must not be zero after rounding
+	if quantity <= 0 {
+		log.Printf("[CHAIN-ENTRY] Skipping %s: quantity rounded to 0 (budget=$%.2f, price=%.2f, precision=%d)",
+			symbol, positionSizeUSD, currentPrice, quantityPrecision)
+		if r.onEntryFailed != nil {
+			r.onEntryFailed(symbol, modeStr, state.Timeframe)
+		}
+		return fmt.Errorf("quantity rounded to 0 for %s: budget $%.2f too small at price $%.2f", symbol, positionSizeUSD, currentPrice)
 	}
 
 	// Step 5: Generate chain ID using sequential generator (Epic 7)

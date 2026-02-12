@@ -286,8 +286,8 @@ export default function TradeLifecycleTab({
     const createdAtMs = histChain.createdAt ? new Date(histChain.createdAt).getTime() || Date.now() : Date.now();
     const updatedAtMs = histChain.updatedAt ? new Date(histChain.updatedAt).getTime() || Date.now() : Date.now();
     const closedAtMs = histChain.closedAt ? new Date(histChain.closedAt).getTime() || undefined : undefined;
-    const positionSide = (histChain.side === 'BUY' ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT' | 'BOTH';
-    const closeSide = (histChain.side === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL';
+    const positionSide = (histChain.side === 'LONG' || histChain.side === 'BUY' ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT' | 'BOTH';
+    const closeSide = (histChain.side === 'LONG' || histChain.side === 'BUY' ? 'SELL' : 'BUY') as 'BUY' | 'SELL';
 
     const isSLFilled = histChain.closeReason === 'SL_HIT' || histChain.closeReason === 'PROTECTION_CLOSE';
     const isTPFilled = histChain.closeReason === 'TP_HIT';
