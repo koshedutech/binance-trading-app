@@ -523,11 +523,13 @@ func (cp *CoinProfiler) UpdateSymbolToPosition(symbol, timeframe, mode string) {
 	log.Printf("%s Updated symbol %s to position source (timeframe=%s, mode=%s)", LogPrefix, symbol, timeframe, mode)
 }
 
-// UpdateSymbolToStrategy reverts a symbol's source back to "strategy" when a position closes.
-// This is called when a chain closes - provides instant coin profiler update.
-// If the symbol was only tracked because of a position (no strategy requirements),
-// it is removed entirely from subscriptions, coinData, and combinedReqs.
-func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
+// RemovePositionSymbol removes a symbol entirely from the CoinProfiler when a position closes.
+// The symbol is fully removed from subscriptions, coinData, and combinedReqs.
+// If the symbol belongs to the strategy watchlist, it will be naturally re-added
+// on the next initializeCoinProfilerSubscriptions() call (triggered in background
+// after chain close) or via RebuildCapacity's onCapacityFreed callback.
+// This ensures clean source tracking - no stale "position→strategy" conversions.
+func (cp *CoinProfiler) RemovePositionSymbol(symbol string) {
 	if symbol == "" {
 		return
 	}
@@ -535,51 +537,25 @@ func (cp *CoinProfiler) UpdateSymbolToStrategy(symbol string) {
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
 
-	// Check if this symbol has strategy-based requirements in combinedReqs.
-	// If the symbol was only added because of a position (e.g., auto-detected from Binance
-	// without a DB chain), it won't have any strategy references and should be removed entirely.
-	hasStrategyBacking := false
+	// Always remove the symbol entirely - let the subscription rebuild
+	// naturally re-add it as "strategy" if it belongs to the watchlist
+	delete(cp.subscriptions, symbol)
+	delete(cp.coinData, symbol)
 	if cp.combinedReqs != nil {
-		if symReq, exists := cp.combinedReqs.BySymbol[symbol]; exists {
-			hasStrategyBacking = len(symReq.Strategies) > 0
+		delete(cp.combinedReqs.BySymbol, symbol)
+		// Remove from AllSymbols list
+		newAllSymbols := make([]string, 0, len(cp.combinedReqs.AllSymbols))
+		for _, s := range cp.combinedReqs.AllSymbols {
+			if s != symbol {
+				newAllSymbols = append(newAllSymbols, s)
+			}
+		}
+		cp.combinedReqs.AllSymbols = newAllSymbols
+		if cp.combinedReqs.PositionCount > 0 {
+			cp.combinedReqs.PositionCount--
 		}
 	}
-
-	if hasStrategyBacking {
-		// Symbol is part of the strategy watchlist - revert source to "strategy"
-		if sub, exists := cp.subscriptions[symbol]; exists {
-			sub.Source = DataSourceStrategy
-		}
-		if coinData, exists := cp.coinData[symbol]; exists {
-			coinData.Source = DataSourceStrategy
-		}
-		if cp.combinedReqs != nil {
-			if symReq, exists := cp.combinedReqs.BySymbol[symbol]; exists {
-				symReq.Source = DataSourceStrategy
-				symReq.Positions = nil // Clear position references
-			}
-		}
-		log.Printf("%s Reverted symbol %s to strategy source (position closed, still in watchlist)", LogPrefix, symbol)
-	} else {
-		// Symbol was tracked ONLY for a position - remove it entirely
-		delete(cp.subscriptions, symbol)
-		delete(cp.coinData, symbol)
-		if cp.combinedReqs != nil {
-			delete(cp.combinedReqs.BySymbol, symbol)
-			// Remove from AllSymbols list
-			newAllSymbols := make([]string, 0, len(cp.combinedReqs.AllSymbols))
-			for _, s := range cp.combinedReqs.AllSymbols {
-				if s != symbol {
-					newAllSymbols = append(newAllSymbols, s)
-				}
-			}
-			cp.combinedReqs.AllSymbols = newAllSymbols
-			if cp.combinedReqs.PositionCount > 0 {
-				cp.combinedReqs.PositionCount--
-			}
-		}
-		log.Printf("%s Removed symbol %s entirely (position closed, not in any watchlist)", LogPrefix, symbol)
-	}
+	log.Printf("%s Removed position symbol %s from profiler (will be re-added by subscription rebuild if in watchlist)", LogPrefix, symbol)
 }
 
 // RebuildCapacity recalculates coin profiler capacity based on active chain count.

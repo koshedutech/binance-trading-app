@@ -282,7 +282,9 @@ func buildEntryDecisionBroadcastData(userID string) map[string]interface{} {
 								cm.CurrentVolume = volProgress.CurrentVolume
 								cm.AvgVolume = volProgress.AverageVolume
 								cm.VolumeMultiplier = volProgress.CurrentRatio
-								cm.VolumeThreshold = volProgress.RequiredRatio
+								if cm.VolumeThreshold == 0 {
+									cm.VolumeThreshold = volProgress.RequiredRatio
+								}
 								// Calculate distance to threshold as percentage
 								if volProgress.RequiredRatio > 0 {
 									cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
@@ -426,18 +428,47 @@ type ActivePositionInfo struct {
 
 // getActivePositionsMap returns a map of symbol -> ActivePositionInfo for all active positions.
 // It queries multiple sources to ensure positions are found regardless of how they were opened:
-// 1. Ginie Autopilot (legacy system)
-// 2. Binance directly (for chain-entry positions not tracked by Ginie)
-// 3. Active order chains from DB (for chain ID and opened-at time)
+// 1. Active order chains from DB (source of truth - queried first)
+// 2. Ginie Autopilot (legacy system) - only for symbols with active chains
+// 3. Binance directly - only for symbols with active chains
+// This prevents stale cached Binance positions from creating false position_running status.
 func (s *Server) getActivePositionsMap(userID string) map[string]*ActivePositionInfo {
 	positions := make(map[string]*ActivePositionInfo)
 
-	// Source 1: Ginie Autopilot
+	// Step 1: Get active chains from DB first - this is the source of truth.
+	// Only positions with a matching active/partial chain in DB will be included.
+	activeChainSymbols := make(map[string]bool)
+	type chainEnrichment struct {
+		ChainID       string
+		EntryFilledAt *time.Time
+		CreatedAt     time.Time
+		Symbol        string
+	}
+	var enrichments []chainEnrichment
+	if s.repo != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		chains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
+		if err == nil {
+			for _, chain := range chains {
+				activeChainSymbols[chain.Symbol] = true
+				enrichments = append(enrichments, chainEnrichment{
+					ChainID:       chain.ChainID,
+					EntryFilledAt: chain.EntryFilledAt,
+					CreatedAt:     chain.CreatedAt,
+					Symbol:        chain.Symbol,
+				})
+			}
+		}
+	}
+
+	// Source 1: Ginie Autopilot - only include if there's a matching active chain in DB
 	if controller := s.getFuturesAutopilot(); controller != nil {
 		if autopilot := controller.GetGinieAutopilot(); autopilot != nil {
 			giniePositions := autopilot.GetPositions()
 			for _, gPos := range giniePositions {
-				if gPos.RemainingQty > 0 {
+				if gPos.RemainingQty > 0 && activeChainSymbols[gPos.Symbol] {
 					positions[gPos.Symbol] = &ActivePositionInfo{
 						Symbol:       gPos.Symbol,
 						EntryPrice:   gPos.EntryPrice,
@@ -451,12 +482,18 @@ func (s *Server) getActivePositionsMap(userID string) map[string]*ActivePosition
 		}
 	}
 
-	// Source 2: Binance directly (for chain-entry positions not tracked by Ginie)
+	// Source 2: Binance directly - only include if there's a matching active chain in DB.
+	// This prevents stale cached positions (30s TTL) from causing flicker between
+	// position_running and watching states after a position is closed.
 	if futuresClient := s.getFuturesClient(); futuresClient != nil {
 		binancePositions, err := futuresClient.GetPositions()
 		if err == nil {
 			for _, pos := range binancePositions {
 				if pos.PositionAmt != 0 {
+					// Only include positions that have active chains in DB
+					if !activeChainSymbols[pos.Symbol] {
+						continue // Skip - no active chain, position is stale/closed
+					}
 					if _, exists := positions[pos.Symbol]; !exists {
 						// Only add if not already from Ginie (avoid duplicates)
 						side := "LONG"
@@ -476,22 +513,14 @@ func (s *Server) getActivePositionsMap(userID string) map[string]*ActivePosition
 		}
 	}
 
-	// Source 3: Enrich with order chain data (chain ID, entry time)
-	if s.repo != nil && len(positions) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		activeChains, err := s.repo.GetDB().GetActiveOrderChains(ctx, userID)
-		if err == nil {
-			for _, chain := range activeChains {
-				if posInfo, exists := positions[chain.Symbol]; exists {
-					posInfo.ChainID = chain.ChainID
-					if chain.EntryFilledAt != nil {
-						posInfo.OpenedAt = *chain.EntryFilledAt
-					} else {
-						posInfo.OpenedAt = chain.CreatedAt
-					}
-				}
+	// Source 3: Enrich with order chain data (chain ID, entry time) from already-loaded chains
+	for _, chain := range enrichments {
+		if posInfo, exists := positions[chain.Symbol]; exists {
+			posInfo.ChainID = chain.ChainID
+			if chain.EntryFilledAt != nil {
+				posInfo.OpenedAt = *chain.EntryFilledAt
+			} else {
+				posInfo.OpenedAt = chain.CreatedAt
 			}
 		}
 	}
@@ -786,7 +815,9 @@ func (s *Server) handleGetEntryDecisionStrategies(c *gin.Context) {
 								cm.CurrentVolume = volProgress.CurrentVolume
 								cm.AvgVolume = volProgress.AverageVolume
 								cm.VolumeMultiplier = volProgress.CurrentRatio
-								cm.VolumeThreshold = volProgress.RequiredRatio
+								if cm.VolumeThreshold == 0 {
+									cm.VolumeThreshold = volProgress.RequiredRatio
+								}
 								// Calculate distance to threshold as percentage
 								if volProgress.RequiredRatio > 0 {
 									cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
@@ -936,7 +967,9 @@ func (s *Server) handleGetEntryDecisionStrategiesForMode(c *gin.Context) {
 								cm.CurrentVolume = volProgress.CurrentVolume
 								cm.AvgVolume = volProgress.AverageVolume
 								cm.VolumeMultiplier = volProgress.CurrentRatio
-								cm.VolumeThreshold = volProgress.RequiredRatio
+								if cm.VolumeThreshold == 0 {
+									cm.VolumeThreshold = volProgress.RequiredRatio
+								}
 								if volProgress.RequiredRatio > 0 {
 									cm.VolumeDistancePercent = ((volProgress.CurrentRatio / volProgress.RequiredRatio) - 1) * 100
 								}

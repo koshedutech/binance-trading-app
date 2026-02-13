@@ -177,7 +177,9 @@ func (p *PatternStateProvider) patternToChainState(
 		ScoreLLM:       0,
 		ScoreHistory:   0,
 		// Strategy identification
-		StrategyGroup: pattern.Strategy,
+		// Map pattern algorithm name to DB strategy_group
+		// Pattern uses "volume_imbalance" (algorithm), DB uses "breakout" (category)
+		StrategyGroup: mapPatternStrategyToDBGroup(pattern.Strategy),
 		SubStrategy:   pattern.SubStrategy,
 		Timeframe:     pattern.Timeframe,
 	}
@@ -269,9 +271,16 @@ func (p *PatternStateProvider) patternToChainState(
 						log.Printf("[PATTERN-STATE-PROVIDER] Using assigned budget: %.2f USD", assignedBudget)
 					}
 
-					// Also get max_concurrent_trades for position limit enforcement
+					// Set use_incremental_equity on state
+					if useIncremental {
+						state.UseIncrementalEquity = true
+						log.Printf("[PATTERN-STATE-PROVIDER] Incremental equity: enabled")
+					}
+
+					// Get max_concurrent_trades for position limit enforcement
 					if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
-						log.Printf("[PATTERN-STATE-PROVIDER] Sub-strategy max concurrent trades: %.0f", maxTrades)
+						state.MaxConcurrentTrades = int(maxTrades)
+						log.Printf("[PATTERN-STATE-PROVIDER] Sub-strategy max concurrent trades: %d", state.MaxConcurrentTrades)
 					}
 				}
 
@@ -298,6 +307,17 @@ func (p *PatternStateProvider) patternToChainState(
 	}
 
 	return state
+}
+
+// mapPatternStrategyToDBGroup maps internal pattern algorithm names to DB strategy_group values.
+// Pattern system uses algorithm names (e.g. "volume_imbalance") while DB uses category names (e.g. "breakout").
+func mapPatternStrategyToDBGroup(patternStrategy string) string {
+	switch patternStrategy {
+	case "volume_imbalance":
+		return "breakout"
+	default:
+		return patternStrategy
+	}
 }
 
 // getDirection extracts direction from pattern state.

@@ -935,27 +935,26 @@ function CoinRow({
                         </span>
                       )}
                     </div>
-                    {/* Price proximity with actual values */}
+                    {/* Volume proximity to threshold */}
                     <div className="flex flex-col gap-0.5 text-xs">
-                      {coin.proximity_to_breakout !== undefined && coin.current_price && (
-                        <>
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-gray-500">Price:</span>
-                            <span className="text-white font-mono">
-                              ${coin.current_price.toFixed(coin.current_price > 100 ? 2 : 4)}
-                            </span>
-                            <span className="text-gray-600">→</span>
-                            <span className="text-green-400 font-mono">
-                              ${coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}
-                            </span>
-                            <span className={`font-mono font-medium px-1 rounded ${
-                              coin.proximity_to_breakout >= 0 ? 'bg-green-500/20 text-green-400' :
-                              coin.proximity_to_breakout > -0.5 ? 'bg-yellow-500/20 text-yellow-400' : 'bg-gray-700 text-gray-400'
-                            }`}>
-                              {coin.proximity_to_breakout >= 0 ? '+' : ''}{coin.proximity_to_breakout.toFixed(2)}%
-                            </span>
-                          </div>
-                        </>
+                      {coin.volume_multiplier !== undefined && (
+                        (() => {
+                          const volThreshold = coin.volume_threshold || effectiveVolumeThreshold || 2.0;
+                          const volRatio = coin.volume_multiplier / volThreshold;
+                          return (
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-gray-500">Vol:</span>
+                              <span className={`font-mono font-medium ${
+                                volRatio >= 1.0 ? 'text-green-400' :
+                                volRatio >= 0.7 ? 'text-yellow-400' : 'text-gray-400'
+                              }`}>
+                                {coin.volume_multiplier.toFixed(2)}x
+                              </span>
+                              <span className="text-gray-600">/</span>
+                              <span className="text-cyan-400 font-mono">{volThreshold.toFixed(1)}x needed</span>
+                            </div>
+                          );
+                        })()
                       )}
                     </div>
                     {/* Potential breakout indicator - blinking */}
@@ -1024,19 +1023,30 @@ function CoinRow({
               </div>
               )}
 
-              {/* Row 3: Breakout level reference */}
-              {coin.reference_candle && coin.current_price && (
+              {/* Row 3: Volume threshold reference */}
+              {coin.reference_candle && coin.volume_multiplier !== undefined && (
                 <div className="flex items-center justify-between text-xs text-gray-500">
                   <span>
-                    Breakout @ <span className="text-yellow-400 font-mono">
-                      ${coin.reference_candle.high.toFixed(coin.reference_candle.high > 100 ? 2 : 4)}
+                    Volume: <span className={`font-mono ${
+                      coin.volume_multiplier >= (coin.volume_threshold || effectiveVolumeThreshold || 2.0) ? 'text-green-400' :
+                      coin.volume_multiplier >= (coin.volume_threshold || effectiveVolumeThreshold || 2.0) * 0.7 ? 'text-yellow-400' : 'text-gray-400'
+                    }`}>
+                      {coin.volume_multiplier.toFixed(2)}x
+                    </span>
+                    <span className="text-gray-600"> / </span>
+                    <span className="text-cyan-400 font-mono">
+                      {(coin.volume_threshold || effectiveVolumeThreshold || 2.0).toFixed(1)}x
                     </span>
                   </span>
-                  <span>
-                    Current: <span className="text-white font-mono">
-                      ${coin.current_price.toFixed(coin.current_price > 100 ? 2 : 4)}
+                  {coin.avg_volume && coin.avg_volume > 0 && (
+                    <span>
+                      Avg: <span className="text-white font-mono">
+                        {coin.avg_volume >= 1000000 ? `${(coin.avg_volume / 1000000).toFixed(1)}M` :
+                         coin.avg_volume >= 1000 ? `${(coin.avg_volume / 1000).toFixed(1)}K` :
+                         coin.avg_volume.toFixed(0)}
+                      </span>
                     </span>
-                  </span>
+                  )}
                 </div>
               )}
 

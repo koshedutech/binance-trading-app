@@ -6317,7 +6317,7 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 	scanEnabled := true
 	if fc.userAutopilotManager != nil && fc.ownerUserID != "" {
 		if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil && inst.CoinProfiler != nil {
-			inst.CoinProfiler.UpdateSymbolToStrategy(chain.Symbol)
+			inst.CoinProfiler.RemovePositionSymbol(chain.Symbol)
 			activeCount, countErr := fc.repo.GetDB().CountActiveChains(ctx, fc.ownerUserID)
 			if countErr != nil {
 				fc.logger.Warn("Failed to count active chains for capacity rebuild", "error", countErr)
@@ -6835,6 +6835,66 @@ func (fc *FuturesController) ProactiveProtectionCheck() {
 					"mark_price", fmt.Sprintf("%.4f", markPrice))
 				go fc.handleProtectionOrderCancelled(chain.ChainID, "TP", chain.Symbol)
 			}
+		}
+	}
+
+	// Step 2: Detect and cancel orphaned algo orders for symbols with no active chains.
+	// This catches the case where CancelAllAlgoOrders in the coordinator succeeded on Binance's
+	// side but the orders persisted (observed with SOL/USDT where SL remained after TP fill).
+	fc.cleanupOrphanedAlgoOrders(ctx, client, ownerUserID, activeChains)
+}
+
+// cleanupOrphanedAlgoOrders queries all open algo orders from Binance and cancels any
+// that belong to symbols with no active chain. This is a safety net for cases where the
+// coordinator's CancelAllAlgoOrders call didn't fully take effect.
+func (fc *FuturesController) cleanupOrphanedAlgoOrders(ctx context.Context, client binance.FuturesClient, ownerUserID string, activeChains []*orders.OrderChain) {
+	// Re-check rate limiter
+	banned, _ := binance.GetRateLimiter().IsIPBanned()
+	if banned {
+		return
+	}
+
+	// Build set of symbols that have active chains
+	activeSymbols := make(map[string]bool)
+	for _, chain := range activeChains {
+		activeSymbols[chain.Symbol] = true
+	}
+
+	// Get ALL open algo orders across all symbols
+	allAlgoOrders, err := client.GetOpenAlgoOrders("")
+	if err != nil {
+		fc.logger.Debug("[PROACTIVE-PROTECTION] Failed to get all open algo orders for orphan check", "error", err)
+		return
+	}
+
+	if len(allAlgoOrders) == 0 {
+		return
+	}
+
+	// Find orphaned orders: algo orders for symbols with no active chain
+	orphanedSymbols := make(map[string]int)
+	for _, ao := range allAlgoOrders {
+		if !activeSymbols[ao.Symbol] {
+			orphanedSymbols[ao.Symbol]++
+		}
+	}
+
+	for symbol, count := range orphanedSymbols {
+		fc.logger.Warn("[PROACTIVE-PROTECTION] Found orphaned algo orders for symbol with no active chain - cancelling",
+			"symbol", symbol, "orphan_count", count)
+
+		if cancelErr := client.CancelAllAlgoOrders(symbol); cancelErr != nil {
+			fc.logger.Error("[PROACTIVE-PROTECTION] Failed to cancel orphaned algo orders",
+				"symbol", symbol, "error", cancelErr)
+		} else {
+			fc.logger.Info("[PROACTIVE-PROTECTION] Successfully cancelled orphaned algo orders",
+				"symbol", symbol, "count", count)
+		}
+
+		// Also cancel any regular (non-algo) orphaned orders
+		if cancelErr := client.CancelAllFuturesOrders(symbol); cancelErr != nil {
+			fc.logger.Debug("[PROACTIVE-PROTECTION] Failed to cancel orphaned regular orders (may not exist)",
+				"symbol", symbol, "error", cancelErr)
 		}
 	}
 }

@@ -109,7 +109,7 @@ export interface OrderChain {
   hedgeOrder: ChainOrder | null;
   hedgeSLOrder: ChainOrder | null;
   hedgeTPOrder: ChainOrder | null;
-  status: 'active' | 'partial' | 'completed' | 'cancelled';
+  status: 'active' | 'partial' | 'completed' | 'closed' | 'cancelled';
   totalValue: number;
   filledValue: number;
   pnl?: number;
@@ -215,7 +215,7 @@ export interface PositionAnalyticsData {
 // Filter options for chains
 export interface ChainFilters {
   mode: TradingModeCode | 'all';
-  status: 'all' | 'active' | 'partial' | 'completed' | 'cancelled';
+  status: 'all' | 'active' | 'partial' | 'completed' | 'closed' | 'cancelled';
   symbol: string | 'all';
   side: 'all' | 'LONG' | 'SHORT';
   dateFrom?: string;

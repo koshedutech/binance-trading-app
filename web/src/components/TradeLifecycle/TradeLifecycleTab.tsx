@@ -223,7 +223,7 @@ export default function TradeLifecycleTab({
       hedgeOrder,
       hedgeSLOrder,
       hedgeTPOrder,
-      status: apiChain.status as 'active' | 'partial' | 'completed' | 'cancelled',
+      status: apiChain.status as 'active' | 'partial' | 'completed' | 'closed' | 'cancelled',
       totalValue: apiChain.total_value,
       filledValue: apiChain.filled_value,
       createdAt: apiChain.created_at,
@@ -374,15 +374,15 @@ export default function TradeLifecycleTab({
       hedgeOrder: null,
       hedgeSLOrder: null,
       hedgeTPOrder: null,
-      // Story 7.21: Case-insensitive status mapping, default to 'completed' for historical chains
+      // Story 7.21: Case-insensitive status mapping, default to 'closed' for historical chains
       status: (() => {
         const normalizedStatus = (histChain.status || '').toUpperCase();
-        if (normalizedStatus === 'CLOSED') return 'completed';
+        if (normalizedStatus === 'CLOSED') return 'closed';
         if (normalizedStatus === 'CANCELLED') return 'cancelled';
         if (normalizedStatus === 'PARTIAL') return 'partial';
         if (normalizedStatus === 'ACTIVE') return 'active';
-        return 'completed'; // Default to completed for unknown historical statuses
-      })() as 'active' | 'partial' | 'completed' | 'cancelled',
+        return 'closed'; // Default to closed for unknown historical statuses
+      })() as 'active' | 'partial' | 'completed' | 'closed' | 'cancelled',
       totalValue: histChain.entryPrice * histChain.entryQuantity,
       filledValue: histChain.entryPrice * histChain.entryQuantity,
       pnl: histChain.realizedPnl,
@@ -627,7 +627,7 @@ export default function TradeLifecycleTab({
         // Build map of chains that have WebSocket-derived close data
         const closedChainState = new Map<string, OrderChain>();
         for (const chain of prev) {
-          if (chain.status === 'completed' && (chain.slStatus || chain.tpStatus || chain.closedAt)) {
+          if ((chain.status === 'completed' || chain.status === 'closed') && (chain.slStatus || chain.tpStatus || chain.closedAt)) {
             closedChainState.set(chain.chainId, chain);
           }
         }
@@ -644,7 +644,7 @@ export default function TradeLifecycleTab({
           // Preserve the authoritative close state
           return {
             ...chain,
-            status: 'completed' as const,
+            status: 'closed' as const,
             slStatus: closedData.slStatus || chain.slStatus,
             tpStatus: closedData.tpStatus || chain.tpStatus,
             slFillPrice: closedData.slFillPrice || chain.slFillPrice,
@@ -781,7 +781,7 @@ export default function TradeLifecycleTab({
         // Update chain status based on order fill
         if (newStatus === 'FILLED' && (orderType === 'SL' || orderType?.startsWith('TP'))) {
           // Exit order filled - position may be closed
-          chain.status = 'completed';
+          chain.status = 'closed';
         }
 
         chain.updatedAt = Date.now();
@@ -829,7 +829,7 @@ export default function TradeLifecycleTab({
               if (posAmt === 0) {
                 updated[i] = {
                   ...updated[i],
-                  status: 'completed',
+                  status: 'closed',
                   positionState: {
                     ...updated[i].positionState!,
                     status: 'CLOSED',
@@ -877,7 +877,7 @@ export default function TradeLifecycleTab({
         const updated = [...prevChains];
         updated[chainIdx] = {
           ...updated[chainIdx],
-          status: 'completed',
+          status: 'closed',
           pnl: pnlData.realized_pnl || pnlData.realizedPnl || 0,
           positionState: updated[chainIdx].positionState ? {
             ...updated[chainIdx].positionState!,
@@ -947,7 +947,7 @@ export default function TradeLifecycleTab({
         const updated = [...prevChains];
         updated[chainIdx] = {
           ...updated[chainIdx],
-          status: 'completed',
+          status: 'closed',
           pnl: data.realized_pnl || updated[chainIdx].pnl,
           positionState: updated[chainIdx].positionState ? {
             ...updated[chainIdx].positionState!,
@@ -989,7 +989,7 @@ export default function TradeLifecycleTab({
 
         return {
           ...chain,
-          status: 'completed',
+          status: 'closed',
           realizedPnl: data.chain.realized_pnl,
           totalFees: data.chain.total_fees,
           closePrice: data.chain.close_price,
@@ -1270,7 +1270,14 @@ export default function TradeLifecycleTab({
       // Active-only toggle filter
       if (activeOnly && chain.status !== 'active' && chain.status !== 'partial') return false;
       if (filters.mode !== 'all' && chain.modeCode !== filters.mode) return false;
-      if (filters.status !== 'all' && chain.status !== filters.status) return false;
+      // Treat 'completed' and 'closed' as equivalent for filtering
+      if (filters.status !== 'all') {
+        if (filters.status === 'closed' || filters.status === 'completed') {
+          if (chain.status !== 'closed' && chain.status !== 'completed') return false;
+        } else if (chain.status !== filters.status) {
+          return false;
+        }
+      }
       if (filters.symbol !== 'all' && chain.symbol !== filters.symbol) return false;
       if (filters.side !== 'all' && chain.positionSide !== filters.side) return false;
       return true;
@@ -1296,7 +1303,7 @@ export default function TradeLifecycleTab({
     const totalChains = chains.length;
     const activeChains = chains.filter(c => c.status === 'active').length;
     const partialChains = chains.filter(c => c.status === 'partial').length;
-    const completedChains = chains.filter(c => c.status === 'completed').length;
+    const completedChains = chains.filter(c => c.status === 'completed' || c.status === 'closed').length;
     const totalOrders = chains.reduce((sum, c) => sum + c.orders.length, 0);
     const longChains = chains.filter(c => c.positionSide === 'LONG').length;
     const shortChains = chains.filter(c => c.positionSide === 'SHORT').length;

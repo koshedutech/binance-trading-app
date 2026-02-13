@@ -273,10 +273,10 @@ export default function ChainCard({
             <span className={`text-sm ${directionColor}`}>{chain.positionSide}</span>
           </div>
 
-          {/* Realized PNL for completed chains */}
-          {chain.status === 'completed' && (() => {
-            const pnl = chain.positionState?.realizedPnl ?? chain.pnl ?? 0;
-            if (pnl === 0 && !chain.positionState?.realizedPnl && !chain.pnl) return null;
+          {/* Realized PNL for completed/closed chains */}
+          {(chain.status === 'completed' || chain.status === 'closed') && (() => {
+            const pnl = chain.realizedPnl ?? chain.positionState?.realizedPnl ?? chain.pnl ?? 0;
+            if (pnl === 0 && !chain.realizedPnl && !chain.positionState?.realizedPnl && !chain.pnl) return null;
             const entryPrice = chain.positionState?.entryPrice || chain.entryOrder?.avgPrice || chain.entryOrder?.price || 0;
             const entryQty = chain.positionState?.entryQuantity || chain.entryOrder?.executedQty || chain.entryOrder?.origQty || 0;
             const entryValue = entryPrice * entryQty;
@@ -674,7 +674,7 @@ export default function ChainCard({
                     );
                   }
                   // For closed chains, show "pending..." (fees arrive via PNL_CORRECTED)
-                  const isClosed = chain.status === 'completed' || chain.status === 'cancelled';
+                  const isClosed = chain.status === 'completed' || chain.status === 'closed' || chain.status === 'cancelled';
                   if (isClosed) {
                     return <span className="text-gray-500 text-xs">pending...</span>;
                   }

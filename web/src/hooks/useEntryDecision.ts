@@ -137,6 +137,11 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
   const lastWsUpdateRef = useRef<number>(0);
   const fallbackTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Track recently-closed symbols to prevent stale position_running status from being re-applied
+  // during the race window between chain close and backend state propagation.
+  // Key: symbol, Value: timestamp when closed. Entries expire after 5 seconds.
+  const recentlyClosedSymbolsRef = useRef<Map<string, number>>(new Map());
+
   const fetchStrategies = useCallback(async () => {
     try {
       const endpoint = mode
@@ -183,11 +188,27 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
   }, [fetchStrategies]);
 
   useEffect(() => {
+    // Helper: check if a symbol was recently closed (within 5 second cooldown).
+    // During this window, we refuse to accept position_running status from merge logic.
+    const isRecentlyClosed = (symbol: string): boolean => {
+      const closedAt = recentlyClosedSymbolsRef.current.get(symbol);
+      if (!closedAt) return false;
+      const elapsed = Date.now() - closedAt;
+      if (elapsed > 5000) {
+        // Expired - remove it
+        recentlyClosedSymbolsRef.current.delete(symbol);
+        return false;
+      }
+      return true;
+    };
+
     // Force-clear stale state for a specific symbol.
     // Called when a position closes (CHAIN_LIFECYCLE_UPDATE / CHAIN_CLOSED) to ensure
     // the coin transitions cleanly back to "watching" without stale reference_candle
     // or position_running status being preserved by the merge logic.
     const forceClearSymbolState = (symbol: string) => {
+      // Record this symbol as recently closed to prevent re-application of stale position_running
+      recentlyClosedSymbolsRef.current.set(symbol, Date.now());
       setStrategies(prev => prev.map(strategy => ({
         ...strategy,
         coins: strategy.coins.map(coin => {
@@ -330,15 +351,26 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
               // Only preserve Step 2 status when it would regress AND we're not coming from Step 4
               const shouldPreserve = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
 
+              // ANTI-FLICKER: If this symbol was recently closed (within 5s cooldown), do NOT
+              // allow position_running to be restored from stale backend data. Force to watching.
+              const symbolRecentlyClosed = isRecentlyClosed(newCoin.symbol);
+              const newStatusIsPosition = newCoin.status === 'position_running' || newCoin.status === 'position_closed';
+
               // Determine the status to use
-              const mergedStatus = shouldPreserve
-                ? prevCoin.status  // Preserve Step 2 status when it would regress
-                : (newCoin.status || prevCoin.status);
+              let mergedStatus: string | undefined;
+              if (symbolRecentlyClosed && newStatusIsPosition) {
+                // Recently closed - force watching to prevent flicker
+                mergedStatus = 'watching';
+              } else if (shouldPreserve) {
+                mergedStatus = prevCoin.status;  // Preserve Step 2 status when it would regress
+              } else {
+                mergedStatus = newCoin.status || prevCoin.status;
+              }
 
               // When transitioning back to watching (from step4 or explicit reset),
               // do NOT preserve stale step 2+ data (reference_candle, entry_candle, etc.)
-              const isResettingToWatching = newCoin.status === 'watching' && (prevWasStep4 || !newCoin.reference_candle);
-              const cleanReset = prevWasStep4 && newStatusIsRegression;
+              const isResettingToWatching = (mergedStatus === 'watching') && (prevWasStep4 || !newCoin.reference_candle);
+              const cleanReset = (symbolRecentlyClosed && newStatusIsPosition) || (prevWasStep4 && newStatusIsRegression);
 
               return {
                 ...newCoin,
@@ -398,12 +430,21 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
                   const shouldPreserve = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
 
-                  const mergedStatus = shouldPreserve
-                    ? prevCoin.status
-                    : (newCoin.status || prevCoin.status);
+                  // ANTI-FLICKER: Same cooldown check as strategies merge above
+                  const symbolRecentlyClosed = isRecentlyClosed(newCoin.symbol);
+                  const newStatusIsPosition = newCoin.status === 'position_running' || newCoin.status === 'position_closed';
 
-                  const isResettingToWatching = newCoin.status === 'watching' && (prevWasStep4 || !newCoin.reference_candle);
-                  const cleanReset = prevWasStep4 && newStatusIsRegression;
+                  let mergedStatus: string | undefined;
+                  if (symbolRecentlyClosed && newStatusIsPosition) {
+                    mergedStatus = 'watching';
+                  } else if (shouldPreserve) {
+                    mergedStatus = prevCoin.status;
+                  } else {
+                    mergedStatus = newCoin.status || prevCoin.status;
+                  }
+
+                  const isResettingToWatching = (mergedStatus === 'watching') && (prevWasStep4 || !newCoin.reference_candle);
+                  const cleanReset = (symbolRecentlyClosed && newStatusIsPosition) || (prevWasStep4 && newStatusIsRegression);
 
                   return {
                     ...newCoin,
@@ -482,12 +523,21 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
           // Only preserve Step 2 when NOT coming from Step 4
           const shouldPreserveStep2 = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
-          // Clean reset: transitioning from position back to watching
-          const cleanReset = prevWasStep4 && newStatusIsRegression;
-          const isResettingToWatching = update.status === 'watching' && (prevWasStep4 || !update.reference_candle);
+
+          // ANTI-FLICKER: If recently closed, block stale position_running from pattern updates
+          const symbolRecentlyClosed = isRecentlyClosed(update.symbol);
+          const newStatusIsPosition = update.status === 'position_running' || update.status === 'position_closed';
+
+          // Clean reset: transitioning from position back to watching (or recently closed)
+          const cleanReset = (symbolRecentlyClosed && newStatusIsPosition) || (prevWasStep4 && newStatusIsRegression);
+          const isResettingToWatching = (symbolRecentlyClosed && newStatusIsPosition) || (update.status === 'watching' && (prevWasStep4 || !update.reference_candle));
 
           // Update status with smart preservation
-          coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
+          if (symbolRecentlyClosed && newStatusIsPosition) {
+            coin.status = 'watching'; // Force watching during cooldown
+          } else {
+            coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
+          }
 
           // Update step - never regress from Step 2+ to Step 1 if we have reference_candle
           // BUT allow regression from Step 4 (position) back to Step 1
@@ -550,9 +600,16 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
           // Update volume progress if available
           if (update.volume_progress) {
             coin.volume_multiplier = update.volume_progress.current_ratio;
-            coin.volume_threshold = update.volume_progress.required_ratio;
+            // Only use required_ratio as fallback - prefer volume_threshold from pattern (ref candle volume)
+            if (!coin.volume_threshold || coin.volume_threshold === 0) {
+              coin.volume_threshold = update.volume_progress.required_ratio;
+            }
             coin.current_volume = update.volume_progress.current_volume;
             coin.avg_volume = update.volume_progress.average_volume;
+          }
+          // Always prefer volume_threshold from the update itself (ref candle's actual multiplier)
+          if (update.volume_threshold && update.volume_threshold > 0) {
+            coin.volume_threshold = update.volume_threshold;
           }
 
           updatedCoins[coinIndex] = coin;
@@ -581,10 +638,19 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
             const hasReferenceCandle = update.reference_candle || prevCoin.reference_candle;
             const newStatusIsRegression = update.status === 'watching' || !update.status;
             const shouldPreserveStep2 = prevWasStep2 && !prevWasStep4 && hasReferenceCandle && newStatusIsRegression;
-            const cleanReset = prevWasStep4 && newStatusIsRegression;
-            const isResettingToWatching = update.status === 'watching' && (prevWasStep4 || !update.reference_candle);
 
-            coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
+            // ANTI-FLICKER: Same cooldown as above
+            const symbolRecentlyClosedByMode = isRecentlyClosed(update.symbol);
+            const newStatusIsPositionByMode = update.status === 'position_running' || update.status === 'position_closed';
+
+            const cleanReset = (symbolRecentlyClosedByMode && newStatusIsPositionByMode) || (prevWasStep4 && newStatusIsRegression);
+            const isResettingToWatching = (symbolRecentlyClosedByMode && newStatusIsPositionByMode) || (update.status === 'watching' && (prevWasStep4 || !update.reference_candle));
+
+            if (symbolRecentlyClosedByMode && newStatusIsPositionByMode) {
+              coin.status = 'watching';
+            } else {
+              coin.status = shouldPreserveStep2 ? prevCoin.status : (update.status || prevCoin.status);
+            }
 
             if (cleanReset) {
               coin.step = update.current_step || 0;
@@ -636,8 +702,15 @@ export function useEntryDecisionStrategies(mode?: string): UseEntryDecisionStrat
 
             if (update.volume_progress) {
               coin.volume_multiplier = update.volume_progress.current_ratio;
-              coin.volume_threshold = update.volume_progress.required_ratio;
+              // Only use required_ratio as fallback - prefer volume_threshold from pattern (ref candle volume)
+              if (!coin.volume_threshold || coin.volume_threshold === 0) {
+                coin.volume_threshold = update.volume_progress.required_ratio;
+              }
               coin.current_volume = update.volume_progress.current_volume;
+            }
+            // Always prefer volume_threshold from the update itself (ref candle's actual multiplier)
+            if (update.volume_threshold && update.volume_threshold > 0) {
+              coin.volume_threshold = update.volume_threshold;
             }
 
             updatedCoins[coinIndex] = coin;

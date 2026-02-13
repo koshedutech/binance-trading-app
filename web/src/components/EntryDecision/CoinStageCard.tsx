@@ -506,9 +506,11 @@ export default function CoinStageCard({
     };
   }, [update.symbol]);
 
-  // Clear the lifecycle reset when we receive a new update from props
+  // Clear the lifecycle reset when we receive a legitimate non-position status from props.
+  // This handles: watching (reset complete), accumulation/consolidating (new pattern started).
+  // We keep lifecycleReset=true as long as the status is still position_running (stale data).
   useEffect(() => {
-    if (lifecycleReset && update.status === 'watching') {
+    if (lifecycleReset && update.status !== 'position_running' && update.status !== 'position_closed') {
       setLifecycleReset(false);
     }
   }, [lifecycleReset, update.status]);

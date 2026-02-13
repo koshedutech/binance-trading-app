@@ -296,16 +296,6 @@ export default function ReferenceCandleContext({
         requiredThreshold={volumeThreshold}
       />
 
-      {/* Price Reference Bar */}
-      <PriceReferenceBar
-        referenceHigh={referenceCandle.high}
-        referenceLow={referenceCandle.low}
-        currentPrice={currentPrice}
-        dayHigh={effectiveDayHigh}
-        dayLow={effectiveDayLow}
-        direction={direction}
-      />
-
       {/* Reference candle summary */}
       <div className="grid grid-cols-4 gap-2 mt-2 pt-2 border-t border-gray-700/30 text-[10px]">
         <div>

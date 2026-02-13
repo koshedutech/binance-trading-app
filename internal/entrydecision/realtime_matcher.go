@@ -633,6 +633,28 @@ func (r *RealtimePatternMatcher) savePatternStateAsync(symbol, mode, timeframe s
 	}()
 }
 
+// deletePatternStateSync deletes a pattern state from the database synchronously.
+// Used in ResetPatternForSymbol (position close path) to ensure stale position_running
+// records are removed BEFORE any restore or broadcast can re-load them.
+func (r *RealtimePatternMatcher) deletePatternStateSync(symbol, mode, timeframe string) {
+	r.mu.RLock()
+	persister := r.persister
+	userID := r.userID
+	r.mu.RUnlock()
+
+	if persister == nil || userID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := persister.DeletePatternStateFromDB(ctx, userID, symbol, mode, timeframe); err != nil {
+		log.Printf("[REALTIME-PATTERN] Failed to delete pattern state %s:%s:%s from DB: %v",
+			symbol, mode, timeframe, err)
+	}
+}
+
 // deletePatternStateAsync deletes a pattern state from the database asynchronously.
 func (r *RealtimePatternMatcher) deletePatternStateAsync(symbol, mode, timeframe string) {
 	r.mu.RLock()
@@ -1246,6 +1268,121 @@ func (r *RealtimePatternMatcher) SetPatternPositionRunningWithChainInfo(symbol, 
 
 		// Enrich with reference candle, entry candle, entry levels from pattern state
 		state := r.getPatternState(symbol, mode, timeframe)
+
+		// DB fallback: if in-memory state is missing or has no reference candle,
+		// try to load from persisted pattern states. This handles restart scenarios
+		// where autoDetect runs before RestorePatternStates has populated the state,
+		// or where the state was only partially restored.
+		if (state == nil || state.ReferenceCandle == nil) && r.persister != nil {
+			r.mu.RLock()
+			persister := r.persister
+			fallbackUserID := r.userID
+			r.mu.RUnlock()
+
+			if persister != nil && fallbackUserID != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				dbStates, dbErr := persister.GetPatternStatesFromDB(ctx, fallbackUserID)
+				cancel()
+
+				if dbErr != nil {
+					log.Printf("[REALTIME-PATTERN] DB fallback failed for %s:%s:%s: %v", symbol, mode, timeframe, dbErr)
+				} else {
+					for _, ps := range dbStates {
+						if ps.Symbol == symbol && ps.Mode == mode && ps.Timeframe == timeframe {
+							// Deserialize reference candle
+							var refCandle *Candle
+							if len(ps.ReferenceCandle) > 0 {
+								refCandle = &Candle{}
+								if err := json.Unmarshal(ps.ReferenceCandle, refCandle); err != nil {
+									log.Printf("[REALTIME-PATTERN] DB fallback: failed to unmarshal reference candle for %s: %v", symbol, err)
+									refCandle = nil
+								}
+							}
+
+							// Deserialize consolidation data
+							var consolidation ConsolidationSnapshot
+							if len(ps.ConsolidationData) > 0 {
+								if err := json.Unmarshal(ps.ConsolidationData, &consolidation); err != nil {
+									log.Printf("[REALTIME-PATTERN] DB fallback: failed to unmarshal consolidation for %s: %v", symbol, err)
+								}
+							}
+
+							// Deserialize pattern data (breakout candle, entry price)
+							var breakoutCandle *Candle
+							var entryPrice float64
+							var breakoutVolMult float64
+							var readyAt time.Time
+							if len(ps.PatternData) > 0 {
+								var patternData map[string]interface{}
+								if err := json.Unmarshal(ps.PatternData, &patternData); err == nil {
+									if breakoutJSON, ok := patternData["breakout_candle"]; ok {
+										breakoutBytes, _ := json.Marshal(breakoutJSON)
+										var candle Candle
+										if err := json.Unmarshal(breakoutBytes, &candle); err == nil {
+											breakoutCandle = &candle
+										}
+									}
+									if v, ok := patternData["entry_price"].(float64); ok {
+										entryPrice = v
+									}
+									if v, ok := patternData["breakout_volume_multiplier"].(float64); ok {
+										breakoutVolMult = v
+									}
+									if readyAtStr, ok := patternData["ready_at"].(string); ok {
+										if t, err := time.Parse(time.RFC3339Nano, readyAtStr); err == nil {
+											readyAt = t
+										}
+									}
+								}
+							}
+
+							if refCandle != nil {
+								// Build or reconstruct in-memory state
+								if state == nil {
+									state = &PatternState{
+										Direction: ps.Direction,
+									}
+								}
+								state.ReferenceCandle = refCandle
+								state.AverageVolumeAtSpike = consolidation.AverageVolumeAtSpike
+								state.ConsolidationCandles = consolidation.ConsolidationCandles
+								state.ConsolidationLow = consolidation.ConsolidationLow
+								state.ConsolidationHigh = consolidation.ConsolidationHigh
+								state.ConsolidationAvgVol = consolidation.ConsolidationAvgVol
+								state.VolumeTrend = consolidation.VolumeTrend
+								if consolidation.ReferenceDetectedAt != nil {
+									state.ReferenceDetectedAt = *consolidation.ReferenceDetectedAt
+								}
+								if breakoutCandle != nil {
+									state.BreakoutCandle = breakoutCandle
+								}
+								if entryPrice > 0 {
+									state.EntryPrice = entryPrice
+								}
+								if breakoutVolMult > 0 {
+									state.BreakoutVolumeMultiplier = breakoutVolMult
+								}
+								if !readyAt.IsZero() {
+									state.ReadyAt = readyAt
+								}
+
+								// Store reconstructed state back into pattern matcher
+								// so future broadcasts don't need the DB fallback
+								key := fmt.Sprintf("%s:%s:%s", symbol, mode, timeframe)
+								r.patternMatcher.mu.Lock()
+								r.patternMatcher.states[key] = state
+								r.patternMatcher.mu.Unlock()
+
+								log.Printf("[REALTIME-PATTERN] DB fallback loaded ref_candle + entry data for %s:%s:%s (ref_candle=%v breakout_candle=%v)",
+									symbol, mode, timeframe, refCandle != nil, breakoutCandle != nil)
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+
 		if state != nil {
 			// Only set direction from state if not already set from chain
 			if update.Direction == "" {
@@ -1373,8 +1510,9 @@ func (r *RealtimePatternMatcher) ResetPatternForSymbol(symbol, mode, timeframe s
 	r.recentlyResetSymbols[symbol] = time.Now()
 	r.mu.Unlock()
 
-	// Delete persisted pattern state from DB (async)
-	r.deletePatternStateAsync(symbol, mode, timeframe)
+	// Delete persisted pattern state from DB synchronously to prevent stale
+	// position_running records from being restored on restart/reconnect
+	r.deletePatternStateSync(symbol, mode, timeframe)
 
 	log.Printf("[REALTIME-PATTERN] Reset pattern for %s:%s:%s (entry failed - ready for new detection)", symbol, mode, timeframe)
 
@@ -2098,8 +2236,12 @@ func (r *RealtimePatternMatcher) buildPatternUpdate(
 	if state != nil {
 		update.Direction = state.Direction
 
-		// Get volume threshold from config
-		if r.patternMatcher != nil {
+		// Use reference candle's actual volume multiplier as the entry threshold
+		// The entry logic (isBreakoutReady) compares against reference candle volume,
+		// so the display should show the ref candle's multiplier (e.g. 3.3x), not the config minimum (e.g. 3.0x)
+		if state.ReferenceCandle != nil && state.AverageVolumeAtSpike > 0 {
+			update.VolumeThreshold = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+		} else if r.patternMatcher != nil {
 			update.VolumeThreshold = r.patternMatcher.config.MinVolumeSpikeMultiplier
 		}
 
@@ -2539,9 +2681,12 @@ func (r *RealtimePatternMatcher) OnPriceUpdate(symbol, timeframe string, price, 
 			}
 		}
 
-		// Get volume threshold from config
+		// Use reference candle's actual volume multiplier as the entry threshold
+		// Falls back to config minimum when no reference candle exists
 		volumeThreshold := 3.0
-		if r.patternMatcher != nil {
+		if state.ReferenceCandle != nil && state.AverageVolumeAtSpike > 0 {
+			volumeThreshold = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+		} else if r.patternMatcher != nil {
 			volumeThreshold = r.patternMatcher.config.MinVolumeSpikeMultiplier
 		}
 

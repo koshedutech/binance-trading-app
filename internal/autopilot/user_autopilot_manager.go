@@ -299,10 +299,12 @@ func (m *UserAutopilotManager) SetChainEventWriter(cew *orders.ChainEventWriter)
 			instance.RealtimePatternMatcher.ResetPatternForSymbol(symbol, mode, timeframe)
 		}
 
-		// Instantly update coin profiler source back to strategy
+		// Remove position symbol from coin profiler entirely
+		// The background initializeCoinProfilerSubscriptions() below will re-add
+		// it as "strategy" source if it belongs to the watchlist
 		if instance.CoinProfiler != nil {
-			instance.CoinProfiler.UpdateSymbolToStrategy(symbol)
-			m.logger.Info("Coin profiler instantly updated: symbol reverted to strategy source",
+			instance.CoinProfiler.RemovePositionSymbol(symbol)
+			m.logger.Info("Coin profiler: removed position symbol (will rebuild via subscriptions)",
 				"symbol", symbol, "user_id", userID)
 		}
 
@@ -895,19 +897,28 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	if m.repo != nil {
 		persister := NewPatternStatePersisterAdapter(m.repo)
 		realtimeMatcher.SetPersister(persister)
-		// Restore any previously saved pattern states from DB
-		realtimeMatcher.RestorePatternStates()
-		m.logger.Info("Pattern state persistence wired and restored from DB", "user_id", userID)
+		m.logger.Info("Pattern state persistence wired", "user_id", userID)
 	}
 
 	// Register with CoinProfiler to receive candle close events
 	realtimeMatcher.RegisterWithCoinProfiler(coinProfiler)
 	// Wire pattern update callback for real-time WebSocket broadcasting
-	// IMPORTANT: Must be wired BEFORE autoDetectActivePositions so that
-	// SetPatternPositionRunning can broadcast Step 4 to the frontend.
+	// IMPORTANT: Must be wired BEFORE RestorePatternStates and autoDetectActivePositions
+	// so that broadcasts from restore/auto-detect reach the frontend.
 	if m.patternUpdateCallback != nil {
 		realtimeMatcher.SetPatternUpdateCallback(m.patternUpdateCallback)
 		m.logger.Info("PatternUpdateCallback wired to RealtimePatternMatcher", "user_id", userID)
+	}
+
+	// Restore pattern states from DB AFTER callback is wired so broadcasts reach the frontend
+	if m.repo != nil {
+		realtimeMatcher.RestorePatternStates()
+		m.logger.Info("Pattern states restored from DB", "user_id", userID)
+
+		// Validate restored position_running patterns against active chains.
+		// Stale position_running records can persist in DB if the sync delete failed
+		// or the container restarted before deletion completed.
+		m.cleanStalePositionRunningPatterns(ctx, userID, realtimeMatcher)
 	}
 	// Wire position exists checker for runtime safety net
 	m.mu.RLock()
@@ -1115,6 +1126,8 @@ func (m *UserAutopilotManager) createInstance(ctx context.Context, userID string
 	coordinator.SetPatternResetter(realtimeMatcher)
 	coordinator.SetCapacityRebuilder(coinProfiler)
 	coordinator.SetFuturesCanceler(futuresClient)
+	coordinator.SetTradesFetcher(futuresClient)
+	coordinator.SetRavindraRemover(ravindraMonitor)
 	// Load max_concurrent_trades from sub-strategy settings
 	coordinatorMaxConcurrent := m.loadMaxConcurrentForUser(ctx, userID)
 	coordinator.SetMaxConcurrent(coordinatorMaxConcurrent)
@@ -1181,6 +1194,63 @@ func (m *UserAutopilotManager) GetInstance(userID string) *UserAutopilotInstance
 		return instance
 	}
 	return nil
+}
+
+// cleanStalePositionRunningPatterns validates restored position_running patterns against active
+// order chains in the database. If a pattern has position_running status but no corresponding
+// active chain exists, the pattern is reset to allow fresh detection.
+// This handles cases where the pattern state DB delete failed or the container restarted
+// before the synchronous delete could complete.
+func (m *UserAutopilotManager) cleanStalePositionRunningPatterns(ctx context.Context, userID string, realtimeMatcher *entrydecision.RealtimePatternMatcher) {
+	if realtimeMatcher == nil || m.chainEventWriter == nil {
+		return
+	}
+
+	patternMatcher := realtimeMatcher.GetPatternMatcher()
+	if patternMatcher == nil {
+		return
+	}
+
+	// Get all restored patterns
+	allPatterns := patternMatcher.GetAllPatterns()
+	if len(allPatterns) == 0 {
+		return
+	}
+
+	// Get active chains from DB
+	activeChains, err := m.chainEventWriter.GetOpenChains(ctx, userID)
+	if err != nil {
+		m.logger.Warn("Failed to fetch active chains for stale pattern cleanup", "error", err, "user_id", userID)
+		return
+	}
+
+	// Build set of symbols with active chains
+	activeSymbols := make(map[string]bool)
+	for _, chain := range activeChains {
+		if chain.Status == orders.OrderChainStatusActive || chain.Status == orders.OrderChainStatusPartial {
+			activeSymbols[chain.Symbol] = true
+		}
+	}
+
+	// Check each position_running pattern for a corresponding active chain
+	staleCount := 0
+	for _, pattern := range allPatterns {
+		if pattern == nil || pattern.Status != entrydecision.PatternStatusPositionRunning {
+			continue
+		}
+		if !activeSymbols[pattern.Symbol] {
+			// Stale position_running pattern - no active chain in DB
+			m.logger.Info("Cleaning stale position_running pattern (no active chain in DB)",
+				"symbol", pattern.Symbol, "mode", pattern.Mode, "timeframe", pattern.Timeframe, "user_id", userID)
+			realtimeMatcher.ResetPatternForSymbol(pattern.Symbol, pattern.Mode, pattern.Timeframe)
+			staleCount++
+		}
+	}
+
+	if staleCount > 0 {
+		m.logger.Info("Cleaned stale position_running patterns on startup",
+			"count", staleCount, "user_id", userID)
+	}
 }
 
 // autoDetectActivePositions checks for active order chains on startup and sets Entry Decision

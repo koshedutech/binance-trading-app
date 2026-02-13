@@ -143,7 +143,7 @@ export default function ChainFilters({ filters, onFilterChange, symbols, onReset
         <option value="all">All Status</option>
         <option value="active">Active</option>
         <option value="partial">Partial</option>
-        <option value="completed">Completed</option>
+        <option value="closed">Closed</option>
         <option value="cancelled">Cancelled</option>
       </select>
 

@@ -798,26 +798,9 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 		return newStopLoss, action
 	}
 
-	// At 1:3 R:R → Move SL to 1:1 level (lock profit)
-	if t.CurrentRR >= t.OneRRLevel && !t.MovedTo1R {
-		var oneRLevel float64
-		if isLong {
-			oneRLevel = t.EntryPrice + t.RiskAmount // 1:1 level above entry
-		} else {
-			oneRLevel = t.EntryPrice - t.RiskAmount // 1:1 level below entry
-		}
-		// For LONG: new SL must be higher than current SL (tighter)
-		// For SHORT: new SL must be lower than current SL (tighter)
-		shouldUpdate := (isLong && oneRLevel > t.StopLoss) || (!isLong && oneRLevel < t.StopLoss)
-		if shouldUpdate {
-			t.StopLoss = oneRLevel
-			newStopLoss = t.StopLoss
-			t.MovedTo1R = true
-			t.MovedToBreakeven = true // Also mark breakeven as done
-			action = "MOVE_TO_1R"
-			return newStopLoss, action
-		}
-	}
+	// IMPORTANT: Check milestones in ascending R:R order so each fires independently.
+	// Previously, MOVE_TO_1R was checked first and set MovedToBreakeven=true,
+	// permanently skipping the breakeven milestone when price jumped past both levels.
 
 	// At 1:2 R:R → Move SL to entry + fee buffer (true breakeven after fees)
 	if t.CurrentRR >= t.BreakevenRRLevel && !t.MovedToBreakeven {
@@ -840,6 +823,32 @@ func (t *TrailingStopManager) Update(currentPrice float64) (newStopLoss float64,
 			newStopLoss = t.StopLoss
 			t.MovedToBreakeven = true
 			action = "MOVE_TO_BREAKEVEN"
+			return newStopLoss, action
+		}
+	}
+
+	// At 1:3 R:R → Move SL to 1:1 level (lock profit)
+	if t.CurrentRR >= t.OneRRLevel && !t.MovedTo1R {
+		var oneRLevel float64
+		if isLong {
+			oneRLevel = t.EntryPrice + t.RiskAmount // 1:1 level above entry
+		} else {
+			oneRLevel = t.EntryPrice - t.RiskAmount // 1:1 level below entry
+		}
+		// For LONG: new SL must be higher than current SL (tighter)
+		// For SHORT: new SL must be lower than current SL (tighter)
+		shouldUpdate := (isLong && oneRLevel > t.StopLoss) || (!isLong && oneRLevel < t.StopLoss)
+		if shouldUpdate {
+			t.StopLoss = oneRLevel
+			newStopLoss = t.StopLoss
+			t.MovedTo1R = true
+			// Do NOT set MovedToBreakeven here - each milestone sets only its own flag.
+			// If breakeven was somehow skipped (shouldn't happen with correct ordering),
+			// mark it as done since 1R SL is already past breakeven level.
+			if !t.MovedToBreakeven {
+				t.MovedToBreakeven = true
+			}
+			action = "MOVE_TO_1R"
 			return newStopLoss, action
 		}
 	}

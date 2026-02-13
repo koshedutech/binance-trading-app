@@ -471,7 +471,9 @@ func (m *VolumeImbalancePatternMatcher) processStep1(
 	// Update state with reference candle
 	state.ReferenceCandle = spike
 	state.ReferenceCandleIdx = spikeIdx
-	state.ReferenceDetectedAt = time.Now()
+	// Use the actual candle open time, NOT time.Now()
+	// This ensures elapsed time reflects time since the candle, not since detection
+	state.ReferenceDetectedAt = spike.OpenTime
 	state.AverageVolumeAtSpike = avgVol
 	state.ConsolidationLow = spike.Low
 	state.ConsolidationHigh = spike.High
@@ -1285,9 +1287,15 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 
 	cm := progress.ToCoinMatch()
 
-	// Always set VolumeThreshold from config, regardless of candle data.
-	// This ensures the frontend always has the configured threshold for display.
-	cm.VolumeThreshold = m.config.MinVolumeSpikeMultiplier
+	// Use reference candle's actual volume multiplier as the entry threshold when available.
+	// The entry logic (isBreakoutReady) compares against reference candle volume,
+	// so the display should show the ref candle's multiplier (e.g. 3.3x), not the config minimum (e.g. 3.0x).
+	// Fall back to config minimum for Step 1 (watching) when no reference candle exists yet.
+	if state != nil && state.ReferenceCandle != nil && state.AverageVolumeAtSpike > 0 {
+		cm.VolumeThreshold = state.ReferenceCandle.Volume / state.AverageVolumeAtSpike
+	} else {
+		cm.VolumeThreshold = m.config.MinVolumeSpikeMultiplier
+	}
 
 	// Always populate volume metrics for progress bar display (especially for watching state)
 	if candles != nil && len(candles) >= m.config.LookbackPeriod {
@@ -1296,18 +1304,17 @@ func (m *VolumeImbalancePatternMatcher) createCoinMatchWithCandles(
 			currentCandle := &candles[len(candles)-1]
 			currentVolume := currentCandle.Volume
 			volumeMultiplier := currentVolume / avgVolume
-			volumeThreshold := m.config.MinVolumeSpikeMultiplier
 
 			// Set volume metrics on CoinMatch
+			// VolumeThreshold is already set above (ref candle multiplier or config fallback)
 			cm.AvgVolume = avgVolume
 			cm.CurrentVolume = currentVolume
-			cm.VolumeThreshold = volumeThreshold
 			cm.VolumeMultiplier = volumeMultiplier
 
 			// Calculate distance to threshold as percentage
 			// Negative = below threshold, Positive = above threshold
-			if volumeThreshold > 0 {
-				cm.VolumeDistancePercent = ((volumeMultiplier / volumeThreshold) - 1) * 100
+			if cm.VolumeThreshold > 0 {
+				cm.VolumeDistancePercent = ((volumeMultiplier / cm.VolumeThreshold) - 1) * 100
 			}
 
 			// Set current price from latest candle

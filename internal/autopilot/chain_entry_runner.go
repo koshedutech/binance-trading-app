@@ -390,6 +390,19 @@ func (r *ChainEntryRunner) executeScanCycle() {
 			r.stats.FailedEntries++
 			r.mu.Unlock()
 			releaseSlot() // Release the reserved slot on failure
+
+			// CRITICAL: Reset pattern back to Step 1 so the UI doesn't stay stuck on
+			// "BREAKOUT DETECTED" when the entry cannot be executed (e.g., no capital).
+			// Without this, the pattern stays in "ready" status indefinitely, retrying
+			// every 30s scan cycle with no indication to the user that entry failed.
+			if r.onEntryFailed != nil {
+				mode := candidate.ActiveStrategy
+				if mode == "" {
+					mode = "scalp"
+				}
+				log.Printf("[CHAIN-ENTRY] Resetting pattern for %s after entry failure: %v", candidate.Symbol, err)
+				r.onEntryFailed(candidate.Symbol, mode, candidate.Timeframe)
+			}
 		} else {
 			entriesExecuted++
 			r.mu.Lock()
@@ -537,20 +550,25 @@ func (r *ChainEntryRunner) canEnterPosition(ctx context.Context, state *ChainCoi
 		return false
 	}
 
-	// Check mode is enabled and has available slots
-	mode := state.ActiveStrategy
-	if mode == "" {
-		mode = "scalp" // Default
-	}
-
-	// Get mode config to check if enabled
-	if r.settingsCache != nil && r.settingsCache.IsHealthy() {
-		modeConfig, err := r.settingsCache.GetModeConfig(ctx, r.userID, mode)
-		if err == nil && modeConfig != nil {
-			if !modeConfig.Enabled {
-				log.Printf("[CHAIN-ENTRY] Mode %s is disabled for %s", mode, state.Symbol)
-				return false
-			}
+	// Check sub-strategy is enabled (NOT the parent mode toggle which is for Ginie autopilot)
+	// The entry decision system uses sub-strategy enablement as its gate
+	if r.repo != nil {
+		mode := state.ActiveStrategy
+		if mode == "" {
+			mode = "scalp"
+		}
+		strategyGroup := state.StrategyGroup
+		if strategyGroup == "" {
+			strategyGroup = "breakout"
+		}
+		subStrategy := state.SubStrategy
+		if subStrategy == "" {
+			subStrategy = "ravindra_volume_imbalance"
+		}
+		subSettings, err := r.repo.GetSubStrategySettings(ctx, r.userID, mode, strategyGroup, subStrategy)
+		if err == nil && subSettings != nil && !subSettings.Enabled {
+			log.Printf("[CHAIN-ENTRY] Sub-strategy %s/%s/%s is disabled for %s", mode, strategyGroup, subStrategy, state.Symbol)
+			return false
 		}
 	}
 
@@ -591,11 +609,11 @@ func (r *ChainEntryRunner) checkPositionLimit(ctx context.Context, state *ChainC
 	if r.repo != nil {
 		strategyGroup := state.StrategyGroup
 		if strategyGroup == "" {
-			strategyGroup = "volume_imbalance" // Default
+			strategyGroup = "breakout" // Default DB strategy_group
 		}
 		subStrategy := state.SubStrategy
 		if subStrategy == "" {
-			subStrategy = "ravindra" // Default
+			subStrategy = "ravindra_volume_imbalance" // Default DB sub_strategy
 		}
 
 		subSettings, err := r.repo.GetSubStrategySettings(ctx, r.userID, mode, strategyGroup, subStrategy)
@@ -719,12 +737,53 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 	// Step 3: Get position size from strategy settings (if available) or fall back to mode defaults
 	// NOTE: We ignore tpPercent from getModeDefaults because we use R:R ratio calculation instead
 	// (tpPercent from defaults is a small percentage like 0.4%, not a R:R ratio)
-	positionSizeUSD, slPercent, _ := r.getModeDefaults(modeStr)
+	modeDefaultUSD, slPercent, _ := r.getModeDefaults(modeStr)
+	positionSizeUSD := modeDefaultUSD
 
 	// Override with strategy-specific settings if provided
 	if state.BudgetUSD > 0 {
 		positionSizeUSD = state.BudgetUSD
-		log.Printf("[CHAIN-ENTRY] Using strategy budget: %.2f USD (from sub-strategy settings)", positionSizeUSD)
+		log.Printf("[CHAIN-ENTRY] Budget: budget_from_settings=$%.2f, mode_default=$%.2f, using=$%.2f",
+			state.BudgetUSD, modeDefaultUSD, positionSizeUSD)
+	} else if r.repo != nil && state.StrategyGroup != "" && state.SubStrategy != "" {
+		// BudgetUSD is 0 - try loading directly from database as fallback
+		// This handles cases where PatternStateProvider didn't load budget properly
+		log.Printf("[CHAIN-ENTRY] BudgetUSD=0 from state, attempting DB fallback for %s/%s/%s",
+			modeStr, state.StrategyGroup, state.SubStrategy)
+		subSettings, dbErr := r.repo.GetSubStrategySettings(ctx, r.userID, modeStr,
+			state.StrategyGroup, state.SubStrategy)
+		if dbErr == nil && subSettings != nil && len(subSettings.Settings) > 0 {
+			var settingsMap map[string]interface{}
+			if jsonErr := json.Unmarshal(subSettings.Settings, &settingsMap); jsonErr == nil {
+				if budgetAlloc, ok := settingsMap["budget_allocation"].(map[string]interface{}); ok {
+					if budgetUSD, ok := budgetAlloc["assigned_budget_usd"].(float64); ok && budgetUSD > 0 {
+						positionSizeUSD = budgetUSD
+						state.BudgetUSD = budgetUSD
+						log.Printf("[CHAIN-ENTRY] Budget loaded from DB fallback: budget_from_db=$%.2f, mode_default=$%.2f, using=$%.2f",
+							budgetUSD, modeDefaultUSD, positionSizeUSD)
+					}
+					// Also load max_concurrent_trades if missing
+					if state.MaxConcurrentTrades <= 0 {
+						if maxTrades, ok := budgetAlloc["max_concurrent_trades"].(float64); ok && maxTrades > 0 {
+							state.MaxConcurrentTrades = int(maxTrades)
+						}
+					}
+					// Also load use_incremental_equity if not set
+					if !state.UseIncrementalEquity {
+						if useIncremental, ok := budgetAlloc["use_incremental_equity"].(bool); ok && useIncremental {
+							state.UseIncrementalEquity = true
+						}
+					}
+				}
+			}
+		}
+		if state.BudgetUSD <= 0 {
+			log.Printf("[CHAIN-ENTRY] Budget: no strategy budget found, budget_from_settings=$0, mode_default=$%.2f, using=$%.2f",
+				modeDefaultUSD, positionSizeUSD)
+		}
+	} else {
+		log.Printf("[CHAIN-ENTRY] Budget: no strategy budget, budget_from_settings=$0, mode_default=$%.2f, using=$%.2f",
+			modeDefaultUSD, positionSizeUSD)
 	}
 
 	// === Incremental Equity Position Sizing ===
@@ -1072,6 +1131,13 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 				} else {
 					log.Printf("[CHAIN-ENTRY] Chain %s cancelled after entry timeout for %s", chainID, symbol)
 				}
+			}
+
+			// CRITICAL: Call onEntryFailed to reset the pattern back to Step 1 scanning
+			// Without this, the frontend stays stuck on Step 3 after timeout/cancellation
+			if r.onEntryFailed != nil {
+				log.Printf("[CHAIN-ENTRY] Calling onEntryFailed callback for %s after fill timeout", symbol)
+				r.onEntryFailed(symbol, modeStr, state.Timeframe)
 			}
 
 			return fmt.Errorf("limit order not filled: %w", fillErr)
