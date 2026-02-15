@@ -6261,8 +6261,37 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 		return
 	}
 
-	// Step 1: Close the order chain in database
-	err := fc.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, 0.0, nil)
+	// Step 0: Cancel algo orders on Binance (SL/TP) to prevent orphan orders
+	client := fc.GetFuturesClient()
+	if client != nil && chain.Symbol != "" {
+		if cancelErr := client.CancelAllAlgoOrders(chain.Symbol); cancelErr != nil {
+			fc.logger.Debug("Failed to cancel algo orders for stale chain (may not exist)",
+				"chain_id", chain.ChainID, "symbol", chain.Symbol, "error", cancelErr)
+		} else {
+			fc.logger.Info("Cancelled algo orders for stale chain",
+				"chain_id", chain.ChainID, "symbol", chain.Symbol)
+		}
+	}
+
+	// Step 1: Determine close price from mark price if available
+	var closePrice *float64
+	if client != nil && chain.Symbol != "" {
+		if markPriceData, mpErr := client.GetMarkPrice(chain.Symbol); mpErr == nil && markPriceData.MarkPrice > 0 {
+			mp := markPriceData.MarkPrice
+			closePrice = &mp
+		}
+	}
+	// Fallback: use SL price or entry price as approximation
+	if closePrice == nil {
+		if chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
+			closePrice = chain.CurrentSLPrice
+		} else if chain.EntryPrice != nil && *chain.EntryPrice > 0 {
+			closePrice = chain.EntryPrice
+		}
+	}
+
+	// Step 1b: Close the order chain in database (with close_price)
+	err := fc.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, realizedPnL, 0.0, closePrice)
 	if err != nil {
 		fc.logger.Error("Failed to close stale order chain",
 			"chain_id", chain.ChainID,
@@ -6272,6 +6301,14 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 			"chain_id", chain.ChainID,
 			"close_reason", closeReason,
 			"realized_pnl", realizedPnL)
+	}
+
+	// Step 1c: Update SL/TP status to CANCELED in DB
+	if slErr := fc.repo.GetDB().UpdateOrderChainSLCanceled(ctx, chain.ChainID, time.Now()); slErr != nil {
+		fc.logger.Debug("Failed to update SL status to CANCELED", "chain_id", chain.ChainID, "error", slErr)
+	}
+	if tpErr := fc.repo.GetDB().UpdateOrderChainTPCanceled(ctx, chain.ChainID, time.Now()); tpErr != nil {
+		fc.logger.Debug("Failed to update TP status to CANCELED", "chain_id", chain.ChainID, "error", tpErr)
 	}
 
 	// Step 2: Close the position state if it exists
@@ -6363,8 +6400,8 @@ func (fc *FuturesController) closeStaleChain(ctx context.Context, chain *orders.
 				"status":    "watching",
 			},
 			"orders": map[string]interface{}{
-				"sl_status": "UNKNOWN",
-				"tp_status": "UNKNOWN",
+				"sl_status": "CANCELED",
+				"tp_status": "CANCELED",
 			},
 			"capacity": map[string]interface{}{
 				"capacity_used":    capacityUsed,
@@ -6838,6 +6875,9 @@ func (fc *FuturesController) ProactiveProtectionCheck() {
 		}
 	}
 
+	// Step 1b: Check for stale ENTRY_PLACED chains (entry order gone from Binance)
+	fc.cleanupStaleEntryPlacedChains(ctx, client, ownerUserID)
+
 	// Step 2: Detect and cancel orphaned algo orders for symbols with no active chains.
 	// This catches the case where CancelAllAlgoOrders in the coordinator succeeded on Binance's
 	// side but the orders persisted (observed with SOL/USDT where SL remained after TP fill).
@@ -6896,6 +6936,71 @@ func (fc *FuturesController) cleanupOrphanedAlgoOrders(ctx context.Context, clie
 			fc.logger.Debug("[PROACTIVE-PROTECTION] Failed to cancel orphaned regular orders (may not exist)",
 				"symbol", symbol, "error", cancelErr)
 		}
+	}
+}
+
+// cleanupStaleEntryPlacedChains checks for chains stuck in ENTRY_PLACED status for too long.
+// If the entry order no longer exists on Binance (cancelled/expired), the chain is closed.
+// This prevents chains from getting stuck indefinitely when the entry order fill event was missed.
+func (fc *FuturesController) cleanupStaleEntryPlacedChains(ctx context.Context, client binance.FuturesClient, ownerUserID string) {
+	// Re-check rate limiter
+	banned, _ := binance.GetRateLimiter().IsIPBanned()
+	if banned {
+		return
+	}
+
+	// Get all open chains (includes PENDING, ENTRY_PLACED, ACTIVE, PARTIAL)
+	openChains, err := fc.repo.GetDB().GetOpenOrderChains(ctx, ownerUserID)
+	if err != nil {
+		fc.logger.Debug("[PROACTIVE-PROTECTION] Failed to get open order chains for entry check", "error", err)
+		return
+	}
+
+	// Filter to only ENTRY_PLACED chains that are older than 30 minutes
+	const staleEntryThreshold = 30 * time.Minute
+
+	for _, chain := range openChains {
+		if chain.Status != "ENTRY_PLACED" {
+			continue
+		}
+
+		age := time.Since(chain.CreatedAt)
+		if age < staleEntryThreshold {
+			continue
+		}
+
+		fc.logger.Info("[PROACTIVE-PROTECTION] Checking stale ENTRY_PLACED chain",
+			"chain_id", chain.ChainID, "symbol", chain.Symbol, "age_minutes", int(age.Minutes()))
+
+		// Check if the entry order still exists on Binance
+		entryClientOrderID := chain.ChainID + "-E"
+		entryStillOpen := false
+
+		openOrders, orderErr := client.GetOpenOrders(chain.Symbol)
+		if orderErr != nil {
+			fc.logger.Debug("[PROACTIVE-PROTECTION] Failed to get open orders for stale entry check",
+				"symbol", chain.Symbol, "error", orderErr)
+			continue
+		}
+
+		for _, order := range openOrders {
+			if order.ClientOrderId == entryClientOrderID {
+				entryStillOpen = true
+				break
+			}
+		}
+
+		if entryStillOpen {
+			// Entry order still exists on Binance - it's just waiting to fill, skip it
+			fc.logger.Debug("[PROACTIVE-PROTECTION] Entry order still open on Binance, skipping",
+				"chain_id", chain.ChainID, "symbol", chain.Symbol)
+			continue
+		}
+
+		// Entry order is gone from Binance - close the stale chain
+		fc.logger.Warn("[PROACTIVE-PROTECTION] Entry order gone from Binance for stale ENTRY_PLACED chain - closing",
+			"chain_id", chain.ChainID, "symbol", chain.Symbol, "age_minutes", int(age.Minutes()))
+		fc.closeStaleChain(ctx, chain, "ENTRY_EXPIRED", 0)
 	}
 }
 

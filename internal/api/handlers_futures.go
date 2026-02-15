@@ -4627,12 +4627,23 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 		log.Printf("[ORDER-SYNC] Chain %s is STALE - entry not open, no position, no algo orders for %s",
 			chain.ChainID, chain.Symbol)
 
+		// Try to get close price from mark price
+		var closePrice *float64
+		if markPriceData, mpErr := futuresClient.GetMarkPrice(chain.Symbol); mpErr == nil && markPriceData.MarkPrice > 0 {
+			mp := markPriceData.MarkPrice
+			closePrice = &mp
+		} else if chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
+			closePrice = chain.CurrentSLPrice // fallback to SL price
+		} else if chain.EntryPrice != nil && *chain.EntryPrice > 0 {
+			closePrice = chain.EntryPrice // fallback to entry price
+		}
+
 		// Close the chain using ChainEventWriter for proper cascade
 		closeReason := "CLOSED_EXTERNALLY"
 		if chainWriter != nil {
-			err = chainWriter.CloseChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, nil)
+			err = chainWriter.CloseChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, closePrice)
 		} else {
-			err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, nil)
+			err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, closeReason, 0.0, 0.0, closePrice)
 		}
 		if err != nil {
 			log.Printf("[ORDER-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
@@ -4640,6 +4651,10 @@ func (s *Server) handleSyncOrderState(c *gin.Context) {
 			log.Printf("[ORDER-SYNC] Closed stale chain %s (reason: %s)", chain.ChainID, closeReason)
 			closedChains++
 		}
+
+		// Update SL/TP status to CANCELED in DB
+		s.repo.GetDB().UpdateOrderChainSLCanceled(ctx, chain.ChainID, time.Now())
+		s.repo.GetDB().UpdateOrderChainTPCanceled(ctx, chain.ChainID, time.Now())
 
 		// Also close position state if exists
 		posState, err := s.repo.GetDB().GetPositionByChainID(ctx, userID, chain.ChainID)
@@ -4769,16 +4784,31 @@ func (s *Server) reconcileStaleOrderChains(userID string, openOrders []binance.F
 		// This chain is stale - close it
 		log.Printf("[AUTO-SYNC] Closing stale chain %s (symbol=%s)", chain.ChainID, chain.Symbol)
 
+		// Try to get close price from mark price
+		var closePrice *float64
+		if markPriceData, mpErr := futuresClient.GetMarkPrice(chain.Symbol); mpErr == nil && markPriceData.MarkPrice > 0 {
+			mp := markPriceData.MarkPrice
+			closePrice = &mp
+		} else if chain.CurrentSLPrice != nil && *chain.CurrentSLPrice > 0 {
+			closePrice = chain.CurrentSLPrice
+		} else if chain.EntryPrice != nil && *chain.EntryPrice > 0 {
+			closePrice = chain.EntryPrice
+		}
+
 		if chainWriter != nil {
-			err = chainWriter.CloseChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, nil)
+			err = chainWriter.CloseChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, closePrice)
 		} else {
-			err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, nil)
+			err = s.repo.GetDB().CloseOrderChain(ctx, chain.ChainID, "CLOSED_EXTERNALLY", 0.0, 0.0, closePrice)
 		}
 		if err != nil {
 			log.Printf("[AUTO-SYNC] Failed to close chain %s: %v", chain.ChainID, err)
 			continue
 		}
 		closedCount++
+
+		// Update SL/TP status to CANCELED in DB
+		s.repo.GetDB().UpdateOrderChainSLCanceled(ctx, chain.ChainID, time.Now())
+		s.repo.GetDB().UpdateOrderChainTPCanceled(ctx, chain.ChainID, time.Now())
 
 		// Also close position state
 		posState, err := s.repo.GetDB().GetPositionByChainID(ctx, userID, chain.ChainID)
