@@ -5437,57 +5437,102 @@ func (fc *FuturesController) HandleStreamOrderUpdate(update *binance.OrderUpdate
 			delete(fc.pendingAlgoSubOrders, order.OrderId)
 			fc.pendingAlgoSubOrdersMu.Unlock()
 
-			fc.logger.Info("Matched ORDER_TRADE_UPDATE to algo sub-order - updating real PnL",
+			fc.logger.Info("Matched ORDER_TRADE_UPDATE to algo sub-order",
 				"order_id", order.OrderId,
 				"chain_id", algoInfo.ChainID,
 				"algo_id", algoInfo.AlgoID,
 				"order_type", algoInfo.OrderType,
+				"order_status", order.OrderStatus,
 				"realized_profit", order.RealizedProfit,
 				"commission", order.Commission,
 				"commission_asset", order.CommissionAsset)
 
-			// Update the chain in DB with real PnL and commission from Binance
-			// Use ChainEventWriter.CorrectChainPnL to also fire the equity callback with the PnL delta
-			if fc.ownerUserID != "" && order.RealizedProfit != 0 {
+			// If sub-order is FILLED, try to close chain through coordinator
+			// This handles the common case where ORDER_TRADE_UPDATE arrives before ALGO_UPDATE FINISHED.
+			// The coordinator's concurrent guard prevents double-close if FINISHED already processed.
+			if order.OrderStatus == "FILLED" && fc.ownerUserID != "" && algoInfo.ChainID != "" {
 				ctx := context.Background()
-				var corrected bool
-				// Try to use ChainEventWriter for PnL correction (fires equity callback)
+
+				// Try Coordinator - will close chain if still active, or return early if already closed
+				var activeCoordinator *PositionLifecycleCoordinator
 				if fc.userAutopilotManager != nil {
-					if cew := fc.userAutopilotManager.GetChainEventWriter(); cew != nil {
-						err := cew.CorrectChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
+					if inst := fc.userAutopilotManager.GetInstance(fc.ownerUserID); inst != nil {
+						activeCoordinator = inst.Coordinator
+					}
+				}
+				if activeCoordinator != nil {
+					fillOrderType := "STOP"
+					if algoInfo.OrderType == "TP" {
+						fillOrderType = "TAKE_PROFIT"
+					}
+					result, err := activeCoordinator.HandleOrderFill(ctx, OrderFillEvent{
+						UserID:          fc.ownerUserID,
+						Symbol:          algoInfo.Symbol,
+						OrderType:       fillOrderType,
+						OrderID:         algoInfo.AlgoID, // Use algo ID for chain lookup in DB
+						FilledPrice:     order.LastFilledPrice,
+						RealizedProfit:  order.RealizedProfit,
+						Commission:      order.Commission,
+						BinanceTimestamp: update.TransactionTime,
+						PositionSide:    order.PositionSide,
+					})
+					if err != nil {
+						fc.logger.Error("Coordinator error for sub-order fill",
+							"order_id", order.OrderId,
+							"chain_id", algoInfo.ChainID,
+							"error", err)
+					}
+					if result != nil && result.Handled && result.CloseReason != "" {
+						fc.logger.Info("Sub-order fill closed chain via Coordinator",
+							"chain_id", result.ChainID,
+							"close_reason", result.CloseReason,
+							"pnl", result.RealizedPnL)
+					}
+				}
+
+				// Always correct PnL with real data from ORDER_TRADE_UPDATE
+				// (chain may have been closed by FINISHED with calculated PnL,
+				// or just closed above - either way, real PnL is more accurate)
+				if order.RealizedProfit != 0 {
+					var corrected bool
+					// Try to use ChainEventWriter for PnL correction (fires equity callback)
+					if fc.userAutopilotManager != nil {
+						if cew := fc.userAutopilotManager.GetChainEventWriter(); cew != nil {
+							err := cew.CorrectChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
+							if err != nil {
+								fc.logger.Error("Failed to correct chain PnL via ChainEventWriter",
+									"chain_id", algoInfo.ChainID,
+									"error", err)
+							} else {
+								corrected = true
+							}
+						}
+					}
+					// Fallback: direct DB update (no equity callback)
+					if !corrected && fc.repo != nil {
+						err := fc.repo.GetDB().UpdateClosedChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
 						if err != nil {
-							fc.logger.Error("Failed to correct chain PnL via ChainEventWriter",
+							fc.logger.Error("Failed to update chain PnL from trade data (fallback)",
 								"chain_id", algoInfo.ChainID,
 								"error", err)
 						} else {
 							corrected = true
 						}
 					}
-				}
-				// Fallback: direct DB update (no equity callback)
-				if !corrected && fc.repo != nil {
-					err := fc.repo.GetDB().UpdateClosedChainPnL(ctx, algoInfo.ChainID, order.RealizedProfit, order.Commission)
-					if err != nil {
-						fc.logger.Error("Failed to update chain PnL from trade data (fallback)",
+					if corrected {
+						fc.logger.Info("Corrected chain PnL with real data from ORDER_TRADE_UPDATE",
 							"chain_id", algoInfo.ChainID,
-							"error", err)
-					} else {
-						corrected = true
-					}
-				}
-				if corrected {
-					fc.logger.Info("Updated chain with real PnL from ORDER_TRADE_UPDATE",
-						"chain_id", algoInfo.ChainID,
-						"realized_pnl", order.RealizedProfit,
-						"commission", order.Commission)
+							"realized_pnl", order.RealizedProfit,
+							"commission", order.Commission)
 
-					// Broadcast corrected PnL to frontend
-					events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
-						"chain_id":     algoInfo.ChainID,
-						"symbol":       algoInfo.Symbol,
-						"realized_pnl": order.RealizedProfit,
-						"commission":   order.Commission,
-					})
+						// Broadcast corrected PnL to frontend
+						events.BroadcastPnLCorrected(fc.ownerUserID, map[string]interface{}{
+							"chain_id":     algoInfo.ChainID,
+							"symbol":       algoInfo.Symbol,
+							"realized_pnl": order.RealizedProfit,
+							"commission":   order.Commission,
+						})
+					}
 				}
 			}
 			// Don't return - still let the normal TRADE processing continue for fee tracking etc.
@@ -5740,13 +5785,66 @@ func (fc *FuturesController) HandleStreamAlgoUpdate(update *binance.AlgoUpdateEv
 		"trigger_price", order.TriggerPrice)
 
 	switch order.AlgoStatus {
-	case "TRIGGERED", "FINISHED":
-		// Algo order has been triggered or fully finished - process as SL/TP fill
+	case "TRIGGERED":
+		// Algo condition met, sub-order placed as LIMIT order on Binance.
+		// IMPORTANT: Do NOT close chain here! TRIGGERED only means the price condition
+		// was met and a LIMIT sub-order was placed. The sub-order may NOT fill if
+		// price bounces back. Wait for FINISHED or ORDER_TRADE_UPDATE FILLED to confirm.
 		orderType := order.OrderType
 		if orderType == "STOP_MARKET" || orderType == "STOP" ||
 			orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
 
-			fc.logger.Info("Algo SL/TP order triggered/finished - processing position close",
+			fc.logger.Info("Algo SL/TP TRIGGERED - sub-order placed, awaiting fill confirmation",
+				"symbol", order.Symbol,
+				"algo_id", order.AlgoId,
+				"order_type", orderType,
+				"trigger_price", order.TriggerPrice,
+				"actual_order_id", order.ActualOrderId)
+
+			// Store sub-order ID mapping so ORDER_TRADE_UPDATE can track the fill
+			if order.ActualOrderId != "" {
+				subOrderID, parseErr := strconv.ParseInt(order.ActualOrderId, 10, 64)
+				if parseErr == nil && subOrderID > 0 {
+					slOrTP := "SL"
+					if orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+						slOrTP = "TP"
+					}
+					// Parse chain ID from client algo ID (e.g., "SCA-16FEB-00001-TP" -> "SCA-16FEB-00001")
+					chainID := ""
+					if order.ClientAlgoId != "" {
+						chainID = protectionParseChainID(order.ClientAlgoId)
+					}
+					fc.pendingAlgoSubOrdersMu.Lock()
+					fc.pendingAlgoSubOrders[subOrderID] = pendingAlgoInfo{
+						ChainID:   chainID,
+						AlgoID:    order.AlgoId,
+						OrderType: slOrTP,
+						Symbol:    order.Symbol,
+						StoredAt:  time.Now(),
+					}
+					// Inline cleanup: remove stale entries older than 5 minutes
+					for id, info := range fc.pendingAlgoSubOrders {
+						if time.Since(info.StoredAt) > 5*time.Minute {
+							delete(fc.pendingAlgoSubOrders, id)
+						}
+					}
+					fc.pendingAlgoSubOrdersMu.Unlock()
+					fc.logger.Info("Stored algo sub-order mapping for fill tracking",
+						"sub_order_id", subOrderID,
+						"chain_id", chainID,
+						"algo_id", order.AlgoId,
+						"order_type", slOrTP)
+				}
+			}
+		}
+
+	case "FINISHED":
+		// Algo order FINISHED - sub-order has been fully filled, position is closed
+		orderType := order.OrderType
+		if orderType == "STOP_MARKET" || orderType == "STOP" ||
+			orderType == "TAKE_PROFIT_MARKET" || orderType == "TAKE_PROFIT" {
+
+			fc.logger.Info("Algo SL/TP order FINISHED - processing position close",
 				"symbol", order.Symbol,
 				"algo_id", order.AlgoId,
 				"order_type", orderType,
@@ -5829,9 +5927,9 @@ func (fc *FuturesController) HandleStreamAlgoUpdate(update *binance.AlgoUpdateEv
 						Symbol:    order.Symbol,
 						StoredAt:  time.Now(),
 					}
-					// Inline cleanup: remove stale entries older than 60 seconds
+					// Inline cleanup: remove stale entries older than 5 minutes
 					for id, info := range fc.pendingAlgoSubOrders {
-						if time.Since(info.StoredAt) > 60*time.Second {
+						if time.Since(info.StoredAt) > 5*time.Minute {
 							delete(fc.pendingAlgoSubOrders, id)
 						}
 					}
