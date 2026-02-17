@@ -1,0 +1,19 @@
+MEAN REVERSION BACKTEST RESULTS
+Symbol,NEARUSDT
+Timeframe,5m
+Initial Capital,$100
+Leverage,10x
+Position Size,$1000
+SL Multiplier,0.75 ATR
+TP Multiplier,3 ATR (4:1 R:R)
+Total Trades,1
+Wins,0
+Losses,1
+Timeouts,0
+Win Rate,0.0%
+Final Capital,$95.48
+Total P&L,$-4.52
+Return,-4.5%
+
+Trade #,Entry Date/Time,Exit Date/Time,Entry Price,SL Price,TP Price,Exit Price,ATR,ATR %,Risk %,Reward %,Position Size,Result,P&L ($),Capital Before,Capital After
+1,2026-01-25 16:20:00,2026-01-25 16:25:00,1.457000,1.450411,1.483357,1.450411,0.008786,0.60%,0.45%,1.81%,$1000.00,LOSS,$-4.52,$100.00,$95.48

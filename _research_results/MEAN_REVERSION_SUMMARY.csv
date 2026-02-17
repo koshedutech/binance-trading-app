@@ -1,0 +1,15 @@
+MEAN REVERSION STRATEGY - ALL COINS COMPARISON
+
+Initial Capital,$100
+Leverage,10x
+Position Size,$1000
+SL,0.75 ATR
+TP,3.0 ATR (4:1 R:R)
+
+Coin,Timeframe,Total Trades,Wins,Losses,Timeouts,Win Rate,Final Capital,Total P&L,Return %
+NEARUSDT,5m,1,0,1,0,0.0%,$95.48,$-4.52,-4.5%
+NEARUSDT,15m,16,5,10,1,31.3%,$224.58,$124.58,124.6%
+DOGEUSDT,5m,0,0,0,0,0.0%,$100.00,$0.00,0.0%
+DOGEUSDT,15m,10,5,4,1,50.0%,$351.48,$251.48,251.5%
+ETHUSDT,5m,0,0,0,0,0.0%,$100.00,$0.00,0.0%
+ETHUSDT,15m,11,4,7,0,36.4%,$191.27,$91.27,91.3%

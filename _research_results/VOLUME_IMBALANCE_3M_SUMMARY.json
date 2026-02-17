@@ -1,0 +1,43 @@
+{
+  "period": "Dec 2025 - Jan 2026",
+  "timeframe": "3m",
+  "symbols": [
+    "DOGEUSDT",
+    "NEARUSDT",
+    "ETHUSDT"
+  ],
+  "initialCapital": 100,
+  "finalEquity": 2035.9034893176406,
+  "totalReturn": 1935.9,
+  "totalTrades": 51,
+  "wins": 24,
+  "losses": 27,
+  "winRate": 47.1,
+  "avgWin": 21.569541856202477,
+  "avgLoss": 4.899624439156973,
+  "profitFactor": 3.91314198312332,
+  "maxDrawdownPct": 35.294217755795984,
+  "bySymbol": {
+    "DOGEUSDT": {
+      "trades": 25,
+      "wins": 11,
+      "pnl": 122.96620829311001
+    },
+    "NEARUSDT": {
+      "trades": 17,
+      "wins": 9,
+      "pnl": 216.99592270800707
+    },
+    "ETHUSDT": {
+      "trades": 9,
+      "wins": 4,
+      "pnl": 45.417013690504035
+    }
+  },
+  "byExit": {
+    "Trailing +1:1": 11,
+    "Stop Loss": 19,
+    "Take Profit": 13,
+    "Trailing BE": 8
+  }
+}
