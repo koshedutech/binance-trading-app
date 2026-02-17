@@ -65,6 +65,18 @@ export default function PnLSummaryCards() {
     // Subscribe to PNL_UPDATE events
     wsService.subscribe('PNL_UPDATE', handlePnLUpdate);
 
+    // Also listen to CHAIN_LIFECYCLE_UPDATE (fires on every position close)
+    const handleChainLifecycleUpdate = () => {
+      fetchPnlSummary();
+    };
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
+
+    // Listen to PNL_CORRECTED (fires when real PnL arrives from Binance sub-orders)
+    const handlePnLCorrected = () => {
+      fetchPnlSummary();
+    };
+    wsService.subscribe('PNL_CORRECTED', handlePnLCorrected);
+
     // Refresh on reconnect (Story 12.9 pattern)
     const handleConnect = () => {
       fetchPnlSummary();
@@ -76,6 +88,8 @@ export default function PnLSummaryCards() {
 
     return () => {
       wsService.unsubscribe('PNL_UPDATE', handlePnLUpdate);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
+      wsService.unsubscribe('PNL_CORRECTED', handlePnLCorrected);
       wsService.offConnect(handleConnect);
       fallbackManager.unregisterFetchFunction('pnl-summary');
     };

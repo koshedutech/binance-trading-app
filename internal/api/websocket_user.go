@@ -314,6 +314,10 @@ func InitUserWebSocket(eventBus *events.EventBus) *UserWSHub {
 		// PnL corrected broadcasts (real PnL from ORDER_TRADE_UPDATE)
 		BroadcastPnLCorrectedEvent(userID, data)
 	})
+	events.SetBroadcastEquityUpdate(func(userID string, data interface{}) {
+		// Equity update broadcasts (trade open/close triggers capacity refresh)
+		BroadcastEquityUpdateEvent(userID, data)
+	})
 
 	log.Println("User-aware WebSocket hub initialized with broadcast callbacks")
 
@@ -760,6 +764,29 @@ func BroadcastPnLCorrectedEvent(userID string, pnlData interface{}) {
 
 	event := events.Event{
 		Type:      events.EventPnLCorrected,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+
+	userWSHub.BroadcastToUser(userID, event)
+}
+
+// BroadcastEquityUpdateEvent broadcasts an equity update event to a specific user
+// Called when trades open or close to trigger equity/capacity refresh in the frontend
+func BroadcastEquityUpdateEvent(userID string, equityData interface{}) {
+	if userWSHub == nil {
+		return
+	}
+
+	data, ok := equityData.(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{
+			"equity_update": equityData,
+		}
+	}
+
+	event := events.Event{
+		Type:      events.EventEquityUpdate,
 		Timestamp: time.Now(),
 		Data:      data,
 	}

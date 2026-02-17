@@ -473,6 +473,19 @@ func (plc *PositionLifecycleCoordinator) HandleOrderFill(ctx context.Context, ev
 		"timeframe":    chain.Timeframe,
 	})
 
+	// Also broadcast PNL_UPDATE so PnL summary/calendar components refresh
+	events.BroadcastPnL(event.UserID, map[string]interface{}{
+		"chain_id":     chain.ChainID,
+		"symbol":       chain.Symbol,
+		"realized_pnl": realizedPnL,
+		"source":       "chain_close",
+	})
+
+	// Broadcast EQUITY_UPDATE so strategy settings refresh
+	events.BroadcastEquityUpdate(event.UserID, map[string]interface{}{
+		"source": "chain_close",
+	})
+
 	// Step 10: Fetch real fees from Binance in background.
 	// ALGO_UPDATE events have Commission=0, and ORDER_TRADE_UPDATE PnL correction
 	// may not always arrive. This ensures fees are always captured from actual trades.

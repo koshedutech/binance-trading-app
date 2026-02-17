@@ -1198,6 +1198,12 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			})
 			log.Printf("[CHAIN-ENTRY] Broadcast POSITION_CREATED: chainID=%s, symbol=%s, side=%s",
 				chainID, symbol, direction)
+
+			// Broadcast EQUITY_UPDATE so strategy settings refresh
+			events.BroadcastEquityUpdate(r.userID, map[string]interface{}{
+				"source": "chain_open",
+			})
+			log.Printf("[CHAIN-ENTRY] Broadcast EQUITY_UPDATE: source=chain_open, chainID=%s", chainID)
 		}
 	}
 
@@ -1316,14 +1322,24 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 		pricePrecision, qtyPrecision := getPrecisionFromSymbol(symbolInfo)
 		log.Printf("[CHAIN-ENTRY] Using precision: price=%d, qty=%d for %s", pricePrecision, qtyPrecision, symbol)
 
-		// Place Stop Loss order (STOP_MARKET - executes as MARKET order when trigger hits, always fills)
+		// Place Stop Loss order (STOP - limit order when trigger hits, controlled fill price)
+		// Uses limit price with 0.2% offset from trigger to ensure fill while avoiding slippage
+		var slLimitPrice float64
+		if direction == "LONG" {
+			slLimitPrice = slPrice * 0.998 // 0.2% below trigger for LONG SL (selling)
+		} else {
+			slLimitPrice = slPrice * 1.002 // 0.2% above trigger for SHORT SL (buying)
+		}
+		slLimitPrice = roundToTickSizeFromSymbol(slLimitPrice, symbolInfo)
+
 		slParams := binance.AlgoOrderParams{
 			Symbol:            symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeStopMarket,
+			Type:              binance.FuturesOrderTypeStop,
 			Quantity:          filledQuantity,
 			TriggerPrice:      slPrice,
+			Price:             slLimitPrice,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      slClientOrderID,
@@ -1331,7 +1347,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[CHAIN-ENTRY] Placing STOP_MARKET SL order for %s: triggerPrice=%.6f, qty=%.6f", symbol, slPrice, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Placing STOP SL order for %s: triggerPrice=%.6f, limitPrice=%.6f, qty=%.6f", symbol, slPrice, slLimitPrice, filledQuantity)
 
 		slResp, err := r.futuresClient.PlaceAlgoOrder(slParams)
 		if err != nil {
@@ -1355,14 +1371,24 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			}
 		}
 
-		// Place Take Profit order (TAKE_PROFIT_MARKET - executes as MARKET order when trigger hits, always fills)
+		// Place Take Profit order (TAKE_PROFIT - limit order when trigger hits, controlled fill price)
+		// Uses limit price with 0.2% offset from trigger to ensure fill while avoiding slippage
+		var tpLimitPrice float64
+		if direction == "LONG" {
+			tpLimitPrice = tpPrice * 1.002 // 0.2% above trigger for LONG TP (selling at higher price)
+		} else {
+			tpLimitPrice = tpPrice * 0.998 // 0.2% below trigger for SHORT TP (buying at lower price)
+		}
+		tpLimitPrice = roundToTickSizeFromSymbol(tpLimitPrice, symbolInfo)
+
 		tpParams := binance.AlgoOrderParams{
 			Symbol:            symbol,
 			Side:              closeSide,
 			PositionSide:      positionSide,
-			Type:              binance.FuturesOrderTypeTakeProfitMarket,
+			Type:              binance.FuturesOrderTypeTakeProfit,
 			Quantity:          filledQuantity,
 			TriggerPrice:      tpPrice,
+			Price:             tpLimitPrice,
 			ClosePosition:     false,
 			WorkingType:       binance.WorkingTypeMarkPrice,
 			ClientAlgoId:      tpClientOrderID,
@@ -1370,7 +1396,7 @@ func (r *ChainEntryRunner) executeChainEntry(ctx context.Context, state *ChainCo
 			QuantityPrecision: qtyPrecision,
 		}
 
-		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT_MARKET TP order for %s: triggerPrice=%.6f, qty=%.6f", symbol, tpPrice, filledQuantity)
+		log.Printf("[CHAIN-ENTRY] Placing TAKE_PROFIT TP order for %s: triggerPrice=%.6f, limitPrice=%.6f, qty=%.6f", symbol, tpPrice, tpLimitPrice, filledQuantity)
 
 		tpResp, err := r.futuresClient.PlaceAlgoOrder(tpParams)
 		if err != nil {

@@ -96,6 +96,9 @@ const (
 
 	// PnL Corrected: Broadcast when real PnL from ORDER_TRADE_UPDATE replaces calculated PnL
 	EventPnLCorrected EventType = "PNL_CORRECTED"
+
+	// Equity Update: Broadcast when trades open or close, triggering equity/capacity refresh
+	EventEquityUpdate EventType = "EQUITY_UPDATE"
 )
 
 // Event represents a system event
@@ -300,6 +303,7 @@ var (
 	broadcastChainLifecycleUpdate BroadcastFunc // Composite chain lifecycle update (close + pattern reset + capacity)
 	broadcastSLTPPlaced           BroadcastFunc // SL/TP orders placed after entry fill
 	broadcastPnLCorrected         BroadcastFunc // PnL corrected from ORDER_TRADE_UPDATE real data
+	broadcastEquityUpdate         BroadcastFunc // Equity update on trade open/close
 )
 
 // SetBroadcastLifecycleEvent sets the callback for lifecycle event broadcasts
@@ -492,6 +496,11 @@ func BroadcastTrailingSLUpdate(userID string, data interface{}) {
 	if broadcastTrailingSLUpdate != nil && userID != "" {
 		go broadcastTrailingSLUpdate(userID, data)
 	}
+	// Fire chain lifecycle hooks to invalidate order chains cache.
+	// SL updates change order data (new order ID, new price) so cached responses become stale.
+	if userID != "" {
+		fireChainLifecycleHooks(userID)
+	}
 }
 
 // SetBroadcastChainClosed sets the callback for chain closed broadcasts
@@ -559,5 +568,20 @@ func SetBroadcastPnLCorrected(fn BroadcastFunc) {
 func BroadcastPnLCorrected(userID string, data interface{}) {
 	if broadcastPnLCorrected != nil && userID != "" {
 		go broadcastPnLCorrected(userID, data)
+	}
+}
+
+// SetBroadcastEquityUpdate sets the callback for equity update broadcasts
+// Called when trades open or close to trigger equity/capacity refresh in the frontend
+func SetBroadcastEquityUpdate(fn BroadcastFunc) {
+	broadcastEquityUpdate = fn
+}
+
+// BroadcastEquityUpdate broadcasts an equity update event to a user
+// Called when a position opens or closes to refresh strategy settings and capacity display
+// Data should include: source ("chain_open" or "chain_close")
+func BroadcastEquityUpdate(userID string, data interface{}) {
+	if broadcastEquityUpdate != nil && userID != "" {
+		go broadcastEquityUpdate(userID, data)
 	}
 }

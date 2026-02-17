@@ -36,6 +36,7 @@ import {
 } from '../../types/modeStrategy';
 import modeStrategyApi from '../../api/modeStrategy';
 import { apiService } from '../../services/api';
+import { wsService } from '../../services/websocket';
 import StrategySettingsForm from './StrategySettingsForm';
 // Story 11.43-11.46: Import sub-strategies hook and types for Ravindra Volume Imbalance
 import { useSubStrategies, useUpdateSubStrategy } from '../../hooks/useStrategyHierarchy';
@@ -810,29 +811,47 @@ function SubStrategyCollapsibleSection({
     active_chains: number;
   } | null>(null);
 
+  // Reusable equity fetch function
+  const fetchEquity = useCallback(async () => {
+    try {
+      const response = await apiService.get<{
+        success: boolean;
+        effective_budget: number;
+        capital_in_use: number;
+        available: number;
+        active_chains: number;
+      }>(`/futures/sub-strategies/${mode}/breakout/${subStrategyName}/equity`);
+      setEquityData(response.data);
+    } catch {
+      // Non-fatal - just don't show available
+    }
+  }, [mode, subStrategyName]);
+
   // Fetch available capital when section is expanded
   useEffect(() => {
     if (!expanded || !isVolumeImbalance) return;
-    let cancelled = false;
-    const fetchEquity = async () => {
-      try {
-        const response = await apiService.get<{
-          success: boolean;
-          effective_budget: number;
-          capital_in_use: number;
-          available: number;
-          active_chains: number;
-        }>(`/futures/sub-strategies/${mode}/breakout/${subStrategyName}/equity`);
-        if (!cancelled) {
-          setEquityData(response.data);
-        }
-      } catch {
-        // Non-fatal - just don't show available
-      }
-    };
     fetchEquity();
-    return () => { cancelled = true; };
-  }, [expanded, isVolumeImbalance, mode, subStrategyName]);
+  }, [expanded, isVolumeImbalance, fetchEquity]);
+
+  // Real-time equity updates via WebSocket
+  useEffect(() => {
+    if (!expanded || !isVolumeImbalance) return;
+
+    const handleEquityUpdate = () => {
+      fetchEquity();
+    };
+
+    // Listen to events that change equity
+    wsService.subscribe('EQUITY_UPDATE', handleEquityUpdate);
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleEquityUpdate);
+    wsService.subscribe('POSITION_CREATED', handleEquityUpdate);
+
+    return () => {
+      wsService.unsubscribe('EQUITY_UPDATE', handleEquityUpdate);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleEquityUpdate);
+      wsService.unsubscribe('POSITION_CREATED', handleEquityUpdate);
+    };
+  }, [expanded, isVolumeImbalance, fetchEquity]);
 
   // Default settings based on Dec 2025 - Jan 2026 backtest: 51 trades, 47.1% WR, +1147% net return
   const defaultSettings: VolumeImbalanceSettings = {

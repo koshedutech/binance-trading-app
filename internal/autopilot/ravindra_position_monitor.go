@@ -273,8 +273,10 @@ func (m *RavindraPositionMonitor) ReRegisterFromChain(chainID, symbol, userID, s
 		UpdatedAt:         time.Now(),
 	}
 
-	// Create trailing stop manager with default config
-	pos.TrailingStop = NewTrailingStopManager(entryPrice, slPrice, tpPrice, nil)
+	// Create trailing stop manager with EXPLICIT direction.
+	// When SL has been tightened past entry (e.g. after breakeven move), the direction
+	// cannot be inferred from SL position. We pass the actual chain direction.
+	pos.TrailingStop = NewTrailingStopManager(entryPrice, slPrice, tpPrice, nil, direction)
 
 	// Check if breakeven was likely already hit based on current SL position
 	// If SL is at or above entry (LONG) or at or below entry (SHORT), mark breakeven as done
@@ -282,6 +284,17 @@ func (m *RavindraPositionMonitor) ReRegisterFromChain(chainID, symbol, userID, s
 		pos.TrailingStop.MovedToBreakeven = true
 	} else if direction == "SHORT" && slPrice <= entryPrice {
 		pos.TrailingStop.MovedToBreakeven = true
+	}
+
+	// Check if 1:1 milestone was also passed (SL is at or above entry + risk for LONG)
+	if pos.TrailingStop.MovedToBreakeven {
+		oneRLevel := entryPrice + pos.TrailingStop.RiskAmount
+		if direction == "SHORT" {
+			oneRLevel = entryPrice - pos.TrailingStop.RiskAmount
+		}
+		if (direction == "LONG" && slPrice >= oneRLevel) || (direction == "SHORT" && slPrice <= oneRLevel) {
+			pos.TrailingStop.MovedTo1R = true
+		}
 	}
 
 	m.positions[chainID] = pos
@@ -458,6 +471,28 @@ func (m *RavindraPositionMonitor) executeSLUpdate(pos *RavindraPosition, newSLPr
 			m.stats.FailedUpdates++
 			return
 		}
+
+		// Verification delay: wait 500ms then confirm old order is actually gone
+		// Prevents duplicate SL orders when Binance cancel ACKs but order persists briefly
+		time.Sleep(500 * time.Millisecond)
+		openAlgos, verifyErr := m.futuresClient.GetOpenAlgoOrders(pos.Symbol)
+		if verifyErr == nil {
+			for _, algo := range openAlgos {
+				if algo.AlgoId == pos.SLOrderID {
+					log.Printf("[RAVINDRA-MONITOR] WARNING: Old SL order %d still present after cancel for %s - retrying cancel", pos.SLOrderID, pos.Symbol)
+					if retryErr := m.cancelOrderWithRetry(ctx, pos.Symbol, pos.SLOrderID, pos.IsAlgoOrder); retryErr != nil {
+						log.Printf("[RAVINDRA-MONITOR] CRITICAL: Retry cancel failed for old SL %d on %s: %v - ABORTING to prevent duplicates", pos.SLOrderID, pos.Symbol, retryErr)
+						m.stats.FailedUpdates++
+						return
+					}
+					// Brief additional wait after retry cancel
+					time.Sleep(300 * time.Millisecond)
+					break
+				}
+			}
+		} else {
+			log.Printf("[RAVINDRA-MONITOR] Could not verify SL cancellation for %s (API error): %v - proceeding cautiously", pos.Symbol, verifyErr)
+		}
 	}
 
 	// Place new SL order (passes pos for precision fields)
@@ -589,14 +624,30 @@ func (m *RavindraPositionMonitor) placeStopLossOrder(ctx context.Context, pos *R
 		clientAlgoId = fmt.Sprintf("%s-SL-M%d", pos.ChainID, time.Now().UnixMilli())
 	}
 
-	// Place STOP_MARKET algo order with precision fields to avoid Binance -1111 errors
+	// Calculate limit price with 0.2% buffer beyond trigger price to ensure fill.
+	// LONG SL: selling below trigger → limit price slightly below trigger
+	// SHORT SL: buying above trigger → limit price slightly above trigger
+	limitPrice := stopPrice
+	if pos.Side == "LONG" {
+		limitPrice = stopPrice * 0.998 // 0.2% below trigger for LONG SL
+	} else {
+		limitPrice = stopPrice * 1.002 // 0.2% above trigger for SHORT SL
+	}
+	// Round limit price to tick size for precision
+	slTickSize := getTickSizePC(pos.Symbol)
+	limitPrice = roundToTickSize(limitPrice, slTickSize)
+
+	// Place STOP (limit) algo order with precision fields to avoid Binance -1111 errors.
+	// Using STOP instead of STOP_MARKET gives a limit fill price, avoiding slippage.
 	params := binance.AlgoOrderParams{
 		Symbol:            pos.Symbol,
 		Side:              closeSide,
 		PositionSide:      positionSide,
-		Type:              binance.FuturesOrderTypeStopMarket,
+		Type:              binance.FuturesOrderTypeStop,
 		Quantity:          pos.Quantity,
 		TriggerPrice:      stopPrice,
+		Price:             limitPrice,
+		TimeInForce:       binance.TimeInForceGTC,
 		WorkingType:       binance.WorkingTypeMarkPrice,
 		PricePrecision:    pos.PricePrecision,
 		QuantityPrecision: pos.QuantityPrecision,
@@ -689,8 +740,8 @@ func CreateRavindraPositionFromChainEntry(
 		UpdatedAt:         time.Now(),
 	}
 
-	// Initialize trailing stop manager
-	pos.TrailingStop = NewTrailingStopManager(entryPrice, slPrice, tpPrice, config)
+	// Initialize trailing stop manager with explicit side
+	pos.TrailingStop = NewTrailingStopManager(entryPrice, slPrice, tpPrice, config, side)
 
 	return pos
 }

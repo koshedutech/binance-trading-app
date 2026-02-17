@@ -721,17 +721,39 @@ type TrailingStopManager struct {
 }
 
 // NewTrailingStopManager creates a new trailing stop manager.
-// It infers direction from the SL/TP relationship to entry price.
+// If explicitSide is provided (non-empty), it is used directly instead of inferring from SL position.
+// This is critical for re-registration after SL has been tightened past entry (which would flip inferred direction).
 // LONG: SL < entry < TP, SHORT: SL > entry > TP.
-func NewTrailingStopManager(entryPrice, stopLoss, takeProfit float64, config *VolumeImbalanceConfig) *TrailingStopManager {
-	// Infer direction from price levels
+func NewTrailingStopManager(entryPrice, stopLoss, takeProfit float64, config *VolumeImbalanceConfig, explicitSide ...string) *TrailingStopManager {
+	// Use explicit side if provided, otherwise infer from price levels
 	side := "LONG"
-	if stopLoss > entryPrice {
+	if len(explicitSide) > 0 && explicitSide[0] != "" {
+		side = explicitSide[0]
+	} else if stopLoss > entryPrice {
 		side = "SHORT"
 	}
 
 	// Risk amount is always positive (absolute distance entry<->SL)
+	// When SL has been tightened past entry (e.g. LONG with SL above entry after breakeven move),
+	// we can't use current SL to calculate risk. Use TP distance / R:R ratio instead.
 	riskAmount := math.Abs(entryPrice - stopLoss)
+	if side == "LONG" && stopLoss >= entryPrice && takeProfit > entryPrice {
+		// SL is at or above entry for a LONG — SL has been tightened past breakeven
+		// Infer original risk from TP distance: TP = entry + (risk * targetRR), default targetRR = 4
+		targetRR := 4.0
+		if config != nil && config.OneRRLevel > 0 {
+			// Use configured R:R levels to estimate
+			targetRR = config.OneRRLevel + 1.0 // e.g., if 1R at 3.0, target is ~4.0
+		}
+		riskAmount = (takeProfit - entryPrice) / targetRR
+	} else if side == "SHORT" && stopLoss <= entryPrice && takeProfit < entryPrice {
+		// SL is at or below entry for a SHORT — SL has been tightened past breakeven
+		targetRR := 4.0
+		if config != nil && config.OneRRLevel > 0 {
+			targetRR = config.OneRRLevel + 1.0
+		}
+		riskAmount = (entryPrice - takeProfit) / targetRR
+	}
 	if riskAmount <= 0 {
 		riskAmount = entryPrice * 0.01 // 1% fallback
 	}

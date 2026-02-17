@@ -292,7 +292,8 @@ export type WebSocketEventType =
   | 'PNL_UPDATE'
   | 'MODE_STATUS_UPDATE'
   | 'SYSTEM_STATUS_UPDATE'
-  | 'SIGNAL_UPDATE';
+  | 'SIGNAL_UPDATE'
+  | 'EQUITY_UPDATE';
 
 // Chart Data
 export interface CandleData {

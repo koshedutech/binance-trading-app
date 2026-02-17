@@ -159,6 +159,18 @@ export default function PnLSummaryCard() {
 
     wsService.subscribe('PNL_UPDATE', handlePnLUpdate);
 
+    // Also listen to CHAIN_LIFECYCLE_UPDATE (fires on every position close)
+    const handleChainLifecycleUpdate = () => {
+      fetchPnlSummary();
+    };
+    wsService.subscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
+
+    // Listen to PNL_CORRECTED (fires when real PnL arrives from Binance sub-orders)
+    const handlePnLCorrected = () => {
+      fetchPnlSummary();
+    };
+    wsService.subscribe('PNL_CORRECTED', handlePnLCorrected);
+
     // Fallback polling when WebSocket disconnected
     const startFallback = () => {
       if (!fallbackRef.current) {
@@ -188,6 +200,8 @@ export default function PnLSummaryCard() {
 
     return () => {
       wsService.unsubscribe('PNL_UPDATE', handlePnLUpdate);
+      wsService.unsubscribe('CHAIN_LIFECYCLE_UPDATE', handleChainLifecycleUpdate);
+      wsService.unsubscribe('PNL_CORRECTED', handlePnLCorrected);
       if (fallbackRef.current) {
         clearInterval(fallbackRef.current);
         fallbackRef.current = null;
