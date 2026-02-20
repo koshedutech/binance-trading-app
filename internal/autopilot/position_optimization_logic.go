@@ -409,6 +409,20 @@ func (g *GinieAutopilot) executeTPSell(pos *GiniePosition, tpLevel int) error {
 	sellQty = g.roundQuantity(pos.Symbol, sellQty)
 	minQty := g.getMinQuantity(pos.Symbol)
 
+	// DUST PREVENTION: If leftover after this sell would be below MinQty, sell 100% instead.
+	// This prevents fractional dust (e.g. 0.8 DOT) that can't be traded due to exchange lot size rules.
+	leftover := g.roundQuantity(pos.Symbol, sr.RemainingQuantity-sellQty)
+	if sellQty > 0 && leftover > 0 && leftover < minQty {
+		fullQty := g.roundQuantity(pos.Symbol, sr.RemainingQuantity)
+		if fullQty >= minQty {
+			sr.AddDebugLog(fmt.Sprintf("TP%d: Leftover %.6f would be below min qty %.6f - selling 100%% (%.4f) to prevent dust", tpLevel, leftover, minQty, fullQty))
+			log.Printf("[POSITION-OPT] %s %s: TP%d dust prevention - selling full %.4f instead of %.4f (leftover %.6f < min %.6f)",
+				pos.Symbol, pos.Side, tpLevel, fullQty, sellQty, leftover, minQty)
+			sellQty = fullQty
+			sellPercent = 100.0
+		}
+	}
+
 	// USD-based minimum threshold for position value - use config value (default $10)
 	minPositionValueUSD := config.MinPositionSizeUSD
 	if minPositionValueUSD <= 0 {
